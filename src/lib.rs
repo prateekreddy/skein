@@ -176,11 +176,15 @@ pub fn attach_inner_script(dir: &str) -> String {
 
 /// The full `sbx` argv that reconnects to box `name` rooted at `dir`.
 /// (The leading program is `sbx`; this returns only its arguments.)
+///
+/// The `--` is load-bearing: `sbx` is a cobra CLI and parses leading-dash tokens
+/// (`-lc`) as its OWN flags unless `--` ends flag parsing first.
 pub fn attach_argv(name: &str, dir: &str) -> Vec<String> {
     vec![
         "run".into(),
         "--name".into(),
         name.into(),
+        "--".into(),
         "bash".into(),
         "-lc".into(),
         attach_inner_script(dir),

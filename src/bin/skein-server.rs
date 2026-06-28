@@ -86,16 +86,21 @@ async fn terminal_session(mut socket: WebSocket, name: String) {
 
     // Build the command. Propagate env + cwd so `sbx`/`sh` resolve on PATH.
     // Default: reconnect to the box's *existing* agent session (tmux + `claude --continue`),
-    // rooted at the dir the box registered. $SKEIN_ATTACH_CMD fully overrides it (local testing).
+    // rooted at the dir the box registered.
+    //
+    // $SKEIN_ATTACH_CMD fully overrides it (run via `sh -c`) — `{name}` and `{dir}` in the
+    // value are substituted first, so you can tune the exact sbx invocation per box without
+    // recompiling, e.g.  SKEIN_ATTACH_CMD='sbx run --name {name} -- claude --continue'
+    let dir = skein::lookup_dir(&name).unwrap_or_default();
     let mut cmd = match std::env::var("SKEIN_ATTACH_CMD") {
         Ok(c) if !c.is_empty() => {
+            let c = c.replace("{name}", &name).replace("{dir}", &dir);
             let mut b = CommandBuilder::new("sh");
             b.arg("-c");
             b.arg(c);
             b
         }
         _ => {
-            let dir = skein::lookup_dir(&name).unwrap_or_default();
             let mut b = CommandBuilder::new("sbx");
             for a in skein::attach_argv(&name, &dir) {
                 b.arg(a);
