@@ -149,6 +149,27 @@
   .diff .hunk { color:var(--accent); background:var(--accent-bg); }
   .diff .meta { color:var(--dim); }
   .diff .note { color:var(--faint); padding:40px; text-align:center; }
+  .diff .ln.cmtable { cursor:pointer; }
+  .diff .ln.cmtable:hover { outline:1px solid color-mix(in srgb,var(--accent) 45%,transparent); outline-offset:-1px; }
+  .diff .ln.cmtable:hover::after { content:"💬"; float:right; opacity:.7; padding-right:6px; }
+  /* comment composer + saved comments, inserted between diff lines */
+  .cmt { font-family:var(--ui); margin:4px 10px; border-left:2px solid var(--accent);
+         background:var(--panel); border-radius:0 8px 8px 0; padding:8px 10px; }
+  .cmt textarea { width:100%; resize:vertical; min-height:52px; background:var(--inset); color:var(--text);
+                  border:1px solid var(--border-2); border-radius:6px; padding:7px 9px; font:inherit; font-size:13px; outline:none; }
+  .cmt textarea:focus { border-color:var(--border-3); }
+  .cmt .ca { display:flex; gap:8px; margin-top:7px; align-items:center; }
+  .cmt .ca .ref { color:var(--faint); font-family:var(--mono); font-size:11px; margin-right:auto; }
+  .cmt button { font:inherit; font-size:12px; border-radius:6px; padding:4px 12px; cursor:pointer; border:1px solid var(--border-2); background:var(--elevated); color:var(--text-2); }
+  .cmt button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .cmt.saved { display:flex; gap:10px; align-items:flex-start; }
+  .cmt.saved .body { flex:1; white-space:pre-wrap; font-size:13px; }
+  .cmt.saved .ref { color:var(--faint); font-family:var(--mono); font-size:11px; }
+  .cmt.saved .rm { color:var(--faint); cursor:pointer; padding:0 4px; }
+  .cmt.saved .rm:hover { color:var(--attn); }
+  .dockbar .send { background:var(--accent); border:1px solid var(--accent); color:#fff; font:inherit; font-size:12px;
+                   border-radius:7px; padding:4px 12px; cursor:pointer; }
+  .dockbar .send:hover { background:var(--accent-2); }
 
   /* command palette */
   #pal { position:fixed; inset:0; z-index:60; display:none; padding-top:14vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
@@ -354,7 +375,7 @@ function createSession(name) {
   ws.binaryType = "arraybuffer";
   const s = { term, fit, ws, host, streaming:false, timer:0 };
   sessions.set(name, s);
-  ws.onopen = () => { if (view.box === name && view.mode === "term") sendResize(name); };
+  ws.onopen = () => { if (view.box === name && view.mode === "term") sendResize(name); if (s.pending) { ws.send(s.pending); s.pending = null; } };
   ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(name); };
   ws.onclose = () => { term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n"); s.dead = true; renderTabs(); refreshRow(name); };
   term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
@@ -387,10 +408,13 @@ function renderDockbar() {
          <button data-m="diff" class="${view.mode==='diff'?'on':''}">Diff</button>
        </div>`
     + (view.mode==='diff' ? `<span class="rf" id="dref" title="refresh diff">↻</span>` : "")
+    + (view.mode==='diff' && (comments.get(view.box)||[]).length
+        ? `<button class="send" id="dsend" title="paste the review into the agent prompt">Send ${(comments.get(view.box)||[]).length} 💬</button>` : "")
     + `<span class="rf" id="dclose" title="close">✕</span>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
   dockbar.querySelector('[data-m=diff]').onclick = () => openDiff(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
+  const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
   dockbar.querySelector("#dclose").onclick = () => { if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } };
 }
 function renderTabs() {
@@ -412,7 +436,7 @@ function renderTabs() {
   }
 }
 function renderTabFlag(name) {
-  const t = tabsEl.querySelector(`.tab[data-name="${CSS.escape(name)}"]`); if (!t) return;
+  const t = [...tabsEl.querySelectorAll(".tab")].find(el => el.dataset.name === name); if (!t) return;
   t.classList.toggle("streaming", !!sessions.get(name)?.streaming);
 }
 function refreshRowAll() { for (const name of rowEls.keys()) refreshRow(name); }
@@ -422,21 +446,92 @@ function loadDiff(name) {
   fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(r => r.text()).then(txt => {
     if (view.box !== name || view.mode !== "diff") return;
     diffpane.innerHTML = renderDiff(txt);
+    renderComments(name);
   }).catch(() => { diffpane.innerHTML = `<div class="diff"><div class="note">could not load diff</div></div>`; });
 }
 function renderDiff(txt) {
   if (!txt || !txt.trim() || txt.startsWith("# no diff"))
     return `<div class="diff"><div class="note">${esc((txt||"").replace(/^#\s*/,"")) || "no changes reported yet"}</div></div>`;
+  let curFile = "", newLine = 0;
   const lines = txt.split("\n").map(l => {
-    let cls = "";
-    if (l.startsWith("@@")) cls = "hunk";
-    else if (l.startsWith("+++") || l.startsWith("---") || l.startsWith("diff ") || l.startsWith("index ")
+    let cls = "", file = "", line = "";
+    if (l.startsWith("+++")) { cls = "meta"; const m = l.match(/^\+\+\+ b\/(.*)$/); if (m) curFile = m[1]; }
+    else if (l.startsWith("@@")) { cls = "hunk"; const m = l.match(/\+(\d+)/); if (m) newLine = +m[1]; }
+    else if (l.startsWith("---") || l.startsWith("diff ") || l.startsWith("index ")
              || l.startsWith("new file") || l.startsWith("deleted") || l.startsWith("rename") || l.startsWith("similarity")) cls = "meta";
-    else if (l.startsWith("+")) cls = "add";
-    else if (l.startsWith("-")) cls = "del";
-    return `<span class="ln ${cls}">${esc(l) || "&nbsp;"}</span>`;
+    else if (l.startsWith("+")) { cls = "add"; file = curFile; line = newLine; newLine++; }
+    else if (l.startsWith("-")) { cls = "del"; file = curFile; line = newLine; }
+    else { file = curFile; line = newLine; newLine++; }   // context
+    const attrs = file ? ` data-file="${esc(file)}" data-line="${line}"` : "";
+    const ce = file ? " cmtable" : "";
+    return `<span class="ln ${cls}${ce}"${attrs}>${esc(l) || "&nbsp;"}</span>`;
   }).join("");
   return `<div class="diff">${lines}</div>`;
+}
+
+// ---------- inline review comments → back to the agent ----------
+const comments = new Map();   // box -> [{file, line, text}]
+diffpane.addEventListener("click", e => {
+  const ln = e.target.closest(".ln.cmtable"); if (!ln || !view.box) return;
+  // don't double-open a composer on the same line
+  if (ln.nextElementSibling?.classList?.contains("composer")) return;
+  openComposer(ln);
+});
+function openComposer(ln, existing) {
+  closeComposers();
+  const file = ln.dataset.file, line = ln.dataset.line;
+  const box = document.createElement("div"); box.className = "cmt composer";
+  box.innerHTML = `<textarea placeholder="Comment for the agent on ${esc(file)}:${esc(line)}…"></textarea>
+    <div class="ca"><span class="ref">${esc(file)}:${esc(line)}</span>
+      <button class="cancel">Cancel</button><button class="primary save">Save</button></div>`;
+  ln.after(box);
+  const ta = box.querySelector("textarea"); ta.value = existing || ""; ta.focus();
+  box.querySelector(".cancel").onclick = () => box.remove();
+  box.querySelector(".save").onclick = () => { saveComment(view.box, file, +line, ta.value.trim()); box.remove(); renderComments(view.box); };
+  ta.addEventListener("keydown", ev => {
+    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); box.querySelector(".save").click(); }
+    else if (ev.key === "Escape") { ev.preventDefault(); box.remove(); }
+    ev.stopPropagation();
+  });
+}
+function closeComposers() { diffpane.querySelectorAll(".cmt.composer").forEach(c => c.remove()); }
+function saveComment(box, file, line, text) {
+  if (!text) return;
+  const arr = comments.get(box) || []; arr.push({ file, line, text }); comments.set(box, arr);
+  renderDockbar();
+}
+function removeComment(box, idx) {
+  const arr = comments.get(box) || []; arr.splice(idx, 1); comments.set(box, arr);
+  renderComments(box); renderDockbar();
+}
+function renderComments(box) {
+  diffpane.querySelectorAll(".cmt.saved").forEach(c => c.remove());
+  const arr = comments.get(box) || [];
+  const lns = [...diffpane.querySelectorAll(".ln[data-file]")];
+  arr.forEach((c, idx) => {
+    const ln = lns.find(e => e.dataset.file === c.file && +e.dataset.line === c.line);
+    const block = document.createElement("div"); block.className = "cmt saved";
+    block.innerHTML = `<span class="ref">${esc(c.file)}:${c.line}</span><div class="body">${esc(c.text)}</div><span class="rm" title="remove">✕</span>`;
+    block.querySelector(".rm").onclick = () => removeComment(box, idx);
+    if (ln) ln.after(block); else diffpane.querySelector(".diff")?.prepend(block);
+  });
+}
+function assembleReview(box) {
+  const arr = comments.get(box) || []; if (!arr.length) return "";
+  const byFile = {}; arr.forEach(c => (byFile[c.file] ??= []).push(c));
+  let out = "Here is my review of your current changes. Please address each point:\n";
+  for (const f in byFile) { out += `\n${f}:\n`; for (const c of byFile[f]) out += `  - line ${c.line}: ${c.text}\n`; }
+  return out + "\n";
+}
+function sendReview(box) {
+  const text = assembleReview(box); if (!text) return;
+  comments.set(box, []);
+  openTerminal(box);   // switch to (or create) the agent's terminal
+  // bracketed paste so multi-line lands as one paste (not line-by-line submits); user presses Enter to send
+  const payload = new TextEncoder().encode("\x1b[200~" + text + "\x1b[201~");
+  const s = sessions.get(box);
+  if (s.ws.readyState === 1) s.ws.send(payload); else s.pending = payload;
+  applyView();
 }
 window.addEventListener("resize", () => { if (view.box && view.mode === "term") { sessions.get(view.box)?.fit.fit(); sendResize(view.box); } });
 
