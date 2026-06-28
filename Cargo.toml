@@ -1,0 +1,18 @@
+[package]
+name = "skein"
+version = "0.1.0"
+edition = "2021"
+description = "See and steer your fleet of agent sandboxes"
+license = "MIT OR Apache-2.0"
+
+# Principle: compose, don't reinvent. We pull the standard wheels rather than
+# hand-rolling JSON / time parsing. The live-TUI slice will add `ratatui` + `crossterm`,
+# and the orchestrator slice can use `honker` (Rust-native) directly as a crate.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+
+[[bin]]
+name = "skein"
+path = "src/main.rs"
