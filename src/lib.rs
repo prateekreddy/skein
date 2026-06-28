@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Diff summary a box reports for its branch-vs-base work (written by box-diff.sh).
@@ -154,10 +154,21 @@ pub fn load_registry() -> Result<(BTreeMap<String, Sandbox>, PathBuf), String> {
 /// The fleet, enriched and sorted "who needs me first" (tier asc, then name).
 pub fn load_views() -> Result<Vec<BoxView>, String> {
     let (boxes, _) = load_registry()?;
+    // skein-server runs *inside* one box; that box is provably up, so don't let it derive
+    // to idle/stale from a quiet `lastSeen`. Override only when the box reports no explicit
+    // status (an agent status always wins). Set $SKEIN_SELF to override the detected vmid.
+    let self_box = env::var("SKEIN_SELF")
+        .or_else(|_| env::var("SANDBOX_VM_ID"))
+        .ok()
+        .filter(|s| !s.is_empty());
     let mut views: Vec<BoxView> = boxes
         .iter()
         .map(|(name, b)| {
-            let (state, tier) = b.state();
+            let (mut state, mut tier) = b.state();
+            if b.status.is_empty() && self_box.as_deref() == Some(name.as_str()) && tier > 3 {
+                state = "live".into();
+                tier = 3;
+            }
             BoxView {
                 name: name.clone(),
                 state,
@@ -393,9 +404,64 @@ pub fn archive_box(name: &str) -> Result<(), String> {
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
 /// (Boxes report their own diff because `sbx run` can't exec an arbitrary command in them.)
 pub fn read_diff(name: &str) -> Option<String> {
+    // Prefer a fresh diff computed host-side when the box's dir is a git repo *on this
+    // host* (direct mode); fall back to the patch the box reported (clone mode, where the
+    // dir is an in-box path this host can't see). Computed on demand only — never per tick.
+    if let Some(dir) = lookup_dir(name) {
+        if let Some(p) = git_diff_for(&dir) {
+            return Some(p);
+        }
+    }
     let reg = locate_registry().ok()?;
     let path = reg.parent()?.join("diffs").join(format!("{name}.patch"));
     fs::read_to_string(path).ok()
+}
+
+fn git_ok(dir: &str, args: &[&str]) -> bool {
+    let mut a = vec!["-C", dir];
+    a.extend_from_slice(args);
+    Command::new("git")
+        .args(&a)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The branch-vs-base patch for a working tree at `dir`, or None if it isn't a git repo here.
+/// Base = the first of origin/main|origin/master|main|master that resolves; the diff spans
+/// the merge-base→working-tree (committed-since-base + uncommitted). With no common ancestor
+/// it falls back to `git diff HEAD` (uncommitted only) rather than exploding into an
+/// unrelated-history diff. Output is capped so a huge patch can't wedge the browser.
+fn git_diff_for(dir: &str) -> Option<String> {
+    if !Path::new(dir).join(".git").exists() {
+        return None;
+    }
+    let base = ["origin/main", "origin/master", "main", "master"]
+        .into_iter()
+        .find(|b| git_ok(dir, &["rev-parse", "--verify", "-q", b]));
+    let merge_base = base.and_then(|b| {
+        let o = Command::new("git")
+            .args(["-C", dir, "merge-base", "HEAD", b])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        (o.status.success() && !s.is_empty()).then_some(s)
+    });
+    let range = merge_base.as_deref().unwrap_or("HEAD");
+    let out = Command::new("git")
+        .args(["-C", dir, "diff", range])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut patch = String::from_utf8_lossy(&out.stdout).to_string();
+    const CAP: usize = 2_000_000;
+    if patch.len() > CAP {
+        patch.truncate(CAP);
+        patch.push_str("\n\n# … diff truncated by skein (too large to render) …\n");
+    }
+    Some(patch)
 }
 
 /// Look up a box's clone root (the `dir` it registered) by name.
