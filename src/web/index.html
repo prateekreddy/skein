@@ -120,11 +120,35 @@
   .dock-actions { margin-left:auto; display:flex; align-items:center; padding:0 8px; gap:6px; }
   .dock-actions .da { color:var(--faint); cursor:pointer; font-size:12px; padding:4px 7px; border-radius:6px; }
   .dock-actions .da:hover { color:var(--text); background:var(--elevated); }
-  .termarea { position:relative; flex:1; min-height:0; }
+  .dockbar { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--border);
+             background:var(--panel); font-size:13px; }
+  .dockbar .bdot { width:8px; height:8px; border-radius:50%; background:var(--stale); flex:none; }
+  .dockbar.s-attn .bdot { background:var(--attn); } .dockbar.s-waiting .bdot { background:var(--waiting); }
+  .dockbar.s-working .bdot { background:var(--working); } .dockbar.s-done .bdot { background:var(--done); }
+  .dockbar .nm { font-weight:600; }
+  .dockbar .br { font-family:var(--mono); color:var(--accent); font-size:12px; }
+  .dockbar .dstat { font-family:var(--mono); font-size:12px; }
+  .dstat .pos { color:var(--done); } .dstat .neg { color:var(--attn); }
+  .seg-toggle { margin-left:auto; display:flex; border:1px solid var(--border-2); border-radius:7px; overflow:hidden; }
+  .seg-toggle button { background:transparent; border:0; color:var(--dim); font:inherit; font-size:12px; padding:4px 13px;
+                       cursor:pointer; transition:background var(--dur-fast), color var(--dur-fast); }
+  .seg-toggle button.on { background:var(--elevated); color:var(--text); }
+  .dockbar .rf { color:var(--faint); cursor:pointer; padding:4px 8px; border-radius:6px; font-size:12px; }
+  .dockbar .rf:hover { color:var(--text); background:var(--elevated); }
+
+  .dockbody { position:relative; flex:1; min-height:0; }
+  .termarea, .diffpane { position:absolute; inset:0; display:none; }
+  .termarea.on { display:block; }
+  .diffpane.on { display:block; overflow:auto; background:var(--inset); }
   .thost { position:absolute; inset:0; padding:8px 10px; display:none; }
   .thost.on { display:block; }
-  .thost .meta { position:absolute; top:10px; right:16px; z-index:2; font-family:var(--mono); font-size:11px;
-                 color:var(--faint); pointer-events:none; }
+  .diff { font-family:var(--mono); font-size:12.5px; line-height:1.5; padding:8px 0; }
+  .diff .ln { display:block; padding:0 14px; white-space:pre-wrap; word-break:break-word; }
+  .diff .add  { color:#7ee787; background:color-mix(in srgb,var(--done) 10%,transparent); }
+  .diff .del  { color:#ffa198; background:color-mix(in srgb,var(--attn) 10%,transparent); }
+  .diff .hunk { color:var(--accent); background:var(--accent-bg); }
+  .diff .meta { color:var(--dim); }
+  .diff .note { color:var(--faint); padding:40px; text-align:center; }
 
   /* command palette */
   #pal { position:fixed; inset:0; z-index:60; display:none; padding-top:14vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
@@ -167,12 +191,16 @@
           </div>
         </header>
         <div id="fleet"></div>
-        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>]</kbd> next that needs you · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
+        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next that needs you · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
       </div>
     </div>
     <div id="dock">
       <div class="tabs" id="tabs"></div>
-      <div class="termarea" id="termarea"></div>
+      <div class="dockbar" id="dockbar"></div>
+      <div class="dockbody">
+        <div class="termarea" id="termarea"></div>
+        <div class="diffpane" id="diffpane"></div>
+      </div>
     </div>
   </div>
 
@@ -199,6 +227,8 @@ const GROUPS = [
 const groupOf = s => (GROUPS.find(g => g.match(s)) || GROUPS[GROUPS.length-1]).key;
 const labelOf = s => ["needs-input","needs-decision","blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+const diffBadge = d => d && (d.files||d.ins||d.del)
+  ? `<span class="pos">+${d.ins}</span> <span class="neg">−${d.del}</span>${d.files?` · ${d.files}f`:""}` : "";
 
 let boxes = [], order = [], sel = null, prevState = {};
 const stateOf = name => boxes.find(b => b.name === name)?.state || "unknown";
@@ -218,7 +248,7 @@ function ensureGroups() {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="branch"></span><span class="dir"></span></div></div>
+    <div class="sub"><span class="branch"></span><span class="dstat"></span><span class="dir"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
   el.addEventListener("click", () => openTerminal(name));
   el.addEventListener("mouseenter", () => select(name, true));
@@ -228,13 +258,14 @@ function updateRow(el, b) {
   const g = groupOf(b.state);
   const wired = sessions.has(b.name);
   el.className = `row s-${g}` + (b.name === sel ? " sel" : "") + (wired ? " wired" : "")
-    + (b.name === active ? " active" : "") + (wired && sessions.get(b.name).streaming ? " streaming" : "");
+    + (b.name === view.box ? " active" : "") + (wired && sessions.get(b.name).streaming ? " streaming" : "");
   el.querySelector(".name").textContent = b.name;
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
   el.querySelector(".pill").textContent = labelOf(b.state);
   el.querySelector(".age").textContent = b.age;
   el.querySelector(".chev").textContent = wired ? "▣" : "›";
+  el.querySelector(".dstat").innerHTML = diffBadge(b.diff);
 }
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
@@ -276,7 +307,7 @@ function select(name, soft) {
   if (sel === name) return;
   if (sel) rowEls.get(sel)?.classList.remove("sel");
   sel = name; const el = rowEls.get(name);
-  if (el) { el.classList.add("sel"); if (!soft) el.scrollIntoView({ block:"nearest" }); }
+  if (el) { el.classList.add("sel"); if (!soft) el.scrollIntoView?.({ block:"nearest" }); }
 }
 function move(d) { if (!order.length) return; let i = sel ? order.indexOf(sel) : -1; i = (i+d+order.length)%order.length; select(order[i]); }
 function nextNeedsYou() {
@@ -284,41 +315,50 @@ function nextNeedsYou() {
   if (!need.length) return; const i = sel ? need.indexOf(sel) : -1; select(need[(i+1)%need.length]);
 }
 
-// ---------- persistent terminal sessions ----------
-const sessions = new Map();   // name -> { term, fit, ws, host, streaming, timer }
-let active = null;
-const termarea = document.getElementById("termarea"), tabsEl = document.getElementById("tabs");
+// ---------- dock: persistent terminals + diff viewer ----------
+const sessions = new Map();   // name -> { term, fit, ws, host, streaming, timer, dead }
+let view = { box: null, mode: "term" };   // what the dock currently shows
+const termarea = document.getElementById("termarea"), diffpane = document.getElementById("diffpane"),
+      tabsEl = document.getElementById("tabs"), dockbar = document.getElementById("dockbar");
 
-function openTerminal(name) {
+function openTerminal(name) { showBox(name, "term"); }
+function openDiff(name) { showBox(name, "diff"); }
+function showBox(name, mode) {
   select(name);
-  if (!sessions.has(name)) createSession(name);
-  setActive(name);
+  view = { box: name, mode };
+  if (mode === "term" && !sessions.has(name)) createSession(name);
+  applyView();
+  if (mode === "diff") loadDiff(name);
+}
+function applyView() {
+  const docked = sessions.size > 0 || !!view.box;
+  document.body.classList.toggle("docked", docked);
+  if (!docked) return;
+  const termMode = view.mode === "term";
+  termarea.classList.toggle("on", termMode);
+  diffpane.classList.toggle("on", !termMode);
+  for (const [n, s] of sessions) s.host.classList.toggle("on", termMode && n === view.box);
+  if (termMode && sessions.has(view.box)) {
+    const s = sessions.get(view.box);
+    requestAnimationFrame(() => { s.fit.fit(); sendResize(view.box); s.term.focus(); });
+  }
+  renderDockbar(); renderTabs(); refreshRowAll();
 }
 function createSession(name) {
-  const host = document.createElement("div"); host.className = "thost";
-  const meta = document.createElement("div"); meta.className = "meta"; host.append(meta);
-  termarea.append(host);
+  const host = document.createElement("div"); host.className = "thost"; termarea.append(host);
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
     cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
   ws.binaryType = "arraybuffer";
-  const s = { term, fit, ws, host, meta, streaming:false, timer:0 };
+  const s = { term, fit, ws, host, streaming:false, timer:0 };
   sessions.set(name, s);
-  ws.onopen = () => { if (active === name) sendResize(name); };
+  ws.onopen = () => { if (view.box === name && view.mode === "term") sendResize(name); };
   ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(name); };
   ws.onclose = () => { term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n"); s.dead = true; renderTabs(); refreshRow(name); };
   term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
-  term.onResize(() => { if (active === name) sendResize(name); });
-  document.body.classList.add("docked");
-}
-function setActive(name) {
-  active = name;
-  for (const [n, s] of sessions) s.host.classList.toggle("on", n === name);
-  const s = sessions.get(name);
-  if (s) { requestAnimationFrame(() => { s.fit.fit(); sendResize(name); s.term.focus(); }); }
-  renderTabs(); refreshRowAll();
+  term.onResize(() => { if (view.box === name && view.mode === "term") sendResize(name); });
 }
 function markStreaming(name) {
   const s = sessions.get(name); if (!s) return;
@@ -330,26 +370,45 @@ function closeSession(name) {
   const s = sessions.get(name); if (!s) return;
   try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
   s.host.remove(); sessions.delete(name);
-  if (active === name) { active = null; const next = sessions.keys().next().value; if (next) setActive(next); }
-  if (!sessions.size) document.body.classList.remove("docked");
-  renderTabs(); refreshRow(name);
+  if (view.box === name) { const next = sessions.keys().next().value; view = next ? { box: next, mode:"term" } : { box:null, mode:"term" }; }
+  applyView(); refreshRow(name);
+}
+function renderDockbar() {
+  if (!view.box) { dockbar.innerHTML = ""; return; }
+  const b = boxes.find(x => x.name === view.box) || { name: view.box };
+  const g = groupOf(b.state || "unknown");
+  dockbar.className = "dockbar s-" + g;
+  dockbar.innerHTML =
+    `<span class="bdot"></span><span class="nm">${esc(view.box)}</span>`
+    + (b.branch ? `<span class="br">${esc(b.branch)}</span>` : "")
+    + `<span class="dstat">${diffBadge(b.diff)}</span>`
+    + `<div class="seg-toggle">
+         <button data-m="term" class="${view.mode==='term'?'on':''}">Terminal</button>
+         <button data-m="diff" class="${view.mode==='diff'?'on':''}">Diff</button>
+       </div>`
+    + (view.mode==='diff' ? `<span class="rf" id="dref" title="refresh diff">↻</span>` : "")
+    + `<span class="rf" id="dclose" title="close">✕</span>`;
+  dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
+  dockbar.querySelector('[data-m=diff]').onclick = () => openDiff(view.box);
+  const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
+  dockbar.querySelector("#dclose").onclick = () => { if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } };
 }
 function renderTabs() {
-  tabsEl.querySelectorAll(".tab").forEach(t => t.remove());
+  tabsEl.querySelectorAll(".tab, .dock-actions").forEach(t => t.remove());
   for (const name of sessions.keys()) {
     const s = sessions.get(name), g = groupOf(stateOf(name));
     const t = document.createElement("div");
-    t.className = `tab t-${g}` + (name === active ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "");
+    t.className = `tab t-${g}` + (name === view.box && view.mode === "term" ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "");
     t.dataset.name = name;
     t.innerHTML = `<span class="td"></span><span class="tl">${esc(name)}</span><span class="tx" title="close">✕</span>`;
-    t.addEventListener("click", e => { if (e.target.classList.contains("tx")) closeSession(name); else setActive(name); });
+    t.addEventListener("click", e => { if (e.target.classList.contains("tx")) closeSession(name); else openTerminal(name); });
     tabsEl.append(t);
   }
-  if (!tabsEl.querySelector(".dock-actions") && sessions.size) {
+  if (sessions.size) {
     const da = document.createElement("div"); da.className = "dock-actions";
-    da.innerHTML = `<span class="da" id="closeall" title="close all sessions">close all</span>`;
+    da.innerHTML = `<span class="da" title="close all sessions">close all</span>`;
+    da.querySelector(".da").addEventListener("click", () => [...sessions.keys()].forEach(closeSession));
     tabsEl.append(da);
-    da.querySelector("#closeall").addEventListener("click", () => [...sessions.keys()].forEach(closeSession));
   }
 }
 function renderTabFlag(name) {
@@ -357,7 +416,29 @@ function renderTabFlag(name) {
   t.classList.toggle("streaming", !!sessions.get(name)?.streaming);
 }
 function refreshRowAll() { for (const name of rowEls.keys()) refreshRow(name); }
-window.addEventListener("resize", () => { if (active) { sessions.get(active)?.fit.fit(); sendResize(active); } });
+
+function loadDiff(name) {
+  diffpane.innerHTML = `<div class="diff"><div class="note">loading…</div></div>`;
+  fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(r => r.text()).then(txt => {
+    if (view.box !== name || view.mode !== "diff") return;
+    diffpane.innerHTML = renderDiff(txt);
+  }).catch(() => { diffpane.innerHTML = `<div class="diff"><div class="note">could not load diff</div></div>`; });
+}
+function renderDiff(txt) {
+  if (!txt || !txt.trim() || txt.startsWith("# no diff"))
+    return `<div class="diff"><div class="note">${esc((txt||"").replace(/^#\s*/,"")) || "no changes reported yet"}</div></div>`;
+  const lines = txt.split("\n").map(l => {
+    let cls = "";
+    if (l.startsWith("@@")) cls = "hunk";
+    else if (l.startsWith("+++") || l.startsWith("---") || l.startsWith("diff ") || l.startsWith("index ")
+             || l.startsWith("new file") || l.startsWith("deleted") || l.startsWith("rename") || l.startsWith("similarity")) cls = "meta";
+    else if (l.startsWith("+")) cls = "add";
+    else if (l.startsWith("-")) cls = "del";
+    return `<span class="ln ${cls}">${esc(l) || "&nbsp;"}</span>`;
+  }).join("");
+  return `<div class="diff">${lines}</div>`;
+}
+window.addEventListener("resize", () => { if (view.box && view.mode === "term") { sessions.get(view.box)?.fit.fit(); sendResize(view.box); } });
 
 // ---------- attention: title / favicon / notifications ----------
 let alertsOn = false;
@@ -415,7 +496,11 @@ function commands() {
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
-  const bx = boxes.map(b => ({ sec:"Boxes", label:b.name, meta:labelOf(b.state), state:b.state, run:()=>openTerminal(b.name) }));
+  const bx = [];
+  for (const b of boxes) {
+    bx.push({ sec:"Boxes", label:b.name, meta:labelOf(b.state), state:b.state, run:()=>openTerminal(b.name) });
+    bx.push({ sec:"Boxes", label:`Diff: ${b.name}`, meta:diffBadge(b.diff)?`${b.diff.ins}+ ${b.diff.del}−`:"", state:b.state, run:()=>openDiff(b.name) });
+  }
   return [...bx, ...acts];
 }
 function fuzzy(q, s) { q = q.toLowerCase(); s = s.toLowerCase(); let i = 0; for (const ch of s) if (ch === q[i]) i++; return i === q.length; }
@@ -450,14 +535,15 @@ palInput.addEventListener("keydown", e => {
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
   if (pal.classList.contains("open")) return;
-  // when focus is in a terminal, only intercept our chord; let the agent get the rest
-  const inTerm = active && sessions.get(active)?.host.contains(document.activeElement);
-  if (e.key === "Escape" && active) { e.preventDefault(); closeSession(active); return; }
+  // when focus is in a live terminal, only intercept our chord; let the agent get the rest
+  const inTerm = view.box && view.mode === "term" && sessions.get(view.box)?.host.contains(document.activeElement);
+  if (e.key === "Escape" && view.box) { e.preventDefault(); if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } return; }
   if (inTerm || e.target.tagName === "INPUT") return;
   switch (e.key) {
     case "j": case "ArrowDown": e.preventDefault(); move(1); break;
     case "k": case "ArrowUp":   e.preventDefault(); move(-1); break;
     case "Enter": case "o": if (sel) { e.preventDefault(); openTerminal(sel); } break;
+    case "d": if (sel) { e.preventDefault(); openDiff(sel); } break;
     case "]": e.preventDefault(); nextNeedsYou(); break;
     case "[": e.preventDefault(); cycleSession(-1); break;
     case "}": e.preventDefault(); cycleSession(1); break;
@@ -465,7 +551,7 @@ document.addEventListener("keydown", e => {
 });
 function cycleSession(d) {
   const ks = [...sessions.keys()]; if (!ks.length) return;
-  const i = active ? ks.indexOf(active) : -1; setActive(ks[(i+d+ks.length)%ks.length]);
+  const i = view.box ? ks.indexOf(view.box) : -1; openTerminal(ks[(i+d+ks.length)%ks.length]);
 }
 
 // ---------- live stream ----------

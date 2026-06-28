@@ -12,6 +12,17 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Diff summary a box reports for its branch-vs-base work (written by box-diff.sh).
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct DiffStat {
+    #[serde(default)]
+    pub files: u32,
+    #[serde(default)]
+    pub ins: u32,
+    #[serde(default)]
+    pub del: u32,
+}
+
 /// One entry in the shared `sandboxes.json` registry written by sandbox-bootstrap.sh.
 #[derive(Debug, Default, Deserialize)]
 pub struct Sandbox {
@@ -21,9 +32,12 @@ pub struct Sandbox {
     pub dir: String,
     #[serde(default, rename = "lastSeen")]
     pub last_seen: String,
-    /// Set by the box status hook (roadmap phase 2); usually empty today.
+    /// Set by the box status hook (box-status.sh); usually empty until a box reports.
     #[serde(default)]
     pub status: String,
+    /// Branch-vs-base diff summary, reported by box-diff.sh. None until first report.
+    #[serde(default)]
+    pub diff: Option<DiffStat>,
 }
 
 /// A registry entry enriched for display — what the CLI table and the web API both render.
@@ -36,6 +50,8 @@ pub struct BoxView {
     pub branch: String,
     pub age: String,
     pub dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffStat>,
 }
 
 impl Sandbox {
@@ -130,11 +146,20 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 branch: b.branch.clone(),
                 age: b.age(),
                 dir: shorten(&b.dir),
+                diff: b.diff.clone(),
             }
         })
         .collect();
     views.sort_by(|a, b| a.tier.cmp(&b.tier).then(a.name.cmp(&b.name)));
     Ok(views)
+}
+
+/// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
+/// (Boxes report their own diff because `sbx run` can't exec an arbitrary command in them.)
+pub fn read_diff(name: &str) -> Option<String> {
+    let reg = locate_registry().ok()?;
+    let path = reg.parent()?.join("diffs").join(format!("{name}.patch"));
+    fs::read_to_string(path).ok()
 }
 
 /// Look up a box's clone root (the `dir` it registered) by name.

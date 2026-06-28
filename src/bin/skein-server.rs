@@ -10,7 +10,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::Path;
 use axum::response::sse::{Event, Sse};
-use axum::response::{Html, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -29,6 +29,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/boxes", get(api_boxes))
+        .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -48,6 +49,23 @@ async fn index() -> Html<&'static str> {
 /// Snapshot of the fleet.
 async fn api_boxes() -> Json<Vec<BoxView>> {
     Json(load_views().unwrap_or_default())
+}
+
+/// The branch-vs-base patch a box last reported (plain text; empty when none yet).
+async fn api_diff(Path(name): Path<String>) -> Response {
+    let body = skein::read_diff(&name)
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| {
+            "# no diff reported yet — the box writes one when its agent pauses (Stop hook)\n".into()
+        });
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 /// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.
