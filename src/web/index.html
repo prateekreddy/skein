@@ -133,8 +133,22 @@
   .seg-toggle button { background:transparent; border:0; color:var(--dim); font:inherit; font-size:12px; padding:4px 13px;
                        cursor:pointer; transition:background var(--dur-fast), color var(--dur-fast); }
   .seg-toggle button.on { background:var(--elevated); color:var(--text); }
-  .dockbar .rf { color:var(--faint); cursor:pointer; padding:4px 8px; border-radius:6px; font-size:12px; }
+  .dockbar .rf { color:var(--faint); cursor:pointer; padding:4px 8px; border-radius:6px; font-size:12px; text-decoration:none; }
   .dockbar .rf:hover { color:var(--text); background:var(--elevated); }
+  .dockbar .shipsep { width:1px; align-self:stretch; background:var(--border-2); margin:0 2px; }
+  .dockbar .ship { font:inherit; font-size:12px; border:1px solid var(--border-2); background:var(--elevated); color:var(--text);
+    border-radius:6px; padding:4px 11px; cursor:pointer; }
+  .dockbar .ship:hover { border-color:var(--border-3); }
+  .dockbar .prlink { color:var(--accent); }
+  .dockbar .ck { font-size:11px; padding:2px 7px; border-radius:999px; }
+  .dockbar .ck.ok { color:var(--done); background:color-mix(in srgb,var(--done) 14%,transparent); }
+  .dockbar .ck.bad { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  .dockbar .ck.pend { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 14%,transparent); }
+  #toast { position:fixed; right:18px; bottom:18px; z-index:80; background:var(--overlay); color:var(--text);
+    border:1px solid var(--border-3); border-radius:9px; padding:10px 14px; font-size:13px; box-shadow:0 12px 40px rgba(0,0,0,.5);
+    opacity:0; transform:translateY(8px); transition:opacity var(--dur), transform var(--dur); pointer-events:none; }
+  #toast.show { opacity:1; transform:none; pointer-events:auto; }
+  #toast a { color:var(--accent); text-decoration:none; }
 
   .dockbody { position:relative; flex:1; min-height:0; }
   .termarea, .diffpane { position:absolute; inset:0; display:none; }
@@ -416,6 +430,7 @@ function showBox(name, mode) {
   if (mode === "term" && !sessions.has(name)) createSession(name);
   applyView();
   if (mode === "diff") loadDiff(name);
+  loadShip(name);
 }
 function applyView() {
   const docked = sessions.size > 0 || !!view.box;
@@ -477,12 +492,60 @@ function renderDockbar() {
     + (view.mode==='diff' ? `<span class="rf" id="dref" title="refresh diff">↻</span>` : "")
     + (view.mode==='diff' && (comments.get(view.box)||[]).length
         ? `<button class="send" id="dsend" title="paste the review into the agent prompt">Send ${(comments.get(view.box)||[]).length} 💬</button>` : "")
+    + shipHtml(view.box)
     + `<span class="rf" id="dclose" title="close">✕</span>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
   dockbar.querySelector('[data-m=diff]').onclick = () => openDiff(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
+  const pr = dockbar.querySelector("#dpr"); if (pr) pr.onclick = () => createPR(view.box);
+  const ar = dockbar.querySelector("#darch"); if (ar) ar.onclick = () => archiveBox(view.box);
   dockbar.querySelector("#dclose").onclick = () => { if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } };
+}
+
+// ---------- ship: PR · checks · archive (host-side via gh/sbx) ----------
+const shipState = new Map();   // box -> ShipStatus
+function shipHtml(box) {
+  const s = shipState.get(box);
+  let h = `<span class="shipsep"></span>`;
+  if (s && s.pr_url) {
+    const ck = s.checks==="passing"?`<span class="ck ok">✓ checks</span>`
+             : s.checks==="failing"?`<span class="ck bad">✗ checks</span>`
+             : s.checks==="pending"?`<span class="ck pend">… checks</span>` : "";
+    h += `<a class="rf prlink" href="${esc(s.pr_url)}" target="_blank" title="${esc(s.pr_state||"")} — open on GitHub">PR ${esc((s.pr_state||"").toLowerCase())}</a>${ck}`;
+  } else {
+    h += `<button class="ship" id="dpr" title="gh pr create for this branch">Create PR</button>`;
+  }
+  h += `<button class="ship" id="darch" title="archive — leaves the board">Archive</button>`;
+  return h;
+}
+function loadShip(name, force) {
+  if (!force && shipState.has(name)) return;
+  fetch(`/api/boxes/${encodeURIComponent(name)}/ship`).then(r => r.json()).then(s => {
+    shipState.set(name, s || {}); if (view.box === name) renderDockbar();
+  }).catch(() => {});
+}
+function createPR(name) {
+  toast("opening PR…");
+  fetch(`/api/boxes/${encodeURIComponent(name)}/pr`, { method:"POST" }).then(r => r.json()).then(d => {
+    if (d.ok) { toast("PR ready ↗", d.url); shipState.delete(name); loadShip(name, true); }
+    else toast("PR failed: " + (d.error||"").split("\n")[0]);
+  }).catch(() => toast("PR failed"));
+}
+function archiveBox(name) {
+  if (!confirm(`Archive ${name}? It leaves the board (kept in history.jsonl) and runs the archive command if you set one.`)) return;
+  fetch(`/api/boxes/${encodeURIComponent(name)}/archive`, { method:"POST" }).then(r => r.json()).then(d => {
+    if (d.ok) { if (sessions.has(name)) closeSession(name); shipState.delete(name);
+      if (view.box === name) { view = {box:null,mode:"term"}; applyView(); } toast(`archived ${name}`); }
+    else toast("archive failed: " + (d.error||""));
+  }).catch(() => toast("archive failed"));
+}
+let toastT;
+function toast(msg, url) {
+  let t = document.getElementById("toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast"; document.body.append(t); }
+  t.innerHTML = url ? `<a href="${esc(url)}" target="_blank">${esc(msg)}</a>` : esc(msg);
+  t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), url ? 8000 : 3500);
 }
 function renderTabs() {
   tabsEl.querySelectorAll(".tab, .dock-actions").forEach(t => t.remove());

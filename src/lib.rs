@@ -245,6 +245,151 @@ pub fn launch_command(branch: &str) -> String {
     format!("setup-sandbox.sh {}", sh_quote(branch))
 }
 
+/// The box's branch, from the registry.
+pub fn branch_of(name: &str) -> Option<String> {
+    let (boxes, _) = load_registry().ok()?;
+    boxes
+        .get(name)
+        .map(|b| b.branch.clone())
+        .filter(|b| !b.is_empty() && b != "?")
+}
+
+/// Run a program in the repo dir ($SKEIN_REPO, else cwd); returns (stdout, stderr, exit-code).
+fn run_capture(prog: &str, args: &[&str]) -> Result<(String, String, i32), String> {
+    let mut c = Command::new(prog);
+    c.args(args);
+    if let Ok(repo) = env::var("SKEIN_REPO") {
+        if !repo.is_empty() {
+            c.current_dir(repo);
+        }
+    }
+    let out = c
+        .output()
+        .map_err(|e| format!("{prog} not runnable: {e}"))?;
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    ))
+}
+
+fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
+    run_capture("sh", &["-c", cmd])
+}
+
+/// Merge-readiness for a box: does a PR exist, its state, and CI checks. All host-side via `gh`.
+#[derive(Debug, Default, Serialize)]
+pub struct ShipStatus {
+    pub branch: Option<String>,
+    pub pr_url: Option<String>,
+    pub pr_state: Option<String>,
+    /// "passing" | "pending" | "failing" | "none"
+    pub checks: Option<String>,
+    pub checks_text: Option<String>,
+}
+
+pub fn ship_status(name: &str) -> ShipStatus {
+    let mut s = ShipStatus::default();
+    let branch = match branch_of(name) {
+        Some(b) => b,
+        None => return s,
+    };
+    s.branch = Some(branch.clone());
+    if let Ok((out, _, 0)) = run_capture("gh", &["pr", "view", &branch, "--json", "url,state"]) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+            s.pr_url = v.get("url").and_then(|x| x.as_str()).map(String::from);
+            s.pr_state = v.get("state").and_then(|x| x.as_str()).map(String::from);
+        }
+    }
+    if s.pr_url.is_some() {
+        if let Ok((out, err, code)) = run_capture("gh", &["pr", "checks", &branch]) {
+            s.checks = Some(
+                match code {
+                    0 => "passing",
+                    8 => "pending",
+                    _ => "failing",
+                }
+                .into(),
+            );
+            let text = if out.trim().is_empty() { err } else { out };
+            s.checks_text = Some(text.lines().take(10).collect::<Vec<_>>().join("\n"));
+        }
+    }
+    s
+}
+
+/// Open (or report) a PR for the box's branch. Override the command with $SKEIN_PR_CMD
+/// (`{branch}`/`{name}` substituted); default `gh pr create --head <branch> --fill`
+/// (+ `--base $SKEIN_BASE` if set). Returns the PR URL on success.
+pub fn create_pr(name: &str) -> Result<String, String> {
+    let branch = branch_of(name).ok_or("box has no branch in the registry")?;
+    let (out, err, code) = match env::var("SKEIN_PR_CMD") {
+        Ok(c) if !c.is_empty() => {
+            run_shell(&c.replace("{branch}", &branch).replace("{name}", name))?
+        }
+        _ => {
+            let mut args = vec!["pr", "create", "--head", &branch, "--fill"];
+            let base = env::var("SKEIN_BASE").unwrap_or_default();
+            if !base.is_empty() {
+                args.push("--base");
+                args.push(&base);
+            }
+            run_capture("gh", &args)?
+        }
+    };
+    if code == 0 {
+        let url = out
+            .split_whitespace()
+            .chain(err.split_whitespace())
+            .find(|w| w.contains("github.com") && w.contains("/pull/"))
+            .map(String::from)
+            .unwrap_or_else(|| out.trim().to_string());
+        Ok(url)
+    } else {
+        let msg = if err.trim().is_empty() { out } else { err };
+        Err(msg.trim().to_string())
+    }
+}
+
+/// Archive a box off the board: remove its registry entry, append it to `<store>/history.jsonl`,
+/// and run $SKEIN_ARCHIVE_CMD if set (e.g. `sbx rm {name}`). skein-owned; needs no external tool.
+pub fn archive_box(name: &str) -> Result<(), String> {
+    let path = locate_registry()?;
+    let data = fs::read_to_string(&path).map_err(|e| format!("reading registry: {e}"))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| format!("parsing registry: {e}"))?;
+    let obj = v.as_object_mut().ok_or("registry is not a JSON object")?;
+    let mut removed = obj.remove(name).ok_or("no such box in the registry")?;
+
+    if let Some(store) = path.parent() {
+        if let Some(m) = removed.as_object_mut() {
+            m.insert("name".into(), serde_json::Value::String(name.into()));
+            m.insert(
+                "archivedAt".into(),
+                serde_json::Value::String(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            );
+        }
+        let line = format!("{removed}\n");
+        let hist = store.join("history.jsonl");
+        let mut existing = fs::read_to_string(&hist).unwrap_or_default();
+        existing.push_str(&line);
+        let _ = fs::write(&hist, existing);
+    }
+
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("writing registry: {e}"))?;
+
+    if let Ok(c) = env::var("SKEIN_ARCHIVE_CMD") {
+        if !c.is_empty() {
+            let _ = run_shell(&c.replace("{name}", name));
+        }
+    }
+    Ok(())
+}
+
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
 /// (Boxes report their own diff because `sbx run` can't exec an arbitrary command in them.)
 pub fn read_diff(name: &str) -> Option<String> {

@@ -12,7 +12,7 @@ use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
@@ -34,6 +34,9 @@ async fn main() {
         .route("/api/boxes", get(api_boxes))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
+        .route("/api/boxes/:name/ship", get(api_ship))
+        .route("/api/boxes/:name/pr", post(api_pr))
+        .route("/api/boxes/:name/archive", post(api_archive))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -99,6 +102,34 @@ async fn api_mailbox_send(Json(r): Json<SendReq>) -> Response {
         Ok(()) => (StatusCode::OK, "ok").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+/// Merge-readiness for a box (PR state + CI checks), host-side via `gh`.
+async fn api_ship(Path(name): Path<String>) -> Json<skein::ShipStatus> {
+    let s = tokio::task::spawn_blocking(move || skein::ship_status(&name))
+        .await
+        .unwrap_or_default();
+    Json(s)
+}
+
+/// Open a PR for the box's branch (host-side). Returns {ok, url|error}.
+async fn api_pr(Path(name): Path<String>) -> Json<serde_json::Value> {
+    let r = tokio::task::spawn_blocking(move || skein::create_pr(&name)).await;
+    Json(match r {
+        Ok(Ok(url)) => serde_json::json!({ "ok": true, "url": url }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// Archive a box off the board. Returns {ok} or {ok:false, error}.
+async fn api_archive(Path(name): Path<String>) -> Json<serde_json::Value> {
+    let r = tokio::task::spawn_blocking(move || skein::archive_box(&name)).await;
+    Json(match r {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
 }
 
 /// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.
