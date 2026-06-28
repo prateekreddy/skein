@@ -25,8 +25,18 @@
   #app { display:flex; height:100vh; overflow:hidden; }
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
-  body.docked #left { flex:1 1 0; }
-  body.docked .wrap { margin:0; max-width:none; }
+  /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
+  body.docked #left { flex:0 0 clamp(260px, 28%, 380px); }
+  body.docked .wrap { margin:0; max-width:none; padding:16px 12px 40px; }
+  body.docked header { flex-wrap:wrap; row-gap:8px; margin-bottom:14px; }
+  body.docked .right { gap:8px; }
+  body.docked .counts { font-size:12px; }
+  body.docked footer { display:none; }
+  /* compact rows in the rail: drop the path, age and chevron; tighten padding */
+  body.docked .row { grid-template-columns:16px 1fr auto; gap:10px; padding:9px 11px; }
+  body.docked .row .age, body.docked .row .chev { display:none; }
+  body.docked .dir { display:none; }
+  body.docked .ghead { padding:10px 4px 5px; }
 
   header { display:flex; align-items:center; gap:14px; margin-bottom:20px; }
   .word { font-weight:650; letter-spacing:-.01em; font-size:18px; }
@@ -97,9 +107,8 @@
         border-bottom-width:2px; border-radius:5px; padding:1px 6px; color:var(--dim); }
 
   /* ---- terminal dock (persistent multi-session) ---- */
-  #dock { flex:0 0 clamp(440px, 56%, 880px); display:none; flex-direction:column;
-          background:var(--inset); border-left:1px solid var(--border-2); }
-  body.docked #dock { display:flex; }
+  #dock { display:none; flex-direction:column; background:var(--inset); border-left:1px solid var(--border-2); }
+  body.docked #dock { display:flex; flex:1 1 0; min-width:0; }
   .tabs { display:flex; align-items:stretch; gap:0; border-bottom:1px solid var(--border); background:var(--panel);
           overflow-x:auto; scrollbar-width:thin; }
   .tab { display:flex; align-items:center; gap:8px; padding:9px 12px; cursor:pointer; white-space:nowrap;
