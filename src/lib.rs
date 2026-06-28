@@ -115,6 +115,29 @@ impl Sandbox {
     }
 }
 
+/// A box name is a registry key / vmid — never a path or a shell token. Reject anything that
+/// could escape the store dir on a filesystem join (`..`, separators, NUL). The server validates
+/// every `:name` route with this, and the path-touching lib fns guard with it too so the check
+/// can't be bypassed by a non-HTTP caller.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.contains("..")
+        && !name.contains(['/', '\\', '\0'])
+}
+
+/// Write `bytes` to `path` atomically: a temp file in the same dir, then rename (POSIX-atomic),
+/// so a concurrent reader sees either the old or the new whole file, never a truncated one.
+/// `dir` must be `path`'s parent (same filesystem) for the rename to be atomic.
+fn write_atomic(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = dir.join(format!(".skein.tmp.{}", std::process::id()));
+    fs::write(&tmp, bytes).map_err(|e| format!("writing temp: {e}"))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("renaming into place: {e}")
+    })
+}
+
 pub fn locate_registry() -> Result<PathBuf, String> {
     if let Ok(p) = env::var("SKEIN_REGISTRY") {
         if !p.is_empty() {
@@ -365,14 +388,32 @@ pub fn create_pr(name: &str) -> Result<String, String> {
 /// Archive a box off the board: remove its registry entry, append it to `<store>/history.jsonl`,
 /// and run $SKEIN_ARCHIVE_CMD if set (e.g. `sbx rm {name}`). skein-owned; needs no external tool.
 pub fn archive_box(name: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    use fs2::FileExt;
+    use std::io::Write as _;
     let path = locate_registry()?;
-    let data = fs::read_to_string(&path).map_err(|e| format!("reading registry: {e}"))?;
-    let mut v: serde_json::Value =
-        serde_json::from_str(&data).map_err(|e| format!("parsing registry: {e}"))?;
-    let obj = v.as_object_mut().ok_or("registry is not a JSON object")?;
-    let mut removed = obj.remove(name).ok_or("no such box in the registry")?;
+    let store = path.parent().ok_or("registry has no parent dir")?.to_path_buf();
 
-    if let Some(store) = path.parent() {
+    // Share the box hooks' flock discipline (sandbox-bootstrap.sh): an exclusive advisory lock on
+    // <store>/.sandboxes.lock held across the whole read-modify-write, then an atomic temp+rename
+    // so a concurrent heartbeat can't be lost mid-write and a reader can't see a truncated file.
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(store.join(".sandboxes.lock"))
+        .map_err(|e| format!("lock open: {e}"))?;
+    lock.lock_exclusive().map_err(|e| format!("lock: {e}"))?;
+
+    let result = (|| {
+        let data = fs::read_to_string(&path).map_err(|e| format!("reading registry: {e}"))?;
+        let mut v: serde_json::Value =
+            serde_json::from_str(&data).map_err(|e| format!("parsing registry: {e}"))?;
+        let obj = v.as_object_mut().ok_or("registry is not a JSON object")?;
+        let mut removed = obj.remove(name).ok_or("no such box in the registry")?;
+
         if let Some(m) = removed.as_object_mut() {
             m.insert("name".into(), serde_json::Value::String(name.into()));
             m.insert(
@@ -380,18 +421,16 @@ pub fn archive_box(name: &str) -> Result<(), String> {
                 serde_json::Value::String(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
             );
         }
-        let line = format!("{removed}\n");
+        // history is append-only — don't rewrite the whole log (racy + O(n)).
         let hist = store.join("history.jsonl");
-        let mut existing = fs::read_to_string(&hist).unwrap_or_default();
-        existing.push_str(&line);
-        let _ = fs::write(&hist, existing);
-    }
-
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("writing registry: {e}"))?;
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&hist) {
+            let _ = writeln!(f, "{removed}");
+        }
+        let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+        write_atomic(&path, &store, pretty.as_bytes())
+    })();
+    let _ = lock.unlock();
+    result?;
 
     if let Ok(c) = env::var("SKEIN_ARCHIVE_CMD") {
         if !c.is_empty() {
@@ -404,6 +443,9 @@ pub fn archive_box(name: &str) -> Result<(), String> {
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
 /// (Boxes report their own diff because `sbx run` can't exec an arbitrary command in them.)
 pub fn read_diff(name: &str) -> Option<String> {
+    if !valid_name(name) {
+        return None;
+    }
     // Prefer a fresh diff computed host-side when the box's dir is a git repo *on this
     // host* (direct mode); fall back to the patch the box reported (clone mode, where the
     // dir is an in-box path this host can't see). Computed on demand only — never per tick.

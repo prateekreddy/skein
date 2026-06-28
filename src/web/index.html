@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>skein</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+<link rel="stylesheet" href="/vendor/xterm.css" />
 <style>
   :root {
     --bg:#0b0d10; --panel:#14171c; --elevated:#1b1f26; --overlay:#20252e; --inset:#08090b;
@@ -322,8 +322,8 @@
     </div>
   </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
 <script>
 // ---------- model ----------
 const GROUPS = [
@@ -337,8 +337,9 @@ const GROUPS = [
 const groupOf = s => (GROUPS.find(g => g.match(s)) || GROUPS[GROUPS.length-1]).key;
 const labelOf = s => ["needs-input","needs-decision","blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+// coerce to integers — these land in innerHTML, so never interpolate raw box-reported values
 const diffBadge = d => d && (d.files||d.ins||d.del)
-  ? `<span class="pos">+${d.ins}</span> <span class="neg">−${d.del}</span>${d.files?` · ${d.files}f`:""}` : "";
+  ? `<span class="pos">+${d.ins|0}</span> <span class="neg">−${d.del|0}</span>${d.files?` · ${d.files|0}f`:""}` : "";
 
 let boxes = [], order = [], sel = null, prevState = {};
 const stateOf = name => boxes.find(b => b.name === name)?.state || "unknown";
@@ -393,7 +394,9 @@ function render(snapshot) {
     for (const g of GROUPS) groupEls[g.key].section.style.display = "none";
     const e = document.createElement("div"); e.className = "empty";
     e.innerHTML = `the skein is empty — launch a box with <code>setup-sandbox.sh &lt;branch&gt;</code>`;
-    fleet.append(e); order = []; return;
+    fleet.append(e); order = [];
+    renderTabs(); notify([]);   // clear stale title/favicon/tabs when the fleet drains
+    return;
   }
   order = []; const seen = new Set();
   for (const g of GROUPS) {
@@ -836,10 +839,14 @@ document.addEventListener("keydown", e => {
   if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
   if (newbox.classList.contains("open")) return;
   if (pal.classList.contains("open")) return;
-  // when focus is in a live terminal, only intercept our chord; let the agent get the rest
+  // When focus is in a live terminal or any text field, let it own every key — including Esc, which
+  // the agent (claude/vim/less/fzf) needs. This guard MUST precede the Esc handler below.
   const inTerm = view.box && view.mode === "term" && sessions.get(view.box)?.host.contains(document.activeElement);
-  if (e.key === "Escape" && view.box) { e.preventDefault(); if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } return; }
-  if (inTerm || e.target.tagName === "INPUT") return;
+  const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+  if (inTerm || inField) return;
+  // Esc returns focus to the fleet for keyboard nav — it never closes/kills a session (that was a
+  // footgun: one keypress destroyed the agent session). Close explicitly via the tab ✕ / "close all".
+  if (e.key === "Escape") { e.preventDefault(); document.activeElement?.blur?.(); return; }
   switch (e.key) {
     case "j": case "ArrowDown": e.preventDefault(); move(1); break;
     case "k": case "ArrowUp":   e.preventDefault(); move(-1); break;
@@ -856,8 +863,10 @@ function cycleSession(d) {
 }
 
 // ---------- live stream ----------
+let es = null;
 function connect() {
-  const es = new EventSource("/api/events");
+  if (es) { try { es.close(); } catch {} }   // don't stack streams on manual reconnect
+  es = new EventSource("/api/events");
   es.addEventListener("boxes", e => { try { render(JSON.parse(e.data)); } catch {} });
   es.onopen = () => { document.getElementById("live").classList.add("on"); document.getElementById("livetext").textContent = "live"; };
   es.onerror = () => { document.getElementById("live").classList.remove("on"); document.getElementById("livetext").textContent = "reconnecting…"; };

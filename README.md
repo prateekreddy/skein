@@ -27,10 +27,14 @@ A self-contained dark page (no build step) that live-updates over SSE. Click any
 open its **embedded terminal** (xterm.js ↔ a server-side PTY running `sbx run --name
 <box>`) and drive that agent without leaving the page. Next: launch / diff / merge /
 archive actions and a ⌘K palette. API: `GET /api/boxes`, `GET /api/events` (SSE),
-`GET /api/boxes/:name/terminal` (WebSocket).
+`GET /api/boxes/:name/terminal` (WebSocket). xterm.js is vendored into the binary
+(served from `/vendor/`), so the terminal works with no CDN — important in the
+firewalled sbx network.
 
-> Localhost-only (`127.0.0.1:7878`). Remote/mobile access is a tunnel + auth — roadmap
-> Phase 4; don't expose this port directly.
+> Localhost-only by default (`127.0.0.1:7878`); set `$SKEIN_ADDR` to change the bind.
+> The terminal WebSocket rejects non-loopback `Origin`s (drive-by / DNS-rebinding guard).
+> Remote/mobile access still needs a tunnel **and an auth token** (not yet implemented) —
+> roadmap Phase 4; don't expose this port directly until then.
 
 ## CLI (terminal client, same core)
 

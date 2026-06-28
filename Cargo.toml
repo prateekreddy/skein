@@ -29,3 +29,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tokio-stream = { version = "0.1", features = ["time"] }
 # reuse the wheel: wezterm's PTY layer for the embedded terminal (xterm.js handles the browser side)
 portable-pty = "0.8"
+# advisory file locking so registry writes share the same flock discipline as the box hooks
+fs2 = "0.4"

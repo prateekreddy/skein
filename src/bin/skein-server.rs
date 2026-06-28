@@ -25,12 +25,25 @@ use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
 const INDEX: &str = include_str!("../web/index.html");
-const ADDR: &str = "127.0.0.1:7878";
+// Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
+const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
+const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
+const FIT_JS: &str = include_str!("../web/vendor/addon-fit.min.js");
+const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 
 #[tokio::main]
 async fn main() {
+    // Bind is loopback-only by default; $SKEIN_ADDR overrides it (a tunnel/remote bind also needs
+    // the auth token noted in `origin_ok` — roadmap phase 4).
+    let addr = std::env::var("SKEIN_ADDR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_ADDR.into());
     let app = Router::new()
         .route("/", get(index))
+        .route("/vendor/xterm.js", get(vendor_xterm_js))
+        .route("/vendor/xterm.css", get(vendor_xterm_css))
+        .route("/vendor/addon-fit.js", get(vendor_fit_js))
         .route("/api/boxes", get(api_boxes))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
@@ -40,10 +53,10 @@ async fn main() {
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
-    let listener = tokio::net::TcpListener::bind(ADDR)
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .unwrap_or_else(|e| panic!("skein-server: cannot bind {ADDR}: {e}"));
-    println!("skein-server → http://{ADDR}");
+        .unwrap_or_else(|e| panic!("skein-server: cannot bind {addr}: {e}"));
+    println!("skein-server → http://{addr}");
     axum::serve(listener, app)
         .await
         .expect("skein-server: serve failed");
@@ -53,6 +66,41 @@ async fn index() -> Html<&'static str> {
     Html(INDEX)
 }
 
+async fn vendor_xterm_js() -> Response {
+    static_asset(XTERM_JS, "application/javascript; charset=utf-8")
+}
+async fn vendor_fit_js() -> Response {
+    static_asset(FIT_JS, "application/javascript; charset=utf-8")
+}
+async fn vendor_xterm_css() -> Response {
+    static_asset(XTERM_CSS, "text/css; charset=utf-8")
+}
+fn static_asset(body: &'static str, ct: &'static str) -> Response {
+    ([(axum::http::header::CONTENT_TYPE, ct)], body).into_response()
+}
+
+/// Same-origin guard for the terminal upgrade. Browsers always send `Origin` on a WebSocket
+/// handshake and page JS cannot forge it, so rejecting non-loopback origins blocks drive-by
+/// cross-origin connections (WS is exempt from same-origin policy) and DNS-rebinding against the
+/// terminal. Non-browser clients send no `Origin` and are allowed — the bind is loopback-only.
+/// Binding off-loopback (`$SKEIN_ADDR`, phase 4) must add an auth token here first.
+fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return true;
+    };
+    let authority = origin.split("://").nth(1).unwrap_or("");
+    let authority = authority.split('/').next().unwrap_or(authority);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest) // [::1]:port -> ::1
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 /// Snapshot of the fleet.
 async fn api_boxes() -> Json<Vec<BoxView>> {
     Json(load_views().unwrap_or_default())
@@ -60,6 +108,9 @@ async fn api_boxes() -> Json<Vec<BoxView>> {
 
 /// The branch-vs-base patch a box last reported (plain text; empty when none yet).
 async fn api_diff(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
     let body = skein::read_diff(&name)
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| {
@@ -105,15 +156,21 @@ async fn api_mailbox_send(Json(r): Json<SendReq>) -> Response {
 }
 
 /// Merge-readiness for a box (PR state + CI checks), host-side via `gh`.
-async fn api_ship(Path(name): Path<String>) -> Json<skein::ShipStatus> {
+async fn api_ship(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
     let s = tokio::task::spawn_blocking(move || skein::ship_status(&name))
         .await
         .unwrap_or_default();
-    Json(s)
+    Json(s).into_response()
 }
 
 /// Open a PR for the box's branch (host-side). Returns {ok, url|error}.
 async fn api_pr(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
     let r = tokio::task::spawn_blocking(move || skein::create_pr(&name)).await;
     Json(match r {
         Ok(Ok(url)) => serde_json::json!({ "ok": true, "url": url }),
@@ -124,6 +181,9 @@ async fn api_pr(Path(name): Path<String>) -> Json<serde_json::Value> {
 
 /// Archive a box off the board. Returns {ok} or {ok:false, error}.
 async fn api_archive(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
     let r = tokio::task::spawn_blocking(move || skein::archive_box(&name)).await;
     Json(match r {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
@@ -149,7 +209,14 @@ async fn terminal(
     ws: WebSocketUpgrade,
     Path(name): Path<String>,
     Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin terminal blocked").into_response();
+    }
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
     let launch = q.get("launch").filter(|s| !s.is_empty()).cloned();
     ws.on_upgrade(move |socket| terminal_session(socket, name, launch))
 }
