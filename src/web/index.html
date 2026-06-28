@@ -7,178 +7,173 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
 <style>
   :root {
-    /* background layers — elevation by lightness, not shadow */
-    --bg:        #0b0d10;
-    --panel:     #14171c;
-    --elevated:  #1b1f26;
-    --overlay:   #20252e;
-    --inset:     #08090b;
-    /* borders — three tiers */
-    --border:    #1b2026;
-    --border-2:  #2a3038;
-    --border-3:  #3d444d;
-    /* text — four tiers */
-    --text:      #e6edf3;
-    --text-2:    #b3bdc9;
-    --dim:       #8b949e;
-    --faint:     #5c636e;
-    /* accent — UI only, never a status */
-    --accent:    #7c7cf0;
-    --accent-2:  #9a9af5;
-    --accent-bg: rgba(124,124,240,.12);
-    /* semantic status — convention-aligned: green = done, blue = working/live */
-    --attn:    #f85149;  /* needs-input / decision — loudest */
-    --waiting: #e3b341;  /* your move (calm amber) */
-    --working: #58a6ff;  /* in-progress — pulses */
-    --done:    #3fb950;  /* finished (green = done, everywhere) */
-    --idle:    #8b949e;
-    --stale:   #484f58;
-    /* motion */
-    --dur-fast: 100ms; --dur: 150ms; --dur-med: 250ms;
-    --ease: cubic-bezier(.2,0,0,1);
-    --radius: 10px;
-    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
-    --ui: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    --bg:#0b0d10; --panel:#14171c; --elevated:#1b1f26; --overlay:#20252e; --inset:#08090b;
+    --border:#1b2026; --border-2:#2a3038; --border-3:#3d444d;
+    --text:#e6edf3; --text-2:#b3bdc9; --dim:#8b949e; --faint:#5c636e;
+    --accent:#7c7cf0; --accent-2:#9a9af5; --accent-bg:rgba(124,124,240,.12);
+    --attn:#f85149; --waiting:#e3b341; --working:#58a6ff; --done:#3fb950; --idle:#8b949e; --stale:#484f58;
+    --dur-fast:100ms; --dur:150ms; --dur-med:250ms; --ease:cubic-bezier(.2,0,0,1);
+    --radius:10px;
+    --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,monospace;
+    --ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; }
-  body {
-    background: radial-gradient(1200px 600px at 70% -10%, #11151b 0%, var(--bg) 60%);
-    color: var(--text); font-family: var(--ui); font-size: 14px; line-height: 1.4;
-    -webkit-font-smoothing: antialiased;
-  }
-  .wrap { max-width: 920px; margin: 0 auto; padding: 26px 20px 64px; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; }
+  body { background:radial-gradient(1200px 600px at 70% -10%, #11151b 0%, var(--bg) 60%);
+         color:var(--text); font-family:var(--ui); font-size:14px; line-height:1.4; -webkit-font-smoothing:antialiased; }
 
-  header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
-  .word { font-weight: 650; letter-spacing: -.01em; font-size: 18px; }
-  .word b { color: var(--accent); }
-  .counts { color: var(--dim); font-size: 13px; display: flex; gap: 10px; }
-  .counts .seg { display: inline-flex; align-items: center; gap: 5px; }
-  .counts .n { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
-  .counts .pip { width: 7px; height: 7px; border-radius: 50%; }
-  .right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
-  .kbtn { font-family: var(--mono); font-size: 11px; color: var(--dim); cursor: pointer;
-          background: var(--panel); border: 1px solid var(--border-2); border-radius: 7px;
-          padding: 4px 9px; transition: color var(--dur-fast), border-color var(--dur-fast); }
-  .kbtn:hover { color: var(--text); border-color: var(--border-3); }
-  .live { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 12px; }
-  .live .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--stale);
-               transition: background var(--dur); }
-  .live.on .pip { background: var(--done); box-shadow: 0 0 8px var(--done); }
+  #app { display:flex; height:100vh; overflow:hidden; }
+  #left { flex:1 1 0; min-width:0; overflow-y:auto; }
+  .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
+  body.docked #left { flex:1 1 0; }
+  body.docked .wrap { margin:0; max-width:none; }
 
-  .group { margin-bottom: 8px; }
-  .ghead { display: flex; align-items: center; gap: 8px; padding: 14px 4px 7px;
-           font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
-           color: var(--faint); }
-  .ghead .gc { color: var(--dim); font-variant-numeric: tabular-nums; }
-  .grows { display: flex; flex-direction: column; gap: 6px; }
+  header { display:flex; align-items:center; gap:14px; margin-bottom:20px; }
+  .word { font-weight:650; letter-spacing:-.01em; font-size:18px; }
+  .word b { color:var(--accent); }
+  .counts { color:var(--dim); font-size:13px; display:flex; gap:10px; flex-wrap:wrap; }
+  .counts .seg { display:inline-flex; align-items:center; gap:5px; }
+  .counts .n { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+  .counts .pip { width:7px; height:7px; border-radius:50%; }
+  .right { margin-left:auto; display:flex; align-items:center; gap:12px; }
+  .kbtn { font-family:var(--mono); font-size:11px; color:var(--dim); cursor:pointer; background:var(--panel);
+          border:1px solid var(--border-2); border-radius:7px; padding:4px 9px;
+          transition:color var(--dur-fast), border-color var(--dur-fast); }
+  .kbtn:hover { color:var(--text); border-color:var(--border-3); }
+  .live { display:flex; align-items:center; gap:7px; color:var(--dim); font-size:12px; }
+  .live .pip { width:7px; height:7px; border-radius:50%; background:var(--stale); transition:background var(--dur); }
+  .live.on .pip { background:var(--done); box-shadow:0 0 8px var(--done); }
 
-  .row {
-    display: grid; grid-template-columns: 18px 1fr auto auto 14px; align-items: center; gap: 14px;
-    padding: 12px 16px; background: var(--panel); border: 1px solid var(--border-2);
-    border-left: 2px solid transparent; border-radius: var(--radius); cursor: pointer;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
-    transition: background var(--dur-fast), border-color var(--dur-fast), transform var(--dur-fast);
-  }
-  .row:hover { background: var(--elevated); border-color: var(--border-3); }
-  .row:hover .chev { color: var(--text); }
-  .row.sel { border-left-color: var(--accent); background: var(--elevated); }
-  .row.s-attn    { border-color: color-mix(in srgb, var(--attn) 42%, var(--border-2)); }
-  .row.s-waiting { border-color: color-mix(in srgb, var(--waiting) 34%, var(--border-2)); }
-  .chev { color: var(--faint); justify-self: end; transition: color var(--dur-fast); }
+  .group { margin-bottom:8px; }
+  .ghead { display:flex; align-items:center; gap:8px; padding:14px 4px 7px; font-size:11px; font-weight:600;
+           letter-spacing:.06em; text-transform:uppercase; color:var(--faint); }
+  .ghead .gc { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .grows { display:flex; flex-direction:column; gap:6px; }
 
-  .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
-  .s-attn    .dot { background: var(--attn);    box-shadow: 0 0 12px var(--attn);    animation: pulse 1.5s var(--ease) infinite; }
-  .s-working .dot { background: var(--working); box-shadow: 0 0 9px var(--working);  animation: pulse 1.9s var(--ease) infinite; }
-  .s-waiting .dot { background: var(--waiting); box-shadow: 0 0 9px var(--waiting); }
-  .s-done    .dot { background: var(--done);    box-shadow: 0 0 7px var(--done); }
-  .s-idle    .dot { background: var(--idle); }
-  .s-stale   .dot, .s-unknown .dot { background: var(--stale); }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+  .row { display:grid; grid-template-columns:18px 1fr auto auto 16px; align-items:center; gap:14px;
+         padding:12px 16px; background:var(--panel); border:1px solid var(--border-2); border-left:2px solid transparent;
+         border-radius:var(--radius); cursor:pointer; box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+         transition:background var(--dur-fast), border-color var(--dur-fast); }
+  .row:hover { background:var(--elevated); border-color:var(--border-3); }
+  .row:hover .chev { color:var(--text); }
+  .row.sel { border-left-color:var(--accent); background:var(--elevated); }
+  .row.wired { border-left-color:color-mix(in srgb,var(--accent) 60%,transparent); }
+  .row.active { border-left-color:var(--accent); }
+  .row.s-attn { border-color:color-mix(in srgb,var(--attn) 42%,var(--border-2)); }
+  .row.s-waiting { border-color:color-mix(in srgb,var(--waiting) 34%,var(--border-2)); }
+  .chev { color:var(--faint); justify-self:end; transition:color var(--dur-fast); font-size:13px; }
+  .row.wired .chev { color:var(--accent); }
+  .row.streaming .chev { animation:pulse 1s var(--ease) infinite; }
 
-  .main { min-width: 0; }
-  .name { font-weight: 600; letter-spacing: -.005em; }
-  .s-stale .name, .s-unknown .name, .s-idle .name { color: var(--faint); font-weight: 500; }
-  .sub { color: var(--dim); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; min-width: 0; }
-  .branch { font-family: var(--mono); color: var(--accent); opacity: .9; white-space: nowrap; }
-  .dir { font-family: var(--mono); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width:9px; height:9px; border-radius:50%; justify-self:center; }
+  .s-attn .dot { background:var(--attn); box-shadow:0 0 12px var(--attn); animation:pulse 1.5s var(--ease) infinite; }
+  .s-working .dot { background:var(--working); box-shadow:0 0 9px var(--working); animation:pulse 1.9s var(--ease) infinite; }
+  .s-waiting .dot { background:var(--waiting); box-shadow:0 0 9px var(--waiting); }
+  .s-done .dot { background:var(--done); box-shadow:0 0 7px var(--done); }
+  .s-idle .dot { background:var(--idle); }
+  .s-stale .dot, .s-unknown .dot { background:var(--stale); }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
 
-  .pill { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-          padding: 3px 9px; border-radius: 999px; color: var(--dim); background: #1b2026;
-          border: 1px solid transparent; white-space: nowrap; }
-  .s-attn    .pill { color: var(--attn);    background: color-mix(in srgb, var(--attn) 14%, transparent);    border-color: color-mix(in srgb, var(--attn) 30%, transparent); }
-  .s-waiting .pill { color: var(--waiting); background: color-mix(in srgb, var(--waiting) 14%, transparent); border-color: color-mix(in srgb, var(--waiting) 28%, transparent); }
-  .s-working .pill { color: var(--working); background: color-mix(in srgb, var(--working) 14%, transparent); border-color: color-mix(in srgb, var(--working) 28%, transparent); }
-  .s-done    .pill { color: var(--done);    background: color-mix(in srgb, var(--done) 14%, transparent);    border-color: color-mix(in srgb, var(--done) 28%, transparent); }
+  .main { min-width:0; }
+  .name { font-weight:600; letter-spacing:-.005em; }
+  .s-stale .name, .s-unknown .name, .s-idle .name { color:var(--faint); font-weight:500; }
+  .sub { color:var(--dim); font-size:12px; margin-top:2px; display:flex; gap:10px; min-width:0; }
+  .branch { font-family:var(--mono); color:var(--accent); opacity:.9; white-space:nowrap; }
+  .dir { font-family:var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-  .age { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .pill { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding:3px 9px;
+          border-radius:999px; color:var(--dim); background:#1b2026; border:1px solid transparent; white-space:nowrap; }
+  .s-attn .pill { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); border-color:color-mix(in srgb,var(--attn) 30%,transparent); }
+  .s-waiting .pill { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 14%,transparent); border-color:color-mix(in srgb,var(--waiting) 28%,transparent); }
+  .s-working .pill { color:var(--working); background:color-mix(in srgb,var(--working) 14%,transparent); border-color:color-mix(in srgb,var(--working) 28%,transparent); }
+  .s-done .pill { color:var(--done); background:color-mix(in srgb,var(--done) 14%,transparent); border-color:color-mix(in srgb,var(--done) 28%,transparent); }
 
-  .empty { color: var(--dim); padding: 52px 16px; text-align: center; border: 1px dashed var(--border-2); border-radius: var(--radius); }
-  .empty code, .empty kbd { font-family: var(--mono); color: var(--text); }
-  footer { margin-top: 24px; color: var(--faint); font-size: 12px; }
-  kbd { font-family: var(--mono); font-size: 11px; background: var(--panel); border: 1px solid var(--border-2);
-        border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; color: var(--dim); }
+  .age { color:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+  .empty { color:var(--dim); padding:52px 16px; text-align:center; border:1px dashed var(--border-2); border-radius:var(--radius); }
+  .empty code { font-family:var(--mono); color:var(--text); }
+  footer { margin-top:24px; color:var(--faint); font-size:12px; }
+  kbd { font-family:var(--mono); font-size:11px; background:var(--panel); border:1px solid var(--border-2);
+        border-bottom-width:2px; border-radius:5px; padding:1px 6px; color:var(--dim); }
+
+  /* ---- terminal dock (persistent multi-session) ---- */
+  #dock { flex:0 0 clamp(440px, 56%, 880px); display:none; flex-direction:column;
+          background:var(--inset); border-left:1px solid var(--border-2); }
+  body.docked #dock { display:flex; }
+  .tabs { display:flex; align-items:stretch; gap:0; border-bottom:1px solid var(--border); background:var(--panel);
+          overflow-x:auto; scrollbar-width:thin; }
+  .tab { display:flex; align-items:center; gap:8px; padding:9px 12px; cursor:pointer; white-space:nowrap;
+         color:var(--dim); border-right:1px solid var(--border); border-bottom:2px solid transparent;
+         transition:color var(--dur-fast), background var(--dur-fast); max-width:220px; }
+  .tab:hover { background:var(--elevated); color:var(--text-2); }
+  .tab.on { color:var(--text); background:var(--inset); border-bottom-color:var(--accent); }
+  .tab .td { width:8px; height:8px; border-radius:50%; flex:none; background:var(--stale); }
+  .tab.t-attn .td { background:var(--attn); }
+  .tab.t-waiting .td { background:var(--waiting); }
+  .tab.t-working .td { background:var(--working); }
+  .tab.t-done .td { background:var(--done); }
+  .tab.streaming .td { animation:pulse 1s var(--ease) infinite; box-shadow:0 0 8px currentColor; }
+  .tab .tl { overflow:hidden; text-overflow:ellipsis; font-size:13px; }
+  .tab .tx { color:var(--faint); font-size:13px; padding:0 2px; border-radius:4px; }
+  .tab .tx:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  .tab .spacer { flex:1; }
+  .dock-actions { margin-left:auto; display:flex; align-items:center; padding:0 8px; gap:6px; }
+  .dock-actions .da { color:var(--faint); cursor:pointer; font-size:12px; padding:4px 7px; border-radius:6px; }
+  .dock-actions .da:hover { color:var(--text); background:var(--elevated); }
+  .termarea { position:relative; flex:1; min-height:0; }
+  .thost { position:absolute; inset:0; padding:8px 10px; display:none; }
+  .thost.on { display:block; }
+  .thost .meta { position:absolute; top:10px; right:16px; z-index:2; font-family:var(--mono); font-size:11px;
+                 color:var(--faint); pointer-events:none; }
 
   /* command palette */
-  #pal { position: fixed; inset: 0; z-index: 60; display: none; padding-top: 14vh;
-         background: rgba(5,7,10,.55); backdrop-filter: blur(3px); }
-  #pal.open { display: flex; justify-content: center; align-items: flex-start; }
-  .pal-card { width: 100%; max-width: 560px; background: var(--overlay); border: 1px solid var(--border-3);
-              border-radius: 12px; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.6);
-              animation: rise var(--dur-med) var(--ease); }
-  @keyframes rise { from { opacity: 0; transform: translateY(-6px) scale(.985); } }
-  .pal-card input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text);
-                    font-family: var(--ui); font-size: 15px; padding: 15px 16px; }
-  .pal-list { max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--border); padding: 6px; }
-  .pal-sec { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
-             color: var(--faint); padding: 9px 10px 5px; }
-  .pal-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px;
-              cursor: pointer; color: var(--text-2); }
-  .pal-item .di { width: 8px; height: 8px; border-radius: 50%; background: var(--stale); flex: none; }
-  .pal-item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pal-item .meta { font-family: var(--mono); font-size: 11px; color: var(--faint); }
-  .pal-item.on { background: var(--accent-bg); color: var(--text); }
-  .pal-foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--border);
-              font-size: 11px; color: var(--faint); }
+  #pal { position:fixed; inset:0; z-index:60; display:none; padding-top:14vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #pal.open { display:flex; justify-content:center; align-items:flex-start; }
+  .pal-card { width:100%; max-width:560px; background:var(--overlay); border:1px solid var(--border-3); border-radius:12px;
+              overflow:hidden; box-shadow:0 24px 70px rgba(0,0,0,.6); animation:rise var(--dur-med) var(--ease); }
+  @keyframes rise { from { opacity:0; transform:translateY(-6px) scale(.985); } }
+  .pal-card input { width:100%; border:0; outline:0; background:transparent; color:var(--text); font-family:var(--ui);
+                    font-size:15px; padding:15px 16px; }
+  .pal-list { max-height:46vh; overflow-y:auto; border-top:1px solid var(--border); padding:6px; }
+  .pal-sec { font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); padding:9px 10px 5px; }
+  .pal-item { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; cursor:pointer; color:var(--text-2); }
+  .pal-item .di { width:8px; height:8px; border-radius:50%; background:var(--stale); flex:none; }
+  .pal-item .lbl { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pal-item .meta { font-family:var(--mono); font-size:11px; color:var(--faint); }
+  .pal-item.on { background:var(--accent-bg); color:var(--text); }
+  .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
-  /* embedded terminal overlay */
-  #term { position: fixed; inset: 0; z-index: 50; display: none; padding: 3vh 3vw;
-          background: rgba(5,7,10,.72); backdrop-filter: blur(4px); }
-  #term.open { display: flex; }
-  .term-card { margin: auto; width: 100%; max-width: 1100px; height: 100%; max-height: 86vh;
-               display: flex; flex-direction: column; overflow: hidden;
-               background: var(--inset); border: 1px solid var(--border-3); border-radius: 12px;
-               box-shadow: 0 24px 70px rgba(0,0,0,.55); animation: rise var(--dur-med) var(--ease); }
-  .term-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
-  .term-head .name { font-weight: 600; }
-  .term-head .branch { font-family: var(--mono); color: var(--accent); font-size: 12px; }
-  .term-head .x { margin-left: auto; cursor: pointer; color: var(--dim); border: 1px solid var(--border-2);
-                  border-radius: 6px; padding: 3px 10px; font-size: 12px; }
-  .term-head .x:hover { color: var(--text); border-color: var(--border-3); }
-  #termhost { flex: 1; min-height: 0; padding: 8px 10px; background: var(--inset); }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after {
-      animation-duration: .01ms !important; animation-iteration-count: 1 !important;
-      transition-duration: .01ms !important; scroll-behavior: auto !important;
-    }
-    .dot { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 0%, transparent); }
+  @media (max-width:860px) {
+    #dock { position:fixed; inset:0; z-index:50; flex:none; border-left:0; }
+    body.docked #left { display:none; }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important;
+      transition-duration:.01ms !important; scroll-behavior:auto !important; }
   }
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <div class="word"><b>skein</b></div>
-      <div class="counts" id="counts"></div>
-      <div class="right">
-        <span class="kbtn" id="alerts" title="Desktop alerts when a box needs you">🔔 alerts</span>
-        <span class="kbtn" onclick="openPalette()">⌘K</span>
-        <span class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></span>
+  <div id="app">
+    <div id="left">
+      <div class="wrap">
+        <header>
+          <div class="word"><b>skein</b></div>
+          <div class="counts" id="counts"></div>
+          <div class="right">
+            <span class="kbtn" id="alerts" title="Desktop alerts when a box needs you">🔔 alerts</span>
+            <span class="kbtn" onclick="openPalette()">⌘K</span>
+            <span class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></span>
+          </div>
+        </header>
+        <div id="fleet"></div>
+        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>]</kbd> next that needs you · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
       </div>
-    </header>
-    <div id="fleet"></div>
-    <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>]</kbd> next that needs you · <kbd>⌘K</kbd> palette · live over SSE</footer>
+    </div>
+    <div id="dock">
+      <div class="tabs" id="tabs"></div>
+      <div class="termarea" id="termarea"></div>
+    </div>
   </div>
 
   <div id="pal" aria-hidden="true">
@@ -189,90 +184,69 @@
     </div>
   </div>
 
-  <div id="term" aria-hidden="true">
-    <div class="term-card">
-      <div class="term-head">
-        <span class="name" id="term-name"></span>
-        <span class="branch" id="term-branch"></span>
-        <span class="x" id="term-x" title="close (sends nothing to the agent)">✕ close</span>
-      </div>
-      <div id="termhost"></div>
-    </div>
-  </div>
-
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
 // ---------- model ----------
 const GROUPS = [
-  { key: "attn",    label: "needs you",  match: s => ["needs-input","needs-decision","blocked"].includes(s) },
-  { key: "waiting", label: "waiting",    match: s => s === "waiting" },
-  { key: "done",    label: "done",       match: s => s === "done" },
-  { key: "working", label: "working",    match: s => ["working","running","live"].includes(s) },
-  { key: "idle",    label: "idle",       match: s => s === "idle" },
-  { key: "stale",   label: "stale",      match: s => s === "stale" || s === "unknown" },
+  { key:"attn",    label:"needs you", match:s => ["needs-input","needs-decision","blocked"].includes(s) },
+  { key:"waiting", label:"waiting",   match:s => s === "waiting" },
+  { key:"done",    label:"done",      match:s => s === "done" },
+  { key:"working", label:"working",   match:s => ["working","running","live"].includes(s) },
+  { key:"idle",    label:"idle",      match:s => s === "idle" },
+  { key:"stale",   label:"stale",     match:s => s === "stale" || s === "unknown" },
 ];
 const groupOf = s => (GROUPS.find(g => g.match(s)) || GROUPS[GROUPS.length-1]).key;
-const labelOf = s => ["needs-input","needs-decision","blocked"].includes(s) ? "decision"
-                   : s === "live" ? "active" : s;
+const labelOf = s => ["needs-input","needs-decision","blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 
-let boxes = [];          // latest snapshot, tier-sorted
-let order = [];          // visible box names in render order (for j/k)
-let sel = null;          // focused box name
-let prevState = {};      // name -> last state, for transition notifications
+let boxes = [], order = [], sel = null, prevState = {};
+const stateOf = name => boxes.find(b => b.name === name)?.state || "unknown";
 
-// ---------- in-place fleet render (keyed reconcile; stable group sections) ----------
+// ---------- fleet render (keyed reconcile) ----------
 const fleet = document.getElementById("fleet");
-const rowEls = new Map();       // name -> row element
-const groupEls = {};            // key -> {section, head, rows}
-
+const rowEls = new Map(), groupEls = {};
 function ensureGroups() {
   for (const g of GROUPS) {
     const section = document.createElement("div"); section.className = "group"; section.style.display = "none";
-    const head = document.createElement("div"); head.className = "ghead";
-    head.innerHTML = `${g.label} <span class="gc"></span>`;
+    const head = document.createElement("div"); head.className = "ghead"; head.innerHTML = `${g.label} <span class="gc"></span>`;
     const rows = document.createElement("div"); rows.className = "grows";
     section.append(head, rows); fleet.append(section);
     groupEls[g.key] = { section, head: head.querySelector(".gc"), rows };
   }
 }
-function makeRow(b) {
-  const el = document.createElement("div");
-  el.dataset.name = b.name;
-  el.innerHTML = `<span class="dot"></span>
-    <div class="main"><div class="name"></div>
-      <div class="sub"><span class="branch"></span><span class="dir"></span></div></div>
+function makeRow(name) {
+  const el = document.createElement("div"); el.dataset.name = name;
+  el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
+    <div class="sub"><span class="branch"></span><span class="dir"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
-  el.addEventListener("click", () => { select(b.name); openTerminal(b.name); });
-  el.addEventListener("mouseenter", () => select(b.name, true));
+  el.addEventListener("click", () => openTerminal(name));
+  el.addEventListener("mouseenter", () => select(name, true));
   return el;
 }
 function updateRow(el, b) {
   const g = groupOf(b.state);
-  el.className = `row s-${g}` + (b.name === sel ? " sel" : "");
+  const wired = sessions.has(b.name);
+  el.className = `row s-${g}` + (b.name === sel ? " sel" : "") + (wired ? " wired" : "")
+    + (b.name === active ? " active" : "") + (wired && sessions.get(b.name).streaming ? " streaming" : "");
   el.querySelector(".name").textContent = b.name;
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
   el.querySelector(".pill").textContent = labelOf(b.state);
   el.querySelector(".age").textContent = b.age;
+  el.querySelector(".chev").textContent = wired ? "▣" : "›";
 }
-
 function render(snapshot) {
-  boxes = snapshot.slice().sort((a, b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
+  boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
   const counts = {};
   for (const b of boxes) (counts[groupOf(b.state)] ??= []).push(b);
-
-  // header counts
-  const need = (counts.attn?.length || 0) + (counts.waiting?.length || 0);
-  const working = counts.working?.length || 0, done = counts.done?.length || 0;
+  const need = (counts.attn?.length||0) + (counts.waiting?.length||0), working = counts.working?.length||0, done = counts.done?.length||0;
   document.getElementById("counts").innerHTML =
     `<span class="seg"><span class="n">${boxes.length}</span> boxes</span>`
     + (need ? `<span class="seg"><span class="pip" style="background:var(--attn)"></span><span class="n">${need}</span> need you</span>` : "")
     + (working ? `<span class="seg"><span class="pip" style="background:var(--working)"></span><span class="n">${working}</span> working</span>` : "")
     + (done ? `<span class="seg"><span class="pip" style="background:var(--done)"></span><span class="n">${done}</span> done</span>` : "");
 
-  // empty state
   fleet.querySelector(".empty")?.remove();
   if (!boxes.length) {
     for (const g of GROUPS) groupEls[g.key].section.style.display = "none";
@@ -280,71 +254,129 @@ function render(snapshot) {
     e.innerHTML = `the skein is empty — launch a box with <code>setup-sandbox.sh &lt;branch&gt;</code>`;
     fleet.append(e); order = []; return;
   }
-
-  // reconcile each group section in place
-  order = [];
-  const seen = new Set();
+  order = []; const seen = new Set();
   for (const g of GROUPS) {
-    const list = counts[g.key] || [];
-    const ge = groupEls[g.key];
+    const list = counts[g.key] || [], ge = groupEls[g.key];
     ge.section.style.display = list.length ? "" : "none";
     ge.head.textContent = list.length || "";
     for (const b of list) {
-      let el = rowEls.get(b.name);
-      if (!el) { el = makeRow(b); rowEls.set(b.name, el); }
-      updateRow(el, b);
-      ge.rows.appendChild(el);   // appendChild MOVES existing nodes → smooth reorder
-      order.push(b.name); seen.add(b.name);
+      let el = rowEls.get(b.name); if (!el) { el = makeRow(b.name); rowEls.set(b.name, el); }
+      updateRow(el, b); ge.rows.appendChild(el); order.push(b.name); seen.add(b.name);
     }
   }
   for (const [name, el] of rowEls) if (!seen.has(name)) { el.remove(); rowEls.delete(name); }
-
   if (sel && !seen.has(sel)) sel = null;
+  renderTabs();          // tab status follows registry status
   notify(boxes);
 }
+function refreshRow(name) { const el = rowEls.get(name), b = boxes.find(x => x.name === name); if (el && b) updateRow(el, b); }
 
-// ---------- keyboard selection ----------
+// ---------- selection / keyboard ----------
 function select(name, soft) {
   if (sel === name) return;
   if (sel) rowEls.get(sel)?.classList.remove("sel");
-  sel = name;
-  const el = rowEls.get(name);
-  if (el) { el.classList.add("sel"); if (!soft) el.scrollIntoView({ block: "nearest" }); }
+  sel = name; const el = rowEls.get(name);
+  if (el) { el.classList.add("sel"); if (!soft) el.scrollIntoView({ block:"nearest" }); }
 }
-function move(d) {
-  if (!order.length) return;
-  let i = sel ? order.indexOf(sel) : -1;
-  i = (i + d + order.length) % order.length;
-  select(order[i]);
-}
+function move(d) { if (!order.length) return; let i = sel ? order.indexOf(sel) : -1; i = (i+d+order.length)%order.length; select(order[i]); }
 function nextNeedsYou() {
   const need = boxes.filter(b => ["attn","waiting"].includes(groupOf(b.state))).map(b => b.name);
-  if (!need.length) return;
-  const i = sel ? need.indexOf(sel) : -1;
-  select(need[(i + 1) % need.length]);
+  if (!need.length) return; const i = sel ? need.indexOf(sel) : -1; select(need[(i+1)%need.length]);
 }
 
-// ---------- attention: title, favicon, web notifications ----------
+// ---------- persistent terminal sessions ----------
+const sessions = new Map();   // name -> { term, fit, ws, host, streaming, timer }
+let active = null;
+const termarea = document.getElementById("termarea"), tabsEl = document.getElementById("tabs");
+
+function openTerminal(name) {
+  select(name);
+  if (!sessions.has(name)) createSession(name);
+  setActive(name);
+}
+function createSession(name) {
+  const host = document.createElement("div"); host.className = "thost";
+  const meta = document.createElement("div"); meta.className = "meta"; host.append(meta);
+  termarea.append(host);
+  const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
+    cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
+  const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
+  ws.binaryType = "arraybuffer";
+  const s = { term, fit, ws, host, meta, streaming:false, timer:0 };
+  sessions.set(name, s);
+  ws.onopen = () => { if (active === name) sendResize(name); };
+  ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(name); };
+  ws.onclose = () => { term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n"); s.dead = true; renderTabs(); refreshRow(name); };
+  term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
+  term.onResize(() => { if (active === name) sendResize(name); });
+  document.body.classList.add("docked");
+}
+function setActive(name) {
+  active = name;
+  for (const [n, s] of sessions) s.host.classList.toggle("on", n === name);
+  const s = sessions.get(name);
+  if (s) { requestAnimationFrame(() => { s.fit.fit(); sendResize(name); s.term.focus(); }); }
+  renderTabs(); refreshRowAll();
+}
+function markStreaming(name) {
+  const s = sessions.get(name); if (!s) return;
+  s.streaming = true; renderTabFlag(name); refreshRow(name);
+  clearTimeout(s.timer); s.timer = setTimeout(() => { s.streaming = false; renderTabFlag(name); refreshRow(name); }, 1100);
+}
+function sendResize(name) { const s = sessions.get(name); if (s && s.ws.readyState === 1) s.ws.send(JSON.stringify({ resize:{ cols:s.term.cols, rows:s.term.rows } })); }
+function closeSession(name) {
+  const s = sessions.get(name); if (!s) return;
+  try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
+  s.host.remove(); sessions.delete(name);
+  if (active === name) { active = null; const next = sessions.keys().next().value; if (next) setActive(next); }
+  if (!sessions.size) document.body.classList.remove("docked");
+  renderTabs(); refreshRow(name);
+}
+function renderTabs() {
+  tabsEl.querySelectorAll(".tab").forEach(t => t.remove());
+  for (const name of sessions.keys()) {
+    const s = sessions.get(name), g = groupOf(stateOf(name));
+    const t = document.createElement("div");
+    t.className = `tab t-${g}` + (name === active ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "");
+    t.dataset.name = name;
+    t.innerHTML = `<span class="td"></span><span class="tl">${esc(name)}</span><span class="tx" title="close">✕</span>`;
+    t.addEventListener("click", e => { if (e.target.classList.contains("tx")) closeSession(name); else setActive(name); });
+    tabsEl.append(t);
+  }
+  if (!tabsEl.querySelector(".dock-actions") && sessions.size) {
+    const da = document.createElement("div"); da.className = "dock-actions";
+    da.innerHTML = `<span class="da" id="closeall" title="close all sessions">close all</span>`;
+    tabsEl.append(da);
+    da.querySelector("#closeall").addEventListener("click", () => [...sessions.keys()].forEach(closeSession));
+  }
+}
+function renderTabFlag(name) {
+  const t = tabsEl.querySelector(`.tab[data-name="${CSS.escape(name)}"]`); if (!t) return;
+  t.classList.toggle("streaming", !!sessions.get(name)?.streaming);
+}
+function refreshRowAll() { for (const name of rowEls.keys()) refreshRow(name); }
+window.addEventListener("resize", () => { if (active) { sessions.get(active)?.fit.fit(); sendResize(active); } });
+
+// ---------- attention: title / favicon / notifications ----------
 let alertsOn = false;
 function setFavicon(count) {
-  const c = document.createElement("canvas"); c.width = c.height = 32;
-  const x = c.getContext("2d");
-  x.fillStyle = count ? "#f85149" : "#7c7cf0";
-  const r = 7; x.beginPath();
-  x.moveTo(2+r,2); x.arcTo(30,2,30,30,r); x.arcTo(30,30,2,30,r); x.arcTo(2,30,2,2,r); x.arcTo(2,2,30,2,r); x.fill();
+  const c = document.createElement("canvas"); c.width = c.height = 32; const x = c.getContext("2d");
+  x.fillStyle = count ? "#f85149" : "#7c7cf0"; const r = 7;
+  x.beginPath(); x.moveTo(2+r,2); x.arcTo(30,2,30,30,r); x.arcTo(30,30,2,30,r); x.arcTo(2,30,2,2,r); x.arcTo(2,2,30,2,r); x.fill();
   x.fillStyle = "#fff"; x.textAlign = "center"; x.textBaseline = "middle";
   x.font = "bold " + (count > 9 ? 15 : 19) + "px " + getComputedStyle(document.body).fontFamily;
   x.fillText(count ? String(count) : "s", 16, 17);
-  let link = document.querySelector("link[rel=icon]");
-  if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.append(link); }
+  let link = document.querySelector("link[rel=icon]"); if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.append(link); }
   link.href = c.toDataURL("image/png");
 }
 let audioCtx;
 function beep() {
   try {
     audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
-    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-    o.type = "sine"; o.frequency.value = 660; o.connect(g); g.connect(audioCtx.destination);
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(); o.type = "sine"; o.frequency.value = 660;
+    o.connect(g); g.connect(audioCtx.destination);
     g.gain.setValueAtTime(.0001, audioCtx.currentTime);
     g.gain.exponentialRampToValueAtTime(.12, audioCtx.currentTime + .02);
     g.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + .35);
@@ -355,27 +387,21 @@ function notify(snapshot) {
   const need = snapshot.filter(b => ["attn","waiting"].includes(groupOf(b.state))).length;
   document.title = need ? `(${need}) skein · ${need} need you` : "skein";
   setFavicon(need);
-  // fire desktop notifications only on real transitions, only when tab hidden
   for (const b of snapshot) {
     const g = groupOf(b.state), was = prevState[b.name];
-    const entering = g !== was;
-    if (entering && alertsOn && document.hidden) {
-      if (g === "attn")  pushNote(`${b.name} needs a decision`, b.name), beep();
+    if (g !== was && alertsOn && document.hidden) {
+      if (g === "attn") { pushNote(`${b.name} needs a decision`, b.name); beep(); }
       else if (g === "done") pushNote(`${b.name} finished`, b.name);
     }
     prevState[b.name] = g;
   }
 }
-function pushNote(body, tag) {
-  if (Notification.permission !== "granted") return;
-  try { new Notification("skein", { body, tag, renotify: true }); } catch {}
-}
+function pushNote(body, tag) { if (Notification.permission === "granted") try { new Notification("skein", { body, tag, renotify:true }); } catch {} }
 document.getElementById("alerts").addEventListener("click", async () => {
   if (!("Notification" in window)) return;
   const p = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
   alertsOn = p === "granted";
-  document.getElementById("alerts").textContent = alertsOn ? "🔔 alerts on" : "🔔 alerts";
-  document.getElementById("alerts").style.color = alertsOn ? "var(--done)" : "";
+  const el = document.getElementById("alerts"); el.textContent = alertsOn ? "🔔 alerts on" : "🔔 alerts"; el.style.color = alertsOn ? "var(--done)" : "";
 });
 window.addEventListener("focus", () => { document.title = "skein"; });
 
@@ -384,47 +410,38 @@ const pal = document.getElementById("pal"), palInput = document.getElementById("
 let palItems = [], palSel = 0;
 function commands() {
   const acts = [
-    { sec: "Actions", label: "Jump to next box that needs you", run: nextNeedsYou, meta: "]" },
-    { sec: "Actions", label: (alertsOn ? "Disable" : "Enable") + " desktop alerts", run: () => document.getElementById("alerts").click() },
-    { sec: "Actions", label: "Reconnect live stream", run: connect },
+    { sec:"Actions", label:"Jump to next box that needs you", run:nextNeedsYou, meta:"]" },
+    { sec:"Actions", label:(alertsOn?"Disable":"Enable")+" desktop alerts", run:()=>document.getElementById("alerts").click() },
+    { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
-  const bx = boxes.map(b => ({ sec: "Boxes", label: b.name, meta: labelOf(b.state), state: b.state,
-                               run: () => { select(b.name); openTerminal(b.name); } }));
+  if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
+  const bx = boxes.map(b => ({ sec:"Boxes", label:b.name, meta:labelOf(b.state), state:b.state, run:()=>openTerminal(b.name) }));
   return [...bx, ...acts];
 }
-function fuzzy(q, s) { // subsequence match
-  q = q.toLowerCase(); s = s.toLowerCase(); let i = 0;
-  for (const ch of s) if (ch === q[i]) i++;
-  return i === q.length;
-}
-function openPalette() {
-  pal.classList.add("open"); palInput.value = ""; renderPal(""); palInput.focus();
-}
+function fuzzy(q, s) { q = q.toLowerCase(); s = s.toLowerCase(); let i = 0; for (const ch of s) if (ch === q[i]) i++; return i === q.length; }
+function openPalette() { pal.classList.add("open"); palInput.value = ""; renderPal(""); palInput.focus(); }
 function closePalette() { pal.classList.remove("open"); }
 function renderPal(q) {
-  palItems = commands().filter(c => !q || fuzzy(q, c.label));
-  palSel = 0;
+  palItems = commands().filter(c => !q || fuzzy(q, c.label)); palSel = 0;
   let html = "", lastSec = null;
   palItems.forEach((c, i) => {
     if (c.sec !== lastSec) { html += `<div class="pal-sec">${c.sec}</div>`; lastSec = c.sec; }
-    const dot = c.state ? `<span class="di" style="background:var(--${groupOf(c.state)==='attn'?'attn':groupOf(c.state)==='waiting'?'waiting':groupOf(c.state)==='done'?'done':groupOf(c.state)==='working'?'working':'stale'})"></span>` : `<span class="di" style="background:transparent"></span>`;
+    const col = c.state ? (groupOf(c.state)) : null;
+    const dot = `<span class="di" style="background:${col?`var(--${col==='attn'?'attn':col==='waiting'?'waiting':col==='done'?'done':col==='working'?'working':'stale'})`:'transparent'}"></span>`;
     html += `<div class="pal-item${i===0?' on':''}" data-i="${i}">${dot}<span class="lbl">${esc(c.label)}</span>${c.meta?`<span class="meta">${esc(c.meta)}</span>`:""}</div>`;
   });
   palList.innerHTML = html || `<div class="pal-sec">no matches</div>`;
   palList.querySelectorAll(".pal-item").forEach(el => {
     el.addEventListener("mousemove", () => setPalSel(+el.dataset.i));
-    el.addEventListener("click", () => runPal());
+    el.addEventListener("click", runPal);
   });
 }
-function setPalSel(i) {
-  palSel = i;
-  palList.querySelectorAll(".pal-item").forEach(el => el.classList.toggle("on", +el.dataset.i === i));
-}
+function setPalSel(i) { palSel = i; palList.querySelectorAll(".pal-item").forEach(el => el.classList.toggle("on", +el.dataset.i === i)); }
 function runPal() { const c = palItems[palSel]; if (c) { closePalette(); c.run(); } }
 palInput.addEventListener("input", () => renderPal(palInput.value.trim()));
 palInput.addEventListener("keydown", e => {
   if (e.key === "ArrowDown") { e.preventDefault(); setPalSel(Math.min(palSel+1, palItems.length-1)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); setPalSel(Math.max(palSel-1, 0)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); setPalSel(Math.max(palSel-1,0)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
   else if (e.key === "Enter") { e.preventDefault(); runPal(); }
   else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
 });
@@ -433,15 +450,23 @@ palInput.addEventListener("keydown", e => {
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
   if (pal.classList.contains("open")) return;
-  if (document.getElementById("term").classList.contains("open")) { if (e.key === "Escape") closeTerminal(); return; }
-  if (e.target.tagName === "INPUT") return;
+  // when focus is in a terminal, only intercept our chord; let the agent get the rest
+  const inTerm = active && sessions.get(active)?.host.contains(document.activeElement);
+  if (e.key === "Escape" && active) { e.preventDefault(); closeSession(active); return; }
+  if (inTerm || e.target.tagName === "INPUT") return;
   switch (e.key) {
     case "j": case "ArrowDown": e.preventDefault(); move(1); break;
     case "k": case "ArrowUp":   e.preventDefault(); move(-1); break;
     case "Enter": case "o": if (sel) { e.preventDefault(); openTerminal(sel); } break;
     case "]": e.preventDefault(); nextNeedsYou(); break;
+    case "[": e.preventDefault(); cycleSession(-1); break;
+    case "}": e.preventDefault(); cycleSession(1); break;
   }
 });
+function cycleSession(d) {
+  const ks = [...sessions.keys()]; if (!ks.length) return;
+  const i = active ? ks.indexOf(active) : -1; setActive(ks[(i+d+ks.length)%ks.length]);
+}
 
 // ---------- live stream ----------
 function connect() {
@@ -451,40 +476,7 @@ function connect() {
   es.onerror = () => { document.getElementById("live").classList.remove("on"); document.getElementById("livetext").textContent = "reconnecting…"; };
 }
 
-// ---------- embedded terminal ----------
-let term, fit, ws;
-document.getElementById("term-x").addEventListener("click", closeTerminal);
-function openTerminal(name) {
-  const b = boxes.find(x => x.name === name);
-  closeTerminal();
-  document.getElementById("term-name").textContent = name;
-  document.getElementById("term-branch").textContent = b?.branch || "";
-  document.getElementById("term").classList.add("open");
-  term = new Terminal({ fontFamily: "ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace",
-    fontSize: 13, cursorBlink: true, theme: { background: "#08090b", foreground: "#e6edf3", cursor: "#7c7cf0" } });
-  fit = new FitAddon.FitAddon(); term.loadAddon(fit);
-  term.open(document.getElementById("termhost")); fit.fit(); term.focus();
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => sendResize();
-  ws.onmessage = e => { if (typeof e.data === "string") term.write(e.data); else term.write(new Uint8Array(e.data)); };
-  ws.onclose = () => term && term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n");
-  term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
-  term.onResize(() => sendResize());
-  window.addEventListener("resize", onWinResize);
-}
-function sendResize() { if (ws && ws.readyState === 1 && term) ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } })); }
-function onWinResize() { if (fit) { fit.fit(); sendResize(); } }
-function closeTerminal() {
-  window.removeEventListener("resize", onWinResize);
-  if (ws) { try { ws.close(); } catch {} ws = null; }
-  if (term) { term.dispose(); term = null; }
-  document.getElementById("term").classList.remove("open");
-}
-
 // ---------- boot ----------
-ensureGroups();
-setFavicon(0);
+ensureGroups(); setFavicon(0);
 fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
 connect();
