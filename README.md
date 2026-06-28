@@ -31,10 +31,30 @@ archive actions and a ⌘K palette. API: `GET /api/boxes`, `GET /api/events` (SS
 (served from `/vendor/`), so the terminal works with no CDN — important in the
 firewalled sbx network.
 
-> Localhost-only by default (`127.0.0.1:7878`); set `$SKEIN_ADDR` to change the bind.
-> The terminal WebSocket rejects non-loopback `Origin`s (drive-by / DNS-rebinding guard).
-> Remote/mobile access still needs a tunnel **and an auth token** (not yet implemented) —
-> roadmap Phase 4; don't expose this port directly until then.
+> Loopback-only by default (`127.0.0.1:7878`); set `$SKEIN_ADDR` to change the bind.
+> The terminal WebSocket rejects unexpected `Origin`s (drive-by / DNS-rebinding guard) — it
+> allows loopback, `*.ts.net`, and `$SKEIN_ALLOWED_ORIGINS`. For remote/mobile use
+> `tailscale serve` (below) rather than exposing the port directly.
+
+### Remote access (Tailscale)
+
+Keep skein bound to loopback and let Tailscale carry the tailnet → loopback hop. The tailnet
+is the auth boundary: only your WireGuard-authenticated devices can reach it, with no public
+surface — so no app-level token is needed.
+
+```sh
+# on the host running skein-server:
+tailscale serve --bg 7878          # serve https://<machine>.<tailnet>.ts.net → 127.0.0.1:7878
+```
+
+Open `https://<machine>.<tailnet>.ts.net` from any device in the tailnet (incl. the phone via
+the Tailscale app). The `.ts.net` origin is allowed by the WebSocket guard automatically; for a
+different reverse proxy, list its host in `$SKEIN_ALLOWED_ORIGINS`.
+
+- **Shared/team tailnet:** restrict *which* users/devices can reach the port with a Tailscale
+  **ACL** — that's the access control.
+- **`tailscale funnel` (public internet):** removes the tailnet boundary, so don't use it for
+  the terminal without adding an app-level auth token first (not currently implemented).
 
 ## CLI (terminal client, same core)
 
@@ -72,6 +92,7 @@ are present — run it first if something looks off. All knobs are environment v
 | `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
 | `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |
 | `SKEIN_ADDR` | server bind address | `127.0.0.1:7878` |
+| `SKEIN_ALLOWED_ORIGINS` | extra WS origins to allow (comma-sep hosts); loopback + `*.ts.net` always allowed | — |
 | `SKEIN_SELF` | this box's vmid (kept `live` when its `lastSeen` is quiet) | `$SANDBOX_VM_ID` |
 | `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) | cwd |
 | `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |

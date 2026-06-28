@@ -5,7 +5,8 @@
 //!   GET /api/boxes/:name/terminal  WebSocket ↔ PTY running `sbx run --name <box>`  (the single-pane bit)
 //!
 //! The terminal reuses wheels: portable-pty (server PTY) + xterm.js (browser). We write only the
-//! WS↔PTY bridge. Bind is localhost-only; remote access = tunnel + auth (roadmap phase 4).
+//! WS↔PTY bridge. Bind is loopback-only; remote access = `tailscale serve` (the tailnet is the
+//! auth boundary) proxying to this loopback port. See README "Remote access".
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
@@ -37,8 +38,8 @@ static PTY_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(24)
 
 #[tokio::main]
 async fn main() {
-    // Bind is loopback-only by default; $SKEIN_ADDR overrides it (a tunnel/remote bind also needs
-    // the auth token noted in `origin_ok` — roadmap phase 4).
+    // Bind is loopback-only by default; $SKEIN_ADDR overrides it. For remote access prefer
+    // `tailscale serve` proxying to this loopback port (see README) over an off-loopback bind.
     let addr = std::env::var("SKEIN_ADDR")
         .ok()
         .filter(|s| !s.is_empty())
@@ -84,11 +85,13 @@ fn static_asset(body: &'static str, ct: &'static str) -> Response {
     ([(axum::http::header::CONTENT_TYPE, ct)], body).into_response()
 }
 
-/// Same-origin guard for the terminal upgrade. Browsers always send `Origin` on a WebSocket
-/// handshake and page JS cannot forge it, so rejecting non-loopback origins blocks drive-by
-/// cross-origin connections (WS is exempt from same-origin policy) and DNS-rebinding against the
-/// terminal. Non-browser clients send no `Origin` and are allowed — the bind is loopback-only.
-/// Binding off-loopback (`$SKEIN_ADDR`, phase 4) must add an auth token here first.
+/// Origin guard for the terminal upgrade. Browsers always send `Origin` on a WebSocket handshake
+/// and page JS cannot forge it, so rejecting unexpected origins blocks drive-by cross-origin
+/// connections (WS is exempt from same-origin policy) and DNS-rebinding against the terminal.
+/// Allowed: loopback (local use); any `*.ts.net` host (Tailscale `serve`/`funnel`, which terminates
+/// TLS and proxies to our loopback bind, so the page origin is the tailnet name); and any host in
+/// `$SKEIN_ALLOWED_ORIGINS` (comma-separated) for other reverse proxies. Non-browser clients send
+/// no `Origin` and are allowed — they can't reach an off-loopback bind without being on the tailnet.
 fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
     let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
@@ -103,7 +106,14 @@ fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
     } else {
         authority.split(':').next().unwrap_or(authority)
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".ts.net") {
+        return true;
+    }
+    std::env::var("SKEIN_ALLOWED_ORIGINS").is_ok_and(|list| {
+        list.split(',')
+            .map(str::trim)
+            .any(|h| !h.is_empty() && h == host)
+    })
 }
 
 /// Snapshot of the fleet.
@@ -407,4 +417,39 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
     // (Child::wait blocks); dropping `master`/the reader closes the PTY so descendants get SIGHUP.
     let _ = child.kill();
     let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::origin_ok;
+    use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
+
+    fn with_origin(o: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(o) = o {
+            h.insert(ORIGIN, HeaderValue::from_str(o).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn origin_guard_allows_local_and_tailnet_blocks_others() {
+        assert!(origin_ok(&with_origin(None))); // non-browser client
+        assert!(origin_ok(&with_origin(Some("http://127.0.0.1:7878"))));
+        assert!(origin_ok(&with_origin(Some("http://localhost:7878"))));
+        assert!(origin_ok(&with_origin(Some("https://box.my-tnet.ts.net"))));
+        assert!(!origin_ok(&with_origin(Some("https://evil.com"))));
+        // a look-alike that only *contains* ts.net must not pass
+        assert!(!origin_ok(&with_origin(Some(
+            "https://box.ts.net.evil.com"
+        ))));
+    }
+
+    #[test]
+    fn origin_guard_honours_allowlist() {
+        std::env::set_var("SKEIN_ALLOWED_ORIGINS", "proxy.local, other.host");
+        assert!(origin_ok(&with_origin(Some("https://proxy.local"))));
+        assert!(!origin_ok(&with_origin(Some("https://nope.local"))));
+        std::env::remove_var("SKEIN_ALLOWED_ORIGINS");
+    }
 }
