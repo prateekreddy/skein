@@ -199,7 +199,9 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 branch: b.branch.clone(),
                 age: b.age(),
                 dir: shorten(&b.dir),
-                diff: b.diff.clone(),
+                // prefer the host-computed shortstat (matches the diff pane); fall back to the
+                // box-reported number for clone-mode boxes this host can't see.
+                diff: host_diffstat(name, &b.dir).or_else(|| b.diff.clone()),
             }
         })
         .collect();
@@ -387,6 +389,37 @@ pub fn create_pr(name: &str) -> Result<String, String> {
     }
 }
 
+/// Merge the box's PR (the step that finishes the loop). Override with $SKEIN_MERGE_CMD
+/// (`{branch}`/`{name}` substituted); default `gh pr merge <branch> <method>` where method is
+/// $SKEIN_MERGE_METHOD (default `--squash`). Returns a short status line on success.
+pub fn merge_pr(name: &str) -> Result<String, String> {
+    let branch = branch_of(name).ok_or("box has no branch in the registry")?;
+    let (out, err, code) = match env::var("SKEIN_MERGE_CMD") {
+        Ok(c) if !c.is_empty() => run_shell(
+            &c.replace("{branch}", &sh_quote(&branch))
+                .replace("{name}", &sh_quote(name)),
+        )?,
+        _ => {
+            let method = env::var("SKEIN_MERGE_METHOD")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "--squash".into());
+            run_capture("gh", &["pr", "merge", &branch, &method])?
+        }
+    };
+    if code == 0 {
+        let msg = out.trim();
+        Ok(if msg.is_empty() {
+            "merged".into()
+        } else {
+            msg.to_string()
+        })
+    } else {
+        let msg = if err.trim().is_empty() { out } else { err };
+        Err(msg.trim().to_string())
+    }
+}
+
 /// Archive a box off the board: remove its registry entry, append it to `<store>/history.jsonl`,
 /// and run $SKEIN_ARCHIVE_CMD if set (e.g. `sbx rm {name}`). skein-owned; needs no external tool.
 pub fn archive_box(name: &str) -> Result<(), String> {
@@ -474,12 +507,11 @@ fn git_ok(dir: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// The branch-vs-base patch for a working tree at `dir`, or None if it isn't a git repo here.
-/// Base = the first of origin/main|origin/master|main|master that resolves; the diff spans
-/// the merge-base→working-tree (committed-since-base + uncommitted). With no common ancestor
-/// it falls back to `git diff HEAD` (uncommitted only) rather than exploding into an
-/// unrelated-history diff. Output is capped so a huge patch can't wedge the browser.
-fn git_diff_for(dir: &str) -> Option<String> {
+/// The git ref the branch-vs-base diff is measured against, or None if `dir` isn't a git repo
+/// here. Base = the first of origin/main|origin/master|main|master that resolves; we diff against
+/// the merge-base→working-tree. With no common ancestor it falls back to `HEAD` (uncommitted only)
+/// rather than exploding into an unrelated-history diff. Shared by the full diff and the shortstat.
+fn git_range(dir: &str) -> Option<String> {
     if !Path::new(dir).join(".git").exists() {
         return None;
     }
@@ -494,9 +526,15 @@ fn git_diff_for(dir: &str) -> Option<String> {
         let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
         (o.status.success() && !s.is_empty()).then_some(s)
     });
-    let range = merge_base.as_deref().unwrap_or("HEAD");
+    Some(merge_base.unwrap_or_else(|| "HEAD".into()))
+}
+
+/// The full branch-vs-base patch for a working tree at `dir`. Output is capped so a huge patch
+/// can't wedge the browser. None if `dir` isn't a git repo here (clone mode → reported patch).
+fn git_diff_for(dir: &str) -> Option<String> {
+    let range = git_range(dir)?;
     let out = Command::new("git")
-        .args(["-C", dir, "diff", range])
+        .args(["-C", dir, "diff", &range])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -509,6 +547,58 @@ fn git_diff_for(dir: &str) -> Option<String> {
         patch.push_str("\n\n# … diff truncated by skein (too large to render) …\n");
     }
     Some(patch)
+}
+
+/// The host-side branch-vs-base shortstat for `dir` (same range as [`git_diff_for`]), so the
+/// fleet's diff± badge matches the diff *pane* for direct-mode boxes instead of drifting from the
+/// box-reported number. None if not a host git repo or there are no changes.
+fn git_diffstat_for(dir: &str) -> Option<DiffStat> {
+    let range = git_range(dir)?;
+    let out = Command::new("git")
+        .args(["-C", dir, "diff", "--shortstat", &range])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // e.g. " 3 files changed, 12 insertions(+), 4 deletions(-)"
+    let s = String::from_utf8_lossy(&out.stdout);
+    let num = |kw: &str| {
+        s.split(',')
+            .find(|p| p.contains(kw))
+            .and_then(|p| p.split_whitespace().next())
+            .and_then(|n| n.parse::<u32>().ok())
+            .unwrap_or(0)
+    };
+    let stat = DiffStat {
+        files: num("file"),
+        ins: num("insertion"),
+        del: num("deletion"),
+    };
+    (stat.files != 0 || stat.ins != 0 || stat.del != 0).then_some(stat)
+}
+
+/// Host-computed diff± for the badge, cached briefly so the per-tick fleet stream doesn't fork a
+/// `git` per box every poll. Clone-mode boxes (no host `.git`) cost only a `stat`, not a fork.
+fn host_diffstat(name: &str, dir: &str) -> Option<DiffStat> {
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    type Cache = std::collections::HashMap<String, (Instant, Option<DiffStat>)>;
+    static CACHE: OnceLock<std::sync::Mutex<Cache>> = OnceLock::new();
+    const TTL: Duration = Duration::from_secs(8);
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(Cache::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some((t, v)) = map.get(name) {
+            if t.elapsed() < TTL {
+                return v.clone();
+            }
+        }
+    }
+    let v = git_diffstat_for(dir);
+    if let Ok(mut map) = cache.lock() {
+        map.insert(name.to_string(), (Instant::now(), v.clone()));
+    }
+    v
 }
 
 /// Look up a box's clone root (the `dir` it registered) by name.
@@ -713,9 +803,12 @@ mod tests {
         fs::write(dir.join("a.txt"), "hello world\n").unwrap();
         let patch = git_diff_for(d).expect("a repo with changes yields a patch");
         assert!(patch.contains("hello world"));
+        let stat = git_diffstat_for(d).expect("a repo with changes yields a shortstat");
+        assert!(stat.files >= 1 && stat.ins + stat.del >= 1);
 
         let empty = tempdir(); // not a git repo → None, never explodes
         assert!(git_diff_for(empty.to_str().unwrap()).is_none());
+        assert!(git_diffstat_for(empty.to_str().unwrap()).is_none());
     }
 
     #[test]

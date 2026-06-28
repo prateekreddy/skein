@@ -53,6 +53,7 @@ async fn main() {
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
         .route("/api/boxes/:name/ship", get(api_ship))
         .route("/api/boxes/:name/pr", post(api_pr))
+        .route("/api/boxes/:name/merge", post(api_merge))
         .route("/api/boxes/:name/archive", post(api_archive))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
@@ -178,6 +179,19 @@ async fn api_pr(Path(name): Path<String>) -> Json<serde_json::Value> {
     let r = tokio::task::spawn_blocking(move || skein::create_pr(&name)).await;
     Json(match r {
         Ok(Ok(url)) => serde_json::json!({ "ok": true, "url": url }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// Merge the box's PR (host-side via `gh`). Returns {ok, msg|error}.
+async fn api_merge(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let r = tokio::task::spawn_blocking(move || skein::merge_pr(&name)).await;
+    Json(match r {
+        Ok(Ok(msg)) => serde_json::json!({ "ok": true, "msg": msg }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })

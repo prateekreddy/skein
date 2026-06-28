@@ -148,6 +148,8 @@
   .dockbar .ship { font:inherit; font-size:12px; border:1px solid var(--border-2); background:var(--elevated); color:var(--text);
     border-radius:6px; padding:4px 11px; cursor:pointer; }
   .dockbar .ship:hover { border-color:var(--border-3); }
+  .dockbar .ship.next { background:var(--accent); border-color:var(--accent); color:#0b0d10; font-weight:600; }
+  .dockbar .ship.next:hover { background:var(--accent-2); }
   .dockbar .prlink { color:var(--accent); }
   .dockbar .ck { font-size:11px; padding:2px 7px; border-radius:999px; }
   .dockbar .ck.ok { color:var(--done); background:color-mix(in srgb,var(--done) 14%,transparent); }
@@ -496,6 +498,7 @@ function renderDockbar() {
   if (!view.box) { dockbar.innerHTML = ""; return; }
   const b = boxes.find(x => x.name === view.box) || { name: view.box };
   const g = groupOf(b.state || "unknown");
+  const nx = nextAction(view.box);
   dockbar.className = "dockbar s-" + g;
   dockbar.innerHTML =
     `<span class="bdot"></span><span class="nm">${esc(view.box)}</span>`
@@ -508,6 +511,7 @@ function renderDockbar() {
     + (view.mode==='diff' ? `<span class="rf" id="dref" title="refresh diff">↻</span>` : "")
     + (view.mode==='diff' && (comments.get(view.box)||[]).length
         ? `<button class="send" id="dsend" title="paste the review into the agent prompt">Send ${(comments.get(view.box)||[]).length} 💬</button>` : "")
+    + (nx ? `<button class="ship next" id="dnext" title="suggested next step">${esc(nx.label)}</button>` : "")
     + shipHtml(view.box)
     + `<span class="rf" id="dclose" title="close">✕</span>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
@@ -516,6 +520,8 @@ function renderDockbar() {
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
   const pr = dockbar.querySelector("#dpr"); if (pr) pr.onclick = () => createPR(view.box);
   const ar = dockbar.querySelector("#darch"); if (ar) ar.onclick = () => archiveBox(view.box);
+  const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
+  const nb = dockbar.querySelector("#dnext"); if (nb && nx) nb.onclick = nx.run;
   dockbar.querySelector("#dclose").onclick = () => { if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } };
 }
 
@@ -529,6 +535,8 @@ function shipHtml(box) {
              : s.checks==="failing"?`<span class="ck bad">✗ checks</span>`
              : s.checks==="pending"?`<span class="ck pend">… checks</span>` : "";
     h += `<a class="rf prlink" href="${esc(s.pr_url)}" target="_blank" title="${esc(s.pr_state||"")} — open on GitHub">PR ${esc((s.pr_state||"").toLowerCase())}</a>${ck}`;
+    if ((s.pr_state||"").toUpperCase() === "OPEN")
+      h += `<button class="ship" id="dmerge" title="gh pr merge — finish the loop">Merge</button>`;
   } else {
     h += `<button class="ship" id="dpr" title="gh pr create for this branch">Create PR</button>`;
   }
@@ -555,6 +563,27 @@ function archiveBox(name) {
       if (view.box === name) { view = {box:null,mode:"term"}; applyView(); } toast(`archived ${name}`); }
     else toast("archive failed: " + (d.error||""));
   }).catch(() => toast("archive failed"));
+}
+function mergePr(name) {
+  if (!confirm(`Merge ${name}'s PR? This squash-merges the branch.`)) return;
+  toast("merging…");
+  fetch(`/api/boxes/${encodeURIComponent(name)}/merge`, { method:"POST" }).then(r => r.json()).then(d => {
+    if (d.ok) { toast("merged ✓ — archive when ready"); shipState.delete(name); loadShip(name, true); }
+    else toast("merge failed: " + (d.error||"").split("\n")[0]);
+  }).catch(() => toast("merge failed"));
+}
+// The single highlighted call-to-action for the loop: reply → review → PR → merge → archive.
+function nextAction(box) {
+  const b = boxes.find(x => x.name === box), s = shipState.get(box), st = b?.state;
+  if (s && s.pr_url) {
+    const ps = (s.pr_state||"").toUpperCase();
+    if (ps === "MERGED") return { label:"Archive ▸", run:() => archiveBox(box) };
+    if (ps === "OPEN" && s.checks === "passing") return { label:"Merge ▸", run:() => mergePr(box) };
+    if (ps === "OPEN") return { label:"Checks ▸", run:() => window.open(s.pr_url, "_blank") };
+  }
+  if (["needs-input","needs-decision","blocked","waiting"].includes(st)) return { label:"Reply ▸", run:() => openTerminal(box) };
+  if (st === "done") return view.mode === "diff" ? { label:"Create PR ▸", run:() => createPR(box) } : { label:"Review diff ▸", run:() => openDiff(box) };
+  return null;
 }
 let toastT;
 function toast(msg, url) {
