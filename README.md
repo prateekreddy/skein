@@ -5,9 +5,10 @@
 > that's missing from the sbx workflow. *Compose, don't reinvent* — see
 > [`ARCHITECTURE.md`](ARCHITECTURE.md); the why is in [`VISION.md`](VISION.md).
 
-**Status:** v0 — a live **web cockpit** (read-only fleet board over SSE) + a CLI. The
-goal is the web UI as the *single pane of glass*; web actions and an embedded per-box
-terminal are next (ARCHITECTURE.md § Roadmap).
+**Status:** v0 — a live **web cockpit** (fleet board over SSE) with an **embedded
+per-box terminal** (click a box → talk to that agent in the browser) + a CLI. The goal
+is the web UI as the *single pane of glass*; web actions (launch/diff/merge/archive) and
+a ⌘K palette are next (ARCHITECTURE.md § Roadmap).
 
 ## Build
 
@@ -22,9 +23,14 @@ SKEIN_REGISTRY=<…>/skein-shared/.claude/sandboxes.json \
   ./target/release/skein-server          # → http://127.0.0.1:7878
 ```
 
-A self-contained dark page (no build step) that live-updates over SSE. Today it shows the
-fleet; Phase 1 adds launch / diff / merge / archive and an embedded terminal so you talk
-to each agent in the browser. API: `GET /api/boxes`, `GET /api/events` (SSE).
+A self-contained dark page (no build step) that live-updates over SSE. Click any box to
+open its **embedded terminal** (xterm.js ↔ a server-side PTY running `sbx run --name
+<box>`) and drive that agent without leaving the page. Next: launch / diff / merge /
+archive actions and a ⌘K palette. API: `GET /api/boxes`, `GET /api/events` (SSE),
+`GET /api/boxes/:name/terminal` (WebSocket).
+
+> Localhost-only (`127.0.0.1:7878`). Remote/mobile access is a tunnel + auth — roadmap
+> Phase 4; don't expose this port directly.
 
 ## CLI (terminal client, same core)
 
