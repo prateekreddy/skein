@@ -8,13 +8,16 @@
 //! WS↔PTY bridge. Bind is localhost-only; remote access = tunnel + auth (roadmap phase 4).
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::Path;
+use axum::extract::{Path, Query};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use serde::Deserialize;
 use skein::{load_views, BoxView};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -30,6 +33,7 @@ async fn main() {
         .route("/", get(index))
         .route("/api/boxes", get(api_boxes))
         .route("/api/boxes/:name/diff", get(api_diff))
+        .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -68,6 +72,35 @@ async fn api_diff(Path(name): Path<String>) -> Response {
         .into_response()
 }
 
+/// All cross-box messages, newest first.
+async fn api_mailbox() -> Json<Vec<skein::Message>> {
+    Json(skein::load_mailbox())
+}
+
+#[derive(Deserialize)]
+struct SendReq {
+    to: String,
+    body: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// Post a message into the shared mailbox (from skein). `to` is a vmid or "broadcast".
+async fn api_mailbox_send(Json(r): Json<SendReq>) -> Response {
+    if r.body.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty body").into_response();
+    }
+    let to = if r.to.trim().is_empty() {
+        "broadcast"
+    } else {
+        r.to.trim()
+    };
+    match skein::send_message(to, &r.kind, &r.body) {
+        Ok(()) => (StatusCode::OK, "ok").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
 /// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.
 /// (Roadmap: replace polling with a honker subscription so it's push, not poll.)
 async fn api_events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -79,14 +112,20 @@ async fn api_events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     Sse::new(stream)
 }
 
-/// Upgrade to a WebSocket that bridges the browser terminal to a PTY running the box session.
-async fn terminal(ws: WebSocketUpgrade, Path(name): Path<String>) -> Response {
-    ws.on_upgrade(move |socket| terminal_session(socket, name))
+/// Upgrade to a WebSocket that bridges the browser terminal to a PTY.
+/// `?launch=<branch>` runs the box-creation command instead of attaching to an existing box.
+async fn terminal(
+    ws: WebSocketUpgrade,
+    Path(name): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let launch = q.get("launch").filter(|s| !s.is_empty()).cloned();
+    ws.on_upgrade(move |socket| terminal_session(socket, name, launch))
 }
 
 /// The WS↔PTY bridge: spawn `sbx run --name <box>` in a PTY, pipe bytes both ways, honour resizes.
 /// Override the spawned command with $SKEIN_ATTACH_CMD (run via `sh -c`) for local testing.
-async fn terminal_session(mut socket: WebSocket, name: String) {
+async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<String>) {
     let pair = match native_pty_system().openpty(PtySize {
         rows: 30,
         cols: 100,
@@ -110,20 +149,28 @@ async fn terminal_session(mut socket: WebSocket, name: String) {
     // value are substituted first, so you can tune the exact sbx invocation per box without
     // recompiling, e.g.  SKEIN_ATTACH_CMD='sbx run --name {name} -- claude --continue'
     let dir = skein::lookup_dir(&name).unwrap_or_default();
-    let mut cmd = match std::env::var("SKEIN_ATTACH_CMD") {
-        Ok(c) if !c.is_empty() => {
-            let c = c.replace("{name}", &name).replace("{dir}", &dir);
-            let mut b = CommandBuilder::new("sh");
-            b.arg("-c");
-            b.arg(c);
-            b
-        }
-        _ => {
-            let mut b = CommandBuilder::new("sbx");
-            for a in skein::attach_argv(&name, &dir) {
-                b.arg(a);
+    let mut cmd = if let Some(branch) = &launch {
+        // create-a-box mode: run the launch command in a PTY so the user watches it come up
+        let mut b = CommandBuilder::new("sh");
+        b.arg("-c");
+        b.arg(skein::launch_command(branch));
+        b
+    } else {
+        match std::env::var("SKEIN_ATTACH_CMD") {
+            Ok(c) if !c.is_empty() => {
+                let c = c.replace("{name}", &name).replace("{dir}", &dir);
+                let mut b = CommandBuilder::new("sh");
+                b.arg("-c");
+                b.arg(c);
+                b
             }
-            b
+            _ => {
+                let mut b = CommandBuilder::new("sbx");
+                for a in skein::attach_argv(&name, &dir) {
+                    b.arg(a);
+                }
+                b
+            }
         }
     };
     for (k, v) in std::env::vars() {

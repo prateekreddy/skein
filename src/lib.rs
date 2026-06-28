@@ -23,6 +23,25 @@ pub struct DiffStat {
     pub del: u32,
 }
 
+/// One cross-box message in the shared `mailbox/` (written by mailbox.sh or skein).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Message {
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub to: String, // a vmid, or "broadcast"
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub ts: String,
+    #[serde(default, rename = "seenBy")]
+    pub seen_by: Vec<String>,
+}
+
 /// One entry in the shared `sandboxes.json` registry written by sandbox-bootstrap.sh.
 #[derive(Debug, Default, Deserialize)]
 pub struct Sandbox {
@@ -152,6 +171,78 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         .collect();
     views.sort_by(|a, b| a.tier.cmp(&b.tier).then(a.name.cmp(&b.name)));
     Ok(views)
+}
+
+/// The shared store directory (parent of `sandboxes.json`).
+fn store_dir() -> Option<PathBuf> {
+    locate_registry().ok()?.parent().map(|p| p.to_path_buf())
+}
+
+/// All cross-box messages, newest first. Reads `<store>/mailbox/*.json`.
+pub fn load_mailbox() -> Vec<Message> {
+    let dir = match store_dir() {
+        Some(d) => d.join("mailbox"),
+        None => return vec![],
+    };
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(txt) = fs::read_to_string(&p) {
+                if let Ok(m) = serde_json::from_str::<Message>(&txt) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.ts.cmp(&a.ts));
+    out
+}
+
+/// Post a message into the shared mailbox (from `skein`), in the same shape mailbox.sh
+/// writes so each box's `inbox` picks it up. `to` is a vmid or "broadcast".
+pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
+    let dir = store_dir()
+        .ok_or("can't locate the shared store")?
+        .join("mailbox");
+    fs::create_dir_all(&dir).map_err(|e| format!("mailbox dir: {e}"))?;
+    let now = Utc::now();
+    let msg = Message {
+        from: "skein".into(),
+        to: to.into(),
+        kind: if kind.is_empty() {
+            "note".into()
+        } else {
+            kind.into()
+        },
+        branch: String::new(),
+        body: body.into(),
+        ts: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        seen_by: vec![],
+    };
+    let id = format!("{}-skein", now.timestamp_nanos_opt().unwrap_or(0));
+    let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+    fs::write(dir.join(format!("{id}.json")), json).map_err(|e| format!("write: {e}"))
+}
+
+/// Wrap a string for safe single-quoting in a POSIX shell.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The host shell command that launches a new box for `branch`. Override with
+/// $SKEIN_LAUNCH_CMD (a template; `{branch}` is substituted); default assumes
+/// `setup-sandbox.sh` is on PATH.
+pub fn launch_command(branch: &str) -> String {
+    if let Ok(t) = env::var("SKEIN_LAUNCH_CMD") {
+        if !t.is_empty() {
+            return t.replace("{branch}", branch);
+        }
+    }
+    format!("setup-sandbox.sh {}", sh_quote(branch))
 }
 
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.

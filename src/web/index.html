@@ -188,6 +188,42 @@
   .pal-item.on { background:var(--accent-bg); color:var(--text); }
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
+  /* mailbox + new-box overlays */
+  #mbx, #newbox { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open { display:flex; justify-content:center; align-items:flex-start; }
+  .mbx-card, .nb-card { width:100%; background:var(--overlay); border:1px solid var(--border-3); border-radius:12px;
+    box-shadow:0 24px 70px rgba(0,0,0,.6); animation:rise var(--dur-med) var(--ease); display:flex; flex-direction:column; }
+  .mbx-card { max-width:620px; max-height:78vh; }
+  .nb-card { max-width:480px; padding:16px; gap:10px; }
+  .mbx-head, .nb-head { display:flex; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid var(--border); }
+  .nb-head { padding:0 0 4px; border:0; }
+  .mbx-head .sub { color:var(--faint); font-size:12px; } .mbx-head .x, .nb-head .x { margin-left:auto; color:var(--dim); cursor:pointer; }
+  .mbx-head .x:hover, .nb-head .x:hover { color:var(--text); }
+  .mbx-list { flex:1; overflow-y:auto; padding:8px; min-height:120px; }
+  .msg { padding:10px 12px; border-radius:9px; background:var(--panel); border:1px solid var(--border); margin-bottom:6px; }
+  .msg .mh { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--dim); margin-bottom:4px; }
+  .msg .who { color:var(--text-2); font-weight:600; } .msg .arrow { color:var(--faint); }
+  .msg .to { color:var(--accent); font-family:var(--mono); }
+  .msg .kind { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--faint); border:1px solid var(--border-2); border-radius:999px; padding:1px 7px; }
+  .msg .mt { margin-left:auto; font-variant-numeric:tabular-nums; }
+  .msg .mb { color:var(--text); font-size:13px; white-space:pre-wrap; word-break:break-word; }
+  .msg .seen { color:var(--faint); font-size:11px; margin-top:3px; }
+  .mbx-list .note { color:var(--faint); text-align:center; padding:36px; }
+  .mbx-compose { border-top:1px solid var(--border); padding:10px 12px; display:flex; flex-direction:column; gap:8px; background:var(--panel); }
+  .mbx-compose .row1 { display:flex; gap:8px; } .mbx-compose .row2 { display:flex; align-items:center; gap:10px; }
+  .mbx-compose .hint { color:var(--faint); font-size:11px; flex:1; }
+  select, .nb-card input, .mbx-compose textarea { background:var(--inset); color:var(--text); border:1px solid var(--border-2);
+    border-radius:7px; padding:7px 9px; font:inherit; font-size:13px; outline:none; }
+  select:focus, .nb-card input:focus, .mbx-compose textarea:focus { border-color:var(--accent); }
+  .mbx-compose textarea { resize:vertical; min-height:54px; }
+  .mbx-compose select { flex:1; }
+  .nb-lbl { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .nb-foot { display:flex; align-items:center; gap:10px; } .nb-foot .hint { flex:1; color:var(--faint); font-size:11px; }
+  .nb-foot code { font-family:var(--mono); color:var(--text-2); }
+  #mbx button.primary, #newbox button.primary { background:var(--accent); border:1px solid var(--accent); color:#0b0d10; font-weight:600;
+    border-radius:7px; padding:7px 16px; font:inherit; font-size:13px; cursor:pointer; }
+  #mbx button.primary:hover, #newbox button.primary:hover { background:var(--accent-2); }
+
   @media (max-width:860px) {
     #dock { position:fixed; inset:0; z-index:50; flex:none; border-left:0; }
     body.docked #left { display:none; }
@@ -206,13 +242,15 @@
           <div class="word"><b>skein</b></div>
           <div class="counts" id="counts"></div>
           <div class="right">
+            <span class="kbtn" onclick="openNewBox()" title="Launch a new box (⌘N)">＋ box</span>
+            <span class="kbtn" id="mbxbtn" onclick="openMailbox()" title="Cross-box mailbox &amp; broadcast">✉ mailbox</span>
             <span class="kbtn" id="alerts" title="Desktop alerts when a box needs you">🔔 alerts</span>
             <span class="kbtn" onclick="openPalette()">⌘K</span>
             <span class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
         </header>
         <div id="fleet"></div>
-        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next that needs you · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
+        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘N</kbd> new box · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
       </div>
     </div>
     <div id="dock">
@@ -230,6 +268,34 @@
       <input id="pal-input" placeholder="Search boxes and actions…" autocomplete="off" spellcheck="false" />
       <div class="pal-list" id="pal-list"></div>
       <div class="pal-foot"><span><kbd>↵</kbd> run</span><span><kbd>↑↓</kbd> move</span><span><kbd>esc</kbd> close</span></div>
+    </div>
+  </div>
+
+  <div id="mbx" aria-hidden="true">
+    <div class="mbx-card">
+      <div class="mbx-head"><b>Mailbox</b><span class="sub">cross-box hand-offs · the shared brain</span><span class="x" onclick="closeMailbox()">✕</span></div>
+      <div class="mbx-list" id="mbx-list"></div>
+      <div class="mbx-compose">
+        <div class="row1">
+          <select id="mbx-to"></select>
+          <select id="mbx-kind">
+            <option value="note">note</option>
+            <option value="handoff">handoff</option>
+            <option value="review-request">review-request</option>
+          </select>
+        </div>
+        <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)"></textarea>
+        <div class="row2"><span class="hint" id="mbx-hint"></span><button class="primary" id="mbx-send">Send</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="newbox" aria-hidden="true">
+    <div class="nb-card">
+      <div class="nb-head"><b>Launch a box</b><span class="x" onclick="closeNewBox()">✕</span></div>
+      <label class="nb-lbl">branch name</label>
+      <input id="nb-branch" placeholder="my-feature" autocomplete="off" spellcheck="false" />
+      <div class="nb-foot"><span class="hint">runs <code id="nb-cmd">setup-sandbox.sh &lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
     </div>
   </div>
 
@@ -365,13 +431,14 @@ function applyView() {
   }
   renderDockbar(); renderTabs(); refreshRowAll();
 }
-function createSession(name) {
+function createSession(name, launchBranch) {
   const host = document.createElement("div"); host.className = "thost"; termarea.append(host);
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
     cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
+  const qs = launchBranch ? `?launch=${encodeURIComponent(launchBranch)}` : "";
+  const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal${qs}`);
   ws.binaryType = "arraybuffer";
   const s = { term, fit, ws, host, streaming:false, timer:0 };
   sessions.set(name, s);
@@ -586,6 +653,9 @@ const pal = document.getElementById("pal"), palInput = document.getElementById("
 let palItems = [], palSel = 0;
 function commands() {
   const acts = [
+    { sec:"Actions", label:"New box…", run:openNewBox, meta:"⌘N" },
+    { sec:"Actions", label:"Open mailbox", run:openMailbox },
+    { sec:"Actions", label:"Broadcast to all boxes…", run:()=>{ openMailbox(); setTimeout(()=>{ document.getElementById("mbx-to").value="broadcast"; document.getElementById("mbx-body").focus(); },50); } },
     { sec:"Actions", label:"Jump to next box that needs you", run:nextNeedsYou, meta:"]" },
     { sec:"Actions", label:(alertsOn?"Disable":"Enable")+" desktop alerts", run:()=>document.getElementById("alerts").click() },
     { sec:"Actions", label:"Reconnect live stream", run:connect },
@@ -626,9 +696,73 @@ palInput.addEventListener("keydown", e => {
   else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
 });
 
+// ---------- mailbox (cross-box hand-offs + broadcast) ----------
+const mbx = document.getElementById("mbx");
+function openMailbox() { mbx.classList.add("open"); fillRecipients(); loadMailbox(); }
+function closeMailbox() { mbx.classList.remove("open"); }
+function fillRecipients() {
+  const sel = document.getElementById("mbx-to"), cur = sel.value;
+  sel.innerHTML = `<option value="broadcast">📢 broadcast — all boxes</option>`
+    + boxes.map(b => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join("");
+  if (cur) sel.value = cur;
+}
+function loadMailbox() {
+  const list = document.getElementById("mbx-list");
+  fetch("/api/mailbox").then(r => r.json()).then(msgs => {
+    if (!msgs.length) { list.innerHTML = `<div class="note">no messages yet — send a hand-off or broadcast below</div>`; return; }
+    list.innerHTML = msgs.map(m => `
+      <div class="msg">
+        <div class="mh"><span class="who">${esc(m.from||"?")}</span><span class="arrow">→</span>
+          <span class="to">${m.to==="broadcast"?"📢 all":esc(m.to)}</span>
+          <span class="kind">${esc(m.kind||"note")}</span>
+          <span class="mt">${esc((m.ts||"").replace("T"," ").replace("Z",""))}</span></div>
+        <div class="mb">${esc(m.body||"")}</div>
+        ${(m.seenBy&&m.seenBy.length)?`<div class="seen">seen by ${m.seenBy.map(esc).join(", ")}</div>`:""}
+      </div>`).join("");
+  }).catch(() => { list.innerHTML = `<div class="note">could not load mailbox</div>`; });
+}
+function sendMail() {
+  const to = document.getElementById("mbx-to").value, kind = document.getElementById("mbx-kind").value;
+  const ta = document.getElementById("mbx-body"), body = ta.value.trim();
+  const hint = document.getElementById("mbx-hint");
+  if (!body) { ta.focus(); return; }
+  hint.textContent = "sending…";
+  fetch("/api/mailbox", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({ to, body, kind }) })
+    .then(r => { if (!r.ok) throw 0; ta.value = ""; hint.textContent = `sent to ${to==="broadcast"?"all boxes":to}`; loadMailbox(); setTimeout(()=>hint.textContent="",2500); })
+    .catch(() => hint.textContent = "send failed");
+}
+document.getElementById("mbx-send").addEventListener("click", sendMail);
+document.getElementById("mbx-body").addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.metaKey||e.ctrlKey)) { e.preventDefault(); sendMail(); }
+  e.stopPropagation();
+});
+
+// ---------- launch a new box ----------
+const newbox = document.getElementById("newbox"), nbBranch = document.getElementById("nb-branch");
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; nbBranch.focus(); }
+function closeNewBox() { newbox.classList.remove("open"); }
+function launchBox(branch) {
+  branch = (branch||"").trim().replace(/\s+/g, "-"); if (!branch) return;
+  const name = branch.startsWith("thing-") ? branch : `thing-${branch}`;
+  closeNewBox();
+  select(name);
+  view = { box: name, mode: "term" };
+  if (!sessions.has(name)) createSession(name, branch);   // launch mode
+  applyView();
+}
+document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
+nbBranch.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
+  else if (e.key === "Escape") { e.preventDefault(); closeNewBox(); }
+  e.stopPropagation();
+});
+
 // ---------- global keys ----------
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") { e.preventDefault(); openNewBox(); return; }
+  if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
+  if (newbox.classList.contains("open")) return;
   if (pal.classList.contains("open")) return;
   // when focus is in a live terminal, only intercept our chord; let the agent get the rest
   const inTerm = view.box && view.mode === "term" && sessions.get(view.box)?.host.contains(document.activeElement);
