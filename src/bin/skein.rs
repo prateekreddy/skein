@@ -47,7 +47,7 @@ fn print_help() {
         "skein — see and steer your fleet of agent sandboxes\n\n\
 usage:\n  \
 skein [ls]            show the fleet (default)\n  \
-skein attach <box>    reconnect to a box (runs: sbx run --name <box>)\n  \
+skein attach <box>    reconnect to the box's running agent session\n  \
 skein version\n  \
 skein help\n\n\
 the web cockpit lives in `skein-server` (run it, open http://127.0.0.1:7878).\n\n\
@@ -83,21 +83,29 @@ fn cmd_ls() -> Result<(), String> {
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     let w_name = rows.iter().map(|r| r.1.len()).fold("BOX".len(), usize::max);
-    let w_st = rows.iter().map(|r| r.2.len()).fold("STATE".len(), usize::max);
-    let w_br = rows.iter().map(|r| r.3.len()).fold("BRANCH".len(), usize::max);
-    let w_age = rows.iter().map(|r| r.4.len()).fold("SEEN".len(), usize::max);
+    let w_st = rows
+        .iter()
+        .map(|r| r.2.len())
+        .fold("STATE".len(), usize::max);
+    let w_br = rows
+        .iter()
+        .map(|r| r.3.len())
+        .fold("BRANCH".len(), usize::max);
+    let w_age = rows
+        .iter()
+        .map(|r| r.4.len())
+        .fold("SEEN".len(), usize::max);
 
     println!(
-        "{BOLD}  {}  {}  {}  {}  {}{RESET}",
+        "{BOLD}  {}  {}  {}  {}  DIR{RESET}",
         pad("BOX", w_name),
         pad("STATE", w_st),
         pad("BRANCH", w_br),
         pad("SEEN", w_age),
-        "DIR"
     );
 
     for (tier, name, st, br, age, dir) in &rows {
-        let name_cell = if *tier == 2 {
+        let name_cell = if *tier >= 4 {
             format!("{DIM}{name}{RESET}")
         } else {
             format!("{BOLD}{name}{RESET}")
@@ -118,9 +126,12 @@ fn cmd_ls() -> Result<(), String> {
 
 fn dot(tier: u8) -> &'static str {
     match tier {
-        0 => "\x1b[32m●\x1b[0m",
-        1 => "\x1b[33m●\x1b[0m",
-        _ => "\x1b[2m○\x1b[0m",
+        0 => "\x1b[31m●\x1b[0m", // needs-input — red (decision/permission blocking)
+        1 => "\x1b[33m●\x1b[0m", // waiting — amber (your move)
+        2 => "\x1b[34m●\x1b[0m", // done — blue (review / merge)
+        3 => "\x1b[32m●\x1b[0m", // working / live — green
+        4 => "\x1b[2m●\x1b[0m",  // idle — dim filled
+        _ => "\x1b[2m○\x1b[0m",  // stale / unknown — dim hollow
     }
 }
 
@@ -141,7 +152,10 @@ fn pad_colored(s: &str, visible: usize, w: usize) -> String {
 }
 
 fn cmd_attach(name: &str) -> Result<(), String> {
-    match Command::new("sbx").args(["run", "--name", name]).status() {
+    // Reconnect to the box's existing agent session (same command the web cockpit uses).
+    let dir = skein::lookup_dir(name).unwrap_or_default();
+    let argv = skein::attach_argv(name, &dir);
+    match Command::new("sbx").args(&argv).status() {
         Ok(s) if s.success() => Ok(()),
         Ok(_) => Err("sbx exited non-zero".into()),
         Err(e) if e.kind() == ErrorKind::NotFound => {

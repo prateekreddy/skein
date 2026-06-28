@@ -9,7 +9,7 @@
   :root {
     --bg: #0b0d10; --panel: #14171c; --panel-2: #181c22; --border: #21262d;
     --text: #e6edf3; --dim: #8b949e; --faint: #6e7681; --accent: #7c7cf0;
-    --waiting: #f5a623; --working: #3fb950; --done: #58a6ff; --idle: #8b949e; --stale: #484f58;
+    --attn: #f85149; --waiting: #f5a623; --working: #3fb950; --done: #58a6ff; --idle: #8b949e; --stale: #484f58;
     --radius: 10px;
     --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
     --ui: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
@@ -40,29 +40,32 @@
   }
   .row:hover { background: var(--panel-2); border-color: #2c333c; transform: translateX(2px); }
   .row:hover .chev { color: var(--text); }
+  .row.attn    { border-color: color-mix(in srgb, var(--attn) 50%, var(--border)); }
   .row.waiting { border-color: color-mix(in srgb, var(--waiting) 40%, var(--border)); }
   .chev { color: var(--faint); justify-self: end; }
 
   .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
+  .s-attn    .dot { background: var(--attn);    box-shadow: 0 0 12px var(--attn);    animation: pulse 1.4s ease-in-out infinite; }
   .s-waiting .dot { background: var(--waiting); box-shadow: 0 0 10px var(--waiting); animation: pulse 1.8s ease-in-out infinite; }
+  .s-done    .dot { background: var(--done);    box-shadow: 0 0 8px var(--done); }
   .s-working .dot { background: var(--working); }
-  .s-done    .dot { background: var(--done); }
   .s-idle    .dot { background: var(--idle); }
   .s-stale   .dot, .s-unknown .dot { background: var(--stale); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
   .main { min-width: 0; }
   .name { font-weight: 600; letter-spacing: -0.005em; }
-  .s-stale .name, .s-unknown .name { color: var(--faint); font-weight: 500; }
+  .s-stale .name, .s-unknown .name, .s-idle .name { color: var(--faint); font-weight: 500; }
   .sub { color: var(--dim); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; }
   .branch { font-family: var(--mono); color: var(--accent); opacity: .9; }
   .dir { font-family: var(--mono); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .state { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
            padding: 3px 9px; border-radius: 999px; color: var(--dim); background: #1b2026; }
+  .s-attn    .state { color: var(--attn);    background: color-mix(in srgb, var(--attn) 18%, transparent); }
   .s-waiting .state { color: var(--waiting); background: color-mix(in srgb, var(--waiting) 16%, transparent); }
-  .s-working .state { color: var(--working); background: color-mix(in srgb, var(--working) 16%, transparent); }
   .s-done    .state { color: var(--done);    background: color-mix(in srgb, var(--done) 16%, transparent); }
+  .s-working .state { color: var(--working); background: color-mix(in srgb, var(--working) 16%, transparent); }
 
   .age { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
@@ -118,36 +121,42 @@
   const live = document.getElementById("live");
   const livetext = document.getElementById("livetext");
 
-  const order = { waiting: 0, "needs-input": 0, blocked: 0, done: 1, working: 2, running: 2, live: 2, idle: 3, stale: 4, unknown: 5 };
-  const cls = s => "s-" + (["waiting","needs-input","blocked"].includes(s) ? "waiting"
-                          : s === "done" ? "done"
-                          : ["working","running","live"].includes(s) ? "working"
-                          : s === "idle" ? "idle" : "stale");
+  // canonical state -> css bucket / display label. Order is the backend `tier`.
+  const bucket = s => ["needs-input","needs-decision","blocked"].includes(s) ? "attn"
+                    : s === "waiting" ? "waiting"
+                    : s === "done" ? "done"
+                    : ["working","running","live"].includes(s) ? "working"
+                    : s === "idle" ? "idle" : "stale";
+  const label = s => s === "needs-input" || s === "needs-decision" || s === "blocked" ? "decision"
+                   : s === "live" ? "active" : s;
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 
   function render(boxes) {
-    boxes.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.name.localeCompare(b.name));
-    const waiting = boxes.filter(b => order[b.state] === 0).length;
+    boxes.sort((a, b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
+    const need = boxes.filter(b => b.tier === 0 || b.tier === 1).length;  // decision + waiting
     const done = boxes.filter(b => b.state === "done").length;
     counts.innerHTML = `<span class="n">${boxes.length}</span> boxes`
-      + (waiting ? ` · <span class="n">${waiting}</span> waiting` : "")
+      + (need ? ` · <span class="n">${need}</span> need you` : "")
       + (done ? ` · <span class="n">${done}</span> done` : "");
 
     if (!boxes.length) {
       fleet.innerHTML = `<div class="empty">the skein is empty — launch a box with <code>setup-sandbox.sh &lt;branch&gt;</code></div>`;
       return;
     }
-    fleet.innerHTML = boxes.map(b => `
-      <div class="row ${cls(b)} ${order[b.state] === 0 ? "waiting" : ""}" data-name="${esc(b.name)}" data-branch="${esc(b.branch || "")}">
+    fleet.innerHTML = boxes.map(b => {
+      const bk = bucket(b.state);
+      const hl = bk === "attn" ? "attn" : bk === "waiting" ? "waiting" : "";
+      return `
+      <div class="row s-${bk} ${hl}" data-name="${esc(b.name)}" data-branch="${esc(b.branch || "")}">
         <span class="dot"></span>
         <div class="main">
           <div class="name">${esc(b.name)}</div>
           <div class="sub"><span class="branch">${esc(b.branch || "—")}</span><span class="dir">${esc(b.dir || "")}</span></div>
         </div>
-        <span class="state">${esc(b.state)}</span>
+        <span class="state">${esc(label(b.state))}</span>
         <span class="age">${esc(b.age)}</span>
         <span class="chev">›</span>
-      </div>`).join("");
+      </div>`; }).join("");
   }
 
   function connect() {

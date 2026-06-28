@@ -54,8 +54,8 @@ async fn api_boxes() -> Json<Vec<BoxView>> {
 /// (Roadmap: replace polling with a honker subscription so it's push, not poll.)
 async fn api_events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(2))).map(|_| {
-        let payload =
-            serde_json::to_string(&load_views().unwrap_or_default()).unwrap_or_else(|_| "[]".into());
+        let payload = serde_json::to_string(&load_views().unwrap_or_default())
+            .unwrap_or_else(|_| "[]".into());
         Ok(Event::default().event("boxes").data(payload))
     });
     Sse::new(stream)
@@ -77,12 +77,16 @@ async fn terminal_session(mut socket: WebSocket, name: String) {
     }) {
         Ok(p) => p,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("skein: pty error: {e}"))).await;
+            let _ = socket
+                .send(Message::Text(format!("skein: pty error: {e}")))
+                .await;
             return;
         }
     };
 
     // Build the command. Propagate env + cwd so `sbx`/`sh` resolve on PATH.
+    // Default: reconnect to the box's *existing* agent session (tmux + `claude --continue`),
+    // rooted at the dir the box registered. $SKEIN_ATTACH_CMD fully overrides it (local testing).
     let mut cmd = match std::env::var("SKEIN_ATTACH_CMD") {
         Ok(c) if !c.is_empty() => {
             let mut b = CommandBuilder::new("sh");
@@ -91,10 +95,11 @@ async fn terminal_session(mut socket: WebSocket, name: String) {
             b
         }
         _ => {
+            let dir = skein::lookup_dir(&name).unwrap_or_default();
             let mut b = CommandBuilder::new("sbx");
-            b.arg("run");
-            b.arg("--name");
-            b.arg(&name);
+            for a in skein::attach_argv(&name, &dir) {
+                b.arg(a);
+            }
             b
         }
     };
@@ -108,7 +113,9 @@ async fn terminal_session(mut socket: WebSocket, name: String) {
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("skein: spawn failed: {e}"))).await;
+            let _ = socket
+                .send(Message::Text(format!("skein: spawn failed: {e}")))
+                .await;
             return;
         }
     };
@@ -117,14 +124,18 @@ async fn terminal_session(mut socket: WebSocket, name: String) {
     let mut reader = match pair.master.try_clone_reader() {
         Ok(r) => r,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("skein: pty reader: {e}"))).await;
+            let _ = socket
+                .send(Message::Text(format!("skein: pty reader: {e}")))
+                .await;
             return;
         }
     };
     let mut writer = match pair.master.take_writer() {
         Ok(w) => w,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("skein: pty writer: {e}"))).await;
+            let _ = socket
+                .send(Message::Text(format!("skein: pty writer: {e}")))
+                .await;
             return;
         }
     };

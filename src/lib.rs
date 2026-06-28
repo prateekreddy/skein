@@ -39,20 +39,28 @@ pub struct BoxView {
 }
 
 impl Sandbox {
-    /// Human label + sort/colour tier: 0 live, 1 idle, 2 stale.
-    /// Prefers an explicit status; falls back to liveness derived from `lastSeen`.
+    /// Human label + sort/colour tier, ordered "who needs me first" (lower = more urgent):
+    ///   0 needs-input (a decision/permission is blocking the agent)
+    ///   1 waiting     (turn ended — your move)
+    ///   2 done        (task finished — review / merge)
+    ///   3 working     (in flight — leave it alone) / `live` when no explicit status
+    ///   4 idle        5 stale / unknown
+    /// Prefers the explicit status the box's hooks write; falls back to liveness
+    /// derived from `lastSeen` when no box has reported a status yet.
     pub fn state(&self) -> (String, u8) {
         match self.status.as_str() {
-            "working" | "running" | "live" => return (self.status.clone(), 0),
-            "waiting" | "needs-input" | "blocked" => return (self.status.clone(), 1),
+            "needs-input" | "needs-decision" | "blocked" => return ("needs-input".into(), 0),
+            "waiting" => return ("waiting".into(), 1),
+            "done" => return ("done".into(), 2),
+            "working" | "running" => return ("working".into(), 3),
             "" => {} // derive from lastSeen below
-            other => return (other.to_string(), 1),
+            other => return (other.to_string(), 3),
         }
         match self.age_secs() {
-            Some(s) if s < 120 => ("live".into(), 0),
-            Some(s) if s < 1800 => ("idle".into(), 1),
-            Some(_) => ("stale".into(), 2),
-            None => ("unknown".into(), 2),
+            Some(s) if s < 120 => ("live".into(), 3),
+            Some(s) if s < 1800 => ("idle".into(), 4),
+            Some(_) => ("stale".into(), 5),
+            None => ("unknown".into(), 5),
         }
     }
 
@@ -127,6 +135,56 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         .collect();
     views.sort_by(|a, b| a.tier.cmp(&b.tier).then(a.name.cmp(&b.name)));
     Ok(views)
+}
+
+/// Look up a box's clone root (the `dir` it registered) by name.
+pub fn lookup_dir(name: &str) -> Option<String> {
+    let (boxes, _) = load_registry().ok()?;
+    boxes
+        .get(name)
+        .map(|b| b.dir.clone())
+        .filter(|d| !d.is_empty())
+}
+
+/// Wrap a string for safe use inside single quotes in a POSIX shell.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The in-box script that *continues* the agent session (vs. starting a new one).
+///
+/// It runs the agent inside a tmux session named `skein`, created on first attach and
+/// reused on every later one (`new-session -A` = attach-if-exists-else-create). So a
+/// browser refresh, a `skein attach`, or a server restart all reconnect to the SAME
+/// live session — tmux lives in the box and survives the client going away. The session
+/// runs `claude --continue` to resume the conversation; if tmux or claude is missing it
+/// degrades to a plain login shell rather than failing. `dir` is the box's clone root.
+pub fn attach_inner_script(dir: &str) -> String {
+    let cd = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("cd {} 2>/dev/null; ", sh_quote(dir))
+    };
+    let agent = "claude --continue 2>/dev/null || claude . 2>/dev/null || exec bash -l";
+    format!(
+        "{cd}if command -v tmux >/dev/null 2>&1; then \
+           exec tmux new-session -A -s skein {}; \
+         else {agent}; fi",
+        sh_quote(agent),
+    )
+}
+
+/// The full `sbx` argv that reconnects to box `name` rooted at `dir`.
+/// (The leading program is `sbx`; this returns only its arguments.)
+pub fn attach_argv(name: &str, dir: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--name".into(),
+        name.into(),
+        "bash".into(),
+        "-lc".into(),
+        attach_inner_script(dir),
+    ]
 }
 
 pub fn shorten(p: &str) -> String {
