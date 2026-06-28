@@ -76,16 +76,33 @@ The registry (`sandboxes.json`) is the contract, written by `sandbox-bootstrap.s
   registry — turning the list into a true "who needs me?" board. (Registry writes use the existing
   `flock` discipline in the bootstrap.)
 
+## Surface decision: web-first
+
+We lead with a **web cockpit**, not a TUI. Reasons: diffs review far better in a browser; remote/
+mobile is a tunnel away; the team can just open a URL; and it **reuses our existing stack** (axum +
+Svelte + design sensibility) whereas ratatui is a stack we use nowhere else. The architecture is
+**server + thin clients**, so the CLI stays and a TUI could later be another client of the same API —
+choosing web closes nothing. Aesthetic is a dark developer cockpit (Linear/Vercel/Raycast), distinct
+from thing's light Fluent product chrome.
+
+> **Remote access note (checked):** Claude's *own* Remote Control is outbound **HTTPS:443 (TLS),
+> not UDP** — it works through the sbx proxy (we allowed `api.anthropic.com`); its only gotcha is it
+> needs claude.ai OAuth, not an API key. But it's **orthogonal to Skein-web**: Skein-web is reached
+> by tunnelling *our own* server port (Tailscale/cloudflared), independent of Anthropic.
+
 ## Roadmap
 
-- **v0 (now):** `skein ls` (status table over the registry) + `skein attach` (→ `sbx run --name`).
-  stdlib-light: serde/chrono only.
-- **Phase 1 — live TUI (ratatui):** auto-refreshing fleet view; keys to attach / diff / broadcast.
-- **Phase 2 — real status:** the box status hook writes `status`; the board shows waiting/working/done.
-- **Phase 3 — review/merge:** per box `git fetch sandbox-<box>` → diff → `gh pr create` / merge / archive.
-- **Phase 4 — orchestrator daemon (honker):** durable launch/merge/archive jobs + event bus; the TUI
-  becomes a client of it. Optional: wrap each box with `coder/agentapi` for steering.
-- **Phase 5 — remote/mobile:** native Claude Code remote control per box (already enabled), or a
-  small web view reading the same honker DB.
+- **v0 (now):** `skein` CLI (`ls` / `attach`) **+ `skein-server`** (axum) — JSON API, a live **SSE**
+  fleet stream, and a self-contained **dark web board** (no build step). Read-only + live.
+- **Phase 1 — web actions + embedded session + ⌘K (the single-pane milestone):** endpoints for
+  launch / diff / merge / archive + a command palette; **attach opens a terminal *in the browser***
+  (xterm.js over a `ttyd`/`coder/agentapi` wrapper of `sbx run`), so you converse with each agent
+  without leaving the page; **Svelte** for the syntax-highlighted diff viewer. After this, the browser
+  is the only surface a dev touches day-to-day.
+- **Phase 2 — real status:** a Claude `Stop`/`Notification` hook writes `status` into the registry;
+  the board shows waiting / working / done instead of inferring from `lastSeen`.
+- **Phase 3 — honker job queue + push:** durable launch/merge/archive jobs and an event bus; replace
+  the SSE *polling* with a honker subscription (push). Optional: `coder/agentapi` per box for steering.
+- **Phase 4 — remote/mobile:** tunnel the server + auth + browser push, so the fleet is on your phone.
 
 Each phase is additive and keeps the reuse rule: pull a wheel before writing one.

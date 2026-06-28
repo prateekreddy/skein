@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>skein</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14171c; --panel-2: #181c22; --border: #21262d;
+    --text: #e6edf3; --dim: #8b949e; --faint: #6e7681; --accent: #7c7cf0;
+    --waiting: #f5a623; --working: #3fb950; --done: #58a6ff; --idle: #8b949e; --stale: #484f58;
+    --radius: 10px;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+    --ui: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(1200px 600px at 70% -10%, #11151b 0%, var(--bg) 60%);
+    color: var(--text); font-family: var(--ui); font-size: 14px; line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 28px 20px 64px; }
+
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 22px; }
+  .word { font-weight: 650; letter-spacing: -0.01em; font-size: 18px; }
+  .word b { color: var(--accent); }
+  .counts { color: var(--dim); font-size: 13px; }
+  .counts .n { color: var(--text); font-weight: 600; }
+  .live { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 12px; }
+  .live .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--stale); }
+  .live.on .pip { background: var(--working); box-shadow: 0 0 8px var(--working); }
+
+  .fleet { display: flex; flex-direction: column; gap: 6px; }
+  .row {
+    display: grid; grid-template-columns: 18px 1fr auto auto; align-items: center; gap: 14px;
+    padding: 13px 16px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); cursor: default; transition: background .12s, border-color .12s, transform .12s;
+  }
+  .row:hover { background: var(--panel-2); border-color: #2c333c; transform: translateX(2px); }
+  .row.waiting { border-color: color-mix(in srgb, var(--waiting) 40%, var(--border)); }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
+  .s-waiting .dot { background: var(--waiting); box-shadow: 0 0 10px var(--waiting); animation: pulse 1.8s ease-in-out infinite; }
+  .s-working .dot { background: var(--working); }
+  .s-done    .dot { background: var(--done); }
+  .s-idle    .dot { background: var(--idle); }
+  .s-stale   .dot, .s-unknown .dot { background: var(--stale); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .main { min-width: 0; }
+  .name { font-weight: 600; letter-spacing: -0.005em; }
+  .s-stale .name, .s-unknown .name { color: var(--faint); font-weight: 500; }
+  .sub { color: var(--dim); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; }
+  .branch { font-family: var(--mono); color: var(--accent); opacity: .9; }
+  .dir { font-family: var(--mono); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .state { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+           padding: 3px 9px; border-radius: 999px; color: var(--dim); background: #1b2026; }
+  .s-waiting .state { color: var(--waiting); background: color-mix(in srgb, var(--waiting) 16%, transparent); }
+  .s-working .state { color: var(--working); background: color-mix(in srgb, var(--working) 16%, transparent); }
+  .s-done    .state { color: var(--done);    background: color-mix(in srgb, var(--done) 16%, transparent); }
+
+  .age { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .empty { color: var(--dim); padding: 48px 16px; text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); }
+  .empty code { font-family: var(--mono); color: var(--text); }
+  footer { margin-top: 26px; color: var(--faint); font-size: 12px; }
+  kbd { font-family: var(--mono); font-size: 11px; background: #1b2026; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; color: var(--dim); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="word"><b>skein</b></div>
+      <div class="counts" id="counts">—</div>
+      <div class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></div>
+    </header>
+    <div class="fleet" id="fleet"></div>
+    <footer>v0 · live over SSE · <kbd>⌘K</kbd> command palette and actions coming next</footer>
+  </div>
+
+<script>
+  const fleet = document.getElementById("fleet");
+  const counts = document.getElementById("counts");
+  const live = document.getElementById("live");
+  const livetext = document.getElementById("livetext");
+
+  const order = { waiting: 0, "needs-input": 0, blocked: 0, done: 1, working: 2, running: 2, live: 2, idle: 3, stale: 4, unknown: 5 };
+  const cls = s => "s-" + (["waiting","needs-input","blocked"].includes(s) ? "waiting"
+                          : s === "done" ? "done"
+                          : ["working","running","live"].includes(s) ? "working"
+                          : s === "idle" ? "idle" : "stale");
+
+  function render(boxes) {
+    boxes.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.name.localeCompare(b.name));
+    const waiting = boxes.filter(b => order[b.state] === 0).length;
+    const done = boxes.filter(b => b.state === "done").length;
+    counts.innerHTML = `<span class="n">${boxes.length}</span> boxes`
+      + (waiting ? ` · <span class="n">${waiting}</span> waiting` : "")
+      + (done ? ` · <span class="n">${done}</span> done` : "");
+
+    if (!boxes.length) {
+      fleet.innerHTML = `<div class="empty">the skein is empty — launch a box with <code>setup-sandbox.sh &lt;branch&gt;</code></div>`;
+      return;
+    }
+    fleet.innerHTML = boxes.map(b => `
+      <div class="row ${cls(b)} ${order[b.state] === 0 ? "waiting" : ""}">
+        <span class="dot"></span>
+        <div class="main">
+          <div class="name">${esc(b.name)}</div>
+          <div class="sub"><span class="branch">${esc(b.branch || "—")}</span><span class="dir">${esc(b.dir || "")}</span></div>
+        </div>
+        <span class="state">${esc(b.state)}</span>
+        <span class="age">${esc(b.age)}</span>
+      </div>`).join("");
+  }
+
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+
+  function connect() {
+    const es = new EventSource("/api/events");
+    es.addEventListener("boxes", e => { try { render(JSON.parse(e.data)); } catch {} });
+    es.onopen = () => { live.classList.add("on"); livetext.textContent = "live"; };
+    es.onerror = () => { live.classList.remove("on"); livetext.textContent = "reconnecting…"; };
+  }
+  // initial paint + live stream
+  fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+  connect();
+</script>
+</body>
+</html>

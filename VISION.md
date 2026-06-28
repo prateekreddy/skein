@@ -45,7 +45,12 @@ the GUI tools can't match.
 
 ## The feel
 
-Open `skein`. A quiet formation of boxes, live ones on top, the one waiting on you
-glowing. Hit a key to drop into it, another to review its diff, another to merge and
-archive. The fleet's shared memory means every box already knows the house rules. You
-never go hunting for "which terminal was that again."
+Open `skein` in your browser. A quiet formation of boxes, live ones on top, the one
+waiting on you glowing. Click in to **talk to that agent right there** (its terminal is
+embedded), review its diff, merge and archive — all on the page. The fleet's shared memory
+means every box already knows the house rules. You never go hunting for "which terminal
+was that again."
+
+**Single pane of glass.** The goal is that the web cockpit is the *only* surface you touch
+day-to-day: fleet overview **and** the per-box agent conversation both live here. The
+terminal is for one-time host setup (`sbx`/Docker) and rare deep debugging — not the loop.

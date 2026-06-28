@@ -5,14 +5,25 @@ edition = "2021"
 description = "See and steer your fleet of agent sandboxes"
 license = "MIT OR Apache-2.0"
 
-# Principle: compose, don't reinvent. We pull the standard wheels rather than
-# hand-rolling JSON / time parsing. The live-TUI slice will add `ratatui` + `crossterm`,
-# and the orchestrator slice can use `honker` (Rust-native) directly as a crate.
+# Principle: compose, don't reinvent. Standard wheels only — serde/chrono for the core,
+# axum/tokio for the server. The rich frontend (Svelte) is added when we need the diff
+# viewer; the v0 web UI is a zero-build dark page served from src/web/index.html.
+[lib]
+name = "skein"
+path = "src/lib.rs"
+
+[[bin]]
+name = "skein"
+path = "src/bin/skein.rs"
+
+[[bin]]
+name = "skein-server"
+path = "src/bin/skein-server.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
-
-[[bin]]
-name = "skein"
-path = "src/main.rs"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-stream = { version = "0.1", features = ["time"] }
