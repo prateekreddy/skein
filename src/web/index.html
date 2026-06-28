@@ -7,9 +7,35 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
 <style>
   :root {
-    --bg: #0b0d10; --panel: #14171c; --panel-2: #181c22; --border: #21262d;
-    --text: #e6edf3; --dim: #8b949e; --faint: #6e7681; --accent: #7c7cf0;
-    --attn: #f85149; --waiting: #f5a623; --working: #3fb950; --done: #58a6ff; --idle: #8b949e; --stale: #484f58;
+    /* background layers — elevation by lightness, not shadow */
+    --bg:        #0b0d10;
+    --panel:     #14171c;
+    --elevated:  #1b1f26;
+    --overlay:   #20252e;
+    --inset:     #08090b;
+    /* borders — three tiers */
+    --border:    #1b2026;
+    --border-2:  #2a3038;
+    --border-3:  #3d444d;
+    /* text — four tiers */
+    --text:      #e6edf3;
+    --text-2:    #b3bdc9;
+    --dim:       #8b949e;
+    --faint:     #5c636e;
+    /* accent — UI only, never a status */
+    --accent:    #7c7cf0;
+    --accent-2:  #9a9af5;
+    --accent-bg: rgba(124,124,240,.12);
+    /* semantic status — convention-aligned: green = done, blue = working/live */
+    --attn:    #f85149;  /* needs-input / decision — loudest */
+    --waiting: #e3b341;  /* your move (calm amber) */
+    --working: #58a6ff;  /* in-progress — pulses */
+    --done:    #3fb950;  /* finished (green = done, everywhere) */
+    --idle:    #8b949e;
+    --stale:   #484f58;
+    /* motion */
+    --dur-fast: 100ms; --dur: 150ms; --dur-med: 250ms;
+    --ease: cubic-bezier(.2,0,0,1);
     --radius: 10px;
     --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
     --ui: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
@@ -21,58 +47,99 @@
     color: var(--text); font-family: var(--ui); font-size: 14px; line-height: 1.4;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 960px; margin: 0 auto; padding: 28px 20px 64px; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 26px 20px 64px; }
 
-  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 22px; }
-  .word { font-weight: 650; letter-spacing: -0.01em; font-size: 18px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+  .word { font-weight: 650; letter-spacing: -.01em; font-size: 18px; }
   .word b { color: var(--accent); }
-  .counts { color: var(--dim); font-size: 13px; }
-  .counts .n { color: var(--text); font-weight: 600; }
-  .live { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 12px; }
-  .live .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--stale); }
-  .live.on .pip { background: var(--working); box-shadow: 0 0 8px var(--working); }
+  .counts { color: var(--dim); font-size: 13px; display: flex; gap: 10px; }
+  .counts .seg { display: inline-flex; align-items: center; gap: 5px; }
+  .counts .n { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .counts .pip { width: 7px; height: 7px; border-radius: 50%; }
+  .right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .kbtn { font-family: var(--mono); font-size: 11px; color: var(--dim); cursor: pointer;
+          background: var(--panel); border: 1px solid var(--border-2); border-radius: 7px;
+          padding: 4px 9px; transition: color var(--dur-fast), border-color var(--dur-fast); }
+  .kbtn:hover { color: var(--text); border-color: var(--border-3); }
+  .live { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 12px; }
+  .live .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--stale);
+               transition: background var(--dur); }
+  .live.on .pip { background: var(--done); box-shadow: 0 0 8px var(--done); }
 
-  .fleet { display: flex; flex-direction: column; gap: 6px; }
+  .group { margin-bottom: 8px; }
+  .ghead { display: flex; align-items: center; gap: 8px; padding: 14px 4px 7px;
+           font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+           color: var(--faint); }
+  .ghead .gc { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .grows { display: flex; flex-direction: column; gap: 6px; }
+
   .row {
     display: grid; grid-template-columns: 18px 1fr auto auto 14px; align-items: center; gap: 14px;
-    padding: 13px 16px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: var(--radius); cursor: pointer; transition: background .12s, border-color .12s, transform .12s;
+    padding: 12px 16px; background: var(--panel); border: 1px solid var(--border-2);
+    border-left: 2px solid transparent; border-radius: var(--radius); cursor: pointer;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+    transition: background var(--dur-fast), border-color var(--dur-fast), transform var(--dur-fast);
   }
-  .row:hover { background: var(--panel-2); border-color: #2c333c; transform: translateX(2px); }
+  .row:hover { background: var(--elevated); border-color: var(--border-3); }
   .row:hover .chev { color: var(--text); }
-  .row.attn    { border-color: color-mix(in srgb, var(--attn) 50%, var(--border)); }
-  .row.waiting { border-color: color-mix(in srgb, var(--waiting) 40%, var(--border)); }
-  .chev { color: var(--faint); justify-self: end; }
+  .row.sel { border-left-color: var(--accent); background: var(--elevated); }
+  .row.s-attn    { border-color: color-mix(in srgb, var(--attn) 42%, var(--border-2)); }
+  .row.s-waiting { border-color: color-mix(in srgb, var(--waiting) 34%, var(--border-2)); }
+  .chev { color: var(--faint); justify-self: end; transition: color var(--dur-fast); }
 
   .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
-  .s-attn    .dot { background: var(--attn);    box-shadow: 0 0 12px var(--attn);    animation: pulse 1.4s ease-in-out infinite; }
-  .s-waiting .dot { background: var(--waiting); box-shadow: 0 0 10px var(--waiting); animation: pulse 1.8s ease-in-out infinite; }
-  .s-done    .dot { background: var(--done);    box-shadow: 0 0 8px var(--done); }
-  .s-working .dot { background: var(--working); }
+  .s-attn    .dot { background: var(--attn);    box-shadow: 0 0 12px var(--attn);    animation: pulse 1.5s var(--ease) infinite; }
+  .s-working .dot { background: var(--working); box-shadow: 0 0 9px var(--working);  animation: pulse 1.9s var(--ease) infinite; }
+  .s-waiting .dot { background: var(--waiting); box-shadow: 0 0 9px var(--waiting); }
+  .s-done    .dot { background: var(--done);    box-shadow: 0 0 7px var(--done); }
   .s-idle    .dot { background: var(--idle); }
   .s-stale   .dot, .s-unknown .dot { background: var(--stale); }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
 
   .main { min-width: 0; }
-  .name { font-weight: 600; letter-spacing: -0.005em; }
+  .name { font-weight: 600; letter-spacing: -.005em; }
   .s-stale .name, .s-unknown .name, .s-idle .name { color: var(--faint); font-weight: 500; }
-  .sub { color: var(--dim); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; }
-  .branch { font-family: var(--mono); color: var(--accent); opacity: .9; }
+  .sub { color: var(--dim); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; min-width: 0; }
+  .branch { font-family: var(--mono); color: var(--accent); opacity: .9; white-space: nowrap; }
   .dir { font-family: var(--mono); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .state { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-           padding: 3px 9px; border-radius: 999px; color: var(--dim); background: #1b2026; }
-  .s-attn    .state { color: var(--attn);    background: color-mix(in srgb, var(--attn) 18%, transparent); }
-  .s-waiting .state { color: var(--waiting); background: color-mix(in srgb, var(--waiting) 16%, transparent); }
-  .s-done    .state { color: var(--done);    background: color-mix(in srgb, var(--done) 16%, transparent); }
-  .s-working .state { color: var(--working); background: color-mix(in srgb, var(--working) 16%, transparent); }
+  .pill { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+          padding: 3px 9px; border-radius: 999px; color: var(--dim); background: #1b2026;
+          border: 1px solid transparent; white-space: nowrap; }
+  .s-attn    .pill { color: var(--attn);    background: color-mix(in srgb, var(--attn) 14%, transparent);    border-color: color-mix(in srgb, var(--attn) 30%, transparent); }
+  .s-waiting .pill { color: var(--waiting); background: color-mix(in srgb, var(--waiting) 14%, transparent); border-color: color-mix(in srgb, var(--waiting) 28%, transparent); }
+  .s-working .pill { color: var(--working); background: color-mix(in srgb, var(--working) 14%, transparent); border-color: color-mix(in srgb, var(--working) 28%, transparent); }
+  .s-done    .pill { color: var(--done);    background: color-mix(in srgb, var(--done) 14%, transparent);    border-color: color-mix(in srgb, var(--done) 28%, transparent); }
 
   .age { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-  .empty { color: var(--dim); padding: 48px 16px; text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); }
-  .empty code { font-family: var(--mono); color: var(--text); }
-  footer { margin-top: 26px; color: var(--faint); font-size: 12px; }
-  kbd { font-family: var(--mono); font-size: 11px; background: #1b2026; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; color: var(--dim); }
+  .empty { color: var(--dim); padding: 52px 16px; text-align: center; border: 1px dashed var(--border-2); border-radius: var(--radius); }
+  .empty code, .empty kbd { font-family: var(--mono); color: var(--text); }
+  footer { margin-top: 24px; color: var(--faint); font-size: 12px; }
+  kbd { font-family: var(--mono); font-size: 11px; background: var(--panel); border: 1px solid var(--border-2);
+        border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; color: var(--dim); }
+
+  /* command palette */
+  #pal { position: fixed; inset: 0; z-index: 60; display: none; padding-top: 14vh;
+         background: rgba(5,7,10,.55); backdrop-filter: blur(3px); }
+  #pal.open { display: flex; justify-content: center; align-items: flex-start; }
+  .pal-card { width: 100%; max-width: 560px; background: var(--overlay); border: 1px solid var(--border-3);
+              border-radius: 12px; overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,.6);
+              animation: rise var(--dur-med) var(--ease); }
+  @keyframes rise { from { opacity: 0; transform: translateY(-6px) scale(.985); } }
+  .pal-card input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text);
+                    font-family: var(--ui); font-size: 15px; padding: 15px 16px; }
+  .pal-list { max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--border); padding: 6px; }
+  .pal-sec { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+             color: var(--faint); padding: 9px 10px 5px; }
+  .pal-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 8px;
+              cursor: pointer; color: var(--text-2); }
+  .pal-item .di { width: 8px; height: 8px; border-radius: 50%; background: var(--stale); flex: none; }
+  .pal-item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pal-item .meta { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .pal-item.on { background: var(--accent-bg); color: var(--text); }
+  .pal-foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--border);
+              font-size: 11px; color: var(--faint); }
 
   /* embedded terminal overlay */
   #term { position: fixed; inset: 0; z-index: 50; display: none; padding: 3vh 3vw;
@@ -80,26 +147,46 @@
   #term.open { display: flex; }
   .term-card { margin: auto; width: 100%; max-width: 1100px; height: 100%; max-height: 86vh;
                display: flex; flex-direction: column; overflow: hidden;
-               background: #0a0c10; border: 1px solid var(--border); border-radius: 12px;
-               box-shadow: 0 24px 70px rgba(0,0,0,.55); }
+               background: var(--inset); border: 1px solid var(--border-3); border-radius: 12px;
+               box-shadow: 0 24px 70px rgba(0,0,0,.55); animation: rise var(--dur-med) var(--ease); }
   .term-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
   .term-head .name { font-weight: 600; }
   .term-head .branch { font-family: var(--mono); color: var(--accent); font-size: 12px; }
-  .term-head .x { margin-left: auto; cursor: pointer; color: var(--dim); border: 1px solid var(--border);
+  .term-head .x { margin-left: auto; cursor: pointer; color: var(--dim); border: 1px solid var(--border-2);
                   border-radius: 6px; padding: 3px 10px; font-size: 12px; }
-  .term-head .x:hover { color: var(--text); border-color: #2c333c; }
-  #termhost { flex: 1; min-height: 0; padding: 8px 10px; background: #0a0c10; }
+  .term-head .x:hover { color: var(--text); border-color: var(--border-3); }
+  #termhost { flex: 1; min-height: 0; padding: 8px 10px; background: var(--inset); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important; scroll-behavior: auto !important;
+    }
+    .dot { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 0%, transparent); }
+  }
 </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <div class="word"><b>skein</b></div>
-      <div class="counts" id="counts">—</div>
-      <div class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></div>
+      <div class="counts" id="counts"></div>
+      <div class="right">
+        <span class="kbtn" id="alerts" title="Desktop alerts when a box needs you">🔔 alerts</span>
+        <span class="kbtn" onclick="openPalette()">⌘K</span>
+        <span class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></span>
+      </div>
     </header>
-    <div class="fleet" id="fleet"></div>
-    <footer>v0 · live over SSE · click a box to open its terminal · <kbd>⌘K</kbd> palette next</footer>
+    <div id="fleet"></div>
+    <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>]</kbd> next that needs you · <kbd>⌘K</kbd> palette · live over SSE</footer>
+  </div>
+
+  <div id="pal" aria-hidden="true">
+    <div class="pal-card">
+      <input id="pal-input" placeholder="Search boxes and actions…" autocomplete="off" spellcheck="false" />
+      <div class="pal-list" id="pal-list"></div>
+      <div class="pal-foot"><span><kbd>↵</kbd> run</span><span><kbd>↑↓</kbd> move</span><span><kbd>esc</kbd> close</span></div>
+    </div>
   </div>
 
   <div id="term" aria-hidden="true">
@@ -116,110 +203,288 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
-  const fleet = document.getElementById("fleet");
-  const counts = document.getElementById("counts");
-  const live = document.getElementById("live");
-  const livetext = document.getElementById("livetext");
-
-  // canonical state -> css bucket / display label. Order is the backend `tier`.
-  const bucket = s => ["needs-input","needs-decision","blocked"].includes(s) ? "attn"
-                    : s === "waiting" ? "waiting"
-                    : s === "done" ? "done"
-                    : ["working","running","live"].includes(s) ? "working"
-                    : s === "idle" ? "idle" : "stale";
-  const label = s => s === "needs-input" || s === "needs-decision" || s === "blocked" ? "decision"
+// ---------- model ----------
+const GROUPS = [
+  { key: "attn",    label: "needs you",  match: s => ["needs-input","needs-decision","blocked"].includes(s) },
+  { key: "waiting", label: "waiting",    match: s => s === "waiting" },
+  { key: "done",    label: "done",       match: s => s === "done" },
+  { key: "working", label: "working",    match: s => ["working","running","live"].includes(s) },
+  { key: "idle",    label: "idle",       match: s => s === "idle" },
+  { key: "stale",   label: "stale",      match: s => s === "stale" || s === "unknown" },
+];
+const groupOf = s => (GROUPS.find(g => g.match(s)) || GROUPS[GROUPS.length-1]).key;
+const labelOf = s => ["needs-input","needs-decision","blocked"].includes(s) ? "decision"
                    : s === "live" ? "active" : s;
-  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 
-  function render(boxes) {
-    boxes.sort((a, b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
-    const need = boxes.filter(b => b.tier === 0 || b.tier === 1).length;  // decision + waiting
-    const done = boxes.filter(b => b.state === "done").length;
-    counts.innerHTML = `<span class="n">${boxes.length}</span> boxes`
-      + (need ? ` · <span class="n">${need}</span> need you` : "")
-      + (done ? ` · <span class="n">${done}</span> done` : "");
+let boxes = [];          // latest snapshot, tier-sorted
+let order = [];          // visible box names in render order (for j/k)
+let sel = null;          // focused box name
+let prevState = {};      // name -> last state, for transition notifications
 
-    if (!boxes.length) {
-      fleet.innerHTML = `<div class="empty">the skein is empty — launch a box with <code>setup-sandbox.sh &lt;branch&gt;</code></div>`;
-      return;
+// ---------- in-place fleet render (keyed reconcile; stable group sections) ----------
+const fleet = document.getElementById("fleet");
+const rowEls = new Map();       // name -> row element
+const groupEls = {};            // key -> {section, head, rows}
+
+function ensureGroups() {
+  for (const g of GROUPS) {
+    const section = document.createElement("div"); section.className = "group"; section.style.display = "none";
+    const head = document.createElement("div"); head.className = "ghead";
+    head.innerHTML = `${g.label} <span class="gc"></span>`;
+    const rows = document.createElement("div"); rows.className = "grows";
+    section.append(head, rows); fleet.append(section);
+    groupEls[g.key] = { section, head: head.querySelector(".gc"), rows };
+  }
+}
+function makeRow(b) {
+  const el = document.createElement("div");
+  el.dataset.name = b.name;
+  el.innerHTML = `<span class="dot"></span>
+    <div class="main"><div class="name"></div>
+      <div class="sub"><span class="branch"></span><span class="dir"></span></div></div>
+    <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
+  el.addEventListener("click", () => { select(b.name); openTerminal(b.name); });
+  el.addEventListener("mouseenter", () => select(b.name, true));
+  return el;
+}
+function updateRow(el, b) {
+  const g = groupOf(b.state);
+  el.className = `row s-${g}` + (b.name === sel ? " sel" : "");
+  el.querySelector(".name").textContent = b.name;
+  el.querySelector(".branch").textContent = b.branch || "—";
+  el.querySelector(".dir").textContent = b.dir || "";
+  el.querySelector(".pill").textContent = labelOf(b.state);
+  el.querySelector(".age").textContent = b.age;
+}
+
+function render(snapshot) {
+  boxes = snapshot.slice().sort((a, b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
+  const counts = {};
+  for (const b of boxes) (counts[groupOf(b.state)] ??= []).push(b);
+
+  // header counts
+  const need = (counts.attn?.length || 0) + (counts.waiting?.length || 0);
+  const working = counts.working?.length || 0, done = counts.done?.length || 0;
+  document.getElementById("counts").innerHTML =
+    `<span class="seg"><span class="n">${boxes.length}</span> boxes</span>`
+    + (need ? `<span class="seg"><span class="pip" style="background:var(--attn)"></span><span class="n">${need}</span> need you</span>` : "")
+    + (working ? `<span class="seg"><span class="pip" style="background:var(--working)"></span><span class="n">${working}</span> working</span>` : "")
+    + (done ? `<span class="seg"><span class="pip" style="background:var(--done)"></span><span class="n">${done}</span> done</span>` : "");
+
+  // empty state
+  fleet.querySelector(".empty")?.remove();
+  if (!boxes.length) {
+    for (const g of GROUPS) groupEls[g.key].section.style.display = "none";
+    const e = document.createElement("div"); e.className = "empty";
+    e.innerHTML = `the skein is empty — launch a box with <code>setup-sandbox.sh &lt;branch&gt;</code>`;
+    fleet.append(e); order = []; return;
+  }
+
+  // reconcile each group section in place
+  order = [];
+  const seen = new Set();
+  for (const g of GROUPS) {
+    const list = counts[g.key] || [];
+    const ge = groupEls[g.key];
+    ge.section.style.display = list.length ? "" : "none";
+    ge.head.textContent = list.length || "";
+    for (const b of list) {
+      let el = rowEls.get(b.name);
+      if (!el) { el = makeRow(b); rowEls.set(b.name, el); }
+      updateRow(el, b);
+      ge.rows.appendChild(el);   // appendChild MOVES existing nodes → smooth reorder
+      order.push(b.name); seen.add(b.name);
     }
-    fleet.innerHTML = boxes.map(b => {
-      const bk = bucket(b.state);
-      const hl = bk === "attn" ? "attn" : bk === "waiting" ? "waiting" : "";
-      return `
-      <div class="row s-${bk} ${hl}" data-name="${esc(b.name)}" data-branch="${esc(b.branch || "")}">
-        <span class="dot"></span>
-        <div class="main">
-          <div class="name">${esc(b.name)}</div>
-          <div class="sub"><span class="branch">${esc(b.branch || "—")}</span><span class="dir">${esc(b.dir || "")}</span></div>
-        </div>
-        <span class="state">${esc(label(b.state))}</span>
-        <span class="age">${esc(b.age)}</span>
-        <span class="chev">›</span>
-      </div>`; }).join("");
   }
+  for (const [name, el] of rowEls) if (!seen.has(name)) { el.remove(); rowEls.delete(name); }
 
-  function connect() {
-    const es = new EventSource("/api/events");
-    es.addEventListener("boxes", e => { try { render(JSON.parse(e.data)); } catch {} });
-    es.onopen = () => { live.classList.add("on"); livetext.textContent = "live"; };
-    es.onerror = () => { live.classList.remove("on"); livetext.textContent = "reconnecting…"; };
+  if (sel && !seen.has(sel)) sel = null;
+  notify(boxes);
+}
+
+// ---------- keyboard selection ----------
+function select(name, soft) {
+  if (sel === name) return;
+  if (sel) rowEls.get(sel)?.classList.remove("sel");
+  sel = name;
+  const el = rowEls.get(name);
+  if (el) { el.classList.add("sel"); if (!soft) el.scrollIntoView({ block: "nearest" }); }
+}
+function move(d) {
+  if (!order.length) return;
+  let i = sel ? order.indexOf(sel) : -1;
+  i = (i + d + order.length) % order.length;
+  select(order[i]);
+}
+function nextNeedsYou() {
+  const need = boxes.filter(b => ["attn","waiting"].includes(groupOf(b.state))).map(b => b.name);
+  if (!need.length) return;
+  const i = sel ? need.indexOf(sel) : -1;
+  select(need[(i + 1) % need.length]);
+}
+
+// ---------- attention: title, favicon, web notifications ----------
+let alertsOn = false;
+function setFavicon(count) {
+  const c = document.createElement("canvas"); c.width = c.height = 32;
+  const x = c.getContext("2d");
+  x.fillStyle = count ? "#f85149" : "#7c7cf0";
+  const r = 7; x.beginPath();
+  x.moveTo(2+r,2); x.arcTo(30,2,30,30,r); x.arcTo(30,30,2,30,r); x.arcTo(2,30,2,2,r); x.arcTo(2,2,30,2,r); x.fill();
+  x.fillStyle = "#fff"; x.textAlign = "center"; x.textBaseline = "middle";
+  x.font = "bold " + (count > 9 ? 15 : 19) + "px " + getComputedStyle(document.body).fontFamily;
+  x.fillText(count ? String(count) : "s", 16, 17);
+  let link = document.querySelector("link[rel=icon]");
+  if (!link) { link = document.createElement("link"); link.rel = "icon"; document.head.append(link); }
+  link.href = c.toDataURL("image/png");
+}
+let audioCtx;
+function beep() {
+  try {
+    audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = "sine"; o.frequency.value = 660; o.connect(g); g.connect(audioCtx.destination);
+    g.gain.setValueAtTime(.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(.12, audioCtx.currentTime + .02);
+    g.gain.exponentialRampToValueAtTime(.0001, audioCtx.currentTime + .35);
+    o.start(); o.stop(audioCtx.currentTime + .36);
+  } catch {}
+}
+function notify(snapshot) {
+  const need = snapshot.filter(b => ["attn","waiting"].includes(groupOf(b.state))).length;
+  document.title = need ? `(${need}) skein · ${need} need you` : "skein";
+  setFavicon(need);
+  // fire desktop notifications only on real transitions, only when tab hidden
+  for (const b of snapshot) {
+    const g = groupOf(b.state), was = prevState[b.name];
+    const entering = g !== was;
+    if (entering && alertsOn && document.hidden) {
+      if (g === "attn")  pushNote(`${b.name} needs a decision`, b.name), beep();
+      else if (g === "done") pushNote(`${b.name} finished`, b.name);
+    }
+    prevState[b.name] = g;
   }
-  fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
-  connect();
+}
+function pushNote(body, tag) {
+  if (Notification.permission !== "granted") return;
+  try { new Notification("skein", { body, tag, renotify: true }); } catch {}
+}
+document.getElementById("alerts").addEventListener("click", async () => {
+  if (!("Notification" in window)) return;
+  const p = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+  alertsOn = p === "granted";
+  document.getElementById("alerts").textContent = alertsOn ? "🔔 alerts on" : "🔔 alerts";
+  document.getElementById("alerts").style.color = alertsOn ? "var(--done)" : "";
+});
+window.addEventListener("focus", () => { document.title = "skein"; });
 
-  // ---- embedded terminal ----
-  let term, fit, ws;
-  fleet.addEventListener("click", e => {
-    const row = e.target.closest(".row");
-    if (row) openTerminal(row.dataset.name, row.dataset.branch);
+// ---------- command palette ----------
+const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
+let palItems = [], palSel = 0;
+function commands() {
+  const acts = [
+    { sec: "Actions", label: "Jump to next box that needs you", run: nextNeedsYou, meta: "]" },
+    { sec: "Actions", label: (alertsOn ? "Disable" : "Enable") + " desktop alerts", run: () => document.getElementById("alerts").click() },
+    { sec: "Actions", label: "Reconnect live stream", run: connect },
+  ];
+  const bx = boxes.map(b => ({ sec: "Boxes", label: b.name, meta: labelOf(b.state), state: b.state,
+                               run: () => { select(b.name); openTerminal(b.name); } }));
+  return [...bx, ...acts];
+}
+function fuzzy(q, s) { // subsequence match
+  q = q.toLowerCase(); s = s.toLowerCase(); let i = 0;
+  for (const ch of s) if (ch === q[i]) i++;
+  return i === q.length;
+}
+function openPalette() {
+  pal.classList.add("open"); palInput.value = ""; renderPal(""); palInput.focus();
+}
+function closePalette() { pal.classList.remove("open"); }
+function renderPal(q) {
+  palItems = commands().filter(c => !q || fuzzy(q, c.label));
+  palSel = 0;
+  let html = "", lastSec = null;
+  palItems.forEach((c, i) => {
+    if (c.sec !== lastSec) { html += `<div class="pal-sec">${c.sec}</div>`; lastSec = c.sec; }
+    const dot = c.state ? `<span class="di" style="background:var(--${groupOf(c.state)==='attn'?'attn':groupOf(c.state)==='waiting'?'waiting':groupOf(c.state)==='done'?'done':groupOf(c.state)==='working'?'working':'stale'})"></span>` : `<span class="di" style="background:transparent"></span>`;
+    html += `<div class="pal-item${i===0?' on':''}" data-i="${i}">${dot}<span class="lbl">${esc(c.label)}</span>${c.meta?`<span class="meta">${esc(c.meta)}</span>`:""}</div>`;
   });
-  document.getElementById("term-x").addEventListener("click", closeTerminal);
+  palList.innerHTML = html || `<div class="pal-sec">no matches</div>`;
+  palList.querySelectorAll(".pal-item").forEach(el => {
+    el.addEventListener("mousemove", () => setPalSel(+el.dataset.i));
+    el.addEventListener("click", () => runPal());
+  });
+}
+function setPalSel(i) {
+  palSel = i;
+  palList.querySelectorAll(".pal-item").forEach(el => el.classList.toggle("on", +el.dataset.i === i));
+}
+function runPal() { const c = palItems[palSel]; if (c) { closePalette(); c.run(); } }
+palInput.addEventListener("input", () => renderPal(palInput.value.trim()));
+palInput.addEventListener("keydown", e => {
+  if (e.key === "ArrowDown") { e.preventDefault(); setPalSel(Math.min(palSel+1, palItems.length-1)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); setPalSel(Math.max(palSel-1, 0)); palList.querySelector(".on")?.scrollIntoView({block:"nearest"}); }
+  else if (e.key === "Enter") { e.preventDefault(); runPal(); }
+  else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
+});
 
-  function openTerminal(name, branch) {
-    closeTerminal();
-    document.getElementById("term-name").textContent = name;
-    document.getElementById("term-branch").textContent = branch || "";
-    document.getElementById("term").classList.add("open");
-
-    term = new Terminal({
-      fontFamily: 'ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace',
-      fontSize: 13, cursorBlink: true,
-      theme: { background: "#0a0c10", foreground: "#e6edf3", cursor: "#7c7cf0" },
-    });
-    fit = new FitAddon.FitAddon();
-    term.loadAddon(fit);
-    term.open(document.getElementById("termhost"));
-    fit.fit();
-    term.focus();
-
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => sendResize();
-    ws.onmessage = e => {
-      if (typeof e.data === "string") term.write(e.data);
-      else term.write(new Uint8Array(e.data));
-    };
-    ws.onclose = () => term && term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n");
-
-    term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
-    term.onResize(() => sendResize());
-    window.addEventListener("resize", onWinResize);
+// ---------- global keys ----------
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
+  if (pal.classList.contains("open")) return;
+  if (document.getElementById("term").classList.contains("open")) { if (e.key === "Escape") closeTerminal(); return; }
+  if (e.target.tagName === "INPUT") return;
+  switch (e.key) {
+    case "j": case "ArrowDown": e.preventDefault(); move(1); break;
+    case "k": case "ArrowUp":   e.preventDefault(); move(-1); break;
+    case "Enter": case "o": if (sel) { e.preventDefault(); openTerminal(sel); } break;
+    case "]": e.preventDefault(); nextNeedsYou(); break;
   }
+});
 
-  function sendResize() {
-    if (ws && ws.readyState === 1 && term) {
-      ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
-    }
-  }
-  function onWinResize() { if (fit) { fit.fit(); sendResize(); } }
-  function closeTerminal() {
-    window.removeEventListener("resize", onWinResize);
-    if (ws) { try { ws.close(); } catch {} ws = null; }
-    if (term) { term.dispose(); term = null; }
-    document.getElementById("term").classList.remove("open");
-  }
-</script>
-</body>
-</html>
+// ---------- live stream ----------
+function connect() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("boxes", e => { try { render(JSON.parse(e.data)); } catch {} });
+  es.onopen = () => { document.getElementById("live").classList.add("on"); document.getElementById("livetext").textContent = "live"; };
+  es.onerror = () => { document.getElementById("live").classList.remove("on"); document.getElementById("livetext").textContent = "reconnecting…"; };
+}
+
+// ---------- embedded terminal ----------
+let term, fit, ws;
+document.getElementById("term-x").addEventListener("click", closeTerminal);
+function openTerminal(name) {
+  const b = boxes.find(x => x.name === name);
+  closeTerminal();
+  document.getElementById("term-name").textContent = name;
+  document.getElementById("term-branch").textContent = b?.branch || "";
+  document.getElementById("term").classList.add("open");
+  term = new Terminal({ fontFamily: "ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace",
+    fontSize: 13, cursorBlink: true, theme: { background: "#08090b", foreground: "#e6edf3", cursor: "#7c7cf0" } });
+  fit = new FitAddon.FitAddon(); term.loadAddon(fit);
+  term.open(document.getElementById("termhost")); fit.fit(); term.focus();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => sendResize();
+  ws.onmessage = e => { if (typeof e.data === "string") term.write(e.data); else term.write(new Uint8Array(e.data)); };
+  ws.onclose = () => term && term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n");
+  term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
+  term.onResize(() => sendResize());
+  window.addEventListener("resize", onWinResize);
+}
+function sendResize() { if (ws && ws.readyState === 1 && term) ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } })); }
+function onWinResize() { if (fit) { fit.fit(); sendResize(); } }
+function closeTerminal() {
+  window.removeEventListener("resize", onWinResize);
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  if (term) { term.dispose(); term = null; }
+  document.getElementById("term").classList.remove("open");
+}
+
+// ---------- boot ----------
+ensureGroups();
+setFavicon(0);
+fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+connect();

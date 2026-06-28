@@ -128,8 +128,8 @@ fn dot(tier: u8) -> &'static str {
     match tier {
         0 => "\x1b[31m●\x1b[0m", // needs-input — red (decision/permission blocking)
         1 => "\x1b[33m●\x1b[0m", // waiting — amber (your move)
-        2 => "\x1b[34m●\x1b[0m", // done — blue (review / merge)
-        3 => "\x1b[32m●\x1b[0m", // working / live — green
+        2 => "\x1b[32m●\x1b[0m", // done — green (finished; green = done everywhere)
+        3 => "\x1b[34m●\x1b[0m", // working / live — blue (in progress)
         4 => "\x1b[2m●\x1b[0m",  // idle — dim filled
         _ => "\x1b[2m○\x1b[0m",  // stale / unknown — dim hollow
     }
