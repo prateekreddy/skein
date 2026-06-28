@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>skein</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
 <style>
   :root {
     --bg: #0b0d10; --panel: #14171c; --panel-2: #181c22; --border: #21262d;
@@ -33,12 +34,14 @@
 
   .fleet { display: flex; flex-direction: column; gap: 6px; }
   .row {
-    display: grid; grid-template-columns: 18px 1fr auto auto; align-items: center; gap: 14px;
+    display: grid; grid-template-columns: 18px 1fr auto auto 14px; align-items: center; gap: 14px;
     padding: 13px 16px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: var(--radius); cursor: default; transition: background .12s, border-color .12s, transform .12s;
+    border-radius: var(--radius); cursor: pointer; transition: background .12s, border-color .12s, transform .12s;
   }
   .row:hover { background: var(--panel-2); border-color: #2c333c; transform: translateX(2px); }
+  .row:hover .chev { color: var(--text); }
   .row.waiting { border-color: color-mix(in srgb, var(--waiting) 40%, var(--border)); }
+  .chev { color: var(--faint); justify-self: end; }
 
   .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
   .s-waiting .dot { background: var(--waiting); box-shadow: 0 0 10px var(--waiting); animation: pulse 1.8s ease-in-out infinite; }
@@ -67,6 +70,22 @@
   .empty code { font-family: var(--mono); color: var(--text); }
   footer { margin-top: 26px; color: var(--faint); font-size: 12px; }
   kbd { font-family: var(--mono); font-size: 11px; background: #1b2026; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; color: var(--dim); }
+
+  /* embedded terminal overlay */
+  #term { position: fixed; inset: 0; z-index: 50; display: none; padding: 3vh 3vw;
+          background: rgba(5,7,10,.72); backdrop-filter: blur(4px); }
+  #term.open { display: flex; }
+  .term-card { margin: auto; width: 100%; max-width: 1100px; height: 100%; max-height: 86vh;
+               display: flex; flex-direction: column; overflow: hidden;
+               background: #0a0c10; border: 1px solid var(--border); border-radius: 12px;
+               box-shadow: 0 24px 70px rgba(0,0,0,.55); }
+  .term-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .term-head .name { font-weight: 600; }
+  .term-head .branch { font-family: var(--mono); color: var(--accent); font-size: 12px; }
+  .term-head .x { margin-left: auto; cursor: pointer; color: var(--dim); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 3px 10px; font-size: 12px; }
+  .term-head .x:hover { color: var(--text); border-color: #2c333c; }
+  #termhost { flex: 1; min-height: 0; padding: 8px 10px; background: #0a0c10; }
 </style>
 </head>
 <body>
@@ -77,9 +96,22 @@
       <div class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></div>
     </header>
     <div class="fleet" id="fleet"></div>
-    <footer>v0 · live over SSE · <kbd>⌘K</kbd> command palette and actions coming next</footer>
+    <footer>v0 · live over SSE · click a box to open its terminal · <kbd>⌘K</kbd> palette next</footer>
   </div>
 
+  <div id="term" aria-hidden="true">
+    <div class="term-card">
+      <div class="term-head">
+        <span class="name" id="term-name"></span>
+        <span class="branch" id="term-branch"></span>
+        <span class="x" id="term-x" title="close (sends nothing to the agent)">✕ close</span>
+      </div>
+      <div id="termhost"></div>
+    </div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
   const fleet = document.getElementById("fleet");
   const counts = document.getElementById("counts");
@@ -91,6 +123,7 @@
                           : s === "done" ? "done"
                           : ["working","running","live"].includes(s) ? "working"
                           : s === "idle" ? "idle" : "stale");
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 
   function render(boxes) {
     boxes.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || a.name.localeCompare(b.name));
@@ -105,7 +138,7 @@
       return;
     }
     fleet.innerHTML = boxes.map(b => `
-      <div class="row ${cls(b)} ${order[b.state] === 0 ? "waiting" : ""}">
+      <div class="row ${cls(b)} ${order[b.state] === 0 ? "waiting" : ""}" data-name="${esc(b.name)}" data-branch="${esc(b.branch || "")}">
         <span class="dot"></span>
         <div class="main">
           <div class="name">${esc(b.name)}</div>
@@ -113,10 +146,9 @@
         </div>
         <span class="state">${esc(b.state)}</span>
         <span class="age">${esc(b.age)}</span>
+        <span class="chev">›</span>
       </div>`).join("");
   }
-
-  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 
   function connect() {
     const es = new EventSource("/api/events");
@@ -124,9 +156,61 @@
     es.onopen = () => { live.classList.add("on"); livetext.textContent = "live"; };
     es.onerror = () => { live.classList.remove("on"); livetext.textContent = "reconnecting…"; };
   }
-  // initial paint + live stream
   fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
   connect();
+
+  // ---- embedded terminal ----
+  let term, fit, ws;
+  fleet.addEventListener("click", e => {
+    const row = e.target.closest(".row");
+    if (row) openTerminal(row.dataset.name, row.dataset.branch);
+  });
+  document.getElementById("term-x").addEventListener("click", closeTerminal);
+
+  function openTerminal(name, branch) {
+    closeTerminal();
+    document.getElementById("term-name").textContent = name;
+    document.getElementById("term-branch").textContent = branch || "";
+    document.getElementById("term").classList.add("open");
+
+    term = new Terminal({
+      fontFamily: 'ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace',
+      fontSize: 13, cursorBlink: true,
+      theme: { background: "#0a0c10", foreground: "#e6edf3", cursor: "#7c7cf0" },
+    });
+    fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById("termhost"));
+    fit.fit();
+    term.focus();
+
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal`);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => sendResize();
+    ws.onmessage = e => {
+      if (typeof e.data === "string") term.write(e.data);
+      else term.write(new Uint8Array(e.data));
+    };
+    ws.onclose = () => term && term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n");
+
+    term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
+    term.onResize(() => sendResize());
+    window.addEventListener("resize", onWinResize);
+  }
+
+  function sendResize() {
+    if (ws && ws.readyState === 1 && term) {
+      ws.send(JSON.stringify({ resize: { cols: term.cols, rows: term.rows } }));
+    }
+  }
+  function onWinResize() { if (fit) { fit.fit(); sendResize(); } }
+  function closeTerminal() {
+    window.removeEventListener("resize", onWinResize);
+    if (ws) { try { ws.close(); } catch {} ws = null; }
+    if (term) { term.dispose(); term = null; }
+    document.getElementById("term").classList.remove("open");
+  }
 </script>
 </body>
 </html>
