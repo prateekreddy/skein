@@ -146,48 +146,22 @@ pub fn lookup_dir(name: &str) -> Option<String> {
         .filter(|d| !d.is_empty())
 }
 
-/// Wrap a string for safe use inside single quotes in a POSIX shell.
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// The in-box script that *continues* the agent session (vs. starting a new one).
+/// The full `sbx` argv that reconnects to box `name` (the leading program is `sbx`;
+/// this returns only its arguments). `_dir` is currently unused for the default agent
+/// invocation (claude resolves the conversation by the box's cwd) but is kept in the
+/// signature so callers needn't special-case it and the `{dir}` override stays uniform.
 ///
-/// It runs the agent inside a tmux session named `skein`, created on first attach and
-/// reused on every later one (`new-session -A` = attach-if-exists-else-create). So a
-/// browser refresh, a `skein attach`, or a server restart all reconnect to the SAME
-/// live session — tmux lives in the box and survives the client going away. The session
-/// runs `claude --continue` to resume the conversation; if tmux or claude is missing it
-/// degrades to a plain login shell rather than failing. `dir` is the box's clone root.
-pub fn attach_inner_script(dir: &str) -> String {
-    let cd = if dir.is_empty() {
-        String::new()
-    } else {
-        format!("cd {} 2>/dev/null; ", sh_quote(dir))
-    };
-    let agent = "claude --continue 2>/dev/null || claude . 2>/dev/null || exec bash -l";
-    format!(
-        "{cd}if command -v tmux >/dev/null 2>&1; then \
-           exec tmux new-session -A -s skein {}; \
-         else {agent}; fi",
-        sh_quote(agent),
-    )
-}
-
-/// The full `sbx` argv that reconnects to box `name` rooted at `dir`.
-/// (The leading program is `sbx`; this returns only its arguments.)
-///
-/// The `--` is load-bearing: `sbx` is a cobra CLI and parses leading-dash tokens
-/// (`-lc`) as its OWN flags unless `--` ends flag parsing first.
-pub fn attach_argv(name: &str, dir: &str) -> Vec<String> {
+/// `sbx run --name <box>` runs the box's agent (claude); a bare run starts a *fresh*
+/// conversation. To *continue* the session we pass claude's own `--continue` flag. The
+/// `--` is load-bearing twice over: `sbx` is a cobra CLI that would otherwise parse
+/// `--continue` as its own flag, and it marks where sbx stops and the agent's args begin.
+pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
     vec![
         "run".into(),
         "--name".into(),
         name.into(),
         "--".into(),
-        "bash".into(),
-        "-lc".into(),
-        attach_inner_script(dir),
+        "--continue".into(),
     ]
 }
 
