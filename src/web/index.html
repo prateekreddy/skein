@@ -249,9 +249,27 @@
     border-radius:7px; padding:7px 16px; font:inherit; font-size:13px; cursor:pointer; }
   #mbx button.primary:hover, #newbox button.primary:hover { background:var(--accent-2); }
 
+  /* on-screen key bar for touch / mobile terminals (the keys a soft keyboard lacks) */
+  .keybar { display:none; gap:6px; padding:7px 8px; background:var(--panel); border-top:1px solid var(--border);
+            overflow-x:auto; scrollbar-width:none; }
+  .keybar::-webkit-scrollbar { display:none; }
+  .keybar button { flex:none; min-width:44px; padding:10px 12px; background:var(--elevated); color:var(--text-2);
+    border:1px solid var(--border-2); border-radius:8px; font-family:var(--mono); font-size:13px; cursor:pointer; }
+  .keybar button:active { background:var(--overlay); }
+  .keybar button.armed { background:var(--accent); border-color:var(--accent); color:#0b0d10; }
+  .dockbar .mback { display:none; }
+
   @media (max-width:860px) {
-    #dock { position:fixed; inset:0; z-index:50; flex:none; border-left:0; }
+    /* size the dock to the *visible* viewport so the soft keyboard doesn't hide the prompt */
+    #dock { position:fixed; inset:0; z-index:50; flex:none; border-left:0; height:var(--vvh,100vh); }
     body.docked #left { display:none; }
+    /* a box is fullscreen; "‹ boxes" returns to the fleet without closing the session */
+    body.docked.show-fleet #left { display:block; position:fixed; inset:0; z-index:60; background:var(--bg); }
+    body.docked.show-fleet #dock { display:none; }
+    body.docked.term-mode .keybar { display:flex; }
+    .dockbar { flex-wrap:wrap; }
+    .dockbar .mback { display:inline-block; }
+    .tab { max-width:160px; }
   }
   @media (prefers-reduced-motion:reduce) {
     *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important;
@@ -284,6 +302,19 @@
       <div class="dockbody">
         <div class="termarea" id="termarea"></div>
         <div class="diffpane" id="diffpane"></div>
+      </div>
+      <div class="keybar" id="keybar">
+        <button data-k="esc">esc</button>
+        <button data-k="tab">tab</button>
+        <button data-k="ctrl">ctrl</button>
+        <button data-k="c-c">^C</button>
+        <button data-k="up">↑</button>
+        <button data-k="down">↓</button>
+        <button data-k="left">←</button>
+        <button data-k="right">→</button>
+        <button data-k="-">-</button>
+        <button data-k="/">/</button>
+        <button data-k="|">|</button>
       </div>
     </div>
   </div>
@@ -442,6 +473,7 @@ const termarea = document.getElementById("termarea"), diffpane = document.getEle
 function openTerminal(name) { showBox(name, "term"); }
 function openDiff(name) { showBox(name, "diff"); }
 function showBox(name, mode) {
+  document.body.classList.remove("show-fleet");   // tapping a box leaves the mobile fleet view
   select(name);
   view = { box: name, mode };
   if (mode === "term" && !sessions.has(name)) createSession(name);
@@ -454,6 +486,7 @@ function applyView() {
   document.body.classList.toggle("docked", docked);
   if (!docked) return;
   const termMode = view.mode === "term";
+  document.body.classList.toggle("term-mode", termMode);   // gates the mobile key bar
   termarea.classList.toggle("on", termMode);
   diffpane.classList.toggle("on", !termMode);
   for (const [n, s] of sessions) s.host.classList.toggle("on", termMode && n === view.box);
@@ -477,7 +510,11 @@ function createSession(name, launchBranch) {
   ws.onopen = () => { if (view.box === name && view.mode === "term") sendResize(name); if (s.pending) { ws.send(s.pending); s.pending = null; } };
   ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(name); };
   ws.onclose = () => { term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n"); s.dead = true; renderTabs(); refreshRow(name); };
-  term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
+  term.onData(d => {
+    // sticky Ctrl (armed from the mobile key bar): fold the next char to its control code
+    if (ctrlArmed && d.length === 1) { d = String.fromCharCode(d.charCodeAt(0) & 0x1f); ctrlArmed = false; updateCtrlBtn(); }
+    if (ws.readyState === 1) ws.send(new TextEncoder().encode(d));
+  });
   term.onResize(() => { if (view.box === name && view.mode === "term") sendResize(name); });
 }
 function markStreaming(name) {
@@ -501,7 +538,8 @@ function renderDockbar() {
   const nx = nextAction(view.box);
   dockbar.className = "dockbar s-" + g;
   dockbar.innerHTML =
-    `<span class="bdot"></span><span class="nm">${esc(view.box)}</span>`
+    `<span class="rf mback" id="dback" title="back to the fleet">‹ boxes</span>`
+    + `<span class="bdot"></span><span class="nm">${esc(view.box)}</span>`
     + (b.branch ? `<span class="br">${esc(b.branch)}</span>` : "")
     + `<span class="dstat">${diffBadge(b.diff)}</span>`
     + `<div class="seg-toggle">
@@ -522,6 +560,7 @@ function renderDockbar() {
   const ar = dockbar.querySelector("#darch"); if (ar) ar.onclick = () => archiveBox(view.box);
   const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
   const nb = dockbar.querySelector("#dnext"); if (nb && nx) nb.onclick = nx.run;
+  const bk = dockbar.querySelector("#dback"); if (bk) bk.onclick = () => document.body.classList.add("show-fleet");
   dockbar.querySelector("#dclose").onclick = () => { if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } };
 }
 
@@ -709,6 +748,29 @@ function sendReview(box) {
   applyView();
 }
 window.addEventListener("resize", () => { if (view.box && view.mode === "term") { sessions.get(view.box)?.fit.fit(); sendResize(view.box); } });
+
+// ---------- mobile: on-screen keys + soft-keyboard sizing ----------
+const keybar = document.getElementById("keybar");
+const KEYS = { esc:"\x1b", tab:"\t", "c-c":"\x03", up:"\x1b[A", down:"\x1b[B", left:"\x1b[D", right:"\x1b[C" };
+let ctrlArmed = false;
+function updateCtrlBtn() { keybar.querySelector("[data-k=ctrl]")?.classList.toggle("armed", ctrlArmed); }
+keybar.addEventListener("click", e => {
+  const b = e.target.closest("button[data-k]"); if (!b) return;
+  const k = b.dataset.k, s = sessions.get(view.box);
+  if (k === "ctrl") { ctrlArmed = !ctrlArmed; updateCtrlBtn(); s?.term.focus(); return; }
+  if (!s || s.ws.readyState !== 1) return;
+  let seq = KEYS[k] ?? k;
+  if (ctrlArmed && seq.length === 1) { seq = String.fromCharCode(seq.charCodeAt(0) & 0x1f); ctrlArmed = false; updateCtrlBtn(); }
+  s.ws.send(new TextEncoder().encode(seq)); s.term.focus();
+});
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const onVV = () => {
+    document.documentElement.style.setProperty("--vvh", vv.height + "px");
+    if (view.box && view.mode === "term") { sessions.get(view.box)?.fit.fit(); sendResize(view.box); }
+  };
+  vv.addEventListener("resize", onVV); vv.addEventListener("scroll", onVV); onVV();
+}
 
 // ---------- attention: title / favicon / notifications ----------
 let alertsOn = false;

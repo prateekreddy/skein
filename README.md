@@ -51,6 +51,10 @@ Open `https://<machine>.<tailnet>.ts.net` from any device in the tailnet (incl. 
 the Tailscale app). The `.ts.net` origin is allowed by the WebSocket guard automatically; for a
 different reverse proxy, list its host in `$SKEIN_ALLOWED_ORIGINS`.
 
+**On a phone:** the layout goes fullscreen per box; an on-screen key bar supplies the keys a soft
+keyboard lacks (`esc`, `tab`, a sticky `ctrl`, `^C`, arrows), the terminal resizes to stay above
+the keyboard, and **‹ boxes** returns to the fleet without ending the session.
+
 - **Shared/team tailnet:** restrict *which* users/devices can reach the port with a Tailscale
   **ACL** — that's the access control.
 - **`tailscale funnel` (public internet):** removes the tailnet boundary, so don't use it for
