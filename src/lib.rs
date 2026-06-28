@@ -262,8 +262,9 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
     fs::write(dir.join(format!("{id}.json")), json).map_err(|e| format!("write: {e}"))
 }
 
-/// Wrap a string for safe single-quoting in a POSIX shell.
-fn sh_quote(s: &str) -> String {
+/// Wrap a string for safe single-quoting in a POSIX shell. Used to quote every value substituted
+/// into a `*_CMD` template before it reaches `sh -c`, so a branch/box name can't inject commands.
+pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -273,7 +274,7 @@ fn sh_quote(s: &str) -> String {
 pub fn launch_command(branch: &str) -> String {
     if let Ok(t) = env::var("SKEIN_LAUNCH_CMD") {
         if !t.is_empty() {
-            return t.replace("{branch}", branch);
+            return t.replace("{branch}", &sh_quote(branch));
         }
     }
     format!("setup-sandbox.sh {}", sh_quote(branch))
@@ -358,9 +359,10 @@ pub fn ship_status(name: &str) -> ShipStatus {
 pub fn create_pr(name: &str) -> Result<String, String> {
     let branch = branch_of(name).ok_or("box has no branch in the registry")?;
     let (out, err, code) = match env::var("SKEIN_PR_CMD") {
-        Ok(c) if !c.is_empty() => {
-            run_shell(&c.replace("{branch}", &branch).replace("{name}", name))?
-        }
+        Ok(c) if !c.is_empty() => run_shell(
+            &c.replace("{branch}", &sh_quote(&branch))
+                .replace("{name}", &sh_quote(name)),
+        )?,
         _ => {
             let mut args = vec!["pr", "create", "--head", &branch, "--fill"];
             let base = env::var("SKEIN_BASE").unwrap_or_default();
@@ -394,7 +396,10 @@ pub fn archive_box(name: &str) -> Result<(), String> {
     use fs2::FileExt;
     use std::io::Write as _;
     let path = locate_registry()?;
-    let store = path.parent().ok_or("registry has no parent dir")?.to_path_buf();
+    let store = path
+        .parent()
+        .ok_or("registry has no parent dir")?
+        .to_path_buf();
 
     // Share the box hooks' flock discipline (sandbox-bootstrap.sh): an exclusive advisory lock on
     // <store>/.sandboxes.lock held across the whole read-modify-write, then an atomic temp+rename
@@ -434,7 +439,7 @@ pub fn archive_box(name: &str) -> Result<(), String> {
 
     if let Ok(c) = env::var("SKEIN_ARCHIVE_CMD") {
         if !c.is_empty() {
-            let _ = run_shell(&c.replace("{name}", name));
+            let _ = run_shell(&c.replace("{name}", &sh_quote(name)));
         }
     }
     Ok(())
@@ -541,4 +546,190 @@ pub fn shorten(p: &str) -> String {
         }
     }
     p.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    // Env vars are process-global; serialize the tests that read/write them.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn tempdir() -> PathBuf {
+        let d = env::temp_dir().join(format!(
+            "skein-test-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn secs_ago(s: i64) -> String {
+        (Utc::now() - chrono::Duration::seconds(s)).to_rfc3339()
+    }
+    fn sb(status: &str, last_seen: &str) -> Sandbox {
+        Sandbox {
+            branch: "b".into(),
+            dir: "/d".into(),
+            last_seen: last_seen.into(),
+            status: status.into(),
+            diff: None,
+        }
+    }
+
+    #[test]
+    fn valid_name_guards_paths() {
+        assert!(valid_name("thing-feature"));
+        assert!(valid_name("box_123"));
+        for bad in ["", "../etc", "a/b", "a\\b", "..", "x..y", "a\0b"] {
+            assert!(!valid_name(bad), "should reject {bad:?}");
+        }
+        assert!(!valid_name(&"x".repeat(200)));
+    }
+
+    #[test]
+    fn state_prefers_explicit_status() {
+        assert_eq!(sb("needs-input", "").state(), ("needs-input".into(), 0));
+        assert_eq!(sb("waiting", "").state().1, 1);
+        assert_eq!(sb("done", "").state().1, 2);
+        assert_eq!(sb("working", "").state().1, 3);
+        assert_eq!(sb("compiling", "").state(), ("compiling".into(), 3)); // passthrough
+    }
+
+    #[test]
+    fn state_derives_liveness_from_last_seen() {
+        assert_eq!(sb("", &secs_ago(10)).state().0, "live");
+        assert_eq!(sb("", &secs_ago(600)).state().0, "idle");
+        assert_eq!(sb("", &secs_ago(7200)).state().0, "stale");
+        assert_eq!(sb("", "not-a-date").state().0, "unknown");
+    }
+
+    #[test]
+    fn age_buckets() {
+        assert!(sb("", &secs_ago(5)).age().ends_with("s ago"));
+        assert!(sb("", &secs_ago(120)).age().ends_with("m ago"));
+        assert!(sb("", &secs_ago(7200)).age().ends_with("h ago"));
+        assert_eq!(sb("", "nope").age(), "?");
+    }
+
+    #[test]
+    fn sh_quote_escapes() {
+        assert_eq!(sh_quote("a b"), "'a b'");
+        assert_eq!(sh_quote("x'; rm -rf ~"), "'x'\\''; rm -rf ~'");
+    }
+
+    #[test]
+    fn shorten_replaces_home() {
+        let _g = ENV_LOCK.lock().unwrap();
+        env::set_var("HOME", "/home/me");
+        assert_eq!(shorten("/home/me/work/x"), "~/work/x");
+        assert_eq!(shorten("/other/x"), "/other/x");
+    }
+
+    #[test]
+    fn load_views_promotes_only_the_self_box_when_quiet() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"thing-self":{{"branch":"s","dir":"/d","lastSeen":"{}","status":""}},
+                    "thing-other":{{"branch":"o","dir":"/d","lastSeen":"{}","status":""}}}}"#,
+                secs_ago(7200),
+                secs_ago(7200)
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+        env::set_var("SKEIN_SELF", "thing-self");
+
+        let v = load_views().unwrap();
+        let self_v = v.iter().find(|b| b.name == "thing-self").unwrap();
+        let other_v = v.iter().find(|b| b.name == "thing-other").unwrap();
+        assert_eq!(self_v.state, "live"); // promoted despite a 2h-old lastSeen
+        assert_eq!(other_v.state, "stale"); // a peer is never promoted
+
+        env::remove_var("SKEIN_SELF");
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn archive_box_removes_records_and_guards() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            r#"{"thing-x":{"branch":"x","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":"done"},
+               "thing-y":{"branch":"y","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+        env::remove_var("SKEIN_ARCHIVE_CMD");
+
+        archive_box("thing-x").unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
+        assert!(after.get("thing-x").is_none());
+        assert!(after.get("thing-y").is_some()); // didn't clobber the rest
+        let hist = fs::read_to_string(dir.join("history.jsonl")).unwrap();
+        assert!(hist.contains("thing-x") && hist.contains("archivedAt"));
+        assert!(dir.join(".sandboxes.lock").exists()); // shares the hooks' flock file
+        assert!(archive_box("thing-x").is_err()); // already gone
+        assert!(archive_box("../escape").is_err()); // name guard
+
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn git_diff_for_handles_repo_and_nonrepo() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return; // git not available in this environment
+        }
+        let dir = tempdir();
+        let d = dir.to_str().unwrap();
+        let git = |args: &[&str]| {
+            let mut a = vec!["-C", d];
+            a.extend_from_slice(args);
+            assert!(Command::new("git")
+                .args(&a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        fs::write(dir.join("a.txt"), "hello\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        fs::write(dir.join("a.txt"), "hello world\n").unwrap();
+        let patch = git_diff_for(d).expect("a repo with changes yields a patch");
+        assert!(patch.contains("hello world"));
+
+        let empty = tempdir(); // not a git repo → None, never explodes
+        assert!(git_diff_for(empty.to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn index_html_is_well_formed() {
+        // The whole UI is one include_str!'d file; a missing close tag silently blanks the page.
+        let html = include_str!("web/index.html");
+        assert_eq!(
+            html.matches("<script").count(),
+            html.matches("</script>").count(),
+            "unbalanced <script> tags"
+        );
+        assert!(html.trim_end().ends_with("</html>"));
+        assert!(html.contains("id=\"fleet\""));
+        assert!(html.contains("/vendor/xterm.js")); // vendored, not CDN
+        assert!(!html.contains("cdn.jsdelivr"));
+    }
 }

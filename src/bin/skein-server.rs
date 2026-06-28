@@ -31,6 +31,10 @@ const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
 const FIT_JS: &str = include_str!("../web/vendor/addon-fit.min.js");
 const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 
+/// Cap concurrent embedded terminals so a flood of WS connections can't exhaust PTYs / file
+/// descriptors on the host. Each live terminal holds one permit for its whole session.
+static PTY_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(24);
+
 #[tokio::main]
 async fn main() {
     // Bind is loopback-only by default; $SKEIN_ADDR overrides it (a tunnel/remote bind also needs
@@ -224,6 +228,19 @@ async fn terminal(
 /// The WS↔PTY bridge: spawn `sbx run --name <box>` in a PTY, pipe bytes both ways, honour resizes.
 /// Override the spawned command with $SKEIN_ATTACH_CMD (run via `sh -c`) for local testing.
 async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<String>) {
+    // Hold a permit for the whole session; reject (rather than queue) when the cap is hit so a
+    // hung browser can't silently stall new terminals. Dropped on every return → released.
+    let _permit = match PTY_LIMIT.try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = socket
+                .send(Message::Text(
+                    "skein: too many terminals open — close one and retry".into(),
+                ))
+                .await;
+            return;
+        }
+    };
     let pair = match native_pty_system().openpty(PtySize {
         rows: 30,
         cols: 100,
@@ -256,7 +273,9 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
     } else {
         match std::env::var("SKEIN_ATTACH_CMD") {
             Ok(c) if !c.is_empty() => {
-                let c = c.replace("{name}", &name).replace("{dir}", &dir);
+                let c = c
+                    .replace("{name}", &skein::sh_quote(&name))
+                    .replace("{dir}", &skein::sh_quote(&dir));
                 let mut b = CommandBuilder::new("sh");
                 b.arg("-c");
                 b.arg(c);
@@ -336,6 +355,11 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
         }
     });
 
+    // Periodic ping surfaces a browser that vanished without a Close frame, so we reap the PTY
+    // promptly instead of leaving `sbx` running until the box happens to emit output.
+    let mut keepalive = tokio::time::interval(Duration::from_secs(30));
+    keepalive.tick().await; // the first tick fires immediately — discard it
+
     loop {
         tokio::select! {
             out = out_rx.recv() => match out {
@@ -359,8 +383,14 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 _ => {}
             },
+            _ = keepalive.tick() => {
+                if socket.send(Message::Ping(Vec::new())).await.is_err() { break; }
+            }
         }
     }
 
+    // Reap the child so it doesn't linger as a zombie. Kill, then wait off the async runtime
+    // (Child::wait blocks); dropping `master`/the reader closes the PTY so descendants get SIGHUP.
     let _ = child.kill();
+    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
 }

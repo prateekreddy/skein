@@ -409,6 +409,9 @@ function render(snapshot) {
     }
   }
   for (const [name, el] of rowEls) if (!seen.has(name)) { el.remove(); rowEls.delete(name); }
+  // prune side-state for boxes that left the registry (live terminal sessions are kept on purpose)
+  for (const m of [shipState, comments]) for (const k of [...m.keys()]) if (!seen.has(k)) m.delete(k);
+  for (const k in prevState) if (!seen.has(k)) delete prevState[k];
   if (sel && !seen.has(sel)) sel = null;
   renderTabs();          // tab status follows registry status
   notify(boxes);
@@ -483,6 +486,7 @@ function markStreaming(name) {
 function sendResize(name) { const s = sessions.get(name); if (s && s.ws.readyState === 1) s.ws.send(JSON.stringify({ resize:{ cols:s.term.cols, rows:s.term.rows } })); }
 function closeSession(name) {
   const s = sessions.get(name); if (!s) return;
+  clearTimeout(s.timer);   // don't let a streaming-flag timer fire on a disposed session
   try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
   s.host.remove(); sessions.delete(name);
   if (view.box === name) { const next = sessions.keys().next().value; view = next ? { box: next, mode:"term" } : { box:null, mode:"term" }; }

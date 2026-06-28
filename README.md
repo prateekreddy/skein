@@ -62,6 +62,27 @@ status hook reports `working|waiting|done` explicitly.
 2. `$SKEIN_SHARED/sandboxes.json`
 3. `<git-toplevel>/../skein-shared/.claude/sandboxes.json`
 
+## Configuration
+
+`skein doctor` reports the resolved registry, bind address, and whether `sbx`/`git`/`gh`
+are present — run it first if something looks off. All knobs are environment variables:
+
+| var | what | default |
+|-----|------|---------|
+| `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
+| `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |
+| `SKEIN_ADDR` | server bind address | `127.0.0.1:7878` |
+| `SKEIN_SELF` | this box's vmid (kept `live` when its `lastSeen` is quiet) | `$SANDBOX_VM_ID` |
+| `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) | cwd |
+| `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
+| `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}` substituted | `setup-sandbox.sh <branch>` |
+| `SKEIN_ATTACH_CMD` | attach template — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
+| `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
+| `SKEIN_ARCHIVE_CMD` | run on archive — `{name}` substituted (e.g. `sbx rm {name}`) | — |
+
+> The `*_CMD` templates run via `sh -c`; values you substitute are shell-quoted, but only
+> point them at trusted commands.
+
 ## How it fits the sbx setup
 
 skein **reads** the shared store the sandboxes already maintain (`sandboxes.json`,

@@ -21,6 +21,7 @@ fn main() {
 
     let result = match cmd {
         "ls" | "status" => cmd_ls(),
+        "doctor" => cmd_doctor(),
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name),
             None => Err("usage: skein attach <box>".to_string()),
@@ -48,6 +49,7 @@ fn print_help() {
 usage:\n  \
 skein [ls]            show the fleet (default)\n  \
 skein attach <box>    reconnect to the box's running agent session\n  \
+skein doctor          check registry + required tools (sbx/git/gh)\n  \
 skein version\n  \
 skein help\n\n\
 the web cockpit lives in `skein-server` (run it, open http://127.0.0.1:7878).\n\n\
@@ -149,6 +151,62 @@ fn pad_colored(s: &str, visible: usize, w: usize) -> String {
     } else {
         format!("{s}{}", " ".repeat(w - visible))
     }
+}
+
+/// Preflight: is the registry resolvable and are the external tools skein drives present?
+/// Always returns Ok — it's a report, not a gate. Failures print, they don't abort.
+fn cmd_doctor() -> Result<(), String> {
+    const OK: &str = "\x1b[32m✓\x1b[0m";
+    const BAD: &str = "\x1b[31m✗\x1b[0m";
+    const WARN: &str = "\x1b[33m!\x1b[0m";
+    println!("{BOLD}skein doctor{RESET}\n");
+
+    match load_registry() {
+        Ok((b, p)) => println!(
+            "{OK} registry      {DIM}{}{RESET} ({} boxes)",
+            p.display(),
+            b.len()
+        ),
+        Err(e) => println!("{BAD} registry      {e}"),
+    }
+    let addr = env::var("SKEIN_ADDR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:7878".into());
+    println!("{DIM}·{RESET} bind          http://{addr}  {DIM}($SKEIN_ADDR){RESET}");
+
+    for (prog, why) in [
+        ("sbx", "attach + launch boxes"),
+        ("git", "host-side diffs"),
+        ("gh", "PR / checks / merge"),
+    ] {
+        if have(prog) {
+            println!("{OK} {prog:<13} on PATH  {DIM}{why}{RESET}");
+        } else {
+            println!("{BAD} {prog:<13} not on PATH — {why} unavailable");
+        }
+    }
+    if have("gh") {
+        let authed = Command::new("gh")
+            .args(["auth", "status"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if authed {
+            println!("{OK} gh auth       authenticated");
+        } else {
+            println!("{WARN} gh auth       `gh auth status` not OK {DIM}(fine if a proxy injects credentials){RESET}");
+        }
+    }
+    Ok(())
+}
+
+/// Is `prog` runnable on PATH? (NotFound = absent; any other outcome means it exists.)
+fn have(prog: &str) -> bool {
+    !matches!(
+        Command::new(prog).arg("--version").output(),
+        Err(e) if e.kind() == ErrorKind::NotFound
+    )
 }
 
 fn cmd_attach(name: &str) -> Result<(), String> {
