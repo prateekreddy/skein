@@ -587,11 +587,16 @@ function createSession(name, launchBranch) {
   term.parser.registerOscHandler(52, data => {
     const semi = data.indexOf(";");
     const payload = semi === -1 ? data : data.slice(semi + 1);
+    toast(`OSC52 fired: data=${data.length} pay=${payload.length}`);   // DIAGNOSTIC
     if (!payload || payload === "?") return true;
     try {
       const text = new TextDecoder().decode(Uint8Array.from(atob(payload), c => c.charCodeAt(0)));
-      if (text) copyToClipboard(text);
-    } catch {}
+      if (text && navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).then(
+          () => toast(`OSC52 copied ${text.length}`),
+          err => toast(`OSC52 clip-fail: ${(err&&err.name)||"?"}`));
+      } else if (text) { copyText(text); toast(`OSC52 execCopy ${text.length}`); }
+    } catch (err) { toast(`OSC52 decode-err`); }
     return true;
   });
   const proto = location.protocol === "https:" ? "wss" : "ws";
