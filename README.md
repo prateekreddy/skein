@@ -34,14 +34,18 @@ commits, the agent's `.skein/journal.md`, and its last message, so you can catch
 scrollback. No model tokens are spent building any of this.
 
 The signals come from each box's Claude Code hooks (`Stop` / `Notification` → `box-status.sh`,
-`box-diff.sh`, `box-session.sh`) writing the shared store; skein only reads and ranks them.
+`box-diff.sh`, `box-session.sh`; `PostToolUse` on `TodoWrite` → `box-task.sh`) writing the shared
+store; skein only reads and ranks them.
 
 More attention helpers, all free unless noted:
 - **One-click continue** — boxes paused on a trivial "shall I proceed?" get a `proceed?` chip; **▸ Continue N**
   resumes them all in one gesture (headless `claude --continue`, fire-and-forget). Never silent — always
   your click — and a real decision or a permission prompt is never auto-resumed.
-- **Peripheral preview** — every open terminal's live bottom line shows on its fleet row, so you can see
-  what other tabs are doing while focused elsewhere.
+- **Peripheral preview** — every row shows what its box is *doing right now* — the in-progress TodoWrite
+  item the agent reports (`box-task.sh`), or its journal's `next …` line as a free fallback — so you can
+  see what the other tabs are working on without switching to them. The same signal upgrades a tier-0
+  `needs-input` row, whose raw notification text is just a generic "waiting for your input", to say what
+  the box was actually working on.
 - **Away digest** — step away and come back and skein shows "while you were away": who now needs you, who
   finished, who made progress.
 - **Collision radar** — ⚠ flags files that two or more boxes have both changed, to reconcile before merge.

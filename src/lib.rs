@@ -75,6 +75,10 @@ pub struct BoxView {
     /// prompt when it's waiting on you, else the first line of its last message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headline: Option<String>,
+    /// what the box is doing *right now* — the in-progress TodoWrite item (or journal `next`).
+    /// The peripheral "what's happening in the other tabs" signal; shown subtly on every row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     /// why the turn ended (the fork-detector) — lets the inbox label & batch the trivial asks.
     pub pause: Pause,
 }
@@ -210,7 +214,16 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                     s.last_message.clone()
                 }
             });
-            let headline = signal_text.as_deref().and_then(first_line);
+            // The live "what's it doing now" signal (box-task.sh / journal `next`).
+            let task = current_task(name);
+            let mut headline = signal_text.as_deref().and_then(first_line);
+            // When the signal is absent or just the generic "waiting for your input", surface the
+            // current task instead — so even a tier-0 needs-input row says what it was working on.
+            if headline.as_deref().map_or(true, is_generic_wait) {
+                if let Some(t) = task.clone() {
+                    headline = Some(t);
+                }
+            }
             let pause = if tier == 3 {
                 Pause::None // still working — nothing owed
             } else {
@@ -227,6 +240,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 // box-reported number for clone-mode boxes this host can't see.
                 diff: host_diffstat(name, &b.dir).or_else(|| b.diff.clone()),
                 headline,
+                task,
                 pause,
             }
         })
@@ -1003,6 +1017,55 @@ pub fn session_signal(name: &str) -> Option<SessionSignal> {
     serde_json::from_str(&txt).ok()
 }
 
+/// The box's *current task* — what it's doing right now, for the fleet's peripheral view. Prefers
+/// the live signal (`box-task.sh` writes the in-progress TodoWrite item to `<store>/tasks/<name>.json`)
+/// and falls back to the `next …` clause of the box's most recent journal line. No model call.
+pub fn current_task(name: &str) -> Option<String> {
+    if !valid_name(name) {
+        return None;
+    }
+    if let Some(p) = store_dir().map(|d| d.join("tasks").join(format!("{name}.json"))) {
+        if let Ok(txt) = fs::read_to_string(p) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                if let Some(t) = v.get("task").and_then(|t| t.as_str()).map(str::trim) {
+                    if !t.is_empty() {
+                        return first_line(t);
+                    }
+                }
+            }
+        }
+    }
+    journal_next(name)
+}
+
+/// The `next …` clause of the box's most recent journal line (the ritual is `did … / next … /
+/// blocked-on …`) — a free, end-of-turn "what's next" when there's no live task signal.
+fn journal_next(name: &str) -> Option<String> {
+    let j = read_journal(name)?;
+    for line in j.lines().rev() {
+        // case-insensitive find of "next"; ASCII fold keeps byte offsets valid in the original line.
+        let lower = line.to_ascii_lowercase();
+        let Some(i) = lower.find("next") else { continue };
+        let rest = line[i + 4..].trim_start_matches([':', ' ', '-', '\t', '…']);
+        // a clause runs to the next "/" separator, or to an inline "blocked" if not slash-delimited.
+        let clause = rest.split('/').next().unwrap_or(rest);
+        let clause = match clause.to_ascii_lowercase().find("blocked") {
+            Some(b) => &clause[..b],
+            None => clause,
+        };
+        if let Some(h) = first_line(clause.trim()) {
+            return Some(h);
+        }
+    }
+    None
+}
+
+/// The Notification signal carries only Claude Code's generic "waiting for your input" text — it says
+/// a box needs you but not what it was doing. Detect it so the headline can fall back to the task.
+fn is_generic_wait(h: &str) -> bool {
+    h.to_ascii_lowercase().contains("waiting for your input")
+}
+
 /// Recent commit subjects on the box's branch (newest first) — the agent's own changelog,
 /// a free, accurate "what was done" with no model call. Bounded; empty if not a host repo.
 pub fn recent_commits(name: &str) -> Vec<String> {
@@ -1513,6 +1576,54 @@ mod tests {
         assert_eq!(s.last_message, "hi");
         assert!(session_signal("thing-missing").is_none());
         assert!(session_signal("../escape").is_none());
+
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn current_task_prefers_live_then_journal() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let work = dir.join("work");
+        fs::create_dir_all(work.join(".skein")).unwrap();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"thing-x":{{"branch":"x","dir":"{}","lastSeen":"","status":""}}}}"#,
+                work.display()
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+
+        // journal-only fallback: the `next …` clause of the last line, stopping at the blocked-on part.
+        fs::write(
+            work.join(".skein").join("journal.md"),
+            "did: scaffolded api / next: wire the reducer / blocked-on: nothing\n",
+        )
+        .unwrap();
+        assert_eq!(current_task("thing-x").as_deref(), Some("wire the reducer"));
+
+        // the live task signal wins over the journal.
+        fs::create_dir_all(dir.join("tasks")).unwrap();
+        fs::write(
+            dir.join("tasks").join("thing-x.json"),
+            r#"{"ts":"2026-06-29T00:00:00Z","task":"Running the tests"}"#,
+        )
+        .unwrap();
+        assert_eq!(current_task("thing-x").as_deref(), Some("Running the tests"));
+
+        // an empty live task falls back to the journal again.
+        fs::write(
+            dir.join("tasks").join("thing-x.json"),
+            r#"{"ts":"2026-06-29T00:00:00Z","task":""}"#,
+        )
+        .unwrap();
+        assert_eq!(current_task("thing-x").as_deref(), Some("wire the reducer"));
+
+        assert!(current_task("../escape").is_none()); // name guard
 
         env::remove_var("SKEIN_REGISTRY");
     }

@@ -97,6 +97,12 @@
               text-overflow:ellipsis; white-space:nowrap; min-width:0; align-items:center; gap:7px; }
   .row.has-head .headline { display:flex; }
   .headline .htext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  /* peripheral "what it's doing now" — the current task, a quieter sub-line under a distinct ask */
+  .taskline { display:none; color:var(--faint,#5b6470); font-size:11px; margin-top:2px; overflow:hidden;
+              text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .row.has-task .taskline { display:flex; }
+  .taskline .ttext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .taskline::before { content:"▸ "; color:var(--working); flex:none; }
   .pchip { flex:none; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
            padding:1px 6px; border-radius:999px; }
   .pchip.needs-input { color:var(--attn); background:color-mix(in srgb,var(--attn) 16%,transparent); }
@@ -445,7 +451,8 @@ function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
     <div class="sub"><span class="branch"></span><span class="dstat"></span><span class="dir"></span></div>
-    <div class="headline"><span class="pchip"></span><span class="htext"></span></div></div>
+    <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
+    <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
   el.addEventListener("click", () => openTerminal(name));
   el.addEventListener("mouseenter", () => select(name, true));
@@ -463,16 +470,20 @@ function updateRow(el, b) {
   el.querySelector(".age").textContent = b.age;
   el.querySelector(".chev").textContent = wired ? "▣" : "›";
   el.querySelector(".dstat").innerHTML = diffBadge(b.diff);
-  // inbox headline + pause chip: shown only when there's something the box reported worth acting on.
-  // A paused box's ask wins; otherwise, for an open terminal, show its live bottom line — so you can
-  // see what another tab is doing while you're focused elsewhere (peripheral awareness).
+  // inbox headline + pause chip: the ask when a box needs you. When nothing's owed, the headline
+  // falls back to the box's current task — so a working tab still shows what it's doing (peripheral
+  // awareness). The task also gets its own sub-line when there's a distinct ask above it, so a real
+  // question shows both "what it asked" and "what it was doing".
   const p = b.pause, chip = PCHIP[p];
   const pauseHead = (p && p !== "none") ? b.headline : "";
-  const live = (wired && !pauseHead) ? (sessions.get(b.name).tail || "") : "";
-  const hl = pauseHead || live;
+  const task = b.task || "";
+  const hl = pauseHead || task;
   el.classList.toggle("has-head", !!hl);
-  el.classList.toggle("live-head", !!live && hl === live);
+  el.classList.toggle("live-head", !pauseHead && !!task && hl === task);
   el.querySelector(".htext").textContent = hl || "";
+  const showTask = task && task !== hl;
+  el.classList.toggle("has-task", !!showTask);
+  el.querySelector(".ttext").textContent = showTask ? task : "";
   const pc = el.querySelector(".pchip");
   pc.className = "pchip" + (chip && pauseHead ? " " + p : "");
   pc.textContent = (chip && pauseHead) ? chip : "";
@@ -1077,27 +1088,6 @@ function showCollisions() {
 }
 setInterval(loadCollisions, 8000);
 
-// ---------- peripheral preview: the live bottom line of every open terminal ----------
-// So while you're in one tab you can still see what the others are doing (and where to look next).
-function sessionTail(s) {
-  try {
-    const buf = s.term.buffer.active, bottom = buf.baseY + buf.cursorY;
-    for (let y = bottom; y >= 0 && y > bottom - 40; y--) {
-      const line = buf.getLine(y); if (!line) continue;
-      const t = line.translateToString(true).trim();
-      if (t) return t.length > 140 ? t.slice(0, 140) + "…" : t;
-    }
-  } catch {}
-  return "";
-}
-setInterval(() => {
-  for (const [name, s] of sessions) {
-    const t = sessionTail(s);
-    if (t !== s.tail) { s.tail = t; refreshRow(name); }
-    const tab = [...tabsEl.querySelectorAll(".tab")].find(el => el.dataset.name === name);
-    if (tab) tab.title = t || name;
-  }
-}, 1500);
 
 // ---------- command palette ----------
 const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
