@@ -588,10 +588,17 @@ function createSession(name, launchBranch) {
     const paste = (e.metaKey && e.key === "v") || (e.ctrlKey && e.shiftKey && (e.key === "V" || e.key === "v"));
     if (copy) {
       const sel = term.getSelection();
-      if (sel) { navigator.clipboard?.writeText(sel).catch(() => {}); return false; }
+      if (sel) {
+        // preventDefault stops the browser's native (empty) copy — xterm's selection lives on a
+        // canvas, not the DOM, so without this macOS beeps "nothing to copy". writeText does the copy.
+        e.preventDefault();
+        navigator.clipboard?.writeText(sel).catch(() => {});
+        return false;
+      }
       return true;   // nothing selected → let Ctrl+C reach the shell as SIGINT
     }
     if (paste) {
+      e.preventDefault();
       navigator.clipboard?.readText().then(t => { if (t) term.paste(t); }).catch(() => {});
       return false;
     }
