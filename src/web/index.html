@@ -364,11 +364,6 @@
   .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
   .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
   .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
-  /* collision radar — a quiet heads-up, not an alarm: worst case is a merge conflict resolved at
-     merge time, so it shouldn't shout as loud as a box that actually needs you. Neutral chip; the
-     ⚠ glyph carries the meaning, full detail is in the tooltip + the popover on click. */
-  .kbtn.warn { color:var(--dim); font-weight:500; }
-  .kbtn.warn:hover { color:var(--text); border-color:var(--border-3); }
 </style>
 </head>
 <body>
@@ -379,7 +374,6 @@
           <div class="word"><b>skein</b></div>
           <div class="counts" id="counts"></div>
           <div class="right">
-            <span class="kbtn warn" id="collide-btn" onclick="showCollisions()" style="display:none"></span>
             <span class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></span>
             <span class="kbtn" onclick="openNewBox()" title="Launch a new box (⌘N)">＋ box</span>
             <span class="kbtn" id="mbxbtn" onclick="openMailbox()" title="Cross-box mailbox &amp; broadcast">✉ mailbox</span>
@@ -1162,12 +1156,11 @@ function renderAwayOverlay(items, sinceT) {
 // ---------- collision radar: files two+ boxes have both changed (free — host-side git) ----------
 let collisions = [];
 function loadCollisions() {
+  // No header chrome: collisions are a low-stakes heads-up (worst case is a merge conflict), so
+  // they live in the ⌘K palette ("View collisions", shown only when there are any) rather than a
+  // permanent header badge. We just keep the list fresh for the palette + the popover.
   fetch("/api/collisions").then(r => r.json()).then(c => {
     collisions = Array.isArray(c) ? c : [];
-    const btn = document.getElementById("collide-btn");
-    btn.style.display = collisions.length ? "" : "none";
-    btn.textContent = `⚠ ${collisions.length}`;
-    btn.title = `${collisions.length} file${collisions.length === 1 ? "" : "s"} changed by more than one box — worst case is a merge conflict; reconcile before merge`;
   }).catch(() => {});
 }
 function showCollisions() {
@@ -1204,6 +1197,7 @@ function commands() {
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
+  if (collisions.length) acts.push({ sec:"Actions", label:`View collisions (${collisions.length})`, run:showCollisions });
   const bx = [];
   for (const b of boxes) {
     bx.push({ sec:"Boxes", label:b.name, meta:labelOf(b.state), state:b.state, run:()=>openTerminal(b.name) });
