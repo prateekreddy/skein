@@ -579,6 +579,24 @@ function createSession(name, launchBranch) {
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
     cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
+  // Clipboard: xterm forwards keys to the PTY by default, so a plain Cmd/Ctrl+C never copies.
+  // Intercept copy/paste at keydown and route through the browser clipboard, leaving the bare
+  // Ctrl+C interrupt (no selection, no shift) to pass through to the shell.
+  term.attachCustomKeyEventHandler(e => {
+    if (e.type !== "keydown") return true;
+    const copy = (e.metaKey && e.key === "c") || (e.ctrlKey && e.shiftKey && (e.key === "C" || e.key === "c"));
+    const paste = (e.metaKey && e.key === "v") || (e.ctrlKey && e.shiftKey && (e.key === "V" || e.key === "v"));
+    if (copy) {
+      const sel = term.getSelection();
+      if (sel) { navigator.clipboard?.writeText(sel).catch(() => {}); return false; }
+      return true;   // nothing selected → let Ctrl+C reach the shell as SIGINT
+    }
+    if (paste) {
+      navigator.clipboard?.readText().then(t => { if (t) term.paste(t); }).catch(() => {});
+      return false;
+    }
+    return true;
+  });
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const qs = launchBranch ? `?launch=${encodeURIComponent(launchBranch)}` : "";
   const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal${qs}`);
