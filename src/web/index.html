@@ -79,9 +79,15 @@
   .live.on .pip { background:var(--done); box-shadow:0 0 8px var(--done); }
 
   .group { margin-bottom:8px; }
-  .ghead { display:flex; align-items:center; gap:8px; padding:14px 4px 7px; font-size:11px; font-weight:600;
-           letter-spacing:.06em; text-transform:uppercase; color:var(--faint); }
+  .ghead { display:flex; align-items:center; gap:6px; padding:14px 4px 7px; font-size:11px; font-weight:600;
+           letter-spacing:.06em; text-transform:uppercase; color:var(--faint); cursor:pointer; user-select:none; }
+  .ghead:hover { color:var(--dim); }
+  .ghead .gcaret { font-size:9px; color:var(--dim); width:9px; text-align:center; }
+  .ghead .glabel { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
   .ghead .gc { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .ghead .gadd { margin-left:auto; color:var(--dim); font-weight:400; text-transform:none; padding:0 4px;
+                 border-radius:5px; }
+  .ghead .gadd:hover { color:var(--text); background:var(--line); }
   .grows { display:flex; flex-direction:column; gap:6px; }
 
   .row { display:grid; grid-template-columns:18px 1fr auto auto 16px; align-items:center; gap:14px;
@@ -510,20 +516,42 @@ const diffBadge = d => d && (d.files||d.ins||d.del)
   ? `<span class="pos">+${d.ins|0}</span> <span class="neg">−${d.del|0}</span>${d.files?` · ${d.files|0}f`:""}` : "";
 
 let boxes = [], order = [], sel = null, prevState = {};
-let multiRepo = false;   // true once boxes span >1 managed repo → show the per-row repo tag
 const stateOf = name => boxes.find(b => b.name === name)?.state || "unknown";
 
 // ---------- fleet render (keyed reconcile) ----------
+// Hybrid layout: a pinned "needs you" section across ALL repos (the attention inbox), then a
+// collapsible section per repo (its boxes, sorted by attention). Sections are dynamic (depend on
+// which repos exist), so they're reconciled by id alongside the keyed rows.
 const fleet = document.getElementById("fleet");
-const rowEls = new Map(), groupEls = {};
-function ensureGroups() {
-  for (const g of GROUPS) {
-    const section = document.createElement("div"); section.className = "group"; section.style.display = "none";
-    const head = document.createElement("div"); head.className = "ghead"; head.innerHTML = `${g.label} <span class="gc"></span>`;
+const rowEls = new Map(), sectionEls = new Map();
+const NEEDS_TIER = 1;   // tier <= 1 (needs-input, waiting) → the pinned "needs you" section
+// Collapse state per section id, persisted so it survives reloads.
+let collapsed = new Set();
+try { collapsed = new Set(JSON.parse(localStorage.getItem("skein.collapsed") || "[]")); } catch {}
+const isCollapsed = id => collapsed.has(id);
+function toggleCollapse(id) {
+  collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id);
+  try { localStorage.setItem("skein.collapsed", JSON.stringify([...collapsed])); } catch {}
+  render(boxes);
+}
+// Create/fetch a section shell (header with caret + label + count, optional per-repo ＋, rows box).
+function ensureSection(id, repoId) {
+  let s = sectionEls.get(id);
+  if (!s) {
+    const section = document.createElement("div"); section.className = "group"; section.dataset.sid = id;
+    const head = document.createElement("div"); head.className = "ghead";
+    head.innerHTML = `<span class="gcaret"></span><span class="glabel"></span><span class="gc"></span><span class="gadd" title="New box in this repo">＋</span>`;
     const rows = document.createElement("div"); rows.className = "grows";
     section.append(head, rows); fleet.append(section);
-    groupEls[g.key] = { section, head: head.querySelector(".gc"), rows };
+    const add = head.querySelector(".gadd");
+    head.addEventListener("click", e => { if (e.target !== add) toggleCollapse(id); });
+    s = { section, head, label: head.querySelector(".glabel"), count: head.querySelector(".gc"),
+          caret: head.querySelector(".gcaret"), rows, add };
+    sectionEls.set(id, s);
   }
+  if (repoId) { s.add.style.display = ""; s.add.onclick = e => { e.stopPropagation(); openNewBoxFor(repoId); }; }
+  else { s.add.style.display = "none"; }
+  return s;
 }
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
@@ -536,16 +564,18 @@ function makeRow(name) {
   el.addEventListener("mouseenter", () => select(name, true));
   return el;
 }
-function updateRow(el, b) {
+function updateRow(el, b, showRepo) {
   const g = groupOf(b.state);
   const wired = boxHasSession(b.name);
   el.className = `row s-${g}` + (b.name === sel ? " sel" : "") + (wired ? " wired" : "")
     + (b.name === view.box ? " active" : "") + (boxAnyStreaming(b.name) ? " streaming" : "");
   el.querySelector(".name").textContent = b.name;
-  // repo tag: only meaningful once skein manages more than one repo (else it's noise).
+  // repo tag: shown only in the cross-repo "needs you" section (in a repo section the header already
+  // names the repo, so it'd be noise). Caller passes showRepo.
   const rt = el.querySelector(".repotag");
-  rt.textContent = (multiRepo && b.repo) ? b.repo : "";
-  rt.style.display = (multiRepo && b.repo) ? "" : "none";
+  const tag = (showRepo && b.repo) ? b.repo : "";
+  rt.textContent = tag;
+  rt.style.display = tag ? "" : "none";
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
   el.querySelector(".pill").textContent = labelOf(b.state);
@@ -575,7 +605,6 @@ function updateRow(el, b) {
 const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
-  multiRepo = new Set(boxes.map(b => b.repo).filter(Boolean)).size > 1;
   const counts = {};
   for (const b of boxes) (counts[groupOf(b.state)] ??= []).push(b);
   const need = (counts.attn?.length||0) + (counts.waiting?.length||0), working = counts.working?.length||0, done = counts.done?.length||0;
@@ -593,22 +622,47 @@ function render(snapshot) {
   ca.title = `Resume ${proceedN} box${proceedN === 1 ? "" : "es"} paused on a trivial "proceed?" (one gesture, not silent)`;
 
   fleet.querySelector(".empty")?.remove();
-  if (!boxes.length) {
-    for (const g of GROUPS) groupEls[g.key].section.style.display = "none";
+  if (!boxes.length && !repos.length) {
+    for (const [, s] of sectionEls) s.section.style.display = "none";
     const e = document.createElement("div"); e.className = "empty";
-    e.innerHTML = `the skein is empty — launch a box with <code>setup-sandbox.sh &lt;branch&gt;</code>`;
+    e.innerHTML = `the skein is empty — <a href="#" onclick="addRepoPrompt();return false">add a repository</a> then launch a box`;
     fleet.append(e); order = [];
     renderTabs(); notify([]);   // clear stale title/favicon/tabs when the fleet drains
     return;
   }
+
+  // Build the desired sections: pinned "needs you" (tier ≤ 1, across repos), then one per repo
+  // (its remaining boxes), then "other" for boxes matching no managed repo. Empty managed repos are
+  // still shown so you can launch into them.
+  const needy = boxes.filter(b => (b.tier ?? 9) <= NEEDS_TIER);
+  const rest  = boxes.filter(b => (b.tier ?? 9) >  NEEDS_TIER);
+  const byRepo = new Map();
+  for (const b of rest) { const k = b.repo || " other"; (byRepo.get(k) || byRepo.set(k, []).get(k)).push(b); }
+  const repoIds = new Set([...repos.map(r => r.id), ...byRepo.keys()].filter(k => k !== " other"));
+  const desired = [];
+  if (needy.length) desired.push({ id:"needs", label:"⚠ needs you", repoId:null, showRepo:true, boxes:needy });
+  for (const id of [...repoIds].sort((a,b) => a.localeCompare(b)))
+    desired.push({ id:`repo:${id}`, label:id, repoId:id, showRepo:false, boxes:byRepo.get(id) || [] });
+  if (byRepo.has(" other"))
+    desired.push({ id:"other", label:"other", repoId:null, showRepo:true, boxes:byRepo.get(" other") });
+
   order = []; const seen = new Set();
-  for (const g of GROUPS) {
-    const list = counts[g.key] || [], ge = groupEls[g.key];
-    ge.section.style.display = list.length ? "" : "none";
-    ge.head.textContent = list.length || "";
-    for (const b of list) {
+  const want = new Set(desired.map(d => d.id));
+  for (const [id, s] of sectionEls) if (!want.has(id)) { s.section.remove(); sectionEls.delete(id); }
+  for (const d of desired) {
+    const s = ensureSection(d.id, d.repoId);
+    fleet.appendChild(s.section);                 // (re)order to match `desired`
+    const col = isCollapsed(d.id);
+    s.label.textContent = d.label;
+    s.caret.textContent = col ? "▸" : "▾";
+    s.count.textContent = d.boxes.length || "";
+    s.rows.style.display = col ? "none" : "";
+    s.section.style.display = "";
+    for (const b of d.boxes) {
       let el = rowEls.get(b.name); if (!el) { el = makeRow(b.name); rowEls.set(b.name, el); }
-      updateRow(el, b); ge.rows.appendChild(el); order.push(b.name); seen.add(b.name);
+      updateRow(el, b, d.showRepo); s.rows.appendChild(el);
+      if (!col) order.push(b.name);
+      seen.add(b.name);
     }
   }
   for (const [name, el] of rowEls) if (!seen.has(name)) { el.remove(); rowEls.delete(name); }
@@ -1382,7 +1436,11 @@ function saveSettings() {
 // Load the repos skein manages so the new-box dialog can prefix `<repo>-<branch>` and the palette
 // can offer "Add a repo". Refreshed when the dialog/palette opens.
 function loadRepos() {
-  return fetch("/api/repos").then(r => r.json()).then(rs => { repos = rs || []; fillRepoSelect(); }).catch(() => {});
+  return fetch("/api/repos").then(r => r.json()).then(rs => {
+    repos = rs || [];
+    fillRepoSelect();
+    render(boxes);   // empty managed repos get their own section so you can launch into them
+  }).catch(() => {});
 }
 function fillRepoSelect() {
   const show = repos.length > 0;
@@ -1399,6 +1457,11 @@ function currentRepoId() {
   return "thing";
 }
 function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; loadRepos(); nbBranch.focus(); }
+// Open the new-box dialog with a specific repo preselected (the per-repo ＋ in the sidebar).
+function openNewBoxFor(repoId) {
+  newbox.classList.add("open"); nbBranch.value = "";
+  loadRepos().then(() => { if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId; nbBranch.focus(); });
+}
 function closeNewBox() { newbox.classList.remove("open"); }
 // Prompt for a repo URL/path and register it, then refresh the repo list.
 function addRepoPrompt() {
@@ -1590,7 +1653,7 @@ function connect() {
 }
 
 // ---------- boot ----------
-ensureGroups(); setFavicon(0);
+setFavicon(0);
 fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
 connect();
 loadCollisions();
