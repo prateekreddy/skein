@@ -1203,14 +1203,15 @@ document.addEventListener("keydown", e => {
   const copy  = (e.metaKey && !e.ctrlKey && c) || (e.ctrlKey && e.shiftKey && c);
   const paste = (e.metaKey && !e.ctrlKey && v) || (e.ctrlKey && e.shiftKey && v);
   if (copy) {
-    // Always swallow the copy chord so macOS never beeps; copy only if something is selected.
-    e.preventDefault(); e.stopPropagation();
-    // xterm's DOM renderer makes terminal text natively selectable, so a mouse-drag produces a
-    // browser selection (the blue highlight) that term.getSelection() — xterm's own selection, the
-    // brown right-click one — doesn't see. Prefer xterm's, fall back to the native DOM selection.
-    const sel = s.term.getSelection() || (window.getSelection ? window.getSelection().toString() : "");
-    if (!sel) { toast("nothing selected"); }
-    else { const ok = copyText(sel); toast(ok ? `copied ${sel.length} chars` : "copy failed"); }
+    const xs = s.term.getSelection() || "";
+    const ws = (window.getSelection ? window.getSelection().toString() : "") || "";
+    const sel = xs || ws;
+    toast(`x=${xs.length} w=${ws.length}`);   // DIAGNOSTIC: xterm vs native selection length
+    if (sel) {
+      e.preventDefault(); e.stopPropagation();
+      copyText(sel);
+    }
+    // if neither API sees a selection, do NOT preventDefault — let the browser's native copy try
   } else if (paste) {
     e.preventDefault(); e.stopPropagation();
     navigator.clipboard?.readText?.().then(t => { if (t) s.term.paste(t); }).catch(() => {});
