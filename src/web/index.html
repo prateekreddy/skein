@@ -142,8 +142,10 @@
   .tab.streaming .td { animation:pulse 1s var(--ease) infinite; box-shadow:0 0 8px currentColor; }
   .tab .tl { overflow:hidden; text-overflow:ellipsis; font-size:13px; }
   .tab .tx { color:var(--faint); font-size:13px; padding:0 2px; border-radius:4px; }
+  .tab.dead { opacity:.85; }
+  .tab.dead .tl { color:var(--dim); }
+  .tab .trc { color:var(--accent); font-size:13px; flex:none; line-height:1; }
   .tab .tx:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
-  .tab .spacer { flex:1; }
   .dock-actions { margin-left:auto; display:flex; align-items:center; padding:0 8px; gap:6px; }
   .dock-actions .da { color:var(--faint); cursor:pointer; font-size:12px; padding:4px 7px; border-radius:6px; }
   .dock-actions .da:hover { color:var(--text); background:var(--elevated); }
@@ -200,6 +202,14 @@
   .sess .meta { color:var(--faint); font-size:12px; margin-top:2px; }
   .thost { position:absolute; inset:0; padding:8px 10px; display:none; }
   .thost.on { display:block; }
+  .disco { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+           background:rgba(8,9,11,.82); cursor:pointer; z-index:6; }
+  .thost.dead .disco { display:flex; }
+  .disco-card { text-align:center; padding:14px 22px; border:1px solid var(--border-2);
+                border-radius:8px; background:var(--panel); transition:border-color var(--dur-fast); }
+  .disco:hover .disco-card { border-color:var(--accent); }
+  .disco-t { font-size:13px; font-weight:600; color:var(--text); }
+  .disco-b { font-size:12px; color:var(--accent); margin-top:4px; }
   .diff { font-family:var(--mono); font-size:12.5px; line-height:1.5; padding:8px 0; }
   .diff .ln { display:block; padding:0 14px; white-space:pre-wrap; word-break:break-word; }
   .diff .add  { color:#7ee787; background:color-mix(in srgb,var(--done) 10%,transparent); }
@@ -535,6 +545,7 @@ function render(snapshot) {
   if (sel && !seen.has(sel)) sel = null;
   renderTabs();          // tab status follows registry status
   notify(boxes);
+  if (!restored) restoreSessions();   // first snapshot: reopen the tabs from before a reload
 }
 function refreshRow(name) { const el = rowEls.get(name), b = boxes.find(x => x.name === name); if (el && b) updateRow(el, b); }
 
@@ -565,13 +576,18 @@ function showBox(name, mode) {
   document.body.classList.remove("show-fleet");   // tapping a box leaves the mobile fleet view
   select(name);
   view = { box: name, mode };
-  if (mode === "term" && !sessions.has(name)) createSession(name);
+  if (mode === "term") {
+    const s = sessions.get(name);
+    if (!s) createSession(name);
+    else if (s.dead) reconnectSession(name);   // clicking a disconnected tab reconnects it
+  }
   applyView();
   if (mode === "diff") loadDiff(name);
   if (mode === "session") loadSession(name);
   loadShip(name);
 }
 function applyView() {
+  persistView();   // remember open tabs + active view so a page reload restores them
   const docked = sessions.size > 0 || !!view.box;
   document.body.classList.toggle("docked", docked);
   if (!docked) return;
@@ -589,6 +605,11 @@ function applyView() {
 }
 function createSession(name, launchBranch) {
   const host = document.createElement("div"); host.className = "thost"; termarea.append(host);
+  // "not connected" overlay — shown when the socket closes; clicking it (or the tab) reconnects.
+  const disco = document.createElement("div"); disco.className = "disco";
+  disco.innerHTML = `<div class="disco-card"><div class="disco-t">session not connected</div><div class="disco-b">click to reconnect</div></div>`;
+  disco.addEventListener("click", () => reconnectSession(name));
+  host.append(disco);
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
     cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
@@ -620,7 +641,7 @@ function createSession(name, launchBranch) {
   sessions.set(name, s);
   ws.onopen = () => { if (view.box === name && view.mode === "term") sendResize(name); if (s.pending) { ws.send(s.pending); s.pending = null; } };
   ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(name); };
-  ws.onclose = () => { term.write("\r\n\x1b[2m[skein: session ended]\x1b[0m\r\n"); s.dead = true; renderTabs(); refreshRow(name); };
+  ws.onclose = () => { s.dead = true; host.classList.add("dead"); renderTabs(); refreshRow(name); };
   term.onData(d => {
     // sticky Ctrl (armed from the mobile key bar): fold the next char to its control code
     if (ctrlArmed && d.length === 1) { d = String.fromCharCode(d.charCodeAt(0) & 0x1f); ctrlArmed = false; updateCtrlBtn(); }
@@ -641,6 +662,36 @@ function closeSession(name) {
   s.host.remove(); sessions.delete(name);
   if (view.box === name) { const next = sessions.keys().next().value; view = next ? { box: next, mode:"term" } : { box:null, mode:"term" }; }
   applyView(); refreshRow(name);
+}
+// Persist the open tabs + active view so a page reload can pick the session back up. The agent
+// session lives inside the sandbox (tmux + `claude --continue`), so reattaching just continues it.
+function persistView() {
+  try { localStorage.setItem("skein.view",
+    JSON.stringify({ open: [...sessions.keys()], box: view.box, mode: view.mode })); } catch {}
+}
+// On the first fleet snapshot, reopen whatever was open before the reload (filtered to boxes that
+// still exist), and reattach — continuing the previous session rather than starting cold.
+let restored = false;
+function restoreSessions() {
+  restored = true;
+  let saved; try { saved = JSON.parse(localStorage.getItem("skein.view") || "null"); } catch {}
+  if (!saved) return;
+  const exist = new Set(boxes.map(b => b.name));
+  for (const name of (saved.open || [])) if (exist.has(name) && !sessions.has(name)) createSession(name);
+  if (saved.box && exist.has(saved.box)) {
+    const mode = ["diff", "session"].includes(saved.mode) ? saved.mode : "term";
+    showBox(saved.box, mode);
+  } else {
+    applyView();
+  }
+}
+// Reconnect a disconnected session: drop the dead one and open a fresh socket to the same box.
+function reconnectSession(name) {
+  const s = sessions.get(name);
+  if (s) { clearTimeout(s.timer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(name); }
+  createSession(name);
+  view = { box: name, mode: "term" };
+  applyView();
 }
 function renderDockbar() {
   if (!view.box) { dockbar.innerHTML = ""; return; }
@@ -793,7 +844,9 @@ function renderTabs() {
     const t = document.createElement("div");
     t.className = `tab t-${g}` + (name === view.box && view.mode === "term" ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "");
     t.dataset.name = name;
-    t.innerHTML = `<span class="td"></span><span class="tl">${esc(name)}</span><span class="tx" title="close">✕</span>`;
+    t.title = s.dead ? `${name} — disconnected · click to reconnect` : name;
+    const lead = s.dead ? `<span class="trc" title="reconnect">↻</span>` : `<span class="td"></span>`;
+    t.innerHTML = `${lead}<span class="tl">${esc(name)}</span><span class="tx" title="close">✕</span>`;
     t.addEventListener("click", e => { if (e.target.classList.contains("tx")) closeSession(name); else openTerminal(name); });
     tabsEl.append(t);
   }
