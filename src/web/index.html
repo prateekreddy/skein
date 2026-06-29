@@ -579,31 +579,6 @@ function createSession(name, launchBranch) {
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
     cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
-  // Clipboard: xterm forwards keys to the PTY by default, so a plain Cmd/Ctrl+C never copies.
-  // Intercept copy/paste at keydown and route through the browser clipboard, leaving the bare
-  // Ctrl+C interrupt (no selection, no shift) to pass through to the shell.
-  term.attachCustomKeyEventHandler(e => {
-    if (e.type !== "keydown") return true;
-    const copy = (e.metaKey && e.key === "c") || (e.ctrlKey && e.shiftKey && (e.key === "C" || e.key === "c"));
-    const paste = (e.metaKey && e.key === "v") || (e.ctrlKey && e.shiftKey && (e.key === "V" || e.key === "v"));
-    if (copy) {
-      const sel = term.getSelection();
-      if (sel) {
-        // preventDefault stops the browser's native (empty) copy — xterm's selection lives on a
-        // canvas, not the DOM, so without this macOS beeps "nothing to copy". writeText does the copy.
-        e.preventDefault();
-        navigator.clipboard?.writeText(sel).catch(() => {});
-        return false;
-      }
-      return true;   // nothing selected → let Ctrl+C reach the shell as SIGINT
-    }
-    if (paste) {
-      e.preventDefault();
-      navigator.clipboard?.readText().then(t => { if (t) term.paste(t); }).catch(() => {});
-      return false;
-    }
-    return true;
-  });
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const qs = launchBranch ? `?launch=${encodeURIComponent(launchBranch)}` : "";
   const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal${qs}`);
@@ -1199,6 +1174,39 @@ nbBranch.addEventListener("keydown", e => {
   else if (e.key === "Escape") { e.preventDefault(); closeNewBox(); }
   e.stopPropagation();
 });
+
+// ---------- terminal clipboard ----------
+// xterm renders its selection on a canvas (no DOM selection) and, after a mouse-drag select, focus
+// sits on document.body — not xterm's hidden textarea — so a key handler bound to the terminal never
+// sees Cmd+C and the native copy beeps on the empty body. We catch copy/paste at the document in the
+// CAPTURE phase (runs before any focused element) and act on the *active* terminal's selection.
+function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(text).catch(() => execCopy(text)); }
+  else execCopy(text);
+}
+function execCopy(text) {   // fallback for non-secure contexts where navigator.clipboard is absent
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+  document.body.append(ta); ta.focus(); ta.select();
+  try { document.execCommand("copy"); } catch {}
+  ta.remove();
+}
+document.addEventListener("keydown", e => {
+  const s = (view.box && view.mode === "term") ? sessions.get(view.box) : null;
+  if (!s) return;
+  const c = e.key === "c" || e.key === "C", v = e.key === "v" || e.key === "V";
+  const copy  = (e.metaKey && !e.ctrlKey && c) || (e.ctrlKey && e.shiftKey && c);
+  const paste = (e.metaKey && !e.ctrlKey && v) || (e.ctrlKey && e.shiftKey && v);
+  if (copy) {
+    // Always swallow the copy chord so macOS never beeps; copy only if something is selected.
+    e.preventDefault(); e.stopPropagation();
+    const sel = s.term.getSelection(); if (sel) copyToClipboard(sel);
+  } else if (paste) {
+    e.preventDefault(); e.stopPropagation();
+    navigator.clipboard?.readText?.().then(t => { if (t) s.term.paste(t); }).catch(() => {});
+  }
+  // bare Ctrl+C (no shift, no meta) is NOT matched here → still reaches the shell as SIGINT
+}, true);
 
 // ---------- global keys ----------
 document.addEventListener("keydown", e => {
