@@ -1224,11 +1224,12 @@ document.addEventListener("keydown", e => {
   const copy  = (e.metaKey && !e.ctrlKey && c) || (e.ctrlKey && e.shiftKey && c);
   const paste = (e.metaKey && !e.ctrlKey && v) || (e.ctrlKey && e.shiftKey && v);
   if (copy) {
-    // Covers the Shift-bypass path: holding Shift makes a native (browser) selection that survives
-    // the app's mouse mode. OSC 52 (above) handles plain copy-on-select. If neither API sees a
-    // selection, don't preventDefault — let the browser's native copy try.
+    // Always swallow the Cmd+C chord (never SIGINT on macOS — that's Ctrl+C, unmatched here) so the
+    // browser's empty native copy can't beep. Copy-on-select already works via OSC 52; this also
+    // covers the Shift-bypass path where holding Shift yields a native selection.
+    e.preventDefault(); e.stopPropagation();
     const sel = s.term.getSelection() || (window.getSelection ? window.getSelection().toString() : "");
-    if (sel) { e.preventDefault(); e.stopPropagation(); copyText(sel); }
+    if (sel) copyText(sel);
   } else if (paste) {
     e.preventDefault(); e.stopPropagation();
     navigator.clipboard?.readText?.().then(t => { if (t) s.term.paste(t); }).catch(() => {});
