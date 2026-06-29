@@ -136,7 +136,10 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | `SKEIN_SELF` | this box's vmid (kept `live` when its `lastSeen` is quiet) | `$SANDBOX_VM_ID` |
 | `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
 | `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
-| `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}` substituted; relative to `$SKEIN_REPO` (e.g. `dev-sandbox/setup-sandbox.sh {branch}`) | `setup-sandbox.sh <branch>` |
+| `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}`/`{name}` substituted; relative to `$SKEIN_REPO`. **Optional**: unset, skein builds the launch itself (below), so the repo needs no launch script | _(native builder)_ |
+| `SKEIN_KIT` | sbx kit for the native launch (`--kit`) — wires the shared store into the clone + runs the bootstrap; resolved under `$SKEIN_REPO` if relative | — |
+| `SKEIN_AGENT` | sbx agent for new boxes (the per-runtime seam) — `claude` \| `codex` \| … | `claude` |
+| `SKEIN_STORE` | shared `.claude` store to mount into a new box | `$SKEIN_REGISTRY`'s dir |
 | `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
 | `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} /bin/bash` |
 | `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | `sbx ls --json` |

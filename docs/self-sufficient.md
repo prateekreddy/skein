@@ -77,8 +77,15 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   `lastSeen` (turn-status still wins) and a stopped box stale; wired into `load_views` + CLI `ls`.
   Overridable via `SKEIN_LS_CMD`; falls back to `lastSeen` when sbx can't be consulted. Unit-tested;
   needs host verification of the real `sbx ls --json` shape.
-- **Phase 2 — skein-owned launch + minimal store provisioning.** skein constructs `sbx run` and
-  provisions the store; repo no longer needs `setup-sandbox.sh` for skein.
+- **Phase 2 — skein-owned launch. ✅ DONE (launch); store-provisioning deferred.** When
+  `$SKEIN_LAUNCH_CMD` is unset, `launch_command` builds `sbx run --clone [--kit $SKEIN_KIT] --name
+  <name> <$SKEIN_AGENT|claude> . <store>` itself — a faithful copy of `setup-sandbox.sh`'s launch
+  line — so the repo needs no launch script. Branch isn't passed: the box's bootstrap derives it from
+  the name (`thing-<branch>` → checkout `<branch>`). `$SKEIN_LAUNCH_CMD` still overrides (fallback).
+  Unit-tested; **needs host verification** (no sbx here). Pinned the per-runtime seam via `$SKEIN_AGENT`.
+  REMAINING: provisioning a store *from scratch* (for fresh/any-repo setups with no existing
+  `.claude`) — currently relies on the kit + an existing store; folds into Phase 4 (URL clone) and
+  Phase 3 (skein ships its own kit that also installs the turn-state probe).
 - **Phase 3 — Claude turn-state adapter.** Embed + inject `box-status.sh`/`box-task.sh`, additive
   settings merge. Fixes "don't see working even when it is."
 - **Enumerate fleet from sbx. ✅ DONE** (pulled ahead, per "remove the registry we maintain unless it

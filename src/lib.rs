@@ -569,13 +569,64 @@ pub fn sh_quote(s: &str) -> String {
 /// The host shell command that launches a new box for `branch`. Override with
 /// $SKEIN_LAUNCH_CMD (a template; `{branch}` is substituted); default assumes
 /// `setup-sandbox.sh` is on PATH.
-pub fn launch_command(branch: &str) -> String {
+pub fn launch_command(name: &str, branch: &str) -> String {
     if let Ok(t) = env::var("SKEIN_LAUNCH_CMD") {
         if !t.is_empty() {
-            return t.replace("{branch}", &sh_quote(branch));
+            return t
+                .replace("{branch}", &sh_quote(branch))
+                .replace("{name}", &sh_quote(name));
         }
     }
-    format!("setup-sandbox.sh {}", sh_quote(branch))
+    native_launch_command(name)
+}
+
+/// skein's own launch command, used when `$SKEIN_LAUNCH_CMD` is unset — so a box can be created
+/// without the repo shipping a `setup-sandbox.sh`. Faithful to that script's launch line:
+///   `sbx run --clone [--kit <kit>] --name <name> <agent> . <store>`
+/// The box's bootstrap derives the branch from the name (`thing-<branch>` → `<branch>`) and checks
+/// it out, so no branch arg is needed. `agent` (`$SKEIN_AGENT`, default `claude`) is the per-runtime
+/// seam; `kit` (`$SKEIN_KIT`, resolved under `$SKEIN_REPO`) wires the shared store into the clone and
+/// runs the bootstrap; `store` (`$SKEIN_STORE`, else the store skein already reads) is mounted so the
+/// kit can link it. Runs with cwd `$SKEIN_REPO`, so `.` is the repo workspace.
+fn native_launch_command(name: &str) -> String {
+    let agent = env::var("SKEIN_AGENT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "claude".into());
+    let mut parts: Vec<String> = vec!["sbx".into(), "run".into(), "--clone".into()];
+    if let Some(kit) = env::var("SKEIN_KIT").ok().filter(|s| !s.is_empty()) {
+        parts.push("--kit".into());
+        parts.push(sh_quote(&resolve_under_repo(&kit)));
+    }
+    parts.push("--name".into());
+    parts.push(sh_quote(name));
+    parts.push(sh_quote(&agent)); // sbx agent positional
+    parts.push(".".into()); // the repo workspace (cwd is $SKEIN_REPO)
+    if let Some(store) = launch_store() {
+        parts.push(sh_quote(&store));
+    }
+    parts.join(" ")
+}
+
+/// Resolve a possibly-relative path against `$SKEIN_REPO` (the dir launches run in), so a relative
+/// `$SKEIN_KIT` behaves like a relative `$SKEIN_LAUNCH_CMD`.
+fn resolve_under_repo(p: &str) -> String {
+    if Path::new(p).is_absolute() {
+        return p.to_string();
+    }
+    match env::var("SKEIN_REPO").ok().filter(|s| !s.is_empty()) {
+        Some(repo) => Path::new(&repo).join(p).to_string_lossy().into_owned(),
+        None => p.to_string(),
+    }
+}
+
+/// The shared store to mount into a launched box: `$SKEIN_STORE`, else the store skein already reads
+/// (parent of `sandboxes.json`). `None` ⇒ omit the mount.
+fn launch_store() -> Option<String> {
+    if let Some(s) = env::var("SKEIN_STORE").ok().filter(|s| !s.is_empty()) {
+        return Some(s);
+    }
+    store_dir().map(|p| p.to_string_lossy().into_owned())
 }
 
 /// The box's branch, from the registry.
@@ -1790,6 +1841,31 @@ mod tests {
         assert_eq!(calender.dir, "/x/gadget-demo");
         assert_eq!(by_name(&v, "claude-agent-memory-consolidation").live, Some(Liveness::Stopped));
         assert_eq!(by_name(&v, "thing-master").dir, "/x/thing");
+    }
+
+    #[test]
+    fn native_launch_command_builds_sbx_run() {
+        let _g = ENV_LOCK.lock().unwrap();
+        env::remove_var("SKEIN_LAUNCH_CMD");
+        env::set_var("SKEIN_KIT", "/abs/kit");
+        env::set_var("SKEIN_AGENT", "claude");
+        env::set_var("SKEIN_STORE", "/abs/store");
+        assert_eq!(
+            launch_command("thing-feat-x", "feat-x"),
+            "sbx run --clone --kit '/abs/kit' --name 'thing-feat-x' 'claude' . '/abs/store'"
+        );
+        // agent override is the per-runtime seam.
+        env::set_var("SKEIN_AGENT", "codex");
+        assert!(launch_command("thing-x", "x").contains(" 'codex' . "));
+        // explicit SKEIN_LAUNCH_CMD still wins, with {branch}/{name} substituted + shell-quoted.
+        env::set_var("SKEIN_LAUNCH_CMD", "setup.sh {branch} {name}");
+        assert_eq!(
+            launch_command("thing-x", "x"),
+            "setup.sh 'x' 'thing-x'"
+        );
+        for v in ["SKEIN_LAUNCH_CMD", "SKEIN_KIT", "SKEIN_AGENT", "SKEIN_STORE"] {
+            env::remove_var(v);
+        }
     }
 
     #[test]

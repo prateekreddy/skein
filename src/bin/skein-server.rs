@@ -440,7 +440,7 @@ async fn terminal_session(
         // create-a-box mode: run the launch command in a PTY so the user watches it come up
         let mut b = CommandBuilder::new("sh");
         b.arg("-c");
-        b.arg(skein::launch_command(branch));
+        b.arg(skein::launch_command(&name, branch));
         b
     } else {
         match std::env::var(override_var) {
