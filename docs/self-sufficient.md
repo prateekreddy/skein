@@ -110,10 +110,25 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   Real `sbx ls --json` schema (pinned in `parse_boxes_real_sbx_schema`):
   `{"sandboxes":[{"name","id","agent","status":"running|stopped","workspaces":[..],"ports":[..]}]}`.
 
-- **Phase 4 — registration + auth + URL clone.** Delivers "repo URL + gh auth → fleet". With
-  enumeration done, the remaining registry role is the turn-state datum; once Phase 3's skein-owned
-  probe writes that to a skein file, `sandboxes.json` can be dropped from skein's read path entirely.
-  (`cmd_ls` in the CLI still lists from the registry — minor follow-up to share `load_views`'s source.)
+- **Phase 4 — registry-independent read path. ✅ DONE.** Every read path now works with **no
+  `sandboxes.json`**: the fleet list from `sbx ls`, `dir` from sbx workspaces, `branch` from host git
+  (`branch_of`/`lookup_dir` fallbacks), turn-state from skein's probe (`current_status`), and
+  `session_digest` rebuilt to use all of those + sbx liveness instead of requiring a registry entry.
+  "Registration" is therefore moot — a box is visible because sbx knows it, not because it registered;
+  skein maintains no registry of its own. The registry, if present, is only a transitional fallback.
+  REMAINING (the genuine frontier, **host/sbx-dependent — not built blind**): the full *new-repo*
+  onboarding "URL + gh auth → fleet" = clone the URL host-side + provision a store from scratch +
+  **skein ships its own kit** (today native launch reuses the repo's `dev-sandbox/kit`) + propagate
+  the gh token into the box (`sbx secret`). None of this is needed for the current local-repo fleet;
+  it should be built with sbx in the loop, not guessed.
+
+- **Phase 5 — repo cleanup. ✅ already satisfied on `master`.** `master`'s `store-template` carries no
+  skein-specific hooks (`box-status`/`box-task`/`box-diff`/`box-session` live only on
+  `feat/dev-sandbox-tooling`), and skein now owns those signals, so nothing on `master` is redundant.
+  The `kit` + `sandbox-bootstrap.sh` stay (the kit links the store; the bootstrap checks out the
+  branch from the box name — both still relied on by native launch). The bootstrap's `sandboxes.json`
+  write is now unused by skein but harmless; left in place. Only leftover: drop the redundant
+  `box-*.sh` from `feat/dev-sandbox-tooling` if/when that branch is reconciled.
 - **Phase 5 — repo cleanup + branch reconcile + docs.**
 
 ## Open items / risks

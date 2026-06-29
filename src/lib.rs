@@ -57,7 +57,7 @@ pub struct Message {
 }
 
 /// One entry in the shared `sandboxes.json` registry written by sandbox-bootstrap.sh.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct Sandbox {
     #[serde(default)]
     pub branch: String,
@@ -359,6 +359,14 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
     }
     let boxes = parse_boxes(&String::from_utf8_lossy(&output.stdout));
     (!boxes.is_empty()).then_some(boxes)
+}
+
+/// One box's run-state from sbx — a single-box view of [`fleet_boxes`].
+fn box_liveness(name: &str) -> Option<Liveness> {
+    fleet_boxes()?
+        .into_iter()
+        .find(|b| b.name == name)
+        .and_then(|b| b.live)
 }
 
 const LS_NAME_KEYS: &[&str] = &[
@@ -1748,9 +1756,25 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
     if !valid_name(name) {
         return None;
     }
-    let (boxes, _) = load_registry().ok()?;
-    let sb = boxes.get(name)?;
-    let (state, tier) = sb.state();
+    // Registry-independent: dir/branch from sbx + host git, state from sbx liveness + skein's probe,
+    // the registry only a fallback. The box must be known to sbx or the registry (else nothing to show).
+    let reg = load_registry().ok().and_then(|(b, _)| b.get(name).cloned());
+    let live = box_liveness(name);
+    let dir = lookup_dir(name).unwrap_or_default();
+    if reg.is_none() && live.is_none() && dir.is_empty() {
+        return None;
+    }
+    let branch = branch_of(name).unwrap_or_default();
+    let sb = Sandbox {
+        branch: branch.clone(),
+        dir: dir.clone(),
+        last_seen: reg.as_ref().map(|r| r.last_seen.clone()).unwrap_or_default(),
+        status: current_status(name)
+            .or_else(|| reg.as_ref().map(|r| r.status.clone()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default(),
+    };
+    let (state, tier) = sb.state_with(live);
     let blocked = state == "needs-input";
 
     let sig = session_signal(name);
@@ -1775,11 +1799,11 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
 
     Some(SessionDigest {
         name: name.to_string(),
-        branch: sb.branch.clone(),
+        branch,
         state,
         tier,
         age: sb.age(),
-        diff: host_diffstat(name, &sb.dir),
+        diff: host_diffstat(name, &dir),
         commits: recent_commits(name),
         journal: read_journal(name),
         last_message,
