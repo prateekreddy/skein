@@ -1205,7 +1205,10 @@ document.addEventListener("keydown", e => {
   if (copy) {
     // Always swallow the copy chord so macOS never beeps; copy only if something is selected.
     e.preventDefault(); e.stopPropagation();
-    const sel = s.term.getSelection();
+    // xterm's DOM renderer makes terminal text natively selectable, so a mouse-drag produces a
+    // browser selection (the blue highlight) that term.getSelection() — xterm's own selection, the
+    // brown right-click one — doesn't see. Prefer xterm's, fall back to the native DOM selection.
+    const sel = s.term.getSelection() || (window.getSelection ? window.getSelection().toString() : "");
     if (!sel) { toast("nothing selected"); }
     else { const ok = copyText(sel); toast(ok ? `copied ${sel.length} chars` : "copy failed"); }
   } else if (paste) {
