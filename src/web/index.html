@@ -366,8 +366,11 @@
   .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
   .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
   .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
-  /* collision radar */
-  .kbtn.warn { color:var(--attn); border-color:color-mix(in srgb,var(--attn) 45%,transparent); background:color-mix(in srgb,var(--attn) 10%,transparent); font-weight:600; }
+  /* collision radar — a quiet heads-up, not an alarm: worst case is a merge conflict resolved at
+     merge time, so it shouldn't shout as loud as a box that actually needs you. Neutral chip; the
+     ⚠ glyph carries the meaning, full detail is in the tooltip + the popover on click. */
+  .kbtn.warn { color:var(--dim); font-weight:500; }
+  .kbtn.warn:hover { color:var(--text); border-color:var(--border-3); }
 </style>
 </head>
 <body>
@@ -1183,8 +1186,8 @@ function loadCollisions() {
     collisions = Array.isArray(c) ? c : [];
     const btn = document.getElementById("collide-btn");
     btn.style.display = collisions.length ? "" : "none";
-    btn.textContent = `⚠ ${collisions.length} collision${collisions.length === 1 ? "" : "s"}`;
-    btn.title = `${collisions.length} file${collisions.length === 1 ? "" : "s"} changed by more than one box — reconcile before merge`;
+    btn.textContent = `⚠ ${collisions.length}`;
+    btn.title = `${collisions.length} file${collisions.length === 1 ? "" : "s"} changed by more than one box — worst case is a merge conflict; reconcile before merge`;
   }).catch(() => {});
 }
 function showCollisions() {
