@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -218,32 +218,67 @@ pub fn load_registry() -> Result<(BTreeMap<String, Sandbox>, PathBuf), String> {
 
 /// The fleet, enriched and sorted "who needs me first" (tier asc, then name).
 pub fn load_views() -> Result<Vec<BoxView>, String> {
-    let (boxes, _) = load_registry()?;
-    // skein-server runs *inside* one box; that box is provably up, so don't let it derive
-    // to idle/stale from a quiet `lastSeen`. Override only when the box reports no explicit
-    // status (an agent status always wins). Set $SKEIN_SELF to override the detected vmid.
+    // Fleet source of record: sbx itself (`sbx ls`). The registry only *enriches* — it carries the
+    // one datum sbx can't (the agent turn-state) — and serves as a fallback when sbx can't be
+    // consulted or a box is direct-mode (no sbx). Everything else (which boxes exist, their dir,
+    // branch, run-state, diff) comes from sbx + host git, so a box no longer has to register itself
+    // to be seen. See docs/self-sufficient.md.
+    let sbx = fleet_boxes();
+    let reg = load_registry().map(|(b, _)| b).unwrap_or_default();
+    // skein-server may run *inside* one box; that box is provably up, so keep it live even when sbx
+    // can't confirm it. Set $SKEIN_SELF to override the detected vmid.
     let self_box = env::var("SKEIN_SELF")
         .or_else(|_| env::var("SANDBOX_VM_ID"))
         .ok()
         .filter(|s| !s.is_empty());
-    // Liveness straight from sbx ("is the sandbox up"), so a box that's working through a long turn
-    // doesn't decay to idle just because no hook fired in 120s. None ⇒ sbx unavailable or doesn't
-    // list this box ⇒ fall back to the lastSeen-derived state.
-    let liveness = fleet_liveness();
-    let mut views: Vec<BoxView> = boxes
-        .iter()
-        .map(|(name, b)| {
-            let live = liveness.as_ref().and_then(|m| m.get(name).copied());
-            let (mut state, mut tier) = b.state_with(live);
+
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    if let Some(v) = &sbx {
+        names.extend(v.iter().map(|b| b.name.clone()));
+    }
+    names.extend(reg.keys().cloned());
+
+    let mut views: Vec<BoxView> = names
+        .into_iter()
+        .map(|name| {
+            let s = sbx.as_ref().and_then(|v| v.iter().find(|b| b.name == name));
+            let r = reg.get(&name);
+            // dir/branch: prefer the registry's known-good values (no regression for registered
+            // boxes); fall back to sbx workspaces + host git for boxes the registry doesn't know.
+            let dir = r
+                .map(|x| x.dir.clone())
+                .filter(|d| !d.is_empty())
+                .or_else(|| s.map(|x| x.dir.clone()).filter(|d| !d.is_empty()))
+                .unwrap_or_default();
+            let branch = r
+                .map(|x| x.branch.clone())
+                .filter(|b| !b.is_empty() && b != "?")
+                .or_else(|| git_branch_for(&dir))
+                .unwrap_or_default();
+            // Reuse the registry-derived state logic; status (turn-state) is the registry's specific
+            // datum, lastSeen is only a fallback when sbx liveness is absent.
+            let sb = Sandbox {
+                branch: branch.clone(),
+                dir: dir.clone(),
+                last_seen: r.map(|x| x.last_seen.clone()).unwrap_or_default(),
+                status: r.map(|x| x.status.clone()).unwrap_or_default(),
+                diff: None,
+            };
+            let live = s.and_then(|x| x.live);
+            let (mut state, mut tier) = sb.state_with(live);
             // Self-box stays live when sbx can't confirm it (e.g. skein running outside sbx).
-            if live.is_none() && b.status.is_empty() && self_box.as_deref() == Some(name.as_str()) && tier > 3 {
+            if live.is_none()
+                && sb.status.is_empty()
+                && self_box.as_deref() == Some(name.as_str())
+                && tier > 3
+            {
                 state = "live".into();
                 tier = 3;
             }
             // The narrative signal (box-session.sh): a cheap per-box file read, no model call.
             // Headline = the blocking prompt when waiting on you, else the gist of the last
             // message; pause classifies *why* it stopped so the inbox can rank and batch.
-            let sig = session_signal(name);
+            let sig = session_signal(&name);
             let blocked = state == "needs-input";
             let signal_text = sig.as_ref().map(|s| {
                 if s.kind == "notification" && !s.prompt.trim().is_empty() {
@@ -253,7 +288,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 }
             });
             // The live "what's it doing now" signal (box-task.sh / journal `next`).
-            let task = current_task(name);
+            let task = current_task(&name);
             let mut headline = signal_text.as_deref().and_then(first_line);
             // When the signal is absent or just the generic "waiting for your input", surface the
             // current task instead — so even a tier-0 needs-input row says what it was working on.
@@ -271,12 +306,11 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 name: name.clone(),
                 state,
                 tier,
-                branch: b.branch.clone(),
-                age: b.age(),
-                dir: shorten(&b.dir),
-                // prefer the host-computed shortstat (matches the diff pane); fall back to the
-                // box-reported number for clone-mode boxes this host can't see.
-                diff: host_diffstat(name, &b.dir).or_else(|| b.diff.clone()),
+                branch,
+                age: sb.age(),
+                dir: shorten(&dir),
+                // host-computed shortstat (matches the diff pane); fall back to a box-reported number.
+                diff: host_diffstat(&name, &dir).or_else(|| r.and_then(|x| x.diff.clone())),
                 headline,
                 task,
                 pause,
@@ -299,12 +333,23 @@ pub enum Liveness {
     Stopped,
 }
 
-/// Ask sbx which boxes are running, so liveness comes from "is the sandbox up" (which sbx knows
-/// directly) rather than a hook-written `lastSeen`. Returns name -> Liveness, or `None` when sbx
-/// can't be consulted (not installed, errored, or output unparseable) — callers then fall back to
-/// the registry's `lastSeen`. Override the command with `$SKEIN_LS_CMD` (run via `sh -c`; must emit
-/// the `sbx ls --json` shape). Statuses other than running/stopped are ignored (that box falls back).
-pub fn fleet_liveness() -> Option<HashMap<String, Liveness>> {
+/// A box as sbx itself sees it (`sbx ls --json`) — the source of record for the fleet, so a box
+/// shows up because it's a sandbox sbx knows about, not because it wrote itself into a registry.
+#[derive(Clone, Debug)]
+pub struct SbxBox {
+    pub name: String,
+    /// "claude" | "codex" | … — the per-runtime seam for the (later) turn-state adapter.
+    pub agent: String,
+    /// Run state; `None` if sbx reports an unrecognised status (caller falls back to lastSeen).
+    pub live: Option<Liveness>,
+    /// The repo workspace (the shared `.claude` store mount is excluded). May be empty.
+    pub dir: String,
+}
+
+/// Enumerate the fleet from sbx. `None` when sbx can't be consulted (not installed, errored, or
+/// unparseable) — callers then fall back to the registry. Override with `$SKEIN_LS_CMD` (run via
+/// `sh -c`; must emit the `sbx ls --json` shape).
+pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
     let output = match env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) {
         Some(c) => Command::new("sh").arg("-c").arg(c).output(),
         None => Command::new("sbx").args(["ls", "--json"]).output(),
@@ -313,18 +358,36 @@ pub fn fleet_liveness() -> Option<HashMap<String, Liveness>> {
     if !output.status.success() {
         return None;
     }
-    parse_liveness(&String::from_utf8_lossy(&output.stdout))
+    let boxes = parse_boxes(&String::from_utf8_lossy(&output.stdout));
+    (!boxes.is_empty()).then_some(boxes)
+}
+
+/// Liveness-only view of [`fleet_boxes`], for callers that just need run-state.
+pub fn fleet_liveness() -> Option<HashMap<String, Liveness>> {
+    let map: HashMap<String, Liveness> = fleet_boxes()?
+        .into_iter()
+        .filter_map(|b| Some((b.name, b.live?)))
+        .collect();
+    (!map.is_empty()).then_some(map)
 }
 
 const LS_NAME_KEYS: &[&str] = &[
     "name", "Name", "NAME", "sandbox", "SANDBOX", "vmId", "vmid", "VmId", "id", "ID",
 ];
 const LS_STATUS_KEYS: &[&str] = &["status", "Status", "STATUS", "state", "State"];
+const LS_AGENT_KEYS: &[&str] = &["agent", "Agent", "AGENT"];
+const LS_WS_KEYS: &[&str] = &[
+    "workspaces",
+    "Workspaces",
+    "workspace",
+    "Workspace",
+    "WORKSPACE",
+];
 
-/// Parse `sbx ls --json` defensively: tolerate NDJSON (one object per line — the common Docker-CLI
-/// `--json` shape) or a single array/object document, and varied key casings. `None` if nothing
-/// usable is found, so the caller falls back to `lastSeen`.
-fn parse_liveness(json: &str) -> Option<HashMap<String, Liveness>> {
+/// Parse `sbx ls --json` defensively: tolerate NDJSON (one object per line — a common Docker-CLI
+/// `--json` shape) or a single array / `{sandboxes:[..]}` / `{name:{..}}` document, and varied key
+/// casings. Boxes without a (valid) name are skipped.
+fn parse_boxes(json: &str) -> Vec<SbxBox> {
     use serde_json::Value;
     // NDJSON first: each non-empty line an object. If that yields <2 objects it isn't NDJSON, so
     // parse the whole payload as one document instead.
@@ -339,30 +402,83 @@ fn parse_liveness(json: &str) -> Option<HashMap<String, Liveness>> {
             entries = collect_ls_entries(v);
         }
     }
-    let mut map = HashMap::new();
+    let mut out = Vec::new();
     for e in entries {
         let obj = match e.as_object() {
             Some(o) => o,
             None => continue,
         };
-        let name = LS_NAME_KEYS
+        let name = match LS_NAME_KEYS
             .iter()
-            .find_map(|k| obj.get(*k).and_then(Value::as_str));
-        let status = LS_STATUS_KEYS
+            .find_map(|k| obj.get(*k).and_then(Value::as_str))
+        {
+            Some(n) if valid_name(n) => n.to_string(),
+            _ => continue,
+        };
+        let agent = LS_AGENT_KEYS
             .iter()
-            .find_map(|k| obj.get(*k).and_then(Value::as_str));
-        if let (Some(n), Some(s)) = (name, status) {
-            let live = if s.eq_ignore_ascii_case("running") {
-                Liveness::Running
-            } else if s.eq_ignore_ascii_case("stopped") {
-                Liveness::Stopped
-            } else {
-                continue; // unknown status → leave it out so the box falls back to lastSeen
-            };
-            map.insert(n.to_string(), live);
-        }
+            .find_map(|k| obj.get(*k).and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
+        let live = LS_STATUS_KEYS
+            .iter()
+            .find_map(|k| obj.get(*k).and_then(Value::as_str))
+            .and_then(|s| {
+                if s.eq_ignore_ascii_case("running") {
+                    Some(Liveness::Running)
+                } else if s.eq_ignore_ascii_case("stopped") {
+                    Some(Liveness::Stopped)
+                } else {
+                    None
+                }
+            });
+        let dir = LS_WS_KEYS
+            .iter()
+            .find_map(|k| obj.get(*k))
+            .map(repo_workspace)
+            .unwrap_or_default();
+        out.push(SbxBox {
+            name,
+            agent,
+            live,
+            dir,
+        });
     }
-    (!map.is_empty()).then_some(map)
+    out
+}
+
+/// Pick the repo workspace from a box's `workspaces` value: the path that isn't the shared `.claude`
+/// store. Accepts an array or a single string; empty if none.
+fn repo_workspace(ws: &serde_json::Value) -> String {
+    use serde_json::Value;
+    let paths: Vec<&str> = match ws {
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+        Value::String(s) => vec![s.as_str()],
+        _ => vec![],
+    };
+    paths
+        .iter()
+        .find(|p| !p.trim_end_matches('/').ends_with("/.claude"))
+        .or_else(|| paths.first())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// The current branch of the git working tree at `dir`, read host-side — so skein can show a box's
+/// branch without the registry. None if `dir` isn't a repo or HEAD is detached.
+fn git_branch_for(dir: &str) -> Option<String> {
+    if dir.is_empty() {
+        return None;
+    }
+    let out = Command::new("git")
+        .args(["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!b.is_empty() && b != "HEAD").then_some(b)
 }
 
 /// Reduce a single `sbx ls --json` document to a flat list of per-box objects, covering an array,
@@ -464,11 +580,17 @@ pub fn launch_command(branch: &str) -> String {
 
 /// The box's branch, from the registry.
 pub fn branch_of(name: &str) -> Option<String> {
-    let (boxes, _) = load_registry().ok()?;
-    boxes
-        .get(name)
-        .map(|b| b.branch.clone())
-        .filter(|b| !b.is_empty() && b != "?")
+    // registry first (no subprocess); else read it host-side from the box's workspace.
+    if let Ok((boxes, _)) = load_registry() {
+        if let Some(b) = boxes
+            .get(name)
+            .map(|b| b.branch.clone())
+            .filter(|b| !b.is_empty() && b != "?")
+        {
+            return Some(b);
+        }
+    }
+    git_branch_for(&lookup_dir(name)?)
 }
 
 /// Run a program in the repo dir ($SKEIN_REPO, else cwd); returns (stdout, stderr, exit-code).
@@ -1073,10 +1195,21 @@ fn host_diffstat(name: &str, dir: &str) -> Option<DiffStat> {
 
 /// Look up a box's clone root (the `dir` it registered) by name.
 pub fn lookup_dir(name: &str) -> Option<String> {
-    let (boxes, _) = load_registry().ok()?;
-    boxes
-        .get(name)
-        .map(|b| b.dir.clone())
+    // registry first (no subprocess); else the box's workspace from sbx, for boxes the registry
+    // doesn't know about (sbx-only / not-yet-registered).
+    if let Ok((boxes, _)) = load_registry() {
+        if let Some(d) = boxes
+            .get(name)
+            .map(|b| b.dir.clone())
+            .filter(|d| !d.is_empty())
+        {
+            return Some(d);
+        }
+    }
+    fleet_boxes()?
+        .into_iter()
+        .find(|b| b.name == name)
+        .map(|b| b.dir)
         .filter(|d| !d.is_empty())
 }
 
@@ -1603,36 +1736,40 @@ mod tests {
         );
     }
 
+    fn by_name<'a>(v: &'a [SbxBox], n: &str) -> &'a SbxBox {
+        v.iter().find(|b| b.name == n).expect("box present")
+    }
+
     #[test]
-    fn parse_liveness_tolerates_shapes() {
+    fn parse_boxes_tolerates_shapes() {
         // NDJSON (Docker-CLI --json), mixed casing, an unknown status, and a stopped box.
         let nd = r#"{"name":"a","status":"running"}
 {"SANDBOX":"b","STATUS":"stopped"}
 {"name":"c","status":"paused"}"#;
-        let m = parse_liveness(nd).expect("ndjson parses");
-        assert_eq!(m.get("a"), Some(&Liveness::Running));
-        assert_eq!(m.get("b"), Some(&Liveness::Stopped));
-        assert_eq!(m.get("c"), None); // unknown status omitted → that box falls back
+        let v = parse_boxes(nd);
+        assert_eq!(by_name(&v, "a").live, Some(Liveness::Running));
+        assert_eq!(by_name(&v, "b").live, Some(Liveness::Stopped));
+        assert_eq!(by_name(&v, "c").live, None); // unknown status → box still listed, falls back
 
-        // A single JSON array document.
-        let arr = r#"[{"name":"x","state":"running"},{"name":"y","state":"stopped"}]"#;
-        let m = parse_liveness(arr).expect("array parses");
-        assert_eq!(m.get("x"), Some(&Liveness::Running));
-        assert_eq!(m.get("y"), Some(&Liveness::Stopped));
+        // A single JSON array document with a workspace path.
+        let arr = r#"[{"name":"x","state":"running","workspace":"/repo/x"}]"#;
+        assert_eq!(by_name(&parse_boxes(arr), "x").dir, "/repo/x");
 
         // A name-keyed object map: {name: {..}}.
         let obj = r#"{"z":{"status":"running"}}"#;
-        assert_eq!(parse_liveness(obj).unwrap().get("z"), Some(&Liveness::Running));
+        assert_eq!(by_name(&parse_boxes(obj), "z").live, Some(Liveness::Running));
 
-        // Garbage / empty → None so the caller falls back to lastSeen.
-        assert!(parse_liveness("not json").is_none());
-        assert!(parse_liveness("[]").is_none());
+        // Garbage / empty → no boxes, so fleet_boxes() returns None and the caller falls back.
+        assert!(parse_boxes("not json").is_empty());
+        assert!(parse_boxes("[]").is_empty());
+        // Invalid names are skipped.
+        assert!(parse_boxes(r#"[{"name":"../escape","status":"running"}]"#).is_empty());
     }
 
     #[test]
-    fn parse_liveness_real_sbx_schema() {
+    fn parse_boxes_real_sbx_schema() {
         // The actual `sbx ls --json` shape (captured from the host): a {"sandboxes":[...]} wrapper,
-        // lowercase name/status, plus agent/id/workspaces/ports we don't need here.
+        // lowercase name/status/agent, and a workspaces array (repo + shared .claude store).
         let real = r#"{
           "sandboxes": [
             { "name": "claude-agent-memory-consolidation", "id": "59eb", "agent": "claude",
@@ -1644,11 +1781,15 @@ mod tests {
               "workspaces": ["/x/thing"] }
           ]
         }"#;
-        let m = parse_liveness(real).expect("real sbx schema parses");
-        assert_eq!(m.get("claude-agent-memory-consolidation"), Some(&Liveness::Stopped));
-        assert_eq!(m.get("thing-feat-calender"), Some(&Liveness::Running));
-        assert_eq!(m.get("thing-master"), Some(&Liveness::Running));
-        assert_eq!(m.len(), 3);
+        let v = parse_boxes(real);
+        assert_eq!(v.len(), 3);
+        let calender = by_name(&v, "thing-feat-calender");
+        assert_eq!(calender.live, Some(Liveness::Running));
+        assert_eq!(calender.agent, "claude");
+        // the repo workspace is chosen, the shared .claude store is excluded.
+        assert_eq!(calender.dir, "/x/gadget-demo");
+        assert_eq!(by_name(&v, "claude-agent-memory-consolidation").live, Some(Liveness::Stopped));
+        assert_eq!(by_name(&v, "thing-master").dir, "/x/thing");
     }
 
     #[test]

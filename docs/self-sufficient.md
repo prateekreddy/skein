@@ -81,15 +81,22 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   provisions the store; repo no longer needs `setup-sandbox.sh` for skein.
 - **Phase 3 — Claude turn-state adapter.** Embed + inject `box-status.sh`/`box-task.sh`, additive
   settings merge. Fixes "don't see working even when it is."
-- **Phase 4 — registration + auth + URL clone + enumerate from sbx.** Delivers "repo URL + gh auth →
-  fleet". Registration via the box's bootstrap *does* work today (boxes appear once they run it), so
-  enumerating from `sbx ls` is a **robustness/decoupling** improvement, not a fix for a current miss:
-  it would also surface boxes that haven't registered yet, direct-mode boxes, and any-repo boxes with
-  no bootstrap — i.e. the fleet list sourced from `sbx ls` (name/agent/status/workspaces), enriched by
-  the registry, rather than the other way round. Not urgent; sequence after launch.
+- **Enumerate fleet from sbx. ✅ DONE** (pulled ahead, per "remove the registry we maintain unless it
+  has specific data"). `fleet_boxes()` parses the full `sbx ls --json` (name/agent/status/workspaces);
+  `load_views` now sources the fleet from sbx ∪ registry, deriving `dir` from workspaces and `branch`
+  host-side via git, with the registry kept only for (a) the **turn-state** datum sbx can't give and
+  (b) a fallback when sbx is down / a box is direct-mode. `lookup_dir`/`branch_of` gained the same
+  sbx/git fallback so diff/PR/session work for sbx-only boxes. A box now appears because sbx knows it,
+  not because it registered. Audit conclusion: the *only* registry-specific datum is the agent
+  turn-state (`status`); `branch`/`dir`/`diff`/`lastSeen` are all derivable from sbx + git.
 
-  Real `sbx ls --json` schema (pinned in `parse_liveness_real_sbx_schema`):
+  Real `sbx ls --json` schema (pinned in `parse_boxes_real_sbx_schema`):
   `{"sandboxes":[{"name","id","agent","status":"running|stopped","workspaces":[..],"ports":[..]}]}`.
+
+- **Phase 4 — registration + auth + URL clone.** Delivers "repo URL + gh auth → fleet". With
+  enumeration done, the remaining registry role is the turn-state datum; once Phase 3's skein-owned
+  probe writes that to a skein file, `sandboxes.json` can be dropped from skein's read path entirely.
+  (`cmd_ls` in the CLI still lists from the registry — minor follow-up to share `load_views`'s source.)
 - **Phase 5 — repo cleanup + branch reconcile + docs.**
 
 ## Open items / risks
