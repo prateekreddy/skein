@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,9 +68,6 @@ pub struct Sandbox {
     /// Set by the box status hook (box-status.sh); usually empty until a box reports.
     #[serde(default)]
     pub status: String,
-    /// Branch-vs-base diff summary, reported by box-diff.sh. None until first report.
-    #[serde(default)]
-    pub diff: Option<DiffStat>,
 }
 
 /// A registry entry enriched for display — what the CLI table and the web API both render.
@@ -138,7 +135,7 @@ impl Sandbox {
         }
     }
 
-    /// State, refined by what sbx itself reports about the box's run state (`fleet_liveness`).
+    /// State, refined by what sbx itself reports about the box's run state (`fleet_boxes`).
     /// `live` is this box's entry from that map:
     ///   - `Some(Running)`: the sandbox is up. An explicit agent turn-status still wins (it's more
     ///     specific); otherwise the box is `live` — *never* aged to `idle`/`stale`. This is the fix
@@ -262,7 +259,6 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 dir: dir.clone(),
                 last_seen: r.map(|x| x.last_seen.clone()).unwrap_or_default(),
                 status: r.map(|x| x.status.clone()).unwrap_or_default(),
-                diff: None,
             };
             let live = s.and_then(|x| x.live);
             let (mut state, mut tier) = sb.state_with(live);
@@ -309,8 +305,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 branch,
                 age: sb.age(),
                 dir: shorten(&dir),
-                // host-computed shortstat (matches the diff pane); fall back to a box-reported number.
-                diff: host_diffstat(&name, &dir).or_else(|| r.and_then(|x| x.diff.clone())),
+                diff: host_diffstat(&name, &dir),
                 headline,
                 task,
                 pause,
@@ -360,15 +355,6 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
     }
     let boxes = parse_boxes(&String::from_utf8_lossy(&output.stdout));
     (!boxes.is_empty()).then_some(boxes)
-}
-
-/// Liveness-only view of [`fleet_boxes`], for callers that just need run-state.
-pub fn fleet_liveness() -> Option<HashMap<String, Liveness>> {
-    let map: HashMap<String, Liveness> = fleet_boxes()?
-        .into_iter()
-        .filter_map(|b| Some((b.name, b.live?)))
-        .collect();
-    (!map.is_empty()).then_some(map)
 }
 
 const LS_NAME_KEYS: &[&str] = &[
@@ -1091,17 +1077,15 @@ fn delist_box(name: &str) -> Result<(), String> {
 }
 
 /// The host shell command that tears a box down — kills *and* removes the sandbox, reclaiming the
-/// resources it consumed. Override with $SKEIN_DESTROY_CMD (legacy: $SKEIN_ARCHIVE_CMD); `{name}` is
+/// resources it consumed. Override with $SKEIN_DESTROY_CMD; `{name}` is
 /// substituted and shell-quoted. Default `sbx rm -f {name}` — `-f` skips sbx's interactive
 /// clone-removal confirmation (skein runs non-interactively, so without it `sbx rm` aborts with
 /// exit 1). DESTRUCTIVE: in clone mode this removes the sandbox's clone, so any commits made in the
 /// box that were never pushed/fetched are lost.
 pub fn destroy_command(name: &str) -> String {
-    for k in ["SKEIN_DESTROY_CMD", "SKEIN_ARCHIVE_CMD"] {
-        if let Ok(t) = env::var(k) {
-            if !t.is_empty() {
-                return t.replace("{name}", &sh_quote(name));
-            }
+    if let Ok(t) = env::var("SKEIN_DESTROY_CMD") {
+        if !t.is_empty() {
+            return t.replace("{name}", &sh_quote(name));
         }
     }
     format!("sbx rm -f {}", sh_quote(name))
@@ -1685,7 +1669,7 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
         state,
         tier,
         age: sb.age(),
-        diff: host_diffstat(name, &sb.dir).or_else(|| sb.diff.clone()),
+        diff: host_diffstat(name, &sb.dir),
         commits: recent_commits(name),
         journal: read_journal(name),
         last_message,
@@ -1732,7 +1716,6 @@ mod tests {
             dir: "/d".into(),
             last_seen: last_seen.into(),
             status: status.into(),
-            diff: None,
         }
     }
 
@@ -1996,7 +1979,6 @@ mod tests {
         .unwrap();
         env::set_var("SKEIN_REGISTRY", &reg);
         env::remove_var("SKEIN_SHARED");
-        env::remove_var("SKEIN_ARCHIVE_CMD");
 
         // failed teardown must NOT delist — the box stays on the board to retry.
         env::set_var("SKEIN_DESTROY_CMD", "false");
