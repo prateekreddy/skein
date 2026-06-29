@@ -31,3 +31,6 @@ tokio-stream = { version = "0.1", features = ["time"] }
 portable-pty = "0.8"
 # advisory file locking so registry writes share the same flock discipline as the box hooks
 fs2 = "0.4"
+# load config from a local .env at startup, so the registry/repo paths don't have to be typed
+# on every invocation; real env vars set on the command line still win (dotenv never overrides).
+dotenvy = "0.15"

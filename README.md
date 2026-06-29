@@ -122,7 +122,10 @@ State prefers the explicit status a box's hooks report (`needs-input` / `waiting
 ## Configuration
 
 `skein doctor` reports the resolved registry, bind address, and whether `sbx`/`git`/`gh`
-are present — run it first if something looks off. All knobs are environment variables:
+are present — run it first if something looks off. All knobs are environment variables — set
+them inline, or drop them in a **`.env`** (loaded automatically at startup from the cwd upward;
+real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you can just run
+`skein` / `skein-server` with no prefix:
 
 | var | what | default |
 |-----|------|---------|
