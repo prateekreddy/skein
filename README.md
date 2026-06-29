@@ -123,9 +123,9 @@ are present — run it first if something looks off. All knobs are environment v
 | `SKEIN_ADDR` | server bind address | `127.0.0.1:7878` |
 | `SKEIN_ALLOWED_ORIGINS` | extra WS origins to allow (comma-sep hosts); loopback + `*.ts.net` always allowed | — |
 | `SKEIN_SELF` | this box's vmid (kept `live` when its `lastSeen` is quiet) | `$SANDBOX_VM_ID` |
-| `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) | cwd |
+| `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
 | `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
-| `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}` substituted | `setup-sandbox.sh <branch>` |
+| `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}` substituted; relative to `$SKEIN_REPO` (e.g. `dev-sandbox/setup-sandbox.sh {branch}`) | `setup-sandbox.sh <branch>` |
 | `SKEIN_ATTACH_CMD` | attach template — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
 | `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
 | `SKEIN_ARCHIVE_CMD` | run on archive — `{name}` substituted (e.g. `sbx rm {name}`) | — |

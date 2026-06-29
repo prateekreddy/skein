@@ -397,8 +397,15 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
     for (k, v) in std::env::vars() {
         cmd.env(k, v);
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
+    // Run launch/attach from the repo ($SKEIN_REPO, else cwd) so a *relative* command resolves —
+    // e.g. SKEIN_LAUNCH_CMD='dev-sandbox/setup-sandbox.sh {branch}' works without an absolute path.
+    let run_dir = std::env::var("SKEIN_REPO")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(dir) = run_dir {
+        cmd.cwd(dir);
     }
 
     let mut child = match pair.slave.spawn_command(cmd) {
