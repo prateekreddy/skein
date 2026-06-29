@@ -643,8 +643,9 @@ pub fn resume_batch(names: &[String]) -> (Vec<String>, Vec<String>) {
     (resumed, held)
 }
 
-/// Archive a box off the board: remove its registry entry, append it to `<store>/history.jsonl`,
-/// and run $SKEIN_ARCHIVE_CMD if set (e.g. `sbx rm {name}`). skein-owned; needs no external tool.
+/// Archive a box off the board: remove its registry entry and append it to `<store>/history.jsonl`.
+/// Non-destructive — the sandbox keeps running and its resources are untouched; this only delists it
+/// from the cockpit. To also tear the sandbox down, use `destroy_box`. skein-owned; needs no tool.
 pub fn archive_box(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
@@ -692,13 +693,36 @@ pub fn archive_box(name: &str) -> Result<(), String> {
     })();
     let _ = lock.unlock();
     result?;
+    Ok(())
+}
 
-    if let Ok(c) = env::var("SKEIN_ARCHIVE_CMD") {
-        if !c.is_empty() {
-            let _ = run_shell(&c.replace("{name}", &sh_quote(name)));
+/// The host shell command that tears a box down — kills *and* removes the sandbox, reclaiming the
+/// resources it consumed. Override with $SKEIN_DESTROY_CMD (legacy: $SKEIN_ARCHIVE_CMD); `{name}` is
+/// substituted and shell-quoted. Default `sbx rm {name}`. DESTRUCTIVE: in clone mode this removes the
+/// sandbox's clone, so any commits made in the box that were never pushed/fetched are lost.
+pub fn destroy_command(name: &str) -> String {
+    for k in ["SKEIN_DESTROY_CMD", "SKEIN_ARCHIVE_CMD"] {
+        if let Ok(t) = env::var(k) {
+            if !t.is_empty() {
+                return t.replace("{name}", &sh_quote(name));
+            }
         }
     }
-    Ok(())
+    format!("sbx rm {}", sh_quote(name))
+}
+
+/// Destroy a box: tear the sandbox down via `destroy_command`, then delist it. The teardown must
+/// succeed before we delist, so a failed `sbx rm` leaves the box on the board to retry rather than
+/// orphaning a still-running sandbox you can no longer see. Destructive — see `destroy_command`.
+pub fn destroy_box(name: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let (_out, err, code) = run_shell(&destroy_command(name))?;
+    if code != 0 {
+        return Err(format!("teardown failed (exit {code}): {}", err.trim()));
+    }
+    archive_box(name)
 }
 
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
@@ -1351,6 +1375,48 @@ mod tests {
         assert!(archive_box("thing-x").is_err()); // already gone
         assert!(archive_box("../escape").is_err()); // name guard
 
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn destroy_box_runs_teardown_then_delists() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        let marker = dir.join("torn-down");
+        fs::write(
+            &reg,
+            r#"{"thing-x":{"branch":"x","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""},
+               "thing-y":{"branch":"y","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+        env::remove_var("SKEIN_ARCHIVE_CMD");
+
+        // failed teardown must NOT delist — the box stays on the board to retry.
+        env::set_var("SKEIN_DESTROY_CMD", "false");
+        assert!(destroy_box("thing-x").is_err());
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
+        assert!(after.get("thing-x").is_some()); // still listed
+
+        // successful teardown runs the command, then delists.
+        env::set_var(
+            "SKEIN_DESTROY_CMD",
+            format!("touch {}", sh_quote(marker.to_str().unwrap())),
+        );
+        destroy_box("thing-x").unwrap();
+        assert!(marker.exists()); // teardown ran
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
+        assert!(after.get("thing-x").is_none()); // delisted
+        assert!(after.get("thing-y").is_some());
+
+        // name guard runs before any teardown command.
+        assert!(destroy_box("../escape").is_err());
+
+        env::remove_var("SKEIN_DESTROY_CMD");
         env::remove_var("SKEIN_REGISTRY");
     }
 

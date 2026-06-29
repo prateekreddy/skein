@@ -162,6 +162,8 @@
   .dockbar .ship:hover { border-color:var(--border-3); }
   .dockbar .ship.next { background:var(--accent); border-color:var(--accent); color:#0b0d10; font-weight:600; }
   .dockbar .ship.next:hover { background:var(--accent-2); }
+  .dockbar .ship.danger { color:#f0a3a3; border-color:#5a2a2a; }
+  .dockbar .ship.danger:hover { background:#3a1f1f; border-color:#7a3a3a; }
   .dockbar .prlink { color:var(--accent); }
   .dockbar .ck { font-size:11px; padding:2px 7px; border-radius:999px; }
   .dockbar .ck.ok { color:var(--done); background:color-mix(in srgb,var(--done) 14%,transparent); }
@@ -658,6 +660,7 @@ function renderDockbar() {
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
   const pr = dockbar.querySelector("#dpr"); if (pr) pr.onclick = () => createPR(view.box);
   const ar = dockbar.querySelector("#darch"); if (ar) ar.onclick = () => archiveBox(view.box);
+  const ds = dockbar.querySelector("#ddestroy"); if (ds) ds.onclick = () => destroyBox(view.box);
   const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
   const nb = dockbar.querySelector("#dnext"); if (nb && nx) nb.onclick = nx.run;
   const bk = dockbar.querySelector("#dback"); if (bk) bk.onclick = () => document.body.classList.add("show-fleet");
@@ -679,7 +682,8 @@ function shipHtml(box) {
   } else {
     h += `<button class="ship" id="dpr" title="gh pr create for this branch">Create PR</button>`;
   }
-  h += `<button class="ship" id="darch" title="archive — leaves the board">Archive</button>`;
+  h += `<button class="ship" id="darch" title="archive — delist only; the sandbox keeps running">Archive</button>`;
+  h += `<button class="ship danger" id="ddestroy" title="destroy — sbx rm: kills & removes the sandbox and its resources (unpushed commits lost)">Destroy</button>`;
   return h;
 }
 function loadShip(name, force) {
@@ -696,12 +700,21 @@ function createPR(name) {
   }).catch(() => toast("PR failed"));
 }
 function archiveBox(name) {
-  if (!confirm(`Archive ${name}? It leaves the board (kept in history.jsonl) and runs the archive command if you set one.`)) return;
+  if (!confirm(`Archive ${name}? It just leaves the board (kept in history.jsonl). The sandbox keeps running — use Destroy to remove it and reclaim its resources.`)) return;
   fetch(`/api/boxes/${encodeURIComponent(name)}/archive`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { if (sessions.has(name)) closeSession(name); shipState.delete(name);
       if (view.box === name) { view = {box:null,mode:"term"}; applyView(); } toast(`archived ${name}`); }
     else toast("archive failed: " + (d.error||""));
   }).catch(() => toast("archive failed"));
+}
+function destroyBox(name) {
+  if (!confirm(`Destroy ${name}?\n\nThis runs the teardown command (sbx rm) — it KILLS and REMOVES the sandbox and reclaims its resources. In clone mode any commits in the box that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
+  toast(`destroying ${name}…`);
+  fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
+    if (d.ok) { if (sessions.has(name)) closeSession(name); shipState.delete(name);
+      if (view.box === name) { view = {box:null,mode:"term"}; applyView(); } toast(`destroyed ${name}`); }
+    else toast("destroy failed: " + (d.error||"").split("\n")[0]);
+  }).catch(() => toast("destroy failed"));
 }
 function mergePr(name) {
   if (!confirm(`Merge ${name}'s PR? This squash-merges the branch.`)) return;

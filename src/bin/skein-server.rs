@@ -61,6 +61,7 @@ async fn main() {
         .route("/api/resume-batch", post(api_resume_batch))
         .route("/api/collisions", get(api_collisions))
         .route("/api/boxes/:name/archive", post(api_archive))
+        .route("/api/boxes/:name/destroy", post(api_destroy))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -293,6 +294,20 @@ async fn api_archive(Path(name): Path<String>) -> Json<serde_json::Value> {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let r = tokio::task::spawn_blocking(move || skein::archive_box(&name)).await;
+    Json(match r {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// Destroy a box: tear the sandbox down (sbx rm — reclaims its resources) then delist it.
+/// Destructive. Returns {ok} or {ok:false, error}.
+async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let r = tokio::task::spawn_blocking(move || skein::destroy_box(&name)).await;
     Json(match r {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),

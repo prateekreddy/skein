@@ -52,7 +52,8 @@ More attention helpers, all free unless noted:
 
 API: `GET /api/boxes`, `GET /api/events` (SSE), `GET /api/boxes/:name/diff`,
 `GET /api/boxes/:name/session`, `GET /api/boxes/:name/narrate`, `GET /api/collisions`,
-`POST /api/boxes/:name/resume`, `POST /api/resume-batch`, `GET /api/boxes/:name/terminal` (WebSocket).
+`POST /api/boxes/:name/resume`, `POST /api/resume-batch`, `POST /api/boxes/:name/archive` (delist),
+`POST /api/boxes/:name/destroy` (sbx rm), `GET /api/boxes/:name/terminal` (WebSocket).
 xterm.js is vendored into the binary (served from `/vendor/`), so the terminal works with no CDN —
 important in the firewalled sbx network.
 
@@ -128,7 +129,8 @@ are present — run it first if something looks off. All knobs are environment v
 | `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}` substituted; relative to `$SKEIN_REPO` (e.g. `dev-sandbox/setup-sandbox.sh {branch}`) | `setup-sandbox.sh <branch>` |
 | `SKEIN_ATTACH_CMD` | attach template — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
 | `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
-| `SKEIN_ARCHIVE_CMD` | run on archive — `{name}` substituted (e.g. `sbx rm {name}`) | — |
+| `SKEIN_DESTROY_CMD` | teardown for **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost) | `sbx rm {name}` |
+| `SKEIN_ARCHIVE_CMD` | legacy fallback for `SKEIN_DESTROY_CMD`; **Archive** itself now only delists and runs no command | — |
 | `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}` substituted | `sbx run --name {name} -- --continue --print {prompt}` |
 | `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |
 | `SKEIN_AI_MODEL` | model for AI calls when `SKEIN_AI` is on | `claude-haiku-4-5` |
