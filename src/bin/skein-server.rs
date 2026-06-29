@@ -46,6 +46,20 @@ async fn main() {
     if let Err(e) = skein::ensure_probe() {
         eprintln!("skein: turn-state probe not installed ({e}); boxes will show live/stale only");
     }
+    // Install skein's own sbx kit (idempotent) so launching a box needs no repo-side kit.
+    if let Err(e) = skein::ensure_kit() {
+        eprintln!("skein: kit not installed ({e}); native launch will fall back to $SKEIN_KIT");
+    }
+    // Seed the host gh token into sbx (global) so boxes can fetch/push/open PRs. Best-effort and
+    // quiet — many setups rely on a proxy injecting credentials instead. Skip with $SKEIN_NO_GH_SECRET.
+    if let Err(e) = skein::ensure_gh_secret() {
+        eprintln!("skein: gh token not seeded ({e}); boxes may not push without it");
+    }
+    // Load the configured SSH key into the host ssh-agent so sbx forwards it into boxes (SSH push).
+    // No-op when none is configured. Best-effort.
+    if let Err(e) = skein::ensure_ssh_key() {
+        eprintln!("skein: ssh key not loaded ({e}); SSH git push from boxes may fail");
+    }
     // Bind is loopback-only by default; $SKEIN_ADDR overrides it. For remote access prefer
     // `tailscale serve` proxying to this loopback port (see README) over an off-loopback bind.
     let addr = std::env::var("SKEIN_ADDR")
@@ -58,6 +72,8 @@ async fn main() {
         .route("/vendor/xterm.css", get(vendor_xterm_css))
         .route("/vendor/addon-fit.js", get(vendor_fit_js))
         .route("/api/boxes", get(api_boxes))
+        .route("/api/repos", get(api_repos).post(api_add_repo))
+        .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/session", get(api_session))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
@@ -183,6 +199,62 @@ struct SendReq {
     body: String,
     #[serde(default)]
     kind: String,
+}
+
+/// List the repos skein manages.
+async fn api_repos() -> Json<Vec<skein::Repo>> {
+    Json(skein::load_repos())
+}
+
+#[derive(Deserialize)]
+struct AddRepoReq {
+    source: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    agent: String,
+}
+
+/// Register a repo: clone a URL (or adopt a local path), provision its store + kit, record it.
+/// `git clone` can take a while, so run the blocking work off the async runtime.
+async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
+    if r.source.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing source").into_response();
+    }
+    let res = tokio::task::spawn_blocking(move || {
+        let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
+        let agent = (!r.agent.trim().is_empty()).then(|| r.agent.trim().to_string());
+        skein::add_repo(r.source.trim(), id.as_deref(), agent.as_deref())
+    })
+    .await;
+    match res {
+        Ok(Ok(repo)) => {
+            // Warn up-front if origin is SSH (push from a box won't work — HTTPS needed).
+            let warning = skein::ssh_remote_warning(&repo.work);
+            Json(serde_json::json!({ "repo": repo, "warning": warning })).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),
+    }
+}
+
+/// Read skein's app settings (the cockpit's toggles).
+async fn api_settings() -> Json<skein::Config> {
+    Json(skein::load_config())
+}
+
+/// Update skein's app settings.
+async fn api_set_settings(Json(c): Json<skein::Config>) -> Response {
+    match skein::save_config(&c) {
+        Ok(()) => {
+            // Apply a newly-set SSH key immediately (load into the agent) so the user needn't restart.
+            if let Err(e) = skein::ensure_ssh_key() {
+                eprintln!("skein: ssh key not loaded ({e})");
+            }
+            Json(c).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
 /// Post a message into the shared mailbox (from skein). `to` is a vmid or "broadcast".
@@ -348,7 +420,8 @@ async fn api_paste_image(
         .unwrap_or("png")
         .to_string();
     let bytes = body.to_vec();
-    let r = tokio::task::spawn_blocking(move || skein::save_pasted_image(&name, &ext, &bytes)).await;
+    let r =
+        tokio::task::spawn_blocking(move || skein::save_pasted_image(&name, &ext, &bytes)).await;
     Json(match r {
         Ok(Ok(path)) => serde_json::json!({ "ok": true, "path": path }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),

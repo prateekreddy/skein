@@ -117,6 +117,9 @@
   .branch { font-family:var(--mono); color:var(--accent); opacity:.9; white-space:nowrap;
             overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
   .dstat { flex:none; white-space:nowrap; }
+  /* repo tag: a quiet badge naming the box's repo, shown only when >1 repo is managed */
+  .repotag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--faint);
+             background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:0 4px; opacity:.85; }
   .dir { font-family:var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* inbox headline: the gist of what the box last said / is asking — one truncated line */
   .headline { display:none; color:var(--dim); font-size:12px; margin-top:3px; overflow:hidden;
@@ -283,8 +286,12 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open { display:flex; justify-content:center; align-items:flex-start; }
+  .set-row { display:flex; align-items:center; gap:10px; font-size:13px; }
+  .set-row input[type=checkbox] { width:auto; }
+  .set-row .desc { color:var(--faint); font-size:11px; }
+  .set-grp { display:flex; flex-direction:column; gap:4px; }
   .mbx-card, .nb-card { width:100%; background:var(--overlay); border:1px solid var(--border-3); border-radius:12px;
     box-shadow:0 24px 70px rgba(0,0,0,.6); animation:rise var(--dur-med) var(--ease); display:flex; flex-direction:column; }
   .mbx-card { max-width:620px; max-height:78vh; }
@@ -441,9 +448,34 @@
   <div id="newbox" aria-hidden="true">
     <div class="nb-card">
       <div class="nb-head"><b>Launch a box</b><span class="x" onclick="closeNewBox()">✕</span></div>
+      <label class="nb-lbl" id="nb-repo-lbl" style="display:none">repo</label>
+      <select id="nb-repo" style="display:none"></select>
       <label class="nb-lbl">branch name</label>
       <input id="nb-branch" placeholder="my-feature" autocomplete="off" spellcheck="false" />
-      <div class="nb-foot"><span class="hint">runs <code id="nb-cmd">setup-sandbox.sh &lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
+      <div class="nb-foot"><span class="hint">creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
+    </div>
+  </div>
+
+  <div id="settings" aria-hidden="true">
+    <div class="nb-card" style="max-width:520px">
+      <div class="nb-head"><b>Settings</b><span class="x" onclick="closeSettings()">✕</span></div>
+      <div class="set-grp">
+        <label class="set-row"><input type="checkbox" id="set-tmux"> Auto-install tmux in boxes
+          <span class="desc">shared agent session so reconnects re-attach the same terminal</span></label>
+        <label class="set-row"><input type="checkbox" id="set-seedgh"> Seed gh token into sbx
+          <span class="desc">global secret so boxes can fetch / push / open PRs</span></label>
+        <label class="set-row"><input type="checkbox" id="set-forcegh"> Overwrite gh token on startup
+          <span class="desc">refresh the sbx secret after a token rotation</span></label>
+        <label class="set-row"><input type="checkbox" id="set-confirmdestroy"> Confirm before Destroy
+          <span class="desc">clone-mode boxes lose unpushed commits</span></label>
+      </div>
+      <label class="nb-lbl">default agent</label>
+      <input id="set-agent" placeholder="claude" autocomplete="off" spellcheck="false" />
+      <label class="nb-lbl">base branch (PRs)</label>
+      <input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" />
+      <label class="nb-lbl">ssh key path <span class="desc">loaded into your ssh-agent so sbx forwards it into boxes for SSH git push (the key never enters a box)</span></label>
+      <input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" />
+      <div class="nb-foot"><span class="hint">saved to <code>~/.skein/config.json</code> · matching <code>$SKEIN_*</code> env vars still override</span><button class="primary" id="set-go">Save</button></div>
     </div>
   </div>
 
@@ -467,6 +499,7 @@ const diffBadge = d => d && (d.files||d.ins||d.del)
   ? `<span class="pos">+${d.ins|0}</span> <span class="neg">−${d.del|0}</span>${d.files?` · ${d.files|0}f`:""}` : "";
 
 let boxes = [], order = [], sel = null, prevState = {};
+let multiRepo = false;   // true once boxes span >1 managed repo → show the per-row repo tag
 const stateOf = name => boxes.find(b => b.name === name)?.state || "unknown";
 
 // ---------- fleet render (keyed reconcile) ----------
@@ -484,7 +517,7 @@ function ensureGroups() {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="branch"></span><span class="dstat"></span><span class="dir"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -498,6 +531,10 @@ function updateRow(el, b) {
   el.className = `row s-${g}` + (b.name === sel ? " sel" : "") + (wired ? " wired" : "")
     + (b.name === view.box ? " active" : "") + (boxAnyStreaming(b.name) ? " streaming" : "");
   el.querySelector(".name").textContent = b.name;
+  // repo tag: only meaningful once skein manages more than one repo (else it's noise).
+  const rt = el.querySelector(".repotag");
+  rt.textContent = (multiRepo && b.repo) ? b.repo : "";
+  rt.style.display = (multiRepo && b.repo) ? "" : "none";
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
   el.querySelector(".pill").textContent = labelOf(b.state);
@@ -527,6 +564,7 @@ function updateRow(el, b) {
 const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
+  multiRepo = new Set(boxes.map(b => b.repo).filter(Boolean)).size > 1;
   const counts = {};
   for (const b of boxes) (counts[groupOf(b.state)] ??= []).push(b);
   const need = (counts.attn?.length||0) + (counts.waiting?.length||0), working = counts.working?.length||0, done = counts.done?.length||0;
@@ -1190,6 +1228,8 @@ let palItems = [], palSel = 0;
 function commands() {
   const acts = [
     { sec:"Actions", label:"New box…", run:openNewBox, meta:"⌘N" },
+    { sec:"Actions", label:"Add a repo…", run:addRepoPrompt },
+    { sec:"Actions", label:"Settings…", run:openSettings },
     { sec:"Actions", label:"Open mailbox", run:openMailbox },
     { sec:"Actions", label:"Broadcast to all boxes…", run:()=>{ openMailbox(); setTimeout(()=>{ document.getElementById("mbx-to").value="broadcast"; document.getElementById("mbx-body").focus(); },50); } },
     { sec:"Actions", label:"Jump to next box that needs you", run:nextNeedsYou, meta:"]" },
@@ -1276,17 +1316,99 @@ document.getElementById("mbx-body").addEventListener("keydown", e => {
 
 // ---------- launch a new box ----------
 const newbox = document.getElementById("newbox"), nbBranch = document.getElementById("nb-branch");
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; nbBranch.focus(); }
+const nbRepo = document.getElementById("nb-repo"), nbRepoLbl = document.getElementById("nb-repo-lbl");
+let repos = [];
+let settings = { install_tmux: true };
+// Load skein's app settings (the cockpit toggles, e.g. auto-install tmux in boxes).
+function loadSettings() {
+  return fetch("/api/settings").then(r => r.json()).then(s => { settings = s || settings; }).catch(() => {});
+}
+const settingsModal = () => document.getElementById("settings");
+function openSettings() {
+  loadSettings().then(() => {
+    document.getElementById("set-tmux").checked = settings.install_tmux !== false;
+    document.getElementById("set-seedgh").checked = settings.seed_gh_secret !== false;
+    document.getElementById("set-forcegh").checked = !!settings.force_gh_secret;
+    document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
+    document.getElementById("set-agent").value = settings.default_agent || "";
+    document.getElementById("set-base").value = settings.base_branch || "";
+    document.getElementById("set-sshkey").value = settings.ssh_key || "";
+    settingsModal().classList.add("open");
+  });
+}
+function closeSettings() { settingsModal().classList.remove("open"); }
+function saveSettings() {
+  const next = {
+    install_tmux: document.getElementById("set-tmux").checked,
+    seed_gh_secret: document.getElementById("set-seedgh").checked,
+    force_gh_secret: document.getElementById("set-forcegh").checked,
+    confirm_destroy: document.getElementById("set-confirmdestroy").checked,
+    default_agent: (document.getElementById("set-agent").value.trim() || "claude"),
+    base_branch: document.getElementById("set-base").value.trim(),
+    ssh_key: document.getElementById("set-sshkey").value.trim(),
+  };
+  fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(next) })
+    .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+    .then(s => { settings = s; closeSettings(); toast("settings saved"); })
+    .catch(e => toast(`couldn't save: ${e.message}`));
+}
+// Load the repos skein manages so the new-box dialog can prefix `<repo>-<branch>` and the palette
+// can offer "Add a repo". Refreshed when the dialog/palette opens.
+function loadRepos() {
+  return fetch("/api/repos").then(r => r.json()).then(rs => { repos = rs || []; fillRepoSelect(); }).catch(() => {});
+}
+function fillRepoSelect() {
+  const show = repos.length > 0;
+  nbRepo.style.display = show && repos.length > 1 ? "" : "none";
+  nbRepoLbl.style.display = show && repos.length > 1 ? "" : "none";
+  const cur = nbRepo.value;
+  nbRepo.innerHTML = repos.map(r => `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join("");
+  if (cur && repos.some(r => r.id === cur)) nbRepo.value = cur;
+}
+// The repo id to prefix a new box with: the dialog selection, else the only/first repo, else "thing".
+function currentRepoId() {
+  if (nbRepo.value) return nbRepo.value;
+  if (repos.length) return repos[0].id;
+  return "thing";
+}
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; loadRepos(); nbBranch.focus(); }
 function closeNewBox() { newbox.classList.remove("open"); }
+// Prompt for a repo URL/path and register it, then refresh the repo list.
+function addRepoPrompt() {
+  const src = prompt("Add a repo — paste a git URL or a local path:");
+  if (!src || !src.trim()) return;
+  toast("adding repo…");
+  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src.trim() }) })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(res => {
+      const repo = res.repo || res;
+      toast(`added ${repo.id}`);
+      loadRepos();
+      // SSH-origin repos can't push from a box — warn up-front (HTTPS is the working path).
+      if (res.warning) { alert(res.warning); }
+    })
+    .catch(e => toast(`add failed: ${e.message}`));
+}
+// Box names can't carry every branch char (sbx rejects `/`), so the NAME is a slug of the branch
+// while the real branch (e.g. feat/auth) is passed through and checked out in the box. Mirror of
+// lib::slug — keep them in sync.
+const slug = s => s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 function launchBox(branch) {
-  branch = (branch||"").trim().replace(/\s+/g, "-"); if (!branch) return;
-  const name = branch.startsWith("thing-") ? branch : `thing-${branch}`;
+  branch = (branch||"").trim(); if (!branch) return;   // keep slashes — they belong to the branch
+  const id = currentRepoId();
+  const name = `${id}-${slug(branch)}`;                 // e.g. thing-feat-auth
   closeNewBox();
   select(name);
   view = { box: name, mode: "term", kind: "agent" };
-  if (!sessions.has(name)) createSession(name, "agent", branch);   // launch mode
+  if (!sessions.has(name)) createSession(name, "agent", branch);   // launch mode — real branch (feat/auth)
   applyView();
 }
+document.getElementById("set-go").addEventListener("click", saveSettings);
+settingsModal().addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); saveSettings(); }
+  else if (e.key === "Escape") { e.preventDefault(); closeSettings(); }
+  e.stopPropagation();
+});
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
@@ -1445,6 +1567,8 @@ ensureGroups(); setFavicon(0);
 fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
 connect();
 loadCollisions();
+loadSettings();
+loadRepos();
 </script>
 </body>
 </html>

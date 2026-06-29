@@ -1,0 +1,102 @@
+schemaVersion: "1"
+kind: mixin
+name: skein
+displayName: skein workspace
+description: >-
+  skein's own repo-agnostic kit. Wires each --clone sandbox to the skein-managed
+  shared .claude store (mailbox + skein's turn-state probe) that lives outside the
+  repo, checks out the box's branch before the agent starts, and installs tmux (for
+  the persistent shell tab). Installed by skein (ensure_kit); used by
+  `sbx run --clone --kit <skein-home>/kit --name <repo>-<branch> <agent> <work> <store>`.
+  Agent reconnect is sbx-native (`sbx run --name <box>`), so no in-box session wrapper.
+
+commands:
+  initFiles:
+    - path: /home/agent/.local/bin/skein-startup.sh
+      mode: "0755"
+      description: Link the skein store into the clone and check out the box branch
+      content: |
+        #!/usr/bin/env bash
+        # skein-startup.sh — kit startup hook (runs every `sbx run`, BEFORE the agent positional).
+        # Repo-agnostic: finds the skein-managed shared store (mounted at its absolute host path),
+        # checks out the branch skein recorded for this box, and links the store into the clone so
+        # Claude loads the project settings/skills/hooks + skein's probe. Idempotent, fail-soft: a
+        # startup problem must never block the session.
+        #
+        # brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace
+        # placeholders and rejects any it doesn't recognise (it supports only WORKDIR). printenv
+        # reads the env without braces and exits nonzero when unset, safe under `set -u`.
+        set -uo pipefail
+
+        # Direct (non-clone) mode already has an in-repo .claude → nothing to do.
+        [ -d /run/sandbox/source ] || exit 0
+
+        # The clone root. The durable-startup dispatcher runs this hook from /home/agent/workspace,
+        # not the clone, so prefer sandboxd's WORKSPACE_DIR; fall back to git/pwd.
+        clone_root="$(printenv WORKSPACE_DIR 2>/dev/null || true)"
+        [ -n "$clone_root" ] || clone_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+        vmid="$(printenv SANDBOX_VM_ID 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+        vmid="$(printf '%s' "$vmid" | tr / -)"
+
+        # Find the skein store: skein writes a per-box launch spec at <store>/skein/launch/<vmid>.json,
+        # so the store is the one mounted dir that contains that marker. Scanning mounts (rather than
+        # guessing a sibling path) works for any repo layout — URL-cloned or local-in-place.
+        store=""
+        if [ -r /proc/self/mountinfo ]; then
+          while read -r mp; do
+            [ -n "$mp" ] || continue
+            if [ -f "$mp/skein/launch/$vmid.json" ]; then store="$mp"; break; fi
+          done < <(awk '{print $5}' /proc/self/mountinfo 2>/dev/null | sort -u)
+        fi
+        # Fallback: an explicit override, then the thing-style sibling convention.
+        [ -n "$store" ] && [ -d "$store" ] || store="$(printenv SKEIN_STORE 2>/dev/null || true)"
+        [ -n "$store" ] && [ -d "$store" ] || store="$(dirname "$clone_root")/store/.claude"
+
+        # Read the launch spec skein recorded for this box (branch + the install-tmux toggle).
+        spec="$store/skein/launch/$vmid.json"
+        branch=""
+        want_tmux="true"
+        if [ -r "$spec" ] && command -v jq >/dev/null 2>&1; then
+          branch="$(jq -r '.branch // ""' "$spec" 2>/dev/null)"
+          want_tmux="$(jq -r 'if .install_tmux == false then "false" else "true" end' "$spec" 2>/dev/null)"
+        fi
+
+        # Check out the branch skein recorded for this box.
+        if [ -n "$branch" ]; then
+          git -C "$clone_root" checkout "$branch" 2>/dev/null \
+            || git -C "$clone_root" checkout -b "$branch" 2>/dev/null \
+            || echo "[skein-kit] could not checkout $branch" >&2
+        fi
+
+        # Install tmux if it's missing and the app setting allows it (default on) — used for skein's
+        # persistent *shell* tab (`tmux new-session -A -s skein-shell`), which survives reconnects.
+        # Fail-soft: a box without tmux still works (the shell tab falls back to a plain shell).
+        # Disable via the cockpit setting (skein writes install_tmux:false into the spec above).
+        if [ "$want_tmux" = "true" ] && ! command -v tmux >/dev/null 2>&1; then
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq 2>/dev/null && sudo apt-get install -y -qq tmux 2>/dev/null \
+              || echo "[skein-kit] tmux install failed (continuing without a shared session)" >&2
+          fi
+        fi
+
+        # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
+        if [ -d "$store" ] && [ ! -e "$clone_root/.claude" ] && [ ! -L "$clone_root/.claude" ]; then
+          ln -s "$store" "$clone_root/.claude" 2>/dev/null \
+            || echo "[skein-kit] could not link $store -> $clone_root/.claude" >&2
+        fi
+        exit 0
+
+  startup:
+    - command: ["bash", "/home/agent/.local/bin/skein-startup.sh"]
+      user: "1000"
+      description: Link skein store into the clone, then check out the box branch
+
+memory: |
+  ## skein workspace (clone + shared .claude)
+
+  This sandbox is a private `--clone` of the repo (isolated code, full git); the
+  `.claude` store (memory/skills/hooks/mailbox + skein's turn-state probe) is a
+  shared mount linked in at startup and is LIVE across every parallel sandbox. The
+  agent runs inside a `skein` tmux session, so reconnecting re-attaches the same
+  live terminal. Coordinate with sibling boxes via the shared mailbox.

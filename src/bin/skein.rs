@@ -24,6 +24,11 @@ fn main() {
 
     let result = match cmd {
         "ls" | "status" => cmd_ls(),
+        "add" => match rest.first() {
+            Some(src) => cmd_add(src, &rest[1..]),
+            None => Err("usage: skein add <git-url|path> [--id <id>] [--agent <claude>]".into()),
+        },
+        "repos" => cmd_repos(),
         "doctor" => cmd_doctor(),
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name),
@@ -51,6 +56,8 @@ fn print_help() {
         "skein — see and steer your fleet of agent sandboxes\n\n\
 usage:\n  \
 skein [ls]            show the fleet (default)\n  \
+skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  \
+skein repos           list registered repos\n  \
 skein attach <box>    reconnect to the box's running agent session\n  \
 skein doctor          check registry + required tools (sbx/git/gh)\n  \
 skein version\n  \
@@ -63,6 +70,50 @@ $SKEIN_SHARED/sandboxes.json\n  \
     );
 }
 
+/// `skein add <git-url|path> [--id <id>] [--agent <claude>]` — register a repo so skein can launch
+/// + observe boxes for it with zero repo-side setup.
+fn cmd_add(source: &str, opts: &[String]) -> Result<(), String> {
+    let id = flag(opts, "--id");
+    let agent = flag(opts, "--agent");
+    let repo = skein::add_repo(source, id.as_deref(), agent.as_deref())?;
+    println!("{BOLD}added{RESET} {CYAN}{}{RESET}", repo.id);
+    println!("  {DIM}source{RESET}  {}", repo.source);
+    println!("  {DIM}work  {RESET}  {}", repo.work);
+    println!("  {DIM}store {RESET}  {}", repo.store);
+    if let Some(w) = skein::ssh_remote_warning(&repo.work) {
+        println!("\n\x1b[33m!\x1b[0m {w}");
+    }
+    println!(
+        "\n{DIM}launch a box:{RESET} open the cockpit and create {CYAN}{}-<branch>{RESET}",
+        repo.id
+    );
+    Ok(())
+}
+
+/// Read a `--flag value` pair out of the remaining args (returns the value if present).
+fn flag(opts: &[String], name: &str) -> Option<String> {
+    opts.iter()
+        .position(|a| a == name)
+        .and_then(|i| opts.get(i + 1))
+        .cloned()
+}
+
+fn cmd_repos() -> Result<(), String> {
+    let repos = skein::load_repos();
+    if repos.is_empty() {
+        println!("{DIM}no repos yet — add one with: skein add <git-url|path>{RESET}");
+        return Ok(());
+    }
+    for r in &repos {
+        println!(
+            "{BOLD}{CYAN}{}{RESET}  {DIM}{}{RESET}\n  {} {DIM}({}){RESET}",
+            r.id, r.agent, r.source, r.work
+        );
+    }
+    println!("\n{DIM}{} repos{RESET}", repos.len());
+    Ok(())
+}
+
 fn cmd_ls() -> Result<(), String> {
     // Same sbx-sourced, "who-needs-me-first"-sorted fleet the web cockpit shows (sbx ∪ registry).
     let views = skein::load_views()?;
@@ -71,10 +122,22 @@ fn cmd_ls() -> Result<(), String> {
         return Ok(());
     }
 
-    let w_name = views.iter().map(|v| v.name.len()).fold("BOX".len(), usize::max);
-    let w_st = views.iter().map(|v| v.state.len()).fold("STATE".len(), usize::max);
-    let w_br = views.iter().map(|v| v.branch.len()).fold("BRANCH".len(), usize::max);
-    let w_age = views.iter().map(|v| v.age.len()).fold("SEEN".len(), usize::max);
+    let w_name = views
+        .iter()
+        .map(|v| v.name.len())
+        .fold("BOX".len(), usize::max);
+    let w_st = views
+        .iter()
+        .map(|v| v.state.len())
+        .fold("STATE".len(), usize::max);
+    let w_br = views
+        .iter()
+        .map(|v| v.branch.len())
+        .fold("BRANCH".len(), usize::max);
+    let w_age = views
+        .iter()
+        .map(|v| v.age.len())
+        .fold("SEEN".len(), usize::max);
 
     println!(
         "{BOLD}  {}  {}  {}  {}  DIR{RESET}",
@@ -177,7 +240,55 @@ fn cmd_doctor() -> Result<(), String> {
             println!("{WARN} gh auth       `gh auth status` not OK {DIM}(fine if a proxy injects credentials){RESET}");
         }
     }
+
+    // skein-managed repos + its own kit (the repo-agnostic path).
+    let repos = skein::load_repos();
+    println!(
+        "{} repos         {DIM}{} managed{RESET}",
+        if repos.is_empty() { WARN } else { OK },
+        repos.len()
+    );
+    let kit = skein::skein_home().join("kit").join("spec.yaml");
+    if kit.exists() {
+        println!("{OK} kit           {DIM}{}{RESET}", kit.display());
+    } else {
+        println!("{WARN} kit           {DIM}not written yet (server startup / `skein add` installs it){RESET}");
+    }
+    let cfg = skein::load_config();
+    println!(
+        "{DIM}·{RESET} settings      tmux-install:{} gh-seed:{} ssh-key:{} {DIM}(~/.skein/config.json){RESET}",
+        on_off(cfg.install_tmux),
+        on_off(cfg.seed_gh_secret),
+        if cfg.ssh_key.is_empty() { "—" } else { "set" },
+    );
+    if have("ssh-add") {
+        let loaded = Command::new("ssh-add")
+            .arg("-l")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if loaded {
+            println!(
+                "{OK} ssh agent     keys loaded {DIM}(forwarded into boxes for SSH push){RESET}"
+            );
+        } else {
+            println!("{WARN} ssh agent     no keys loaded {DIM}(SSH git push from boxes will fail — set an ssh key in settings){RESET}");
+        }
+    }
+
+    // The sbx-dependent facts skein can't verify itself — surface them so they're not silent.
+    println!(
+        "\n{DIM}host notes:{RESET}\n  {DIM}· reconnect = `sbx run --name <box> -- --continue` (resumes the agent's last session so it shows\n    up). sbx has no live-process attach, so this resumes the transcript in a fresh session.\n  · the shell tab uses a persistent tmux session when tmux is present, else a plain shell;\n    skein auto-installs tmux unless disabled in settings.\n  · push from a box: HTTPS uses the proxy's creds + the seeded gh token (no setup); SSH remotes use\n    your forwarded host SSH agent (works iff it has the key loaded), per sbx's credentials docs.{RESET}"
+    );
     Ok(())
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 /// Is `prog` runnable on PATH? (NotFound = absent; any other outcome means it exists.)

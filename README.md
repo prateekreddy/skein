@@ -119,6 +119,41 @@ State prefers the explicit status a box's hooks report (`needs-input` / `waiting
 2. `$SKEIN_SHARED/sandboxes.json`
 3. `<git-toplevel>/../skein-shared/.claude/sandboxes.json`
 
+## Adding repos
+
+skein manages a set of repos itself — you don't wire anything into the repo. Add one by URL
+(skein clones it) or by local path (skein adopts it in place):
+
+```
+skein add https://github.com/org/app.git      # clones into ~/.skein/repos/app/work
+skein add /path/to/checkout                    # adopts an existing local clone
+skein repos                                    # list managed repos
+```
+
+…or in the cockpit: **⌘K → "Add a repo…"**. Adding a repo provisions a shared `.claude` store
+from scratch (mailbox + skein's turn-state probe), installs skein's own sbx kit, and seeds the
+host `gh` token into sbx so boxes can push/open PRs. Boxes are then named `<repo>-<branch>`; create
+one from the **New box** dialog (which gains a repo selector once you manage more than one).
+
+The registry lives at `~/.skein/repos.json` (override the home with `$SKEIN_HOME`). The kit is
+embedded in the binary and written to `~/.skein/kit/` — no repo-side `dev-sandbox/kit` needed. The
+agent runs inside a `skein` tmux session, so reconnecting (attach) re-joins the **same** live
+terminal instead of spawning a parallel `claude --continue`.
+
+**Branch names with slashes just work.** Type `feat/auth` in the New box dialog: the sbx box is
+named with a slug (`<repo>-feat-auth`, since sbx names can't contain `/`) while the box actually
+checks out the real `feat/auth` branch.
+
+**Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): auto-install tmux in boxes,
+seed/force the gh token, default agent, base branch for PRs, confirm-before-Destroy, and an SSH key
+path. Each matching `$SKEIN_*` env var still overrides the saved value for headless use.
+
+**Git auth inside boxes.** HTTPS remotes push with no setup — the sbx proxy injects GitHub
+credentials and skein also seeds the `gh` token. For SSH remotes (`git@…`/`ssh://…`), sbx forwards
+your **host SSH agent** into the box (the private key stays on the host); set an SSH key path in
+Settings and skein `ssh-add`s it so it's available to forward. `skein add` warns up-front if a repo's
+`origin` is SSH so you can switch it to HTTPS or load the key.
+
 ## Configuration
 
 `skein doctor` reports the resolved registry, bind address, and whether `sbx`/`git`/`gh`
@@ -129,6 +164,10 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 
 | var | what | default |
 |-----|------|---------|
+| `SKEIN_HOME` | skein's own dir (`repos.json`, embedded `kit/`, cloned repos) | `~/.skein` |
+| `SKEIN_NO_GH_SECRET` | set to skip seeding the host `gh` token into sbx (`sbx secret set -g github`) | — |
+| `SKEIN_FORCE_GH_SECRET` | set to overwrite an existing sbx `github` secret with the current token (refresh on rotation) | — |
+| `SKEIN_SSH_KEY` | path to a private SSH key skein `ssh-add`s into the host agent (sbx forwards it into boxes for SSH git push; the key never enters a box) | — |
 | `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
 | `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |
 | `SKEIN_ADDR` | server bind address | `127.0.0.1:7878` |
@@ -137,11 +176,11 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
 | `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
 | `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}`/`{name}` substituted; relative to `$SKEIN_REPO`. **Optional**: unset, skein builds the launch itself (below), so the repo needs no launch script | _(native builder)_ |
-| `SKEIN_KIT` | sbx kit for the native launch (`--kit`) — wires the shared store into the clone + runs the bootstrap; resolved under `$SKEIN_REPO` if relative | — |
-| `SKEIN_AGENT` | sbx agent for new boxes (the per-runtime seam) — `claude` \| `codex` \| … | `claude` |
-| `SKEIN_STORE` | shared `.claude` store to mount into a new box | `$SKEIN_REGISTRY`'s dir |
-| `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
-| `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} /bin/bash` |
+| `SKEIN_KIT` | _(legacy single-repo fallback)_ sbx kit for the native launch when the box isn't in `repos.json`; managed repos use skein's own embedded kit | — |
+| `SKEIN_AGENT` | sbx agent positional override (the per-runtime seam). For a managed repo, defaults to skein's tmux `skein-agent` wrapper; set to `claude` if sbx rejects a path positional or the image lacks tmux | _(wrapper)_ |
+| `SKEIN_STORE` | _(legacy single-repo fallback)_ store to mount when the box isn't in `repos.json` | `$SKEIN_REGISTRY`'s dir |
+| `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein` |
+| `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein-shell` |
 | `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | `sbx ls --json` |
 | `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
 | `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; halts the sandbox to free compute (resume via attach). Non-destructive | `sbx stop {name}` |

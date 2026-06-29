@@ -80,6 +80,10 @@ pub struct BoxView {
     pub branch: String,
     pub age: String,
     pub dir: String,
+    /// the registered repo this box belongs to (`<repo>-<branch>`), empty if it matches none.
+    /// Lets the cockpit group rows by repo once more than one is managed.
+    #[serde(default)]
+    pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffStat>,
     /// one-line gist of the box's last reported signal (the inbox headline) — the blocking
@@ -247,10 +251,13 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 .filter(|d| !d.is_empty())
                 .or_else(|| s.map(|x| x.dir.clone()).filter(|d| !d.is_empty()))
                 .unwrap_or_default();
+            // The repo this box belongs to (if any), used for grouping + branch fallback.
+            let repo = repo_for_box(&name);
             let branch = r
                 .map(|x| x.branch.clone())
                 .filter(|b| !b.is_empty() && b != "?")
                 .or_else(|| git_branch_for(&dir))
+                .or_else(|| repo.as_ref().map(|rp| branch_from_box(&name, rp)))
                 .unwrap_or_default();
             // Reuse the registry-derived state logic; status (turn-state) is the registry's specific
             // datum, lastSeen is only a fallback when sbx liveness is absent.
@@ -309,6 +316,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 branch,
                 age: sb.age(),
                 dir: shorten(&dir),
+                repo: repo.map(|rp| rp.id).unwrap_or_default(),
                 diff: host_diffstat(&name, &dir),
                 headline,
                 task,
@@ -564,6 +572,470 @@ pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// ───────────────────────────── skein-owned repo registry ─────────────────────────────
+//
+// skein is no longer single-repo. `~/.skein/repos.json` lists every repo skein manages; each box
+// is `<repo-id>-<branch>` and maps back to its repo by id-prefix. This is skein's OWN config —
+// distinct from the per-box `sandboxes.json` we dropped — and it's what makes "add a repo URL and
+// go" work without the repo shipping anything for skein.
+
+/// One managed repo. `work` is the host clone (for host-side git/diff + as the `sbx run` workspace);
+/// `store` is the host `.claude` skein provisions and mounts into every box for that repo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Repo {
+    pub id: String,
+    pub source: String, // git URL or local path the repo was added from
+    pub work: String,   // host working clone
+    pub store: String,  // host shared `.claude` store
+    #[serde(default = "default_agent")]
+    pub agent: String, // "claude" (codex later)
+}
+
+fn default_agent() -> String {
+    "claude".into()
+}
+
+/// skein's home dir (`$SKEIN_HOME`, else `~/.skein`): holds `repos.json`, the embedded `kit/`, and
+/// (for URL-added repos) `repos/<id>/{work,store}`.
+pub fn skein_home() -> PathBuf {
+    if let Some(h) = env::var_os("SKEIN_HOME").filter(|s| !s.is_empty()) {
+        return PathBuf::from(h);
+    }
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".skein")
+}
+
+fn repos_json() -> PathBuf {
+    skein_home().join("repos.json")
+}
+
+/// skein's app settings (`~/.skein/config.json`) — the toggles the cockpit exposes. Every field has a
+/// serde default so old/partial files keep working as new settings are added. Matching `$SKEIN_*` env
+/// vars still override these at runtime (env wins) for headless/CI use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// Have the kit `apt-get install tmux` in a box when it's missing (so the agent gets a shared
+    /// session and reconnects re-attach the same terminal). Off ⇒ the box uses whatever's installed.
+    #[serde(default = "default_true")]
+    pub install_tmux: bool,
+    /// Seed the host `gh` token into sbx (global) at startup so boxes can fetch/push/open PRs.
+    /// Off is the UI equivalent of `$SKEIN_NO_GH_SECRET`.
+    #[serde(default = "default_true")]
+    pub seed_gh_secret: bool,
+    /// Overwrite an already-set sbx `github` secret with the current token (refresh on rotation).
+    /// On is the UI equivalent of `$SKEIN_FORCE_GH_SECRET`.
+    #[serde(default)]
+    pub force_gh_secret: bool,
+    /// Default agent for newly-added repos / boxes (the per-runtime seam). `claude` for now.
+    #[serde(default = "default_agent")]
+    pub default_agent: String,
+    /// Base branch for `gh pr create` / merge when a repo doesn't specify one. Empty ⇒ repo default.
+    /// UI equivalent of `$SKEIN_BASE`.
+    #[serde(default)]
+    pub base_branch: String,
+    /// Confirm before a destructive **Destroy** (clone-mode boxes lose unpushed commits). The cockpit
+    /// reads this to decide whether to prompt.
+    #[serde(default = "default_true")]
+    pub confirm_destroy: bool,
+    /// Path to a private SSH key (host) to load into the host ssh-agent so sbx forwards it into boxes
+    /// for SSH git push (`git@…`/`ssh://` remotes). Empty ⇒ rely on whatever's already in the agent.
+    /// `$SKEIN_SSH_KEY` overrides. The key never enters a box — only the agent socket is forwarded.
+    #[serde(default)]
+    pub ssh_key: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            install_tmux: true,
+            seed_gh_secret: true,
+            force_gh_secret: false,
+            default_agent: default_agent(),
+            base_branch: String::new(),
+            confirm_destroy: true,
+            ssh_key: String::new(),
+        }
+    }
+}
+
+/// Ensure the configured SSH key is loaded in the host ssh-agent, so sbx forwards it into boxes for
+/// SSH git push. `$SKEIN_SSH_KEY` overrides the config. No key configured ⇒ no-op (the agent's
+/// existing keys, if any, are forwarded as-is). The key itself never enters a box — only the agent
+/// socket is forwarded (docs.docker.com/ai/sandboxes/security/credentials). Best-effort: returns Err
+/// (logged by callers) but never panics. Idempotent — `ssh-add` of an already-loaded key is a no-op.
+pub fn ensure_ssh_key() -> Result<(), String> {
+    let key = env::var("SKEIN_SSH_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| load_config().ssh_key);
+    let key = key.trim();
+    if key.is_empty() {
+        return Ok(());
+    }
+    let expanded = expand_tilde(key);
+    if !Path::new(&expanded).exists() {
+        return Err(format!("ssh key not found: {expanded}"));
+    }
+    let out = Command::new("ssh-add")
+        .arg(&expanded)
+        .output()
+        .map_err(|e| format!("ssh-add: {e} (is an ssh-agent running? $SSH_AUTH_SOCK)"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "ssh-add failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Expand a leading `~/` to `$HOME` (ssh-add doesn't do shell tilde expansion when called directly).
+fn expand_tilde(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            return Path::new(&home).join(rest).to_string_lossy().into_owned();
+        }
+    }
+    p.to_string()
+}
+
+fn config_json() -> PathBuf {
+    skein_home().join("config.json")
+}
+
+/// Load skein's app settings (defaults if the file is absent/malformed).
+pub fn load_config() -> Config {
+    fs::read_to_string(config_json())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Persist skein's app settings to `~/.skein/config.json`.
+pub fn save_config(c: &Config) -> Result<(), String> {
+    let home = skein_home();
+    fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
+    let bytes = serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?;
+    write_atomic(&config_json(), &home, &bytes)
+}
+
+/// Every repo skein manages (empty if none added yet / file absent or malformed).
+pub fn load_repos() -> Vec<Repo> {
+    fs::read_to_string(repos_json())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<Repo>>(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the repo list to `~/.skein/repos.json` (pretty, atomic).
+pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
+    let home = skein_home();
+    fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
+    let bytes = serde_json::to_vec_pretty(repos).map_err(|e| e.to_string())?;
+    write_atomic(&repos_json(), &home, &bytes)
+}
+
+/// The repo a box belongs to: the registered repo whose id is the box-name prefix (`<id>-<branch>`).
+/// Longest id wins, so `web` and `web-api` are unambiguous.
+pub fn repo_for_box(name: &str) -> Option<Repo> {
+    load_repos()
+        .into_iter()
+        .filter(|r| name == r.id || name.starts_with(&format!("{}-", r.id)))
+        .max_by_key(|r| r.id.len())
+}
+
+/// The branch *slug* encoded in a box name (`<id>-<branch-slug>` → `<branch-slug>`). This is the
+/// sanitized form (no `/`), used only as a fallback when the real branch isn't otherwise known — the
+/// authoritative branch (which may contain `/`, e.g. `feat/auth`) is carried in the launch spec and
+/// recovered host-side from git. See [`box_name`].
+pub fn branch_from_box(name: &str, repo: &Repo) -> String {
+    name.strip_prefix(&format!("{}-", repo.id))
+        .unwrap_or(name)
+        .to_string()
+}
+
+/// Sbx sandbox names can't carry every branch character (notably `/`), so the box name is a *slug* of
+/// the branch: anything outside `[A-Za-z0-9._-]` becomes `-`, runs collapse, ends trimmed. The real
+/// branch (`feat/auth`) is preserved separately (launch spec → `git checkout`); only the *name* is
+/// slugged (`<repo>-feat-auth`). Same branch ⇒ same name (stable), so reconnect/lookup are consistent.
+pub fn slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// The sbx box name for a repo + branch: `<repo-id>-<branch-slug>`.
+pub fn box_name(repo_id: &str, branch: &str) -> String {
+    format!("{}-{}", repo_id, slug(branch))
+}
+
+/// Is `source` a git URL (clone it) versus a local path (use in place)?
+fn is_git_url(source: &str) -> bool {
+    source.starts_with("http://")
+        || source.starts_with("https://")
+        || source.starts_with("git@")
+        || source.starts_with("ssh://")
+        || source.ends_with(".git")
+}
+
+/// Is this an SSH git remote (`git@host:…` / `ssh://…`)? sbx forwards the host SSH *agent*
+/// (`SSH_AUTH_SOCK`) into the box, so SSH push works *iff* the host agent is running with the key
+/// loaded; otherwise it'll fail and HTTPS (proxy-injected creds) is the no-setup path. See
+/// docs.docker.com/ai/sandboxes/security/credentials.
+fn is_ssh_url(s: &str) -> bool {
+    s.starts_with("git@") || s.starts_with("ssh://")
+}
+
+/// The `origin` URL of the clone at `work`, if any.
+fn remote_origin_url(work: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C", work, "remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+/// A heads-up if a managed repo's `origin` is SSH: in-box push then depends on the host SSH agent
+/// (sbx forwards `SSH_AUTH_SOCK`), so it works only when that agent has the key loaded — else switch
+/// to HTTPS. `None` for HTTPS / no origin. Surfaced by `skein add` + the cockpit so it's known
+/// up-front. Not an error; SSH is supported, just host-agent-dependent.
+pub fn ssh_remote_warning(work: &str) -> Option<String> {
+    let url = remote_origin_url(work)?;
+    if !is_ssh_url(&url) {
+        return None;
+    }
+    // If a key is configured, skein loads it into the agent (which sbx forwards) — so it's set up;
+    // only note the network-policy caveat. Otherwise spell out the agent requirement + HTTPS fallback.
+    let key_configured = env::var("SKEIN_SSH_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some(load_config().ssh_key).filter(|s| !s.is_empty()))
+        .is_some();
+    if key_configured {
+        return Some(format!(
+            "origin is an SSH remote ({url}). skein loads your configured key into the ssh-agent (sbx forwards it into boxes), so push should work — just ensure the sandbox network policy allows {}.",
+            host_of(&url).unwrap_or("the git host")
+        ));
+    }
+    let mut msg = format!(
+        "origin is an SSH remote ({url}). In-box push uses your host's forwarded SSH agent, so it works only if a key is loaded — set one in Settings (skein will `ssh-add` it), or it must already be in your agent."
+    );
+    if let Some(h) = ssh_to_https(&url) {
+        msg.push_str(&format!(
+            " For a no-setup path, switch to HTTPS:  git -C {work} remote set-url origin {h}"
+        ));
+    }
+    Some(msg)
+}
+
+/// Host component of an SSH git URL (for the network-policy hint). `None` if unparseable.
+fn host_of(url: &str) -> Option<&str> {
+    if let Some(rest) = url.strip_prefix("git@") {
+        return rest.split(':').next();
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
+        return rest.split(['/', ':']).next();
+    }
+    None
+}
+
+/// Best-effort `git@github.com:org/repo.git` / `ssh://git@host/org/repo.git` → `https://host/org/repo.git`.
+/// Returns `None` for shapes we don't recognise (caller just omits the suggestion).
+fn ssh_to_https(url: &str) -> Option<String> {
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return Some(format!("https://{host}/{path}"));
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.strip_prefix("git@").unwrap_or(rest);
+        return Some(format!("https://{rest}"));
+    }
+    None
+}
+
+/// Derive a repo id from a source: the last path/URL component, minus a trailing `.git`.
+fn repo_id_from_source(source: &str) -> String {
+    let last = source
+        .trim_end_matches('/')
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(source);
+    last.strip_suffix(".git").unwrap_or(last).to_string()
+}
+
+/// Add a repo to skein: clone it (URL) or adopt it in place (local path), provision its shared store
+/// and skein's kit, seed gh auth, and record it in `repos.json`. Returns the stored `Repo`. This is
+/// the whole `skein add <url|path>` flow; the box launch then needs nothing from the repo.
+pub fn add_repo(source: &str, id: Option<&str>, agent: Option<&str>) -> Result<Repo, String> {
+    let id = id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| repo_id_from_source(source));
+    if id.is_empty() {
+        return Err("could not derive a repo id — pass one explicitly".into());
+    }
+    let home = skein_home();
+    let store = home.join("repos").join(&id).join("store").join(".claude");
+
+    let work = if is_git_url(source) {
+        // Clone the URL into skein's managed area.
+        let work = home.join("repos").join(&id).join("work");
+        if work.join(".git").is_dir() {
+            // already cloned — leave it (the user can pull); just (re)register.
+        } else {
+            // An SSH URL needs a key in the host agent for the clone itself; load it first.
+            if is_ssh_url(source) {
+                let _ = ensure_ssh_key();
+            }
+            fs::create_dir_all(work.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
+            let out = Command::new("git")
+                .args(["clone", source])
+                .arg(&work)
+                .output()
+                .map_err(|e| format!("git clone: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "git clone failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        }
+        work
+    } else {
+        // Local path: use it in place.
+        let p = PathBuf::from(source);
+        let p = p.canonicalize().unwrap_or(p);
+        if !p.join(".git").exists() {
+            return Err(format!("{} is not a git repo", p.display()));
+        }
+        p
+    };
+
+    ensure_kit()?;
+    ensure_store(&store)?;
+    let _ = ensure_gh_secret(); // best-effort; private clones/PRs need it, but absence isn't fatal
+
+    let repo = Repo {
+        id: id.clone(),
+        source: source.to_string(),
+        work: work.to_string_lossy().into_owned(),
+        store: store.to_string_lossy().into_owned(),
+        agent: agent
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| load_config().default_agent),
+    };
+    let mut repos = load_repos();
+    repos.retain(|r| r.id != id); // replace any existing entry with the same id
+    repos.push(repo.clone());
+    repos.sort_by(|a, b| a.id.cmp(&b.id));
+    save_repos(&repos)?;
+    Ok(repo)
+}
+
+/// Seed the host's GitHub token into sbx globally so every box can fetch/push/open PRs:
+/// `sbx secret set -g github -t "$(gh auth token)"`. Best-effort; skip with $SKEIN_NO_GH_SECRET.
+/// Done once (global) rather than per-box, sidestepping the "box must exist first" timing.
+///
+/// Idempotent: sbx refuses to overwrite an existing secret without `-f`, so an already-seeded token
+/// is treated as success (the boxes can already push) — not an error. Set $SKEIN_FORCE_GH_SECRET to
+/// pass `-f` and refresh the token (e.g. after `gh auth refresh` / rotation).
+pub fn ensure_gh_secret() -> Result<(), String> {
+    let cfg = load_config();
+    // env wins over the UI setting (headless/CI); either can disable seeding.
+    if env::var_os("SKEIN_NO_GH_SECRET").is_some() || !cfg.seed_gh_secret {
+        return Ok(());
+    }
+    let token = Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .map_err(|e| format!("gh auth token: {e}"))?;
+    if !token.status.success() {
+        return Err("gh auth token failed (run `gh auth login` on the host)".into());
+    }
+    let token = String::from_utf8_lossy(&token.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err("gh auth token was empty".into());
+    }
+    let force = env::var_os("SKEIN_FORCE_GH_SECRET").is_some() || cfg.force_gh_secret;
+    let mut args = vec!["secret", "set", "-g", "github", "-t", &token];
+    if force {
+        args.push("-f");
+    }
+    let out = Command::new("sbx")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("sbx secret set: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // Not forcing + the secret is already there → boxes can already push; that's success, not failure.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !force && stderr.contains("already exists") {
+        return Ok(());
+    }
+    Err(format!("sbx secret set failed: {}", stderr.trim()))
+}
+
+// ───────────────────────────── kit / store provisioning ─────────────────────────────
+
+const KIT_SPEC_YAML: &str = include_str!("kit/spec.yaml");
+
+/// Install skein's own sbx kit into `~/.skein/kit/spec.yaml` so native launch can `--kit` it without
+/// the repo shipping a kit. Embedded via `include_str!`; rewritten each call (idempotent).
+pub fn ensure_kit() -> Result<PathBuf, String> {
+    let kit = skein_home().join("kit");
+    fs::create_dir_all(&kit).map_err(|e| format!("mkdir {}: {e}", kit.display()))?;
+    let spec = kit.join("spec.yaml");
+    fs::write(&spec, KIT_SPEC_YAML).map_err(|e| format!("write {}: {e}", spec.display()))?;
+    Ok(kit)
+}
+
+/// Provision a shared store from scratch at `store` (a `.claude` dir): the dirs skein + the probe
+/// need, plus the turn-state probe itself. Idempotent. Lets a brand-new repo work with no existing
+/// `.claude` and no repo store-template.
+pub fn ensure_store(store: &Path) -> Result<(), String> {
+    for d in ["mailbox", "status", "tasks", "skein/launch", "skein/bin"] {
+        let p = store.join(d);
+        fs::create_dir_all(&p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
+    }
+    ensure_probe_in(store)
+}
+
+/// Record, for box `name`, what its kit startup needs (branch + agent) at
+/// `<store>/skein/launch/<name>.json`. The kit finds this file (the store is mounted) and checks out
+/// the branch — our env-free channel into the box, since `sbx run --env` is unconfirmed.
+fn write_launch_spec(name: &str, branch: &str, repo: &Repo) -> Result<(), String> {
+    let dir = Path::new(&repo.store).join("skein").join("launch");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let body = serde_json::json!({
+        "branch": branch,
+        "agent": repo.agent,
+        "install_tmux": load_config().install_tmux,
+    });
+    let bytes = serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join(format!("{name}.json")), &dir, &bytes)
+}
+
 /// The host shell command that launches a new box for `branch`. Override with
 /// $SKEIN_LAUNCH_CMD (a template; `{branch}` is substituted); default assumes
 /// `setup-sandbox.sh` is on PATH.
@@ -575,7 +1047,7 @@ pub fn launch_command(name: &str, branch: &str) -> String {
                 .replace("{name}", &sh_quote(name));
         }
     }
-    native_launch_command(name)
+    native_launch_command(name, branch)
 }
 
 /// skein's own launch command, used when `$SKEIN_LAUNCH_CMD` is unset — so a box can be created
@@ -586,7 +1058,12 @@ pub fn launch_command(name: &str, branch: &str) -> String {
 /// seam; `kit` (`$SKEIN_KIT`, resolved under `$SKEIN_REPO`) wires the shared store into the clone and
 /// runs the bootstrap; `store` (`$SKEIN_STORE`, else the store skein already reads) is mounted so the
 /// kit can link it. Runs with cwd `$SKEIN_REPO`, so `.` is the repo workspace.
-fn native_launch_command(name: &str) -> String {
+fn native_launch_command(name: &str, branch: &str) -> String {
+    // Repo-managed path: if the box belongs to a registered repo, build entirely from `repos.json`
+    // + skein's own kit — no `SKEIN_REPO`/`SKEIN_KIT` env, no repo-side script.
+    if let Some(repo) = repo_for_box(name) {
+        return repo_launch_command(name, &repo, branch);
+    }
     let agent = env::var("SKEIN_AGENT")
         .ok()
         .filter(|s| !s.is_empty())
@@ -604,6 +1081,53 @@ fn native_launch_command(name: &str) -> String {
         parts.push(sh_quote(&store));
     }
     parts.join(" ")
+}
+
+/// Launch line for a registered repo, built from `repos.json` + skein's embedded kit:
+///   `sbx run --clone --kit <home>/kit --name <id>-<branch> <wrapper> <work> <store>`
+/// The agent positional is a registered sbx agent **name** (`sbx run` only accepts the built-in set:
+/// claude, codex, …; each has its own image, so it can't be a path or a wrapper command). It's the
+/// repo's `agent` (`$SKEIN_AGENT` overrides). `<work>` is the host clone; `<store>` is mounted at its
+/// host path so the kit links it in. The kit checks out the branch (from the launch spec) before the
+/// agent starts. Reconnect is sbx-native — `sbx run --name <box>` re-attaches (see [`attach_argv`]),
+/// so no in-box session wrapper is needed. Side effect: writes the launch spec + ensures kit/store
+/// (best-effort; a failure only logs, the command still builds).
+fn repo_launch_command(name: &str, repo: &Repo, branch: &str) -> String {
+    // The real branch (may contain `/`, e.g. feat/auth) comes from the caller; the box *name* is its
+    // slug. Fall back to the name's slug only if the caller didn't pass one (e.g. a bare relaunch).
+    let branch = if branch.trim().is_empty() {
+        branch_from_box(name, repo)
+    } else {
+        branch.trim().to_string()
+    };
+    if let Err(e) = ensure_kit() {
+        eprintln!("skein: ensure_kit: {e}");
+    }
+    if let Err(e) = ensure_store(Path::new(&repo.store)) {
+        eprintln!("skein: ensure_store: {e}");
+    }
+    if let Err(e) = write_launch_spec(name, &branch, repo) {
+        eprintln!("skein: write_launch_spec: {e}");
+    }
+    let kit = skein_home().join("kit");
+    let agent = env::var("SKEIN_AGENT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| (!repo.agent.is_empty()).then(|| repo.agent.clone()))
+        .unwrap_or_else(|| "claude".into());
+    [
+        "sbx".to_string(),
+        "run".into(),
+        "--clone".into(),
+        "--kit".into(),
+        sh_quote(&kit.to_string_lossy()),
+        "--name".into(),
+        sh_quote(name),
+        sh_quote(&agent), // registered sbx agent name (claude | codex | …)
+        sh_quote(&repo.work),
+        sh_quote(&repo.store),
+    ]
+    .join(" ")
 }
 
 /// Resolve a possibly-relative path against `$SKEIN_REPO` (the dir launches run in), so a relative
@@ -677,8 +1201,16 @@ pub fn save_pasted_image(name: &str, ext: &str, bytes: &[u8]) -> Result<String, 
     if bytes.is_empty() {
         return Err("empty image".into());
     }
-    let ext: String = ext.chars().filter(char::is_ascii_alphanumeric).take(5).collect();
-    let ext = if ext.is_empty() { "png".into() } else { ext.to_ascii_lowercase() };
+    let ext: String = ext
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(5)
+        .collect();
+    let ext = if ext.is_empty() {
+        "png".into()
+    } else {
+        ext.to_ascii_lowercase()
+    };
     // unique-enough: millis-since-epoch + a process-local counter (no collisions within a run).
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -764,7 +1296,11 @@ pub fn create_pr(name: &str) -> Result<String, String> {
         )?,
         _ => {
             let mut args = vec!["pr", "create", "--head", &branch, "--fill"];
-            let base = env::var("SKEIN_BASE").unwrap_or_default();
+            // base branch: $SKEIN_BASE wins (headless), else the cockpit setting, else repo default.
+            let base = env::var("SKEIN_BASE")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| load_config().base_branch);
             if !base.is_empty() {
                 args.push("--base");
                 args.push(&base);
@@ -1362,30 +1898,54 @@ fn compute_collisions() -> Vec<Collision> {
     out
 }
 
-/// The full `sbx` argv that reconnects to box `name` (the leading program is `sbx`;
-/// this returns only its arguments). `_dir` is currently unused for the default agent
-/// invocation (claude resolves the conversation by the box's cwd) but is kept in the
-/// signature so callers needn't special-case it and the `{dir}` override stays uniform.
+/// The full `sbx` argv that reconnects to box `name` (the leading program is `sbx`; this returns only
+/// its arguments). `_dir` is unused for the default invocation but kept so the `{dir}` override stays
+/// uniform.
 ///
-/// `sbx run --name <box>` runs the box's agent (claude); a bare run starts a *fresh*
-/// conversation. To *continue* the session we pass claude's own `--continue` flag. The
-/// `--` is load-bearing twice over: `sbx` is a cobra CLI that would otherwise parse
-/// `--continue` as its own flag, and it marks where sbx stops and the agent's args begin.
+/// `sbx run --name <box>` re-attaches to the persistent sandbox and starts an agent session reading
+/// the agent from its spec (per `sbx run --help`). Each session is *fresh*, so to make a prior
+/// conversation show up we pass the agent's own resume flag — `claude --continue`. The `--` is
+/// load-bearing twice: `sbx` (a cobra CLI) would otherwise eat `--continue` as its own flag, and it
+/// marks where sbx args end and the agent's begin. The resume flag is per-agent (the runtime seam):
+/// claude → `--continue`; unknown agents get a bare re-attach. Override wholesale with
+/// `$SKEIN_ATTACH_CMD`. (NB: sbx has no live-process attach — `--continue` resumes the transcript in
+/// a new session; a *single shared live* PTY would need the agent running inside tmux, which the
+/// registered-agent / per-agent-image model doesn't currently allow. See docs/self-sufficient.md.)
 pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
-    vec![
-        "run".into(),
-        "--name".into(),
-        name.into(),
-        "--".into(),
-        "--continue".into(),
-    ]
+    let agent = repo_for_box(name)
+        .map(|r| r.agent)
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| "claude".into());
+    let mut v = vec!["run".into(), "--name".into(), name.into()];
+    v.extend(resume_args(&agent));
+    v
+}
+
+/// The agent's "resume my last session" args, appended after `--` on re-attach (the per-runtime seam).
+/// claude resumes with `--continue`; add other agents' flags here as they're supported. Empty ⇒ the
+/// agent has no resume flag (bare re-attach).
+fn resume_args(agent: &str) -> Vec<String> {
+    match agent {
+        "claude" => vec!["--".into(), "--continue".into()],
+        // codex/others: fill in their resume flag when supported; bare re-attach until then.
+        _ => vec![],
+    }
 }
 
 /// `sbx` argv for an interactive *shell* in the box — a plain terminal to run commands in, separate
-/// from the agent session. `sbx exec -it <box> /bin/bash` (per the Docker Sandboxes CLI). Override
-/// the whole command with $SKEIN_SHELL_CMD (run via `sh -c`; `{name}`/`{dir}` substituted).
+/// from the agent session. Uses a persistent `skein-shell` tmux session when tmux is present (so this
+/// terminal survives reconnects), and falls back to a plain login shell when it isn't — so it never
+/// breaks on an image without tmux. Override the whole command with $SKEIN_SHELL_CMD (`sh -c`).
 pub fn shell_argv(name: &str) -> Vec<String> {
-    vec!["exec".into(), "-it".into(), name.into(), "/bin/bash".into()]
+    vec![
+        "exec".into(),
+        "-it".into(),
+        name.into(),
+        "bash".into(),
+        "-lc".into(),
+        "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s skein-shell || exec bash -li"
+            .into(),
+    ]
 }
 
 /// The narrative signal a box writes on each turn-end (box-session.sh): the last assistant
@@ -1464,8 +2024,13 @@ const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh"
 /// into every box, so this is how skein gets working/waiting/needs-input + task for any box without
 /// the repo shipping a thing. Best-effort: returns Err but never panics.
 pub fn ensure_probe() -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     let store = store_dir().ok_or("no shared store to install the probe into")?;
+    ensure_probe_in(&store)
+}
+
+/// `ensure_probe` against a specific store dir (the store skein reads, or a freshly-provisioned one).
+pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
     let bin = store.join("skein").join("bin");
     fs::create_dir_all(&bin).map_err(|e| format!("mkdir {}: {e}", bin.display()))?;
     for (file, body) in [
@@ -1483,7 +2048,7 @@ pub fn ensure_probe() -> Result<(), String> {
         .unwrap_or_else(|| serde_json::json!({}));
     let merged = settings_with_probe(&current);
     let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
-    write_atomic(&settings, &store, &bytes)
+    write_atomic(&settings, store, &bytes)
 }
 
 /// Add skein's probe hooks to a `settings.json` value, preserving every existing hook and never
@@ -1492,8 +2057,16 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     use serde_json::{json, Value};
     // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite.
     let entries: [(&str, String, Option<&str>); 4] = [
-        ("UserPromptSubmit", format!("{PROBE_STATUS_CMD} working"), None),
-        ("Notification", format!("{PROBE_STATUS_CMD} needs-input"), None),
+        (
+            "UserPromptSubmit",
+            format!("{PROBE_STATUS_CMD} working"),
+            None,
+        ),
+        (
+            "Notification",
+            format!("{PROBE_STATUS_CMD} needs-input"),
+            None,
+        ),
         ("Stop", format!("{PROBE_STATUS_CMD} waiting"), None),
         ("PostToolUse", PROBE_TASK_CMD.to_string(), Some("TodoWrite")),
     ];
@@ -1502,9 +2075,7 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         out = json!({});
     }
     let root = out.as_object_mut().unwrap();
-    let hooks = root
-        .entry("hooks")
-        .or_insert_with(|| json!({}));
+    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
     if !hooks.is_object() {
         *hooks = json!({});
     }
@@ -1517,13 +2088,10 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         let arr = arr.as_array_mut().unwrap();
         // idempotent: skip if an entry already wires this exact command.
         let present = arr.iter().any(|e| {
-            e.get("hooks")
-                .and_then(|h| h.as_array())
-                .is_some_and(|hs| {
-                    hs.iter().any(|h| {
-                        h.get("command").and_then(|c| c.as_str()) == Some(cmd.as_str())
-                    })
-                })
+            e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                hs.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd.as_str()))
+            })
         });
         if present {
             continue;
@@ -1768,7 +2336,10 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
     let sb = Sandbox {
         branch: branch.clone(),
         dir: dir.clone(),
-        last_seen: reg.as_ref().map(|r| r.last_seen.clone()).unwrap_or_default(),
+        last_seen: reg
+            .as_ref()
+            .map(|r| r.last_seen.clone())
+            .unwrap_or_default(),
         status: current_status(name)
             .or_else(|| reg.as_ref().map(|r| r.status.clone()))
             .filter(|s| !s.is_empty())
@@ -1925,7 +2496,10 @@ mod tests {
 
         // A name-keyed object map: {name: {..}}.
         let obj = r#"{"z":{"status":"running"}}"#;
-        assert_eq!(by_name(&parse_boxes(obj), "z").live, Some(Liveness::Running));
+        assert_eq!(
+            by_name(&parse_boxes(obj), "z").live,
+            Some(Liveness::Running)
+        );
 
         // Garbage / empty → no boxes, so fleet_boxes() returns None and the caller falls back.
         assert!(parse_boxes("not json").is_empty());
@@ -1956,8 +2530,140 @@ mod tests {
         assert_eq!(calender.agent, "claude");
         // the repo workspace is chosen, the shared .claude store is excluded.
         assert_eq!(calender.dir, "/x/gadget-demo");
-        assert_eq!(by_name(&v, "claude-agent-memory-consolidation").live, Some(Liveness::Stopped));
+        assert_eq!(
+            by_name(&v, "claude-agent-memory-consolidation").live,
+            Some(Liveness::Stopped)
+        );
         assert_eq!(by_name(&v, "thing-master").dir, "/x/thing");
+    }
+
+    #[test]
+    fn repo_id_and_url_detection() {
+        assert_eq!(
+            repo_id_from_source("https://github.com/acme/gadget-demo.git"),
+            "gadget-demo"
+        );
+        assert_eq!(
+            repo_id_from_source("git@github.com:org/My-Repo.git"),
+            "My-Repo"
+        );
+        assert_eq!(repo_id_from_source("/Users/you/work/thing/"), "thing");
+        assert!(is_git_url("https://github.com/x/y.git"));
+        assert!(is_git_url("git@github.com:x/y.git"));
+        assert!(is_git_url("ssh://git@host/x.git"));
+        assert!(!is_git_url("/Users/you/work/thing"));
+    }
+
+    #[test]
+    fn repo_for_box_matches_longest_id_prefix() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let repos = vec![
+            Repo {
+                id: "web".into(),
+                source: "s".into(),
+                work: "/w".into(),
+                store: "/s".into(),
+                agent: "claude".into(),
+            },
+            Repo {
+                id: "web-api".into(),
+                source: "s".into(),
+                work: "/w".into(),
+                store: "/s".into(),
+                agent: "claude".into(),
+            },
+        ];
+        save_repos(&repos).unwrap();
+        // longest matching id wins, so "web-api-feat-x" is web-api/feat-x, not web/api-feat-x.
+        let r = repo_for_box("web-api-feat-x").unwrap();
+        assert_eq!(r.id, "web-api");
+        assert_eq!(branch_from_box("web-api-feat-x", &r), "feat-x");
+        let r2 = repo_for_box("web-login").unwrap();
+        assert_eq!(r2.id, "web");
+        assert_eq!(branch_from_box("web-login", &r2), "login");
+        assert!(repo_for_box("other-x").is_none());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn repo_launch_command_uses_skein_kit_and_wrapper() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::remove_var("SKEIN_AGENT");
+        let store = home.join("st").join(".claude");
+        let repo = Repo {
+            id: "thing".into(),
+            source: "s".into(),
+            work: "/work/thing".into(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "claude".into(),
+        };
+        // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
+        let cmd = repo_launch_command("thing-feat-auth", &repo, "feat/auth");
+        assert!(cmd.contains("sbx run --clone --kit"));
+        assert!(cmd.contains("kit'") || cmd.contains("/kit"));
+        assert!(cmd.contains("--name 'thing-feat-auth'"));
+        assert!(cmd.contains("'claude'")); // registered sbx agent name as the positional
+        assert!(cmd.contains("'/work/thing'"));
+        // the launch spec carries the real branch (feat/auth) for the kit to check out — not the slug
+        let spec = store
+            .join("skein")
+            .join("launch")
+            .join("thing-feat-auth.json");
+        let txt = fs::read_to_string(&spec).unwrap();
+        assert!(txt.contains("\"branch\": \"feat/auth\""), "spec was: {txt}");
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn ssh_url_detection_and_https_conversion() {
+        assert!(is_ssh_url("git@github.com:org/repo.git"));
+        assert!(is_ssh_url("ssh://git@github.com/org/repo.git"));
+        assert!(!is_ssh_url("https://github.com/org/repo.git"));
+        assert_eq!(
+            ssh_to_https("git@github.com:org/repo.git").as_deref(),
+            Some("https://github.com/org/repo.git")
+        );
+        assert_eq!(
+            ssh_to_https("ssh://git@gitlab.com/org/repo.git").as_deref(),
+            Some("https://gitlab.com/org/repo.git")
+        );
+        assert_eq!(host_of("git@github.com:org/repo.git"), Some("github.com"));
+        assert_eq!(
+            host_of("ssh://git@gitlab.com/org/repo.git"),
+            Some("gitlab.com")
+        );
+    }
+
+    #[test]
+    fn slug_and_box_name_handle_slashes() {
+        assert_eq!(slug("feat/auth"), "feat-auth");
+        assert_eq!(slug("feat/auth/v2"), "feat-auth-v2");
+        assert_eq!(slug("user@host~weird"), "user-host-weird");
+        assert_eq!(slug("keep.dots_and-dashes"), "keep.dots_and-dashes");
+        assert_eq!(slug("/leading/and/trailing/"), "leading-and-trailing");
+        assert_eq!(box_name("thing", "feat/auth"), "thing-feat-auth");
+    }
+
+    #[test]
+    fn ensure_store_and_kit_provision_layout() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("repos").join("x").join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        for d in ["mailbox", "status", "tasks", "skein/launch", "skein/bin"] {
+            assert!(store.join(d).is_dir(), "missing {d}");
+        }
+        // probe scripts + settings landed in the fresh store
+        assert!(store.join("skein/bin/box-status.sh").is_file());
+        assert!(store.join("settings.json").is_file());
+        let kit = ensure_kit().unwrap();
+        assert!(kit.join("spec.yaml").is_file());
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -1974,7 +2680,9 @@ mod tests {
         // existing hooks are preserved …
         assert_eq!(merged["statusLine"]["command"], "statusline.sh");
         let ups = merged["hooks"]["UserPromptSubmit"].as_array().unwrap();
-        assert!(ups.iter().any(|e| e["hooks"][0]["command"] == "slice-gate.sh"));
+        assert!(ups
+            .iter()
+            .any(|e| e["hooks"][0]["command"] == "slice-gate.sh"));
         // … and skein's are added.
         assert!(ups.iter().any(|e| e["hooks"][0]["command"]
             .as_str()
@@ -1997,7 +2705,11 @@ mod tests {
     fn settings_with_probe_from_empty() {
         let merged = settings_with_probe(&serde_json::json!({}));
         for ev in ["UserPromptSubmit", "Notification", "Stop", "PostToolUse"] {
-            assert_eq!(merged["hooks"][ev].as_array().unwrap().len(), 1, "missing {ev}");
+            assert_eq!(
+                merged["hooks"][ev].as_array().unwrap().len(),
+                1,
+                "missing {ev}"
+            );
         }
     }
 
@@ -2017,11 +2729,13 @@ mod tests {
         assert!(launch_command("thing-x", "x").contains(" 'codex' . "));
         // explicit SKEIN_LAUNCH_CMD still wins, with {branch}/{name} substituted + shell-quoted.
         env::set_var("SKEIN_LAUNCH_CMD", "setup.sh {branch} {name}");
-        assert_eq!(
-            launch_command("thing-x", "x"),
-            "setup.sh 'x' 'thing-x'"
-        );
-        for v in ["SKEIN_LAUNCH_CMD", "SKEIN_KIT", "SKEIN_AGENT", "SKEIN_STORE"] {
+        assert_eq!(launch_command("thing-x", "x"), "setup.sh 'x' 'thing-x'");
+        for v in [
+            "SKEIN_LAUNCH_CMD",
+            "SKEIN_KIT",
+            "SKEIN_AGENT",
+            "SKEIN_STORE",
+        ] {
             env::remove_var(v);
         }
     }
@@ -2280,14 +2994,26 @@ mod tests {
 
     #[test]
     fn shell_and_attach_argv_differ() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // empty home ⇒ repo_for_box finds nothing ⇒ the default agent (claude) → `--continue`.
+        env::set_var("SKEIN_HOME", tempdir());
+        // attach re-attaches and resumes the agent's session (claude → `--continue`) so a prior
+        // session shows up; the `--` separates sbx args from the agent's.
         assert_eq!(
             attach_argv("thing-x", "/d"),
             ["run", "--name", "thing-x", "--", "--continue"]
         );
-        assert_eq!(
-            shell_argv("thing-x"),
-            ["exec", "-it", "thing-x", "/bin/bash"]
-        );
+        // a non-claude agent with no resume flag gets a bare re-attach.
+        assert_eq!(resume_args("shell"), Vec::<String>::new());
+        // shell prefers a persistent tmux session but falls back to a plain shell when tmux is absent.
+        let sh = shell_argv("thing-x");
+        assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
+        assert!(sh
+            .last()
+            .unwrap()
+            .contains("tmux new-session -A -s skein-shell"));
+        assert!(sh.last().unwrap().contains("exec bash -li"));
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
