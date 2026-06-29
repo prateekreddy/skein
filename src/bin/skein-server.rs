@@ -41,6 +41,11 @@ async fn main() {
     // Pick up a local .env so the registry/repo paths needn't be typed each run (real env vars
     // still win; a malformed file is reported, not silently half-applied). See skein::load_dotenv.
     skein::load_dotenv();
+    // Install skein's turn-state probe into the shared store (idempotent), so every box reports
+    // working/waiting/needs-input + task without the repo shipping hooks. Best-effort.
+    if let Err(e) = skein::ensure_probe() {
+        eprintln!("skein: turn-state probe not installed ({e}); boxes will show live/stale only");
+    }
     // Bind is loopback-only by default; $SKEIN_ADDR overrides it. For remote access prefer
     // `tailscale serve` proxying to this loopback port (see README) over an off-loopback bind.
     let addr = std::env::var("SKEIN_ADDR")

@@ -258,7 +258,11 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 branch: branch.clone(),
                 dir: dir.clone(),
                 last_seen: r.map(|x| x.last_seen.clone()).unwrap_or_default(),
-                status: r.map(|x| x.status.clone()).unwrap_or_default(),
+                // turn-state from skein's own probe; the registry's status is a transitional fallback.
+                status: current_status(&name)
+                    .or_else(|| r.map(|x| x.status.clone()))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_default(),
             };
             let live = s.and_then(|x| x.live);
             let (mut state, mut tier) = sb.state_with(live);
@@ -1422,6 +1426,112 @@ pub fn current_task(name: &str) -> Option<String> {
     journal_next(name)
 }
 
+/// The agent turn-state skein's own probe (box-status.sh) records for a box, from
+/// `<store>/status/<name>.json` — the skein-owned replacement for the registry's `status` field.
+pub fn current_status(name: &str) -> Option<String> {
+    if !valid_name(name) {
+        return None;
+    }
+    let p = store_dir()?.join("status").join(format!("{name}.json"));
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    v.get("status")
+        .and_then(|s| s.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+// ---------- the turn-state probe (skein-owned, installed into the shared store) ----------
+// skein ships these hook scripts and wires them into the store's settings.json, so a box reports
+// working/waiting/needs-input + its current task without the *repo* providing anything. The store is
+// linked into every box by the kit, so every box's Claude loads these hooks. See docs/self-sufficient.md.
+const PROBE_STATUS_SH: &str = include_str!("probe/box-status.sh");
+const PROBE_TASK_SH: &str = include_str!("probe/box-task.sh");
+// Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
+const PROBE_STATUS_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh";
+const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh";
+
+/// Install skein's turn-state probe into the shared store: write the hook scripts to
+/// `<store>/skein/bin/` and merge their hook wiring into `<store>/settings.json` (additive +
+/// idempotent — the repo's own hooks are preserved, re-runs don't duplicate). The store is mounted
+/// into every box, so this is how skein gets working/waiting/needs-input + task for any box without
+/// the repo shipping a thing. Best-effort: returns Err but never panics.
+pub fn ensure_probe() -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let store = store_dir().ok_or("no shared store to install the probe into")?;
+    let bin = store.join("skein").join("bin");
+    fs::create_dir_all(&bin).map_err(|e| format!("mkdir {}: {e}", bin.display()))?;
+    for (file, body) in [
+        ("box-status.sh", PROBE_STATUS_SH),
+        ("box-task.sh", PROBE_TASK_SH),
+    ] {
+        let p = bin.join(file);
+        fs::write(&p, body).map_err(|e| format!("write {}: {e}", p.display()))?;
+        let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o755));
+    }
+    let settings = store.join("settings.json");
+    let current: serde_json::Value = fs::read_to_string(&settings)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let merged = settings_with_probe(&current);
+    let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
+    write_atomic(&settings, &store, &bytes)
+}
+
+/// Add skein's probe hooks to a `settings.json` value, preserving every existing hook and never
+/// duplicating skein's own on a re-run (idempotent). Pure — the testable core of `ensure_probe`.
+fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Value};
+    // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite.
+    let entries: [(&str, String, Option<&str>); 4] = [
+        ("UserPromptSubmit", format!("{PROBE_STATUS_CMD} working"), None),
+        ("Notification", format!("{PROBE_STATUS_CMD} needs-input"), None),
+        ("Stop", format!("{PROBE_STATUS_CMD} waiting"), None),
+        ("PostToolUse", PROBE_TASK_CMD.to_string(), Some("TodoWrite")),
+    ];
+    let mut out = existing.clone();
+    if !out.is_object() {
+        out = json!({});
+    }
+    let root = out.as_object_mut().unwrap();
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    if !hooks.is_object() {
+        *hooks = json!({});
+    }
+    let hooks = hooks.as_object_mut().unwrap();
+    for (event, cmd, matcher) in entries {
+        let arr = hooks.entry(event).or_insert_with(|| json!([]));
+        if !arr.is_array() {
+            *arr = json!([]);
+        }
+        let arr = arr.as_array_mut().unwrap();
+        // idempotent: skip if an entry already wires this exact command.
+        let present = arr.iter().any(|e| {
+            e.get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()) == Some(cmd.as_str())
+                    })
+                })
+        });
+        if present {
+            continue;
+        }
+        let mut entry = json!({ "hooks": [ { "type": "command", "command": cmd } ] });
+        if let Some(m) = matcher {
+            entry
+                .as_object_mut()
+                .unwrap()
+                .insert("matcher".into(), Value::String(m.to_string()));
+        }
+        arr.push(entry);
+    }
+    out
+}
+
 /// The `next …` clause of the box's most recent journal line (the ritual is `did … / next … /
 /// blocked-on …`) — a free, end-of-turn "what's next" when there's no live task signal.
 fn journal_next(name: &str) -> Option<String> {
@@ -1824,6 +1934,47 @@ mod tests {
         assert_eq!(calender.dir, "/x/gadget-demo");
         assert_eq!(by_name(&v, "claude-agent-memory-consolidation").live, Some(Liveness::Stopped));
         assert_eq!(by_name(&v, "thing-master").dir, "/x/thing");
+    }
+
+    #[test]
+    fn settings_with_probe_is_additive_and_idempotent() {
+        // an existing project settings.json with its own UserPromptSubmit + PreToolUse hooks.
+        let existing = serde_json::json!({
+            "hooks": {
+                "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "slice-gate.sh" } ] } ],
+                "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "commit-guard.sh" } ] } ]
+            },
+            "statusLine": { "type": "command", "command": "statusline.sh" }
+        });
+        let merged = settings_with_probe(&existing);
+        // existing hooks are preserved …
+        assert_eq!(merged["statusLine"]["command"], "statusline.sh");
+        let ups = merged["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert!(ups.iter().any(|e| e["hooks"][0]["command"] == "slice-gate.sh"));
+        // … and skein's are added.
+        assert!(ups.iter().any(|e| e["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("box-status.sh working")));
+        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post[0]["matcher"], "TodoWrite");
+
+        // idempotent: re-running adds nothing.
+        let again = settings_with_probe(&merged);
+        assert_eq!(
+            again["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+            ups.len()
+        );
+        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn settings_with_probe_from_empty() {
+        let merged = settings_with_probe(&serde_json::json!({}));
+        for ev in ["UserPromptSubmit", "Notification", "Stop", "PostToolUse"] {
+            assert_eq!(merged["hooks"][ev].as_array().unwrap().len(), 1, "missing {ev}");
+        }
     }
 
     #[test]

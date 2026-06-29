@@ -86,8 +86,18 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   REMAINING: provisioning a store *from scratch* (for fresh/any-repo setups with no existing
   `.claude`) — currently relies on the kit + an existing store; folds into Phase 4 (URL clone) and
   Phase 3 (skein ships its own kit that also installs the turn-state probe).
-- **Phase 3 — Claude turn-state adapter.** Embed + inject `box-status.sh`/`box-task.sh`, additive
-  settings merge. Fixes "don't see working even when it is."
+- **Phase 3 — turn-state probe. ✅ DONE (Claude adapter); needs host verification.** skein ships
+  `box-status.sh`/`box-task.sh` (embedded via `include_str!`) and `ensure_probe()` installs them into
+  the shared store's `skein/bin/` + **additively merges** the `UserPromptSubmit`/`Stop`/`Notification`/
+  `PostToolUse(TodoWrite)` hooks into the store's `settings.json` (idempotent; the repo's own hooks
+  preserved). The probe writes turn-state to `<store>/status/<vmid>.json`; `current_status()` reads it,
+  wired into `load_views` (registry `status` kept only as a transitional fallback). `ensure_probe`
+  runs at server startup. Fixes "don't see working vs waiting". Pure logic unit-tested
+  (`settings_with_probe_*`); the actual hook firing needs sbx (host). NOTE: a running box only picks
+  up the hooks on its *next* session start — works for newly-created boxes. With this, the registry's
+  last job (turn-state) is covered by skein, so `sandboxes.json` can be dropped from skein's reads
+  (left as fallback for now). Caveat: `setup-sandbox.sh --sync` would overwrite the store
+  `settings.json`; skein re-adds on next startup (idempotent).
 - **Enumerate fleet from sbx. ✅ DONE** (pulled ahead, per "remove the registry we maintain unless it
   has specific data"). `fleet_boxes()` parses the full `sbx ls --json` (name/agent/status/workspaces);
   `load_views` now sources the fleet from sbx ∪ registry, deriving `dir` from workspaces and `branch`
