@@ -70,11 +70,15 @@ fn cmd_ls() -> Result<(), String> {
         return Ok(());
     }
 
+    // liveness from sbx (running/stopped) so a long-running turn isn't shown as idle; None per box
+    // ⇒ fall back to the lastSeen-derived state.
+    let liveness = skein::fleet_liveness();
     // (tier, name, state, branch, age, dir)
     let mut rows: Vec<(u8, String, String, String, String, String)> = boxes
         .iter()
         .map(|(name, b)| {
-            let (st, tier) = b.state();
+            let live = liveness.as_ref().and_then(|m| m.get(name).copied());
+            let (st, tier) = b.state_with(live);
             (
                 tier,
                 name.clone(),

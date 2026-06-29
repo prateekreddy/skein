@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -137,6 +137,24 @@ impl Sandbox {
             Some(s) => format!("{}d ago", s / 86400),
         }
     }
+
+    /// State, refined by what sbx itself reports about the box's run state (`fleet_liveness`).
+    /// `live` is this box's entry from that map:
+    ///   - `Some(Running)`: the sandbox is up. An explicit agent turn-status still wins (it's more
+    ///     specific); otherwise the box is `live` — *never* aged to `idle`/`stale`. This is the fix
+    ///     for "goes idle while still working": liveness is "is the sandbox running", which sbx
+    ///     knows directly, not "did a hook fire in the last 120s".
+    ///   - `Some(Stopped)`: halted — show stale regardless of a now-meaningless registry status.
+    ///   - `None`: sbx couldn't be consulted, or doesn't list this box (e.g. a direct-mode box) —
+    ///     fall back to the `lastSeen`-derived `state()`.
+    pub fn state_with(&self, live: Option<Liveness>) -> (String, u8) {
+        match live {
+            Some(Liveness::Running) if self.status.is_empty() => ("live".into(), 3),
+            Some(Liveness::Running) => self.state(), // explicit agent turn-status wins
+            Some(Liveness::Stopped) => ("stale".into(), 5),
+            None => self.state(),
+        }
+    }
 }
 
 /// A box name is a registry key / vmid — never a path or a shell token. Reject anything that
@@ -208,11 +226,17 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         .or_else(|_| env::var("SANDBOX_VM_ID"))
         .ok()
         .filter(|s| !s.is_empty());
+    // Liveness straight from sbx ("is the sandbox up"), so a box that's working through a long turn
+    // doesn't decay to idle just because no hook fired in 120s. None ⇒ sbx unavailable or doesn't
+    // list this box ⇒ fall back to the lastSeen-derived state.
+    let liveness = fleet_liveness();
     let mut views: Vec<BoxView> = boxes
         .iter()
         .map(|(name, b)| {
-            let (mut state, mut tier) = b.state();
-            if b.status.is_empty() && self_box.as_deref() == Some(name.as_str()) && tier > 3 {
+            let live = liveness.as_ref().and_then(|m| m.get(name).copied());
+            let (mut state, mut tier) = b.state_with(live);
+            // Self-box stays live when sbx can't confirm it (e.g. skein running outside sbx).
+            if live.is_none() && b.status.is_empty() && self_box.as_deref() == Some(name.as_str()) && tier > 3 {
                 state = "live".into();
                 tier = 3;
             }
@@ -266,6 +290,103 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             .then(a.name.cmp(&b.name))
     });
     Ok(views)
+}
+
+/// What sbx itself reports about a box's run state (from `sbx ls`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Liveness {
+    Running,
+    Stopped,
+}
+
+/// Ask sbx which boxes are running, so liveness comes from "is the sandbox up" (which sbx knows
+/// directly) rather than a hook-written `lastSeen`. Returns name -> Liveness, or `None` when sbx
+/// can't be consulted (not installed, errored, or output unparseable) — callers then fall back to
+/// the registry's `lastSeen`. Override the command with `$SKEIN_LS_CMD` (run via `sh -c`; must emit
+/// the `sbx ls --json` shape). Statuses other than running/stopped are ignored (that box falls back).
+pub fn fleet_liveness() -> Option<HashMap<String, Liveness>> {
+    let output = match env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) {
+        Some(c) => Command::new("sh").arg("-c").arg(c).output(),
+        None => Command::new("sbx").args(["ls", "--json"]).output(),
+    }
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_liveness(&String::from_utf8_lossy(&output.stdout))
+}
+
+const LS_NAME_KEYS: &[&str] = &[
+    "name", "Name", "NAME", "sandbox", "SANDBOX", "vmId", "vmid", "VmId", "id", "ID",
+];
+const LS_STATUS_KEYS: &[&str] = &["status", "Status", "STATUS", "state", "State"];
+
+/// Parse `sbx ls --json` defensively: tolerate NDJSON (one object per line — the common Docker-CLI
+/// `--json` shape) or a single array/object document, and varied key casings. `None` if nothing
+/// usable is found, so the caller falls back to `lastSeen`.
+fn parse_liveness(json: &str) -> Option<HashMap<String, Liveness>> {
+    use serde_json::Value;
+    // NDJSON first: each non-empty line an object. If that yields <2 objects it isn't NDJSON, so
+    // parse the whole payload as one document instead.
+    let mut entries: Vec<Value> = json
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(Value::is_object)
+        .collect();
+    if entries.len() < 2 {
+        if let Ok(v) = serde_json::from_str::<Value>(json) {
+            entries = collect_ls_entries(v);
+        }
+    }
+    let mut map = HashMap::new();
+    for e in entries {
+        let obj = match e.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let name = LS_NAME_KEYS
+            .iter()
+            .find_map(|k| obj.get(*k).and_then(Value::as_str));
+        let status = LS_STATUS_KEYS
+            .iter()
+            .find_map(|k| obj.get(*k).and_then(Value::as_str));
+        if let (Some(n), Some(s)) = (name, status) {
+            let live = if s.eq_ignore_ascii_case("running") {
+                Liveness::Running
+            } else if s.eq_ignore_ascii_case("stopped") {
+                Liveness::Stopped
+            } else {
+                continue; // unknown status → leave it out so the box falls back to lastSeen
+            };
+            map.insert(n.to_string(), live);
+        }
+    }
+    (!map.is_empty()).then_some(map)
+}
+
+/// Reduce a single `sbx ls --json` document to a flat list of per-box objects, covering an array,
+/// an `{key: [..]}` wrapper, or a `{name: {..}}` map (the box name is injected as `name`).
+fn collect_ls_entries(v: serde_json::Value) -> Vec<serde_json::Value> {
+    use serde_json::Value;
+    match v {
+        Value::Array(a) => a,
+        Value::Object(o) => {
+            if let Some(arr) = o.values().find_map(Value::as_array) {
+                return arr.clone();
+            }
+            o.into_iter()
+                .filter_map(|(k, mut val)| match val {
+                    Value::Object(ref mut m) => {
+                        m.insert("name".into(), Value::String(k));
+                        Some(val)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 /// The shared store directory (parent of `sandboxes.json`).
@@ -1456,6 +1577,56 @@ mod tests {
         assert_eq!(sb("", &secs_ago(600)).state().0, "idle");
         assert_eq!(sb("", &secs_ago(7200)).state().0, "stale");
         assert_eq!(sb("", "not-a-date").state().0, "unknown");
+    }
+
+    #[test]
+    fn state_with_sbx_liveness() {
+        // A running sandbox with no hook status is LIVE even if lastSeen is ancient — the fix.
+        assert_eq!(
+            sb("", &secs_ago(99999)).state_with(Some(Liveness::Running)),
+            ("live".into(), 3)
+        );
+        // An explicit agent turn-status still wins over the generic "live".
+        assert_eq!(
+            sb("needs-input", &secs_ago(99999)).state_with(Some(Liveness::Running)),
+            ("needs-input".into(), 0)
+        );
+        // Stopped → stale regardless of a stale "working" left in the registry.
+        assert_eq!(
+            sb("working", &secs_ago(5)).state_with(Some(Liveness::Stopped)),
+            ("stale".into(), 5)
+        );
+        // No sbx info → behaves exactly like the lastSeen-derived state().
+        assert_eq!(
+            sb("", &secs_ago(600)).state_with(None),
+            sb("", &secs_ago(600)).state()
+        );
+    }
+
+    #[test]
+    fn parse_liveness_tolerates_shapes() {
+        // NDJSON (Docker-CLI --json), mixed casing, an unknown status, and a stopped box.
+        let nd = r#"{"name":"a","status":"running"}
+{"SANDBOX":"b","STATUS":"stopped"}
+{"name":"c","status":"paused"}"#;
+        let m = parse_liveness(nd).expect("ndjson parses");
+        assert_eq!(m.get("a"), Some(&Liveness::Running));
+        assert_eq!(m.get("b"), Some(&Liveness::Stopped));
+        assert_eq!(m.get("c"), None); // unknown status omitted → that box falls back
+
+        // A single JSON array document.
+        let arr = r#"[{"name":"x","state":"running"},{"name":"y","state":"stopped"}]"#;
+        let m = parse_liveness(arr).expect("array parses");
+        assert_eq!(m.get("x"), Some(&Liveness::Running));
+        assert_eq!(m.get("y"), Some(&Liveness::Stopped));
+
+        // A name-keyed object map: {name: {..}}.
+        let obj = r#"{"z":{"status":"running"}}"#;
+        assert_eq!(parse_liveness(obj).unwrap().get("z"), Some(&Liveness::Running));
+
+        // Garbage / empty → None so the caller falls back to lastSeen.
+        assert!(parse_liveness("not json").is_none());
+        assert!(parse_liveness("[]").is_none());
     }
 
     #[test]
