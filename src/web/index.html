@@ -26,7 +26,12 @@
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
   /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
-  body.docked #left { flex:0 0 clamp(260px, 28%, 380px); }
+  body.docked #left { flex:0 0 var(--fleet-w, clamp(260px, 28%, 380px)); }
+  /* draggable gutter between the fleet sidebar and the dock — sets --fleet-w (persisted) */
+  #gutter { display:none; }
+  body.docked #gutter { display:block; flex:0 0 5px; cursor:col-resize; background:var(--border-2);
+                        transition:background var(--dur-fast); }
+  body.docked #gutter:hover, #gutter.drag { background:var(--accent); }
   body.docked .wrap { margin:0; max-width:none; padding:16px 12px 40px; }
   body.docked header { flex-wrap:wrap; row-gap:8px; margin-bottom:14px; }
   body.docked .right { gap:8px; }
@@ -307,7 +312,7 @@
   @media (max-width:860px) {
     /* size the dock to the *visible* viewport so the soft keyboard doesn't hide the prompt */
     #dock { position:fixed; inset:0; z-index:50; flex:none; border-left:0; height:var(--vvh,100vh); }
-    body.docked #left { display:none; }
+    body.docked #left, body.docked #gutter { display:none; }
     /* a box is fullscreen; "‹ boxes" returns to the fleet without closing the session */
     body.docked.show-fleet #left { display:block; position:fixed; inset:0; z-index:60; background:var(--bg); }
     body.docked.show-fleet #dock { display:none; }
@@ -365,6 +370,7 @@
         <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘N</kbd> new box · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
       </div>
     </div>
+    <div id="gutter" title="drag to resize"></div>
     <div id="dock">
       <div class="tabs" id="tabs"></div>
       <div class="dockbar" id="dockbar"></div>
@@ -1371,6 +1377,34 @@ function cycleSession(d) {
   const ns = sessions.get(ks[(i+d+ks.length)%ks.length]);
   showBox(ns.box, "term", ns.kind);
 }
+
+// ---------- resizable fleet sidebar ----------
+// Drag the gutter to set --fleet-w (the docked fleet width); persisted across reloads. Keeps the
+// active terminal fitted while dragging. (Groundwork for a future right-side terminal pane too.)
+(function () {
+  const gutter = document.getElementById("gutter");
+  const saved = localStorage.getItem("skein.fleetW");
+  if (saved) document.documentElement.style.setProperty("--fleet-w", saved);
+  gutter.addEventListener("pointerdown", e => {
+    e.preventDefault(); gutter.classList.add("drag");
+    try { gutter.setPointerCapture(e.pointerId); } catch {}
+    let w = saved;
+    const move = ev => {
+      w = Math.max(220, Math.min(window.innerWidth - 320, ev.clientX)) + "px";
+      document.documentElement.style.setProperty("--fleet-w", w);
+      activeSession()?.fit.fit();
+    };
+    const up = () => {
+      gutter.classList.remove("drag");
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      if (w) { try { localStorage.setItem("skein.fleetW", w); } catch {} }
+      activeSession()?.fit.fit(); sendResize(activeSid());
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  });
+})();
 
 // ---------- live stream ----------
 let es = null;
