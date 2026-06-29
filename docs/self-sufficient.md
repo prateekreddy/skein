@@ -82,11 +82,11 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
 - **Phase 3 — Claude turn-state adapter.** Embed + inject `box-status.sh`/`box-task.sh`, additive
   settings merge. Fixes "don't see working even when it is."
 - **Phase 4 — registration + auth + URL clone + enumerate from sbx.** Delivers "repo URL + gh auth →
-  fleet". NOTE (confirmed from host `sbx ls --json`): the registry can *miss running boxes* sbx knows
-  about (host showed `thing-feat-calender`/`thing-skill-review` running but absent from
-  `sandboxes.json`). `load_views` iterates the registry, so those boxes don't appear at all today —
-  the fleet list itself should be sourced from `sbx ls` (name/agent/status/workspaces), enriched by
-  the registry, not the other way round.
+  fleet". Registration via the box's bootstrap *does* work today (boxes appear once they run it), so
+  enumerating from `sbx ls` is a **robustness/decoupling** improvement, not a fix for a current miss:
+  it would also surface boxes that haven't registered yet, direct-mode boxes, and any-repo boxes with
+  no bootstrap — i.e. the fleet list sourced from `sbx ls` (name/agent/status/workspaces), enriched by
+  the registry, rather than the other way round. Not urgent; sequence after launch.
 
   Real `sbx ls --json` schema (pinned in `parse_liveness_real_sbx_schema`):
   `{"sandboxes":[{"name","id","agent","status":"running|stopped","workspaces":[..],"ports":[..]}]}`.
