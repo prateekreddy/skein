@@ -64,46 +64,17 @@ $SKEIN_SHARED/sandboxes.json\n  \
 }
 
 fn cmd_ls() -> Result<(), String> {
-    let (boxes, path) = load_registry()?;
-    if boxes.is_empty() {
+    // Same sbx-sourced, "who-needs-me-first"-sorted fleet the web cockpit shows (sbx ∪ registry).
+    let views = skein::load_views()?;
+    if views.is_empty() {
         println!("{DIM}the skein is empty — launch a box with: setup-sandbox.sh <branch>{RESET}");
         return Ok(());
     }
 
-    // liveness from sbx (running/stopped) so a long-running turn isn't shown as idle; None per box
-    // ⇒ fall back to the lastSeen-derived state.
-    let liveness = skein::fleet_liveness();
-    // (tier, name, state, branch, age, dir)
-    let mut rows: Vec<(u8, String, String, String, String, String)> = boxes
-        .iter()
-        .map(|(name, b)| {
-            let live = liveness.as_ref().and_then(|m| m.get(name).copied());
-            let (st, tier) = b.state_with(live);
-            (
-                tier,
-                name.clone(),
-                st,
-                b.branch.clone(),
-                b.age(),
-                skein::shorten(&b.dir),
-            )
-        })
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    let w_name = rows.iter().map(|r| r.1.len()).fold("BOX".len(), usize::max);
-    let w_st = rows
-        .iter()
-        .map(|r| r.2.len())
-        .fold("STATE".len(), usize::max);
-    let w_br = rows
-        .iter()
-        .map(|r| r.3.len())
-        .fold("BRANCH".len(), usize::max);
-    let w_age = rows
-        .iter()
-        .map(|r| r.4.len())
-        .fold("SEEN".len(), usize::max);
+    let w_name = views.iter().map(|v| v.name.len()).fold("BOX".len(), usize::max);
+    let w_st = views.iter().map(|v| v.state.len()).fold("STATE".len(), usize::max);
+    let w_br = views.iter().map(|v| v.branch.len()).fold("BRANCH".len(), usize::max);
+    let w_age = views.iter().map(|v| v.age.len()).fold("SEEN".len(), usize::max);
 
     println!(
         "{BOLD}  {}  {}  {}  {}  DIR{RESET}",
@@ -113,23 +84,24 @@ fn cmd_ls() -> Result<(), String> {
         pad("SEEN", w_age),
     );
 
-    for (tier, name, st, br, age, dir) in &rows {
-        let name_cell = if *tier >= 4 {
-            format!("{DIM}{name}{RESET}")
+    for v in &views {
+        let name_cell = if v.tier >= 4 {
+            format!("{DIM}{}{RESET}", v.name)
         } else {
-            format!("{BOLD}{name}{RESET}")
+            format!("{BOLD}{}{RESET}", v.name)
         };
         println!(
-            "{} {}  {}  {}  {}  {DIM}{dir}{RESET}",
-            dot(*tier),
-            pad_colored(&name_cell, name.len(), w_name),
-            pad(st, w_st),
-            pad_colored(&format!("{CYAN}{br}{RESET}"), br.len(), w_br),
-            pad(age, w_age),
+            "{} {}  {}  {}  {}  {DIM}{}{RESET}",
+            dot(v.tier),
+            pad_colored(&name_cell, v.name.len(), w_name),
+            pad(&v.state, w_st),
+            pad_colored(&format!("{CYAN}{}{RESET}", v.branch), v.branch.len(), w_br),
+            pad(&v.age, w_age),
+            v.dir,
         );
     }
 
-    println!("\n{DIM}{} boxes · {}{RESET}", boxes.len(), path.display());
+    println!("\n{DIM}{} boxes{RESET}", views.len());
     Ok(())
 }
 
