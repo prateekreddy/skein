@@ -131,7 +131,8 @@ are present — run it first if something looks off. All knobs are environment v
 | `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
 | `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
 | `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}` substituted; relative to `$SKEIN_REPO` (e.g. `dev-sandbox/setup-sandbox.sh {branch}`) | `setup-sandbox.sh <branch>` |
-| `SKEIN_ATTACH_CMD` | attach template — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
+| `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
+| `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} /bin/bash` |
 | `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
 | `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; halts the sandbox to free compute (resume via attach). Non-destructive | `sbx stop {name}` |
 | `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost). Legacy fallback `SKEIN_ARCHIVE_CMD` | `sbx rm -f {name}` |

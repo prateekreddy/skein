@@ -145,6 +145,8 @@
   .tab.dead { opacity:.85; }
   .tab.dead .tl { color:var(--dim); }
   .tab .trc { color:var(--accent); font-size:13px; flex:none; line-height:1; }
+  .tab .tk { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--working);
+             border:1px solid color-mix(in srgb,var(--working) 40%,transparent); border-radius:3px; padding:0 3px; margin-left:5px; }
   .tab .tx:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
   .dock-actions { margin-left:auto; display:flex; align-items:center; padding:0 8px; gap:6px; }
   .dock-actions .da { color:var(--faint); cursor:pointer; font-size:12px; padding:4px 7px; border-radius:6px; }
@@ -470,9 +472,9 @@ function makeRow(name) {
 }
 function updateRow(el, b) {
   const g = groupOf(b.state);
-  const wired = sessions.has(b.name);
+  const wired = boxHasSession(b.name);
   el.className = `row s-${g}` + (b.name === sel ? " sel" : "") + (wired ? " wired" : "")
-    + (b.name === view.box ? " active" : "") + (wired && sessions.get(b.name).streaming ? " streaming" : "");
+    + (b.name === view.box ? " active" : "") + (boxAnyStreaming(b.name) ? " streaming" : "");
   el.querySelector(".name").textContent = b.name;
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
@@ -563,23 +565,37 @@ function nextNeedsYou() {
 }
 
 // ---------- dock: persistent terminals + diff viewer ----------
-const sessions = new Map();   // name -> { term, fit, ws, host, streaming, timer, dead }
-let view = { box: null, mode: "term" };   // what the dock currently shows
+// A box can have two terminals: the "agent" session (claude) and a "shell" session (sbx exec bash).
+// Sessions are keyed by a composite id = box (+ a suffix for the shell), while view.box stays the
+// registry box name so ship/diff/state lookups are unaffected; view.kind picks which terminal.
+const SHELL_SFX = "\u0000shell";   // NUL can't appear in a valid box name → collision-free delimiter
+const sessions = new Map();   // sid -> { term, fit, ws, host, box, kind, sid, streaming, timer, dead }
+let view = { box: null, mode: "term", kind: "agent" };   // what the dock currently shows
+const sidOf = (box, kind) => kind === "shell" ? box + SHELL_SFX : box;
+const boxOf = (id) => id.endsWith(SHELL_SFX) ? id.slice(0, -SHELL_SFX.length) : id;
+const kindOf = (id) => id.endsWith(SHELL_SFX) ? "shell" : "agent";
+const activeSid = () => view.box ? sidOf(view.box, view.kind) : null;
+const activeSession = () => { const id = activeSid(); return id ? sessions.get(id) : null; };
+const boxHasSession = (box) => sessions.has(box) || sessions.has(box + SHELL_SFX);
+const boxAnyStreaming = (box) => ["agent","shell"].some(k => sessions.get(sidOf(box,k))?.streaming);
+function closeBoxSessions(box) { for (const k of ["agent","shell"]) { const id = sidOf(box,k); if (sessions.has(id)) closeSession(id); } }
 const termarea = document.getElementById("termarea"), diffpane = document.getElementById("diffpane"),
       sesspane = document.getElementById("sesspane"),
       tabsEl = document.getElementById("tabs"), dockbar = document.getElementById("dockbar");
 
-function openTerminal(name) { showBox(name, "term"); }
+function openTerminal(name) { showBox(name, "term", "agent"); }
+function openShell(name) { showBox(name, "term", "shell"); }
 function openDiff(name) { showBox(name, "diff"); }
 function openSession(name) { showBox(name, "session"); }
-function showBox(name, mode) {
+function showBox(name, mode, kind = "agent") {
   document.body.classList.remove("show-fleet");   // tapping a box leaves the mobile fleet view
   select(name);
-  view = { box: name, mode };
+  view = { box: name, mode, kind };
   if (mode === "term") {
-    const s = sessions.get(name);
-    if (!s) createSession(name);
-    else if (s.dead) reconnectSession(name);   // clicking a disconnected tab reconnects it
+    const id = sidOf(name, kind);
+    const s = sessions.get(id);
+    if (!s) createSession(name, kind);
+    else if (s.dead) reconnectSession(name, kind);   // clicking a disconnected tab reconnects it
   }
   applyView();
   if (mode === "diff") loadDiff(name);
@@ -596,19 +612,21 @@ function applyView() {
   termarea.classList.toggle("on", termMode);
   diffpane.classList.toggle("on", view.mode === "diff");
   sesspane.classList.toggle("on", view.mode === "session");
-  for (const [n, s] of sessions) s.host.classList.toggle("on", termMode && n === view.box);
-  if (termMode && sessions.has(view.box)) {
-    const s = sessions.get(view.box);
-    requestAnimationFrame(() => { s.fit.fit(); sendResize(view.box); s.term.focus(); });
+  const aid = activeSid();
+  for (const [id, s] of sessions) s.host.classList.toggle("on", termMode && id === aid);
+  if (termMode && aid && sessions.has(aid)) {
+    const s = sessions.get(aid);
+    requestAnimationFrame(() => { s.fit.fit(); sendResize(aid); s.term.focus(); });
   }
   renderDockbar(); renderTabs(); refreshRowAll();
 }
-function createSession(name, launchBranch) {
+function createSession(box, kind, launchBranch) {
+  const id = sidOf(box, kind);
   const host = document.createElement("div"); host.className = "thost"; termarea.append(host);
   // "not connected" overlay — shown when the socket closes; clicking it (or the tab) reconnects.
   const disco = document.createElement("div"); disco.className = "disco";
   disco.innerHTML = `<div class="disco-card"><div class="disco-t">session not connected</div><div class="disco-b">click to reconnect</div></div>`;
-  disco.addEventListener("click", () => reconnectSession(name));
+  disco.addEventListener("click", () => reconnectSession(box, kind));
   host.append(disco);
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
     cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
@@ -634,40 +652,50 @@ function createSession(name, launchBranch) {
     return true;
   });
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const qs = launchBranch ? `?launch=${encodeURIComponent(launchBranch)}` : "";
-  const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(name)}/terminal${qs}`);
+  const params = new URLSearchParams();
+  if (launchBranch) params.set("launch", launchBranch);
+  if (kind === "shell") params.set("shell", "1");
+  const qs = params.toString() ? `?${params}` : "";
+  const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(box)}/terminal${qs}`);
   ws.binaryType = "arraybuffer";
-  const s = { term, fit, ws, host, streaming:false, timer:0 };
-  sessions.set(name, s);
-  ws.onopen = () => { if (view.box === name && view.mode === "term") sendResize(name); if (s.pending) { ws.send(s.pending); s.pending = null; } };
-  ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(name); };
-  ws.onclose = () => { s.dead = true; host.classList.add("dead"); renderTabs(); refreshRow(name); };
+  const s = { term, fit, ws, host, box, kind, sid: id, streaming:false, timer:0 };
+  sessions.set(id, s);
+  const isActive = () => view.mode === "term" && activeSid() === id;
+  ws.onopen = () => { if (isActive()) sendResize(id); if (s.pending) { ws.send(s.pending); s.pending = null; } };
+  ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(id); };
+  ws.onclose = () => { s.dead = true; host.classList.add("dead"); renderTabs(); refreshRow(box); };
   term.onData(d => {
     // sticky Ctrl (armed from the mobile key bar): fold the next char to its control code
     if (ctrlArmed && d.length === 1) { d = String.fromCharCode(d.charCodeAt(0) & 0x1f); ctrlArmed = false; updateCtrlBtn(); }
     if (ws.readyState === 1) ws.send(new TextEncoder().encode(d));
   });
-  term.onResize(() => { if (view.box === name && view.mode === "term") sendResize(name); });
+  term.onResize(() => { if (isActive()) sendResize(id); });
 }
-function markStreaming(name) {
-  const s = sessions.get(name); if (!s) return;
-  s.streaming = true; renderTabFlag(name); refreshRow(name);
-  clearTimeout(s.timer); s.timer = setTimeout(() => { s.streaming = false; renderTabFlag(name); refreshRow(name); }, 1100);
+function markStreaming(id) {
+  const s = sessions.get(id); if (!s) return;
+  s.streaming = true; renderTabFlag(id); refreshRow(s.box);
+  clearTimeout(s.timer); s.timer = setTimeout(() => { s.streaming = false; renderTabFlag(id); refreshRow(s.box); }, 1100);
 }
-function sendResize(name) { const s = sessions.get(name); if (s && s.ws.readyState === 1) s.ws.send(JSON.stringify({ resize:{ cols:s.term.cols, rows:s.term.rows } })); }
-function closeSession(name) {
-  const s = sessions.get(name); if (!s) return;
+function sendResize(id) { const s = sessions.get(id); if (s && s.ws.readyState === 1) s.ws.send(JSON.stringify({ resize:{ cols:s.term.cols, rows:s.term.rows } })); }
+function closeSession(id) {
+  const s = sessions.get(id); if (!s) return;
+  const box = s.box;
   clearTimeout(s.timer);   // don't let a streaming-flag timer fire on a disposed session
   try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
-  s.host.remove(); sessions.delete(name);
-  if (view.box === name) { const next = sessions.keys().next().value; view = next ? { box: next, mode:"term" } : { box:null, mode:"term" }; }
-  applyView(); refreshRow(name);
+  s.host.remove(); sessions.delete(id);
+  if (activeSid() === id) {   // closed the active terminal → fall back to any other open session
+    const nextId = sessions.keys().next().value;
+    const ns = nextId ? sessions.get(nextId) : null;
+    view = ns ? { box: ns.box, mode:"term", kind: ns.kind } : { box:null, mode:"term", kind:"agent" };
+  }
+  applyView(); refreshRow(box);
 }
 // Persist the open tabs + active view so a page reload can pick the session back up. The agent
 // session lives inside the sandbox (tmux + `claude --continue`), so reattaching just continues it.
 function persistView() {
-  try { localStorage.setItem("skein.view",
-    JSON.stringify({ open: [...sessions.keys()], box: view.box, mode: view.mode })); } catch {}
+  try { localStorage.setItem("skein.view", JSON.stringify({
+    open: [...sessions.values()].map(s => ({ box: s.box, kind: s.kind })),
+    box: view.box, mode: view.mode, kind: view.kind })); } catch {}
 }
 // On the first fleet snapshot, reopen whatever was open before the reload (filtered to boxes that
 // still exist), and reattach — continuing the previous session rather than starting cold.
@@ -677,20 +705,25 @@ function restoreSessions() {
   let saved; try { saved = JSON.parse(localStorage.getItem("skein.view") || "null"); } catch {}
   if (!saved) return;
   const exist = new Set(boxes.map(b => b.name));
-  for (const name of (saved.open || [])) if (exist.has(name) && !sessions.has(name)) createSession(name);
+  for (const o of (saved.open || [])) {
+    const box = typeof o === "string" ? o : o.box;          // back-compat: old format was [name]
+    const kind = (typeof o === "object" && o.kind === "shell") ? "shell" : "agent";
+    if (exist.has(box) && !sessions.has(sidOf(box, kind))) createSession(box, kind);
+  }
   if (saved.box && exist.has(saved.box)) {
     const mode = ["diff", "session"].includes(saved.mode) ? saved.mode : "term";
-    showBox(saved.box, mode);
+    showBox(saved.box, mode, saved.kind === "shell" ? "shell" : "agent");
   } else {
     applyView();
   }
 }
 // Reconnect a disconnected session: drop the dead one and open a fresh socket to the same box.
-function reconnectSession(name) {
-  const s = sessions.get(name);
-  if (s) { clearTimeout(s.timer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(name); }
-  createSession(name);
-  view = { box: name, mode: "term" };
+function reconnectSession(box, kind) {
+  const id = sidOf(box, kind);
+  const s = sessions.get(id);
+  if (s) { clearTimeout(s.timer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(id); }
+  createSession(box, kind);
+  view = { box, mode: "term", kind };
   applyView();
 }
 function renderDockbar() {
@@ -705,7 +738,8 @@ function renderDockbar() {
     + (b.branch ? `<span class="br">${esc(b.branch)}</span>` : "")
     + `<span class="dstat">${diffBadge(b.diff)}</span>`
     + `<div class="seg-toggle">
-         <button data-m="term" class="${view.mode==='term'?'on':''}">Terminal</button>
+         <button data-m="term" class="${view.mode==='term'&&view.kind!=='shell'?'on':''}">Agent</button>
+         <button data-m="shell" class="${view.mode==='term'&&view.kind==='shell'?'on':''}">Shell</button>
          <button data-m="session" class="${view.mode==='session'?'on':''}">Session</button>
          <button data-m="diff" class="${view.mode==='diff'?'on':''}">Diff</button>
        </div>`
@@ -716,6 +750,7 @@ function renderDockbar() {
     + shipHtml(view.box)
     + `<span class="rf" id="dclose" title="close">✕</span>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
+  dockbar.querySelector('[data-m=shell]').onclick = () => openShell(view.box);
   dockbar.querySelector('[data-m=session]').onclick = () => openSession(view.box);
   dockbar.querySelector('[data-m=diff]').onclick = () => openDiff(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
@@ -726,7 +761,7 @@ function renderDockbar() {
   const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
   const nb = dockbar.querySelector("#dnext"); if (nb && nx) nb.onclick = nx.run;
   const bk = dockbar.querySelector("#dback"); if (bk) bk.onclick = () => document.body.classList.add("show-fleet");
-  dockbar.querySelector("#dclose").onclick = () => { if (sessions.has(view.box)) closeSession(view.box); else { view = {box:null,mode:"term"}; applyView(); } };
+  dockbar.querySelector("#dclose").onclick = () => { const id = activeSid(); if (id && sessions.has(id)) closeSession(id); else { view = {box:null,mode:"term",kind:"agent"}; applyView(); } };
 }
 
 // ---------- ship: PR · checks · stop · destroy (host-side via gh/sbx) ----------
@@ -765,7 +800,7 @@ function stopBox(name) {
   if (!confirm(`Stop ${name}? This halts the sandbox to free its compute. Nothing is lost — resume it later via attach.`)) return;
   toast(`stopping ${name}…`);
   fetch(`/api/boxes/${encodeURIComponent(name)}/stop`, { method:"POST" }).then(r => r.json()).then(d => {
-    if (d.ok) { if (sessions.has(name)) closeSession(name); toast(`stopped ${name}`); refreshRow(name); }
+    if (d.ok) { closeBoxSessions(name); toast(`stopped ${name}`); refreshRow(name); }
     else toast("stop failed: " + (d.error||"").split("\n")[0]);
   }).catch(() => toast("stop failed"));
 }
@@ -773,8 +808,8 @@ function destroyBox(name) {
   if (!confirm(`Destroy ${name}?\n\nThis runs the teardown command (sbx rm) — it KILLS and REMOVES the sandbox and reclaims its resources. In clone mode any commits in the box that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
   toast(`destroying ${name}…`);
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
-    if (d.ok) { if (sessions.has(name)) closeSession(name); shipState.delete(name);
-      if (view.box === name) { view = {box:null,mode:"term"}; applyView(); } toast(`destroyed ${name}`); }
+    if (d.ok) { closeBoxSessions(name); shipState.delete(name);
+      if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); } toast(`destroyed ${name}`); }
     else toast("destroy failed: " + (d.error||"").split("\n")[0]);
   }).catch(() => toast("destroy failed"));
 }
@@ -839,15 +874,18 @@ function toast(msg, url) {
 }
 function renderTabs() {
   tabsEl.querySelectorAll(".tab, .dock-actions").forEach(t => t.remove());
-  for (const name of sessions.keys()) {
-    const s = sessions.get(name), g = groupOf(stateOf(name));
+  const aid = activeSid();
+  for (const [id, s] of sessions) {
+    const g = groupOf(stateOf(s.box));
     const t = document.createElement("div");
-    t.className = `tab t-${g}` + (name === view.box && view.mode === "term" ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "");
-    t.dataset.name = name;
-    t.title = s.dead ? `${name} — disconnected · click to reconnect` : name;
+    t.className = `tab t-${g}` + (id === aid && view.mode === "term" ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "") + (s.kind === "shell" ? " shell" : "");
+    t.dataset.id = id;
+    const what = s.kind === "shell" ? `${s.box} — shell` : s.box;
+    t.title = s.dead ? `${what} — disconnected · click to reconnect` : what;
     const lead = s.dead ? `<span class="trc" title="reconnect">↻</span>` : `<span class="td"></span>`;
-    t.innerHTML = `${lead}<span class="tl">${esc(name)}</span><span class="tx" title="close">✕</span>`;
-    t.addEventListener("click", e => { if (e.target.classList.contains("tx")) closeSession(name); else openTerminal(name); });
+    const label = esc(s.box) + (s.kind === "shell" ? ` <span class="tk">sh</span>` : "");
+    t.innerHTML = `${lead}<span class="tl">${label}</span><span class="tx" title="close">✕</span>`;
+    t.addEventListener("click", e => { if (e.target.classList.contains("tx")) closeSession(id); else showBox(s.box, "term", s.kind); });
     tabsEl.append(t);
   }
   if (sessions.size) {
@@ -857,9 +895,9 @@ function renderTabs() {
     tabsEl.append(da);
   }
 }
-function renderTabFlag(name) {
-  const t = [...tabsEl.querySelectorAll(".tab")].find(el => el.dataset.name === name); if (!t) return;
-  t.classList.toggle("streaming", !!sessions.get(name)?.streaming);
+function renderTabFlag(id) {
+  const t = [...tabsEl.querySelectorAll(".tab")].find(el => el.dataset.id === id); if (!t) return;
+  t.classList.toggle("streaming", !!sessions.get(id)?.streaming);
 }
 function refreshRowAll() { for (const name of rowEls.keys()) refreshRow(name); }
 
@@ -990,7 +1028,7 @@ function sendReview(box) {
   if (s.ws.readyState === 1) s.ws.send(payload); else s.pending = payload;
   applyView();
 }
-window.addEventListener("resize", () => { if (view.box && view.mode === "term") { sessions.get(view.box)?.fit.fit(); sendResize(view.box); } });
+window.addEventListener("resize", () => { if (view.mode === "term") { activeSession()?.fit.fit(); sendResize(activeSid()); } });
 
 // ---------- mobile: on-screen keys + soft-keyboard sizing ----------
 const keybar = document.getElementById("keybar");
@@ -999,7 +1037,7 @@ let ctrlArmed = false;
 function updateCtrlBtn() { keybar.querySelector("[data-k=ctrl]")?.classList.toggle("armed", ctrlArmed); }
 keybar.addEventListener("click", e => {
   const b = e.target.closest("button[data-k]"); if (!b) return;
-  const k = b.dataset.k, s = sessions.get(view.box);
+  const k = b.dataset.k, s = activeSession();
   if (k === "ctrl") { ctrlArmed = !ctrlArmed; updateCtrlBtn(); s?.term.focus(); return; }
   if (!s || s.ws.readyState !== 1) return;
   let seq = KEYS[k] ?? k;
@@ -1010,7 +1048,7 @@ if (window.visualViewport) {
   const vv = window.visualViewport;
   const onVV = () => {
     document.documentElement.style.setProperty("--vvh", vv.height + "px");
-    if (view.box && view.mode === "term") { sessions.get(view.box)?.fit.fit(); sendResize(view.box); }
+    if (view.mode === "term") { activeSession()?.fit.fit(); sendResize(activeSid()); }
   };
   vv.addEventListener("resize", onVV); vv.addEventListener("scroll", onVV); onVV();
 }
@@ -1241,8 +1279,8 @@ function launchBox(branch) {
   const name = branch.startsWith("thing-") ? branch : `thing-${branch}`;
   closeNewBox();
   select(name);
-  view = { box: name, mode: "term" };
-  if (!sessions.has(name)) createSession(name, branch);   // launch mode
+  view = { box: name, mode: "term", kind: "agent" };
+  if (!sessions.has(name)) createSession(name, "agent", branch);   // launch mode
   applyView();
 }
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
@@ -1277,7 +1315,7 @@ function copyText(text) {
   return ok;
 }
 document.addEventListener("keydown", e => {
-  const s = (view.box && view.mode === "term") ? sessions.get(view.box) : null;
+  const s = (view.mode === "term") ? activeSession() : null;
   if (!s) return;
   const c = e.key === "c" || e.key === "C", v = e.key === "v" || e.key === "V";
   const copy  = (e.metaKey && !e.ctrlKey && c) || (e.ctrlKey && e.shiftKey && c);
@@ -1311,7 +1349,7 @@ document.addEventListener("keydown", e => {
   if (pal.classList.contains("open")) return;
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
   // the agent (claude/vim/less/fzf) needs. This guard MUST precede the Esc handler below.
-  const inTerm = view.box && view.mode === "term" && sessions.get(view.box)?.host.contains(document.activeElement);
+  const inTerm = view.mode === "term" && activeSession()?.host.contains(document.activeElement);
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
   if (inTerm || inField) return;
   // Esc returns focus to the fleet for keyboard nav — it never closes/kills a session (that was a
@@ -1329,7 +1367,9 @@ document.addEventListener("keydown", e => {
 });
 function cycleSession(d) {
   const ks = [...sessions.keys()]; if (!ks.length) return;
-  const i = view.box ? ks.indexOf(view.box) : -1; openTerminal(ks[(i+d+ks.length)%ks.length]);
+  const i = ks.indexOf(activeSid());
+  const ns = sessions.get(ks[(i+d+ks.length)%ks.length]);
+  showBox(ns.box, "term", ns.kind);
 }
 
 // ---------- live stream ----------

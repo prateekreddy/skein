@@ -342,12 +342,21 @@ async fn terminal(
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let launch = q.get("launch").filter(|s| !s.is_empty()).cloned();
-    ws.on_upgrade(move |socket| terminal_session(socket, name, launch))
+    let shell = q
+        .get("shell")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    ws.on_upgrade(move |socket| terminal_session(socket, name, launch, shell))
 }
 
 /// The WS↔PTY bridge: spawn `sbx run --name <box>` in a PTY, pipe bytes both ways, honour resizes.
 /// Override the spawned command with $SKEIN_ATTACH_CMD (run via `sh -c`) for local testing.
-async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<String>) {
+async fn terminal_session(
+    mut socket: WebSocket,
+    name: String,
+    launch: Option<String>,
+    shell: bool,
+) {
     // Hold a permit for the whole session; reject (rather than queue) when the cap is hit so a
     // hung browser can't silently stall new terminals. Dropped on every return → released.
     let _permit = match PTY_LIMIT.try_acquire() {
@@ -384,6 +393,14 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
     // value are substituted first, so you can tune the exact sbx invocation per box without
     // recompiling, e.g.  SKEIN_ATTACH_CMD='sbx run --name {name} -- claude --continue'
     let dir = skein::lookup_dir(&name).unwrap_or_default();
+    // $SKEIN_SHELL_CMD overrides the shell command, $SKEIN_ATTACH_CMD the agent attach (both run via
+    // `sh -c`, `{name}`/`{dir}` substituted). Default agent: reconnect to the box's tmux+`claude
+    // --continue` session; default shell: `sbx exec -it <box> /bin/bash` — a plain terminal.
+    let override_var = if shell {
+        "SKEIN_SHELL_CMD"
+    } else {
+        "SKEIN_ATTACH_CMD"
+    };
     let mut cmd = if let Some(branch) = &launch {
         // create-a-box mode: run the launch command in a PTY so the user watches it come up
         let mut b = CommandBuilder::new("sh");
@@ -391,7 +408,7 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
         b.arg(skein::launch_command(branch));
         b
     } else {
-        match std::env::var("SKEIN_ATTACH_CMD") {
+        match std::env::var(override_var) {
             Ok(c) if !c.is_empty() => {
                 let c = c
                     .replace("{name}", &skein::sh_quote(&name))
@@ -403,7 +420,12 @@ async fn terminal_session(mut socket: WebSocket, name: String, launch: Option<St
             }
             _ => {
                 let mut b = CommandBuilder::new("sbx");
-                for a in skein::attach_argv(&name, &dir) {
+                let argv = if shell {
+                    skein::shell_argv(&name)
+                } else {
+                    skein::attach_argv(&name, &dir)
+                };
+                for a in argv {
                     b.arg(a);
                 }
                 b

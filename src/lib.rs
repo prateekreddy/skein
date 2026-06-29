@@ -1020,6 +1020,13 @@ pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
     ]
 }
 
+/// `sbx` argv for an interactive *shell* in the box — a plain terminal to run commands in, separate
+/// from the agent session. `sbx exec -it <box> /bin/bash` (per the Docker Sandboxes CLI). Override
+/// the whole command with $SKEIN_SHELL_CMD (run via `sh -c`; `{name}`/`{dir}` substituted).
+pub fn shell_argv(name: &str) -> Vec<String> {
+    vec!["exec".into(), "-it".into(), name.into(), "/bin/bash".into()]
+}
+
 /// The narrative signal a box writes on each turn-end (box-session.sh): the last assistant
 /// message (Stop) or the prompt it's blocked on (Notification). The free digest source —
 /// the agent already wrote the words, so reading them costs no model tokens.
@@ -1642,6 +1649,18 @@ mod tests {
         assert!(session_signal("../escape").is_none());
 
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn shell_and_attach_argv_differ() {
+        assert_eq!(
+            attach_argv("thing-x", "/d"),
+            ["run", "--name", "thing-x", "--", "--continue"]
+        );
+        assert_eq!(
+            shell_argv("thing-x"),
+            ["exec", "-it", "thing-x", "/bin/bash"]
+        );
     }
 
     #[test]
