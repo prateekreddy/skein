@@ -1203,15 +1203,9 @@ nbBranch.addEventListener("keydown", e => {
 // Last text the active terminal offered via OSC 52 (copy-on-select under mouse mode). The async
 // escape can't write the clipboard itself (no gesture), so Cmd+C commits this within its gesture.
 let oscClipboard = "";
-// Clipboard-API first (right for async paths like OSC 52 where there's no keydown gesture but the
-// page is focused), falling back to the synchronous execCommand copy.
-function copyToClipboard(text) {
-  if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(text).catch(() => copyText(text)); }
-  else copyText(text);
-}
-// Synchronous execCommand copy runs inside the keydown gesture and works even when the Clipboard
-// API rejects ("document not focused") or is absent (non-secure context). We try it first, then
-// fall back to navigator.clipboard. Returns true if either path reports success.
+// Copy synchronously via execCommand inside the keydown gesture (works even when the Clipboard API
+// rejects with "document not focused" or is absent in a non-secure context); fall back to the
+// Clipboard API. Returns true if either path reports success.
 function copyText(text) {
   let ok = false;
   const active = document.activeElement;
@@ -1241,8 +1235,10 @@ document.addEventListener("keydown", e => {
     const sel = s.term.getSelection() || (window.getSelection ? window.getSelection().toString() : "") || oscClipboard;
     if (sel) { const ok = copyText(sel); toast(ok ? `copied ${sel.length} chars` : "copy failed"); }
   } else if (paste) {
-    e.preventDefault(); e.stopPropagation();
-    navigator.clipboard?.readText?.().then(t => { if (t) s.term.paste(t); }).catch(() => {});
+    // Don't intercept — calling clipboard.readText() triggers Safari's paste-permission button.
+    // Just ensure the terminal owns focus so the browser's native paste event lands on xterm, which
+    // pastes (with bracketed-paste) needing no prompt. No preventDefault: let that native paste run.
+    s.term.focus();
   }
   // bare Ctrl+C (no shift, no meta) is NOT matched here → still reaches the shell as SIGINT
 }, true);
