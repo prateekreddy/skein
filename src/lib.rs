@@ -219,7 +219,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             let mut headline = signal_text.as_deref().and_then(first_line);
             // When the signal is absent or just the generic "waiting for your input", surface the
             // current task instead — so even a tier-0 needs-input row says what it was working on.
-            if headline.as_deref().map_or(true, is_generic_wait) {
+            if headline.as_deref().is_none_or(is_generic_wait) {
                 if let Some(t) = task.clone() {
                     headline = Some(t);
                 }
@@ -1071,7 +1071,9 @@ fn journal_next(name: &str) -> Option<String> {
     for line in j.lines().rev() {
         // case-insensitive find of "next"; ASCII fold keeps byte offsets valid in the original line.
         let lower = line.to_ascii_lowercase();
-        let Some(i) = lower.find("next") else { continue };
+        let Some(i) = lower.find("next") else {
+            continue;
+        };
         let rest = line[i + 4..].trim_start_matches([':', ' ', '-', '\t', '…']);
         // a clause runs to the next "/" separator, or to an inline "blocked" if not slash-delimited.
         let clause = rest.split('/').next().unwrap_or(rest);
@@ -1664,7 +1666,10 @@ mod tests {
             "did: scaffolded api / next: wire the reducer / blocked-on: nothing\n",
         )
         .unwrap();
-        assert_eq!(current_task("thing-x").as_deref(), Some("wire the reducer"));
+        assert_eq!(
+            current_task("thing-x").as_deref(),
+            Some("wire the reducer")
+        );
 
         // the live task signal wins over the journal.
         fs::create_dir_all(dir.join("tasks")).unwrap();
@@ -1673,7 +1678,10 @@ mod tests {
             r#"{"ts":"2026-06-29T00:00:00Z","task":"Running the tests"}"#,
         )
         .unwrap();
-        assert_eq!(current_task("thing-x").as_deref(), Some("Running the tests"));
+        assert_eq!(
+            current_task("thing-x").as_deref(),
+            Some("Running the tests")
+        );
 
         // an empty live task falls back to the journal again.
         fs::write(
@@ -1681,7 +1689,10 @@ mod tests {
             r#"{"ts":"2026-06-29T00:00:00Z","task":""}"#,
         )
         .unwrap();
-        assert_eq!(current_task("thing-x").as_deref(), Some("wire the reducer"));
+        assert_eq!(
+            current_task("thing-x").as_deref(),
+            Some("wire the reducer")
+        );
 
         assert!(current_task("../escape").is_none()); // name guard
 
