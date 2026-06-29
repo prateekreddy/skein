@@ -516,22 +516,51 @@ fn store_dir() -> Option<PathBuf> {
     locate_registry().ok()?.parent().map(|p| p.to_path_buf())
 }
 
-/// All cross-box messages, newest first. Reads `<store>/mailbox/*.json`.
+/// The store to read a *specific box's* per-box signals from. Each managed repo has its own store
+/// (`~/.skein/repos/<id>/store/.claude`, mounted into its boxes), so turn-state / task / session /
+/// journal for a box must come from ITS repo's store — not a single global one. Falls back to
+/// `store_dir()` for boxes that match no registered repo (the legacy single-repo path).
+fn store_for_box(name: &str) -> Option<PathBuf> {
+    if let Some(repo) = repo_for_box(name) {
+        let p = PathBuf::from(&repo.store);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    store_dir()
+}
+
+/// Every distinct store skein reads from: each managed repo's store plus the legacy `store_dir()`.
+/// Boxes write signals/mailbox into their own repo store, so aggregate views must span all of them.
+fn all_stores() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = load_repos()
+        .into_iter()
+        .map(|r| PathBuf::from(r.store))
+        .collect();
+    if let Some(d) = store_dir() {
+        out.push(d);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// All cross-box messages, newest first — aggregated across every repo's store (boxes post into their
+/// own repo's `<store>/mailbox/`, so a single store would miss other repos' messages).
 pub fn load_mailbox() -> Vec<Message> {
-    let dir = match store_dir() {
-        Some(d) => d.join("mailbox"),
-        None => return vec![],
-    };
     let mut out = Vec::new();
-    if let Ok(rd) = fs::read_dir(&dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(txt) = fs::read_to_string(&p) {
-                if let Ok(m) = serde_json::from_str::<Message>(&txt) {
-                    out.push(m);
+    for store in all_stores() {
+        let dir = store.join("mailbox");
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(txt) = fs::read_to_string(&p) {
+                    if let Ok(m) = serde_json::from_str::<Message>(&txt) {
+                        out.push(m);
+                    }
                 }
             }
         }
@@ -540,13 +569,18 @@ pub fn load_mailbox() -> Vec<Message> {
     out
 }
 
-/// Post a message into the shared mailbox (from `skein`), in the same shape mailbox.sh
-/// writes so each box's `inbox` picks it up. `to` is a vmid or "broadcast".
+/// Post a message (from `skein`) in the shape mailbox.sh writes so each box's `inbox` picks it up.
+/// `to` is a vmid or "broadcast". Routed to the right store: a specific box → its repo's store; a
+/// broadcast → every store (so boxes of every repo see it).
 pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
-    let dir = store_dir()
-        .ok_or("can't locate the shared store")?
-        .join("mailbox");
-    fs::create_dir_all(&dir).map_err(|e| format!("mailbox dir: {e}"))?;
+    let targets: Vec<PathBuf> = if to == "broadcast" || to.is_empty() {
+        all_stores()
+    } else {
+        vec![store_for_box(to).ok_or("can't locate a store for that box")?]
+    };
+    if targets.is_empty() {
+        return Err("can't locate the shared store".into());
+    }
     let now = Utc::now();
     let msg = Message {
         from: "skein".into(),
@@ -563,7 +597,24 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
     };
     let id = format!("{}-skein", now.timestamp_nanos_opt().unwrap_or(0));
     let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
-    fs::write(dir.join(format!("{id}.json")), json).map_err(|e| format!("write: {e}"))
+    let mut wrote = false;
+    let mut last_err = String::new();
+    for store in targets {
+        let dir = store.join("mailbox");
+        if let Err(e) = fs::create_dir_all(&dir) {
+            last_err = format!("mailbox dir: {e}");
+            continue;
+        }
+        match fs::write(dir.join(format!("{id}.json")), &json) {
+            Ok(()) => wrote = true,
+            Err(e) => last_err = format!("write: {e}"),
+        }
+    }
+    if wrote {
+        Ok(())
+    } else {
+        Err(last_err)
+    }
 }
 
 /// Wrap a string for safe single-quoting in a POSIX shell. Used to quote every value substituted
@@ -740,6 +791,20 @@ pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(repos).map_err(|e| e.to_string())?;
     write_atomic(&repos_json(), &home, &bytes)
+}
+
+/// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
+/// clone or store on disk (they may hold unpushed work / a clone-mode box's only copy) — only skein's
+/// registration is removed; report the paths so the user can delete them deliberately.
+pub fn remove_repo(id: &str) -> Result<Repo, String> {
+    let mut repos = load_repos();
+    let pos = repos
+        .iter()
+        .position(|r| r.id == id)
+        .ok_or_else(|| format!("no repo with id {id:?}"))?;
+    let removed = repos.remove(pos);
+    save_repos(&repos)?;
+    Ok(removed)
 }
 
 /// The repo a box belongs to: the registered repo whose id is the box-name prefix (`<id>-<branch>`).
@@ -1968,7 +2033,9 @@ pub fn session_signal(name: &str) -> Option<SessionSignal> {
     if !valid_name(name) {
         return None;
     }
-    let path = store_dir()?.join("sessions").join(format!("{name}.json"));
+    let path = store_for_box(name)?
+        .join("sessions")
+        .join(format!("{name}.json"));
     let txt = fs::read_to_string(path).ok()?;
     serde_json::from_str(&txt).ok()
 }
@@ -1980,7 +2047,7 @@ pub fn current_task(name: &str) -> Option<String> {
     if !valid_name(name) {
         return None;
     }
-    if let Some(p) = store_dir().map(|d| d.join("tasks").join(format!("{name}.json"))) {
+    if let Some(p) = store_for_box(name).map(|d| d.join("tasks").join(format!("{name}.json"))) {
         if let Ok(txt) = fs::read_to_string(p) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
                 if let Some(t) = v.get("task").and_then(|t| t.as_str()).map(str::trim) {
@@ -2000,7 +2067,9 @@ pub fn current_status(name: &str) -> Option<String> {
     if !valid_name(name) {
         return None;
     }
-    let p = store_dir()?.join("status").join(format!("{name}.json"));
+    let p = store_for_box(name)?
+        .join("status")
+        .join(format!("{name}.json"));
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
     v.get("status")
         .and_then(|s| s.as_str())
@@ -2026,6 +2095,22 @@ const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh"
 pub fn ensure_probe() -> Result<(), String> {
     let store = store_dir().ok_or("no shared store to install the probe into")?;
     ensure_probe_in(&store)
+}
+
+/// Install/refresh the probe in *every* store skein reads — each managed repo's plus `store_dir()` —
+/// so multi-repo fleets all report turn-state. Best-effort: errors are collected, not fatal.
+pub fn ensure_probe_all() -> Result<(), String> {
+    let mut errs = Vec::new();
+    for store in all_stores() {
+        if let Err(e) = ensure_probe_in(&store) {
+            errs.push(format!("{}: {e}", store.display()));
+        }
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("; "))
+    }
 }
 
 /// `ensure_probe` against a specific store dir (the store skein reads, or a freshly-provisioned one).

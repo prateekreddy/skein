@@ -29,6 +29,10 @@ fn main() {
             None => Err("usage: skein add <git-url|path> [--id <id>] [--agent <claude>]".into()),
         },
         "repos" => cmd_repos(),
+        "remove" | "rm" => match rest.first() {
+            Some(id) => cmd_remove(id),
+            None => Err("usage: skein remove <repo-id>".into()),
+        },
         "doctor" => cmd_doctor(),
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name),
@@ -58,6 +62,7 @@ usage:\n  \
 skein [ls]            show the fleet (default)\n  \
 skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  \
 skein repos           list registered repos\n  \
+skein remove <id>     unregister a repo (files left on disk)\n  \
 skein attach <box>    reconnect to the box's running agent session\n  \
 skein doctor          check registry + required tools (sbx/git/gh)\n  \
 skein version\n  \
@@ -98,6 +103,19 @@ fn flag(opts: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
+fn cmd_remove(id: &str) -> Result<(), String> {
+    let repo = skein::remove_repo(id)?;
+    println!(
+        "{BOLD}removed{RESET} {CYAN}{}{RESET} {DIM}(unregistered){RESET}",
+        repo.id
+    );
+    println!(
+        "  {DIM}files left on disk — delete if you're sure:{RESET}\n    {}\n    {}",
+        repo.work, repo.store
+    );
+    Ok(())
+}
+
 fn cmd_repos() -> Result<(), String> {
     let repos = skein::load_repos();
     if repos.is_empty() {
@@ -118,7 +136,7 @@ fn cmd_ls() -> Result<(), String> {
     // Same sbx-sourced, "who-needs-me-first"-sorted fleet the web cockpit shows (sbx ∪ registry).
     let views = skein::load_views()?;
     if views.is_empty() {
-        println!("{DIM}the skein is empty — launch a box with: setup-sandbox.sh <branch>{RESET}");
+        println!("{DIM}the skein is empty — add a repo (skein add <url|path>) then launch a box{RESET}");
         return Ok(());
     }
 

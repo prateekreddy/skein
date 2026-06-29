@@ -43,7 +43,7 @@ async fn main() {
     skein::load_dotenv();
     // Install skein's turn-state probe into the shared store (idempotent), so every box reports
     // working/waiting/needs-input + task without the repo shipping hooks. Best-effort.
-    if let Err(e) = skein::ensure_probe() {
+    if let Err(e) = skein::ensure_probe_all() {
         eprintln!("skein: turn-state probe not installed ({e}); boxes will show live/stale only");
     }
     // Install skein's own sbx kit (idempotent) so launching a box needs no repo-side kit.
@@ -73,6 +73,7 @@ async fn main() {
         .route("/vendor/addon-fit.js", get(vendor_fit_js))
         .route("/api/boxes", get(api_boxes))
         .route("/api/repos", get(api_repos).post(api_add_repo))
+        .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/session", get(api_session))
@@ -235,6 +236,14 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
         }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),
+    }
+}
+
+/// Unregister a repo (files left on disk).
+async fn api_remove_repo(Path(id): Path<String>) -> Response {
+    match skein::remove_repo(&id) {
+        Ok(repo) => Json(repo).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
 
