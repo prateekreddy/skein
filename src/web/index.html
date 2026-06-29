@@ -1413,7 +1413,10 @@ document.addEventListener("paste", e => {
         { method:"POST", headers:{ "Content-Type": file.type || "image/png" }, body: file })
     .then(r => r.json()).then(d => {
       if (d.ok) {
-        if (ses && ses.ws.readyState === 1) ses.ws.send(new TextEncoder().encode(d.path + " "));
+        // Claude Code auto-detects an image path only when it arrives as a *paste*, so send it via
+        // bracketed paste (not raw typing) — that's what converts it to an inline [Image #N].
+        if (ses && ses.ws.readyState === 1)
+          ses.ws.send(new TextEncoder().encode("\x1b[200~" + d.path + "\x1b[201~ "));
         toast("image added → " + d.path);
       } else toast("image upload failed: " + (d.error||"").split("\n")[0]);
     }).catch(() => toast("image upload failed"));
