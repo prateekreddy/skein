@@ -738,8 +738,10 @@ fn delist_box(name: &str) -> Result<(), String> {
 
 /// The host shell command that tears a box down — kills *and* removes the sandbox, reclaiming the
 /// resources it consumed. Override with $SKEIN_DESTROY_CMD (legacy: $SKEIN_ARCHIVE_CMD); `{name}` is
-/// substituted and shell-quoted. Default `sbx rm {name}`. DESTRUCTIVE: in clone mode this removes the
-/// sandbox's clone, so any commits made in the box that were never pushed/fetched are lost.
+/// substituted and shell-quoted. Default `sbx rm -f {name}` — `-f` skips sbx's interactive
+/// clone-removal confirmation (skein runs non-interactively, so without it `sbx rm` aborts with
+/// exit 1). DESTRUCTIVE: in clone mode this removes the sandbox's clone, so any commits made in the
+/// box that were never pushed/fetched are lost.
 pub fn destroy_command(name: &str) -> String {
     for k in ["SKEIN_DESTROY_CMD", "SKEIN_ARCHIVE_CMD"] {
         if let Ok(t) = env::var(k) {
@@ -748,7 +750,7 @@ pub fn destroy_command(name: &str) -> String {
             }
         }
     }
-    format!("sbx rm {}", sh_quote(name))
+    format!("sbx rm -f {}", sh_quote(name))
 }
 
 /// Destroy a box: tear the sandbox down via `destroy_command`, then delist it. The teardown must

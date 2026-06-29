@@ -134,7 +134,7 @@ are present — run it first if something looks off. All knobs are environment v
 | `SKEIN_ATTACH_CMD` | attach template — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
 | `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
 | `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; halts the sandbox to free compute (resume via attach). Non-destructive | `sbx stop {name}` |
-| `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost). Legacy fallback `SKEIN_ARCHIVE_CMD` | `sbx rm {name}` |
+| `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost). Legacy fallback `SKEIN_ARCHIVE_CMD` | `sbx rm -f {name}` |
 | `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}` substituted | `sbx run --name {name} -- --continue --print {prompt}` |
 | `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |
 | `SKEIN_AI_MODEL` | model for AI calls when `SKEIN_AI` is on | `claude-haiku-4-5` |
