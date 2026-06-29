@@ -31,7 +31,10 @@ blocked on, or the gist of its last message — with a chip from the **fork-dete
 box to open its **embedded terminal** (xterm.js ↔ a server-side PTY running `sbx run --name <box>`),
 its **diff**, or a **Session** digest — "what happened here" assembled for free from the branch's
 commits, the agent's `.skein/journal.md`, and its last message, so you can catch up without reading the
-scrollback. No model tokens are spent building any of this.
+scrollback. No model tokens are spent building any of this. Each box also gets a second **Shell** tab
+(`sbx exec -it <box> /bin/bash`) for running commands yourself, and **pasting an image** into a terminal
+uploads it into the box (the agent can't see your clipboard — it runs in the microVM) and types the
+in-box path in for the agent to read.
 
 The signals come from each box's Claude Code hooks (`Stop` / `Notification` → `box-status.sh`,
 `box-diff.sh`, `box-session.sh`; `PostToolUse` on `TodoWrite` → `box-task.sh`) writing the shared

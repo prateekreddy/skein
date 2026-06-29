@@ -359,6 +359,52 @@ fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
     run_capture("sh", &["-c", cmd])
 }
 
+/// Save a pasted image into the box and return its in-box path. The agent runs *inside* the sandbox
+/// (and can't see the user's clipboard), so the bytes are streamed through `sbx exec -i <box> sh -c
+/// 'cat > <path>'` to land at `/tmp/skein-paste-<unique>.<ext>`, which the agent can then read. Only
+/// `-i` (no `-t`) so the binary isn't mangled by a pty. `ext` is sanitised to a short alnum suffix.
+pub fn save_pasted_image(name: &str, ext: &str, bytes: &[u8]) -> Result<String, String> {
+    use std::io::Write as _;
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    if bytes.is_empty() {
+        return Err("empty image".into());
+    }
+    let ext: String = ext.chars().filter(char::is_ascii_alphanumeric).take(5).collect();
+    let ext = if ext.is_empty() { "png".into() } else { ext.to_ascii_lowercase() };
+    // unique-enough: millis-since-epoch + a process-local counter (no collisions within a run).
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = format!("/tmp/skein-paste-{ms}-{n}.{ext}");
+    let inner = format!("cat > {}", sh_quote(&path));
+    let mut child = Command::new("sbx")
+        .args(["exec", "-i", name, "sh", "-c", &inner])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("sbx exec not runnable: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin pipe")?
+        .write_all(bytes)
+        .map_err(|e| format!("writing image to box: {e}"))?; // ChildStdin drops here → EOF for cat
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "sbx exec failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(path)
+}
+
 /// Merge-readiness for a box: does a PR exist, its state, and CI checks. All host-side via `gh`.
 #[derive(Debug, Default, Serialize)]
 pub struct ShipStatus {
@@ -1661,6 +1707,13 @@ mod tests {
             shell_argv("thing-x"),
             ["exec", "-it", "thing-x", "/bin/bash"]
         );
+    }
+
+    #[test]
+    fn save_pasted_image_guards_before_spawning() {
+        // both reject before any sbx exec — so the test never shells out.
+        assert!(save_pasted_image("../escape", "png", b"x").is_err()); // name guard
+        assert!(save_pasted_image("thing-x", "png", b"").is_err()); // empty image
     }
 
     #[test]

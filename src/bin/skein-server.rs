@@ -62,6 +62,11 @@ async fn main() {
         .route("/api/collisions", get(api_collisions))
         .route("/api/boxes/:name/stop", post(api_stop))
         .route("/api/boxes/:name/destroy", post(api_destroy))
+        .route(
+            "/api/boxes/:name/paste-image",
+            // screenshots are bigger than axum's 2 MB default body cap — allow up to 25 MB.
+            post(api_paste_image).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -311,6 +316,33 @@ async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Value> {
     let r = tokio::task::spawn_blocking(move || skein::destroy_box(&name)).await;
     Json(match r {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// Receive a pasted image (raw bytes, `Content-Type: image/*`) and stream it into the box, returning
+/// its in-box path for the agent to read. The agent can't see the user's clipboard (it's in the
+/// microVM), so this bridges a browser paste to a file the agent can open.
+async fn api_paste_image(
+    Path(name): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let ext = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ct| ct.split(';').next())
+        .and_then(|ct| ct.trim().strip_prefix("image/"))
+        .unwrap_or("png")
+        .to_string();
+    let bytes = body.to_vec();
+    let r = tokio::task::spawn_blocking(move || skein::save_pasted_image(&name, &ext, &bytes)).await;
+    Json(match r {
+        Ok(Ok(path)) => serde_json::json!({ "ok": true, "path": path }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })

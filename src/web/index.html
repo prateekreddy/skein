@@ -26,7 +26,25 @@
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
   /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
-  body.docked #left { flex:0 0 var(--fleet-w, clamp(260px, 28%, 380px)); }
+  body.docked #left { flex:0 0 var(--fleet-w, clamp(260px, 28%, 380px));
+                      container-type:inline-size; overflow-x:hidden; }
+  /* graceful degradation as the sidebar narrows (keyed on the sidebar's own width, not the viewport,
+     so it tracks the drag-resize). Smaller paddings/fonts; the action buttons drop to their own row. */
+  @container (max-width: 340px) {
+    .wrap { padding:12px 9px 30px; }
+    header { gap:8px; margin-bottom:12px; }
+    .word { font-size:15px; }
+    .counts { font-size:11px; gap:7px; }
+    .right { margin-left:0; width:100%; gap:6px; flex-wrap:wrap; }
+    .kbtn { font-size:10px; padding:3px 7px; }
+    body.docked .row { gap:8px; padding:8px 9px; }
+    .sub { gap:7px; font-size:11px; }
+  }
+  @container (max-width: 270px) {
+    .word { font-size:14px; }
+    .live #livetext { display:none; }                 /* keep just the pip when very narrow */
+    .branch { max-width:120px; overflow:hidden; text-overflow:ellipsis; }
+  }
   /* draggable gutter between the fleet sidebar and the dock — sets --fleet-w (persisted) */
   #gutter { display:none; }
   body.docked #gutter { display:block; flex:0 0 5px; cursor:col-resize; background:var(--border-2);
@@ -1377,6 +1395,29 @@ function cycleSession(d) {
   const ns = sessions.get(ks[(i+d+ks.length)%ks.length]);
   showBox(ns.box, "term", ns.kind);
 }
+
+// ---------- image paste ----------
+// The agent runs inside the sandbox and can't see your clipboard, so a pasted image is uploaded into
+// the box (server streams it to /tmp via sbx exec) and its path is typed into the active terminal for
+// the agent to read. Text paste is untouched — it flows through to xterm as before.
+document.addEventListener("paste", e => {
+  if (view.mode !== "term" || !view.box) return;
+  const items = e.clipboardData && e.clipboardData.items; if (!items) return;
+  const item = [...items].find(it => it.kind === "file" && it.type.startsWith("image/"));
+  if (!item) return;                         // not an image → let xterm handle the (text) paste
+  const file = item.getAsFile(); if (!file) return;
+  e.preventDefault(); e.stopPropagation();   // don't let xterm paste binary as text
+  const box = view.box, ses = activeSession();
+  toast("uploading image…");
+  fetch(`/api/boxes/${encodeURIComponent(box)}/paste-image`,
+        { method:"POST", headers:{ "Content-Type": file.type || "image/png" }, body: file })
+    .then(r => r.json()).then(d => {
+      if (d.ok) {
+        if (ses && ses.ws.readyState === 1) ses.ws.send(new TextEncoder().encode(d.path + " "));
+        toast("image added → " + d.path);
+      } else toast("image upload failed: " + (d.error||"").split("\n")[0]);
+    }).catch(() => toast("image upload failed"));
+}, true);
 
 // ---------- resizable fleet sidebar ----------
 // Drag the gutter to set --fleet-w (the docked fleet width); persisted across reloads. Keeps the
