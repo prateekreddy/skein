@@ -85,7 +85,7 @@ fn cmd_add(source: &str, opts: &[String]) -> Result<(), String> {
     println!("  {DIM}source{RESET}  {}", repo.source);
     println!("  {DIM}work  {RESET}  {}", repo.work);
     println!("  {DIM}store {RESET}  {}", repo.store);
-    if let Some(w) = skein::ssh_remote_warning(&repo.work) {
+    if let Some(w) = skein::remote_warning(&repo.work) {
         println!("\n\x1b[33m!\x1b[0m {w}");
     }
     println!(

@@ -54,30 +54,46 @@ commands:
         [ -n "$store" ] && [ -d "$store" ] || store="$(dirname "$clone_root")/store/.claude"
 
         # Read the launch spec skein recorded for this box (branch + the install-tmux toggle).
+        # jq-free by design: the agent image may not ship jq, and a missed branch here is exactly the
+        # "box stuck on the base branch" failure — so parse the small skein-written JSON with sed/grep
+        # when jq is absent rather than silently skipping the checkout.
         spec="$store/skein/launch/$vmid.json"
         branch=""
         want_tmux="true"
-        if [ -r "$spec" ] && command -v jq >/dev/null 2>&1; then
-          branch="$(jq -r '.branch // ""' "$spec" 2>/dev/null)"
-          want_tmux="$(jq -r 'if .install_tmux == false then "false" else "true" end' "$spec" 2>/dev/null)"
+        if [ -r "$spec" ]; then
+          if command -v jq >/dev/null 2>&1; then
+            branch="$(jq -r '.branch // ""' "$spec" 2>/dev/null)"
+            want_tmux="$(jq -r 'if .install_tmux == false then "false" else "true" end' "$spec" 2>/dev/null)"
+          else
+            branch="$(sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$spec" | head -n1)"
+            grep -q '"install_tmux"[[:space:]]*:[[:space:]]*false' "$spec" && want_tmux="false" || want_tmux="true"
+          fi
+        else
+          echo "[skein-kit] no launch spec at $spec — staying on the clone's default branch" >&2
         fi
 
-        # Check out the branch skein recorded for this box.
+        # Check out the branch skein recorded for this box (creating it if it's new).
         if [ -n "$branch" ]; then
           git -C "$clone_root" checkout "$branch" 2>/dev/null \
             || git -C "$clone_root" checkout -b "$branch" 2>/dev/null \
             || echo "[skein-kit] could not checkout $branch" >&2
         fi
 
-        # Install tmux if it's missing and the app setting allows it (default on) — used for skein's
-        # persistent *shell* tab (`tmux new-session -A -s skein-shell`), which survives reconnects.
-        # Fail-soft: a box without tmux still works (the shell tab falls back to a plain shell).
-        # Disable via the cockpit setting (skein writes install_tmux:false into the spec above).
-        if [ "$want_tmux" = "true" ] && ! command -v tmux >/dev/null 2>&1; then
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq 2>/dev/null && sudo apt-get install -y -qq tmux 2>/dev/null \
-              || echo "[skein-kit] tmux install failed (continuing without a shared session)" >&2
-          fi
+        # Install the box-side tools the agent image may lack — one apt pass for whatever's missing:
+        #   jq   — the bootstrap's registry writer (sandboxes.json) and the launch-spec read both use
+        #          it; the sed/grep fallback above only covers the branch, so without jq a box still
+        #          never registers. Always ensure it.
+        #   tmux — the persistent shell/agent sessions (`tmux new-session -A`); only when enabled.
+        # Fail-soft: a box still works without them (shell falls back to a plain shell). tmux is
+        # gated by the cockpit setting (skein writes install_tmux:false into the spec above).
+        need=""
+        command -v jq >/dev/null 2>&1 || need="$need jq"
+        if [ "$want_tmux" = "true" ]; then
+          command -v tmux >/dev/null 2>&1 || need="$need tmux"
+        fi
+        if [ -n "$need" ] && command -v apt-get >/dev/null 2>&1; then
+          sudo apt-get update -qq 2>/dev/null && sudo apt-get install -y -qq $need 2>/dev/null \
+            || echo "[skein-kit] could not install:$need (continuing)" >&2
         fi
 
         # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
@@ -97,6 +113,8 @@ memory: |
 
   This sandbox is a private `--clone` of the repo (isolated code, full git); the
   `.claude` store (memory/skills/hooks/mailbox + skein's turn-state probe) is a
-  shared mount linked in at startup and is LIVE across every parallel sandbox. The
-  agent runs inside a `skein` tmux session, so reconnecting re-attaches the same
-  live terminal. Coordinate with sibling boxes via the shared mailbox.
+  shared mount linked in at startup and is LIVE across every parallel sandbox.
+  Re-opening a box attaches to a persistent tmux session — `skein-agent` for the
+  agent, `skein-shell` for the shell — so the live process survives disconnects;
+  the agent resumes its transcript via `claude --continue` when the session needs
+  (re)creating. Coordinate with sibling boxes via the shared mailbox.

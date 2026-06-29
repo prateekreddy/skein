@@ -30,6 +30,9 @@ const INDEX: &str = include_str!("../web/index.html");
 const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
 const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
 const FIT_JS: &str = include_str!("../web/vendor/addon-fit.min.js");
+// WebGL renderer addon — keeps the agent TUI's heavy redraws off the main thread so typed
+// keystrokes echo without competing with the spinner/repaint churn of the DOM renderer.
+const WEBGL_JS: &str = include_str!("../web/vendor/addon-webgl.min.js");
 const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 
 /// Cap concurrent embedded terminals so a flood of WS connections can't exhaust PTYs / file
@@ -71,10 +74,12 @@ async fn main() {
         .route("/vendor/xterm.js", get(vendor_xterm_js))
         .route("/vendor/xterm.css", get(vendor_xterm_css))
         .route("/vendor/addon-fit.js", get(vendor_fit_js))
+        .route("/vendor/addon-webgl.js", get(vendor_webgl_js))
         .route("/api/boxes", get(api_boxes))
         .route("/api/repos", get(api_repos).post(api_add_repo))
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/settings", get(api_settings).post(api_set_settings))
+        .route("/api/pick-path", post(api_pick_path))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/session", get(api_session))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
@@ -99,9 +104,33 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("skein-server: cannot bind {addr}: {e}"));
     println!("skein-server → http://{addr}");
-    axum::serve(listener, app)
-        .await
-        .expect("skein-server: serve failed");
+
+    // Our own accept loop instead of `axum::serve`, solely so we can set TCP_NODELAY per
+    // connection. The terminal sends one keystroke per packet; with Nagle's algorithm on, those
+    // tiny writes get held back and coalesced with the next, which shows up as the echo arriving
+    // in bursts. `serve_connection_with_upgrades` keeps the WebSocket upgrade path intact.
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder as ConnBuilder;
+    use hyper_util::service::TowerToHyperService;
+    use tower::Service;
+    let mut make = app.into_make_service();
+    loop {
+        let (stream, _peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let _ = stream.set_nodelay(true);
+        let svc = match make.call(()).await {
+            Ok(s) => s,
+            Err(e) => match e {}, // IntoMakeService is Infallible — this arm is unreachable
+        };
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+            let _ = ConnBuilder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, TowerToHyperService::new(svc))
+                .await;
+        });
+    }
 }
 
 async fn index() -> Html<&'static str> {
@@ -113,6 +142,9 @@ async fn vendor_xterm_js() -> Response {
 }
 async fn vendor_fit_js() -> Response {
     static_asset(FIT_JS, "application/javascript; charset=utf-8")
+}
+async fn vendor_webgl_js() -> Response {
+    static_asset(WEBGL_JS, "application/javascript; charset=utf-8")
 }
 async fn vendor_xterm_css() -> Response {
     static_asset(XTERM_CSS, "text/css; charset=utf-8")
@@ -230,8 +262,8 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     .await;
     match res {
         Ok(Ok(repo)) => {
-            // Warn up-front if origin is SSH (push from a box won't work — HTTPS needed).
-            let warning = skein::ssh_remote_warning(&repo.work);
+            // Warn up-front if the push path is shaky (no origin, or SSH without a loaded key).
+            let warning = skein::remote_warning(&repo.work);
             Json(serde_json::json!({ "repo": repo, "warning": warning })).into_response()
         }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -301,6 +333,25 @@ async fn api_pr(Path(name): Path<String>) -> Json<serde_json::Value> {
     let r = tokio::task::spawn_blocking(move || skein::create_pr(&name)).await;
     Json(match r {
         Ok(Ok(url)) => serde_json::json!({ "ok": true, "url": url }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+#[derive(Deserialize, Default)]
+struct PickPathReq {
+    kind: String, // "file" → file picker; anything else → folder picker
+}
+
+/// Pop the host's native folder/file dialog (skein-server runs on the host). Returns {ok, path} on a
+/// pick, {ok, cancelled} if dismissed, or {ok:false, error} when no GUI picker is available (headless
+/// / remote — the user types the path instead).
+async fn api_pick_path(Json(r): Json<PickPathReq>) -> Json<serde_json::Value> {
+    let kind = if r.kind == "file" { "file" } else { "folder" }.to_string();
+    let res = tokio::task::spawn_blocking(move || skein::pick_path(&kind)).await;
+    Json(match res {
+        Ok(Ok(Some(path))) => serde_json::json!({ "ok": true, "path": path }),
+        Ok(Ok(None)) => serde_json::json!({ "ok": true, "cancelled": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })

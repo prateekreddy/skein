@@ -7,14 +7,22 @@
 <link rel="stylesheet" href="/vendor/xterm.css" />
 <style>
   :root {
-    --bg:#0b0d10; --panel:#14171c; --elevated:#1b1f26; --overlay:#20252e; --inset:#08090b;
-    --border:#1b2026; --border-2:#2a3038; --border-3:#3d444d;
-    --text:#e6edf3; --text-2:#b3bdc9; --dim:#8b949e; --faint:#5c636e;
-    --accent:#7c7cf0; --accent-2:#9a9af5; --accent-bg:rgba(124,124,240,.12);
-    --attn:#f85149; --waiting:#e3b341; --working:#58a6ff; --done:#3fb950; --idle:#8b949e; --stale:#484f58;
-    --dur-fast:100ms; --dur:150ms; --dur-med:250ms; --ease:cubic-bezier(.2,0,0,1);
-    --radius:10px;
-    --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,monospace;
+    /* surfaces: darkest → lightest */
+    --bg:#0a0c0f; --inset:#06080a; --panel:#13161b; --elevated:#1a1e25; --overlay:#212733;
+    --card:#13161b;                       /* alias of --panel */
+    /* hairlines & borders: subtle → strong */
+    --line:#1f252d; --border:#1a1f26; --border-2:#2a313a; --border-3:#3b434d;
+    /* text: brightest → faintest */
+    --text:#e8edf3; --fg:#e8edf3; --text-2:#b4bec9; --dim:#828d99; --faint:#586169;
+    /* accent (periwinkle — the one chromatic identity, used with restraint) */
+    --accent:#7d80f2; --accent-2:#9fa2f8; --accent-bg:rgba(125,128,242,.12);
+    /* state — functional colour only; shared by dot, pill, tab, chip */
+    --attn:#f85149; --waiting:#e3b341; --working:#58a6ff; --done:#3fb950; --idle:#828d99; --stale:#3b434c;
+    --dur-fast:100ms; --dur:150ms; --dur-med:240ms; --ease:cubic-bezier(.2,0,0,1);
+    --radius:10px; --radius-sm:7px;
+    /* type: mono carries identifiers & structural labels (it's terminal-native and the names ARE
+       git strings); grotesk carries prose (headlines, tasks, empty states). */
+    --mono:ui-monospace,"JetBrains Mono","SF Mono","Cascadia Code",Menlo,monospace;
     --ui:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif;
   }
   * { box-sizing:border-box; }
@@ -36,7 +44,7 @@
     .word { font-size:15px; }
     .counts { font-size:11px; gap:7px; }
     .right { margin-left:0; width:100%; gap:6px; flex-wrap:wrap; }
-    .kbtn { font-size:10px; padding:3px 7px; }
+    .kbtn { font-size:10px; padding:3px 7px; height:24px; }
     body.docked .row { gap:8px; padding:8px 9px; }
     .sub { gap:7px; font-size:11px; }
   }
@@ -60,20 +68,35 @@
   body.docked .dir { display:none; }
   body.docked .ghead { padding:10px 4px 5px; }
 
-  header { display:flex; align-items:center; gap:14px; margin-bottom:20px; }
+  header { display:flex; align-items:center; gap:14px; row-gap:10px; flex-wrap:wrap; margin-bottom:20px; }
   .word { font-weight:650; letter-spacing:-.01em; font-size:18px; }
   .word b { color:var(--accent); }
   .counts { color:var(--dim); font-size:13px; display:flex; gap:10px; flex-wrap:wrap; }
-  .counts .seg { display:inline-flex; align-items:center; gap:5px; }
+  .counts .seg { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
   .counts .n { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
   .counts .pip { width:7px; height:7px; border-radius:50%; }
-  .right { margin-left:auto; display:flex; align-items:center; gap:12px; }
-  .kbtn { font-family:var(--mono); font-size:11px; color:var(--dim); cursor:pointer; background:var(--panel);
-          border:1px solid var(--border-2); border-radius:7px; padding:4px 9px;
-          transition:color var(--dur-fast), border-color var(--dur-fast); }
+  .right { margin-left:auto; display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+  .kbtn { display:inline-flex; align-items:center; gap:6px; flex:none; white-space:nowrap; line-height:1;
+          font-family:var(--mono); font-size:11px;
+          color:var(--dim); cursor:pointer; background:var(--panel);
+          border:1px solid var(--border-2); border-radius:7px; padding:5px 10px; height:28px;
+          transition:color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast); }
   .kbtn:hover { color:var(--text); border-color:var(--border-3); }
+  /* one monochrome icon language (inline SVG, inherits currentColor) — no emoji glyphs */
+  .ic { width:13px; height:13px; flex:none; fill:none; stroke:currentColor; stroke-width:2;
+        stroke-linecap:round; stroke-linejoin:round; }
+  .kbtn.ghost .ic { width:15px; height:15px; }
   .kbtn.go { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%,transparent); background:var(--accent-bg); font-weight:600; }
   .kbtn.go:hover { color:var(--accent); border-color:var(--accent); }
+  /* the one primary action in the rail — everything else stays quiet */
+  .kbtn.primary { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 50%,transparent);
+                  background:var(--accent-bg); font-weight:600; }
+  .kbtn.primary:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 18%,transparent); }
+  /* icon-only quiet buttons (repo, mailbox, alerts, settings, palette) — chrome, not content */
+  .kbtn.ghost { background:transparent; border-color:transparent; padding:0 8px; color:var(--faint); }
+  .kbtn.ghost:hover { background:var(--panel); border-color:var(--border-2); color:var(--text); }
+  /* a hairline grouping the primary create-action from the utility icons */
+  .hdiv { flex:none; align-self:center; width:1px; height:18px; background:var(--border-2); margin:0 3px; }
   .live { display:flex; align-items:center; gap:7px; color:var(--dim); font-size:12px; }
   .live .pip { width:7px; height:7px; border-radius:50%; background:var(--stale); transition:background var(--dur); }
   .live.on .pip { background:var(--done); box-shadow:0 0 8px var(--done); }
@@ -85,12 +108,23 @@
   .ghead .gcaret { font-size:9px; color:var(--dim); width:9px; text-align:center; }
   .ghead .glabel { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
   .ghead .gc { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .ghead .glabel { font-family:var(--mono); text-transform:none; letter-spacing:0; }
+  /* the pinned "needs you" section is the cockpit's focal point — make its header read as primary */
+  .group[data-sid="needs"] .ghead { color:var(--text-2); }
+  .group[data-sid="needs"] .glabel { color:var(--text); }
+  .group[data-sid="needs"] .gc { color:var(--attn); }
   .ghead .gadd { margin-left:auto; color:var(--dim); font-weight:400; text-transform:none; padding:0 4px;
                  border-radius:5px; }
   .ghead .gadd:hover { color:var(--text); background:var(--line); }
-  .grows { display:flex; flex-direction:column; gap:6px; }
+  /* the skein: a faint thread runs down each section behind the cards; the status dots sit on it as
+     beads (visible in the 6px gaps between cards), so the fleet reads as strands you're holding.
+     --thread-x = the dot centre (border-left 2px + padding-left + half the dot column). */
+  .grows { display:flex; flex-direction:column; gap:6px; position:relative; --thread-x:27px; }
+  .grows::before { content:""; position:absolute; left:var(--thread-x); top:7px; bottom:7px; width:1px;
+                   background:color-mix(in srgb,var(--accent) 22%,var(--line)); pointer-events:none; }
+  body.docked .grows { --thread-x:21px; }
 
-  .row { display:grid; grid-template-columns:18px 1fr auto auto 16px; align-items:center; gap:14px;
+  .row { position:relative; z-index:1; display:grid; grid-template-columns:18px 1fr auto auto 16px; align-items:center; gap:14px;
          padding:12px 16px; background:var(--panel); border:1px solid var(--border-2); border-left:2px solid transparent;
          border-radius:var(--radius); cursor:pointer; box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
          transition:background var(--dur-fast), border-color var(--dur-fast); }
@@ -105,18 +139,25 @@
   .row.wired .chev { color:var(--accent); }
   .row.streaming .chev { animation:pulse 1s var(--ease) infinite; }
 
-  .dot { width:9px; height:9px; border-radius:50%; justify-self:center; }
-  .s-attn .dot { background:var(--attn); box-shadow:0 0 12px var(--attn); animation:pulse 1.5s var(--ease) infinite; }
-  .s-working .dot { background:var(--working); box-shadow:0 0 9px var(--working); animation:pulse 1.9s var(--ease) infinite; }
-  .s-waiting .dot { background:var(--waiting); box-shadow:0 0 9px var(--waiting); }
-  .s-done .dot { background:var(--done); box-shadow:0 0 7px var(--done); }
+  /* status node. Motion is rationed: only "needs you" pulses (a ring), so movement in the rail
+     always means a box is waiting on you. Everything else is a calm, slightly-glowing dot. */
+  .dot { width:9px; height:9px; border-radius:50%; justify-self:center; position:relative; }
+  .s-attn .dot { background:var(--attn); box-shadow:0 0 0 0 color-mix(in srgb,var(--attn) 70%,transparent);
+                 animation:ring 1.8s var(--ease) infinite; }
+  .s-working .dot { background:var(--working); box-shadow:0 0 7px color-mix(in srgb,var(--working) 60%,transparent); }
+  .s-waiting .dot { background:var(--waiting); box-shadow:0 0 6px color-mix(in srgb,var(--waiting) 50%,transparent); }
+  .s-done .dot { background:var(--done); box-shadow:0 0 6px color-mix(in srgb,var(--done) 45%,transparent); }
   .s-idle .dot { background:var(--idle); }
-  .s-stale .dot, .s-unknown .dot { background:var(--stale); }
+  .s-stale .dot { background:var(--stale); }
   @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+  /* an expanding halo — reads as "calling for attention" without the whole dot blinking */
+  @keyframes ring { 0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--attn) 65%,transparent);}
+                    70%{box-shadow:0 0 0 7px transparent;} 100%{box-shadow:0 0 0 0 transparent;} }
 
   .main { min-width:0; }
-  .name { font-weight:600; letter-spacing:-.005em; }
-  .s-stale .name, .s-unknown .name, .s-idle .name { color:var(--faint); font-weight:500; }
+  .name { font-family:var(--mono); font-size:13px; font-weight:500; letter-spacing:-.01em; color:var(--text);
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .s-stale .name, .s-idle .name { color:var(--dim); }
   .sub { color:var(--dim); font-size:12px; margin-top:2px; display:flex; gap:10px; min-width:0;
          flex-wrap:nowrap; align-items:baseline; }
   /* the branch yields first: it ellipsizes so the diff badge always stays whole on one line */
@@ -144,12 +185,16 @@
   .pchip.fork { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 16%,transparent); }
   .pchip.proceed { color:var(--accent); background:var(--accent-bg); }
 
-  .pill { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding:3px 9px;
-          border-radius:999px; color:var(--dim); background:#1b2026; border:1px solid transparent; white-space:nowrap; }
-  .s-attn .pill { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); border-color:color-mix(in srgb,var(--attn) 30%,transparent); }
-  .s-waiting .pill { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 14%,transparent); border-color:color-mix(in srgb,var(--waiting) 28%,transparent); }
-  .s-working .pill { color:var(--working); background:color-mix(in srgb,var(--working) 14%,transparent); border-color:color-mix(in srgb,var(--working) 28%,transparent); }
-  .s-done .pill { color:var(--done); background:color-mix(in srgb,var(--done) 14%,transparent); border-color:color-mix(in srgb,var(--done) 28%,transparent); }
+  /* state word — a quiet right-aligned annotation. The dot is the colour anchor; this just names it.
+     It's hidden on rows that show an actionable pause chip (decision / proceed?) so state isn't
+     printed twice. */
+  .pill { font-family:var(--mono); font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+          padding:0; border:0; background:transparent; color:var(--dim); white-space:nowrap; }
+  .s-attn .pill { color:var(--attn); }
+  .s-waiting .pill { color:var(--waiting); }
+  .s-working .pill { color:var(--working); }
+  .s-done .pill { color:var(--done); }
+  .s-idle .pill, .s-stale .pill { color:var(--faint); }
 
   .age { color:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
 
@@ -186,29 +231,37 @@
   .dock-actions { margin-left:auto; display:flex; align-items:center; padding:0 8px; gap:6px; }
   .dock-actions .da { color:var(--faint); cursor:pointer; font-size:12px; padding:4px 7px; border-radius:6px; }
   .dock-actions .da:hover { color:var(--text); background:var(--elevated); }
-  .dockbar { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--border);
+  /* drilldown header — same button vocabulary as the rail: identity left, focal toggle centre,
+     actions right (grouped by consequence, destroy fenced behind a hairline). */
+  .dockbar { display:flex; align-items:center; gap:8px; padding:7px 12px; border-bottom:1px solid var(--border);
              background:var(--panel); font-size:13px; }
-  .dockbar .bdot { width:8px; height:8px; border-radius:50%; background:var(--stale); flex:none; }
-  .dockbar.s-attn .bdot { background:var(--attn); } .dockbar.s-waiting .bdot { background:var(--waiting); }
-  .dockbar.s-working .bdot { background:var(--working); } .dockbar.s-done .bdot { background:var(--done); }
-  .dockbar .nm { font-weight:600; }
-  .dockbar .br { font-family:var(--mono); color:var(--accent); font-size:12px; }
-  .dockbar .dstat { font-family:var(--mono); font-size:12px; }
+  .dockbar .dback { margin-right:1px; }
+  .dockbar .bdot { width:8px; height:8px; border-radius:50%; background:var(--stale); flex:none;
+                   box-shadow:0 0 0 3px color-mix(in srgb,var(--stale) 16%,transparent); }
+  .dockbar.s-attn .bdot   { background:var(--attn);    box-shadow:0 0 0 3px color-mix(in srgb,var(--attn) 24%,transparent); }
+  .dockbar.s-waiting .bdot{ background:var(--waiting); box-shadow:0 0 0 3px color-mix(in srgb,var(--waiting) 20%,transparent); }
+  .dockbar.s-working .bdot{ background:var(--working); box-shadow:0 0 0 3px color-mix(in srgb,var(--working) 20%,transparent); }
+  .dockbar.s-done .bdot   { background:var(--done);    box-shadow:0 0 0 3px color-mix(in srgb,var(--done) 20%,transparent); }
+  .dockbar .nm { font-family:var(--mono); font-size:13px; font-weight:500; color:var(--text);
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:26vw; }
+  .dockbar .br { font-family:var(--mono); font-size:11px; color:var(--accent-2); background:var(--accent-bg);
+                 border-radius:5px; padding:2px 7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:20vw; }
+  .dockbar .dstat { font-family:var(--mono); font-size:12px; color:var(--dim); white-space:nowrap; }
   .dstat .pos { color:var(--done); } .dstat .neg { color:var(--attn); }
-  .seg-toggle { margin-left:auto; display:flex; border:1px solid var(--border-2); border-radius:7px; overflow:hidden; }
+  /* the focal control — a calm, centred segmented toggle */
+  .seg-toggle { margin:0 auto; display:flex; gap:2px; background:var(--inset); border:1px solid var(--border);
+                border-radius:var(--radius-sm); padding:2px; flex:none; }
   .seg-toggle button { background:transparent; border:0; color:var(--dim); font:inherit; font-size:12px; padding:4px 13px;
-                       cursor:pointer; transition:background var(--dur-fast), color var(--dur-fast); }
-  .seg-toggle button.on { background:var(--elevated); color:var(--text); }
-  .dockbar .rf { color:var(--faint); cursor:pointer; padding:4px 8px; border-radius:6px; font-size:12px; text-decoration:none; }
-  .dockbar .rf:hover { color:var(--text); background:var(--elevated); }
-  .dockbar .shipsep { width:1px; align-self:stretch; background:var(--border-2); margin:0 2px; }
-  .dockbar .ship { font:inherit; font-size:12px; border:1px solid var(--border-2); background:var(--elevated); color:var(--text);
-    border-radius:6px; padding:4px 11px; cursor:pointer; }
-  .dockbar .ship:hover { border-color:var(--border-3); }
-  .dockbar .ship.danger { color:#f0a3a3; border-color:#5a2a2a; }
-  .dockbar .ship.danger:hover { background:#3a1f1f; border-color:#7a3a3a; }
-  .dockbar .prlink { color:var(--accent); }
-  .dockbar .ck { font-size:11px; padding:2px 7px; border-radius:999px; }
+                       border-radius:5px; cursor:pointer; transition:background var(--dur-fast), color var(--dur-fast); }
+  .seg-toggle button:hover { color:var(--text-2); }
+  .seg-toggle button.on { background:var(--elevated); color:var(--text); box-shadow:0 1px 2px rgba(0,0,0,.3); }
+  /* right action cluster */
+  .dock-right { display:flex; align-items:center; gap:7px; flex:none; }
+  .dockbar .prlink { font-family:var(--mono); font-size:12px; color:var(--accent-2); text-decoration:none; white-space:nowrap; }
+  .dockbar .prlink:hover { text-decoration:underline; }
+  .dockbar .danger:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent);
+                           border-color:color-mix(in srgb,var(--attn) 35%,transparent); }
+  .dockbar .ck { font-family:var(--mono); font-size:11px; padding:2px 7px; border-radius:999px; white-space:nowrap; }
   .dockbar .ck.ok { color:var(--done); background:color-mix(in srgb,var(--done) 14%,transparent); }
   .dockbar .ck.bad { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
   .dockbar .ck.pend { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 14%,transparent); }
@@ -292,18 +345,54 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open { display:flex; justify-content:center; align-items:flex-start; }
-  .set-row { display:flex; align-items:center; gap:10px; font-size:13px; }
-  .set-row input[type=checkbox] { width:auto; }
+  #mbx, #newbox, #settings, #addrepo { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open { display:flex; justify-content:center; align-items:flex-start; }
+  /* add-repo modal: derived-id preview + inline result/warning (replaces the native prompt/alert) */
+  .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
+  .ar-derived b { color:var(--accent); font-weight:600; }
+  .ar-msg { font-size:12px; line-height:1.5; border-radius:8px; padding:9px 11px; border:1px solid var(--line); }
+  .ar-msg.err  { color:#ffb4ae; background:color-mix(in srgb,var(--attn) 12%,transparent); border-color:color-mix(in srgb,var(--attn) 35%,transparent); }
+  .ar-msg.warn { color:#f0d28a; background:color-mix(in srgb,var(--waiting) 11%,transparent); border-color:color-mix(in srgb,var(--waiting) 32%,transparent); }
+  .ar-msg.ok   { color:#9ae6b0; background:color-mix(in srgb,var(--done) 11%,transparent); border-color:color-mix(in srgb,var(--done) 30%,transparent); }
   .set-row .desc { color:var(--faint); font-size:11px; }
-  .set-grp { display:flex; flex-direction:column; gap:4px; }
+  /* an input paired with a native "Browse…" picker button (folder/file paths) */
+  .path-row { display:flex; gap:8px; align-items:stretch; }
+  .path-row input { flex:1; min-width:0; }
+  .path-row .kbtn { flex:none; height:auto; }
   .set-repos { display:flex; flex-direction:column; gap:4px; max-height:160px; overflow:auto; margin:2px 0; }
   .set-repos .rrow { display:flex; align-items:baseline; gap:8px; font-size:12px; padding:3px 6px; border:1px solid var(--line); border-radius:6px; }
   .set-repos .rrow .rid { font-family:var(--mono); color:var(--accent); }
   .set-repos .rrow .rsrc { color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
   .set-repos .rrow .rx { color:var(--dim); cursor:pointer; } .set-repos .rrow .rx:hover { color:var(--attn); }
   .set-repos .none { color:var(--faint); font-size:12px; }
+  /* settings: sectioned card with a scrolling body, pinned header/footer, and real toggle switches */
+  .set-card { max-width:540px; max-height:84vh; padding:0; gap:0; }
+  .set-card .nb-head { padding:14px 18px; border-bottom:1px solid var(--line); }
+  .set-body { overflow-y:auto; padding:4px 18px 12px; display:flex; flex-direction:column; }
+  .set-sec { font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+             color:var(--faint); margin:16px 0 4px; }
+  .set-sec:first-child { margin-top:10px; }
+  .set-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:9px 0;
+             border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); cursor:pointer; font-size:13px; }
+  .set-row:last-of-type { border-bottom:0; }
+  .set-txt { display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .set-title { font-size:13px; color:var(--text); }
+  .set-field { display:flex; flex-direction:column; gap:5px; padding:9px 0; cursor:default; }
+  .set-field input { width:100%; }
+  /* toggle switch (replaces bare checkboxes) */
+  .switch { appearance:none; -webkit-appearance:none; position:relative; width:34px; height:20px; flex:none; margin:0;
+            background:var(--border-2); border:1px solid var(--border-3); border-radius:999px; cursor:pointer;
+            transition:background var(--dur-fast), border-color var(--dur-fast); }
+  .switch::after { content:""; position:absolute; top:1px; left:1px; width:16px; height:16px; border-radius:50%;
+                   background:var(--text-2); transition:transform var(--dur-fast), background var(--dur-fast); }
+  .switch:checked { background:color-mix(in srgb,var(--accent) 55%,transparent); border-color:var(--accent); }
+  .switch:checked::after { transform:translateX(14px); background:#fff; }
+  .switch:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .set-add { display:inline-flex; align-items:center; gap:6px; align-self:flex-start; margin-top:4px;
+             font:inherit; font-size:12px; color:var(--accent); background:var(--accent-bg);
+             border:1px solid color-mix(in srgb,var(--accent) 40%,transparent); border-radius:7px; padding:5px 10px; cursor:pointer; }
+  .set-add:hover { border-color:var(--accent); }
+  .set-card .nb-foot { padding:12px 18px; border-top:1px solid var(--line); }
   .mbx-card, .nb-card { width:100%; background:var(--overlay); border:1px solid var(--border-3); border-radius:12px;
     box-shadow:0 24px 70px rgba(0,0,0,.6); animation:rise var(--dur-med) var(--ease); display:flex; flex-direction:column; }
   .mbx-card { max-width:620px; max-height:78vh; }
@@ -345,7 +434,6 @@
     border:1px solid var(--border-2); border-radius:8px; font-family:var(--mono); font-size:13px; cursor:pointer; }
   .keybar button:active { background:var(--overlay); }
   .keybar button.armed { background:var(--accent); border-color:var(--accent); color:#0b0d10; }
-  .dockbar .mback { display:none; }
 
   @media (max-width:860px) {
     /* size the dock to the *visible* viewport so the soft keyboard doesn't hide the prompt */
@@ -356,7 +444,8 @@
     body.docked.show-fleet #dock { display:none; }
     body.docked.term-mode .keybar { display:flex; }
     .dockbar { flex-wrap:wrap; }
-    .dockbar .mback { display:inline-block; }
+    .seg-toggle { margin:0; order:3; }
+    .dock-right { order:2; margin-left:auto; }
     .tab { max-width:160px; }
   }
   @media (prefers-reduced-motion:reduce) {
@@ -394,13 +483,14 @@
           <div class="counts" id="counts"></div>
           <div class="right">
             <span class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></span>
-            <span class="kbtn" onclick="openNewBox()" title="Launch a new box (⌘N)">＋ box</span>
-            <span class="kbtn" onclick="addRepoPrompt()" title="Add a repository">＋ repo</span>
-            <span class="kbtn" id="mbxbtn" onclick="openMailbox()" title="Cross-box mailbox &amp; broadcast">✉ mailbox</span>
-            <span class="kbtn" id="alerts" title="Desktop alerts when a box needs you">🔔 alerts</span>
-            <span class="kbtn" onclick="openSettings()" title="Settings &amp; repos">⚙</span>
-            <span class="kbtn" onclick="openPalette()">⌘K</span>
-            <span class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></span>
+            <span class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</span>
+            <span class="hdiv"></span>
+            <span class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span>
+            <span class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></span>
+            <span class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span>
+            <span class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+            <span class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)">⌘K</span>
+            <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
         </header>
         <div id="fleet"></div>
@@ -470,34 +560,48 @@
     </div>
   </div>
 
-  <div id="settings" aria-hidden="true">
+  <div id="addrepo" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
-      <div class="nb-head"><b>Settings</b><span class="x" onclick="closeSettings()">✕</span></div>
-      <label class="nb-lbl">repos <span class="desc">repos skein manages — boxes are &lt;repo&gt;-&lt;branch&gt;</span></label>
-      <div id="set-repos" class="set-repos"></div>
-      <div style="margin:2px 0 6px"><span class="kbtn" onclick="addRepoPrompt()" title="Add a repository">＋ add repository</span></div>
-      <div class="set-grp">
-        <label class="set-row"><input type="checkbox" id="set-tmux"> Auto-install tmux in boxes
-          <span class="desc">shared agent session so reconnects re-attach the same terminal</span></label>
-        <label class="set-row"><input type="checkbox" id="set-seedgh"> Seed gh token into sbx
-          <span class="desc">global secret so boxes can fetch / push / open PRs</span></label>
-        <label class="set-row"><input type="checkbox" id="set-forcegh"> Overwrite gh token on startup
-          <span class="desc">refresh the sbx secret after a token rotation</span></label>
-        <label class="set-row"><input type="checkbox" id="set-confirmdestroy"> Confirm before Destroy
-          <span class="desc">clone-mode boxes lose unpushed commits</span></label>
+      <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
+      <label class="nb-lbl">git URL or local path</label>
+      <div class="path-row">
+        <input id="ar-src" placeholder="https://github.com/org/repo.git   ·   ~/code/repo" autocomplete="off" spellcheck="false" />
+        <button type="button" class="kbtn" id="ar-browse" title="Pick a local folder"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button>
       </div>
-      <label class="nb-lbl">default agent</label>
-      <input id="set-agent" placeholder="claude" autocomplete="off" spellcheck="false" />
-      <label class="nb-lbl">base branch (PRs)</label>
-      <input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" />
-      <label class="nb-lbl">ssh key path <span class="desc">loaded into your ssh-agent so sbx forwards it into boxes for SSH git push (the key never enters a box)</span></label>
-      <input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" />
-      <div class="nb-foot"><span class="hint">saved to <code>~/.skein/config.json</code> · matching <code>$SKEIN_*</code> env vars still override</span><button class="primary" id="set-go">Save</button></div>
+      <div class="ar-derived" id="ar-derived"></div>
+      <div class="ar-msg" id="ar-msg" style="display:none"></div>
+      <div class="nb-foot"><span class="hint">clones a URL into <code>~/.skein/repos</code> · adopts a local path in place</span><button class="primary" id="ar-go">Add →</button></div>
+    </div>
+  </div>
+
+  <div id="settings" aria-hidden="true">
+    <div class="nb-card set-card">
+      <div class="nb-head"><b>Settings</b><span class="x" onclick="closeSettings()">✕</span></div>
+      <div class="set-body">
+        <div class="set-sec">Repositories</div>
+        <div id="set-repos" class="set-repos"></div>
+        <button class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>add repository</button>
+
+        <div class="set-sec">Boxes</div>
+        <label class="set-row"><span class="set-txt"><span class="set-title">Auto-install tmux</span><span class="desc">a shared shell session that survives reconnects</span></span><input type="checkbox" id="set-tmux" class="switch"></label>
+
+        <div class="set-sec">GitHub</div>
+        <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">so boxes can fetch, push, and open PRs</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
+        <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">refresh the sbx secret after a rotation</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
+        <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key never enters a box</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
+
+        <div class="set-sec">Workflow</div>
+        <label class="set-field"><span class="set-title">Default agent</span><input id="set-agent" placeholder="claude" autocomplete="off" spellcheck="false" /></label>
+        <label class="set-field"><span class="set-title">Base branch for PRs</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
+        <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
+      </div>
+      <div class="nb-foot"><span class="hint">saved to <code>~/.skein/config.json</code> · <code>$SKEIN_*</code> env overrides</span><button class="primary" id="set-go">Save</button></div>
     </div>
   </div>
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/addon-webgl.js"></script>
 <script>
 // ---------- model ----------
 const GROUPS = [
@@ -517,6 +621,9 @@ const diffBadge = d => d && (d.files||d.ins||d.del)
 
 let boxes = [], order = [], sel = null, prevState = {};
 const stateOf = name => boxes.find(b => b.name === name)?.state || "unknown";
+// Demo mode (?demo): seed realistic data and short-circuit the network so the cockpit can be opened
+// and design-reviewed with no server / no sbx. Purely a preview switch — no effect on the real app.
+const DEMO = new URLSearchParams(location.search).has("demo");
 
 // ---------- fleet render (keyed reconcile) ----------
 // Hybrid layout: a pinned "needs you" section across ALL repos (the attention inbox), then a
@@ -597,9 +704,13 @@ function updateRow(el, b, showRepo) {
   el.classList.toggle("has-task", !!showTask);
   el.querySelector(".ttext").textContent = showTask ? task : "";
   const pc = el.querySelector(".pchip");
-  pc.className = "pchip" + (chip && pauseHead ? " " + p : "");
-  pc.textContent = (chip && pauseHead) ? chip : "";
-  pc.style.display = (chip && pauseHead) ? "" : "none";
+  const showChip = !!(chip && pauseHead);
+  pc.className = "pchip" + (showChip ? " " + p : "");
+  pc.textContent = showChip ? chip : "";
+  pc.style.display = showChip ? "" : "none";
+  // dedupe: the actionable chip (decision / proceed?) already names what's owed, so drop the
+  // right-side state word on those rows — no printing "decision" twice.
+  el.querySelector(".pill").style.display = showChip ? "none" : "";
 }
 // pause → row-chip label (the fork-detector's verdict; statement/none get no chip)
 const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
@@ -644,7 +755,7 @@ function render(snapshot) {
   for (const id of [...repoIds].sort((a,b) => a.localeCompare(b)))
     desired.push({ id:`repo:${id}`, label:id, repoId:id, showRepo:false, boxes:byRepo.get(id) || [] });
   if (byRepo.has(" other"))
-    desired.push({ id:"other", label:"other", repoId:null, showRepo:true, boxes:byRepo.get(" other") });
+    desired.push({ id:"other", label: repos.length ? "unassigned" : "fleet", repoId:null, showRepo:true, boxes:byRepo.get(" other") });
 
   order = []; const seen = new Set();
   const want = new Set(desired.map(d => d.id));
@@ -746,6 +857,7 @@ function applyView() {
   renderDockbar(); renderTabs(); refreshRowAll();
 }
 function createSession(box, kind, launchBranch) {
+  if (DEMO) return createDemoSession(box, kind);   // no server in demo — show a placeholder pane
   const id = sidOf(box, kind);
   const host = document.createElement("div"); host.className = "thost"; termarea.append(host);
   // "not connected" overlay — shown when the socket closes; clicking it (or the tab) reconnects.
@@ -756,6 +868,13 @@ function createSession(box, kind, launchBranch) {
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
     cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
+  // GPU renderer: keeps the agent TUI's constant repaints off the layout/DOM path so keystrokes
+  // echo crisply. Fall back to the DOM renderer if WebGL is unavailable or its context is lost.
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => { try { webgl.dispose(); } catch {} });
+    term.loadAddon(webgl);
+  } catch {}
   // OSC 52 clipboard: TUIs like Claude Code run with mouse mode on, so a drag is consumed by the app
   // (neither xterm nor the browser sees a selection — that's the x=0/w=0). The app copies by emitting
   // an OSC 52 escape ("sent N chars via OSC 52"); xterm ignores OSC 52 by default, so it never reached
@@ -856,22 +975,28 @@ function renderDockbar() {
   const b = boxes.find(x => x.name === view.box) || { name: view.box };
   const g = groupOf(b.state || "unknown");
   dockbar.className = "dockbar s-" + g;
+  const m = view.mode, isShell = view.kind === "shell";
+  const hasReview = m === 'diff' && (comments.get(view.box) || []).length;
   dockbar.innerHTML =
-    `<span class="rf mback" id="dback" title="back to the fleet">‹ boxes</span>`
+      `<button class="kbtn ghost dback" id="dback" title="back to the fleet"><svg class="ic" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>`
     + `<span class="bdot"></span><span class="nm">${esc(view.box)}</span>`
     + (b.branch ? `<span class="br">${esc(b.branch)}</span>` : "")
     + `<span class="dstat">${diffBadge(b.diff)}</span>`
     + `<div class="seg-toggle">
-         <button data-m="term" class="${view.mode==='term'&&view.kind!=='shell'?'on':''}">Agent</button>
-         <button data-m="shell" class="${view.mode==='term'&&view.kind==='shell'?'on':''}">Shell</button>
-         <button data-m="session" class="${view.mode==='session'?'on':''}">Session</button>
-         <button data-m="diff" class="${view.mode==='diff'?'on':''}">Diff</button>
+         <button data-m="term" class="${m==='term'&&!isShell?'on':''}">Agent</button>
+         <button data-m="shell" class="${m==='term'&&isShell?'on':''}">Shell</button>
+         <button data-m="session" class="${m==='session'?'on':''}">Session</button>
+         <button data-m="diff" class="${m==='diff'?'on':''}">Diff</button>
        </div>`
-    + (view.mode==='diff' ? `<span class="rf" id="dref" title="refresh diff">↻</span>` : "")
-    + (view.mode==='diff' && (comments.get(view.box)||[]).length
-        ? `<button class="send" id="dsend" title="paste the review into the agent prompt">Send ${(comments.get(view.box)||[]).length} 💬</button>` : "")
-    + shipHtml(view.box)
-    + `<span class="rf" id="dclose" title="close">✕</span>`;
+    + `<div class="dock-right">`
+    + (m==='diff' ? `<button class="kbtn ghost" id="dref" title="refresh diff"><svg class="ic" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>` : "")
+    + (hasReview
+        ? `<button class="kbtn primary" id="dsend" title="paste the review into the agent prompt">Send ${hasReview}</button>` : "")
+    + shipHtml(view.box, hasReview)
+    + `<span class="hdiv"></span>`
+    + `<button class="kbtn ghost danger" id="ddestroy" title="destroy — sbx rm: kills & removes the sandbox and its resources (unpushed commits lost)"><svg class="ic" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
+    + `<button class="kbtn ghost" id="dclose" title="close"><svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
+    + `</div>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
   dockbar.querySelector('[data-m=shell]').onclick = () => openShell(view.box);
   dockbar.querySelector('[data-m=session]').onclick = () => openSession(view.box);
@@ -888,21 +1013,23 @@ function renderDockbar() {
 
 // ---------- ship: PR · checks · stop · destroy (host-side via gh/sbx) ----------
 const shipState = new Map();   // box -> ShipStatus
-function shipHtml(box) {
+// Constructive ship actions (PR · checks · merge · stop). Destroy lives in renderDockbar, fenced off.
+// `demote` drops the accent when a review is staged — then "Send" is the one highlighted action.
+function shipHtml(box, demote) {
   const s = shipState.get(box);
-  let h = `<span class="shipsep"></span>`;
+  const pcls = demote ? "kbtn" : "kbtn primary";
+  let h = "";
   if (s && s.pr_url) {
     const ck = s.checks==="passing"?`<span class="ck ok">✓ checks</span>`
              : s.checks==="failing"?`<span class="ck bad">✗ checks</span>`
              : s.checks==="pending"?`<span class="ck pend">… checks</span>` : "";
-    h += `<a class="rf prlink" href="${esc(s.pr_url)}" target="_blank" title="${esc(s.pr_state||"")} — open on GitHub">PR ${esc((s.pr_state||"").toLowerCase())}</a>${ck}`;
+    h += `<a class="prlink" href="${esc(s.pr_url)}" target="_blank" title="${esc(s.pr_state||"")} — open on GitHub">PR ${esc((s.pr_state||"").toLowerCase())}</a>${ck}`;
     if ((s.pr_state||"").toUpperCase() === "OPEN")
-      h += `<button class="ship" id="dmerge" title="gh pr merge — finish the loop">Merge</button>`;
+      h += `<button class="${pcls}" id="dmerge" title="gh pr merge — finish the loop">Merge</button>`;
   } else {
-    h += `<button class="ship" id="dpr" title="gh pr create for this branch">Create PR</button>`;
+    h += `<button class="${pcls}" id="dpr" title="gh pr create for this branch">Create PR</button>`;
   }
-  h += `<button class="ship" id="dstop" title="stop — halt the sandbox to free compute; resume later via attach">Stop</button>`;
-  h += `<button class="ship danger" id="ddestroy" title="destroy — sbx rm: kills & removes the sandbox and its resources (unpushed commits lost)">Destroy</button>`;
+  h += `<button class="kbtn" id="dstop" title="stop — halt the sandbox to free compute; resume later via attach">Stop</button>`;
   return h;
 }
 function loadShip(name, force) {
@@ -942,16 +1069,6 @@ function mergePr(name) {
     if (d.ok) { toast("merged ✓ — stop or destroy when ready"); shipState.delete(name); loadShip(name, true); }
     else toast("merge failed: " + (d.error||"").split("\n")[0]);
   }).catch(() => toast("merge failed"));
-}
-// One-click resume (step 6): tell a paused agent to proceed, headless & fire-and-forget. Not silent —
-// always a human click; batch use is restricted to the trivial "proceed?" set.
-function resumeBox(name, prompt) {
-  fetch(`/api/boxes/${encodeURIComponent(name)}/resume`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: prompt || "" })
-  }).then(r => r.json()).then(d => {
-    if (!d.ok) toast("continue failed: " + (d.error || "").split("\n")[0]);
-  }).catch(() => toast("continue failed"));
 }
 function batchResume() {
   const ps = boxes.filter(b => b.pause === "proceed");
@@ -1202,7 +1319,9 @@ document.getElementById("alerts").addEventListener("click", async () => {
   if (!("Notification" in window)) return;
   const p = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
   alertsOn = p === "granted";
-  const el = document.getElementById("alerts"); el.textContent = alertsOn ? "🔔 alerts on" : "🔔 alerts"; el.style.color = alertsOn ? "var(--done)" : "";
+  const el = document.getElementById("alerts");
+  el.style.color = alertsOn ? "var(--done)" : "";
+  el.title = alertsOn ? "Desktop alerts on — you'll be pinged when a box needs you" : "Desktop alerts when a box needs you";
 });
 window.addEventListener("focus", () => { document.title = "skein"; });
 
@@ -1450,11 +1569,12 @@ function fillRepoSelect() {
   nbRepo.innerHTML = repos.map(r => `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join("");
   if (cur && repos.some(r => r.id === cur)) nbRepo.value = cur;
 }
-// The repo id to prefix a new box with: the dialog selection, else the only/first repo, else "thing".
+// The repo id to prefix a new box with: the dialog selection, else the only/first repo, else a
+// neutral "box" (no repos registered yet — a degenerate case the launch can't really satisfy).
 function currentRepoId() {
   if (nbRepo.value) return nbRepo.value;
   if (repos.length) return repos[0].id;
-  return "thing";
+  return "box";
 }
 function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; loadRepos(); nbBranch.focus(); }
 // Open the new-box dialog with a specific repo preselected (the per-repo ＋ in the sidebar).
@@ -1464,21 +1584,54 @@ function openNewBoxFor(repoId) {
 }
 function closeNewBox() { newbox.classList.remove("open"); }
 // Prompt for a repo URL/path and register it, then refresh the repo list.
-function addRepoPrompt() {
-  const src = prompt("Add a repo — paste a git URL or a local path:");
-  if (!src || !src.trim()) return;
-  toast("adding repo…");
-  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src.trim() }) })
+// Derive the repo id the server would pick (mirror of lib::repo_id_from_source) so we can preview it.
+function deriveRepoId(src) {
+  src = (src || "").trim().replace(/\/+$/, "");
+  if (!src) return "";
+  const last = src.split(/[/:]/).pop() || src;
+  return last.replace(/\.git$/, "");
+}
+const arModal = () => document.getElementById("addrepo");
+function arSetMsg(text, kind) {        // kind: "" | "err" | "warn" | "ok"
+  const el = document.getElementById("ar-msg");
+  if (!text) { el.style.display = "none"; el.textContent = ""; el.className = "ar-msg"; return; }
+  el.style.display = ""; el.textContent = text; el.className = "ar-msg " + (kind || "");
+}
+function openAddRepo() {
+  const src = document.getElementById("ar-src");
+  src.value = ""; arSetMsg(""); arUpdateDerived();
+  document.getElementById("ar-go").textContent = "Add →";
+  arModal().classList.add("open");
+  setTimeout(() => src.focus(), 0);
+}
+function closeAddRepo() { arModal().classList.remove("open"); }
+function arUpdateDerived() {
+  const id = deriveRepoId(document.getElementById("ar-src").value);
+  const d = document.getElementById("ar-derived");
+  d.innerHTML = id ? `box names will be <b>${esc(id)}</b>-&lt;branch&gt;` : "";
+}
+function submitAddRepo() {
+  const src = document.getElementById("ar-src").value.trim();
+  if (!src) { arSetMsg("Paste a git URL or a local path.", "err"); return; }
+  if (DEMO) { arSetMsg("Adding repos is disabled in demo.", "warn"); return; }
+  const go = document.getElementById("ar-go");
+  go.textContent = "Adding…"; arSetMsg("");
+  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src }) })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       const repo = res.repo || res;
-      toast(`added ${repo.id}`);
       loadRepos();
-      // SSH-origin repos can't push from a box — warn up-front (HTTPS is the working path).
-      if (res.warning) { alert(res.warning); }
+      if (res.warning) {            // e.g. SSH origin — keep the modal up so the note is readable
+        arSetMsg(res.warning, "warn");
+        go.textContent = "Done"; go.onclick = closeAddRepo;
+      } else {
+        closeAddRepo(); toast(`added ${repo.id}`);
+      }
     })
-    .catch(e => toast(`add failed: ${e.message}`));
+    .catch(e => { arSetMsg(`Couldn't add it: ${e.message}`, "err"); go.textContent = "Add →"; });
 }
+// kept name for existing callers (header ＋repo, per-section ＋, settings, palette) → opens the modal
+function addRepoPrompt() { openAddRepo(); }
 // Box names can't carry every branch char (sbx rejects `/`), so the NAME is a slug of the branch
 // while the real branch (e.g. feat/auth) is passed through and checked out in the box. Mirror of
 // lib::slug — keep them in sync.
@@ -1503,6 +1656,28 @@ document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBra
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
   else if (e.key === "Escape") { e.preventDefault(); closeNewBox(); }
+  e.stopPropagation();
+});
+document.getElementById("ar-go").addEventListener("click", submitAddRepo);
+document.getElementById("ar-src").addEventListener("input", arUpdateDerived);
+// Native folder/file picker: skein-server pops the host's OS dialog and returns the absolute path
+// (a browser can't read one). Local-GUI only; over Tailscale the dialog can't show, so keep typing.
+function pickPath(kind, input, after) {
+  if (DEMO) { toast("the folder picker needs the server"); return; }
+  fetch("/api/pick-path", { method:"POST", headers:{ "content-type":"application/json" }, body:JSON.stringify({ kind }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok && d.path) { input.value = d.path; input.focus(); if (after) after(); }
+      else if (d.ok && d.cancelled) { /* dismissed — leave the field as-is */ }
+      else toast("picker unavailable: " + ((d.error || "type the path instead").split("\n")[0]));
+    }).catch(() => toast("folder picker unavailable — type the path"));
+}
+document.getElementById("ar-browse").addEventListener("click",
+  () => pickPath("folder", document.getElementById("ar-src"), arUpdateDerived));
+document.getElementById("set-sshkey-browse").addEventListener("click",
+  () => pickPath("file", document.getElementById("set-sshkey")));
+arModal().addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }
+  else if (e.key === "Escape") { e.preventDefault(); closeAddRepo(); }
   e.stopPropagation();
 });
 
@@ -1652,13 +1827,62 @@ function connect() {
   es.onerror = () => { document.getElementById("live").classList.remove("on"); document.getElementById("livetext").textContent = "reconnecting…"; };
 }
 
+// ---------- demo seed (only used under ?demo) ----------
+const DEMO_REPOS = [
+  { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/.claude", agent:"claude" },
+  { id:"skein",  source:"/Users/you/work/slate/legalAI/dev/thing/skein", work:"/Users/you/work/slate/legalAI/dev/thing/skein", store:"~/.skein/repos/skein/store/.claude", agent:"claude" },
+];
+const DEMO_BOXES = [
+  { name:"thing-feat-auth", repo:"thing", branch:"feat/auth", state:"needs-input", tier:0, age:"2m",
+    dir:"~/.skein/repos/thing/work", diff:{files:6,ins:124,del:18}, pause:"needs-input",
+    headline:"Store the session token in localStorage or an httpOnly cookie?", task:"Wiring the login flow" },
+  { name:"skein-fix-login", repo:"skein", branch:"fix/login", state:"waiting", tier:1, age:"5m",
+    dir:"~/.skein/repos/skein/work", diff:{files:2,ins:41,del:6}, pause:"proceed",
+    headline:"Fix looks right — want me to push and open a PR?", task:"" },
+  { name:"thing-master", repo:"thing", branch:"master", state:"working", tier:3, age:"just now",
+    dir:"~/.skein/repos/thing/work", diff:{files:9,ins:312,del:44}, pause:"none",
+    headline:"", task:"Refactoring the diff parser" },
+  { name:"skein-ui-redesign", repo:"skein", branch:"ui/redesign", state:"working", tier:3, age:"just now",
+    dir:"~/.skein/repos/skein/work", diff:{files:4,ins:88,del:12}, pause:"none",
+    headline:"", task:"Restyling the fleet rail" },
+  { name:"thing-calendar", repo:"thing", branch:"feat/calendar", state:"done", tier:2, age:"11m",
+    dir:"~/.skein/repos/thing/work", diff:{files:7,ins:210,del:3}, pause:"none",
+    headline:"Calendar view implemented; all tests pass.", task:"" },
+  { name:"thing-spike-ocr", repo:"thing", branch:"spike/ocr", state:"idle", tier:4, age:"3h",
+    dir:"~/.skein/repos/thing/work", diff:{files:1,ins:12,del:0}, pause:"none", headline:"", task:"" },
+  { name:"skein-old-probe", repo:"skein", branch:"chore/probe", state:"stale", tier:5, age:"2d",
+    dir:"~/.skein/repos/skein/work", diff:null, pause:"none", headline:"", task:"" },
+];
+// A non-functional terminal pane for demo (no websocket); keeps the dock layout reviewable.
+function createDemoSession(box, kind) {
+  const id = sidOf(box, kind);
+  const host = document.createElement("div"); host.className = "thost";
+  host.innerHTML = `<div style="font-family:var(--mono);font-size:13px;color:var(--dim);padding:20px;line-height:1.7">
+    <span style="color:var(--accent)">demo</span> — live terminal disabled.<br>
+    this pane is <b style="color:var(--text)">${esc(box)}</b> · ${esc(kind)} session.<br>
+    run <code style="color:var(--text)">skein-server</code> for real agent terminals.</div>`;
+  termarea.append(host);
+  const s = { term:{ focus(){}, write(){} }, fit:{ fit(){} }, ws:{ readyState:1, send(){} },
+              host, box, kind, sid:id, streaming:false };
+  sessions.set(id, s);
+  return s;
+}
+
 // ---------- boot ----------
 setFavicon(0);
-fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
-connect();
-loadCollisions();
-loadSettings();
-loadRepos();
+if (DEMO) {
+  repos = DEMO_REPOS;
+  restored = true;                                  // don't reopen real tabs from a prior session
+  render(DEMO_BOXES);
+  const live = document.getElementById("live"); live.classList.add("on");
+  document.getElementById("livetext").textContent = "demo";
+} else {
+  fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+  connect();
+  loadCollisions();
+  loadSettings();
+  loadRepos();
+}
 </script>
 </body>
 </html>

@@ -212,9 +212,31 @@ pub fn locate_registry() -> Result<PathBuf, String> {
 pub fn load_registry() -> Result<(BTreeMap<String, Sandbox>, PathBuf), String> {
     let path = locate_registry()?;
     let data = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let value = parse_registry(&data).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     let boxes: BTreeMap<String, Sandbox> =
-        serde_json::from_str(&data).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+        serde_json::from_value(value).map_err(|e| format!("parsing {}: {e}", path.display()))?;
     Ok((boxes, path))
+}
+
+/// Parse the registry JSON, self-healing one corruption we've seen in the wild: a stray leading `{}`
+/// that an interrupted/legacy writer left before the real object, which serde rejects as "trailing
+/// characters". Strict parse first — a valid file is never touched; only on failure do we strip a
+/// leading bare `{}` and re-add the object's opening brace, so the cockpit recovers instead of going
+/// blank (and `delist_box`'s rewrite then persists the clean version).
+fn parse_registry(data: &str) -> Result<serde_json::Value, String> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+        return Ok(v);
+    }
+    let rest = data.trim_start().strip_prefix("{}").map(str::trim_start);
+    if let Some(rest) = rest {
+        if rest.starts_with('"') {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&format!("{{{rest}")) {
+                return Ok(v);
+            }
+        }
+    }
+    // surface the original strict error
+    serde_json::from_str::<serde_json::Value>(data).map_err(|e| e.to_string())
 }
 
 /// The fleet, enriched and sorted "who needs me first" (tier asc, then name).
@@ -233,11 +255,21 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         .ok()
         .filter(|s| !s.is_empty());
 
+    // sbx (`sbx ls`) is authoritative for which boxes *exist*; the registry only enriches them. We
+    // fall back to the registry to populate the board *only* when sbx can't be consulted (None) — so a
+    // destroyed box whose registry entry lingers (e.g. a delist that failed on a corrupt registry) no
+    // longer shows up as a stale phantom once sbx confirms it's gone.
     let mut names: BTreeSet<String> = BTreeSet::new();
-    if let Some(v) = &sbx {
-        names.extend(v.iter().map(|b| b.name.clone()));
+    match &sbx {
+        Some(v) => {
+            names.extend(v.iter().map(|b| b.name.clone()));
+            // keep the self-box even if sbx didn't list it (skein may be running inside it).
+            if let Some(self_name) = &self_box {
+                names.insert(self_name.clone());
+            }
+        }
+        None => names.extend(reg.keys().cloned()),
     }
-    names.extend(reg.keys().cloned());
 
     let mut views: Vec<BoxView> = names
         .into_iter()
@@ -880,12 +912,18 @@ fn remote_origin_url(work: &str) -> Option<String> {
     (!url.is_empty()).then_some(url)
 }
 
-/// A heads-up if a managed repo's `origin` is SSH: in-box push then depends on the host SSH agent
-/// (sbx forwards `SSH_AUTH_SOCK`), so it works only when that agent has the key loaded — else switch
-/// to HTTPS. `None` for HTTPS / no origin. Surfaced by `skein add` + the cockpit so it's known
-/// up-front. Not an error; SSH is supported, just host-agent-dependent.
-pub fn ssh_remote_warning(work: &str) -> Option<String> {
-    let url = remote_origin_url(work)?;
+/// A heads-up about a managed repo's push path, surfaced by `skein add` + the cockpit so it's known
+/// up-front (not an error — both cases are workable). Two cases warn: a repo with **no `origin`
+/// remote** (common when adopting a local folder never pushed) — a box can't push or open a PR until
+/// one exists; and an **SSH `origin`** — in-box push then leans on the host SSH agent (sbx forwards
+/// `SSH_AUTH_SOCK`), so it works only when that agent has the key loaded, else switch to HTTPS.
+/// `None` for an HTTPS origin (the no-setup happy path; a URL clone always lands here).
+pub fn remote_warning(work: &str) -> Option<String> {
+    let Some(url) = remote_origin_url(work) else {
+        return Some(format!(
+            "this repo has no `origin` remote — a box can't push or open a PR until one exists. Add it on the host:  git -C {work} remote add origin <url>  (HTTPS needs no setup)."
+        ));
+    };
     if !is_ssh_url(&url) {
         return None;
     }
@@ -1154,9 +1192,17 @@ fn native_launch_command(name: &str, branch: &str) -> String {
 /// claude, codex, …; each has its own image, so it can't be a path or a wrapper command). It's the
 /// repo's `agent` (`$SKEIN_AGENT` overrides). `<work>` is the host clone; `<store>` is mounted at its
 /// host path so the kit links it in. The kit checks out the branch (from the launch spec) before the
-/// agent starts. Reconnect is sbx-native — `sbx run --name <box>` re-attaches (see [`attach_argv`]),
-/// so no in-box session wrapper is needed. Side effect: writes the launch spec + ensures kit/store
-/// (best-effort; a failure only logs, the command still builds).
+/// agent starts. This `sbx run` *creates* the box (its first agent session); re-opens go through
+/// [`attach_argv`], which runs the agent inside a persistent `skein-agent` tmux session so it survives
+/// disconnects. Side effect: writes the launch spec + ensures kit/store (best-effort; a failure only
+/// logs, the command still builds).
+///
+/// TODO(first-session-persistence): this first session runs claude *directly* (not in tmux), so a
+/// disconnect during the very first launch loses it — persistence only kicks in from the first
+/// re-open. Wrap the first session in the same `skein-agent` tmux session so the user never sees a
+/// non-persistent session. Needs a way to boot the claude *image* without `sbx run` auto-starting
+/// claude (so we can `exec` the tmux-wrapped agent like [`attach_argv`] does); revisit once sbx's
+/// agent/boot model is confirmed to allow it.
 fn repo_launch_command(name: &str, repo: &Repo, branch: &str) -> String {
     // The real branch (may contain `/`, e.g. feat/auth) comes from the caller; the box *name* is its
     // slug. Fall back to the name's slug only if the caller didn't pass one (e.g. a bare relaunch).
@@ -1664,8 +1710,7 @@ fn delist_box(name: &str) -> Result<(), String> {
 
     let result = (|| {
         let data = fs::read_to_string(&path).map_err(|e| format!("reading registry: {e}"))?;
-        let mut v: serde_json::Value =
-            serde_json::from_str(&data).map_err(|e| format!("parsing registry: {e}"))?;
+        let mut v = parse_registry(&data).map_err(|e| format!("parsing registry: {e}"))?;
         let obj = v.as_object_mut().ok_or("registry is not a JSON object")?;
         let mut removed = obj.remove(name).ok_or("no such box in the registry")?;
 
@@ -1715,7 +1760,14 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
     if code != 0 {
         return Err(format!("teardown failed (exit {code}): {}", err.trim()));
     }
-    delist_box(name)
+    // The sandbox is gone (`sbx rm` succeeded). Delisting is just bookkeeping, and `sbx ls` is the
+    // fleet source of record — so a stale/unparseable registry must NOT fail the destroy, which would
+    // leave the box's tab open over a sandbox that no longer exists. Log and move on; the next
+    // successful delist (or a registry self-heal) cleans up the leftover entry.
+    if let Err(e) = delist_box(name) {
+        eprintln!("skein: destroyed {name}, but delisting it from the registry failed (harmless — sbx ls is the source of record): {e}");
+    }
+    Ok(())
 }
 
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
@@ -1963,37 +2015,44 @@ fn compute_collisions() -> Vec<Collision> {
     out
 }
 
-/// The full `sbx` argv that reconnects to box `name` (the leading program is `sbx`; this returns only
-/// its arguments). `_dir` is unused for the default invocation but kept so the `{dir}` override stays
-/// uniform.
+/// The `sbx` argv (sans the leading `sbx`, which the server prepends) that opens box `name`'s agent
+/// terminal. `_dir` is unused for the default invocation but kept so the `{dir}` override stays uniform.
 ///
-/// `sbx run --name <box>` re-attaches to the persistent sandbox and starts an agent session reading
-/// the agent from its spec (per `sbx run --help`). Each session is *fresh*, so to make a prior
-/// conversation show up we pass the agent's own resume flag — `claude --continue`. The `--` is
-/// load-bearing twice: `sbx` (a cobra CLI) would otherwise eat `--continue` as its own flag, and it
-/// marks where sbx args end and the agent's begin. The resume flag is per-agent (the runtime seam):
-/// claude → `--continue`; unknown agents get a bare re-attach. Override wholesale with
-/// `$SKEIN_ATTACH_CMD`. (NB: sbx has no live-process attach — `--continue` resumes the transcript in
-/// a new session; a *single shared live* PTY would need the agent running inside tmux, which the
-/// registered-agent / per-agent-image model doesn't currently allow. See docs/self-sufficient.md.)
+/// The agent runs inside a persistent `skein-agent` tmux session so its live process survives a
+/// browser disconnect — sbx has no live-process attach of its own, so without this a closed tab kills
+/// the agent mid-turn. `tmux new-session -A` is the seam: on open it *re-attaches* to that session if
+/// it's still running (you land exactly where the agent is, mid-stream output and all), and only
+/// *creates* it — running the agent's resume command — when there's none yet (a fresh box, or one
+/// that was restarted). The resume command is per-agent: claude → `claude --continue` (picks the
+/// transcript back up); other agents start bare until their resume flag is wired in. Falls back to
+/// running the agent directly on an image without tmux. Mirror of [`shell_argv`], which backs the
+/// shell tab the same way. Override wholesale with `$SKEIN_ATTACH_CMD`.
 pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
     let agent = repo_for_box(name)
         .map(|r| r.agent)
         .filter(|a| !a.is_empty())
         .unwrap_or_else(|| "claude".into());
-    let mut v = vec!["run".into(), "--name".into(), name.into()];
-    v.extend(resume_args(&agent));
-    v
+    let resume = agent_resume_cmd(&agent);
+    vec![
+        "exec".into(),
+        "-it".into(),
+        name.into(),
+        "bash".into(),
+        "-lc".into(),
+        format!(
+            "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s skein-agent {resume:?} || exec {resume}"
+        ),
+    ]
 }
 
-/// The agent's "resume my last session" args, appended after `--` on re-attach (the per-runtime seam).
-/// claude resumes with `--continue`; add other agents' flags here as they're supported. Empty ⇒ the
-/// agent has no resume flag (bare re-attach).
-fn resume_args(agent: &str) -> Vec<String> {
+/// The shell command that (re)starts an agent, resuming prior history when the runtime supports it —
+/// run inside the `skein-agent` tmux session by [`attach_argv`] (the per-runtime seam). claude resumes
+/// with `--continue`; other agents start bare (their binary name) until a resume flag is wired in.
+fn agent_resume_cmd(agent: &str) -> String {
     match agent {
-        "claude" => vec!["--".into(), "--continue".into()],
-        // codex/others: fill in their resume flag when supported; bare re-attach until then.
-        _ => vec![],
+        "claude" => "claude --continue".into(),
+        // codex/others: append their resume flag when supported; bare launch until then.
+        other => other.to_string(),
     }
 }
 
@@ -2011,6 +2070,65 @@ pub fn shell_argv(name: &str) -> Vec<String> {
         "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s skein-shell || exec bash -li"
             .into(),
     ]
+}
+
+/// Pop the host's native folder/file picker and return the chosen absolute path (`Ok(None)` if the
+/// user cancelled). `kind` is "file" → file picker, anything else → folder picker. skein-server runs
+/// on the host, so this is a *real* OS dialog — which means it only works where that host has a GUI
+/// (local use, not a headless / `tailscale serve` box, where the user types the path instead).
+/// Best-effort across platforms: macOS `osascript`, then Linux `zenity`, then `kdialog`.
+pub fn pick_path(kind: &str) -> Result<Option<String>, String> {
+    let folder = kind != "file";
+    let clean = |p: &str| -> Option<String> {
+        let p = p.trim().trim_end_matches('/');
+        (!p.is_empty()).then(|| p.to_string())
+    };
+    // macOS — AppleScript returns a POSIX path; a cancel exits non-zero with "User canceled".
+    if cfg!(target_os = "macos") {
+        let script = if folder {
+            "POSIX path of (choose folder with prompt \"Pick a folder\")"
+        } else {
+            "POSIX path of (choose file with prompt \"Pick a file\")"
+        };
+        let out = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| format!("osascript: {e}"))?;
+        if out.status.success() {
+            return Ok(clean(&String::from_utf8_lossy(&out.stdout)));
+        }
+        let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        if err.contains("cancel") {
+            return Ok(None); // user dismissed the dialog
+        }
+        return Err(format!("native picker failed: {}", err.trim()));
+    }
+    // Linux — zenity, then kdialog. Both exit non-zero on cancel with empty stdout.
+    for (bin, args) in linux_picker_argv(folder) {
+        match std::process::Command::new(bin).args(&args).output() {
+            Ok(out) if out.status.success() => {
+                return Ok(clean(&String::from_utf8_lossy(&out.stdout)));
+            }
+            Ok(_) => return Ok(None), // present but cancelled
+            Err(_) => continue,       // not installed → try the next
+        }
+    }
+    Err("no native folder picker found (install zenity or kdialog, or type the path)".into())
+}
+
+fn linux_picker_argv(folder: bool) -> Vec<(&'static str, Vec<&'static str>)> {
+    if folder {
+        vec![
+            ("zenity", vec!["--file-selection", "--directory"]),
+            ("kdialog", vec!["--getexistingdirectory", "."]),
+        ]
+    } else {
+        vec![
+            ("zenity", vec!["--file-selection"]),
+            ("kdialog", vec!["--getopenfilename", "."]),
+        ]
+    }
 }
 
 /// The narrative signal a box writes on each turn-end (box-session.sh): the last assistant
@@ -2091,14 +2209,10 @@ const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh"
 /// `<store>/skein/bin/` and merge their hook wiring into `<store>/settings.json` (additive +
 /// idempotent — the repo's own hooks are preserved, re-runs don't duplicate). The store is mounted
 /// into every box, so this is how skein gets working/waiting/needs-input + task for any box without
-/// the repo shipping a thing. Best-effort: returns Err but never panics.
-pub fn ensure_probe() -> Result<(), String> {
-    let store = store_dir().ok_or("no shared store to install the probe into")?;
-    ensure_probe_in(&store)
-}
-
-/// Install/refresh the probe in *every* store skein reads — each managed repo's plus `store_dir()` —
-/// so multi-repo fleets all report turn-state. Best-effort: errors are collected, not fatal.
+/// the repo shipping a thing.
+///
+/// Refreshes *every* store skein reads — each managed repo's plus `store_dir()` — so multi-repo
+/// fleets all report turn-state. Best-effort: errors are collected, not fatal.
 pub fn ensure_probe_all() -> Result<(), String> {
     let mut errs = Vec::new();
     for store in all_stores() {
@@ -2113,7 +2227,8 @@ pub fn ensure_probe_all() -> Result<(), String> {
     }
 }
 
-/// `ensure_probe` against a specific store dir (the store skein reads, or a freshly-provisioned one).
+/// Install/refresh the probe in one specific store dir (called per-store by `ensure_probe_all`, and
+/// on a freshly-provisioned store).
 pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let bin = store.join("skein").join("bin");
@@ -2190,6 +2305,10 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         }
         arr.push(entry);
     }
+    // Default boxes to Claude Code's fullscreen (alternate-screen) renderer — it draws far better in
+    // the browser PTY than the inline renderer, and equals `CLAUDE_CODE_NO_FLICKER=1` without needing
+    // an env var (sbx has no --env). Additive: never clobber a `tui` already set in the store.
+    root.entry("tui").or_insert_with(|| json!("fullscreen"));
     out
 }
 
@@ -2283,16 +2402,6 @@ pub enum Pause {
 }
 
 impl Pause {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Pause::NeedsInput => "needs-input",
-            Pause::Proceed => "proceed",
-            Pause::Fork => "fork",
-            Pause::Statement => "statement",
-            Pause::None => "none",
-        }
-    }
-
     /// Inbox tie-breaker within a status tier: a genuine decision outranks a rote "proceed?",
     /// which outranks a bare statement. Lower = wants your attention sooner.
     pub fn rank(self) -> u8 {
@@ -2865,6 +2974,9 @@ mod tests {
         env::set_var("SKEIN_REGISTRY", &reg);
         env::remove_var("SKEIN_SHARED");
         env::set_var("SKEIN_SELF", "thing-self");
+        // Force `fleet_boxes()` to None so the board is built from the registry (the "sbx can't be
+        // consulted" path). Without this the test would behave differently on a host that has sbx.
+        env::set_var("SKEIN_LS_CMD", "false");
 
         let v = load_views().unwrap();
         let self_v = v.iter().find(|b| b.name == "thing-self").unwrap();
@@ -2872,7 +2984,45 @@ mod tests {
         assert_eq!(self_v.state, "live"); // promoted despite a 2h-old lastSeen
         assert_eq!(other_v.state, "stale"); // a peer is never promoted
 
+        env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_SELF");
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn load_views_drops_registry_only_boxes_when_sbx_is_authoritative() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        // Registry remembers two boxes, but sbx only lists one — the other was destroyed and its
+        // registry entry lingered (e.g. a delist that failed on a corrupt registry).
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"thing-live":{{"branch":"l","dir":"/d","lastSeen":"{}","status":""}},
+                    "thing-ghost":{{"branch":"g","dir":"/d","lastSeen":"{}","status":""}}}}"#,
+                secs_ago(60),
+                secs_ago(60)
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+        env::remove_var("SKEIN_SELF");
+        // sbx is consulted and lists only thing-live, so thing-ghost must not show up.
+        env::set_var(
+            "SKEIN_LS_CMD",
+            r#"printf '[{"name":"thing-live","status":"running"}]'"#,
+        );
+
+        let v = load_views().unwrap();
+        assert!(v.iter().any(|b| b.name == "thing-live"));
+        assert!(
+            !v.iter().any(|b| b.name == "thing-ghost"),
+            "a destroyed box that sbx no longer lists must not linger on the board"
+        );
+
+        env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
     }
 
@@ -2981,6 +3131,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_registry_heals_stray_leading_empty_object() {
+        // the corruption seen in the wild: a leading `{}` before the real object's body.
+        let corrupt = "{}\n \"thing-x\": {\n  \"branch\": \"x\"\n }\n}";
+        assert!(serde_json::from_str::<serde_json::Value>(corrupt).is_err()); // serde rejects it
+        let v = parse_registry(corrupt).expect("self-heals");
+        assert_eq!(v["thing-x"]["branch"], "x");
+        // a valid registry is returned untouched.
+        let ok = r#"{"a":{"branch":"b"}}"#;
+        assert_eq!(parse_registry(ok).unwrap()["a"]["branch"], "b");
+    }
+
+    #[test]
+    fn destroy_succeeds_even_when_registry_is_unparseable() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        // a registry too broken to even self-heal: delist will fail, but the sandbox is already gone.
+        fs::write(&reg, "{ not json at all").unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+        env::set_var("SKEIN_DESTROY_CMD", "true"); // teardown "succeeds"
+        // destroy must still report success so the cockpit closes the tab over the removed box.
+        assert!(destroy_box("thing-x").is_ok());
+        env::remove_var("SKEIN_DESTROY_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
     fn git_diff_for_handles_repo_and_nonrepo() {
         if Command::new("git").arg("--version").output().is_err() {
             return; // git not available in this environment
@@ -3082,14 +3260,15 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         // empty home ⇒ repo_for_box finds nothing ⇒ the default agent (claude) → `--continue`.
         env::set_var("SKEIN_HOME", tempdir());
-        // attach re-attaches and resumes the agent's session (claude → `--continue`) so a prior
-        // session shows up; the `--` separates sbx args from the agent's.
-        assert_eq!(
-            attach_argv("thing-x", "/d"),
-            ["run", "--name", "thing-x", "--", "--continue"]
-        );
-        // a non-claude agent with no resume flag gets a bare re-attach.
-        assert_eq!(resume_args("shell"), Vec::<String>::new());
+        // attach opens the agent inside a persistent `skein-agent` tmux session so the live process
+        // survives a disconnect; `claude --continue` is the (re)create command.
+        let a = attach_argv("thing-x", "/d");
+        assert_eq!(&a[..3], ["exec", "-it", "thing-x"]);
+        assert!(a.last().unwrap().contains("tmux new-session -A -s skein-agent"));
+        assert!(a.last().unwrap().contains("claude --continue"));
+        // claude resumes its transcript; a non-claude agent starts bare (its binary name).
+        assert_eq!(agent_resume_cmd("claude"), "claude --continue");
+        assert_eq!(agent_resume_cmd("shell"), "shell");
         // shell prefers a persistent tmux session but falls back to a plain shell when tmux is absent.
         let sh = shell_argv("thing-x");
         assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
