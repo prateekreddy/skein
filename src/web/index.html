@@ -196,8 +196,6 @@
   .dockbar .ship { font:inherit; font-size:12px; border:1px solid var(--border-2); background:var(--elevated); color:var(--text);
     border-radius:6px; padding:4px 11px; cursor:pointer; }
   .dockbar .ship:hover { border-color:var(--border-3); }
-  .dockbar .ship.next { background:var(--accent); border-color:var(--accent); color:#0b0d10; font-weight:600; }
-  .dockbar .ship.next:hover { background:var(--accent-2); }
   .dockbar .ship.danger { color:#f0a3a3; border-color:#5a2a2a; }
   .dockbar .ship.danger:hover { background:#3a1f1f; border-color:#7a3a3a; }
   .dockbar .prlink { color:var(--accent); }
@@ -760,7 +758,6 @@ function renderDockbar() {
   if (!view.box) { dockbar.innerHTML = ""; return; }
   const b = boxes.find(x => x.name === view.box) || { name: view.box };
   const g = groupOf(b.state || "unknown");
-  const nx = nextAction(view.box);
   dockbar.className = "dockbar s-" + g;
   dockbar.innerHTML =
     `<span class="rf mback" id="dback" title="back to the fleet">‹ boxes</span>`
@@ -776,7 +773,6 @@ function renderDockbar() {
     + (view.mode==='diff' ? `<span class="rf" id="dref" title="refresh diff">↻</span>` : "")
     + (view.mode==='diff' && (comments.get(view.box)||[]).length
         ? `<button class="send" id="dsend" title="paste the review into the agent prompt">Send ${(comments.get(view.box)||[]).length} 💬</button>` : "")
-    + (nx ? `<button class="ship next" id="dnext" title="suggested next step">${esc(nx.label)}</button>` : "")
     + shipHtml(view.box)
     + `<span class="rf" id="dclose" title="close">✕</span>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
@@ -789,7 +785,6 @@ function renderDockbar() {
   const ar = dockbar.querySelector("#dstop"); if (ar) ar.onclick = () => stopBox(view.box);
   const ds = dockbar.querySelector("#ddestroy"); if (ds) ds.onclick = () => destroyBox(view.box);
   const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
-  const nb = dockbar.querySelector("#dnext"); if (nb && nx) nb.onclick = nx.run;
   const bk = dockbar.querySelector("#dback"); if (bk) bk.onclick = () => document.body.classList.add("show-fleet");
   dockbar.querySelector("#dclose").onclick = () => { const id = activeSid(); if (id && sessions.has(id)) closeSession(id); else { view = {box:null,mode:"term",kind:"agent"}; applyView(); } };
 }
@@ -880,21 +875,6 @@ function batchResume() {
 }
 
 // The single highlighted call-to-action for the loop: continue/reply → review → PR → merge → destroy.
-function nextAction(box) {
-  const b = boxes.find(x => x.name === box), s = shipState.get(box), st = b?.state;
-  if (s && s.pr_url) {
-    const ps = (s.pr_state||"").toUpperCase();
-    // merged → the branch is safely in base, so removing the box loses nothing and finishes the loop.
-    if (ps === "MERGED") return { label:"Destroy ▸", run:() => destroyBox(box) };
-    if (ps === "OPEN" && s.checks === "passing") return { label:"Merge ▸", run:() => mergePr(box) };
-    if (ps === "OPEN") return { label:"Checks ▸", run:() => window.open(s.pr_url, "_blank") };
-  }
-  // a trivial "proceed?" pause → one-click continue; a real fork/decision still routes to the terminal
-  if (b?.pause === "proceed") return { label:"Continue ▸", run:() => resumeBox(box, "") };
-  if (["needs-input","needs-decision","blocked","waiting"].includes(st)) return { label:"Reply ▸", run:() => openTerminal(box) };
-  if (st === "done") return view.mode === "diff" ? { label:"Create PR ▸", run:() => createPR(box) } : { label:"Review diff ▸", run:() => openDiff(box) };
-  return null;
-}
 let toastT;
 function toast(msg, url) {
   let t = document.getElementById("toast");
