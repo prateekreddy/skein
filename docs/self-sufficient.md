@@ -81,7 +81,15 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   provisions the store; repo no longer needs `setup-sandbox.sh` for skein.
 - **Phase 3 — Claude turn-state adapter.** Embed + inject `box-status.sh`/`box-task.sh`, additive
   settings merge. Fixes "don't see working even when it is."
-- **Phase 4 — registration + auth + URL clone.** Delivers the "repo URL + gh auth → fleet" onboarding.
+- **Phase 4 — registration + auth + URL clone + enumerate from sbx.** Delivers "repo URL + gh auth →
+  fleet". NOTE (confirmed from host `sbx ls --json`): the registry can *miss running boxes* sbx knows
+  about (host showed `thing-feat-calender`/`thing-skill-review` running but absent from
+  `sandboxes.json`). `load_views` iterates the registry, so those boxes don't appear at all today —
+  the fleet list itself should be sourced from `sbx ls` (name/agent/status/workspaces), enriched by
+  the registry, not the other way round.
+
+  Real `sbx ls --json` schema (pinned in `parse_liveness_real_sbx_schema`):
+  `{"sandboxes":[{"name","id","agent","status":"running|stopped","workspaces":[..],"ports":[..]}]}`.
 - **Phase 5 — repo cleanup + branch reconcile + docs.**
 
 ## Open items / risks

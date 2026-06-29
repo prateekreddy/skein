@@ -1630,6 +1630,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_liveness_real_sbx_schema() {
+        // The actual `sbx ls --json` shape (captured from the host): a {"sandboxes":[...]} wrapper,
+        // lowercase name/status, plus agent/id/workspaces/ports we don't need here.
+        let real = r#"{
+          "sandboxes": [
+            { "name": "claude-agent-memory-consolidation", "id": "59eb", "agent": "claude",
+              "status": "stopped", "workspaces": ["/x/agent-memory-consolidation"] },
+            { "name": "thing-feat-calender", "id": "2b78", "agent": "claude", "status": "running",
+              "ports": [{"host_ip":"127.0.0.1","host_port":49161,"sandbox_port":9418,"protocol":"tcp"}],
+              "workspaces": ["/x/gadget-demo", "/x/skein-shared/.claude"] },
+            { "name": "thing-master", "id": "f1bf", "agent": "claude", "status": "running",
+              "workspaces": ["/x/thing"] }
+          ]
+        }"#;
+        let m = parse_liveness(real).expect("real sbx schema parses");
+        assert_eq!(m.get("claude-agent-memory-consolidation"), Some(&Liveness::Stopped));
+        assert_eq!(m.get("thing-feat-calender"), Some(&Liveness::Running));
+        assert_eq!(m.get("thing-master"), Some(&Liveness::Running));
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
     fn age_buckets() {
         assert!(sb("", &secs_ago(5)).age().ends_with("s ago"));
         assert!(sb("", &secs_ago(120)).age().ends_with("m ago"));
