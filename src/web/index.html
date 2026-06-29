@@ -43,7 +43,6 @@
   @container (max-width: 270px) {
     .word { font-size:14px; }
     .live #livetext { display:none; }                 /* keep just the pip when very narrow */
-    .branch { max-width:120px; overflow:hidden; text-overflow:ellipsis; }
   }
   /* draggable gutter between the fleet sidebar and the dock — sets --fleet-w (persisted) */
   #gutter { display:none; }
@@ -112,8 +111,12 @@
   .main { min-width:0; }
   .name { font-weight:600; letter-spacing:-.005em; }
   .s-stale .name, .s-unknown .name, .s-idle .name { color:var(--faint); font-weight:500; }
-  .sub { color:var(--dim); font-size:12px; margin-top:2px; display:flex; gap:10px; min-width:0; }
-  .branch { font-family:var(--mono); color:var(--accent); opacity:.9; white-space:nowrap; }
+  .sub { color:var(--dim); font-size:12px; margin-top:2px; display:flex; gap:10px; min-width:0;
+         flex-wrap:nowrap; align-items:baseline; }
+  /* the branch yields first: it ellipsizes so the diff badge always stays whole on one line */
+  .branch { font-family:var(--mono); color:var(--accent); opacity:.9; white-space:nowrap;
+            overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
+  .dstat { flex:none; white-space:nowrap; }
   .dir { font-family:var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* inbox headline: the gist of what the box last said / is asking — one truncated line */
   .headline { display:none; color:var(--dim); font-size:12px; margin-top:3px; overflow:hidden;
