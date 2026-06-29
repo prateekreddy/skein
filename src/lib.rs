@@ -657,10 +657,36 @@ pub fn resume_batch(names: &[String]) -> (Vec<String>, Vec<String>) {
     (resumed, held)
 }
 
-/// Archive a box off the board: remove its registry entry and append it to `<store>/history.jsonl`.
-/// Non-destructive — the sandbox keeps running and its resources are untouched; this only delists it
-/// from the cockpit. To also tear the sandbox down, use `destroy_box`. skein-owned; needs no tool.
-pub fn archive_box(name: &str) -> Result<(), String> {
+/// The host shell command that stops a running box — halts the sandbox so it stops consuming compute,
+/// while keeping it so you can resume it later (e.g. via attach). Override with $SKEIN_STOP_CMD;
+/// `{name}` is substituted and shell-quoted. Default `sbx stop {name}`. Non-destructive — no commits
+/// are lost; the box simply goes stale in the registry until resumed.
+pub fn stop_command(name: &str) -> String {
+    if let Ok(t) = env::var("SKEIN_STOP_CMD") {
+        if !t.is_empty() {
+            return t.replace("{name}", &sh_quote(name));
+        }
+    }
+    format!("sbx stop {}", sh_quote(name))
+}
+
+/// Stop a box: run `stop_command` to halt the running sandbox. The box stays listed (it goes stale
+/// until resumed) — this only frees the compute, it does not delist or destroy.
+pub fn stop_box(name: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let (_out, err, code) = run_shell(&stop_command(name))?;
+    if code != 0 {
+        return Err(format!("stop failed (exit {code}): {}", err.trim()));
+    }
+    Ok(())
+}
+
+/// Delist a box from the cockpit: remove its registry entry and append it to `<store>/history.jsonl`.
+/// Used after `destroy_box` tears the sandbox down, so a removed sandbox doesn't linger as stale.
+/// Touches only skein's own records, never the sandbox.
+fn delist_box(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
@@ -736,7 +762,7 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
     if code != 0 {
         return Err(format!("teardown failed (exit {code}): {}", err.trim()));
     }
-    archive_box(name)
+    delist_box(name)
 }
 
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
@@ -1413,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_box_removes_records_and_guards() {
+    fn delist_box_removes_records_and_guards() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
@@ -1425,9 +1451,8 @@ mod tests {
         .unwrap();
         env::set_var("SKEIN_REGISTRY", &reg);
         env::remove_var("SKEIN_SHARED");
-        env::remove_var("SKEIN_ARCHIVE_CMD");
 
-        archive_box("thing-x").unwrap();
+        delist_box("thing-x").unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
         assert!(after.get("thing-x").is_none());
@@ -1435,9 +1460,44 @@ mod tests {
         let hist = fs::read_to_string(dir.join("history.jsonl")).unwrap();
         assert!(hist.contains("thing-x") && hist.contains("archivedAt"));
         assert!(dir.join(".sandboxes.lock").exists()); // shares the hooks' flock file
-        assert!(archive_box("thing-x").is_err()); // already gone
-        assert!(archive_box("../escape").is_err()); // name guard
+        assert!(delist_box("thing-x").is_err()); // already gone
+        assert!(delist_box("../escape").is_err()); // name guard
 
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn stop_box_runs_command_without_delisting() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        let marker = dir.join("stopped");
+        fs::write(
+            &reg,
+            r#"{"thing-x":{"branch":"x","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+
+        // a failed stop surfaces an error and changes nothing.
+        env::set_var("SKEIN_STOP_CMD", "false");
+        assert!(stop_box("thing-x").is_err());
+
+        // a successful stop runs the command but leaves the box listed (stop ≠ delist).
+        env::set_var(
+            "SKEIN_STOP_CMD",
+            format!("touch {}", sh_quote(marker.to_str().unwrap())),
+        );
+        stop_box("thing-x").unwrap();
+        assert!(marker.exists());
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
+        assert!(after.get("thing-x").is_some()); // still listed
+
+        assert!(stop_box("../escape").is_err()); // name guard
+
+        env::remove_var("SKEIN_STOP_CMD");
         env::remove_var("SKEIN_REGISTRY");
     }
 

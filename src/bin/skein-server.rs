@@ -60,7 +60,7 @@ async fn main() {
         .route("/api/boxes/:name/narrate", get(api_narrate))
         .route("/api/resume-batch", post(api_resume_batch))
         .route("/api/collisions", get(api_collisions))
-        .route("/api/boxes/:name/archive", post(api_archive))
+        .route("/api/boxes/:name/stop", post(api_stop))
         .route("/api/boxes/:name/destroy", post(api_destroy))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
@@ -288,12 +288,13 @@ async fn api_collisions() -> Json<Vec<skein::Collision>> {
     )
 }
 
-/// Archive a box off the board. Returns {ok} or {ok:false, error}.
-async fn api_archive(Path(name): Path<String>) -> Json<serde_json::Value> {
+/// Stop a box: halt the sandbox (frees compute; resume later via attach). Non-destructive — the box
+/// stays listed and goes stale until resumed. Returns {ok} or {ok:false, error}.
+async fn api_stop(Path(name): Path<String>) -> Json<serde_json::Value> {
     if !skein::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
-    let r = tokio::task::spawn_blocking(move || skein::archive_box(&name)).await;
+    let r = tokio::task::spawn_blocking(move || skein::stop_box(&name)).await;
     Json(match r {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
