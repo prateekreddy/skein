@@ -292,6 +292,12 @@
   .set-row input[type=checkbox] { width:auto; }
   .set-row .desc { color:var(--faint); font-size:11px; }
   .set-grp { display:flex; flex-direction:column; gap:4px; }
+  .set-repos { display:flex; flex-direction:column; gap:4px; max-height:160px; overflow:auto; margin:2px 0; }
+  .set-repos .rrow { display:flex; align-items:baseline; gap:8px; font-size:12px; padding:3px 6px; border:1px solid var(--line); border-radius:6px; }
+  .set-repos .rrow .rid { font-family:var(--mono); color:var(--accent); }
+  .set-repos .rrow .rsrc { color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+  .set-repos .rrow .rx { color:var(--dim); cursor:pointer; } .set-repos .rrow .rx:hover { color:var(--attn); }
+  .set-repos .none { color:var(--faint); font-size:12px; }
   .mbx-card, .nb-card { width:100%; background:var(--overlay); border:1px solid var(--border-3); border-radius:12px;
     box-shadow:0 24px 70px rgba(0,0,0,.6); animation:rise var(--dur-med) var(--ease); display:flex; flex-direction:column; }
   .mbx-card { max-width:620px; max-height:78vh; }
@@ -383,8 +389,10 @@
           <div class="right">
             <span class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></span>
             <span class="kbtn" onclick="openNewBox()" title="Launch a new box (⌘N)">＋ box</span>
+            <span class="kbtn" onclick="addRepoPrompt()" title="Add a repository">＋ repo</span>
             <span class="kbtn" id="mbxbtn" onclick="openMailbox()" title="Cross-box mailbox &amp; broadcast">✉ mailbox</span>
             <span class="kbtn" id="alerts" title="Desktop alerts when a box needs you">🔔 alerts</span>
+            <span class="kbtn" onclick="openSettings()" title="Settings &amp; repos">⚙</span>
             <span class="kbtn" onclick="openPalette()">⌘K</span>
             <span class="live" id="live"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
@@ -459,6 +467,9 @@
   <div id="settings" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
       <div class="nb-head"><b>Settings</b><span class="x" onclick="closeSettings()">✕</span></div>
+      <label class="nb-lbl">repos <span class="desc">repos skein manages — boxes are &lt;repo&gt;-&lt;branch&gt;</span></label>
+      <div id="set-repos" class="set-repos"></div>
+      <div style="margin:2px 0 6px"><span class="kbtn" onclick="addRepoPrompt()" title="Add a repository">＋ add repository</span></div>
       <div class="set-grp">
         <label class="set-row"><input type="checkbox" id="set-tmux"> Auto-install tmux in boxes
           <span class="desc">shared agent session so reconnects re-attach the same terminal</span></label>
@@ -1325,7 +1336,7 @@ function loadSettings() {
 }
 const settingsModal = () => document.getElementById("settings");
 function openSettings() {
-  loadSettings().then(() => {
+  Promise.all([loadSettings(), loadRepos()]).then(() => {
     document.getElementById("set-tmux").checked = settings.install_tmux !== false;
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret !== false;
     document.getElementById("set-forcegh").checked = !!settings.force_gh_secret;
@@ -1333,8 +1344,24 @@ function openSettings() {
     document.getElementById("set-agent").value = settings.default_agent || "";
     document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
+    renderRepoList();
     settingsModal().classList.add("open");
   });
+}
+function renderRepoList() {
+  const el = document.getElementById("set-repos");
+  if (!repos.length) { el.innerHTML = `<div class="none">no repos yet — add one below</div>`; return; }
+  el.innerHTML = repos.map(r =>
+    `<div class="rrow"><span class="rid">${esc(r.id)}</span><span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span><span class="rx" data-id="${esc(r.id)}" title="Unregister (files left on disk)">✕</span></div>`
+  ).join("");
+  el.querySelectorAll(".rx").forEach(x => x.addEventListener("click", () => removeRepo(x.dataset.id)));
+}
+function removeRepo(id) {
+  if (!confirm(`Unregister repo "${id}"? Its clone and store stay on disk; only skein's registration is removed.`)) return;
+  fetch(`/api/repos/${encodeURIComponent(id)}`, { method:"DELETE" })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(() => { toast(`removed ${id}`); loadRepos().then(renderRepoList); })
+    .catch(e => toast(`remove failed: ${e.message}`));
 }
 function closeSettings() { settingsModal().classList.remove("open"); }
 function saveSettings() {
