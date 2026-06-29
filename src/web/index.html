@@ -587,16 +587,16 @@ function createSession(name, launchBranch) {
   term.parser.registerOscHandler(52, data => {
     const semi = data.indexOf(";");
     const payload = semi === -1 ? data : data.slice(semi + 1);
-    toast(`OSC52 fired: data=${data.length} pay=${payload.length}`);   // DIAGNOSTIC
     if (!payload || payload === "?") return true;
     try {
       const text = new TextDecoder().decode(Uint8Array.from(atob(payload), c => c.charCodeAt(0)));
-      if (text && navigator.clipboard?.writeText) {
-        navigator.clipboard.writeText(text).then(
-          () => toast(`OSC52 copied ${text.length}`),
-          err => toast(`OSC52 clip-fail: ${(err&&err.name)||"?"}`));
-      } else if (text) { copyText(text); toast(`OSC52 execCopy ${text.length}`); }
-    } catch (err) { toast(`OSC52 decode-err`); }
+      if (!text) return true;
+      // The escape arrives async (over the websocket), outside any user gesture, so a direct
+      // clipboard write is refused (NotAllowedError, esp. Safari). Stash it and let the Cmd+C
+      // gesture commit it; also attempt a best-effort async write for browsers that permit it.
+      oscClipboard = text;
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).catch(() => {});
+    } catch {}
     return true;
   });
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -1200,6 +1200,9 @@ nbBranch.addEventListener("keydown", e => {
 // sits on document.body — not xterm's hidden textarea — so a key handler bound to the terminal never
 // sees Cmd+C and the native copy beeps on the empty body. We catch copy/paste at the document in the
 // CAPTURE phase (runs before any focused element) and act on the *active* terminal's selection.
+// Last text the active terminal offered via OSC 52 (copy-on-select under mouse mode). The async
+// escape can't write the clipboard itself (no gesture), so Cmd+C commits this within its gesture.
+let oscClipboard = "";
 // Clipboard-API first (right for async paths like OSC 52 where there's no keydown gesture but the
 // page is focused), falling back to the synchronous execCommand copy.
 function copyToClipboard(text) {
@@ -1233,8 +1236,10 @@ document.addEventListener("keydown", e => {
     // browser's empty native copy can't beep. Copy-on-select already works via OSC 52; this also
     // covers the Shift-bypass path where holding Shift yields a native selection.
     e.preventDefault(); e.stopPropagation();
-    const sel = s.term.getSelection() || (window.getSelection ? window.getSelection().toString() : "");
-    if (sel) copyText(sel);
+    // Prefer a live selection (Shift-bypass native or xterm); fall back to the text the TUI offered
+    // via OSC 52 on select. copyText runs synchronously inside this gesture, so the write is allowed.
+    const sel = s.term.getSelection() || (window.getSelection ? window.getSelection().toString() : "") || oscClipboard;
+    if (sel) { const ok = copyText(sel); toast(ok ? `copied ${sel.length} chars` : "copy failed"); }
   } else if (paste) {
     e.preventDefault(); e.stopPropagation();
     navigator.clipboard?.readText?.().then(t => { if (t) s.term.paste(t); }).catch(() => {});
