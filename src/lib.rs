@@ -12,6 +12,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Load a local `.env` (searched from the cwd upward) so the registry/repo paths and `*_CMD`
+/// templates needn't be passed on every invocation. Variables already set in the real
+/// environment win — dotenv never overrides — so a command-line `VAR=… skein …` still takes
+/// precedence. A missing file is fine and silent; a *malformed* file is reported on stderr
+/// rather than silently dropping every line after the bad one (which once made a quoting slip
+/// look like a "command not found"). The binaries call this once at startup.
+pub fn load_dotenv() {
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => eprintln!("skein: ignoring malformed .env — {e}"),
+    }
+}
+
 /// Diff summary a box reports for its branch-vs-base work (written by box-diff.sh).
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct DiffStat {

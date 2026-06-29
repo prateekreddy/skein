@@ -38,10 +38,9 @@ static PTY_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(24)
 
 #[tokio::main]
 async fn main() {
-    // Load a local .env (searched from the cwd upward) so the registry/repo paths needn't be
-    // typed on every run; vars already set in the real environment take precedence (dotenv never
-    // overrides), so `SKEIN_ADDR=… skein-server` still wins over the file.
-    let _ = dotenvy::dotenv();
+    // Pick up a local .env so the registry/repo paths needn't be typed each run (real env vars
+    // still win; a malformed file is reported, not silently half-applied). See skein::load_dotenv.
+    skein::load_dotenv();
     // Bind is loopback-only by default; $SKEIN_ADDR overrides it. For remote access prefer
     // `tailscale serve` proxying to this loopback port (see README) over an off-loopback bind.
     let addr = std::env::var("SKEIN_ADDR")

@@ -15,9 +15,9 @@ const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 
 fn main() {
-    // Load a local .env (cwd upward) so $SKEIN_REGISTRY etc. needn't be typed each run; real
-    // environment vars still take precedence (dotenv never overrides what's already set).
-    let _ = dotenvy::dotenv();
+    // Pick up a local .env so $SKEIN_REGISTRY etc. needn't be typed each run (real env vars still
+    // win; a malformed file is reported, not silently half-applied). See skein::load_dotenv.
+    skein::load_dotenv();
     let args: Vec<String> = env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("ls");
     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
