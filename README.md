@@ -23,13 +23,38 @@ SKEIN_REGISTRY=<…>/skein-shared/.claude/sandboxes.json \
   ./target/release/skein-server          # → http://127.0.0.1:7878
 ```
 
-A self-contained dark page (no build step) that live-updates over SSE. Click any box to
-open its **embedded terminal** (xterm.js ↔ a server-side PTY running `sbx run --name
-<box>`) and drive that agent without leaving the page. Next: launch / diff / merge /
-archive actions and a ⌘K palette. API: `GET /api/boxes`, `GET /api/events` (SSE),
-`GET /api/boxes/:name/terminal` (WebSocket). xterm.js is vendored into the binary
-(served from `/vendor/`), so the terminal works with no CDN — important in the
-firewalled sbx network.
+A self-contained dark page (no build step) that live-updates over SSE. The fleet is an **attention
+inbox**: boxes sort "who needs you first" (a decision-blocked box, then a turn that ended on a
+question, then work in flight), and each row carries a one-line **headline** — the prompt it's
+blocked on, or the gist of its last message — with a chip from the **fork-detector**
+(`decision` / `asks` / `proceed?`) so a real fork stands out from a rote "shall I proceed?". Click any
+box to open its **embedded terminal** (xterm.js ↔ a server-side PTY running `sbx run --name <box>`),
+its **diff**, or a **Session** digest — "what happened here" assembled for free from the branch's
+commits, the agent's `.skein/journal.md`, and its last message, so you can catch up without reading the
+scrollback. No model tokens are spent building any of this.
+
+The signals come from each box's Claude Code hooks (`Stop` / `Notification` → `box-status.sh`,
+`box-diff.sh`, `box-session.sh`) writing the shared store; skein only reads and ranks them.
+
+More attention helpers, all free unless noted:
+- **One-click continue** — boxes paused on a trivial "shall I proceed?" get a `proceed?` chip; **▸ Continue N**
+  resumes them all in one gesture (headless `claude --continue`, fire-and-forget). Never silent — always
+  your click — and a real decision or a permission prompt is never auto-resumed.
+- **Peripheral preview** — every open terminal's live bottom line shows on its fleet row, so you can see
+  what other tabs are doing while focused elsewhere.
+- **Away digest** — step away and come back and skein shows "while you were away": who now needs you, who
+  finished, who made progress.
+- **Collision radar** — ⚠ flags files that two or more boxes have both changed, to reconcile before merge.
+- **AI enrichment (opt-in, `SKEIN_AI=on`)** — skein runs inside an `sbx run` box where `claude` is logged in,
+  so it can spend *rationed* Haiku calls on the subscription: a one-line digest for boxes with no journal,
+  and a conservative safety gate on **Continue N** (a box is held back unless the model says it's routine).
+  Off by default because it shares the fleet's rate-limit window; lazy and cached when on.
+
+API: `GET /api/boxes`, `GET /api/events` (SSE), `GET /api/boxes/:name/diff`,
+`GET /api/boxes/:name/session`, `GET /api/boxes/:name/narrate`, `GET /api/collisions`,
+`POST /api/boxes/:name/resume`, `POST /api/resume-batch`, `GET /api/boxes/:name/terminal` (WebSocket).
+xterm.js is vendored into the binary (served from `/vendor/`), so the terminal works with no CDN —
+important in the firewalled sbx network.
 
 > Loopback-only by default (`127.0.0.1:7878`); set `$SKEIN_ADDR` to change the bind.
 > The terminal WebSocket rejects unexpected `Origin`s (drive-by / DNS-rebinding guard) — it
@@ -77,8 +102,8 @@ Example:
 ○ thing-export  stale  export                    9h ago  ~/work/.../gadget-demo
 ```
 
-State is `live` (<2m) / `idle` (<30m) / `stale` from `lastSeen`, until the Phase-2
-status hook reports `working|waiting|done` explicitly.
+State prefers the explicit status a box's hooks report (`needs-input` / `waiting` / `working` /
+`done`); with no report it falls back to `live` (<2m) / `idle` (<30m) / `stale` from `lastSeen`.
 
 ## Registry resolution (first match wins)
 
@@ -104,6 +129,10 @@ are present — run it first if something looks off. All knobs are environment v
 | `SKEIN_ATTACH_CMD` | attach template — `{name}`/`{dir}` substituted | `sbx run --name {name} -- --continue` |
 | `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
 | `SKEIN_ARCHIVE_CMD` | run on archive — `{name}` substituted (e.g. `sbx rm {name}`) | — |
+| `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}` substituted | `sbx run --name {name} -- --continue --print {prompt}` |
+| `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |
+| `SKEIN_AI_MODEL` | model for AI calls when `SKEIN_AI` is on | `claude-haiku-4-5` |
+| `SKEIN_CLAUDE_BIN` | path to the `claude` CLI (for AI calls) | `claude` |
 
 > The `*_CMD` templates run via `sh -c`; values you substitute are shell-quoted, but only
 > point them at trusted commands.

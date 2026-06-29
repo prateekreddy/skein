@@ -50,6 +50,8 @@
           border:1px solid var(--border-2); border-radius:7px; padding:4px 9px;
           transition:color var(--dur-fast), border-color var(--dur-fast); }
   .kbtn:hover { color:var(--text); border-color:var(--border-3); }
+  .kbtn.go { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%,transparent); background:var(--accent-bg); font-weight:600; }
+  .kbtn.go:hover { color:var(--accent); border-color:var(--accent); }
   .live { display:flex; align-items:center; gap:7px; color:var(--dim); font-size:12px; }
   .live .pip { width:7px; height:7px; border-radius:50%; background:var(--stale); transition:background var(--dur); }
   .live.on .pip { background:var(--done); box-shadow:0 0 8px var(--done); }
@@ -90,6 +92,16 @@
   .sub { color:var(--dim); font-size:12px; margin-top:2px; display:flex; gap:10px; min-width:0; }
   .branch { font-family:var(--mono); color:var(--accent); opacity:.9; white-space:nowrap; }
   .dir { font-family:var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* inbox headline: the gist of what the box last said / is asking — one truncated line */
+  .headline { display:none; color:var(--dim); font-size:12px; margin-top:3px; overflow:hidden;
+              text-overflow:ellipsis; white-space:nowrap; min-width:0; align-items:center; gap:7px; }
+  .row.has-head .headline { display:flex; }
+  .headline .htext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .pchip { flex:none; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+           padding:1px 6px; border-radius:999px; }
+  .pchip.needs-input { color:var(--attn); background:color-mix(in srgb,var(--attn) 16%,transparent); }
+  .pchip.fork { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 16%,transparent); }
+  .pchip.proceed { color:var(--accent); background:var(--accent-bg); }
 
   .pill { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; padding:3px 9px;
           border-radius:999px; color:var(--dim); background:#1b2026; border:1px solid transparent; white-space:nowrap; }
@@ -162,9 +174,22 @@
   #toast a { color:var(--accent); text-decoration:none; }
 
   .dockbody { position:relative; flex:1; min-height:0; }
-  .termarea, .diffpane { position:absolute; inset:0; display:none; }
+  .termarea, .diffpane, .sesspane { position:absolute; inset:0; display:none; }
   .termarea.on { display:block; }
-  .diffpane.on { display:block; overflow:auto; background:var(--inset); }
+  .diffpane.on, .sesspane.on { display:block; overflow:auto; background:var(--inset); }
+  /* session digest — "what happened here" without reading the terminal */
+  .sess { padding:18px 20px; max-width:860px; font-size:13px; line-height:1.6; }
+  .sess .blk { margin-bottom:20px; }
+  .sess h4 { margin:0 0 8px; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:var(--faint); }
+  .sess .ask { border-left:3px solid var(--attn); background:color-mix(in srgb,var(--attn) 8%,transparent); padding:10px 12px; border-radius:0 6px 6px 0; white-space:pre-wrap; }
+  .sess .msg { color:var(--fg); white-space:pre-wrap; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .sess .msg.ai { border-left:3px solid var(--accent); }
+  .sess .jrnl { font-family:var(--mono); font-size:12px; white-space:pre-wrap; color:var(--dim); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .sess ul.cmts { margin:0; padding:0; list-style:none; }
+  .sess ul.cmts li { font-family:var(--mono); font-size:12px; color:var(--dim); padding:3px 0; border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent); }
+  .sess ul.cmts li:last-child { border:0; }
+  .sess .note { color:var(--faint); padding:40px; text-align:center; }
+  .sess .meta { color:var(--faint); font-size:12px; margin-top:2px; }
   .thost { position:absolute; inset:0; padding:8px 10px; display:none; }
   .thost.on { display:block; }
   .diff { font-family:var(--mono); font-size:12.5px; line-height:1.5; padding:8px 0; }
@@ -275,6 +300,28 @@
     *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important;
       transition-duration:.01ms !important; scroll-behavior:auto !important; }
   }
+  /* live peripheral preview: the bottom line of an open terminal, shown on its fleet row so you
+     can see what other tabs are doing while focused elsewhere */
+  .row.live-head .htext { color:var(--working); font-family:var(--mono); }
+  .row.live-head .headline::before { content:"▸"; color:var(--working); flex:none; }
+  /* away digest — "while you were gone" */
+  #away { position:fixed; inset:0; z-index:120; background:rgba(0,0,0,.45); display:none; align-items:flex-start; justify-content:center; }
+  #away.open { display:flex; }
+  .away-card { margin-top:8vh; width:min(560px,92vw); background:var(--panel); border:1px solid var(--border-2); border-radius:14px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.5); }
+  .away-head { display:flex; align-items:center; gap:8px; padding:13px 16px; border-bottom:1px solid var(--line); }
+  .away-head b { font-size:14px; } .away-head .sub { color:var(--faint); font-size:12px; } .away-head .x { margin-left:auto; cursor:pointer; color:var(--dim); }
+  .away-list { max-height:60vh; overflow:auto; }
+  .away-row { display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent); cursor:pointer; }
+  .away-row:last-child { border-bottom:0; }
+  .away-row:hover { background:var(--inset); }
+  .away-row .ad { width:8px; height:8px; border-radius:50%; flex:none; }
+  .away-row .nm { font-weight:600; white-space:nowrap; }
+  .away-row .tx { color:var(--dim); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
+  .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
+  .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
+  /* collision radar */
+  .kbtn.warn { color:var(--attn); border-color:color-mix(in srgb,var(--attn) 45%,transparent); background:color-mix(in srgb,var(--attn) 10%,transparent); font-weight:600; }
 </style>
 </head>
 <body>
@@ -285,6 +332,8 @@
           <div class="word"><b>skein</b></div>
           <div class="counts" id="counts"></div>
           <div class="right">
+            <span class="kbtn warn" id="collide-btn" onclick="showCollisions()" style="display:none"></span>
+            <span class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></span>
             <span class="kbtn" onclick="openNewBox()" title="Launch a new box (⌘N)">＋ box</span>
             <span class="kbtn" id="mbxbtn" onclick="openMailbox()" title="Cross-box mailbox &amp; broadcast">✉ mailbox</span>
             <span class="kbtn" id="alerts" title="Desktop alerts when a box needs you">🔔 alerts</span>
@@ -302,6 +351,7 @@
       <div class="dockbody">
         <div class="termarea" id="termarea"></div>
         <div class="diffpane" id="diffpane"></div>
+        <div class="sesspane" id="sesspane"></div>
       </div>
       <div class="keybar" id="keybar">
         <button data-k="esc">esc</button>
@@ -392,7 +442,8 @@ function ensureGroups() {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="branch"></span><span class="dstat"></span><span class="dir"></span></div></div>
+    <div class="sub"><span class="branch"></span><span class="dstat"></span><span class="dir"></span></div>
+    <div class="headline"><span class="pchip"></span><span class="htext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
   el.addEventListener("click", () => openTerminal(name));
   el.addEventListener("mouseenter", () => select(name, true));
@@ -410,7 +461,23 @@ function updateRow(el, b) {
   el.querySelector(".age").textContent = b.age;
   el.querySelector(".chev").textContent = wired ? "▣" : "›";
   el.querySelector(".dstat").innerHTML = diffBadge(b.diff);
+  // inbox headline + pause chip: shown only when there's something the box reported worth acting on.
+  // A paused box's ask wins; otherwise, for an open terminal, show its live bottom line — so you can
+  // see what another tab is doing while you're focused elsewhere (peripheral awareness).
+  const p = b.pause, chip = PCHIP[p];
+  const pauseHead = (p && p !== "none") ? b.headline : "";
+  const live = (wired && !pauseHead) ? (sessions.get(b.name).tail || "") : "";
+  const hl = pauseHead || live;
+  el.classList.toggle("has-head", !!hl);
+  el.classList.toggle("live-head", !!live && hl === live);
+  el.querySelector(".htext").textContent = hl || "";
+  const pc = el.querySelector(".pchip");
+  pc.className = "pchip" + (chip && pauseHead ? " " + p : "");
+  pc.textContent = (chip && pauseHead) ? chip : "";
+  pc.style.display = (chip && pauseHead) ? "" : "none";
 }
+// pause → row-chip label (the fork-detector's verdict; statement/none get no chip)
+const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
   const counts = {};
@@ -421,6 +488,13 @@ function render(snapshot) {
     + (need ? `<span class="seg"><span class="pip" style="background:var(--attn)"></span><span class="n">${need}</span> need you</span>` : "")
     + (working ? `<span class="seg"><span class="pip" style="background:var(--working)"></span><span class="n">${working}</span> working</span>` : "")
     + (done ? `<span class="seg"><span class="pip" style="background:var(--done)"></span><span class="n">${done}</span> done</span>` : "");
+
+  // batch-resolve button: count the boxes paused on a trivial "proceed?" (the fork-detector's verdict)
+  const proceedN = boxes.filter(b => b.pause === "proceed").length;
+  const ca = document.getElementById("contall");
+  ca.style.display = proceedN ? "" : "none";
+  ca.textContent = `▸ Continue ${proceedN}`;
+  ca.title = `Resume ${proceedN} box${proceedN === 1 ? "" : "es"} paused on a trivial "proceed?" (one gesture, not silent)`;
 
   fleet.querySelector(".empty")?.remove();
   if (!boxes.length) {
@@ -468,10 +542,12 @@ function nextNeedsYou() {
 const sessions = new Map();   // name -> { term, fit, ws, host, streaming, timer, dead }
 let view = { box: null, mode: "term" };   // what the dock currently shows
 const termarea = document.getElementById("termarea"), diffpane = document.getElementById("diffpane"),
+      sesspane = document.getElementById("sesspane"),
       tabsEl = document.getElementById("tabs"), dockbar = document.getElementById("dockbar");
 
 function openTerminal(name) { showBox(name, "term"); }
 function openDiff(name) { showBox(name, "diff"); }
+function openSession(name) { showBox(name, "session"); }
 function showBox(name, mode) {
   document.body.classList.remove("show-fleet");   // tapping a box leaves the mobile fleet view
   select(name);
@@ -479,6 +555,7 @@ function showBox(name, mode) {
   if (mode === "term" && !sessions.has(name)) createSession(name);
   applyView();
   if (mode === "diff") loadDiff(name);
+  if (mode === "session") loadSession(name);
   loadShip(name);
 }
 function applyView() {
@@ -488,7 +565,8 @@ function applyView() {
   const termMode = view.mode === "term";
   document.body.classList.toggle("term-mode", termMode);   // gates the mobile key bar
   termarea.classList.toggle("on", termMode);
-  diffpane.classList.toggle("on", !termMode);
+  diffpane.classList.toggle("on", view.mode === "diff");
+  sesspane.classList.toggle("on", view.mode === "session");
   for (const [n, s] of sessions) s.host.classList.toggle("on", termMode && n === view.box);
   if (termMode && sessions.has(view.box)) {
     const s = sessions.get(view.box);
@@ -544,6 +622,7 @@ function renderDockbar() {
     + `<span class="dstat">${diffBadge(b.diff)}</span>`
     + `<div class="seg-toggle">
          <button data-m="term" class="${view.mode==='term'?'on':''}">Terminal</button>
+         <button data-m="session" class="${view.mode==='session'?'on':''}">Session</button>
          <button data-m="diff" class="${view.mode==='diff'?'on':''}">Diff</button>
        </div>`
     + (view.mode==='diff' ? `<span class="rf" id="dref" title="refresh diff">↻</span>` : "")
@@ -553,6 +632,7 @@ function renderDockbar() {
     + shipHtml(view.box)
     + `<span class="rf" id="dclose" title="close">✕</span>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box);
+  dockbar.querySelector('[data-m=session]').onclick = () => openSession(view.box);
   dockbar.querySelector('[data-m=diff]').onclick = () => openDiff(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
@@ -611,7 +691,35 @@ function mergePr(name) {
     else toast("merge failed: " + (d.error||"").split("\n")[0]);
   }).catch(() => toast("merge failed"));
 }
-// The single highlighted call-to-action for the loop: reply → review → PR → merge → archive.
+// One-click resume (step 6): tell a paused agent to proceed, headless & fire-and-forget. Not silent —
+// always a human click; batch use is restricted to the trivial "proceed?" set.
+function resumeBox(name, prompt) {
+  fetch(`/api/boxes/${encodeURIComponent(name)}/resume`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: prompt || "" })
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) toast("continue failed: " + (d.error || "").split("\n")[0]);
+  }).catch(() => toast("continue failed"));
+}
+function batchResume() {
+  const ps = boxes.filter(b => b.pause === "proceed");
+  if (!ps.length) return;
+  const list = ps.map(b => `  • ${b.name} — ${b.headline || "proceed?"}`).join("\n");
+  if (!confirm(`Continue ${ps.length} box${ps.length === 1 ? "" : "es"} paused on a trivial "proceed?":\n\n${list}\n\n`
+      + `Each resumes its agent and runs in the shared rate-limit window. They'll pause again if they hit real doubt.`)) return;
+  fetch("/api/resume-batch", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ names: ps.map(b => b.name) })
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) { toast("continue failed"); return; }
+    const n = (d.resumed || []).length, h = (d.held || []).length;
+    // held = boxes the AI safety gate flagged as a real decision (only when SKEIN_AI=on) — route to one
+    toast(`continuing ${n}${h ? ` · held ${h} for your eyes` : ""}`);
+    if (h && d.held[0]) select(d.held[0]);
+  }).catch(() => toast("continue failed"));
+}
+
+// The single highlighted call-to-action for the loop: continue/reply → review → PR → merge → archive.
 function nextAction(box) {
   const b = boxes.find(x => x.name === box), s = shipState.get(box), st = b?.state;
   if (s && s.pr_url) {
@@ -620,6 +728,8 @@ function nextAction(box) {
     if (ps === "OPEN" && s.checks === "passing") return { label:"Merge ▸", run:() => mergePr(box) };
     if (ps === "OPEN") return { label:"Checks ▸", run:() => window.open(s.pr_url, "_blank") };
   }
+  // a trivial "proceed?" pause → one-click continue; a real fork/decision still routes to the terminal
+  if (b?.pause === "proceed") return { label:"Continue ▸", run:() => resumeBox(box, "") };
   if (["needs-input","needs-decision","blocked","waiting"].includes(st)) return { label:"Reply ▸", run:() => openTerminal(box) };
   if (st === "done") return view.mode === "diff" ? { label:"Create PR ▸", run:() => createPR(box) } : { label:"Review diff ▸", run:() => openDiff(box) };
   return null;
@@ -654,6 +764,41 @@ function renderTabFlag(name) {
   t.classList.toggle("streaming", !!sessions.get(name)?.streaming);
 }
 function refreshRowAll() { for (const name of rowEls.keys()) refreshRow(name); }
+
+// ---------- session digest: "what happened here" (free — commits + journal + last message) ----------
+function loadSession(name) {
+  sesspane.innerHTML = `<div class="sess"><div class="note">loading…</div></div>`;
+  fetch(`/api/boxes/${encodeURIComponent(name)}/session`).then(r => r.ok ? r.json() : null).then(d => {
+    if (view.box !== name || view.mode !== "session") return;
+    sesspane.innerHTML = d ? renderSession(d) : `<div class="sess"><div class="note">no session digest yet</div></div>`;
+    sesspane.querySelector("#seediff")?.addEventListener("click", e => { e.preventDefault(); openDiff(name); });
+    // lazy AI narration (step 7): only when there's no journal to read; returns null unless SKEIN_AI=on.
+    // One rationed Haiku call per turn-end, server-cached — so reopening the tab won't re-spend.
+    if (d && !d.journal && (d.last_message || d.blocked_on)) loadNarration(name);
+  }).catch(() => { sesspane.innerHTML = `<div class="sess"><div class="note">could not load session</div></div>`; });
+}
+function loadNarration(name) {
+  fetch(`/api/boxes/${encodeURIComponent(name)}/narrate`).then(r => r.json()).then(d => {
+    if (view.box !== name || view.mode !== "session" || !d.summary) return;
+    const sess = sesspane.querySelector(".sess"); if (!sess) return;
+    const blk = document.createElement("div"); blk.className = "blk";
+    blk.innerHTML = `<h4>✨ summary</h4><div class="msg ai">${esc(d.summary)}</div>`;
+    sess.prepend(blk);
+  }).catch(() => {});
+}
+function renderSession(d) {
+  let h = `<div class="sess">`;
+  if (d.blocked_on) h += `<div class="blk"><h4>blocked on</h4><div class="ask">${esc(d.blocked_on)}</div></div>`;
+  else if (d.last_message) h += `<div class="blk"><h4>last message</h4><div class="msg">${esc(d.last_message)}</div></div>`;
+  if (d.journal) h += `<div class="blk"><h4>journal</h4><div class="jrnl">${esc(d.journal)}</div></div>`;
+  if (d.commits?.length)
+    h += `<div class="blk"><h4>commits (${d.commits.length})</h4><ul class="cmts">${d.commits.map(c => `<li>${esc(c)}</li>`).join("")}</ul></div>`;
+  if (d.diff && (d.diff.files||d.diff.ins||d.diff.del))
+    h += `<div class="blk"><h4>changes</h4><div class="meta">${diffBadge(d.diff)} — <a href="#" id="seediff">view diff ▸</a></div></div>`;
+  if (!d.blocked_on && !d.last_message && !d.journal && !d.commits?.length)
+    h += `<div class="note">nothing reported yet — the box writes a digest when its agent pauses (Stop hook)</div>`;
+  return h + `</div>`;
+}
 
 function loadDiff(name) {
   diffpane.innerHTML = `<div class="diff"><div class="note">loading…</div></div>`;
@@ -818,6 +963,109 @@ document.getElementById("alerts").addEventListener("click", async () => {
 });
 window.addEventListener("focus", () => { document.title = "skein"; });
 
+// ---------- away digest: "while you were gone" (free — client-side fleet delta) ----------
+let awaySnap = null;
+function snapFleet() {
+  const m = {};
+  for (const b of boxes) m[b.name] = { g: groupOf(b.state), pause: b.pause, headline: b.headline, d: (b.diff?.ins||0)+(b.diff?.del||0) };
+  return { t: Date.now(), m };
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) awaySnap = snapFleet();
+  else if (awaySnap) { if ((Date.now()-awaySnap.t)/60000 >= 0.75) showAwayDigest(awaySnap); awaySnap = null; }
+});
+function showAwayDigest(snap) {
+  const items = [], now = {};
+  for (const b of boxes) now[b.name] = b;
+  for (const b of boxes) {
+    const before = snap.m[b.name], g = groupOf(b.state), dnow = (b.diff?.ins||0)+(b.diff?.del||0);
+    if (!before) { items.push({ pri:2, name:b.name, kind:"new", text:`started — ${b.headline||b.branch||""}` }); continue; }
+    if (g !== before.g) {
+      if (g === "attn")         items.push({ pri:0, name:b.name, kind:"attn",    text:`now needs a decision${b.headline?` — ${b.headline}`:""}` });
+      else if (g === "waiting") items.push({ pri:0, name:b.name, kind:"waiting", text:`paused for you${b.headline?` — ${b.headline}`:""}` });
+      else if (g === "done")    items.push({ pri:1, name:b.name, kind:"done",    text:`finished${dnow?` (${dnow} lines changed)`:""}` });
+      else if (g === "working") items.push({ pri:3, name:b.name, kind:"working", text:`back to work` });
+    } else if (dnow > before.d) {
+      items.push({ pri:3, name:b.name, kind:"prog", text:`+${dnow-before.d} more lines changed` });
+    }
+  }
+  for (const name in snap.m) if (!now[name]) items.push({ pri:2, name, kind:"gone", text:`left the board (archived / merged)` });
+  if (!items.length) return;
+  items.sort((a,b) => a.pri-b.pri || a.name.localeCompare(b.name));
+  renderAwayOverlay(items, snap.t);
+}
+function renderAwayOverlay(items, sinceT) {
+  let ov = document.getElementById("away");
+  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov);
+    ov.addEventListener("click", e => { if (e.target === ov) ov.classList.remove("open"); }); }
+  const mins = Math.max(1, Math.round((Date.now()-sinceT)/60000));
+  ov.innerHTML = `<div class="away-card"><div class="away-head"><b>While you were away</b>`
+    + `<span class="sub">~${mins}m · ${items.length} update${items.length>1?"s":""}</span><span class="x">✕</span></div>`
+    + `<div class="away-list"></div></div>`;
+  const list = ov.querySelector(".away-list");
+  for (const it of items) {
+    const row = document.createElement("div"); row.className = `away-row k-${it.kind}`;
+    row.innerHTML = `<span class="ad"></span><span class="nm">${esc(it.name)}</span><span class="tx">${esc(it.text)}</span>`;
+    row.addEventListener("click", () => { ov.classList.remove("open"); openSession(it.name); });
+    list.append(row);
+  }
+  ov.querySelector(".x").addEventListener("click", () => ov.classList.remove("open"));
+  ov.classList.add("open");
+}
+
+// ---------- collision radar: files two+ boxes have both changed (free — host-side git) ----------
+let collisions = [];
+function loadCollisions() {
+  fetch("/api/collisions").then(r => r.json()).then(c => {
+    collisions = Array.isArray(c) ? c : [];
+    const btn = document.getElementById("collide-btn");
+    btn.style.display = collisions.length ? "" : "none";
+    btn.textContent = `⚠ ${collisions.length} collision${collisions.length === 1 ? "" : "s"}`;
+    btn.title = `${collisions.length} file${collisions.length === 1 ? "" : "s"} changed by more than one box — reconcile before merge`;
+  }).catch(() => {});
+}
+function showCollisions() {
+  if (!collisions.length) return;
+  let ov = document.getElementById("away");
+  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov);
+    ov.addEventListener("click", e => { if (e.target === ov) ov.classList.remove("open"); }); }
+  ov.innerHTML = `<div class="away-card"><div class="away-head"><b>Collision radar</b>`
+    + `<span class="sub">${collisions.length} file${collisions.length>1?"s":""} changed by 2+ boxes</span><span class="x">✕</span></div>`
+    + `<div class="away-list"></div></div>`;
+  const list = ov.querySelector(".away-list");
+  for (const c of collisions) {
+    const row = document.createElement("div"); row.className = "away-row k-attn";
+    row.innerHTML = `<span class="ad"></span><span class="nm">${esc(c.file)}</span><span class="tx">${esc((c.boxes||[]).join(", "))}</span>`;
+    row.addEventListener("click", () => { ov.classList.remove("open"); if (c.boxes?.[0]) openDiff(c.boxes[0]); });
+    list.append(row);
+  }
+  ov.querySelector(".x").addEventListener("click", () => ov.classList.remove("open"));
+  ov.classList.add("open");
+}
+setInterval(loadCollisions, 8000);
+
+// ---------- peripheral preview: the live bottom line of every open terminal ----------
+// So while you're in one tab you can still see what the others are doing (and where to look next).
+function sessionTail(s) {
+  try {
+    const buf = s.term.buffer.active, bottom = buf.baseY + buf.cursorY;
+    for (let y = bottom; y >= 0 && y > bottom - 40; y--) {
+      const line = buf.getLine(y); if (!line) continue;
+      const t = line.translateToString(true).trim();
+      if (t) return t.length > 140 ? t.slice(0, 140) + "…" : t;
+    }
+  } catch {}
+  return "";
+}
+setInterval(() => {
+  for (const [name, s] of sessions) {
+    const t = sessionTail(s);
+    if (t !== s.tail) { s.tail = t; refreshRow(name); }
+    const tab = [...tabsEl.querySelectorAll(".tab")].find(el => el.dataset.name === name);
+    if (tab) tab.title = t || name;
+  }
+}, 1500);
+
 // ---------- command palette ----------
 const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
 let palItems = [], palSel = 0;
@@ -931,6 +1179,8 @@ nbBranch.addEventListener("keydown", e => {
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.classList.contains("open") ? closePalette() : openPalette(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") { e.preventDefault(); openNewBox(); return; }
+  const away = document.getElementById("away");
+  if (away?.classList.contains("open")) { if (e.key === "Escape") away.classList.remove("open"); return; }
   if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
   if (newbox.classList.contains("open")) return;
   if (pal.classList.contains("open")) return;
@@ -971,6 +1221,7 @@ function connect() {
 ensureGroups(); setFavicon(0);
 fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
 connect();
+loadCollisions();
 </script>
 </body>
 </html>

@@ -51,10 +51,15 @@ async fn main() {
         .route("/vendor/addon-fit.js", get(vendor_fit_js))
         .route("/api/boxes", get(api_boxes))
         .route("/api/boxes/:name/diff", get(api_diff))
+        .route("/api/boxes/:name/session", get(api_session))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
         .route("/api/boxes/:name/ship", get(api_ship))
         .route("/api/boxes/:name/pr", post(api_pr))
         .route("/api/boxes/:name/merge", post(api_merge))
+        .route("/api/boxes/:name/resume", post(api_resume))
+        .route("/api/boxes/:name/narrate", get(api_narrate))
+        .route("/api/resume-batch", post(api_resume_batch))
+        .route("/api/collisions", get(api_collisions))
         .route("/api/boxes/:name/archive", post(api_archive))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
@@ -141,6 +146,18 @@ async fn api_diff(Path(name): Path<String>) -> Response {
         .into_response()
 }
 
+/// The free session digest for a box — "what happened here" assembled from commits, diff,
+/// the agent's journal, and its last reported message. No model tokens spent. 404 if unknown.
+async fn api_session(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::session_digest(&name)).await {
+        Ok(Some(d)) => Json(d).into_response(),
+        _ => (StatusCode::NOT_FOUND, "no such box").into_response(),
+    }
+}
+
 /// All cross-box messages, newest first.
 async fn api_mailbox() -> Json<Vec<skein::Message>> {
     Json(skein::load_mailbox())
@@ -205,6 +222,69 @@ async fn api_merge(Path(name): Path<String>) -> Json<serde_json::Value> {
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })
+}
+
+#[derive(Deserialize, Default)]
+struct ResumeReq {
+    #[serde(default)]
+    prompt: String,
+}
+
+/// Resume a paused box (the one-click "continue" — step 6). Fire-and-forget: kicks off the box's
+/// agent headless and returns immediately; the inbox follows the box's own hooks. Returns {ok} or
+/// {ok:false, error}. Only ever called from an explicit click; batch use is gated to `proceed` boxes.
+async fn api_resume(
+    Path(name): Path<String>,
+    body: Option<Json<ResumeReq>>,
+) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let prompt = body.map(|Json(b)| b.prompt).unwrap_or_default();
+    let r = tokio::task::spawn_blocking(move || skein::resume_box(&name, &prompt)).await;
+    Json(match r {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// Lazy AI narration of a box's last turn — the rationed Haiku fallback for the digest when the box
+/// keeps no journal (step 7). Returns {summary} (null when AI is off / unavailable). Called on demand
+/// only (Session-tab open), cached per turn-end; never per fleet tick.
+async fn api_narrate(Path(name): Path<String>) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "summary": null }));
+    }
+    let s = tokio::task::spawn_blocking(move || skein::narrate(&name))
+        .await
+        .ok()
+        .flatten();
+    Json(serde_json::json!({ "summary": s }))
+}
+
+#[derive(Deserialize)]
+struct BatchReq {
+    #[serde(default)]
+    names: Vec<String>,
+}
+
+/// Batch-resume the boxes paused on a trivial "proceed?" (step 6). With AI on (step 7) each is first
+/// run past the conservative safety gate; genuine decisions are held back. Returns {ok, resumed, held}.
+async fn api_resume_batch(Json(r): Json<BatchReq>) -> Json<serde_json::Value> {
+    let (resumed, held) = tokio::task::spawn_blocking(move || skein::resume_batch(&r.names))
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({ "ok": true, "resumed": resumed, "held": held }))
+}
+
+/// Files two or more boxes have both changed — the collision radar (step 9). Cached host-side.
+async fn api_collisions() -> Json<Vec<skein::Collision>> {
+    Json(
+        tokio::task::spawn_blocking(skein::collisions)
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 /// Archive a box off the board. Returns {ok} or {ok:false, error}.
