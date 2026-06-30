@@ -18,6 +18,7 @@
     --accent:#7d80f2; --accent-2:#9fa2f8; --accent-bg:rgba(125,128,242,.12);
     /* state — functional colour only; shared by dot, pill, tab, chip */
     --attn:#f85149; --waiting:#e3b341; --working:#58a6ff; --done:#3fb950; --idle:#828d99; --stale:#3b434c;
+    --error:#f0883e; /* API failure — a hot amber, distinct from the attn-red "needs you" and yellow "waiting" */
     --dur-fast:100ms; --dur:150ms; --dur-med:240ms; --ease:cubic-bezier(.2,0,0,1);
     --radius:10px; --radius-sm:7px;
     /* type: mono carries identifiers & structural labels (it's terminal-native and the names ARE
@@ -142,6 +143,7 @@
   .row.wired { border-left-color:color-mix(in srgb,var(--accent) 60%,transparent); }
   .row.active { border-left-color:var(--accent); }
   .row.s-attn { border-color:color-mix(in srgb,var(--attn) 42%,var(--border-2)); }
+  .row.s-error { border-color:color-mix(in srgb,var(--error) 46%,var(--border-2)); }
   .row.s-waiting { border-color:color-mix(in srgb,var(--waiting) 34%,var(--border-2)); }
   .chev { color:var(--faint); justify-self:end; transition:color var(--dur-fast); font-size:13px; }
   .row.wired .chev { color:var(--accent); }
@@ -154,8 +156,10 @@
                  animation:ring 1.8s var(--ease) infinite; }
   .s-working .dot { background:var(--working); box-shadow:0 0 7px color-mix(in srgb,var(--working) 60%,transparent); }
   .s-waiting .dot { background:var(--waiting); box-shadow:0 0 6px color-mix(in srgb,var(--waiting) 50%,transparent); }
+  .s-error .dot { background:var(--error); box-shadow:0 0 9px color-mix(in srgb,var(--error) 70%,transparent); }
   .s-done .dot { background:var(--done); box-shadow:0 0 6px color-mix(in srgb,var(--done) 45%,transparent); }
   .s-idle .dot { background:var(--idle); }
+  .s-ended .dot { background:var(--idle); }
   .s-stale .dot { background:var(--stale); }
   @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
   /* an expanding halo — reads as "calling for attention" without the whole dot blinking */
@@ -165,7 +169,7 @@
   .main { min-width:0; }
   .name { font-family:var(--mono); font-size:13px; font-weight:500; letter-spacing:-.01em; color:var(--text);
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .s-stale .name, .s-idle .name { color:var(--dim); }
+  .s-stale .name, .s-idle .name, .s-ended .name { color:var(--dim); }
   .sub { color:var(--dim); font-size:12px; margin-top:2px; display:flex; gap:10px; min-width:0;
          flex-wrap:nowrap; align-items:baseline; }
   /* the branch yields first: it ellipsizes so the diff badge always stays whole on one line */
@@ -199,10 +203,11 @@
   .pill { font-family:var(--mono); font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
           padding:0; border:0; background:transparent; color:var(--dim); white-space:nowrap; }
   .s-attn .pill { color:var(--attn); }
+  .s-error .pill { color:var(--error); }
   .s-waiting .pill { color:var(--waiting); }
   .s-working .pill { color:var(--working); }
   .s-done .pill { color:var(--done); }
-  .s-idle .pill, .s-stale .pill { color:var(--faint); }
+  .s-idle .pill, .s-stale .pill, .s-ended .pill { color:var(--faint); }
 
   .age { color:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
 
@@ -619,10 +624,12 @@
 <script>
 // ---------- model ----------
 const GROUPS = [
+  { key:"error",   label:"error",     match:s => s === "error" },
   { key:"attn",    label:"needs you", match:s => ["needs-input","needs-decision","blocked"].includes(s) },
   { key:"waiting", label:"waiting",   match:s => s === "waiting" },
   { key:"done",    label:"done",      match:s => s === "done" },
-  { key:"working", label:"working",   match:s => ["working","running","live"].includes(s) },
+  { key:"working", label:"working",   match:s => ["working","running","live","compacting"].includes(s) },
+  { key:"ended",   label:"ended",     match:s => s === "ended" },
   { key:"idle",    label:"idle",      match:s => s === "idle" },
   { key:"stale",   label:"stale",     match:s => s === "stale" || s === "unknown" },
 ];
@@ -714,7 +721,10 @@ function updateRow(el, b, showRepo) {
   // awareness). The task also gets its own sub-line when there's a distinct ask above it, so a real
   // question shows both "what it asked" and "what it was doing".
   const p = b.pause, chip = PCHIP[p];
-  const pauseHead = (p && p !== "none") ? b.headline : "";
+  // error/ended carry their reason in the headline (the backend put it there); show it even though
+  // they have no pause chip, so the row reads e.g. "API error: rate limit".
+  const outcome = b.state === "error" || b.state === "ended";
+  const pauseHead = ((p && p !== "none") || outcome) ? b.headline : "";
   const task = b.task || "";
   const hl = pauseHead || task;
   el.classList.toggle("has-head", !!hl);
@@ -1479,8 +1489,15 @@ palInput.addEventListener("keydown", e => {
 
 // ---------- mailbox (cross-box hand-offs + broadcast) ----------
 const mbx = document.getElementById("mbx");
-function openMailbox() { mbx.classList.add("open"); fillRecipients(); loadMailbox(); }
-function closeMailbox() { mbx.classList.remove("open"); }
+let mbxPoll = null;   // live-refresh the message list while the panel is open (no daemon push exists)
+function openMailbox() {
+  mbx.classList.add("open"); fillRecipients(); loadMailbox();
+  if (!mbxPoll) mbxPoll = setInterval(loadMailbox, 5000);
+}
+function closeMailbox() {
+  mbx.classList.remove("open");
+  if (mbxPoll) { clearInterval(mbxPoll); mbxPoll = null; }
+}
 function fillRecipients() {
   const sel = document.getElementById("mbx-to"), cur = sel.value;
   sel.innerHTML = `<option value="broadcast">📢 broadcast — all boxes</option>`

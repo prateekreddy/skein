@@ -100,19 +100,22 @@ pub struct BoxView {
 
 impl Sandbox {
     /// Human label + sort/colour tier, ordered "who needs me first" (lower = more urgent):
-    ///   0 needs-input (a decision/permission is blocking the agent)
+    ///   0 error       (the turn died on an API error — most urgent) / needs-input (a decision blocks it)
     ///   1 waiting     (turn ended — your move)
     ///   2 done        (task finished — review / merge)
-    ///   3 working     (in flight — leave it alone) / `live` when no explicit status
-    ///   4 idle        5 stale / unknown
+    ///   3 working     (in flight — leave it alone) / compacting / `live` when no explicit status
+    ///   4 ended       (session terminated) / idle        5 stale / unknown
     /// Prefers the explicit status the box's hooks write; falls back to liveness
     /// derived from `lastSeen` when no box has reported a status yet.
     pub fn state(&self) -> (String, u8) {
         match self.status.as_str() {
+            "error" => return ("error".into(), 0),
             "needs-input" | "needs-decision" | "blocked" => return ("needs-input".into(), 0),
             "waiting" => return ("waiting".into(), 1),
             "done" => return ("done".into(), 2),
             "working" | "running" => return ("working".into(), 3),
+            "compacting" => return ("compacting".into(), 3),
+            "ended" => return ("ended".into(), 4),
             "" => {} // derive from lastSeen below
             other => return (other.to_string(), 3),
         }
@@ -342,8 +345,16 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                     headline = Some(t);
                 }
             }
-            let pause = if tier == 3 {
-                Pause::None // still working — nothing owed
+            // error/ended carry their own reason from the probe (error_type / end reason) — that's the
+            // headline that matters for those rows, so it wins over the stale narrative/task signal.
+            let is_outcome = state == "error" || state == "ended";
+            if is_outcome {
+                if let Some(d) = current_status_detail(&name) {
+                    headline = Some(d);
+                }
+            }
+            let pause = if tier == 3 || is_outcome {
+                Pause::None // still working, or a terminal outcome whose pill speaks for itself
             } else {
                 classify_message(signal_text.as_deref().unwrap_or(""), blocked)
             };
@@ -1834,6 +1845,8 @@ fn delist_box(name: &str) -> Result<(), String> {
     // turn-state probe output and its launch spec. Best-effort — a missing file is fine.
     for p in [
         store.join("status").join(format!("{name}.json")),
+        store.join("status").join(format!("{name}.agents")),
+        store.join("status").join(format!("{name}.agents.lock")),
         store.join("skein").join("launch").join(format!("{name}.json")),
     ] {
         let _ = fs::remove_file(&p);
@@ -2302,6 +2315,23 @@ pub fn current_status(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The human-readable `detail` the probe attaches to a state that carries one — the StopFailure
+/// `error_type` ("API error: rate limit") or the SessionEnd `reason` ("session ended: logout").
+/// Empty/absent for the common states. Surfaced as the box's headline so the row says *why*.
+pub fn current_status_detail(name: &str) -> Option<String> {
+    if !valid_name(name) {
+        return None;
+    }
+    let p = store_for_box(name)?
+        .join("status")
+        .join(format!("{name}.json"));
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    v.get("detail")
+        .and_then(|s| s.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 // ---------- the turn-state probe (skein-owned, installed into the shared store) ----------
 // skein ships these hook scripts and wires them into the store's settings.json, so a box reports
 // working/waiting/needs-input + its current task without the *repo* providing anything. The store is
@@ -2375,7 +2405,13 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     use serde_json::{json, Value};
     // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite, and
     // the SessionStart bootstrap that bridges memory + surfaces the mailbox (so an empty store works).
-    let entries: [(&str, String, Option<&str>); 5] = [
+    // Sub-agent tracking: PreToolUse(Task) and SubagentStop maintain an in-flight counter so a
+    // Notification fired while the box is DELEGATING to sub-agents reads as "working", not "needs-input"
+    // (it's waiting on its own agents, not on you). UserPromptSubmit/Stop reset the counter each turn.
+    // The richer fleet-states ride extra lifecycle events (all best-effort: a Claude Code that predates
+    // one simply never fires it): StopFailure→error (rate_limit/overloaded/…), PreCompact/PostCompact→
+    // compacting (busy, not stuck), SessionEnd→ended (distinct from a liveness-derived "stale").
+    let entries: [(&str, String, Option<&str>); 11] = [
         (
             "UserPromptSubmit",
             format!("{PROBE_STATUS_CMD} working"),
@@ -2383,10 +2419,20 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         ),
         (
             "Notification",
-            format!("{PROBE_STATUS_CMD} needs-input"),
+            format!("{PROBE_STATUS_CMD} notify"),
             None,
         ),
         ("Stop", format!("{PROBE_STATUS_CMD} waiting"), None),
+        (
+            "PreToolUse",
+            format!("{PROBE_STATUS_CMD} agent-start"),
+            Some("Task"),
+        ),
+        ("SubagentStop", format!("{PROBE_STATUS_CMD} agent-stop"), None),
+        ("StopFailure", format!("{PROBE_STATUS_CMD} error"), None),
+        ("PreCompact", format!("{PROBE_STATUS_CMD} compacting"), None),
+        ("PostCompact", format!("{PROBE_STATUS_CMD} compacted"), None),
+        ("SessionEnd", format!("{PROBE_STATUS_CMD} ended"), None),
         ("PostToolUse", PROBE_TASK_CMD.to_string(), Some("TodoWrite")),
         ("SessionStart", BOOTSTRAP_CMD.to_string(), None),
     ];
@@ -2759,6 +2805,11 @@ mod tests {
         assert_eq!(sb("done", "").state().1, 2);
         assert_eq!(sb("working", "").state().1, 3);
         assert_eq!(sb("compiling", "").state(), ("compiling".into(), 3)); // passthrough
+        // the richer lifecycle states
+        assert_eq!(sb("error", "").state(), ("error".into(), 0)); // most urgent
+        assert_eq!(sb("blocked", "").state(), ("needs-input".into(), 0)); // permission → needs you
+        assert_eq!(sb("compacting", "").state(), ("compacting".into(), 3)); // busy, not stuck
+        assert_eq!(sb("ended", "").state(), ("ended".into(), 4)); // distinct from stale
     }
 
     #[test]
@@ -3077,6 +3128,12 @@ mod tests {
             "UserPromptSubmit",
             "Notification",
             "Stop",
+            "PreToolUse",
+            "SubagentStop",
+            "StopFailure",
+            "PreCompact",
+            "PostCompact",
+            "SessionEnd",
             "PostToolUse",
             "SessionStart",
         ] {
@@ -3086,6 +3143,13 @@ mod tests {
                 "missing {ev}"
             );
         }
+        // the Notification hook routes through the counter-aware `notify` mode (not a bare needs-input)
+        assert!(merged["hooks"]["Notification"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with("box-status.sh notify"));
+        // sub-agent tracking: PreToolUse is scoped to the Task tool
+        assert_eq!(merged["hooks"]["PreToolUse"][0]["matcher"], "Task");
         // a default status line is wired when the store doesn't set one
         assert!(merged["statusLine"]["command"]
             .as_str()
