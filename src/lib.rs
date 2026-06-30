@@ -990,7 +990,12 @@ fn repo_id_from_source(source: &str) -> String {
 /// Add a repo to skein: clone it (URL) or adopt it in place (local path), provision its shared store
 /// and skein's kit, seed gh auth, and record it in `repos.json`. Returns the stored `Repo`. This is
 /// the whole `skein add <url|path>` flow; the box launch then needs nothing from the repo.
-pub fn add_repo(source: &str, id: Option<&str>, agent: Option<&str>) -> Result<Repo, String> {
+pub fn add_repo(
+    source: &str,
+    id: Option<&str>,
+    agent: Option<&str>,
+    store: Option<&str>,
+) -> Result<Repo, String> {
     let id = id
         .map(|s| s.to_string())
         .unwrap_or_else(|| repo_id_from_source(source));
@@ -998,7 +1003,15 @@ pub fn add_repo(source: &str, id: Option<&str>, agent: Option<&str>) -> Result<R
         return Err("could not derive a repo id — pass one explicitly".into());
     }
     let home = skein_home();
-    let store = home.join("repos").join(&id).join("store").join(".claude");
+    // The repo's shared-data folder (its `.claude` store), shared live across all the repo's boxes —
+    // cross-box memory/mailbox/skills/statusline. The caller may point it at an existing rich store
+    // (e.g. thing's `skein-shared/.claude`); otherwise skein manages one under its home. Either way
+    // `ensure_store` is idempotent (adds the probe, seeds only what's absent), so an existing store is
+    // adopted, not clobbered.
+    let store = match store.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => PathBuf::from(expand_tilde(s)),
+        None => home.join("repos").join(&id).join("store").join(".claude"),
+    };
 
     let work = if is_git_url(source) {
         // Clone the URL into skein's managed area.
@@ -1053,6 +1066,39 @@ pub fn add_repo(source: &str, id: Option<&str>, agent: Option<&str>) -> Result<R
     repos.sort_by(|a, b| a.id.cmp(&b.id));
     save_repos(&repos)?;
     Ok(repo)
+}
+
+/// Pull the latest code into a managed repo's working clone (`git -C <work> pull --ff-only`), so the
+/// next box branches from current upstream. Fast-forward-only on purpose: skein never merges or
+/// rebases on the user's behalf, so a diverged or dirty clone fails loudly rather than silently
+/// rewriting their tree. Returns git's own summary on success. `None` repo id ⇒ error.
+pub fn pull_repo(id: &str) -> Result<String, String> {
+    let repo = load_repos()
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("no repo with id {id:?}"))?;
+    if remote_origin_url(&repo.work).is_none() {
+        return Err("this repo has no `origin` remote to pull from".into());
+    }
+    let out = Command::new("git")
+        .args(["-C", &repo.work, "pull", "--ff-only"])
+        .output()
+        .map_err(|e| format!("git pull: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        return Err(if err.is_empty() {
+            "git pull failed (the clone may have diverged or have local changes)".into()
+        } else {
+            err.to_string()
+        });
+    }
+    let summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if summary.is_empty() {
+        "Already up to date.".into()
+    } else {
+        summary
+    })
 }
 
 /// Seed the host's GitHub token into sbx globally so every box can fetch/push/open PRs:
@@ -1113,15 +1159,47 @@ pub fn ensure_kit() -> Result<PathBuf, String> {
     Ok(kit)
 }
 
-/// Provision a shared store from scratch at `store` (a `.claude` dir): the dirs skein + the probe
-/// need, plus the turn-state probe itself. Idempotent. Lets a brand-new repo work with no existing
-/// `.claude` and no repo store-template.
+/// Documents the shared-store layout for the user — written into a fresh store only when absent.
+const STORE_README: &str = include_str!("store/README.md");
+
+/// Provision a repo's shared-data folder at `store` (a `.claude` dir): scaffold the directory
+/// structure (only what's missing — never clobbering data the user already put there), install skein's
+/// own machinery (turn-state probe + the SessionStart bootstrap, mailbox, and a default status line,
+/// all under `skein/bin/`), and wire it into `settings.json`. Idempotent and safe to run on every
+/// launch — an empty folder comes up fully working (memory bridge, mailbox, status line), an
+/// already-populated one is left intact (machinery refreshed, settings merged additively). The user
+/// only optionally fills `memory/` and `skills/` with their own content.
 pub fn ensure_store(store: &Path) -> Result<(), String> {
-    for d in ["mailbox", "status", "tasks", "skein/launch", "skein/bin"] {
+    fs::create_dir_all(store).map_err(|e| format!("mkdir {}: {e}", store.display()))?;
+    // skein-owned runtime (skein/, mailbox/, status/, tasks/) + the user-filled content homes
+    // (memory/, skills/, hooks/). create_dir_all is idempotent, so existing dirs are untouched.
+    for d in [
+        "mailbox",
+        "status",
+        "tasks",
+        "skein/launch",
+        "skein/bin",
+        "memory",
+        "skills",
+        "hooks",
+    ] {
         let p = store.join(d);
         fs::create_dir_all(&p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
     }
+    // Document the layout so the user knows what they can optionally add — written only if absent.
+    write_if_absent(&store.join("README.md"), STORE_README);
     ensure_probe_in(store)
+}
+
+/// Write `body` to `path` only when nothing is there yet — so scaffolding never overwrites the user's
+/// own files. Best-effort: a write failure is logged, not fatal.
+fn write_if_absent(path: &Path, body: &str) {
+    if path.exists() {
+        return;
+    }
+    if let Err(e) = fs::write(path, body) {
+        eprintln!("skein: write {}: {e}", path.display());
+    }
 }
 
 /// Record, for box `name`, what its kit startup needs (branch + agent) at
@@ -2201,9 +2279,17 @@ pub fn current_status(name: &str) -> Option<String> {
 // linked into every box by the kit, so every box's Claude loads these hooks. See docs/self-sufficient.md.
 const PROBE_STATUS_SH: &str = include_str!("probe/box-status.sh");
 const PROBE_TASK_SH: &str = include_str!("probe/box-task.sh");
+// skein-owned machinery installed alongside the probe so an empty shared folder works end-to-end:
+// the SessionStart bootstrap (memory bridge + mailbox inbox + box registration), the mailbox, and a
+// default status line. They live in `<store>/skein/bin/` (skein-owned namespace), refreshed each run.
+const BOOTSTRAP_SH: &str = include_str!("store/sandbox-bootstrap.sh");
+const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
+const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 // Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
 const PROBE_STATUS_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh";
 const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh";
+const BOOTSTRAP_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/sandbox-bootstrap.sh";
+const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusline-command.sh";
 
 /// Install skein's turn-state probe into the shared store: write the hook scripts to
 /// `<store>/skein/bin/` and merge their hook wiring into `<store>/settings.json` (additive +
@@ -2236,6 +2322,9 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     for (file, body) in [
         ("box-status.sh", PROBE_STATUS_SH),
         ("box-task.sh", PROBE_TASK_SH),
+        ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
+        ("mailbox.sh", MAILBOX_SH),
+        ("statusline-command.sh", STATUSLINE_SH),
     ] {
         let p = bin.join(file);
         fs::write(&p, body).map_err(|e| format!("write {}: {e}", p.display()))?;
@@ -2255,8 +2344,9 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
 /// duplicating skein's own on a re-run (idempotent). Pure — the testable core of `ensure_probe`.
 fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     use serde_json::{json, Value};
-    // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite.
-    let entries: [(&str, String, Option<&str>); 4] = [
+    // (event, command, optional matcher) — status on the turn-boundary events, task on TodoWrite, and
+    // the SessionStart bootstrap that bridges memory + surfaces the mailbox (so an empty store works).
+    let entries: [(&str, String, Option<&str>); 5] = [
         (
             "UserPromptSubmit",
             format!("{PROBE_STATUS_CMD} working"),
@@ -2269,6 +2359,7 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         ),
         ("Stop", format!("{PROBE_STATUS_CMD} waiting"), None),
         ("PostToolUse", PROBE_TASK_CMD.to_string(), Some("TodoWrite")),
+        ("SessionStart", BOOTSTRAP_CMD.to_string(), None),
     ];
     let mut out = existing.clone();
     if !out.is_object() {
@@ -2309,6 +2400,10 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // the browser PTY than the inline renderer, and equals `CLAUDE_CODE_NO_FLICKER=1` without needing
     // an env var (sbx has no --env). Additive: never clobber a `tui` already set in the store.
     root.entry("tui").or_insert_with(|| json!("fullscreen"));
+    // A default status line so a box shows context/usage out of the box. `or_insert` — a store that
+    // already sets its own `statusLine` keeps it.
+    root.entry("statusLine")
+        .or_insert_with(|| json!({ "type": "command", "command": STATUSLINE_CMD }));
     out
 }
 
@@ -2849,14 +2944,65 @@ mod tests {
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("repos").join("x").join("store").join(".claude");
         ensure_store(&store).unwrap();
-        for d in ["mailbox", "status", "tasks", "skein/launch", "skein/bin"] {
+        // the full structure: skein runtime + the user-filled content homes.
+        for d in [
+            "mailbox", "status", "tasks", "skein/launch", "skein/bin", "memory", "skills", "hooks",
+        ] {
             assert!(store.join(d).is_dir(), "missing {d}");
         }
-        // probe scripts + settings landed in the fresh store
-        assert!(store.join("skein/bin/box-status.sh").is_file());
+        // skein installs all the machinery so an empty store works end-to-end
+        for f in [
+            "skein/bin/box-status.sh",
+            "skein/bin/sandbox-bootstrap.sh",
+            "skein/bin/mailbox.sh",
+            "skein/bin/statusline-command.sh",
+        ] {
+            assert!(store.join(f).is_file(), "missing {f}");
+        }
         assert!(store.join("settings.json").is_file());
+        // layout is documented for the user to (optionally) fill
+        assert!(store.join("README.md").is_file());
+        // settings wire the SessionStart bootstrap + a default statusLine
+        let s: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap()).unwrap();
+        assert!(s["statusLine"]["command"].as_str().unwrap().contains("statusline-command.sh"));
+        assert!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("sandbox-bootstrap.sh"));
         let kit = ensure_kit().unwrap();
         assert!(kit.join("spec.yaml").is_file());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn ensure_store_scaffolds_without_clobbering_user_data() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("shared").join(".claude");
+
+        // the user pre-populates the folder with their own data + a custom README.
+        fs::create_dir_all(store.join("memory")).unwrap();
+        fs::write(store.join("memory").join("mine.md"), "user memory").unwrap();
+        fs::write(store.join("README.md"), "MY OWN README").unwrap();
+
+        ensure_store(&store).unwrap();
+
+        // scaffolding added the missing structure + machinery …
+        assert!(store.join("skills").is_dir());
+        assert!(store.join("skein/bin/box-status.sh").is_file());
+        assert!(store.join("skein/bin/sandbox-bootstrap.sh").is_file());
+        // … but never clobbered what the user already put there.
+        assert_eq!(
+            fs::read_to_string(store.join("memory").join("mine.md")).unwrap(),
+            "user memory"
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("README.md")).unwrap(),
+            "MY OWN README",
+            "an existing README is left alone"
+        );
         env::remove_var("SKEIN_HOME");
     }
 
@@ -2898,13 +3044,24 @@ mod tests {
     #[test]
     fn settings_with_probe_from_empty() {
         let merged = settings_with_probe(&serde_json::json!({}));
-        for ev in ["UserPromptSubmit", "Notification", "Stop", "PostToolUse"] {
+        for ev in [
+            "UserPromptSubmit",
+            "Notification",
+            "Stop",
+            "PostToolUse",
+            "SessionStart",
+        ] {
             assert_eq!(
                 merged["hooks"][ev].as_array().unwrap().len(),
                 1,
                 "missing {ev}"
             );
         }
+        // a default status line is wired when the store doesn't set one
+        assert!(merged["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("statusline-command.sh"));
     }
 
     #[test]

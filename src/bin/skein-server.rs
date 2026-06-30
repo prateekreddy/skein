@@ -78,6 +78,7 @@ async fn main() {
         .route("/api/boxes", get(api_boxes))
         .route("/api/repos", get(api_repos).post(api_add_repo))
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
+        .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/pick-path", post(api_pick_path))
         .route("/api/boxes/:name/diff", get(api_diff))
@@ -246,6 +247,9 @@ struct AddRepoReq {
     id: String,
     #[serde(default)]
     agent: String,
+    /// Shared-data folder for the repo (its `.claude` store). Empty ⇒ skein manages one under its home.
+    #[serde(default)]
+    store: String,
 }
 
 /// Register a repo: clone a URL (or adopt a local path), provision its store + kit, record it.
@@ -257,7 +261,8 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     let res = tokio::task::spawn_blocking(move || {
         let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
         let agent = (!r.agent.trim().is_empty()).then(|| r.agent.trim().to_string());
-        skein::add_repo(r.source.trim(), id.as_deref(), agent.as_deref())
+        let store = (!r.store.trim().is_empty()).then(|| r.store.trim().to_string());
+        skein::add_repo(r.source.trim(), id.as_deref(), agent.as_deref(), store.as_deref())
     })
     .await;
     match res {
@@ -276,6 +281,17 @@ async fn api_remove_repo(Path(id): Path<String>) -> Response {
     match skein::remove_repo(&id) {
         Ok(repo) => Json(repo).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Pull the latest code into a repo's working clone (fast-forward only). `git pull` hits the network,
+/// so run the blocking work off the async runtime.
+async fn api_pull_repo(Path(id): Path<String>) -> Response {
+    let res = tokio::task::spawn_blocking(move || skein::pull_repo(&id)).await;
+    match res {
+        Ok(Ok(summary)) => Json(serde_json::json!({ "summary": summary })).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),
     }
 }
 

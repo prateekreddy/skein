@@ -75,12 +75,15 @@ $SKEIN_SHARED/sandboxes.json\n  \
     );
 }
 
-/// `skein add <git-url|path> [--id <id>] [--agent <claude>]` — register a repo so skein can launch
-/// + observe boxes for it with zero repo-side setup.
+/// `skein add <git-url|path> [--id <id>] [--agent <claude>] [--store <shared-data-folder>]` — register
+/// a repo so skein can launch + observe boxes for it with zero repo-side setup. `--store` points the
+/// repo at an existing shared `.claude` folder (e.g. thing's `skein-shared/.claude`) so its
+/// memory/skills/mailbox/statusline are live across the repo's boxes; omit it to let skein manage one.
 fn cmd_add(source: &str, opts: &[String]) -> Result<(), String> {
     let id = flag(opts, "--id");
     let agent = flag(opts, "--agent");
-    let repo = skein::add_repo(source, id.as_deref(), agent.as_deref())?;
+    let store = flag(opts, "--store");
+    let repo = skein::add_repo(source, id.as_deref(), agent.as_deref(), store.as_deref())?;
     println!("{BOLD}added{RESET} {CYAN}{}{RESET}", repo.id);
     println!("  {DIM}source{RESET}  {}", repo.source);
     println!("  {DIM}work  {RESET}  {}", repo.work);

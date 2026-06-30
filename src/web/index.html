@@ -109,12 +109,20 @@
   .ghead .glabel { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
   .ghead .gc { color:var(--dim); font-variant-numeric:tabular-nums; }
   .ghead .glabel { font-family:var(--mono); text-transform:none; letter-spacing:0; }
+  /* a managed repo's name is the board's primary wayfinding label — size it up a touch from the
+     state-group headers so the repo you're scanning for stands out. */
+  .group[data-sid^="repo:"] .ghead .glabel { font-size:13px; color:var(--dim); }
   /* the pinned "needs you" section is the cockpit's focal point — make its header read as primary */
   .group[data-sid="needs"] .ghead { color:var(--text-2); }
   .group[data-sid="needs"] .glabel { color:var(--text); }
   .group[data-sid="needs"] .gc { color:var(--attn); }
-  .ghead .gadd { margin-left:auto; color:var(--dim); font-weight:400; text-transform:none; padding:0 4px;
+  /* the repo header's right-side controls: sync-to-remote then new-box. gpull carries the auto margin
+     so both sit together at the right edge (gadd-only sections don't exist — both show iff repoId). */
+  .ghead .gpull, .ghead .gadd { color:var(--dim); font-weight:400; text-transform:none; padding:0 4px;
                  border-radius:5px; }
+  .ghead .gpull { margin-left:auto; }
+  .ghead .gpull:hover { color:var(--accent); background:var(--line); }
+  .ghead .gpull.busy { color:var(--dim); cursor:default; }
   .ghead .gadd:hover { color:var(--text); background:var(--line); }
   /* the skein: a faint thread runs down each section behind the cards; the status dots sit on it as
      beads (visible in the 6px gaps between cards), so the fleet reads as strands you're holding.
@@ -569,6 +577,12 @@
         <button type="button" class="kbtn" id="ar-browse" title="Pick a local folder"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button>
       </div>
       <div class="ar-derived" id="ar-derived"></div>
+      <label class="nb-lbl">shared data folder <span style="opacity:.6">(optional)</span></label>
+      <div class="path-row">
+        <input id="ar-store" placeholder="(skein manages one under ~/.skein/repos)" autocomplete="off" spellcheck="false" />
+        <button type="button" class="kbtn" id="ar-store-browse" title="Pick the shared data folder"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button>
+      </div>
+      <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds it; leave blank to auto-manage.</div>
       <div class="ar-msg" id="ar-msg" style="display:none"></div>
       <div class="nb-foot"><span class="hint">clones a URL into <code>~/.skein/repos</code> · adopts a local path in place</span><button class="primary" id="ar-go">Add →</button></div>
     </div>
@@ -647,17 +661,23 @@ function ensureSection(id, repoId) {
   if (!s) {
     const section = document.createElement("div"); section.className = "group"; section.dataset.sid = id;
     const head = document.createElement("div"); head.className = "ghead";
-    head.innerHTML = `<span class="gcaret"></span><span class="glabel"></span><span class="gc"></span><span class="gadd" title="New box in this repo">＋</span>`;
+    head.innerHTML = `<span class="gcaret"></span><span class="glabel"></span><span class="gc"></span><span class="gpull" title="Sync to remote (git pull --ff-only)">⟳</span><span class="gadd" title="New box in this repo">＋</span>`;
     const rows = document.createElement("div"); rows.className = "grows";
     section.append(head, rows); fleet.append(section);
-    const add = head.querySelector(".gadd");
-    head.addEventListener("click", e => { if (e.target !== add) toggleCollapse(id); });
+    const add = head.querySelector(".gadd"), pull = head.querySelector(".gpull");
+    // clicking the header toggles collapse — except on the per-repo action controls.
+    head.addEventListener("click", e => { if (!e.target.closest(".gadd, .gpull")) toggleCollapse(id); });
     s = { section, head, label: head.querySelector(".glabel"), count: head.querySelector(".gc"),
-          caret: head.querySelector(".gcaret"), rows, add };
+          caret: head.querySelector(".gcaret"), rows, add, pull };
     sectionEls.set(id, s);
   }
-  if (repoId) { s.add.style.display = ""; s.add.onclick = e => { e.stopPropagation(); openNewBoxFor(repoId); }; }
-  else { s.add.style.display = "none"; }
+  if (repoId) {
+    s.add.style.display = ""; s.add.onclick = e => { e.stopPropagation(); openNewBoxFor(repoId); };
+    s.pull.style.display = ""; s.pull.dataset.id = repoId;
+    s.pull.onclick = e => { e.stopPropagation(); pullRepo(s.pull); };
+  } else {
+    s.add.style.display = "none"; s.pull.style.display = "none";
+  }
   return s;
 }
 function makeRow(name) {
@@ -1529,6 +1549,18 @@ function renderRepoList() {
   ).join("");
   el.querySelectorAll(".rx").forEach(x => x.addEventListener("click", () => removeRepo(x.dataset.id)));
 }
+// Sync a repo's working clone to its remote (git pull --ff-only). `x` is the clicked control; it
+// carries the repo id in data-id and shows a brief busy state. Used by each repo's sidebar header.
+function pullRepo(x) {
+  const id = x.dataset.id;
+  if (x.classList.contains("busy")) return;
+  x.classList.add("busy"); x.textContent = "…";
+  fetch(`/api/repos/${encodeURIComponent(id)}/pull`, { method:"POST" })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(d => toast(`${id}: ${(d.summary || "pulled").split("\n")[0]}`))
+    .catch(e => toast(`pull failed: ${e.message}`))
+    .finally(() => { x.classList.remove("busy"); x.textContent = "⟳"; });
+}
 function removeRepo(id) {
   if (!confirm(`Unregister repo "${id}"? Its clone and store stay on disk; only skein's registration is removed.`)) return;
   fetch(`/api/repos/${encodeURIComponent(id)}`, { method:"DELETE" })
@@ -1599,7 +1631,7 @@ function arSetMsg(text, kind) {        // kind: "" | "err" | "warn" | "ok"
 }
 function openAddRepo() {
   const src = document.getElementById("ar-src");
-  src.value = ""; arSetMsg(""); arUpdateDerived();
+  src.value = ""; document.getElementById("ar-store").value = ""; arSetMsg(""); arUpdateDerived();
   document.getElementById("ar-go").textContent = "Add →";
   arModal().classList.add("open");
   setTimeout(() => src.focus(), 0);
@@ -1614,9 +1646,10 @@ function submitAddRepo() {
   const src = document.getElementById("ar-src").value.trim();
   if (!src) { arSetMsg("Paste a git URL or a local path.", "err"); return; }
   if (DEMO) { arSetMsg("Adding repos is disabled in demo.", "warn"); return; }
+  const store = document.getElementById("ar-store").value.trim();
   const go = document.getElementById("ar-go");
   go.textContent = "Adding…"; arSetMsg("");
-  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src }) })
+  fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src, store }) })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       const repo = res.repo || res;
@@ -1673,6 +1706,8 @@ function pickPath(kind, input, after) {
 }
 document.getElementById("ar-browse").addEventListener("click",
   () => pickPath("folder", document.getElementById("ar-src"), arUpdateDerived));
+document.getElementById("ar-store-browse").addEventListener("click",
+  () => pickPath("folder", document.getElementById("ar-store")));
 document.getElementById("set-sshkey-browse").addEventListener("click",
   () => pickPath("file", document.getElementById("set-sshkey")));
 arModal().addEventListener("keydown", e => {
