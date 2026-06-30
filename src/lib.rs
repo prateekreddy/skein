@@ -1897,16 +1897,16 @@ pub fn read_diff(name: &str) -> Option<String> {
         return None;
     }
     // Prefer a fresh diff computed host-side when the box's dir is a git repo *on this
-    // host* (direct mode); fall back to the patch the box reported (clone mode, where the
-    // dir is an in-box path this host can't see). Computed on demand only — never per tick.
+    // host* (direct mode); fall back to the patch box-diff.sh wrote (clone mode, where the
+    // git repo lives inside the sandbox). Computed on demand only — never per tick.
     if let Some(dir) = lookup_dir(name) {
         if let Some(p) = git_diff_for(&dir) {
             return Some(p);
         }
     }
-    let reg = locate_registry().ok()?;
-    let path = reg.parent()?.join("diffs").join(format!("{name}.patch"));
-    fs::read_to_string(path).ok()
+    let path = store_for_box(name)?.join("diffs").join(format!("{name}.patch"));
+    let s = fs::read_to_string(path).ok()?;
+    (!s.trim().is_empty()).then_some(s)
 }
 
 fn git_ok(dir: &str, args: &[&str]) -> bool {
@@ -1991,7 +1991,7 @@ fn git_diffstat_for(dir: &str) -> Option<DiffStat> {
 }
 
 /// Host-computed diff± for the badge, cached briefly so the per-tick fleet stream doesn't fork a
-/// `git` per box every poll. Clone-mode boxes (no host `.git`) cost only a `stat`, not a fork.
+/// `git` per box every poll. Clone-mode boxes fall back to the stat box-diff.sh wrote.
 fn host_diffstat(name: &str, dir: &str) -> Option<DiffStat> {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
@@ -2006,11 +2006,25 @@ fn host_diffstat(name: &str, dir: &str) -> Option<DiffStat> {
             }
         }
     }
-    let v = git_diffstat_for(dir);
+    // Prefer the stat box-diff.sh wrote: the box always knows its own branch, whereas host-side
+    // git runs against whatever `dir` resolves to on the host — for clone-mode boxes that's the
+    // HOST's checkout of the same path (a different branch), giving wrong numbers. Fall back to
+    // host-side git only when the box hasn't written a stat yet (box-diff.sh not yet deployed).
+    let v = read_diffstat_file(name).or_else(|| git_diffstat_for(dir));
     if let Ok(mut map) = cache.lock() {
         map.insert(name.to_string(), (Instant::now(), v.clone()));
     }
     v
+}
+
+/// Read the shortstat JSON box-diff.sh writes to `<store>/diffs/<name>.json`.
+fn read_diffstat_file(name: &str) -> Option<DiffStat> {
+    let path = store_for_box(name)?.join("diffs").join(format!("{name}.json"));
+    let s = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    let get = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let stat = DiffStat { files: get("files"), ins: get("ins"), del: get("del") };
+    (stat.files != 0 || stat.ins != 0 || stat.del != 0).then_some(stat)
 }
 
 /// Look up a box's clone root (the `dir` it registered) by name.
@@ -2338,6 +2352,10 @@ pub fn current_status_detail(name: &str) -> Option<String> {
 // linked into every box by the kit, so every box's Claude loads these hooks. See docs/self-sufficient.md.
 const PROBE_STATUS_SH: &str = include_str!("probe/box-status.sh");
 const PROBE_TASK_SH: &str = include_str!("probe/box-task.sh");
+// box-diff.sh: wired from Stop — writes branch-vs-base patch + shortstat JSON + commit list to
+// <store>/diffs/<vmid>.{patch,json,commits} so the host can show them for clone-mode boxes where
+// the git repo lives inside the sandbox and is not visible to the host.
+const PROBE_DIFF_SH: &str = include_str!("probe/box-diff.sh");
 // skein-owned machinery installed alongside the probe so an empty shared folder works end-to-end:
 // the SessionStart bootstrap (memory bridge + mailbox inbox + box registration), the mailbox, and a
 // default status line. They live in `<store>/skein/bin/` (skein-owned namespace), refreshed each run.
@@ -2347,6 +2365,7 @@ const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 // Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
 const PROBE_STATUS_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh";
 const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh";
+const PROBE_DIFF_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-diff.sh";
 const BOOTSTRAP_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/sandbox-bootstrap.sh";
 const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusline-command.sh";
 
@@ -2381,6 +2400,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     for (file, body) in [
         ("box-status.sh", PROBE_STATUS_SH),
         ("box-task.sh", PROBE_TASK_SH),
+        ("box-diff.sh", PROBE_DIFF_SH),
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
@@ -2411,7 +2431,7 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // The richer fleet-states ride extra lifecycle events (all best-effort: a Claude Code that predates
     // one simply never fires it): StopFailure→error (rate_limit/overloaded/…), PreCompact/PostCompact→
     // compacting (busy, not stuck), SessionEnd→ended (distinct from a liveness-derived "stale").
-    let entries: [(&str, String, Option<&str>); 11] = [
+    let entries: [(&str, String, Option<&str>); 12] = [
         (
             "UserPromptSubmit",
             format!("{PROBE_STATUS_CMD} working"),
@@ -2423,6 +2443,9 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
             None,
         ),
         ("Stop", format!("{PROBE_STATUS_CMD} waiting"), None),
+        // box-diff.sh runs alongside box-status.sh on Stop: writes the branch-vs-base
+        // patch + shortstat + commit list so the host can show them for clone-mode boxes.
+        ("Stop", PROBE_DIFF_CMD.to_string(), None),
         (
             "PreToolUse",
             format!("{PROBE_STATUS_CMD} agent-start"),
@@ -2513,27 +2536,50 @@ fn is_generic_wait(h: &str) -> bool {
 }
 
 /// Recent commit subjects on the box's branch (newest first) — the agent's own changelog,
-/// a free, accurate "what was done" with no model call. Bounded; empty if not a host repo.
+/// a free, accurate "what was done" with no model call. For direct-mode boxes, computed host-side.
+/// For clone-mode boxes, reads the file box-diff.sh wrote. Empty when neither is available.
 pub fn recent_commits(name: &str) -> Vec<String> {
-    let dir = match lookup_dir(name) {
-        Some(d) => d,
-        None => return vec![],
-    };
-    let range = match git_range(&dir) {
-        Some(r) => format!("{r}..HEAD"),
-        None => return vec![],
-    };
-    let out = Command::new("git")
-        .args(["-C", &dir, "log", "--format=%s", "-n", "20", &range])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        _ => vec![],
+    // Prefer box-diff.sh's commit file: the box is on the feature branch and knows its own
+    // commits. Host-side git would run against whatever `dir` resolves to on the host — for
+    // clone-mode boxes that's the HOST's checkout (main), which lists the wrong commits.
+    if let Some(path) = store_for_box(name)
+        .map(|s| s.join("diffs").join(format!("{name}.commits")))
+        .filter(|p| p.exists())
+    {
+        if let Ok(s) = fs::read_to_string(&path) {
+            let v: Vec<String> = s
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if !v.is_empty() {
+                return v;
+            }
+        }
     }
+    // Fall back to host-side git — useful for direct-mode boxes where the host dir IS the
+    // box's working tree (box-diff.sh may not have run yet on a fresh box).
+    if let Some(dir) = lookup_dir(name) {
+        if let Some(range) = git_range(&dir) {
+            let r = format!("{range}..HEAD");
+            if let Ok(out) = Command::new("git")
+                .args(["-C", &dir, "log", "--format=%s", "-n", "20", &r])
+                .output()
+            {
+                if out.status.success() {
+                    let v: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !v.is_empty() {
+                        return v;
+                    }
+                }
+            }
+        }
+    }
+    vec![]
 }
 
 /// The agent's own turn-end journal (`<dir>/.skein/journal.md`), if it keeps one — the best
@@ -3108,7 +3154,7 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("box-status.sh working")));
-        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 2);
         let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post[0]["matcher"], "TodoWrite");
 
@@ -3118,16 +3164,16 @@ mod tests {
             again["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
             ups.len()
         );
-        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn settings_with_probe_from_empty() {
         let merged = settings_with_probe(&serde_json::json!({}));
+        // Every event gets at least one hook entry.
         for ev in [
             "UserPromptSubmit",
             "Notification",
-            "Stop",
             "PreToolUse",
             "SubagentStop",
             "StopFailure",
@@ -3143,6 +3189,15 @@ mod tests {
                 "missing {ev}"
             );
         }
+        // Stop has two entries: box-status.sh (turn-state) + box-diff.sh (diff snapshot).
+        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 2, "Stop needs 2 hooks");
+        let stop_cmds: Vec<&str> = merged["hooks"]["Stop"]
+            .as_array().unwrap()
+            .iter()
+            .map(|e| e["hooks"][0]["command"].as_str().unwrap_or(""))
+            .collect();
+        assert!(stop_cmds.iter().any(|c| c.ends_with("box-status.sh waiting")), "status hook missing");
+        assert!(stop_cmds.iter().any(|c| c.ends_with("box-diff.sh")), "diff hook missing");
         // the Notification hook routes through the counter-aware `notify` mode (not a bare needs-input)
         assert!(merged["hooks"]["Notification"][0]["hooks"][0]["command"]
             .as_str()
