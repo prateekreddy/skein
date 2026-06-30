@@ -285,11 +285,17 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 .unwrap_or_default();
             // The repo this box belongs to (if any), used for grouping + branch fallback.
             let repo = repo_for_box(&name);
+            // Branch resolution, most-authoritative first. For a repo (clone-mode) box, `dir` on the
+            // host is the *shared* clone (on its own branch, often master) — NOT the box's private
+            // clone — so `git_branch_for(dir)` would mislabel every box. Prefer the launch spec skein
+            // recorded (the box's real branch, host-readable) and the box-name slug; only fall back to
+            // host git for a box that belongs to no managed repo.
             let branch = r
                 .map(|x| x.branch.clone())
                 .filter(|b| !b.is_empty() && b != "?")
-                .or_else(|| git_branch_for(&dir))
+                .or_else(|| repo.as_ref().and_then(|rp| launch_spec_branch(rp, &name)))
                 .or_else(|| repo.as_ref().map(|rp| branch_from_box(&name, rp)))
+                .or_else(|| git_branch_for(&dir))
                 .unwrap_or_default();
             // Reuse the registry-derived state logic; status (turn-state) is the registry's specific
             // datum, lastSeen is only a fallback when sbx liveness is absent.
@@ -846,6 +852,21 @@ pub fn repo_for_box(name: &str) -> Option<Repo> {
         .into_iter()
         .filter(|r| name == r.id || name.starts_with(&format!("{}-", r.id)))
         .max_by_key(|r| r.id.len())
+}
+
+/// The branch skein recorded for a box in its repo's launch spec (`<store>/skein/launch/<name>.json`).
+/// Host-readable and authoritative for a clone-mode box (whose private clone isn't on the host), so
+/// the board can show the box's real branch — including a slashed one the name slug would have flattened.
+fn launch_spec_branch(repo: &Repo, name: &str) -> Option<String> {
+    let p = Path::new(&repo.store)
+        .join("skein")
+        .join("launch")
+        .join(format!("{name}.json"));
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    v.get("branch")
+        .and_then(|b| b.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
 }
 
 /// The branch *slug* encoded in a box name (`<id>-<branch-slug>` → `<branch-slug>`). This is the
@@ -1809,6 +1830,14 @@ fn delist_box(name: &str) -> Result<(), String> {
     })();
     let _ = lock.unlock();
     result?;
+    // Drop the box's per-box runtime files too, so a destroyed box leaves nothing stale behind: its
+    // turn-state probe output and its launch spec. Best-effort — a missing file is fine.
+    for p in [
+        store.join("status").join(format!("{name}.json")),
+        store.join("skein").join("launch").join(format!("{name}.json")),
+    ] {
+        let _ = fs::remove_file(&p);
+    }
     Ok(())
 }
 
@@ -3196,12 +3225,20 @@ mod tests {
         .unwrap();
         env::set_var("SKEIN_REGISTRY", &reg);
         env::remove_var("SKEIN_SHARED");
+        // per-box runtime files that delisting must also clean up
+        fs::create_dir_all(dir.join("status")).unwrap();
+        fs::create_dir_all(dir.join("skein/launch")).unwrap();
+        fs::write(dir.join("status/thing-x.json"), "{}").unwrap();
+        fs::write(dir.join("skein/launch/thing-x.json"), "{}").unwrap();
 
         delist_box("thing-x").unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
         assert!(after.get("thing-x").is_none());
         assert!(after.get("thing-y").is_some()); // didn't clobber the rest
+        // the box's status + launch files are gone, not left stale
+        assert!(!dir.join("status/thing-x.json").exists());
+        assert!(!dir.join("skein/launch/thing-x.json").exists());
         let hist = fs::read_to_string(dir.join("history.jsonl")).unwrap();
         assert!(hist.contains("thing-x") && hist.contains("archivedAt"));
         assert!(dir.join(".sandboxes.lock").exists()); // shares the hooks' flock file
