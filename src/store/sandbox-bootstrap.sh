@@ -21,6 +21,42 @@ store="$root/.claude"
 
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
 vmid="${vmid//\//-}"
+mirror="/run/sandbox/source"   # the RO host repo mirror — present only in --clone mode
+
+# --- surface gitignored shared paths from the RO mirror (clone mode) -----------------------------
+# A clone carries only TRACKED files, so gitignored ones the project needs (CLAUDE.md, .env, …) are
+# absent. Each non-comment line of <store>/shared-paths.txt is a repo-relative path (file or dir) to
+# symlink from the mirror into the clone, so it's present + live. Repo-agnostic: the manifest is the
+# project's own list. Surfaced paths are added to the clone's .git/info/exclude so a careless
+# `git add -A` can't stage a host-absolute symlink (the tracked .gitignore is never touched).
+manifest="$store/shared-paths.txt"
+if [ -d "$mirror" ] && [ -f "$manifest" ]; then
+  git_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
+  case "$git_dir" in "") ;; /*) ;; *) git_dir="$root/$git_dir" ;; esac
+  exclude="${git_dir:+$git_dir/info/exclude}"
+  exclude_path() {                         # $1 = repo-relative path; add an anchored pattern once
+    [ -n "$exclude" ] || return 0
+    local pat="/${1%/}"
+    mkdir -p "$(dirname "$exclude")" 2>/dev/null || true
+    grep -qxF "$pat" "$exclude" 2>/dev/null || printf '%s\n' "$pat" >> "$exclude"
+  }
+  exclude_path ".claude"                   # the store is surfaced by the kit, not this manifest
+  while IFS= read -r p; do
+    p="${p%%#*}"; p="$(printf '%s' "$p" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -z "$p" ] && continue
+    src="$mirror/$p"; dst="$root/$p"
+    [ -e "$src" ] || continue
+    if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+      mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+      if ln -s "$src" "$dst" 2>/dev/null; then
+        # CLAUDE.md is read into context at session START — before this hook runs — so on the run
+        # that first links it, print it so this fresh clone still gets the project direction.
+        [ "$p" = "CLAUDE.md" ] && { echo "[skein-bootstrap] project direction (CLAUDE.md, freshly linked):"; echo "----- BEGIN CLAUDE.md -----"; cat "$src" 2>/dev/null; echo "----- END CLAUDE.md -----"; }
+      fi
+    fi
+    exclude_path "$p"                       # idempotent; self-heals clones linked before this ran
+  done < "$manifest"
+fi
 
 # --- memory bridge: per-$HOME memory dir → the shared store's memory/ (live, cross-box) ----------
 # Claude's memory tool writes to ~/.claude/projects/<slug>/memory (slug = cwd with '/'→'-'). Point

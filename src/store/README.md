@@ -17,6 +17,11 @@ What you *optionally* add is your own project content:
                    empty and accumulates as boxes work; drop in notes to seed it.
     skills/        project skills (one dir per skill).
     hooks/         your own hook scripts, if you reference them from settings.json.
+    shared-paths.txt   one repo-relative path per line of GITIGNORED files/dirs the box
+                   needs (CLAUDE.md, .env, local config, …). A --clone carries only
+                   tracked files, so the bootstrap symlinks each of these from the
+                   read-only host mirror into the box. Without this, CLAUDE.md and
+                   .env are absent in the box. Lines starting with # are comments.
     settings.json  skein adds its probe hooks, SessionStart bootstrap, a statusLine,
                    and fullscreen TUI. Add your own statusLine / enabledPlugins / hooks
                    here — skein only fills what's missing and never clobbers yours.
