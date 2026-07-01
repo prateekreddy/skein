@@ -72,11 +72,20 @@ commands:
           echo "[skein-kit] no launch spec at $spec — staying on the clone's default branch" >&2
         fi
 
-        # Check out the branch skein recorded for this box (creating it if it's new).
-        if [ -n "$branch" ]; then
+        # Check out the branch skein recorded for this box (creating it if it's new) — but ONLY on
+        # the box's first-ever startup. This hook re-runs on every `sbx run` including reattaches
+        # (see the top comment), while the launch spec is written once at creation time. Without a
+        # once-only guard, an agent that switches branches mid-session (e.g. branch-per-slice work)
+        # gets silently reverted to the creation branch on its next reconnect — a real incident:
+        # unattributed `git checkout` in the reflog clobbering an active slice branch. The marker
+        # lives in $clone_root/.git (persists exactly as long as the clone's branch state does), so
+        # "first startup" and "branch not yet asserted" are the same condition.
+        marker="$clone_root/.git/skein-branch-checked-out"
+        if [ -n "$branch" ] && [ ! -e "$marker" ]; then
           git -C "$clone_root" checkout "$branch" 2>/dev/null \
             || git -C "$clone_root" checkout -b "$branch" 2>/dev/null \
             || echo "[skein-kit] could not checkout $branch" >&2
+          touch "$marker" 2>/dev/null || true
         fi
 
         # Install the box-side tools the agent image may lack — one apt pass for whatever's missing:
