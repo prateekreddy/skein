@@ -25,10 +25,18 @@ mirror="/run/sandbox/source"   # the RO host repo mirror — present only in --c
 
 # --- surface gitignored shared paths from the RO mirror (clone mode) -----------------------------
 # A clone carries only TRACKED files, so gitignored ones the project needs (CLAUDE.md, .env, …) are
-# absent. Each non-comment line of <store>/shared-paths.txt is a repo-relative path (file or dir) to
-# symlink from the mirror into the clone, so it's present + live. Repo-agnostic: the manifest is the
+# absent. Each non-comment line of <store>/shared-paths.txt is a repo-relative path (file or dir),
+# optionally followed by `rw`, to surface into the clone. Repo-agnostic: the manifest is the
 # project's own list. Surfaced paths are added to the clone's .git/info/exclude so a careless
 # `git add -A` can't stage a host-absolute symlink (the tracked .gitignore is never touched).
+#
+# Default (no `rw` suffix) — RO: symlinked straight from the mirror. `/run/sandbox/source` is a
+# read-only bind mount (sbx's own doing — no per-file trick makes it writable), so edits fail.
+# `rw` suffix — RW + host-visible + shared: the file is seeded ONCE into the store's shared-rw/
+# (a genuinely writable host directory, same as memory/), then symlinked from THERE instead of the
+# mirror. Edits inside the box persist to that store path and are live across every box on the
+# repo (last-write-wins, same semantics as the memory bridge below) — just not back to the file's
+# original repo-relative host path, since that path is unreachable read-write from inside a clone.
 manifest="$store/shared-paths.txt"
 if [ -d "$mirror" ] && [ -f "$manifest" ]; then
   git_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
@@ -41,17 +49,42 @@ if [ -d "$mirror" ] && [ -f "$manifest" ]; then
     grep -qxF "$pat" "$exclude" 2>/dev/null || printf '%s\n' "$pat" >> "$exclude"
   }
   exclude_path ".claude"                   # the store is surfaced by the kit, not this manifest
-  while IFS= read -r p; do
-    p="${p%%#*}"; p="$(printf '%s' "$p" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  rw_root="$store/shared-rw"
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    p="$(printf '%s' "$line" | awk '{print $1}')"
+    flag="$(printf '%s' "$line" | awk '{print $2}')"
     [ -z "$p" ] && continue
-    src="$mirror/$p"; dst="$root/$p"
-    [ -e "$src" ] || continue
-    if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
-      mkdir -p "$(dirname "$dst")" 2>/dev/null || true
-      if ln -s "$src" "$dst" 2>/dev/null; then
-        # CLAUDE.md is read into context at session START — before this hook runs — so on the run
-        # that first links it, print it so this fresh clone still gets the project direction.
-        [ "$p" = "CLAUDE.md" ] && { echo "[skein-bootstrap] project direction (CLAUDE.md, freshly linked):"; echo "----- BEGIN CLAUDE.md -----"; cat "$src" 2>/dev/null; echo "----- END CLAUDE.md -----"; }
+    dst="$root/$p"
+    if [ "$flag" = "rw" ]; then
+      rwcopy="$rw_root/$p"
+      if [ ! -e "$rwcopy" ]; then
+        mkdir -p "$(dirname "$rwcopy")" 2>/dev/null || true
+        [ -e "$mirror/$p" ] && cp -a "$mirror/$p" "$rwcopy" 2>/dev/null
+      fi
+      [ -e "$rwcopy" ] || continue
+      # self-heal: an existing symlink from before this box was RW-flagged pointed at the RO mirror.
+      if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$rwcopy" ]; then
+        rm -f "$dst"
+      fi
+      if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+        mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+        ln -s "$rwcopy" "$dst" 2>/dev/null
+      fi
+    else
+      src="$mirror/$p"
+      [ -e "$src" ] || continue
+      # self-heal: an existing symlink from before this path was RO-flagged pointed at the rw copy.
+      if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$src" ]; then
+        rm -f "$dst"
+      fi
+      if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+        mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+        if ln -s "$src" "$dst" 2>/dev/null; then
+          # CLAUDE.md is read into context at session START — before this hook runs — so on the run
+          # that first links it, print it so this fresh clone still gets the project direction.
+          [ "$p" = "CLAUDE.md" ] && { echo "[skein-bootstrap] project direction (CLAUDE.md, freshly linked):"; echo "----- BEGIN CLAUDE.md -----"; cat "$src" 2>/dev/null; echo "----- END CLAUDE.md -----"; }
+        fi
       fi
     fi
     exclude_path "$p"                       # idempotent; self-heals clones linked before this ran

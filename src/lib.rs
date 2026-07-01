@@ -1214,6 +1214,10 @@ pub fn ensure_store(store: &Path) -> Result<(), String> {
         "memory",
         "skills",
         "hooks",
+        // RW-surfaced shared paths (shared-paths.txt entries marked `rw`) live here — the store is
+        // a genuinely writable host directory, unlike the RO clone-mode source mirror. See
+        // sandbox-bootstrap.sh's surfacing loop.
+        "shared-rw",
     ] {
         let p = store.join(d);
         fs::create_dir_all(&p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
@@ -3073,6 +3077,7 @@ mod tests {
         // the full structure: skein runtime + the user-filled content homes.
         for d in [
             "mailbox", "status", "tasks", "skein/launch", "skein/bin", "memory", "skills", "hooks",
+            "shared-rw",
         ] {
             assert!(store.join(d).is_dir(), "missing {d}");
         }

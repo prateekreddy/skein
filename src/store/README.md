@@ -22,6 +22,10 @@ What you *optionally* add is your own project content:
                    tracked files, so the bootstrap symlinks each of these from the
                    read-only host mirror into the box. Without this, CLAUDE.md and
                    .env are absent in the box. Lines starting with # are comments.
+                   Add ` rw` after a path (e.g. `LOCAL_DEV.md rw`) to make it editable:
+                   the file is seeded once into shared-rw/ (a writable store dir) and
+                   symlinked from there instead — edits persist there and are shared
+                   live across the project's boxes. Default (no suffix) is read-only.
     settings.json  skein adds its probe hooks, SessionStart bootstrap, a statusLine,
                    and fullscreen TUI. Add your own statusLine / enabledPlugins / hooks
                    here — skein only fills what's missing and never clobbers yours.
@@ -30,3 +34,4 @@ Managed by skein (don't edit):
 
     skein/         the probe + machinery scripts + launch specs.
     mailbox/  status/  tasks/   per-box runtime.
+    shared-rw/     the writable copies of `rw`-flagged shared-paths.txt entries.
