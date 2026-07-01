@@ -1253,6 +1253,26 @@ fn write_launch_spec(name: &str, branch: &str, repo: &Repo) -> Result<(), String
     write_atomic(&dir.join(format!("{name}.json")), &dir, &bytes)
 }
 
+/// Re-pin an already-created box to a different branch, without relaunching it. For when the agent
+/// has moved off the box's recorded branch (e.g. branch-per-slice work) and the kit's startup hook —
+/// which re-reads the launch spec on every reconnect — needs to stop re-asserting the stale one on
+/// its next reconnect instead of the branch the agent actually wants to be on. This only rewrites the
+/// launch spec; it does not touch the box's live working tree, so if the box is currently mid-session
+/// on the wrong branch you still need to `git checkout` inside it once, or just reconnect after this.
+/// Errs for an unknown box name or one that belongs to no registered repo (the legacy single-repo
+/// path derives its branch from the box name and keeps no launch spec to repin).
+pub fn repin_branch(name: &str, branch: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("branch is empty".into());
+    }
+    let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
+    write_launch_spec(name, branch, &repo)
+}
+
 /// The host shell command that launches a new box for `branch`. Override with
 /// $SKEIN_LAUNCH_CMD (a template; `{branch}` is substituted); default assumes
 /// `setup-sandbox.sh` is on PATH.
@@ -3003,6 +3023,39 @@ mod tests {
         assert_eq!(r2.id, "web");
         assert_eq!(branch_from_box("web-login", &r2), "login");
         assert!(repo_for_box("other-x").is_none());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn repin_branch_rewrites_launch_spec_without_relaunch() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("st").join(".claude");
+        fs::create_dir_all(&store).unwrap();
+        let repos = vec![Repo {
+            id: "thing".into(),
+            source: "s".into(),
+            work: "/w".into(),
+            store: store.to_string_lossy().to_string(),
+            agent: "claude".into(),
+        }];
+        save_repos(&repos).unwrap();
+        // box created on the wrong branch (its creation branch)…
+        write_launch_spec("thing-feat-x", "feat-x", &repos[0]).unwrap();
+        assert_eq!(
+            launch_spec_branch(&repos[0], "thing-feat-x").as_deref(),
+            Some("feat-x")
+        );
+        // …re-pinned to the branch the agent actually moved to, without relaunching.
+        repin_branch("thing-feat-x", "feat-y").unwrap();
+        assert_eq!(
+            launch_spec_branch(&repos[0], "thing-feat-x").as_deref(),
+            Some("feat-y")
+        );
+        // unknown / unregistered box name errs rather than silently no-opping.
+        assert!(repin_branch("no-such-box", "main").is_err());
+        assert!(repin_branch("thing-feat-x", "").is_err());
         env::remove_var("SKEIN_HOME");
     }
 

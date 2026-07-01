@@ -87,6 +87,7 @@ async fn main() {
         .route("/api/boxes/:name/ship", get(api_ship))
         .route("/api/boxes/:name/pr", post(api_pr))
         .route("/api/boxes/:name/merge", post(api_merge))
+        .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
         .route("/api/boxes/:name/narrate", get(api_narrate))
         .route("/api/resume-batch", post(api_resume_batch))
@@ -368,6 +369,28 @@ async fn api_pick_path(Json(r): Json<PickPathReq>) -> Json<serde_json::Value> {
     Json(match res {
         Ok(Ok(Some(path))) => serde_json::json!({ "ok": true, "path": path }),
         Ok(Ok(None)) => serde_json::json!({ "ok": true, "cancelled": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+#[derive(Deserialize)]
+struct RepinReq {
+    branch: String,
+}
+
+/// Re-pin an existing box's launch spec to a different branch, without relaunching it — for a box
+/// whose agent has moved off its recorded branch (e.g. branch-per-slice work) and keeps getting
+/// checked back onto the stale one every reconnect. Takes effect on the box's next reconnect.
+/// Returns {ok, error?}.
+async fn api_repin(Path(name): Path<String>, Json(r): Json<RepinReq>) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let branch = r.branch;
+    let res = tokio::task::spawn_blocking(move || skein::repin_branch(&name, &branch)).await;
+    Json(match res {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })
