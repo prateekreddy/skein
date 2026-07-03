@@ -3,8 +3,9 @@
 # view can show working / waiting / needs-input / blocked / error / compacting / ended.
 # SHIPPED AND INSTALLED BY SKEIN (not the repo) — written into <store>/skein/bin/ and wired from
 # <store>/settings.json. Modes (the hook event that drives each, in parens):
-#   working      (UserPromptSubmit) you gave it work; new turn → reset the sub-agent counter, and
-#                                    refresh the registry's branch (see refresh_branch below)
+#   working      (UserPromptSubmit) you gave it work; new turn → reset the sub-agent counter,
+#                                    refresh the registry's branch, and mark the turn's start time
+#                                    (see refresh_branch / mark_turn_start below)
 #   agent-start  (PreToolUse Task)  it delegated to a sub-agent; still WORKING; counter++
 #   agent-stop   (SubagentStop)     a sub-agent finished; counter--; still working
 #   waiting      (Stop)             the turn ended, your move; also refreshes the registry's branch
@@ -96,6 +97,15 @@ refresh_branch() {
   ) 9>"$store/.sandboxes.lock" 2>/dev/null || true
 }
 
+# Record when this turn started (epoch seconds), so box-token-usage.sh can compute wall-clock turn
+# duration at Stop. Lives under telemetry/ (not status/) since it's consumed by the telemetry probe,
+# not the turn-state one. No stdout; fail-soft.
+mark_turn_start() {
+  local tdir="$store/telemetry/.turn-start"
+  mkdir -p "$tdir" 2>/dev/null || return 0
+  date -u +%s > "$tdir/$vmid" 2>/dev/null || true
+}
+
 write_status() { # $1 = status key, $2 = optional human detail
   local tmp
   tmp="$(mktemp "$dir/.st.XXXXXX" 2>/dev/null)" || return 0
@@ -113,6 +123,7 @@ case "$mode" in
   working)
     adjust reset
     refresh_branch
+    mark_turn_start
     write_status working
     ;;
   agent-start)

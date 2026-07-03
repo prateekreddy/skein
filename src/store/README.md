@@ -56,11 +56,14 @@ Managed by skein (don't edit):
                    of that box's own .skein/journal.md — the only way the host can see it for a
                    clone-mode box (its private clone isn't otherwise visible to the host at all).
     telemetry/     telemetry/<vmid>.jsonl — one line per turn, appended by box-token-usage.sh:
-                   {ts, input, output, cache_read, cache_creation, total} token usage summed from
-                   the turn's transcript entries. Durable and structured (unlike journal.md's free
-                   prose) so cost/usage stays reviewable across a box's whole lifetime — feeds the
-                   same cross-run learn-loop as journals/diffs. Never deleted when a box is torn
-                   down (a --clone's own transcript dies with it; this is the only durable record).
+                   {ts, input, output, cache_read, cache_creation, total, duration_secs, tools}:
+                   token usage + tool-call counts (e.g. {"Bash":2,"Read":1}) summed from the turn's
+                   transcript entries, plus wall-clock turn duration (from box-status.sh's
+                   mark_turn_start marker at UserPromptSubmit). Durable and structured (unlike
+                   journal.md's free prose) so cost/usage stays reviewable across a box's whole
+                   lifetime — feeds the same cross-run learn-loop as journals/diffs. Never deleted
+                   when a box is torn down (a --clone's own transcript dies with it; this is the
+                   only durable record).
     shared-rw/     the writable copies of `rw`-flagged shared-paths.txt entries.
 
 Everything under `journals/`, `diffs/`, `tasks/`, and `telemetry/` deliberately **outlives** the box

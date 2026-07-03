@@ -4118,12 +4118,22 @@ mod tests {
         ensure_store(&store).unwrap();
         let script = store.join("skein").join("bin").join("box-token-usage.sh");
 
+        // The turn-start marker box-status.sh's `working` mode writes — read here to compute
+        // duration_secs. Backdated so the test doesn't depend on real wall-clock timing.
+        let start_dir = store.join("telemetry").join(".turn-start");
+        fs::create_dir_all(&start_dir).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        fs::write(start_dir.join("boxA"), (now - 5).to_string()).unwrap();
+
         let transcript = home.join("transcript.jsonl");
         fs::write(
             &transcript,
             concat!(
                 r#"{"type":"user","message":{"role":"user","content":"hi"}}"#, "\n",
-                r#"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":200}}}"#, "\n",
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":200},"content":[{"type":"tool_use","name":"Bash"}]}}"#, "\n",
             ),
         )
         .unwrap();
@@ -4164,6 +4174,9 @@ mod tests {
         assert_eq!(entries[0]["output"], 50);
         assert_eq!(entries[0]["cache_creation"], 200);
         assert_eq!(entries[0]["total"], 350);
+        assert_eq!(entries[0]["tools"]["Bash"], 1);
+        let duration = entries[0]["duration_secs"].as_i64().unwrap();
+        assert!((4..=6).contains(&duration), "duration was {duration}");
 
         // No new transcript lines: rerunning must not duplicate the entry.
         assert!(run().status.success());
@@ -4181,8 +4194,8 @@ mod tests {
             r#"{{"type":"user","message":{{"role":"user","content":"more"}}}}"#
         )
         .unwrap();
-        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":2,"output_tokens":782,"cache_read_input_tokens":447904,"cache_creation_input_tokens":1247}}}}}}"#).unwrap();
-        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":5,"output_tokens":100,"cache_read_input_tokens":448000,"cache_creation_input_tokens":0}}}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":2,"output_tokens":782,"cache_read_input_tokens":447904,"cache_creation_input_tokens":1247}},"content":[{{"type":"tool_use","name":"Bash"}},{{"type":"tool_use","name":"Read"}}]}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":5,"output_tokens":100,"cache_read_input_tokens":448000,"cache_creation_input_tokens":0}},"content":[{{"type":"tool_use","name":"Read"}}]}}}}"#).unwrap();
         drop(f);
         assert!(run().status.success());
         let entries2: Vec<serde_json::Value> = fs::read_to_string(&log)
@@ -4194,6 +4207,11 @@ mod tests {
         assert_eq!(entries2[1]["input"], 7);
         assert_eq!(entries2[1]["output"], 882);
         assert_eq!(entries2[1]["cache_read"], 895904);
+        assert_eq!(entries2[1]["tools"]["Bash"], 1);
+        assert_eq!(
+            entries2[1]["tools"]["Read"], 2,
+            "counts across both assistant entries"
+        );
     }
 
     #[test]
