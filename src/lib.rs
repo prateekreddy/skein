@@ -54,6 +54,15 @@ pub struct Message {
     pub ts: String,
     #[serde(default, rename = "seenBy")]
     pub seen_by: Vec<String>,
+    /// Host-only bookkeeping: destination store paths this message has already been relayed to by
+    /// `relay_cross_project_mail`, so a repeat sweep doesn't re-deliver it. Empty for anything a box
+    /// itself wrote and skein hasn't touched yet.
+    #[serde(default, rename = "relayedTo")]
+    pub relayed_to: Vec<String>,
+    /// Set on a relayed *copy* to the source repo id (or store path, if unmanaged) so the receiving
+    /// side can show provenance across a project boundary. Empty for a box's own local messages.
+    #[serde(default, rename = "originProject")]
+    pub origin_project: String,
 }
 
 /// One entry in the shared `sandboxes.json` registry written by sandbox-bootstrap.sh.
@@ -643,6 +652,8 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
         body: body.into(),
         ts: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         seen_by: vec![],
+        relayed_to: vec![],
+        origin_project: String::new(),
     };
     let id = format!("{}-skein", now.timestamp_nanos_opt().unwrap_or(0));
     let json = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
@@ -663,6 +674,181 @@ pub fn send_message(to: &str, kind: &str, body: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(last_err)
+    }
+}
+
+/// Read one store's box registry (`sandboxes.json`) as a map, ignoring any read/parse error
+/// (fail-soft — a store with no registry, or a stale one, just yields no matches).
+fn sandboxes_in(store: &Path) -> BTreeMap<String, Sandbox> {
+    fs::read_to_string(store.join("sandboxes.json"))
+        .ok()
+        .and_then(|data| parse_registry(&data).ok())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Sweep every managed store's mailbox for box-authored messages addressed across a project
+/// boundary — `to: "all-projects"`, `to: "project:<repo-id>"`, or a bare vmid that belongs to a
+/// DIFFERENT project's registry than the one the message was found in — and copy them into the
+/// destination store(s)' mailbox, rewriting `to` to whatever that destination's own local delivery
+/// already matches (`broadcast`, or the specific vmid unchanged). This is the one hop a box itself
+/// cannot make: each box mounts only its own project's store (separate microVM kernels), so
+/// cross-project delivery can only happen host-side, where skein already reads every managed store
+/// (`all_stores`, `load_mailbox`, `send_message`).
+///
+/// Idempotent: marks the origin message's `relayedTo` with every destination store it has already
+/// copied into (locked the same way `mailbox.sh` locks a message file to mark `seenBy`), so a repeat
+/// sweep never re-delivers the same message twice. Host-only — never called from inside a box.
+/// Best-effort: a single unreadable/unwritable message is skipped, not fatal to the sweep.
+pub fn relay_cross_project_mail() -> Result<(), String> {
+    use fs2::FileExt;
+    let stores = all_stores();
+    if stores.len() < 2 {
+        return Ok(()); // nothing to relay across when there's only one (or zero) managed project
+    }
+    let repos = load_repos();
+    let mut errs = Vec::new();
+
+    for origin in &stores {
+        let mailbox_dir = origin.join("mailbox");
+        let Ok(rd) = fs::read_dir(&mailbox_dir) else {
+            continue;
+        };
+        let origin_id = repos
+            .iter()
+            .find(|r| Path::new(&r.store) == origin.as_path())
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| origin.display().to_string());
+        let origin_registry = sandboxes_in(origin);
+
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(txt) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(msg) = serde_json::from_str::<Message>(&txt) else {
+                continue;
+            };
+
+            // Resolve destination stores this message hasn't already reached.
+            let mut targets: Vec<PathBuf> = Vec::new();
+            if msg.to == "all-projects" {
+                targets.extend(stores.iter().filter(|s| *s != origin).cloned());
+            } else if let Some(id) = msg.to.strip_prefix("project:") {
+                if let Some(r) = repos.iter().find(|r| r.id == id) {
+                    let p = PathBuf::from(&r.store);
+                    if p != *origin {
+                        targets.push(p);
+                    }
+                }
+                // an unresolved project id (not added yet) is left unmarked — retried next sweep.
+            } else if !msg.to.is_empty()
+                && msg.to != "broadcast"
+                && !origin_registry.contains_key(&msg.to)
+            {
+                // A bare vmid the ORIGIN project's own registry doesn't know — it may belong to
+                // another one (a box addressing a specific sibling in a different project).
+                for other in stores.iter().filter(|s| *s != origin) {
+                    if sandboxes_in(other).contains_key(&msg.to) {
+                        targets.push(other.clone());
+                    }
+                }
+            }
+            targets.retain(|t| {
+                let t_str = t.display().to_string();
+                !msg.relayed_to.contains(&t_str)
+            });
+            if targets.is_empty() {
+                continue;
+            }
+
+            // "all-projects" and "project:<id>" are both fan-out-to-a-whole-project addresses —
+            // the relayed copy in the destination project must read as THAT project's own
+            // broadcast (mailbox.sh's local match only ever recognizes "broadcast"/"all-projects"/
+            // its own vmid; a literal "project:b" would never locally match any box in project b).
+            // A bare cross-project vmid address is left as-is so it still targets that one box.
+            let new_to = if msg.to == "all-projects" || msg.to.starts_with("project:") {
+                "broadcast".to_string()
+            } else {
+                msg.to.clone()
+            };
+            let mut relayed_now: Vec<String> = Vec::new();
+            for target in &targets {
+                let dest_dir = target.join("mailbox");
+                if let Err(e) = fs::create_dir_all(&dest_dir) {
+                    errs.push(format!("{}: mkdir: {e}", target.display()));
+                    continue;
+                }
+                let copy = Message {
+                    from: msg.from.clone(),
+                    to: new_to.clone(),
+                    kind: msg.kind.clone(),
+                    branch: msg.branch.clone(),
+                    body: msg.body.clone(),
+                    ts: msg.ts.clone(),
+                    seen_by: vec![],
+                    relayed_to: vec![],
+                    origin_project: origin_id.clone(),
+                };
+                let Ok(json) = serde_json::to_string(&copy) else {
+                    continue;
+                };
+                // The origin filename (timestamp-vmid-pid) is already unique per message, and each
+                // target writes into its own store's mailbox dir, so "-relay" alone can't collide.
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("msg");
+                match fs::write(dest_dir.join(format!("{stem}-relay.json")), &json) {
+                    Ok(()) => relayed_now.push(target.display().to_string()),
+                    Err(e) => errs.push(format!("{}: write: {e}", target.display())),
+                }
+            }
+            if relayed_now.is_empty() {
+                continue;
+            }
+
+            // Mark the origin message's relayedTo, locked the same way mailbox.sh locks a message
+            // file to mark seenBy — so a box's concurrent seenBy update can't race this update.
+            let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+            let lock = match fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    errs.push(format!("{}: lock open: {e}", path.display()));
+                    continue;
+                }
+            };
+            if lock.lock_exclusive().is_err() {
+                errs.push(format!("{}: lock", path.display()));
+                continue;
+            }
+            let result = (|| -> Result<(), String> {
+                let txt = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                let mut cur: Message = serde_json::from_str(&txt).map_err(|e| e.to_string())?;
+                for t in &relayed_now {
+                    if !cur.relayed_to.contains(t) {
+                        cur.relayed_to.push(t.clone());
+                    }
+                }
+                let bytes = serde_json::to_vec_pretty(&cur).map_err(|e| e.to_string())?;
+                write_atomic(&path, &mailbox_dir, &bytes)
+            })();
+            let _ = lock.unlock();
+            let _ = fs::remove_file(&lock_path);
+            if let Err(e) = result {
+                errs.push(format!("{}: {e}", path.display()));
+            }
+        }
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("; "))
     }
 }
 
@@ -1209,6 +1395,8 @@ pub fn ensure_store(store: &Path) -> Result<(), String> {
         "mailbox",
         "status",
         "tasks",
+        "journals",
+        "telemetry",
         "skein/launch",
         "skein/bin",
         "memory",
@@ -1865,13 +2053,21 @@ fn delist_box(name: &str) -> Result<(), String> {
     })();
     let _ = lock.unlock();
     result?;
-    // Drop the box's per-box runtime files too, so a destroyed box leaves nothing stale behind: its
-    // turn-state probe output and its launch spec. Best-effort — a missing file is fine.
+    // Drop the box's per-box *live* runtime files, so a destroyed box leaves nothing stale behind:
+    // its turn-state probe output and its launch spec. Best-effort — a missing file is fine.
+    //
+    // Deliberately NOT deleted here: journals/<name>.md, diffs/<name>.*, tasks/<name>.json. A
+    // --clone's own working tree (and its .skein/journal.md) dies with the box, so the store copies
+    // are the only durable record of what that box did — they feed the cross-run workflow/process
+    // learn-loop and must outlive the box, not just its live session.
     for p in [
         store.join("status").join(format!("{name}.json")),
         store.join("status").join(format!("{name}.agents")),
         store.join("status").join(format!("{name}.agents.lock")),
-        store.join("skein").join("launch").join(format!("{name}.json")),
+        store
+            .join("skein")
+            .join("launch")
+            .join(format!("{name}.json")),
     ] {
         let _ = fs::remove_file(&p);
     }
@@ -1928,7 +2124,9 @@ pub fn read_diff(name: &str) -> Option<String> {
             return Some(p);
         }
     }
-    let path = store_for_box(name)?.join("diffs").join(format!("{name}.patch"));
+    let path = store_for_box(name)?
+        .join("diffs")
+        .join(format!("{name}.patch"));
     let s = fs::read_to_string(path).ok()?;
     (!s.trim().is_empty()).then_some(s)
 }
@@ -2043,11 +2241,17 @@ fn host_diffstat(name: &str, dir: &str) -> Option<DiffStat> {
 
 /// Read the shortstat JSON box-diff.sh writes to `<store>/diffs/<name>.json`.
 fn read_diffstat_file(name: &str) -> Option<DiffStat> {
-    let path = store_for_box(name)?.join("diffs").join(format!("{name}.json"));
+    let path = store_for_box(name)?
+        .join("diffs")
+        .join(format!("{name}.json"));
     let s = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&s).ok()?;
     let get = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-    let stat = DiffStat { files: get("files"), ins: get("ins"), del: get("del") };
+    let stat = DiffStat {
+        files: get("files"),
+        ins: get("ins"),
+        del: get("del"),
+    };
     (stat.files != 0 || stat.ins != 0 || stat.del != 0).then_some(stat)
 }
 
@@ -2380,6 +2584,14 @@ const PROBE_TASK_SH: &str = include_str!("probe/box-task.sh");
 // <store>/diffs/<vmid>.{patch,json,commits} so the host can show them for clone-mode boxes where
 // the git repo lives inside the sandbox and is not visible to the host.
 const PROBE_DIFF_SH: &str = include_str!("probe/box-diff.sh");
+// box-journal.sh: wired from Stop — copies `.skein/journal.md`'s tail to <store>/journals/<vmid>.md,
+// the same "host can't see inside the clone" problem box-diff.sh solves, applied to the journal so
+// the cockpit's Session tab can actually show it for clone-mode boxes (read_journal reads this first).
+const PROBE_JOURNAL_SH: &str = include_str!("probe/box-journal.sh");
+// box-token-usage.sh: wired from Stop — appends this turn's token usage (from the transcript the
+// Stop hook points at) to <store>/telemetry/<vmid>.jsonl, a durable per-turn log that outlives the
+// box, feeding the same cross-run learn-loop as journals/diffs.
+const PROBE_TOKEN_USAGE_SH: &str = include_str!("probe/box-token-usage.sh");
 // skein-owned machinery installed alongside the probe so an empty shared folder works end-to-end:
 // the SessionStart bootstrap (memory bridge + mailbox inbox + box registration), the mailbox, and a
 // default status line. They live in `<store>/skein/bin/` (skein-owned namespace), refreshed each run.
@@ -2390,8 +2602,17 @@ const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 const PROBE_STATUS_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh";
 const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh";
 const PROBE_DIFF_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-diff.sh";
+const PROBE_JOURNAL_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-journal.sh";
+const PROBE_TOKEN_USAGE_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-token-usage.sh";
 const BOOTSTRAP_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/sandbox-bootstrap.sh";
 const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusline-command.sh";
+// mailbox.sh hook entries — turn-boundary delivery so mail is re-checked every turn, not just at
+// SessionStart. `inbox` (UserPromptSubmit) surfaces unread mail as additional context at the start
+// of a turn; `stop-check` (Stop) blocks the stop with exit 2 + stderr if mail arrived mid-turn, so a
+// message can never sit unread just because nobody happened to ask. Both mark seenBy on delivery,
+// so the same message can't fire twice.
+const MAILBOX_INBOX_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh inbox";
+const MAILBOX_STOPCHECK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh stop-check";
 
 /// Install skein's turn-state probe into the shared store: write the hook scripts to
 /// `<store>/skein/bin/` and merge their hook wiring into `<store>/settings.json` (additive +
@@ -2425,6 +2646,8 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("box-status.sh", PROBE_STATUS_SH),
         ("box-task.sh", PROBE_TASK_SH),
         ("box-diff.sh", PROBE_DIFF_SH),
+        ("box-journal.sh", PROBE_JOURNAL_SH),
+        ("box-token-usage.sh", PROBE_TOKEN_USAGE_SH),
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
@@ -2455,27 +2678,58 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // The richer fleet-states ride extra lifecycle events (all best-effort: a Claude Code that predates
     // one simply never fires it): StopFailure→error (rate_limit/overloaded/…), PreCompact/PostCompact→
     // compacting (busy, not stuck), SessionEnd→ended (distinct from a liveness-derived "stale").
-    let entries: [(&str, String, Option<&str>); 12] = [
+    let entries: [(&str, String, Option<&str>); 18] = [
         (
             "UserPromptSubmit",
             format!("{PROBE_STATUS_CMD} working"),
             None,
         ),
+        // Turn-boundary mailbox delivery (start of turn): surfaces unread mail as additional
+        // context, so it's never gated behind a human asking "did you get that?".
+        ("UserPromptSubmit", MAILBOX_INBOX_CMD.to_string(), None),
+        // Notification: Claude Code's hook payload carries NO field naming which notification type
+        // fired (confirmed against the hooks docs — there is no `notification_type` on the stdin
+        // JSON); it disambiguates *before* invoking the hook, via each entry's own `matcher`. So
+        // this MUST be three separate entries, each scoped to a matcher and calling a distinct
+        // literal mode — a single entry trying to sniff the type from payload silently never
+        // distinguishes anything and always falls through to one bucket.
         (
             "Notification",
-            format!("{PROBE_STATUS_CMD} notify"),
-            None,
+            format!("{PROBE_STATUS_CMD} notify-blocked"),
+            Some("permission_prompt|elicitation_dialog|agent_needs_input"),
+        ),
+        (
+            "Notification",
+            format!("{PROBE_STATUS_CMD} notify-waiting"),
+            Some("idle_prompt"),
+        ),
+        (
+            "Notification",
+            format!("{PROBE_STATUS_CMD} notify-ignore"),
+            Some("auth_success|elicitation_complete|elicitation_response|agent_completed"),
         ),
         ("Stop", format!("{PROBE_STATUS_CMD} waiting"), None),
         // box-diff.sh runs alongside box-status.sh on Stop: writes the branch-vs-base
         // patch + shortstat + commit list so the host can show them for clone-mode boxes.
         ("Stop", PROBE_DIFF_CMD.to_string(), None),
+        // box-journal.sh runs alongside box-diff.sh on Stop: copies the journal tail to the store
+        // so the Session tab can show it for clone-mode boxes (the host can't read the box's clone).
+        ("Stop", PROBE_JOURNAL_CMD.to_string(), None),
+        // box-token-usage.sh: appends this turn's token usage to a durable per-turn log.
+        ("Stop", PROBE_TOKEN_USAGE_CMD.to_string(), None),
+        // Turn-boundary mailbox delivery (end of turn): blocks the stop (exit 2) if mail arrived
+        // mid-turn, so the agent can't end a turn without having seen it.
+        ("Stop", MAILBOX_STOPCHECK_CMD.to_string(), None),
         (
             "PreToolUse",
             format!("{PROBE_STATUS_CMD} agent-start"),
             Some("Task"),
         ),
-        ("SubagentStop", format!("{PROBE_STATUS_CMD} agent-stop"), None),
+        (
+            "SubagentStop",
+            format!("{PROBE_STATUS_CMD} agent-stop"),
+            None,
+        ),
         ("StopFailure", format!("{PROBE_STATUS_CMD} error"), None),
         ("PreCompact", format!("{PROBE_STATUS_CMD} compacting"), None),
         ("PostCompact", format!("{PROBE_STATUS_CMD} compacted"), None),
@@ -2606,12 +2860,24 @@ pub fn recent_commits(name: &str) -> Vec<String> {
     vec![]
 }
 
-/// The agent's own turn-end journal (`<dir>/.skein/journal.md`), if it keeps one — the best
-/// "what was done" source because it's written with full context (see the CLAUDE.md ritual).
-/// Returns the tail (last ~40 lines), capped, or None when the box keeps no journal.
+/// The agent's own turn-end journal (`.skein/journal.md`), if it keeps one — the best "what was
+/// done" source because it's written with full context (see the CLAUDE.md ritual). Returns the tail
+/// (last ~40 lines), capped, or None when the box keeps no journal.
+///
+/// Reads `<store>/journals/<vmid>.md` first — box-journal.sh's Stop-hook copy of the box's own
+/// `.skein/journal.md`, the only way the host can see it for a clone-mode box (a box's private clone
+/// isn't visible to the host at all; `dir` for a repo box is the *shared* host working clone, not the
+/// box's own). Falls back to reading `<dir>/.skein/journal.md` directly for a direct-mode box, where
+/// the host-mounted repo genuinely is the box's own working tree.
 pub fn read_journal(name: &str) -> Option<String> {
-    let dir = lookup_dir(name)?;
-    let txt = fs::read_to_string(Path::new(&dir).join(".skein").join("journal.md")).ok()?;
+    let from_store = store_for_box(name)
+        .map(|s| s.join("journals").join(format!("{name}.md")))
+        .and_then(|p| fs::read_to_string(p).ok());
+    let dir = lookup_dir(name);
+    let from_dir = dir
+        .as_deref()
+        .and_then(|d| fs::read_to_string(Path::new(d).join(".skein").join("journal.md")).ok());
+    let txt = from_store.or(from_dir)?;
     let tail: Vec<&str> = txt.lines().rev().take(40).collect();
     let mut s: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
     const CAP: usize = 4000;
@@ -2875,7 +3141,7 @@ mod tests {
         assert_eq!(sb("done", "").state().1, 2);
         assert_eq!(sb("working", "").state().1, 3);
         assert_eq!(sb("compiling", "").state(), ("compiling".into(), 3)); // passthrough
-        // the richer lifecycle states
+                                                                          // the richer lifecycle states
         assert_eq!(sb("error", "").state(), ("error".into(), 0)); // most urgent
         assert_eq!(sb("blocked", "").state(), ("needs-input".into(), 0)); // permission → needs you
         assert_eq!(sb("compacting", "").state(), ("compacting".into(), 3)); // busy, not stuck
@@ -3129,7 +3395,15 @@ mod tests {
         ensure_store(&store).unwrap();
         // the full structure: skein runtime + the user-filled content homes.
         for d in [
-            "mailbox", "status", "tasks", "skein/launch", "skein/bin", "memory", "skills", "hooks",
+            "mailbox",
+            "status",
+            "tasks",
+            "journals",
+            "skein/launch",
+            "skein/bin",
+            "memory",
+            "skills",
+            "hooks",
             "shared-rw",
         ] {
             assert!(store.join(d).is_dir(), "missing {d}");
@@ -3137,6 +3411,8 @@ mod tests {
         // skein installs all the machinery so an empty store works end-to-end
         for f in [
             "skein/bin/box-status.sh",
+            "skein/bin/box-journal.sh",
+            "skein/bin/box-token-usage.sh",
             "skein/bin/sandbox-bootstrap.sh",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
@@ -3148,8 +3424,12 @@ mod tests {
         assert!(store.join("README.md").is_file());
         // settings wire the SessionStart bootstrap + a default statusLine
         let s: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap()).unwrap();
-        assert!(s["statusLine"]["command"].as_str().unwrap().contains("statusline-command.sh"));
+            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap())
+                .unwrap();
+        assert!(s["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("statusline-command.sh"));
         assert!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -3212,7 +3492,9 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("box-status.sh working")));
-        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        // Stop: box-status.sh + box-diff.sh + box-journal.sh + box-token-usage.sh + mailbox.sh
+        // stop-check.
+        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 5);
         let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post[0]["matcher"], "TodoWrite");
 
@@ -3222,7 +3504,7 @@ mod tests {
             again["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
             ups.len()
         );
-        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 5);
     }
 
     #[test]
@@ -3230,8 +3512,6 @@ mod tests {
         let merged = settings_with_probe(&serde_json::json!({}));
         // Every event gets at least one hook entry.
         for ev in [
-            "UserPromptSubmit",
-            "Notification",
             "PreToolUse",
             "SubagentStop",
             "StopFailure",
@@ -3247,20 +3527,80 @@ mod tests {
                 "missing {ev}"
             );
         }
-        // Stop has two entries: box-status.sh (turn-state) + box-diff.sh (diff snapshot).
-        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 2, "Stop needs 2 hooks");
-        let stop_cmds: Vec<&str> = merged["hooks"]["Stop"]
-            .as_array().unwrap()
+        // UserPromptSubmit: box-status.sh (turn-state reset) + mailbox.sh inbox (turn-boundary
+        // mail delivery — the fix for mail sitting unread past SessionStart).
+        let ups_cmds: Vec<&str> = merged["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|e| e["hooks"][0]["command"].as_str().unwrap_or(""))
             .collect();
-        assert!(stop_cmds.iter().any(|c| c.ends_with("box-status.sh waiting")), "status hook missing");
-        assert!(stop_cmds.iter().any(|c| c.ends_with("box-diff.sh")), "diff hook missing");
-        // the Notification hook routes through the counter-aware `notify` mode (not a bare needs-input)
-        assert!(merged["hooks"]["Notification"][0]["hooks"][0]["command"]
-            .as_str()
+        assert_eq!(ups_cmds.len(), 2, "UserPromptSubmit needs 2 hooks");
+        assert!(ups_cmds
+            .iter()
+            .any(|c| c.ends_with("box-status.sh working")));
+        assert!(ups_cmds.iter().any(|c| c.ends_with("mailbox.sh inbox")));
+        // Stop: box-status.sh (turn-state) + box-diff.sh (diff snapshot) + box-journal.sh (journal
+        // copy) + box-token-usage.sh (per-turn token log) + mailbox.sh stop-check (blocks the stop
+        // if mail arrived mid-turn).
+        assert_eq!(
+            merged["hooks"]["Stop"].as_array().unwrap().len(),
+            5,
+            "Stop needs 5 hooks"
+        );
+        let stop_cmds: Vec<&str> = merged["hooks"]["Stop"]
+            .as_array()
             .unwrap()
-            .ends_with("box-status.sh notify"));
+            .iter()
+            .map(|e| e["hooks"][0]["command"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            stop_cmds
+                .iter()
+                .any(|c| c.ends_with("box-status.sh waiting")),
+            "status hook missing"
+        );
+        assert!(
+            stop_cmds.iter().any(|c| c.ends_with("box-diff.sh")),
+            "diff hook missing"
+        );
+        assert!(
+            stop_cmds.iter().any(|c| c.ends_with("box-journal.sh")),
+            "journal hook missing"
+        );
+        assert!(
+            stop_cmds.iter().any(|c| c.ends_with("box-token-usage.sh")),
+            "token-usage hook missing"
+        );
+        assert!(
+            stop_cmds
+                .iter()
+                .any(|c| c.ends_with("mailbox.sh stop-check")),
+            "mailbox stop-check missing"
+        );
+        // Notification is matcher-scoped into three entries — the hook payload carries no field
+        // naming which type fired, so disambiguation has to happen via `matcher`, not the command.
+        let notif = merged["hooks"]["Notification"].as_array().unwrap();
+        assert_eq!(notif.len(), 3, "Notification needs 3 matcher-scoped hooks");
+        let notif_matcher_cmd = |m: &str| -> Option<&str> {
+            notif
+                .iter()
+                .find(|e| e["matcher"] == m)
+                .and_then(|e| e["hooks"][0]["command"].as_str())
+        };
+        assert!(
+            notif_matcher_cmd("permission_prompt|elicitation_dialog|agent_needs_input")
+                .unwrap()
+                .ends_with("box-status.sh notify-blocked")
+        );
+        assert!(notif_matcher_cmd("idle_prompt")
+            .unwrap()
+            .ends_with("box-status.sh notify-waiting"));
+        assert!(notif_matcher_cmd(
+            "auth_success|elicitation_complete|elicitation_response|agent_completed"
+        )
+        .unwrap()
+        .ends_with("box-status.sh notify-ignore"));
         // sub-agent tracking: PreToolUse is scoped to the Task tool
         assert_eq!(merged["hooks"]["PreToolUse"][0]["matcher"], "Task");
         // a default status line is wired when the store doesn't set one
@@ -3413,7 +3753,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&reg).unwrap()).unwrap();
         assert!(after.get("thing-x").is_none());
         assert!(after.get("thing-y").is_some()); // didn't clobber the rest
-        // the box's status + launch files are gone, not left stale
+                                                  // the box's status + launch files are gone, not left stale
         assert!(!dir.join("status/thing-x.json").exists());
         assert!(!dir.join("skein/launch/thing-x.json").exists());
         let hist = fs::read_to_string(dir.join("history.jsonl")).unwrap();
@@ -3523,7 +3863,7 @@ mod tests {
         env::set_var("SKEIN_REGISTRY", &reg);
         env::remove_var("SKEIN_SHARED");
         env::set_var("SKEIN_DESTROY_CMD", "true"); // teardown "succeeds"
-        // destroy must still report success so the cockpit closes the tab over the removed box.
+                                                   // destroy must still report success so the cockpit closes the tab over the removed box.
         assert!(destroy_box("thing-x").is_ok());
         env::remove_var("SKEIN_DESTROY_CMD");
         env::remove_var("SKEIN_REGISTRY");
@@ -3635,7 +3975,10 @@ mod tests {
         // survives a disconnect; `claude --continue` is the (re)create command.
         let a = attach_argv("thing-x", "/d");
         assert_eq!(&a[..3], ["exec", "-it", "thing-x"]);
-        assert!(a.last().unwrap().contains("tmux new-session -A -s skein-agent"));
+        assert!(a
+            .last()
+            .unwrap()
+            .contains("tmux new-session -A -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --continue"));
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
         assert_eq!(agent_resume_cmd("claude"), "claude --continue");
@@ -3713,6 +4056,144 @@ mod tests {
         assert!(current_task("../escape").is_none()); // name guard
 
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn read_journal_prefers_store_over_host_dir() {
+        // Simulates the clone-mode bug directly: `dir` (the registered box dir) is the HOST's
+        // shared working clone, which never has the box's own `.skein/journal.md` — only
+        // box-journal.sh's copy in the store does. read_journal must find it there.
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let work = dir.join("work");
+        fs::create_dir_all(&work).unwrap(); // no .skein/journal.md here — the clone-mode case
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"thing-x":{{"branch":"x","dir":"{}","lastSeen":"","status":""}}}}"#,
+                work.display()
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+
+        // Nothing in the store yet either → None, not a panic.
+        assert_eq!(read_journal("thing-x"), None);
+
+        // box-journal.sh's copy lands in <store>/journals/<name>.md.
+        fs::create_dir_all(dir.join("journals")).unwrap();
+        fs::write(
+            dir.join("journals").join("thing-x.md"),
+            "did: x / next: y / blocked-on: reviewer\n",
+        )
+        .unwrap();
+        assert!(read_journal("thing-x")
+            .unwrap()
+            .contains("blocked-on: reviewer"));
+
+        // Direct-mode compatibility: with no store copy, falls back to the host dir directly.
+        fs::remove_file(dir.join("journals").join("thing-x.md")).unwrap();
+        fs::create_dir_all(work.join(".skein")).unwrap();
+        fs::write(
+            work.join(".skein").join("journal.md"),
+            "did: a / next: b / blocked-on: nothing\n",
+        )
+        .unwrap();
+        assert!(read_journal("thing-x")
+            .unwrap()
+            .contains("blocked-on: nothing"));
+
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn box_token_usage_sums_new_assistant_entries_and_is_idempotent() {
+        // Shells out to the installed script directly (like the mailbox round-trip test) so this
+        // proves the real jq pipeline, not just a Rust-side assumption about its behavior.
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let script = store.join("skein").join("bin").join("box-token-usage.sh");
+
+        let transcript = home.join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#, "\n",
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":200}}}"#, "\n",
+            ),
+        )
+        .unwrap();
+
+        // box-token-usage.sh resolves its store via `git -C $CLAUDE_PROJECT_DIR rev-parse
+        // --show-toplevel` (falling back to $CLAUDE_PROJECT_DIR itself when it's not a git repo,
+        // as here) + `.claude` — so this must point at the store's *parent*, not `home`.
+        let project_dir = store.parent().unwrap().to_path_buf();
+        let run = || -> std::process::Output {
+            use std::io::Write as _;
+            let mut child = Command::new("bash")
+                .arg(&script)
+                .env("SANDBOX_VM_ID", "boxA")
+                .env("CLAUDE_PROJECT_DIR", &project_dir)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn box-token-usage.sh");
+            write!(
+                child.stdin.take().unwrap(),
+                r#"{{"transcript_path":"{}"}}"#,
+                transcript.display()
+            )
+            .unwrap();
+            child.wait_with_output().expect("run box-token-usage.sh")
+        };
+
+        assert!(run().status.success());
+        let log = store.join("telemetry").join("boxA.jsonl");
+        let entries: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1, "one turn logged");
+        assert_eq!(entries[0]["input"], 100);
+        assert_eq!(entries[0]["output"], 50);
+        assert_eq!(entries[0]["cache_creation"], 200);
+        assert_eq!(entries[0]["total"], 350);
+
+        // No new transcript lines: rerunning must not duplicate the entry.
+        assert!(run().status.success());
+        let lines_after: usize = fs::read_to_string(&log).unwrap().lines().count();
+        assert_eq!(lines_after, 1, "must not re-log unchanged transcript");
+
+        // A second turn with two assistant entries (a tool-call round trip) sums both.
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"more"}}}}"#
+        )
+        .unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":2,"output_tokens":782,"cache_read_input_tokens":447904,"cache_creation_input_tokens":1247}}}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":5,"output_tokens":100,"cache_read_input_tokens":448000,"cache_creation_input_tokens":0}}}}}}"#).unwrap();
+        drop(f);
+        assert!(run().status.success());
+        let entries2: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries2.len(), 2);
+        assert_eq!(entries2[1]["input"], 7);
+        assert_eq!(entries2[1]["output"], 882);
+        assert_eq!(entries2[1]["cache_read"], 895904);
     }
 
     #[test]
@@ -3858,6 +4339,216 @@ mod tests {
             vec!["box-a".to_string(), "box-b".to_string()]
         );
 
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn mailbox_turn_boundary_delivery_round_trip() {
+        // Proves the P0 fix at the shell level: mail delivered at UserPromptSubmit (inbox) and
+        // blocked-and-surfaced at Stop (stop-check), not just once at SessionStart. Two vmids
+        // sharing one temp store stand in for two boxes sharing one shared mount.
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            Command::new("bash")
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SANDBOX_VM_ID", vmid)
+                .output()
+                .expect("run mailbox.sh")
+        };
+
+        let sent = run(
+            "boxA",
+            &[
+                "send",
+                "--to",
+                "broadcast",
+                "--kind",
+                "note",
+                "--body",
+                "hello from A",
+            ],
+        );
+        assert!(
+            sent.status.success(),
+            "send failed: {}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+
+        // Box B's UserPromptSubmit-equivalent surfaces it once …
+        let inbox1 = run("boxB", &["inbox"]);
+        assert!(inbox1.status.success());
+        let out1 = String::from_utf8_lossy(&inbox1.stdout);
+        assert!(
+            out1.contains("hello from A"),
+            "expected message in inbox, got: {out1}"
+        );
+        // … and never again (seenBy dedup).
+        let inbox2 = run("boxB", &["inbox"]);
+        assert!(inbox2.status.success());
+        assert!(String::from_utf8_lossy(&inbox2.stdout).trim().is_empty());
+        // The sender never sees its own broadcast.
+        let inbox_a = run("boxA", &["inbox"]);
+        assert!(String::from_utf8_lossy(&inbox_a.stdout).trim().is_empty());
+
+        // A fresh message + the Stop-boundary check: blocks (exit 2), body on stderr.
+        let sent2 = run(
+            "boxA",
+            &[
+                "send",
+                "--to",
+                "broadcast",
+                "--kind",
+                "note",
+                "--body",
+                "stop-check test",
+            ],
+        );
+        assert!(sent2.status.success());
+        let stop1 = run("boxC", &["stop-check"]);
+        assert_eq!(
+            stop1.status.code(),
+            Some(2),
+            "stop-check must block on unread mail"
+        );
+        assert!(String::from_utf8_lossy(&stop1.stderr).contains("stop-check test"));
+        // Repeat: already seen, silent success — the same message can't block twice.
+        let stop2 = run("boxC", &["stop-check"]);
+        assert_eq!(stop2.status.code(), Some(0));
+        assert!(stop2.stderr.is_empty());
+    }
+
+    #[test]
+    fn relay_cross_project_mail_delivers_across_stores() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        // Keep store_dir()'s legacy git-toplevel fallback from picking up this checkout's own
+        // store and adding a spurious third store to the sweep.
+        env::set_var(
+            "SKEIN_REGISTRY",
+            home.join("no-such-dir").join("sandboxes.json"),
+        );
+
+        let store_a = home.join("repos").join("a").join("store").join(".claude");
+        let store_b = home.join("repos").join("b").join("store").join(".claude");
+        fs::create_dir_all(store_a.join("mailbox")).unwrap();
+        fs::create_dir_all(store_b.join("mailbox")).unwrap();
+        save_repos(&[
+            Repo {
+                id: "a".into(),
+                source: "a".into(),
+                work: "a".into(),
+                store: store_a.to_string_lossy().into_owned(),
+                agent: "claude".into(),
+            },
+            Repo {
+                id: "b".into(),
+                source: "b".into(),
+                work: "b".into(),
+                store: store_b.to_string_lossy().into_owned(),
+                agent: "claude".into(),
+            },
+        ])
+        .unwrap();
+
+        // A box in project A writes an "all-projects" broadcast (as mailbox.sh would, once a
+        // box uses that keyword).
+        let msg = Message {
+            from: "boxA".into(),
+            to: "all-projects".into(),
+            kind: "note".into(),
+            branch: "master".into(),
+            body: "cross-project hello".into(),
+            ts: "2026-01-01T00:00:00Z".into(),
+            seen_by: vec![],
+            relayed_to: vec![],
+            origin_project: String::new(),
+        };
+        fs::write(
+            store_a.join("mailbox").join("1.json"),
+            serde_json::to_string(&msg).unwrap(),
+        )
+        .unwrap();
+
+        relay_cross_project_mail().unwrap();
+
+        // A copy landed in B's mailbox, rewritten to broadcast (B's own local match), tagged with
+        // provenance, and with a fresh (unrelayed) seenBy so B's boxes still see it as unread.
+        let b_files: Vec<_> = fs::read_dir(store_b.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(b_files.len(), 1, "expected exactly one relayed copy in B");
+        let copy: Message =
+            serde_json::from_str(&fs::read_to_string(b_files[0].path()).unwrap()).unwrap();
+        assert_eq!(copy.to, "broadcast");
+        assert_eq!(copy.body, "cross-project hello");
+        assert_eq!(copy.origin_project, "a");
+        assert!(copy.seen_by.is_empty());
+
+        // Idempotent: a second sweep doesn't duplicate the delivery.
+        relay_cross_project_mail().unwrap();
+        let b_files2: Vec<_> = fs::read_dir(store_b.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(
+            b_files2.len(),
+            1,
+            "relay must not duplicate on a repeat sweep"
+        );
+
+        // The origin message is marked relayedTo, which is what makes the sweep idempotent.
+        let origin: Message = serde_json::from_str(
+            &fs::read_to_string(store_a.join("mailbox").join("1.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(!origin.relayed_to.is_empty());
+
+        // project:<id> direct addressing: only the named project gets a copy, also rewritten to
+        // that project's own broadcast (never delivered as a literal "project:b" no box matches).
+        let msg2 = Message {
+            from: "boxA".into(),
+            to: "project:b".into(),
+            kind: "note".into(),
+            branch: "master".into(),
+            body: "hi just b".into(),
+            ts: "2026-01-01T00:01:00Z".into(),
+            seen_by: vec![],
+            relayed_to: vec![],
+            origin_project: String::new(),
+        };
+        fs::write(
+            store_a.join("mailbox").join("2.json"),
+            serde_json::to_string(&msg2).unwrap(),
+        )
+        .unwrap();
+        relay_cross_project_mail().unwrap();
+        let b_files3: Vec<_> = fs::read_dir(store_b.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(
+            b_files3.len(),
+            2,
+            "the project:b message should also land in B"
+        );
+        let copy2 = b_files3
+            .iter()
+            .map(|e| {
+                serde_json::from_str::<Message>(&fs::read_to_string(e.path()).unwrap()).unwrap()
+            })
+            .find(|m| m.body == "hi just b")
+            .expect("project:b copy present");
+        assert_eq!(copy2.to, "broadcast");
+
+        env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_REGISTRY");
     }
 

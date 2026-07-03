@@ -136,10 +136,18 @@ fn cmd_repos() -> Result<(), String> {
 }
 
 fn cmd_ls() -> Result<(), String> {
+    // Best-effort cross-project mailbox relay pass, so the plain CLI (no skein-server running)
+    // still makes progress on cross-project mail rather than only ever relaying when the web
+    // cockpit happens to be up.
+    if let Err(e) = skein::relay_cross_project_mail() {
+        eprintln!("skein: mailbox relay: {e}");
+    }
     // Same sbx-sourced, "who-needs-me-first"-sorted fleet the web cockpit shows (sbx ∪ registry).
     let views = skein::load_views()?;
     if views.is_empty() {
-        println!("{DIM}the skein is empty — add a repo (skein add <url|path>) then launch a box{RESET}");
+        println!(
+            "{DIM}the skein is empty — add a repo (skein add <url|path>) then launch a box{RESET}"
+        );
         return Ok(());
     }
 

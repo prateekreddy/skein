@@ -778,14 +778,14 @@ function render(snapshot) {
   const needy = boxes.filter(b => (b.tier ?? 9) <= NEEDS_TIER);
   const rest  = boxes.filter(b => (b.tier ?? 9) >  NEEDS_TIER);
   const byRepo = new Map();
-  for (const b of rest) { const k = b.repo || " other"; (byRepo.get(k) || byRepo.set(k, []).get(k)).push(b); }
-  const repoIds = new Set([...repos.map(r => r.id), ...byRepo.keys()].filter(k => k !== " other"));
+  for (const b of rest) { const k = b.repo || "other"; (byRepo.get(k) || byRepo.set(k, []).get(k)).push(b); }
+  const repoIds = new Set([...repos.map(r => r.id), ...byRepo.keys()].filter(k => k !== "other"));
   const desired = [];
   if (needy.length) desired.push({ id:"needs", label:"⚠ needs you", repoId:null, showRepo:true, boxes:needy });
   for (const id of [...repoIds].sort((a,b) => a.localeCompare(b)))
     desired.push({ id:`repo:${id}`, label:id, repoId:id, showRepo:false, boxes:byRepo.get(id) || [] });
-  if (byRepo.has(" other"))
-    desired.push({ id:"other", label: repos.length ? "unassigned" : "fleet", repoId:null, showRepo:true, boxes:byRepo.get(" other") });
+  if (byRepo.has("other"))
+    desired.push({ id:"other", label: repos.length ? "unassigned" : "fleet", repoId:null, showRepo:true, boxes:byRepo.get("other") });
 
   order = []; const seen = new Set();
   const want = new Set(desired.map(d => d.id));

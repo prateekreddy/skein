@@ -63,6 +63,20 @@ async fn main() {
     if let Err(e) = skein::ensure_ssh_key() {
         eprintln!("skein: ssh key not loaded ({e}); SSH git push from boxes may fail");
     }
+    // Cross-project mailbox relay: a box only ever mounts its own project's store, so a message
+    // addressed "all-projects" / "project:<id>" / to a vmid living in another project can only be
+    // delivered by the host, which already reads every managed store. Its own standalone loop
+    // (not piggybacked on the per-connection SSE ticker below) so relay keeps running even when no
+    // browser tab has the cockpit open.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            if let Err(e) = skein::relay_cross_project_mail() {
+                eprintln!("skein: mailbox relay: {e}");
+            }
+        }
+    });
     // Bind is loopback-only by default; $SKEIN_ADDR overrides it. For remote access prefer
     // `tailscale serve` proxying to this loopback port (see README) over an off-loopback bind.
     let addr = std::env::var("SKEIN_ADDR")
@@ -263,7 +277,12 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
         let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
         let agent = (!r.agent.trim().is_empty()).then(|| r.agent.trim().to_string());
         let store = (!r.store.trim().is_empty()).then(|| r.store.trim().to_string());
-        skein::add_repo(r.source.trim(), id.as_deref(), agent.as_deref(), store.as_deref())
+        skein::add_repo(
+            r.source.trim(),
+            id.as_deref(),
+            agent.as_deref(),
+            store.as_deref(),
+        )
     })
     .await;
     match res {

@@ -3,15 +3,24 @@
 # view can show working / waiting / needs-input / blocked / error / compacting / ended.
 # SHIPPED AND INSTALLED BY SKEIN (not the repo) — written into <store>/skein/bin/ and wired from
 # <store>/settings.json. Modes (the hook event that drives each, in parens):
-#   working      (UserPromptSubmit) you gave it work; new turn → reset the sub-agent counter
+#   working      (UserPromptSubmit) you gave it work; new turn → reset the sub-agent counter, and
+#                                    refresh the registry's branch (see refresh_branch below)
 #   agent-start  (PreToolUse Task)  it delegated to a sub-agent; still WORKING; counter++
 #   agent-stop   (SubagentStop)     a sub-agent finished; counter--; still working
-#   notify       (Notification)     a notification fired — disambiguated by .notification_type on stdin:
-#                                      permission_prompt / elicitation_dialog → blocked (needs your call)
-#                                      idle_prompt                            → waiting (turn idle)
-#                                      auth_success / elicitation_complete|response → informational, ignored
-#                                      (absent → older CC: fall back to needs-input so nothing is missed)
-#                                    BUT if sub-agents are in flight it's just waiting on THEM → working.
+#   waiting      (Stop)             the turn ended, your move; also refreshes the registry's branch
+#   notify-blocked  (Notification, matcher permission_prompt|elicitation_dialog|agent_needs_input)
+#                                    needs your call → blocked
+#   notify-waiting  (Notification, matcher idle_prompt)
+#                                    the turn went idle → waiting, your move
+#   notify-ignore   (Notification, matcher auth_success|elicitation_complete|elicitation_response|agent_completed)
+#                                    informational only → keep the current state
+#   (all three: if sub-agents are in flight it's just waiting on THEM → working, regardless of type)
+#
+#   IMPORTANT: the Notification hook's stdin JSON carries no field that names which of the above
+#   fired (confirmed against Claude Code's hooks docs — there is no `notification_type` on the
+#   payload). Claude Code disambiguates *before* invoking the hook, via each hook entry's own
+#   `matcher` in settings.json — so the modes above are selected by which matcher routed here, wired
+#   as separate Notification entries in `settings_with_probe` (lib.rs), never by reading the payload.
 #   error        (StopFailure)      the turn died on an API error; .error_type → the detail (rate_limit…)
 #   compacting   (PreCompact)       context compaction running — busy, not stuck
 #   compacted    (PostCompact)      compaction done → back to working
@@ -66,6 +75,27 @@ inflight() {
 # Pull a string field out of the hook payload (empty if jq/field absent).
 field() { command -v jq >/dev/null 2>&1 && printf '%s' "$payload" | jq -r --arg k "$1" '.[$k] // ""' 2>/dev/null || true; }
 
+# Refresh this box's branch in the shared registry (sandboxes.json) on every turn boundary. Without
+# this, the board's branch column is whatever sandbox-bootstrap.sh captured once at SessionStart (or
+# the launch spec, captured once at creation) — stale the instant a box does its own `git checkout`
+# mid-session (e.g. branch-per-slice work). Shares sandbox-bootstrap.sh's exact lock file and merge
+# style so a concurrent registration write can't race this update. No stdout; fail-soft.
+refresh_branch() {
+  command -v jq >/dev/null 2>&1 || return 0
+  local b reg
+  b="$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [ -n "$b" ] && [ "$b" != "HEAD" ] || return 0
+  reg="$store/sandboxes.json"
+  (
+    flock -w 5 9 || exit 0
+    [ -s "$reg" ] || echo '{}' >"$reg"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/sbxreg.XXXXXX")" || exit 0
+    if jq --arg v "$vmid" --arg b "$b" \
+          '.[$v] = ((.[$v] // {}) + {branch:$b})' \
+          "$reg" >"$tmp" 2>/dev/null; then mv "$tmp" "$reg"; else rm -f "$tmp"; fi
+  ) 9>"$store/.sandboxes.lock" 2>/dev/null || true
+}
+
 write_status() { # $1 = status key, $2 = optional human detail
   local tmp
   tmp="$(mktemp "$dir/.st.XXXXXX" 2>/dev/null)" || return 0
@@ -82,6 +112,7 @@ write_status() { # $1 = status key, $2 = optional human detail
 case "$mode" in
   working)
     adjust reset
+    refresh_branch
     write_status working
     ;;
   agent-start)
@@ -92,17 +123,22 @@ case "$mode" in
     adjust -1
     write_status working
     ;;
-  notify)
+  notify-blocked)
     if [ "$(inflight)" -gt 0 ]; then
       write_status working # waiting on its own sub-agents, not on you
     else
-      case "$(field notification_type)" in
-        permission_prompt | elicitation_dialog) write_status blocked ;; # needs your decision
-        idle_prompt) write_status waiting ;;                            # idle, your move
-        auth_success | elicitation_complete | elicitation_response) : ;; # informational; keep state
-        *) write_status needs-input ;;                                   # unknown/older CC → don't miss it
-      esac
+      write_status blocked
     fi
+    ;;
+  notify-waiting)
+    if [ "$(inflight)" -gt 0 ]; then
+      write_status working
+    else
+      write_status waiting
+    fi
+    ;;
+  notify-ignore)
+    : # informational only; leave the current status alone
     ;;
   error)
     adjust reset
@@ -122,6 +158,7 @@ case "$mode" in
     ;;
   waiting)
     adjust reset
+    refresh_branch
     write_status waiting
     ;;
   *)
