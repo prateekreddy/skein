@@ -2737,6 +2737,17 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         ("PostToolUse", PROBE_TASK_CMD.to_string(), Some("TodoWrite")),
         ("SessionStart", BOOTSTRAP_CMD.to_string(), None),
     ];
+    // Entries a *previous* skein version wired that this one has since replaced/renamed. Purely
+    // additive merging (below) would otherwise leave these stale forever in an already-provisioned
+    // project's settings.json — and here that's not just dead weight: the old single unconditional
+    // `box-status.sh notify` entry (replaced by three matcher-scoped notify-blocked/waiting/ignore
+    // entries, since Notification's payload carries no field saying which type fired) still exists
+    // in any store provisioned before this change, but box-status.sh no longer has a `notify` case
+    // at all — it would now hit the passthrough branch and write a literal `status:"notify"`. Retire
+    // it explicitly so upgrading a long-lived project store self-heals instead of accumulating a
+    // silently-wrong hook forever. Exact-match only, so a user's own hook of the same name is untouched.
+    let obsolete: [(&str, String); 1] = [("Notification", format!("{PROBE_STATUS_CMD} notify"))];
+
     let mut out = existing.clone();
     if !out.is_object() {
         out = json!({});
@@ -2747,6 +2758,17 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         *hooks = json!({});
     }
     let hooks = hooks.as_object_mut().unwrap();
+    for (event, stale_cmd) in &obsolete {
+        if let Some(arr) = hooks.get_mut(*event).and_then(|a| a.as_array_mut()) {
+            arr.retain(|e| {
+                !e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()) == Some(stale_cmd.as_str())
+                    })
+                })
+            });
+        }
+    }
     for (event, cmd, matcher) in entries {
         let arr = hooks.entry(event).or_insert_with(|| json!([]));
         if !arr.is_array() {
@@ -3608,6 +3630,41 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("statusline-command.sh"));
+    }
+
+    #[test]
+    fn settings_with_probe_retires_the_old_unconditional_notify_entry() {
+        // A project store provisioned by a pre-matcher-fix skein has this exact stale entry — no
+        // matcher, calling a `notify` mode box-status.sh no longer implements at all (it would now
+        // fall through to the passthrough branch and write a bogus status:"notify"). Upgrading must
+        // remove it, not just add the three new matcher-scoped entries alongside it.
+        let stale_cmd = format!("{PROBE_STATUS_CMD} notify");
+        let existing = serde_json::json!({
+            "hooks": {
+                "Notification": [ { "hooks": [ { "type": "command", "command": stale_cmd } ] } ]
+            }
+        });
+        let merged = settings_with_probe(&existing);
+        let notif = merged["hooks"]["Notification"].as_array().unwrap();
+        assert_eq!(
+            notif.len(),
+            3,
+            "the stale unconditional entry must be removed, leaving only the 3 matcher-scoped ones"
+        );
+        assert!(
+            notif
+                .iter()
+                .all(|e| e["hooks"][0]["command"] != stale_cmd.as_str()),
+            "stale entry should be gone"
+        );
+        assert!(
+            notif.iter().all(|e| e.get("matcher").is_some()),
+            "every remaining Notification entry must be matcher-scoped"
+        );
+
+        // Idempotent from here on: re-running doesn't reintroduce or duplicate anything.
+        let again = settings_with_probe(&merged);
+        assert_eq!(again["hooks"]["Notification"].as_array().unwrap().len(), 3);
     }
 
     #[test]
