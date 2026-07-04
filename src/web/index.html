@@ -744,6 +744,7 @@ function updateRow(el, b, showRepo) {
 }
 // pause → row-chip label (the fork-detector's verdict; statement/none get no chip)
 const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
+// Full-board re-render, fired on each 2s SSE "boxes" tick.
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
   const counts = {};
@@ -895,8 +896,11 @@ function createSession(box, kind, launchBranch) {
   disco.innerHTML = `<div class="disco-card"><div class="disco-t">session not connected</div><div class="disco-b">click to reconnect</div></div>`;
   disco.addEventListener("click", () => reconnectSession(box, kind));
   host.append(disco);
+  // cursorBlink is OFF on purpose: a blinking cursor doesn't reset its on/off phase on keypress, so
+  // a character that rendered instantly can sit next to a cursor that's mid-blink-off for up to
+  // ~300ms, reading as "my typing lagged" even though nothing did. A solid cursor removes that.
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
-    cursorBlink:true, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
+    cursorBlink:false, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
   // GPU renderer: keeps the agent TUI's constant repaints off the layout/DOM path so keystrokes
   // echo crisply. Fall back to the DOM renderer if WebGL is unavailable or its context is lost.
@@ -935,8 +939,14 @@ function createSession(box, kind, launchBranch) {
   const s = { term, fit, ws, host, box, kind, sid: id, streaming:false, timer:0 };
   sessions.set(id, s);
   const isActive = () => view.mode === "term" && activeSid() === id;
-  ws.onopen = () => { if (isActive()) sendResize(id); if (s.pending) { ws.send(s.pending); s.pending = null; } };
-  ws.onmessage = e => { term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data)); markStreaming(id); };
+  ws.onopen = () => {
+    if (isActive()) sendResize(id);
+    if (s.pending) { ws.send(s.pending); s.pending = null; }
+  };
+  ws.onmessage = e => {
+    term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+    markStreaming(id);
+  };
   ws.onclose = () => { s.dead = true; host.classList.add("dead"); renderTabs(); refreshRow(box); };
   term.onData(d => {
     // sticky Ctrl (armed from the mobile key bar): fold the next char to its control code
@@ -1331,10 +1341,19 @@ function beep() {
     o.start(); o.stop(audioCtx.currentTime + .36);
   } catch {}
 }
+// setFavicon does a synchronous canvas draw + toDataURL PNG encode — real main-thread cost (tens
+// of ms), unlike the near-free DOM writes elsewhere in notify(). notify() runs on every 2s fleet
+// tick regardless of whether anything changed, so without this guard that encode cost was paid every
+// single tick — including every tick where `need` was identical to last time — a periodic
+// main-thread stall that shows up as "typing lags even when the board is calm". Only redraw the
+// favicon when the count actually moves.
+// (document.title stays unconditional: the focus handler below resets it independently of `need`,
+// so it must keep resyncing every tick or it'd stay stuck at "skein" after a tab refocus.)
+let lastNeedCount = -1;
 function notify(snapshot) {
   const need = snapshot.filter(b => ["attn","waiting"].includes(groupOf(b.state))).length;
   document.title = need ? `(${need}) skein · ${need} need you` : "skein";
-  setFavicon(need);
+  if (need !== lastNeedCount) { lastNeedCount = need; setFavicon(need); }
   for (const b of snapshot) {
     const g = groupOf(b.state), was = prevState[b.name];
     if (g !== was && alertsOn && document.hidden) {

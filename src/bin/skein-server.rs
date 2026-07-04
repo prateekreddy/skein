@@ -200,9 +200,14 @@ fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
     })
 }
 
-/// Snapshot of the fleet.
+/// Snapshot of the fleet. `load_views` is blocking (subprocess `sbx ls` + per-box `git` + journal
+/// reads), so it runs on the blocking pool, never inline on an async worker — see the note on
+/// `api_events` for why blocking a worker here would stall concurrent terminal websockets.
 async fn api_boxes() -> Json<Vec<BoxView>> {
-    Json(load_views().unwrap_or_default())
+    let views = tokio::task::spawn_blocking(|| load_views().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    Json(views)
 }
 
 /// The branch-vs-base patch a box last reported (plain text; empty when none yet).
@@ -550,11 +555,22 @@ async fn api_paste_image(
 /// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.
 /// (Roadmap: replace polling with a honker subscription so it's push, not poll.)
 async fn api_events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(2))).map(|_| {
-        let payload = serde_json::to_string(&load_views().unwrap_or_default())
-            .unwrap_or_else(|_| "[]".into());
-        Ok(Event::default().event("boxes").data(payload))
-    });
+    // `.then` (async), NOT `.map` (sync): `load_views` shells out to `sbx ls` and a per-box `git`
+    // subprocess plus journal/diff reads — 1-2s of synchronous work for a busy fleet. Running it
+    // inline on the async worker (as `.map` did) blocks that worker for the whole computation every
+    // 2s, and any terminal websocket scheduled on the same worker is starved for that window. That
+    // was the "typing lags only when the box is idle" freeze: mid-stream the output flood masks the
+    // gap, but at rest a lone keystroke's echo waits out the stall. Offload to the blocking pool so
+    // the async runtime stays free to pump the terminal sockets — matching every other blocking
+    // `skein::`/`load_*` call in this file.
+    let stream =
+        IntervalStream::new(tokio::time::interval(Duration::from_secs(2))).then(|_| async {
+            let views = tokio::task::spawn_blocking(|| load_views().unwrap_or_default())
+                .await
+                .unwrap_or_default();
+            let payload = serde_json::to_string(&views).unwrap_or_else(|_| "[]".into());
+            Ok(Event::default().event("boxes").data(payload))
+        });
     Sse::new(stream)
 }
 
@@ -749,7 +765,9 @@ async fn terminal_session(
                 None => break, // PTY closed (child exited)
             },
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Binary(b))) => { let _ = in_tx.send(b).await; }
+                Some(Ok(Message::Binary(b))) => {
+                    let _ = in_tx.send(b).await;
+                }
                 Some(Ok(Message::Text(t))) => {
                     // resize control frame: {"resize":{"cols":N,"rows":M}}
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {

@@ -199,3 +199,24 @@ skein **reads** the shared store the sandboxes already maintain (`sandboxes.json
 `mailbox/`) and **drives** `sbx` / `git` / `gh`. It owns no state the bootstrap owns,
 and degrades gracefully when `sbx` isn't on PATH (e.g. read-only `ls` from anywhere
 with `$SKEIN_REGISTRY` set).
+
+## Terminal responsiveness (an invariant worth guarding)
+
+The embedded terminal shares skein-server's async runtime with everything else: the SSE
+fleet stream, every JSON handler, and the WS↔PTY bridge are all tasks on the same tokio
+workers. So **no request handler or stream may run blocking work inline** — anything that
+shells out (`sbx`, `git`, `gh`) or touches the filesystem must go through
+`tokio::task::spawn_blocking`. A single inline blocking call freezes its worker for the
+whole duration and starves any terminal websocket scheduled on it: keystrokes stop echoing
+until it returns.
+
+The subtle case was the 2s fleet-snapshot tick (`load_views` — `sbx ls` + a per-box `git`,
+1-2s for a busy fleet). Run inline it caused a periodic "typing lags **only when the box is
+idle**" freeze — mid-stream the output flood hid the gap, but at rest a lone keystroke's
+echo waited out the stall. Every `skein::` call in `skein-server.rs` is on `spawn_blocking`
+for this reason; the regression is guarded by
+`slow_fleet_snapshot_does_not_starve_concurrent_requests` in `tests/server.rs` (pins the
+server to one worker, makes `load_views` sleep, and asserts a concurrent request isn't
+blocked). Separately, each accepted connection sets `TCP_NODELAY` (our own accept loop, not
+`axum::serve`) so Nagle's algorithm can't coalesce single-keystroke packets. Both matter:
+the socket must be fed promptly *and* flushed promptly.

@@ -93,3 +93,58 @@ fn server_serves_ui_vendor_and_guards_routes() {
     let (st, _) = http_get(&addr, "/api/boxes/x..y/diff");
     assert_eq!(st, 400, "path-traversal name must be rejected");
 }
+
+/// Regression guard for the "typing lags only when the box is idle" freeze.
+///
+/// The live-fleet snapshot (`load_views` — subprocess `sbx ls` + a per-box `git` + journal/diff
+/// reads, 1-2s for a busy fleet) must run on the blocking pool, never inline on an async worker.
+/// Inline (the original `api_events` `.map` / `api_boxes` body) it froze the worker for the whole
+/// computation every 2s SSE tick, starving any terminal websocket sharing that worker: mid-stream
+/// the output flood hid the gap, but at rest a lone keystroke's echo waited out the stall.
+///
+/// Proven at the HTTP layer — a terminal WS bridge is just another task on the same runtime, so if a
+/// cheap request isn't starved, neither is the socket. Pin the server to ONE async worker thread
+/// (`TOKIO_WORKER_THREADS=1`) so the starvation is deterministic (with the default worker-per-core
+/// pool an inline block on one worker wouldn't reliably starve a task on another), make every
+/// `load_views` sleep ~2s, then race a cheap static asset against an in-flight `/api/boxes`. Inline,
+/// the sole worker is blocked and the asset can't be served until the sleep ends (~2s) → fails;
+/// offloaded via `spawn_blocking`, the worker stays free and it returns in milliseconds.
+#[test]
+fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("TOKIO_WORKER_THREADS", "1") // one async worker → starvation is deterministic
+        .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
+        .env_remove("SKEIN_REGISTRY")
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Put a slow snapshot in-flight on the worker, then time a cheap static asset racing it.
+    let slow_addr = addr.clone();
+    let slow = std::thread::spawn(move || http_get(&slow_addr, "/api/boxes")); // ~2s
+    std::thread::sleep(Duration::from_millis(200)); // let load_views reach its sleep
+    let t0 = Instant::now();
+    let (st, _) = http_get(&addr, "/vendor/xterm.js");
+    let cheap = t0.elapsed();
+    assert_eq!(st, 200);
+    assert!(
+        cheap < Duration::from_millis(1000),
+        "a cheap request was blocked for {cheap:?} while the fleet snapshot ran — load_views is \
+         blocking the sole async worker instead of the blocking pool (the idle-terminal freeze)"
+    );
+    let _ = slow.join();
+}
