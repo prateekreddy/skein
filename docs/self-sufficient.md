@@ -2,7 +2,7 @@
 
 > Status: PROPOSAL (awaiting approval). Goal: a user gives skein a **repo URL** and **GitHub
 > auth**, and gets a working, observable, steerable fleet — with the repo implementing *nothing*
-> for skein's sake. Works toward repo-agnostic *and* agent-agnostic (Claude now, Codex later).
+> for skein's sake. Repo-agnostic with native Claude and Codex runtime adapters.
 
 ## Guiding principle
 
@@ -49,7 +49,11 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
    detect & apply an optional repo store-template/kit.
 3. **Liveness from sbx** — `fleet_running()` parses `sbx ls`; `state()` uses running state for
    live/stopped, falling back to `lastSeen` only if `sbx` is unavailable.
-4. **Turn-state adapter (Claude)** — skein owns `box-status.sh` + `box-task.sh` (embedded via
+4. **Turn-state adapters** — Skein owns the provider-neutral probe contract. Claude maps
+   Notification/TodoWrite lifecycle events; Codex maps PermissionRequest/UserPromptSubmit/PostToolUse
+   and Stop. Both write the same status/task/session/diff/telemetry files. Claude's wiring is merged
+   into project settings and Codex's generated user-level hooks are installed by the kit.
+   The original Claude path uses `box-status.sh` + `box-task.sh` (embedded via
    `include_str!`); installs them into the box and **additively merges** the
    `UserPromptSubmit`/`Stop`/`Notification`/`PostToolUse` entries into the box's `settings.json`
    (preserving the project's own hooks). Idempotent. (Considered alt: host-side transcript tail —

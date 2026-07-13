@@ -1,7 +1,7 @@
 # skein
 
 > See and steer your fleet of agent sandboxes. A thin control surface over `sbx`
-> microVM boxes + the shared `.claude` store — the layer Conductor-likes have but
+> microVM boxes + a mounted shared store — the layer Conductor-likes have but
 > that's missing from the sbx workflow. *Compose, don't reinvent* — see
 > [`ARCHITECTURE.md`](ARCHITECTURE.md); the why is in [`VISION.md`](VISION.md).
 
@@ -36,13 +36,14 @@ scrollback. No model tokens are spent building any of this. Each box also gets a
 uploads it into the box (the agent can't see your clipboard — it runs in the microVM) and types the
 in-box path in for the agent to read.
 
-The signals come from each box's Claude Code hooks (`Stop` / `Notification` → `box-status.sh`,
-`box-diff.sh`, `box-session.sh`; `PostToolUse` on `TodoWrite` → `box-task.sh`) writing the shared
-store; skein only reads and ranks them.
+Signals come through thin runtime adapters writing the same shared contract. Claude maps
+`Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,
+`UserPromptSubmit`, `PostToolUse`, and `Stop`. Both produce the same status, task, session, diff,
+telemetry, mailbox, and handoff files; skein only reads and ranks that provider-neutral data.
 
 More attention helpers, all free unless noted:
 - **One-click continue** — boxes paused on a trivial "shall I proceed?" get a `proceed?` chip; **▸ Continue N**
-  resumes them all in one gesture (headless `claude --continue`, fire-and-forget). Never silent — always
+  resumes them all in one gesture using each box's native runtime, fire-and-forget. Never silent — always
   your click — and a real decision or a permission prompt is never auto-resumed.
 - **Peripheral preview** — every row shows what its box is *doing right now* — the in-progress TodoWrite
   item the agent reports (`box-task.sh`), or its journal's `next …` line as a free fallback — so you can
@@ -57,17 +58,22 @@ More attention helpers, all free unless noted:
   and a conservative safety gate on **Continue N** (a box is held back unless the model says it's routine).
   Off by default because it shares the fleet's rate-limit window; lazy and cached when on.
 
-API: `GET /api/boxes`, `GET /api/events` (SSE), `GET /api/boxes/:name/diff`,
-`GET /api/boxes/:name/session`, `GET /api/boxes/:name/narrate`, `GET /api/collisions`,
-`POST /api/boxes/:name/resume`, `POST /api/resume-batch`, `POST /api/boxes/:name/stop` (sbx stop),
-`POST /api/boxes/:name/destroy` (sbx rm), `GET /api/boxes/:name/terminal` (WebSocket).
-xterm.js is vendored into the binary (served from `/vendor/`), so the terminal works with no CDN —
-important in the firewalled sbx network.
+Each box also gets a **Files** tab — browse its workspace and read files without leaving skein:
+markdown renders (README auto-opens at the root, relative links navigate), images display inline,
+everything else shows as text. Served from the box's host-side workspace, path-traversal hardened.
 
-> Loopback-only by default (`127.0.0.1:7878`); set `$SKEIN_ADDR` to change the bind.
-> The terminal WebSocket rejects unexpected `Origin`s (drive-by / DNS-rebinding guard) — it
-> allows loopback, `*.ts.net`, and `$SKEIN_ALLOWED_ORIGINS`. For remote/mobile use
-> `tailscale serve` (below) rather than exposing the port directly.
+API: `GET /api/{boxes,health,runtimes}`, `GET /api/events` (SSE), `GET /api/boxes/:name/{diff,session,narrate,ship}`,
+`GET /api/boxes/:name/files?path=` + `GET /api/boxes/:name/file?path=` (the Files tab),
+`GET /api/{collisions,repos,settings,mailbox}`, `POST /api/boxes/:name/{resume,stop,destroy,pr,merge,repin,paste-image}`,
+`POST /api/{resume-batch,repos,settings,mailbox,pick-path}`, `GET /api/boxes/:name/terminal` (WebSocket).
+xterm.js and marked.js are vendored into the binary (served from `/vendor/`), so everything works
+with no CDN — important in the firewalled sbx network.
+
+> Loopback-only by default (`127.0.0.1:7878`); set `$SKEIN_ADDR` (e.g. `0.0.0.0:7878`) to bind
+> off-loopback. The terminal WebSocket rejects unexpected `Origin`s (drive-by / DNS-rebinding
+> guard) — it allows loopback, `*.ts.net`, Tailscale IP ranges, and `$SKEIN_ALLOWED_ORIGINS`.
+> For remote/mobile you can either `tailscale serve` (below, keeps the loopback bind) or bind
+> off-loopback and hit the box's tailnet address directly.
 
 ### Remote access (Tailscale)
 
@@ -93,11 +99,28 @@ the keyboard, and **‹ boxes** returns to the fleet without ending the session.
 - **`tailscale funnel` (public internet):** removes the tailnet boundary, so don't use it for
   the terminal without adding an app-level auth token first (not currently implemented).
 
+**Alternative — bind off-loopback directly.** If you'd rather skip `tailscale serve`, bind the
+server to a broader interface with `$SKEIN_ADDR` and reach it at the box's own tailnet address:
+
+```sh
+SKEIN_ADDR=0.0.0.0:7878 ./target/release/skein-server   # all interfaces
+# or SKEIN_ADDR=<tailnet-ip>:7878 to bind just the tailnet interface
+```
+
+Then open `http://<machine>.<tailnet>.ts.net:7878` or `http://<tailnet-ip>:7878`. The origin guard
+trusts `*.ts.net` **and** Tailscale IP ranges (CGNAT `100.64.0.0/10`, `fd7a:115c:a1e0::/48`), so the
+embedded terminals work over the raw tailnet address with no per-host config — the tailnet stays the
+auth boundary. (A non-tailnet LAN/public IP is still rejected; list it in `$SKEIN_ALLOWED_ORIGINS`
+if you really mean to expose it there.) `tailscale serve` is still preferred where you can use it —
+it keeps the bind on loopback and gives you real HTTPS.
+
 ## CLI (terminal client, same core)
 
 ```sh
 skein                 # = skein ls — the fleet, live boxes first
 skein attach <box>    # reconnect (runs: sbx run --name <box>)
+skein attach <box> --agent codex --handoff   # Codex takes over a Claude box
+skein attach <box> --agent claude --handoff  # Claude takes over a Codex box
 skein version · help
 ```
 
@@ -154,6 +177,22 @@ your **host SSH agent** into the box (the private key stays on the host); set an
 Settings and skein `ssh-add`s it so it's available to forward. `skein add` warns up-front if a repo's
 `origin` is SSH so you can switch it to HTTPS or load the key.
 
+## Claude and Codex runtimes
+
+Choose the default runtime when adding a repo, override it when launching a box, or use the cockpit's
+`↔` action to hand the current sandbox to another supported runtime. Skein keeps a separate tmux and
+native conversation for each provider, so switching back resumes that provider's own history.
+
+Native transcripts are provider-specific and are not converted. A takeover shares the exact sandbox,
+branch, commits, and uncommitted working tree, then injects a durable brief containing the active task,
+last outcome, journal, diff summary, and changed files. The target CLI must already exist and be
+authenticated in that sandbox image; Skein deliberately does not install both large agent CLIs into
+every box. If it is absent, the terminal explains the missing capability and leaves a shell open.
+
+Skein installs `jq` as its one required probe dependency. `tmux` is installed only when persistent
+sessions are enabled. Probe scripts and handoff data live once in the mounted shared store, not as a
+copy in every box. `GET /api/health` and the cockpit banner make a failed dependency/hook setup visible.
+
 ## Configuration
 
 `skein doctor` reports the resolved registry, bind address, and whether `sbx`/`git`/`gh`
@@ -177,15 +216,17 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
 | `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}`/`{name}` substituted; relative to `$SKEIN_REPO`. **Optional**: unset, skein builds the launch itself (below), so the repo needs no launch script | _(native builder)_ |
 | `SKEIN_KIT` | _(legacy single-repo fallback)_ sbx kit for the native launch when the box isn't in `repos.json`; managed repos use skein's own embedded kit | — |
-| `SKEIN_AGENT` | sbx agent positional override (the per-runtime seam). For a managed repo, defaults to skein's tmux `skein-agent` wrapper; set to `claude` if sbx rejects a path positional or the image lacks tmux | _(wrapper)_ |
+| `SKEIN_AGENT` | sbx runtime override; must match a registered Skein runtime adapter | repo/default runtime |
 | `SKEIN_STORE` | _(legacy single-repo fallback)_ store to mount when the box isn't in `repos.json` | `$SKEIN_REGISTRY`'s dir |
 | `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein` |
 | `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein-shell` |
 | `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | `sbx ls --json` |
 | `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
 | `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; halts the sandbox to free compute (resume via attach). Non-destructive | `sbx stop {name}` |
-| `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost). Legacy fallback `SKEIN_ARCHIVE_CMD` | `sbx rm -f {name}` |
-| `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}` substituted | `sbx run --name {name} -- --continue --print {prompt}` |
+| `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost) | `sbx rm -f {name}` |
+| `SKEIN_MERGE_CMD` | **Merge** — override the whole merge command (`{name}` substituted) | `gh pr merge <branch>` |
+| `SKEIN_MERGE_METHOD` | merge strategy flag passed to `gh pr merge` | `--squash` |
+| `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}`/`{runtime}` substituted | runtime adapter's native headless resume |
 | `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |
 | `SKEIN_AI_MODEL` | model for AI calls when `SKEIN_AI` is on | `claude-haiku-4-5` |
 | `SKEIN_CLAUDE_BIN` | path to the `claude` CLI (for AI calls) | `claude` |

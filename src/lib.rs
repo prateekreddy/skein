@@ -11,6 +11,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Load a local `.env` (searched from the cwd upward) so the registry/repo paths and `*_CMD`
 /// templates needn't be passed on every invocation. Variables already set in the real
@@ -93,6 +94,10 @@ pub struct BoxView {
     /// Lets the cockpit group rows by repo once more than one is managed.
     #[serde(default)]
     pub repo: String,
+    /// Runtime configured for this sandbox (`claude` or `codex`). The cockpit uses this as the
+    /// default agent and offers the other runtime as an explicit takeover target.
+    #[serde(default = "default_agent")]
+    pub agent: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffStat>,
     /// one-line gist of the box's last reported signal (the inbox headline) — the blocking
@@ -105,6 +110,10 @@ pub struct BoxView {
     pub task: Option<String>,
     /// why the turn ended (the fork-detector) — lets the inbox label & batch the trivial asks.
     pub pause: Pause,
+    /// probe wiring health: "" = fine; "never" = the sandbox is Running but no probe has EVER
+    /// reported (no heartbeat, no status file) — hooks dark for this box; the cockpit badges it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hook_health: String,
 }
 
 impl Sandbox {
@@ -185,7 +194,11 @@ pub fn valid_name(name: &str) -> bool {
 /// so a concurrent reader sees either the old or the new whole file, never a truncated one.
 /// `dir` must be `path`'s parent (same filesystem) for the rename to be atomic.
 fn write_atomic(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = dir.join(format!(".skein.tmp.{}", std::process::id()));
+    // pid + per-call counter: a pid-only temp name let two threads of the same process writing
+    // into the same dir clobber each other's temp mid-write and rename the wrong bytes into place.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".skein.tmp.{}.{n}", std::process::id()));
     fs::write(&tmp, bytes).map_err(|e| format!("writing temp: {e}"))?;
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
@@ -204,10 +217,9 @@ pub fn locate_registry() -> Result<PathBuf, String> {
             return Ok(PathBuf::from(p).join("sandboxes.json"));
         }
     }
-    if let Ok(out) = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
+    let mut command = Command::new("git");
+    command.args(["rev-parse", "--show-toplevel"]);
+    if let Ok(out) = bounded_output(&mut command, "git rev-parse", Duration::from_secs(5)) {
         if out.status.success() {
             let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if let Some(parent) = PathBuf::from(&top).parent() {
@@ -297,6 +309,15 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 .unwrap_or_default();
             // The repo this box belongs to (if any), used for grouping + branch fallback.
             let repo = repo_for_box(&name);
+            // Runtime resolution mirrors branch resolution: sbx knows what image/agent created the
+            // box; the launch spec preserves an explicit per-box override; the repo is the default.
+            let agent = s
+                .map(|x| x.agent.clone())
+                .filter(|a| valid_runtime(a))
+                .or_else(|| repo.as_ref().and_then(|rp| launch_spec_agent(rp, &name)))
+                .or_else(|| repo.as_ref().map(|rp| rp.agent.clone()))
+                .filter(|a| valid_runtime(a))
+                .unwrap_or_else(default_agent);
             // Branch resolution, most-authoritative first. For a repo (clone-mode) box, `dir` on the
             // host is the *shared* clone (on its own branch, often master) — NOT the box's private
             // clone — so `git_branch_for(dir)` would mislabel every box. Prefer the launch spec skein
@@ -367,6 +388,25 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             } else {
                 classify_message(signal_text.as_deref().unwrap_or(""), blocked)
             };
+            // Hook-health: distinguish never-wired probes from sessions still running an older
+            // box-side contract. Silence alone is normal between lifecycle events; revision drift
+            // is not, because the old session may emit a payload shape the new host misreads.
+            let hook_health = if live == Some(Liveness::Running) {
+                let store = store_for_box(&name);
+                let dark = store.as_ref().is_none_or(|st| {
+                    !st.join("hook-log").join(format!("{name}.jsonl")).exists()
+                        && !st.join("status").join(format!("{name}.json")).exists()
+                });
+                if dark {
+                    "never".to_string()
+                } else if store.as_ref().is_some_and(|st| probe_is_stale(st, &name)) {
+                    "stale".to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             BoxView {
                 name: name.clone(),
                 state,
@@ -374,11 +414,13 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 branch,
                 age: sb.age(),
                 dir: shorten(&dir),
-                repo: repo.map(|rp| rp.id).unwrap_or_default(),
+                repo: repo.as_ref().map(|rp| rp.id.clone()).unwrap_or_default(),
+                agent,
                 diff: host_diffstat(&name, &dir),
                 headline,
                 task,
                 pause,
+                hook_health,
             }
         })
         .collect();
@@ -389,6 +431,19 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             .then(a.name.cmp(&b.name))
     });
     Ok(views)
+}
+
+fn probe_is_stale(store: &Path, name: &str) -> bool {
+    let current = fs::read_to_string(store.join("skein/probe-revision"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let booted = fs::read_to_string(store.join("skein/boot").join(format!("{name}.json")))
+        .ok()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .and_then(|value| value.get("probe_revision")?.as_str().map(str::to_string))
+        .filter(|value| !value.is_empty());
+    current.is_some() && current != booted
 }
 
 /// What sbx itself reports about a box's run state (from `sbx ls`).
@@ -411,20 +466,111 @@ pub struct SbxBox {
     pub dir: String,
 }
 
-/// Enumerate the fleet from sbx. `None` when sbx can't be consulted (not installed, errored, or
-/// unparseable) — callers then fall back to the registry. Override with `$SKEIN_LS_CMD` (run via
-/// `sh -c`; must emit the `sbx ls --json` shape).
+/// 1.5s micro-cache over `sbx ls`: `load_views` used to re-run it once at the top and then again
+/// via `lookup_dir` for every box the registry didn't know (`read_journal` → `lookup_dir` →
+/// `fleet_boxes`) — an N-box fleet paid 1+N subprocess spawns per 2s tick, times open browser tabs.
+static FLEET_CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<Vec<SbxBox>>)>> =
+    std::sync::Mutex::new(None);
+
+/// Enumerate the fleet from sbx. `None` when sbx can't be consulted (not installed, errored,
+/// unparseable, or hung past the timeout) — callers then fall back to the registry. Override with
+/// `$SKEIN_LS_CMD` (run via `sh -c`; must emit the `sbx ls --json` shape). Micro-cached — see
+/// FLEET_CACHE.
 pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
-    let output = match env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) {
-        Some(c) => Command::new("sh").arg("-c").arg(c).output(),
-        None => Command::new("sbx").args(["ls", "--json"]).output(),
+    // cfg!(test): tests swap $SKEIN_LS_CMD per case and run in parallel — a process-wide cache
+    // would serve one test's fleet to another. Prod (server/CLI) keeps it.
+    if !cfg!(test) {
+        let cache = FLEET_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, boxes)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_millis(1500) {
+                return boxes.clone();
+            }
+        }
     }
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let boxes = parse_boxes(&String::from_utf8_lossy(&output.stdout));
-    (!boxes.is_empty()).then_some(boxes)
+    let mut cmd = match env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) {
+        Some(c) => {
+            let mut sh = Command::new("sh");
+            sh.arg("-c").arg(c);
+            sh
+        }
+        None => {
+            let mut sbx = Command::new("sbx");
+            sbx.args(["ls", "--json"]);
+            sbx
+        }
+    };
+    // Bounded: a wedged sbx daemon used to hang this .output() forever — and with it every
+    // fleet-snapshot task, accumulating stuck blocking threads until the board went permanently
+    // blank. A timeout degrades to the registry fallback instead.
+    let boxes = output_with_timeout(&mut cmd, Duration::from_secs(5))
+        .filter(|o| o.status.success())
+        .map(|o| parse_boxes(&String::from_utf8_lossy(&o.stdout)))
+        .filter(|b| !b.is_empty());
+    *FLEET_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), boxes.clone()));
+    boxes
+}
+
+/// Run a command with a hard wall-clock bound: kill + reap on expiry, `None` on timeout/spawn
+/// failure. Pipes are drained on their own threads so a chatty child can't fill the pipe buffer
+/// and deadlock against the polling loop. Dependency-free; callers are all off the async runtime
+/// (blocking pool / CLI).
+fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::Output> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out_pipe = child.stdout.take()?;
+    let mut err_pipe = child.stderr.take()?;
+    let out_h = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = out_pipe.read_to_end(&mut v);
+        v
+    });
+    let err_h = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = err_pipe.read_to_end(&mut v);
+        v
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    Some(std::process::Output {
+        status,
+        stdout: out_h.join().unwrap_or_default(),
+        stderr: err_h.join().unwrap_or_default(),
+    })
+}
+
+fn bounded_output(
+    cmd: &mut Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    output_with_timeout(cmd, timeout).ok_or_else(|| {
+        format!(
+            "{label} failed to start or exceeded the {}s timeout",
+            timeout.as_secs()
+        )
+    })
 }
 
 /// One box's run-state from sbx — a single-box view of [`fleet_boxes`].
@@ -534,10 +680,9 @@ fn git_branch_for(dir: &str) -> Option<String> {
     if dir.is_empty() {
         return None;
     }
-    let out = Command::new("git")
-        .args(["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
+    let out = bounded_output(&mut command, "git branch", Duration::from_secs(5)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -874,11 +1019,219 @@ pub struct Repo {
     pub work: String,   // host working clone
     pub store: String,  // host shared `.claude` store
     #[serde(default = "default_agent")]
-    pub agent: String, // "claude" (codex later)
+    pub agent: String, // runtime adapter id (see `supported_runtimes`)
 }
 
 fn default_agent() -> String {
     "claude".into()
+}
+
+/// Public runtime metadata consumed by the CLI and cockpit. Runtime choices are deliberately
+/// discovered from the core instead of duplicated in every client; adding another adapter therefore
+/// makes it appear everywhere without another round of provider-specific UI conditionals.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeInfo {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub executable: &'static str,
+    pub supports_resume: bool,
+    pub supports_handoff: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthCheck {
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthReport {
+    pub ok: bool,
+    pub registry: HealthCheck,
+    pub sbx: HealthCheck,
+    pub git: HealthCheck,
+    pub gh: HealthCheck,
+    pub probes: HealthCheck,
+    pub mailbox: HealthCheck,
+    pub stale_boxes: Vec<String>,
+    pub runtimes: Vec<RuntimeInfo>,
+}
+
+/// Everything Skein needs to start or resume a native agent process. Lifecycle hook translation is
+/// kept beside this registry below, while launch, attach, takeover, validation, health, and UI all
+/// consume these definitions. Provider quirks belong here, not at their call sites.
+struct RuntimeAdapter {
+    info: RuntimeInfo,
+    /// Extra arguments passed through `sbx run` to the agent on first launch.
+    launch_args: &'static [&'static str],
+    /// Shell command used when creating a provider-specific persistent tmux session.
+    interactive_resume: &'static str,
+    /// Headless command run inside an existing box; `{prompt}` is replaced with a shell-quoted value.
+    headless_resume: &'static str,
+}
+
+static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
+    RuntimeAdapter {
+        info: RuntimeInfo {
+            id: "claude",
+            label: "Claude",
+            executable: "claude",
+            supports_resume: true,
+            supports_handoff: true,
+        },
+        launch_args: &[],
+        interactive_resume: "claude --continue",
+        headless_resume: "claude --continue --print {prompt}",
+    },
+    RuntimeAdapter {
+        info: RuntimeInfo {
+            id: "codex",
+            label: "Codex",
+            executable: "codex",
+            supports_resume: true,
+            supports_handoff: true,
+        },
+        // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
+        // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
+        launch_args: &["--dangerously-bypass-hook-trust"],
+        interactive_resume: "codex resume --last --dangerously-bypass-hook-trust || codex --dangerously-bypass-hook-trust",
+        headless_resume: "codex exec resume --last --dangerously-bypass-hook-trust {prompt} || codex exec --dangerously-bypass-hook-trust {prompt}",
+    },
+];
+
+fn runtime_adapter(id: &str) -> Option<&'static RuntimeAdapter> {
+    RUNTIME_ADAPTERS
+        .iter()
+        .find(|runtime| runtime.info.id == id)
+}
+
+pub fn supported_runtimes() -> Vec<RuntimeInfo> {
+    RUNTIME_ADAPTERS
+        .iter()
+        .map(|runtime| runtime.info.clone())
+        .collect()
+}
+
+pub fn valid_runtime(id: &str) -> bool {
+    runtime_adapter(id).is_some()
+}
+
+fn program_on_path(name: &str) -> bool {
+    env::var_os("PATH").is_some_and(|path| {
+        env::split_paths(&path).any(|dir| {
+            let candidate = dir.join(name);
+            candidate.is_file()
+        })
+    })
+}
+
+/// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
+/// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
+pub fn health_report() -> HealthReport {
+    let registry = match load_registry() {
+        Ok((boxes, path)) => HealthCheck {
+            ok: true,
+            detail: format!("{} ({} boxes)", path.display(), boxes.len()),
+        },
+        Err(error) => HealthCheck {
+            ok: false,
+            detail: error,
+        },
+    };
+    let fleet = fleet_boxes();
+    let sbx = HealthCheck {
+        ok: program_on_path("sbx") && fleet.is_some(),
+        detail: match &fleet {
+            Some(boxes) => format!("available ({} boxes)", boxes.len()),
+            None if program_on_path("sbx") => "installed, but `sbx ls` failed or timed out".into(),
+            None => "not found on PATH".into(),
+        },
+    };
+    let tool = |name: &str, required: bool| HealthCheck {
+        ok: program_on_path(name) || !required,
+        detail: if program_on_path(name) {
+            "available".into()
+        } else if required {
+            "not found on PATH".into()
+        } else {
+            "not found (optional)".into()
+        },
+    };
+    let git = tool("git", true);
+    let gh = tool("gh", false);
+
+    let repos = load_repos();
+    let mut probe_errors = Vec::new();
+    let mut mailbox_errors = Vec::new();
+    for repo in &repos {
+        let store = Path::new(&repo.store);
+        for relative in [
+            "skein/probe-revision",
+            "skein/runtimes.tsv",
+            "skein/bin/box-status.sh",
+            "skein/bin/mailbox.sh",
+        ] {
+            if !store.join(relative).is_file() {
+                probe_errors.push(format!("{} missing {relative}", repo.id));
+            }
+        }
+        if !store.join("mailbox").is_dir() {
+            mailbox_errors.push(format!("{} mailbox directory missing", repo.id));
+        }
+        let boot_dir = store.join("skein/boot");
+        if let Ok(entries) = fs::read_dir(boot_dir) {
+            for path in entries.flatten().map(|entry| entry.path()) {
+                let jq_available = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .and_then(|value| value.get("jq")?.as_bool());
+                if jq_available == Some(false) {
+                    mailbox_errors.push(format!(
+                        "{} is missing jq",
+                        path.file_stem().and_then(|s| s.to_str()).unwrap_or("box")
+                    ));
+                }
+            }
+        }
+    }
+    let probes = HealthCheck {
+        ok: probe_errors.is_empty(),
+        detail: if probe_errors.is_empty() {
+            format!("installed for {} managed repos", repos.len())
+        } else {
+            probe_errors.join("; ")
+        },
+    };
+    let mailbox = HealthCheck {
+        ok: mailbox_errors.is_empty(),
+        detail: if mailbox_errors.is_empty() {
+            "shared stores and jq available in reporting boxes".into()
+        } else {
+            mailbox_errors.join("; ")
+        },
+    };
+    let stale_boxes = load_views()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|view| view.hook_health == "stale")
+        .map(|view| view.name)
+        .collect::<Vec<_>>();
+    let ok = registry.ok && sbx.ok && git.ok && probes.ok && mailbox.ok && stale_boxes.is_empty();
+    HealthReport {
+        ok,
+        registry,
+        sbx,
+        git,
+        gh,
+        probes,
+        mailbox,
+        stale_boxes,
+        runtimes: supported_runtimes(),
+    }
+}
+
+fn resolve_runtime(id: &str) -> &'static RuntimeAdapter {
+    runtime_adapter(id).unwrap_or(&RUNTIME_ADAPTERS[0])
 }
 
 /// skein's home dir (`$SKEIN_HOME`, else `~/.skein`): holds `repos.json`, the embedded `kit/`, and
@@ -968,10 +1321,9 @@ pub fn ensure_ssh_key() -> Result<(), String> {
     if !Path::new(&expanded).exists() {
         return Err(format!("ssh key not found: {expanded}"));
     }
-    let out = Command::new("ssh-add")
-        .arg(&expanded)
-        .output()
-        .map_err(|e| format!("ssh-add: {e} (is an ssh-agent running? $SSH_AUTH_SOCK)"))?;
+    let mut command = Command::new("ssh-add");
+    command.arg(&expanded);
+    let out = bounded_output(&mut command, "ssh-add", Duration::from_secs(15))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -1006,22 +1358,47 @@ pub fn load_config() -> Config {
 
 /// Persist skein's app settings to `~/.skein/config.json`.
 pub fn save_config(c: &Config) -> Result<(), String> {
+    if !valid_runtime(&c.default_agent) {
+        return Err(format!("unsupported default runtime {:?}", c.default_agent));
+    }
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?;
     write_atomic(&config_json(), &home, &bytes)
 }
 
-/// Every repo skein manages (empty if none added yet / file absent or malformed).
+/// 1s micro-cache over `repos.json`: a single `load_views` pass consults the repo list dozens of
+/// times per box (store_for_box, current_status, current_task, …) and each SSE tick repeats that
+/// per open browser tab — hundreds of disk reads every 2s on a busy fleet, all returning the same
+/// bytes. Cleared by `save_repos` so a mutation is visible immediately.
+static REPOS_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<Repo>)>> =
+    std::sync::Mutex::new(None);
+
+/// Every repo skein manages (empty if none added yet / file absent or malformed). Micro-cached —
+/// see REPOS_CACHE.
 pub fn load_repos() -> Vec<Repo> {
-    fs::read_to_string(repos_json())
+    // cfg!(test): unit tests point $SKEIN_HOME at per-test temp dirs and run in parallel — a
+    // process-wide cache would leak one test's repo list into the next. Prod (server/CLI) keeps it.
+    if !cfg!(test) {
+        let cache = REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, repos)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_secs(1) {
+                return repos.clone();
+            }
+        }
+    }
+    let repos = fs::read_to_string(repos_json())
         .ok()
         .and_then(|t| serde_json::from_str::<Vec<Repo>>(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), repos.clone()));
+    repos
 }
 
 /// Persist the repo list to `~/.skein/repos.json` (pretty, atomic).
 pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
+    *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None; // mutation → drop the micro-cache
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(repos).map_err(|e| e.to_string())?;
@@ -1055,13 +1432,25 @@ pub fn repo_for_box(name: &str) -> Option<Repo> {
 /// Host-readable and authoritative for a clone-mode box (whose private clone isn't on the host), so
 /// the board can show the box's real branch — including a slashed one the name slug would have flattened.
 fn launch_spec_branch(repo: &Repo, name: &str) -> Option<String> {
+    launch_spec(repo, name)?
+        .get("branch")
+        .and_then(|b| b.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
+fn launch_spec(repo: &Repo, name: &str) -> Option<serde_json::Value> {
     let p = Path::new(&repo.store)
         .join("skein")
         .join("launch")
         .join(format!("{name}.json"));
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
-    v.get("branch")
-        .and_then(|b| b.as_str())
+    serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
+}
+
+fn launch_spec_agent(repo: &Repo, name: &str) -> Option<String> {
+    launch_spec(repo, name)?
+        .get("agent")
+        .and_then(|a| a.as_str())
         .map(str::to_string)
         .filter(|s| !s.is_empty())
 }
@@ -1119,10 +1508,9 @@ fn is_ssh_url(s: &str) -> bool {
 
 /// The `origin` URL of the clone at `work`, if any.
 fn remote_origin_url(work: &str) -> Option<String> {
-    let out = Command::new("git")
-        .args(["-C", work, "remote", "get-url", "origin"])
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(["-C", work, "remote", "get-url", "origin"]);
+    let out = bounded_output(&mut command, "git remote", Duration::from_secs(5)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1214,6 +1602,18 @@ pub fn add_repo(
     agent: Option<&str>,
     store: Option<&str>,
 ) -> Result<Repo, String> {
+    if let Some(runtime) = agent.map(str::trim).filter(|value| !value.is_empty()) {
+        if !valid_runtime(runtime) {
+            return Err(format!(
+                "unsupported runtime {runtime:?}; available: {}",
+                supported_runtimes()
+                    .iter()
+                    .map(|r| r.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
     let id = id
         .map(|s| s.to_string())
         .unwrap_or_else(|| repo_id_from_source(source));
@@ -1242,11 +1642,9 @@ pub fn add_repo(
                 let _ = ensure_ssh_key();
             }
             fs::create_dir_all(work.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
-            let out = Command::new("git")
-                .args(["clone", source])
-                .arg(&work)
-                .output()
-                .map_err(|e| format!("git clone: {e}"))?;
+            let mut command = Command::new("git");
+            command.args(["clone", source]).arg(&work);
+            let out = bounded_output(&mut command, "git clone", Duration::from_secs(300))?;
             if !out.status.success() {
                 return Err(format!(
                     "git clone failed: {}",
@@ -1298,10 +1696,9 @@ pub fn pull_repo(id: &str) -> Result<String, String> {
     if remote_origin_url(&repo.work).is_none() {
         return Err("this repo has no `origin` remote to pull from".into());
     }
-    let out = Command::new("git")
-        .args(["-C", &repo.work, "pull", "--ff-only"])
-        .output()
-        .map_err(|e| format!("git pull: {e}"))?;
+    let mut command = Command::new("git");
+    command.args(["-C", &repo.work, "pull", "--ff-only"]);
+    let out = bounded_output(&mut command, "git pull", Duration::from_secs(120))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.trim();
@@ -1332,10 +1729,9 @@ pub fn ensure_gh_secret() -> Result<(), String> {
     if env::var_os("SKEIN_NO_GH_SECRET").is_some() || !cfg.seed_gh_secret {
         return Ok(());
     }
-    let token = Command::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .map_err(|e| format!("gh auth token: {e}"))?;
+    let mut token_command = Command::new("gh");
+    token_command.args(["auth", "token"]);
+    let token = bounded_output(&mut token_command, "gh auth token", Duration::from_secs(15))?;
     if !token.status.success() {
         return Err("gh auth token failed (run `gh auth login` on the host)".into());
     }
@@ -1348,10 +1744,13 @@ pub fn ensure_gh_secret() -> Result<(), String> {
     if force {
         args.push("-f");
     }
-    let out = Command::new("sbx")
-        .args(&args)
-        .output()
-        .map_err(|e| format!("sbx secret set: {e}"))?;
+    let mut secret_command = Command::new("sbx");
+    secret_command.args(&args);
+    let out = bounded_output(
+        &mut secret_command,
+        "sbx secret set",
+        Duration::from_secs(30),
+    )?;
     if out.status.success() {
         return Ok(());
     }
@@ -1397,6 +1796,13 @@ pub fn ensure_store(store: &Path) -> Result<(), String> {
         "tasks",
         "journals",
         "telemetry",
+        // durable Claude <-> Codex takeover briefs plus one-shot per-runtime pending copies
+        "handoffs",
+        // narrative signal per box (box-session.sh): the headline / fork-detector / digest source
+        "sessions",
+        // per-box hook heartbeats (every probe appends one line per firing) — how the cockpit
+        // distinguishes "hooks broken" from "box quiet"; see hook_health in load_views
+        "hook-log",
         "skein/launch",
         "skein/bin",
         "memory",
@@ -1429,12 +1835,17 @@ fn write_if_absent(path: &Path, body: &str) {
 /// Record, for box `name`, what its kit startup needs (branch + agent) at
 /// `<store>/skein/launch/<name>.json`. The kit finds this file (the store is mounted) and checks out
 /// the branch — our env-free channel into the box, since `sbx run --env` is unconfirmed.
-fn write_launch_spec(name: &str, branch: &str, repo: &Repo) -> Result<(), String> {
+fn write_launch_spec_for_agent(
+    name: &str,
+    branch: &str,
+    repo: &Repo,
+    agent: &str,
+) -> Result<(), String> {
     let dir = Path::new(&repo.store).join("skein").join("launch");
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let body = serde_json::json!({
         "branch": branch,
-        "agent": repo.agent,
+        "agent": agent,
         "install_tmux": load_config().install_tmux,
     });
     let bytes = serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?;
@@ -1458,13 +1869,21 @@ pub fn repin_branch(name: &str, branch: &str) -> Result<(), String> {
         return Err("branch is empty".into());
     }
     let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
-    write_launch_spec(name, branch, &repo)
+    let agent = launch_spec_agent(&repo, name).unwrap_or_else(|| repo.agent.clone());
+    write_launch_spec_for_agent(name, branch, &repo, &agent)
 }
 
 /// The host shell command that launches a new box for `branch`. Override with
 /// $SKEIN_LAUNCH_CMD (a template; `{branch}` is substituted); default assumes
 /// `setup-sandbox.sh` is on PATH.
 pub fn launch_command(name: &str, branch: &str) -> String {
+    launch_command_with_agent(name, branch, None)
+}
+
+/// Build a launch command with an optional per-box runtime override. The repo's configured agent
+/// remains the default; the cockpit uses this seam when the New box dialog explicitly selects
+/// Claude or Codex.
+pub fn launch_command_with_agent(name: &str, branch: &str, agent: Option<&str>) -> String {
     if let Ok(t) = env::var("SKEIN_LAUNCH_CMD") {
         if !t.is_empty() {
             return t
@@ -1472,7 +1891,7 @@ pub fn launch_command(name: &str, branch: &str) -> String {
                 .replace("{name}", &sh_quote(name));
         }
     }
-    native_launch_command(name, branch)
+    native_launch_command(name, branch, agent)
 }
 
 /// skein's own launch command, used when `$SKEIN_LAUNCH_CMD` is unset — so a box can be created
@@ -1483,15 +1902,15 @@ pub fn launch_command(name: &str, branch: &str) -> String {
 /// seam; `kit` (`$SKEIN_KIT`, resolved under `$SKEIN_REPO`) wires the shared store into the clone and
 /// runs the bootstrap; `store` (`$SKEIN_STORE`, else the store skein already reads) is mounted so the
 /// kit can link it. Runs with cwd `$SKEIN_REPO`, so `.` is the repo workspace.
-fn native_launch_command(name: &str, branch: &str) -> String {
+fn native_launch_command(name: &str, branch: &str, agent_override: Option<&str>) -> String {
     // Repo-managed path: if the box belongs to a registered repo, build entirely from `repos.json`
     // + skein's own kit — no `SKEIN_REPO`/`SKEIN_KIT` env, no repo-side script.
     if let Some(repo) = repo_for_box(name) {
-        return repo_launch_command(name, &repo, branch);
+        return repo_launch_command_as(name, &repo, branch, agent_override);
     }
-    let agent = env::var("SKEIN_AGENT")
-        .ok()
-        .filter(|s| !s.is_empty())
+    let agent = agent_override
+        .map(str::to_string)
+        .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "claude".into());
     let mut parts: Vec<String> = vec!["sbx".into(), "run".into(), "--clone".into()];
     if let Some(kit) = env::var("SKEIN_KIT").ok().filter(|s| !s.is_empty()) {
@@ -1504,6 +1923,11 @@ fn native_launch_command(name: &str, branch: &str) -> String {
     parts.push(".".into()); // the repo workspace (cwd is $SKEIN_REPO)
     if let Some(store) = launch_store() {
         parts.push(sh_quote(&store));
+    }
+    let runtime = resolve_runtime(&agent);
+    if !runtime.launch_args.is_empty() {
+        parts.push("--".into());
+        parts.extend(runtime.launch_args.iter().map(|arg| (*arg).to_string()));
     }
     parts.join(" ")
 }
@@ -1525,7 +1949,12 @@ fn native_launch_command(name: &str, branch: &str) -> String {
 /// non-persistent session. Needs a way to boot the claude *image* without `sbx run` auto-starting
 /// claude (so we can `exec` the tmux-wrapped agent like [`attach_argv`] does); revisit once sbx's
 /// agent/boot model is confirmed to allow it.
-fn repo_launch_command(name: &str, repo: &Repo, branch: &str) -> String {
+fn repo_launch_command_as(
+    name: &str,
+    repo: &Repo,
+    branch: &str,
+    agent_override: Option<&str>,
+) -> String {
     // The real branch (may contain `/`, e.g. feat/auth) comes from the caller; the box *name* is its
     // slug. Fall back to the name's slug only if the caller didn't pass one (e.g. a bare relaunch).
     let branch = if branch.trim().is_empty() {
@@ -1539,16 +1968,16 @@ fn repo_launch_command(name: &str, repo: &Repo, branch: &str) -> String {
     if let Err(e) = ensure_store(Path::new(&repo.store)) {
         eprintln!("skein: ensure_store: {e}");
     }
-    if let Err(e) = write_launch_spec(name, &branch, repo) {
-        eprintln!("skein: write_launch_spec: {e}");
-    }
     let kit = skein_home().join("kit");
-    let agent = env::var("SKEIN_AGENT")
-        .ok()
-        .filter(|s| !s.is_empty())
+    let agent = agent_override
+        .map(str::to_string)
+        .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
         .or_else(|| (!repo.agent.is_empty()).then(|| repo.agent.clone()))
         .unwrap_or_else(|| "claude".into());
-    [
+    if let Err(e) = write_launch_spec_for_agent(name, &branch, repo, &agent) {
+        eprintln!("skein: write_launch_spec: {e}");
+    }
+    let mut parts = vec![
         "sbx".to_string(),
         "run".into(),
         "--clone".into(),
@@ -1559,8 +1988,13 @@ fn repo_launch_command(name: &str, repo: &Repo, branch: &str) -> String {
         sh_quote(&agent), // registered sbx agent name (claude | codex | …)
         sh_quote(&repo.work),
         sh_quote(&repo.store),
-    ]
-    .join(" ")
+    ];
+    let runtime = resolve_runtime(&agent);
+    if !runtime.launch_args.is_empty() {
+        parts.push("--".into());
+        parts.extend(runtime.launch_args.iter().map(|arg| (*arg).to_string()));
+    }
+    parts.join(" ")
 }
 
 /// Resolve a possibly-relative path against `$SKEIN_REPO` (the dir launches run in), so a relative
@@ -1586,7 +2020,11 @@ fn launch_store() -> Option<String> {
 
 /// The box's branch, from the registry.
 pub fn branch_of(name: &str) -> Option<String> {
-    // registry first (no subprocess); else read it host-side from the box's workspace.
+    // SAME cascade as the board (load_views): registry → launch spec → box-name slug → host git.
+    // This feeds *write* actions (gh pr create/merge --head), where the old registry-else-host-git
+    // shortcut was dangerous: for a clone-mode box, `lookup_dir` is the SHARED host clone (often
+    // sitting on master) — a missing registry branch meant creating/merging a PR for master, not
+    // the box's real branch. The board never made that mistake; now the actions can't either.
     if let Ok((boxes, _)) = load_registry() {
         if let Some(b) = boxes
             .get(name)
@@ -1596,7 +2034,32 @@ pub fn branch_of(name: &str) -> Option<String> {
             return Some(b);
         }
     }
+    if let Some(rp) = repo_for_box(name) {
+        if let Some(b) = launch_spec_branch(&rp, name) {
+            return Some(b);
+        }
+        return Some(branch_from_box(name, &rp));
+    }
     git_branch_for(&lookup_dir(name)?)
+}
+
+/// Runtime configured for a box. Prefer sbx's live record, then the per-box launch spec (which
+/// preserves a New-box override), then the repo default. Unknown/legacy boxes remain Claude for
+/// backwards compatibility.
+pub fn agent_for_box(name: &str) -> String {
+    if let Some(agent) = fleet_boxes()
+        .and_then(|boxes| boxes.into_iter().find(|b| b.name == name))
+        .map(|b| b.agent)
+        .filter(|a| valid_runtime(a))
+    {
+        return agent;
+    }
+    if let Some(repo) = repo_for_box(name) {
+        return launch_spec_agent(&repo, name)
+            .or_else(|| (!repo.agent.is_empty()).then(|| repo.agent.clone()))
+            .unwrap_or_else(default_agent);
+    }
+    default_agent()
 }
 
 /// Run a program in the repo dir ($SKEIN_REPO, else cwd); returns (stdout, stderr, exit-code).
@@ -1608,9 +2071,17 @@ fn run_capture(prog: &str, args: &[&str]) -> Result<(String, String, i32), Strin
             c.current_dir(repo);
         }
     }
-    let out = c
-        .output()
-        .map_err(|e| format!("{prog} not runnable: {e}"))?;
+    let timeout = env::var("SKEIN_ACTION_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30));
+    let out = output_with_timeout(&mut c, timeout).ok_or_else(|| {
+        format!(
+            "{prog} failed to start or exceeded the {}s action timeout",
+            timeout.as_secs()
+        )
+    })?;
     Ok((
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -1800,33 +2271,90 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
+    let boxes = fleet_boxes().ok_or("cannot verify box state (`sbx ls` unavailable)")?;
+    let live = boxes
+        .iter()
+        .find(|b| b.name == name)
+        .ok_or_else(|| format!("box {name:?} does not exist"))?
+        .live;
+    if live != Some(Liveness::Running) {
+        return Err(format!(
+            "box {name:?} is not running; attach/start it before resuming"
+        ));
+    }
     let p = if prompt.trim().is_empty() {
         "Yes, please proceed."
     } else {
         prompt
     };
+    let agent = agent_for_box(name);
+    let runtime =
+        runtime_adapter(&agent).ok_or_else(|| format!("box uses unsupported runtime {agent:?}"))?;
     let inner = match env::var("SKEIN_RESUME_CMD") {
         Ok(c) if !c.is_empty() => c
             .replace("{name}", &sh_quote(name))
-            .replace("{prompt}", &sh_quote(p)),
-        _ => format!(
-            "sbx run --name {} -- --continue --print {}",
-            sh_quote(name),
-            sh_quote(p)
-        ),
+            .replace("{prompt}", &sh_quote(p))
+            .replace("{runtime}", &sh_quote(runtime.info.id)),
+        _ => {
+            let guest = runtime.headless_resume.replace("{prompt}", &sh_quote(p));
+            format!("sbx exec {} bash -lc {}", sh_quote(name), sh_quote(&guest))
+        }
     };
-    // fire-and-forget: nohup + `&` so the agent runs detached; the inner `sh` returns at once (and is
-    // reaped here, no zombie) while the grandchild agent keeps running, reparented away from skein.
-    let (_o, err, code) = run_shell(&format!("nohup {inner} >/dev/null 2>&1 &"))?;
-    if code == 0 {
-        Ok(())
-    } else {
-        Err(if err.trim().is_empty() {
-            "resume failed to launch".into()
-        } else {
-            err.trim().to_string()
-        })
+
+    // Keep a durable log and observe the child briefly. The old `nohup … &` only proved that a
+    // shell forked, so a missing CLI or rejected resume was reported as success. Here an immediate
+    // non-zero exit is surfaced; a healthy long-running agent is reaped by a tiny waiter thread.
+    let store = store_for_box(name).ok_or("can't locate the box's shared store")?;
+    let status_dir = store.join("status");
+    fs::create_dir_all(&status_dir).map_err(|e| format!("mkdir {}: {e}", status_dir.display()))?;
+    let log_path = status_dir.join(format!("{name}.resume.log"));
+    let mut stdout =
+        fs::File::create(&log_path).map_err(|e| format!("create {}: {e}", log_path.display()))?;
+    {
+        use std::io::Write as _;
+        let _ = writeln!(
+            stdout,
+            "skein resume: ts={} runtime={}",
+            Utc::now().to_rfc3339(),
+            runtime.info.id
+        );
     }
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| format!("clone {}: {e}", log_path.display()))?;
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(&inner)
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .map_err(|e| format!("resume launch: {e}"))?;
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_millis(500) {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                let detail = fs::read_to_string(&log_path).unwrap_or_default();
+                return Err(format!(
+                    "resume exited {}{}; see {}",
+                    status.code().unwrap_or(-1),
+                    if detail.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", detail.trim())
+                    },
+                    log_path.display()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(format!("resume status: {e}")),
+        }
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 // ---------- step 7: rationed, lazy AI enrichment (subscription `claude -p`, no API key) ----------
@@ -1858,19 +2386,9 @@ fn claude_oneshot(prompt: &str) -> Option<String> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "claude-haiku-4-5".into());
-    // `timeout` guards a hung subprocess; if it isn't on PATH, fall back to an unguarded call.
-    let run = |guarded: bool| {
-        if guarded {
-            Command::new("timeout")
-                .args(["30", &bin, "-p", "--model", &model, prompt])
-                .output()
-        } else {
-            Command::new(&bin)
-                .args(["-p", "--model", &model, prompt])
-                .output()
-        }
-    };
-    let out = run(true).or_else(|_| run(false)).ok()?;
+    let mut command = Command::new(&bin);
+    command.args(["-p", "--model", &model, prompt]);
+    let out = bounded_output(&mut command, "AI enrichment", Duration::from_secs(30)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2134,11 +2652,10 @@ pub fn read_diff(name: &str) -> Option<String> {
 fn git_ok(dir: &str, args: &[&str]) -> bool {
     let mut a = vec!["-C", dir];
     a.extend_from_slice(args);
-    Command::new("git")
-        .args(&a)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut command = Command::new("git");
+    command.args(&a);
+    bounded_output(&mut command, "git", Duration::from_secs(10))
+        .is_ok_and(|output| output.status.success())
 }
 
 /// The git ref the branch-vs-base diff is measured against, or None if `dir` isn't a git repo
@@ -2153,10 +2670,9 @@ fn git_range(dir: &str) -> Option<String> {
         .into_iter()
         .find(|b| git_ok(dir, &["rev-parse", "--verify", "-q", b]));
     let merge_base = base.and_then(|b| {
-        let o = Command::new("git")
-            .args(["-C", dir, "merge-base", "HEAD", b])
-            .output()
-            .ok()?;
+        let mut command = Command::new("git");
+        command.args(["-C", dir, "merge-base", "HEAD", b]);
+        let o = bounded_output(&mut command, "git merge-base", Duration::from_secs(10)).ok()?;
         let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
         (o.status.success() && !s.is_empty()).then_some(s)
     });
@@ -2167,10 +2683,9 @@ fn git_range(dir: &str) -> Option<String> {
 /// can't wedge the browser. None if `dir` isn't a git repo here (clone mode → reported patch).
 fn git_diff_for(dir: &str) -> Option<String> {
     let range = git_range(dir)?;
-    let out = Command::new("git")
-        .args(["-C", dir, "diff", &range])
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(["-C", dir, "diff", &range]);
+    let out = bounded_output(&mut command, "git diff", Duration::from_secs(30)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2188,10 +2703,14 @@ fn git_diff_for(dir: &str) -> Option<String> {
 /// box-reported number. None if not a host git repo or there are no changes.
 fn git_diffstat_for(dir: &str) -> Option<DiffStat> {
     let range = git_range(dir)?;
-    let out = Command::new("git")
-        .args(["-C", dir, "diff", "--shortstat", &range])
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(["-C", dir, "diff", "--shortstat", &range]);
+    let out = bounded_output(
+        &mut command,
+        "git diff --shortstat",
+        Duration::from_secs(15),
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2275,6 +2794,106 @@ pub fn lookup_dir(name: &str) -> Option<String> {
         .filter(|d| !d.is_empty())
 }
 
+// ---------- files: in-cockpit browsing of a box's workspace ----------
+// The cockpit's answer to "I have to leave skein just to read a doc or check a file": list and
+// read the box's HOST-side workspace (`dir` — the same tree diff/session already read), so a dev
+// never exits to an editor for a README, a config, or an artifact the agent produced.
+
+/// One entry in a workspace directory listing.
+#[derive(Debug, Serialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub dir: bool,
+    pub size: u64,
+}
+
+/// A workspace directory listing. `path` is the normalized workspace-relative dir ("" = root).
+#[derive(Debug, Serialize)]
+pub struct FileListing {
+    pub path: String,
+    pub entries: Vec<FileEntry>,
+}
+
+/// Cap on file bytes served to the cockpit — larger than any doc/source file a human reads,
+/// small enough that a stray binary can't balloon a response. The UI shows a truncation notice.
+pub const FILE_READ_CAP: usize = 2 * 1024 * 1024;
+
+/// Resolve `rel` safely inside a box's workspace. Rejects absolute paths and `..` components up
+/// front, then canonicalizes and re-checks containment so a symlink inside the tree can't escape
+/// it either. Returns (workspace_root, resolved_target).
+fn resolve_in_workspace(name: &str, rel: &str) -> Result<(PathBuf, PathBuf), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let dir = lookup_dir(name).ok_or_else(|| format!("no workspace known for {name}"))?;
+    let root = PathBuf::from(expand_tilde(&dir))
+        .canonicalize()
+        .map_err(|e| format!("workspace unavailable: {e}"))?;
+    if rel.starts_with('/') || rel.split('/').any(|c| c == "..") {
+        return Err("invalid path".into());
+    }
+    let target = root
+        .join(rel)
+        .canonicalize()
+        .map_err(|_| format!("not found: {rel}"))?;
+    if !target.starts_with(&root) {
+        return Err("path escapes the workspace".into());
+    }
+    Ok((root, target))
+}
+
+/// List a directory inside a box's workspace — dirs first, then files, both case-insensitively
+/// alphabetical. `.git` is omitted (never what a doc-reading dev wants and enormous); other
+/// dotfiles show, because .env/.github/.claude are exactly the things people check.
+pub fn list_box_files(name: &str, rel: &str) -> Result<FileListing, String> {
+    let (root, dir) = resolve_in_workspace(name, rel)?;
+    if !dir.is_dir() {
+        return Err("not a directory".into());
+    }
+    let mut entries: Vec<FileEntry> = fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name() != ".git")
+        .filter_map(|e| {
+            let md = e.metadata().ok()?;
+            Some(FileEntry {
+                name: e.file_name().to_string_lossy().into_owned(),
+                dir: md.is_dir(),
+                size: md.len(),
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    let path = dir
+        .strip_prefix(&root)
+        .unwrap_or(Path::new(""))
+        .to_string_lossy()
+        .into_owned();
+    Ok(FileListing { path, entries })
+}
+
+/// Read a file inside a box's workspace, capped at FILE_READ_CAP. Returns (bytes, truncated).
+pub fn read_box_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
+    use std::io::Read as _;
+    let (_, file) = resolve_in_workspace(name, rel)?;
+    if !file.is_file() {
+        return Err("not a file".into());
+    }
+    let len = fs::metadata(&file).map_err(|e| e.to_string())?.len();
+    let truncated = len as usize > FILE_READ_CAP;
+    let mut buf = Vec::with_capacity(len.min(FILE_READ_CAP as u64) as usize);
+    fs::File::open(&file)
+        .map_err(|e| e.to_string())?
+        .take(FILE_READ_CAP as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    Ok((buf, truncated))
+}
+
 // ---------- step 9: collision radar — warn before two boxes' work overwrites the same file ----------
 
 /// The files a box changed on its branch (host-side `git diff --name-only`, or parsed from the
@@ -2285,10 +2904,13 @@ pub fn changed_files(name: &str) -> Vec<String> {
     }
     if let Some(dir) = lookup_dir(name) {
         if let Some(range) = git_range(&dir) {
-            if let Ok(out) = Command::new("git")
-                .args(["-C", &dir, "diff", "--name-only", &range])
-                .output()
-            {
+            let mut command = Command::new("git");
+            command.args(["-C", &dir, "diff", "--name-only", &range]);
+            if let Ok(out) = bounded_output(
+                &mut command,
+                "git diff --name-only",
+                Duration::from_secs(15),
+            ) {
                 if out.status.success() {
                     let v: Vec<String> = String::from_utf8_lossy(&out.stdout)
                         .lines()
@@ -2377,6 +2999,75 @@ fn compute_collisions() -> Vec<Collision> {
     out
 }
 
+/// Write a durable, provider-neutral takeover brief plus a one-shot copy for `target`. Native
+/// Claude and Codex transcripts remain separate, but the receiving runtime gets the same sandbox,
+/// branch, uncommitted tree, commits, task, journal, diff summary, and last turn outcome. The
+/// box-handoff hook adds this brief (and authoritative in-box git status) as developer context.
+pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<PathBuf, String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    if !valid_runtime(target) {
+        return Err(format!("unsupported handoff runtime {target:?}"));
+    }
+    let source = from
+        .filter(|a| valid_runtime(a))
+        .map(str::to_string)
+        .unwrap_or_else(|| agent_for_box(name));
+    let digest = session_digest(name).ok_or_else(|| format!("no such box: {name}"))?;
+    let store = store_for_box(name).ok_or("can't locate the box's shared store")?;
+    let dir = store.join("handoffs");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+
+    let mut brief = format!(
+        "# Skein cross-agent handoff\n\n- box: `{name}`\n- from: `{source}`\n- to: `{target}`\n- branch: `{}`\n- state: `{}`\n- prepared: `{}`\n\nContinue the existing work in this same sandbox. Preserve the current working tree; inspect it before editing and do not redo completed work.\n",
+        digest.branch,
+        digest.state,
+        Utc::now().to_rfc3339()
+    );
+    brief.push_str(
+        "\n## Git authentication reminder\n\nInspect `git remote -v` before pushing. HTTPS uses Skein's seeded `gh` credentials (`gh auth status`; `gh auth setup-git` if needed). For GitHub SSH, establish host trust once with `mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh -o StrictHostKeyChecking=accept-new -T git@github.com`, then inspect the forwarded agent with `ssh-add -l`. GitHub's successful-auth/no-shell message exits 1 and means SSH works. Never copy a private key into the box.\n",
+    );
+    if let Some(task) = current_task(name) {
+        brief.push_str(&format!("\n## Active objective\n\n{task}\n"));
+    }
+    if let Some(blocked) = digest.blocked_on {
+        brief.push_str(&format!("\n## Blocked on\n\n{blocked}\n"));
+    } else if let Some(last) = digest.last_message {
+        brief.push_str(&format!("\n## Previous agent's last message\n\n{last}\n"));
+    }
+    if let Some(journal) = digest.journal {
+        brief.push_str(&format!("\n## Journal tail\n\n{journal}\n"));
+    }
+    if !digest.commits.is_empty() {
+        brief.push_str("\n## Recent branch commits\n");
+        for commit in digest.commits.iter().take(20) {
+            brief.push_str(&format!("\n- {commit}"));
+        }
+        brief.push('\n');
+    }
+    if let Some(d) = digest.diff {
+        brief.push_str(&format!(
+            "\n## Change summary\n\n{} files, +{} / -{} lines.\n",
+            d.files, d.ins, d.del
+        ));
+    }
+    let files = changed_files(name);
+    if !files.is_empty() {
+        brief.push_str("\nChanged files reported to Skein:\n");
+        for file in files.iter().take(120) {
+            brief.push_str(&format!("\n- `{file}`"));
+        }
+        brief.push('\n');
+    }
+
+    let durable = dir.join(format!("{name}.md"));
+    write_atomic(&durable, &dir, brief.as_bytes())?;
+    let pending = dir.join(format!("{name}.{target}.pending.md"));
+    write_atomic(&pending, &dir, brief.as_bytes())?;
+    Ok(pending)
+}
+
 /// The `sbx` argv (sans the leading `sbx`, which the server prepends) that opens box `name`'s agent
 /// terminal. `_dir` is unused for the default invocation but kept so the `{dir}` override stays uniform.
 ///
@@ -2390,32 +3081,82 @@ fn compute_collisions() -> Vec<Collision> {
 /// running the agent directly on an image without tmux. Mirror of [`shell_argv`], which backs the
 /// shell tab the same way. Override wholesale with `$SKEIN_ATTACH_CMD`.
 pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
-    let agent = repo_for_box(name)
-        .map(|r| r.agent)
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| "claude".into());
-    let resume = agent_resume_cmd(&agent);
+    let agent = agent_for_box(name);
+    attach_argv_as(name, _dir, &agent)
+}
+
+/// Attach using an explicit runtime. The configured runtime keeps the legacy `skein-agent` tmux
+/// name; a takeover runtime gets `skein-agent-<runtime>`, so both native conversations survive and
+/// switching back reattaches the original agent rather than replacing it.
+pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
+    let runtime = resolve_runtime(agent);
+    let agent = runtime.info.id;
+    let tmux_name = agent_session_name(name, agent);
+    let resume = runtime.interactive_resume.to_string();
+    let executable = runtime.info.executable;
+    let shell = format!(
+        "if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
+         if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {tmux_name} {resume:?}; else exec bash -lc {resume:?}; fi"
+    );
     vec![
         "exec".into(),
         "-it".into(),
         name.into(),
         "bash".into(),
         "-lc".into(),
-        format!(
-            "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s skein-agent {resume:?} || exec {resume}"
-        ),
+        shell,
     ]
+}
+
+fn agent_session_name(name: &str, runtime: &str) -> String {
+    if runtime == agent_for_box(name) {
+        "skein-agent".to_string()
+    } else {
+        format!("skein-agent-{runtime}")
+    }
+}
+
+/// Stop one runtime's persistent tmux process without touching the sandbox or another provider's
+/// native session. Reattaching recreates it through that adapter's native resume command.
+pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let runtime = runtime
+        .map(str::to_string)
+        .unwrap_or_else(|| agent_for_box(name));
+    let runtime = runtime.as_str();
+    if !valid_runtime(runtime) {
+        return Err(format!("unsupported runtime {runtime:?}"));
+    }
+    if box_liveness(name) != Some(Liveness::Running) {
+        return Err(format!("box {name:?} is not running"));
+    }
+    let session = agent_session_name(name, runtime);
+    let (out, err, code) = run_capture(
+        "sbx",
+        &["exec", name, "tmux", "kill-session", "-t", &session],
+    )?;
+    if code == 0 {
+        Ok(())
+    } else {
+        let detail = if err.trim().is_empty() { out } else { err };
+        Err(if detail.trim().is_empty() {
+            format!("could not restart {runtime} session")
+        } else {
+            detail.trim().to_string()
+        })
+    }
 }
 
 /// The shell command that (re)starts an agent, resuming prior history when the runtime supports it —
 /// run inside the `skein-agent` tmux session by [`attach_argv`] (the per-runtime seam). claude resumes
 /// with `--continue`; other agents start bare (their binary name) until a resume flag is wired in.
+#[cfg(test)]
 fn agent_resume_cmd(agent: &str) -> String {
-    match agent {
-        "claude" => "claude --continue".into(),
-        // codex/others: append their resume flag when supported; bare launch until then.
-        other => other.to_string(),
-    }
+    runtime_adapter(agent)
+        .map(|runtime| runtime.interactive_resume.to_string())
+        .unwrap_or_else(|| agent.to_string())
 }
 
 /// `sbx` argv for an interactive *shell* in the box — a plain terminal to run commands in, separate
@@ -2551,10 +3292,27 @@ pub fn current_status(name: &str) -> Option<String> {
         .join("status")
         .join(format!("{name}.json"));
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
-    v.get("status")
+    let status = v
+        .get("status")
         .and_then(|s| s.as_str())
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty())?;
+    // A *busy* status is a claim of current activity — trust it only while fresh. If the agent
+    // process dies mid-turn (crash/OOM: no hook fires again), "working" would otherwise stick to a
+    // Running sandbox forever and the user would dutifully leave it alone. Past the threshold,
+    // fall back to liveness ("live": sandbox up, no agent claim) — the next real turn event
+    // rewrites the file and the state snaps back. Outcome states (waiting/needs-input/error/
+    // ended/done) stay sticky: they describe how the turn ENDED, and age is expected.
+    if matches!(status.as_str(), "working" | "running" | "compacting") {
+        if let Some(ts) = v.get("ts").and_then(|t| t.as_str()) {
+            if let Ok(t) = DateTime::parse_from_rfc3339(ts) {
+                if (Utc::now() - t.with_timezone(&Utc)).num_seconds() > 45 * 60 {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(status)
 }
 
 /// The human-readable `detail` the probe attaches to a state that carries one — the StopFailure
@@ -2592,6 +3350,18 @@ const PROBE_JOURNAL_SH: &str = include_str!("probe/box-journal.sh");
 // Stop hook points at) to <store>/telemetry/<vmid>.jsonl, a durable per-turn log that outlives the
 // box, feeding the same cross-run learn-loop as journals/diffs.
 const PROBE_TOKEN_USAGE_SH: &str = include_str!("probe/box-token-usage.sh");
+// Codex runtime adapter: its UserPromptSubmit prompt is the active objective, while its rollout
+// token_count events + PostToolUse hooks provide telemetry.
+const PROBE_CODEX_TASK_SH: &str = include_str!("probe/box-codex-task.sh");
+const PROBE_CODEX_TELEMETRY_SH: &str = include_str!("probe/box-codex-telemetry.sh");
+// Provider-neutral one-shot context bridge used when Claude takes over Codex work or vice versa.
+const PROBE_HANDOFF_SH: &str = include_str!("probe/box-handoff.sh");
+// box-session.sh writes the narrative signal (<store>/sessions/<vmid>.json) that session_signal()
+// reads — the last assistant message at Stop, the blocking prompt at Notification. Without it the
+// whole headline / fork-detector / digest pipeline reads a file nothing writes (which is exactly
+// what happened for skein's first months: the feature was tested against hand-written fixtures and
+// dark in production).
+const PROBE_SESSION_SH: &str = include_str!("probe/box-session.sh");
 // skein-owned machinery installed alongside the probe so an empty shared folder works end-to-end:
 // the SessionStart bootstrap (memory bridge + mailbox inbox + box registration), the mailbox, and a
 // default status line. They live in `<store>/skein/bin/` (skein-owned namespace), refreshed each run.
@@ -2604,6 +3374,8 @@ const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh"
 const PROBE_DIFF_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-diff.sh";
 const PROBE_JOURNAL_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-journal.sh";
 const PROBE_TOKEN_USAGE_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-token-usage.sh";
+const PROBE_HANDOFF_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-handoff.sh";
+const PROBE_SESSION_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-session.sh";
 const BOOTSTRAP_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/sandbox-bootstrap.sh";
 const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusline-command.sh";
 // mailbox.sh hook entries — turn-boundary delivery so mail is re-checked every turn, not just at
@@ -2613,6 +3385,33 @@ const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusl
 // so the same message can't fire twice.
 const MAILBOX_INBOX_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh inbox";
 const MAILBOX_STOPCHECK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh stop-check";
+
+/// Content-derived revision for the box-side contract. It deliberately covers scripts and both
+/// lifecycle adapters, so a running session can be compared with what the host currently serves.
+/// FNV-1a keeps this dependency-free and deterministic; cryptographic strength is unnecessary.
+fn probe_revision() -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for body in [
+        PROBE_STATUS_SH,
+        PROBE_TASK_SH,
+        PROBE_DIFF_SH,
+        PROBE_JOURNAL_SH,
+        PROBE_TOKEN_USAGE_SH,
+        PROBE_CODEX_TASK_SH,
+        PROBE_CODEX_TELEMETRY_SH,
+        PROBE_HANDOFF_SH,
+        PROBE_SESSION_SH,
+        BOOTSTRAP_SH,
+        MAILBOX_SH,
+        STATUSLINE_SH,
+    ] {
+        for byte in body.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
+}
 
 /// Install skein's turn-state probe into the shared store: write the hook scripts to
 /// `<store>/skein/bin/` and merge their hook wiring into `<store>/settings.json` (additive +
@@ -2648,12 +3447,18 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("box-diff.sh", PROBE_DIFF_SH),
         ("box-journal.sh", PROBE_JOURNAL_SH),
         ("box-token-usage.sh", PROBE_TOKEN_USAGE_SH),
+        ("box-codex-task.sh", PROBE_CODEX_TASK_SH),
+        ("box-codex-telemetry.sh", PROBE_CODEX_TELEMETRY_SH),
+        ("box-handoff.sh", PROBE_HANDOFF_SH),
+        ("box-session.sh", PROBE_SESSION_SH),
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
     ] {
         let p = bin.join(file);
-        fs::write(&p, body).map_err(|e| format!("write {}: {e}", p.display()))?;
+        // temp + rename, not a bare write: these scripts are EXECUTED by live boxes through the
+        // shared mount — a box invoking one mid-rewrite would run a truncated file.
+        write_atomic(&p, &bin, body.as_bytes())?;
         let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o755));
     }
     let settings = store.join("settings.json");
@@ -2663,7 +3468,40 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         .unwrap_or_else(|| serde_json::json!({}));
     let merged = settings_with_probe(&current);
     let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
-    write_atomic(&settings, store, &bytes)
+    write_atomic(&settings, store, &bytes)?;
+
+    let skein_dir = store.join("skein");
+    write_atomic(
+        &skein_dir.join("probe-revision"),
+        &skein_dir,
+        format!("{}\n", probe_revision()).as_bytes(),
+    )?;
+    let runtime_manifest = RUNTIME_ADAPTERS
+        .iter()
+        .map(|runtime| {
+            format!(
+                "{}\t{}\t{}",
+                runtime.info.id, runtime.info.label, runtime.info.executable
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    write_atomic(
+        &skein_dir.join("runtimes.tsv"),
+        &skein_dir,
+        runtime_manifest.as_bytes(),
+    )?;
+
+    // Codex loads user-level hooks installed by the kit. Keep the generated, provider-specific
+    // hook source in the shared store so every box gets the same adapter without repo-side files.
+    let codex_hooks = codex_hooks_with_probe();
+    let codex_bytes = serde_json::to_vec_pretty(&codex_hooks).map_err(|e| e.to_string())?;
+    write_atomic(
+        &store.join("skein/codex-hooks.json"),
+        &skein_dir,
+        &codex_bytes,
+    )
 }
 
 /// Add skein's probe hooks to a `settings.json` value, preserving every existing hook and never
@@ -2678,7 +3516,11 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // The richer fleet-states ride extra lifecycle events (all best-effort: a Claude Code that predates
     // one simply never fires it): StopFailure→error (rate_limit/overloaded/…), PreCompact/PostCompact→
     // compacting (busy, not stuck), SessionEnd→ended (distinct from a liveness-derived "stale").
-    let entries: [(&str, String, Option<&str>); 18] = [
+    // Every command is wrapped `bash "<script>" <args>` at wiring time (see `wire` below): invoking
+    // the script path bare relies on the exec bit surviving the shared mount into the microVM — if
+    // it's squashed, every hook fails "permission denied" on every event, silently. The status line
+    // learned this lesson first (STATUSLINE_CMD was already bash-prefixed); now it's uniform.
+    let entries: [(&str, String, Option<&str>); 23] = [
         (
             "UserPromptSubmit",
             format!("{PROBE_STATUS_CMD} working"),
@@ -2687,6 +3529,13 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         // Turn-boundary mailbox delivery (start of turn): surfaces unread mail as additional
         // context, so it's never gated behind a human asking "did you get that?".
         ("UserPromptSubmit", MAILBOX_INBOX_CMD.to_string(), None),
+        // If Codex handed this box to Claude, inject the pending provider-neutral brief as context
+        // on the next prompt (SessionStart below catches a newly-created Claude session sooner).
+        (
+            "UserPromptSubmit",
+            format!("{PROBE_HANDOFF_CMD} claude"),
+            None,
+        ),
         // Notification: Claude Code's hook payload carries NO field naming which notification type
         // fired (confirmed against the hooks docs — there is no `notification_type` on the stdin
         // JSON); it disambiguates *before* invoking the hook, via each entry's own `matcher`. So
@@ -2708,7 +3557,25 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
             format!("{PROBE_STATUS_CMD} notify-ignore"),
             Some("auth_success|elicitation_complete|elicitation_response|agent_completed"),
         ),
+        // Belt-and-braces for Claude versions that include notification_type in the payload but do
+        // not apply matcher routing consistently. The probe is a strict no-op when the field is
+        // absent, so it cannot race the matcher-specific compatibility entries above.
+        (
+            "Notification",
+            format!("{PROBE_STATUS_CMD} notify-auto"),
+            None,
+        ),
         ("Stop", format!("{PROBE_STATUS_CMD} waiting"), None),
+        // box-session.sh stop: record the turn's last assistant message — the narrative signal the
+        // inbox headline, fork-detector, and session digest read (session_signal in this file).
+        ("Stop", format!("{PROBE_SESSION_CMD} stop"), None),
+        // box-session.sh ask: record the prompt the agent is blocked on, same matcher set that
+        // routes box-status.sh to notify-blocked.
+        (
+            "Notification",
+            format!("{PROBE_SESSION_CMD} ask"),
+            Some("permission_prompt|elicitation_dialog|agent_needs_input"),
+        ),
         // box-diff.sh runs alongside box-status.sh on Stop: writes the branch-vs-base
         // patch + shortstat + commit list so the host can show them for clone-mode boxes.
         ("Stop", PROBE_DIFF_CMD.to_string(), None),
@@ -2736,6 +3603,7 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         ("SessionEnd", format!("{PROBE_STATUS_CMD} ended"), None),
         ("PostToolUse", PROBE_TASK_CMD.to_string(), Some("TodoWrite")),
         ("SessionStart", BOOTSTRAP_CMD.to_string(), None),
+        ("SessionStart", format!("{PROBE_HANDOFF_CMD} claude"), None),
     ];
     // Entries a *previous* skein version wired that this one has since replaced/renamed. Purely
     // additive merging (below) would otherwise leave these stale forever in an already-provisioned
@@ -2746,7 +3614,21 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // at all — it would now hit the passthrough branch and write a literal `status:"notify"`. Retire
     // it explicitly so upgrading a long-lived project store self-heals instead of accumulating a
     // silently-wrong hook forever. Exact-match only, so a user's own hook of the same name is untouched.
-    let obsolete: [(&str, String); 1] = [("Notification", format!("{PROBE_STATUS_CMD} notify"))];
+    // `bash "<script>" <args>` — see the note above `entries`.
+    let wire = |cmd: &str| -> String {
+        match cmd.split_once(' ') {
+            Some((script, args)) => format!("bash \"{script}\" {args}"),
+            None => format!("bash \"{cmd}\""),
+        }
+    };
+    // Retire the pre-`bash`-wrapping form of every current entry (stores provisioned before the
+    // exec-bit hardening carry the bare-path commands; purely-additive merging would keep both and
+    // fire each hook twice), plus the explicitly renamed one.
+    let mut obsolete: Vec<(&str, String)> = entries
+        .iter()
+        .map(|(ev, cmd, _)| (*ev, cmd.clone()))
+        .collect();
+    obsolete.push(("Notification", format!("{PROBE_STATUS_CMD} notify")));
 
     let mut out = existing.clone();
     if !out.is_object() {
@@ -2770,6 +3652,7 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         }
     }
     for (event, cmd, matcher) in entries {
+        let cmd = wire(&cmd);
         let arr = hooks.entry(event).or_insert_with(|| json!([]));
         if !arr.is_array() {
             *arr = json!([]);
@@ -2803,6 +3686,108 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     root.entry("statusLine")
         .or_insert_with(|| json!({ "type": "command", "command": STATUSLINE_CMD }));
     out
+}
+
+/// Codex's native lifecycle adapter. Current Codex exposes the same turn-boundary vocabulary Skein
+/// needs, but not Claude's Notification/TodoWrite events: PermissionRequest is the needs-input
+/// signal, UserPromptSubmit carries the active objective, and PostToolUse supplies tool telemetry.
+///
+/// The kit installs this generated value as a user-level `~/.codex/hooks.json` inside the sandbox.
+/// User-level placement avoids project-trust suppressing the adapter in a fresh clone; Codex is
+/// launched with `--dangerously-bypass-hook-trust` because these exact commands are generated and
+/// vetted by Skein itself.
+fn codex_hooks_with_probe() -> serde_json::Value {
+    use serde_json::{json, Map, Value};
+
+    let command = |file: &str, args: &str| {
+        let suffix = if args.is_empty() {
+            String::new()
+        } else {
+            format!(" {args}")
+        };
+        format!("bash \"$(git rev-parse --show-toplevel)/.claude/skein/bin/{file}\"{suffix}")
+    };
+    let mut hooks = Map::<String, Value>::new();
+    let mut add = |event: &str, matcher: Option<&str>, cmd: String| {
+        let mut entry = json!({
+            "hooks": [{ "type": "command", "command": cmd, "timeout": 30 }]
+        });
+        if let Some(m) = matcher {
+            entry
+                .as_object_mut()
+                .expect("hook entry is an object")
+                .insert("matcher".into(), Value::String(m.into()));
+        }
+        hooks
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("hook event is an array")
+            .push(entry);
+    };
+
+    add(
+        "SessionStart",
+        Some("startup|resume|clear|compact"),
+        command("sandbox-bootstrap.sh", ""),
+    );
+    add(
+        "SessionStart",
+        Some("startup|resume|clear|compact"),
+        command("box-handoff.sh", "codex"),
+    );
+    add(
+        "UserPromptSubmit",
+        None,
+        command("box-status.sh", "working"),
+    );
+    add("UserPromptSubmit", None, command("box-codex-task.sh", ""));
+    add("UserPromptSubmit", None, command("mailbox.sh", "inbox"));
+    add("UserPromptSubmit", None, command("box-handoff.sh", "codex"));
+    add(
+        "PermissionRequest",
+        None,
+        command("box-status.sh", "notify-blocked"),
+    );
+    // Clear a permission-blocked state once the approved tool actually completes, without resetting
+    // the turn timer/subagent count as a fresh UserPromptSubmit would.
+    add(
+        "PostToolUse",
+        Some("*"),
+        command("box-status.sh", "working-tool"),
+    );
+    add(
+        "PostToolUse",
+        Some("*"),
+        command("box-codex-telemetry.sh", "tool"),
+    );
+    add(
+        "SubagentStart",
+        None,
+        command("box-status.sh", "agent-start"),
+    );
+    add("SubagentStop", None, command("box-status.sh", "agent-stop"));
+    add(
+        "PreCompact",
+        Some("manual|auto"),
+        command("box-status.sh", "compacting"),
+    );
+    add(
+        "PostCompact",
+        Some("manual|auto"),
+        command("box-status.sh", "compacted"),
+    );
+    for (file, args) in [
+        ("box-status.sh", "waiting"),
+        ("box-session.sh", "stop"),
+        ("box-diff.sh", ""),
+        ("box-journal.sh", ""),
+        ("box-codex-telemetry.sh", "stop"),
+        ("mailbox.sh", "stop-check"),
+    ] {
+        add("Stop", None, command(file, args));
+    }
+    json!({ "hooks": hooks })
 }
 
 /// The `next …` clause of the box's most recent journal line (the ritual is `did … / next … /
@@ -2862,10 +3847,9 @@ pub fn recent_commits(name: &str) -> Vec<String> {
     if let Some(dir) = lookup_dir(name) {
         if let Some(range) = git_range(&dir) {
             let r = format!("{range}..HEAD");
-            if let Ok(out) = Command::new("git")
-                .args(["-C", &dir, "log", "--format=%s", "-n", "20", &r])
-                .output()
-            {
+            let mut command = Command::new("git");
+            command.args(["-C", &dir, "log", "--format=%s", "-n", "20", &r]);
+            if let Ok(out) = bounded_output(&mut command, "git log", Duration::from_secs(15)) {
                 if out.status.success() {
                     let v: Vec<String> = String::from_utf8_lossy(&out.stdout)
                         .lines()
@@ -3330,7 +4314,7 @@ mod tests {
         }];
         save_repos(&repos).unwrap();
         // box created on the wrong branch (its creation branch)…
-        write_launch_spec("thing-feat-x", "feat-x", &repos[0]).unwrap();
+        write_launch_spec_for_agent("thing-feat-x", "feat-x", &repos[0], "claude").unwrap();
         assert_eq!(
             launch_spec_branch(&repos[0], "thing-feat-x").as_deref(),
             Some("feat-x")
@@ -3362,7 +4346,7 @@ mod tests {
             agent: "claude".into(),
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
-        let cmd = repo_launch_command("thing-feat-auth", &repo, "feat/auth");
+        let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None);
         assert!(cmd.contains("sbx run --clone --kit"));
         assert!(cmd.contains("kit'") || cmd.contains("/kit"));
         assert!(cmd.contains("--name 'thing-feat-auth'"));
@@ -3375,6 +4359,28 @@ mod tests {
             .join("thing-feat-auth.json");
         let txt = fs::read_to_string(&spec).unwrap();
         assert!(txt.contains("\"branch\": \"feat/auth\""), "spec was: {txt}");
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn codex_launch_records_runtime_and_bypasses_generated_hook_review() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let repo = Repo {
+            id: "skein".into(),
+            source: "s".into(),
+            work: "/work/skein".into(),
+            store: home.join("store/.claude").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+        };
+        let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
+        assert!(cmd.contains("'codex'"));
+        assert!(cmd.ends_with("-- --dangerously-bypass-hook-trust"));
+        assert_eq!(
+            launch_spec_agent(&repo, "skein-codex").as_deref(),
+            Some("codex")
+        );
         env::remove_var("SKEIN_HOME");
     }
 
@@ -3421,6 +4427,7 @@ mod tests {
             "status",
             "tasks",
             "journals",
+            "handoffs",
             "skein/launch",
             "skein/bin",
             "memory",
@@ -3435,6 +4442,9 @@ mod tests {
             "skein/bin/box-status.sh",
             "skein/bin/box-journal.sh",
             "skein/bin/box-token-usage.sh",
+            "skein/bin/box-codex-task.sh",
+            "skein/bin/box-codex-telemetry.sh",
+            "skein/bin/box-handoff.sh",
             "skein/bin/sandbox-bootstrap.sh",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
@@ -3442,6 +4452,9 @@ mod tests {
             assert!(store.join(f).is_file(), "missing {f}");
         }
         assert!(store.join("settings.json").is_file());
+        assert!(store.join("skein/codex-hooks.json").is_file());
+        assert!(store.join("skein/probe-revision").is_file());
+        assert!(store.join("skein/runtimes.tsv").is_file());
         // layout is documented for the user to (optionally) fill
         assert!(store.join("README.md").is_file());
         // settings wire the SessionStart bootstrap + a default statusLine
@@ -3509,14 +4522,20 @@ mod tests {
         assert!(ups
             .iter()
             .any(|e| e["hooks"][0]["command"] == "slice-gate.sh"));
-        // … and skein's are added.
+        // … and skein's are added — every one invoked via `bash "<script>" <args>` so a squashed
+        // exec bit on the shared mount can't silently kill the whole probe set.
         assert!(ups.iter().any(|e| e["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .ends_with("box-status.sh working")));
-        // Stop: box-status.sh + box-diff.sh + box-journal.sh + box-token-usage.sh + mailbox.sh
-        // stop-check.
-        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 5);
+            .contains(r#"box-status.sh" working"#)));
+        assert!(ups
+            .iter()
+            .filter_map(|e| e["hooks"][0]["command"].as_str())
+            .filter(|c| c.contains("skein/bin"))
+            .all(|c| c.starts_with("bash \"")));
+        // Stop: box-status.sh + box-session.sh + box-diff.sh + box-journal.sh + box-token-usage.sh
+        // + mailbox.sh stop-check.
+        assert_eq!(merged["hooks"]["Stop"].as_array().unwrap().len(), 6);
         let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(post[0]["matcher"], "TodoWrite");
 
@@ -3526,7 +4545,7 @@ mod tests {
             again["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
             ups.len()
         );
-        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 5);
+        assert_eq!(again["hooks"]["Stop"].as_array().unwrap().len(), 6);
     }
 
     #[test]
@@ -3541,7 +4560,6 @@ mod tests {
             "PostCompact",
             "SessionEnd",
             "PostToolUse",
-            "SessionStart",
         ] {
             assert_eq!(
                 merged["hooks"][ev].as_array().unwrap().len(),
@@ -3549,6 +4567,11 @@ mod tests {
                 "missing {ev}"
             );
         }
+        assert_eq!(
+            merged["hooks"]["SessionStart"].as_array().unwrap().len(),
+            2,
+            "SessionStart needs bootstrap + handoff context"
+        );
         // UserPromptSubmit: box-status.sh (turn-state reset) + mailbox.sh inbox (turn-boundary
         // mail delivery — the fix for mail sitting unread past SessionStart).
         let ups_cmds: Vec<&str> = merged["hooks"]["UserPromptSubmit"]
@@ -3557,18 +4580,25 @@ mod tests {
             .iter()
             .map(|e| e["hooks"][0]["command"].as_str().unwrap_or(""))
             .collect();
-        assert_eq!(ups_cmds.len(), 2, "UserPromptSubmit needs 2 hooks");
+        assert_eq!(
+            ups_cmds.len(),
+            3,
+            "UserPromptSubmit needs status + mailbox + handoff hooks"
+        );
         assert!(ups_cmds
             .iter()
-            .any(|c| c.ends_with("box-status.sh working")));
-        assert!(ups_cmds.iter().any(|c| c.ends_with("mailbox.sh inbox")));
-        // Stop: box-status.sh (turn-state) + box-diff.sh (diff snapshot) + box-journal.sh (journal
-        // copy) + box-token-usage.sh (per-turn token log) + mailbox.sh stop-check (blocks the stop
-        // if mail arrived mid-turn).
+            .any(|c| c.contains(r#"box-status.sh" working"#)));
+        assert!(ups_cmds.iter().any(|c| c.contains(r#"mailbox.sh" inbox"#)));
+        assert!(ups_cmds
+            .iter()
+            .any(|c| c.contains(r#"box-handoff.sh" claude"#)));
+        // Stop: box-status.sh (turn-state) + box-session.sh (narrative signal) + box-diff.sh (diff
+        // snapshot) + box-journal.sh (journal copy) + box-token-usage.sh (per-turn token log) +
+        // mailbox.sh stop-check (blocks the stop if mail arrived mid-turn).
         assert_eq!(
             merged["hooks"]["Stop"].as_array().unwrap().len(),
-            5,
-            "Stop needs 5 hooks"
+            6,
+            "Stop needs 6 hooks"
         );
         let stop_cmds: Vec<&str> = merged["hooks"]["Stop"]
             .as_array()
@@ -3579,50 +4609,68 @@ mod tests {
         assert!(
             stop_cmds
                 .iter()
-                .any(|c| c.ends_with("box-status.sh waiting")),
+                .any(|c| c.contains(r#"box-status.sh" waiting"#)),
             "status hook missing"
         );
         assert!(
-            stop_cmds.iter().any(|c| c.ends_with("box-diff.sh")),
+            stop_cmds
+                .iter()
+                .any(|c| c.contains(r#"box-session.sh" stop"#)),
+            "session (narrative signal) hook missing"
+        );
+        assert!(
+            stop_cmds.iter().any(|c| c.contains("box-diff.sh")),
             "diff hook missing"
         );
         assert!(
-            stop_cmds.iter().any(|c| c.ends_with("box-journal.sh")),
+            stop_cmds.iter().any(|c| c.contains("box-journal.sh")),
             "journal hook missing"
         );
         assert!(
-            stop_cmds.iter().any(|c| c.ends_with("box-token-usage.sh")),
+            stop_cmds.iter().any(|c| c.contains("box-token-usage.sh")),
             "token-usage hook missing"
         );
         assert!(
             stop_cmds
                 .iter()
-                .any(|c| c.ends_with("mailbox.sh stop-check")),
+                .any(|c| c.contains(r#"mailbox.sh" stop-check"#)),
             "mailbox stop-check missing"
         );
-        // Notification is matcher-scoped into three entries — the hook payload carries no field
-        // naming which type fired, so disambiguation has to happen via `matcher`, not the command.
+        // Notification keeps matcher-scoped compatibility plus one unconditional payload fallback.
         let notif = merged["hooks"]["Notification"].as_array().unwrap();
-        assert_eq!(notif.len(), 3, "Notification needs 3 matcher-scoped hooks");
-        let notif_matcher_cmd = |m: &str| -> Option<&str> {
-            notif
-                .iter()
-                .find(|e| e["matcher"] == m)
-                .and_then(|e| e["hooks"][0]["command"].as_str())
-        };
-        assert!(
-            notif_matcher_cmd("permission_prompt|elicitation_dialog|agent_needs_input")
-                .unwrap()
-                .ends_with("box-status.sh notify-blocked")
+        assert_eq!(
+            notif.len(),
+            5,
+            "Notification needs matcher hooks plus payload fallback"
         );
-        assert!(notif_matcher_cmd("idle_prompt")
-            .unwrap()
-            .ends_with("box-status.sh notify-waiting"));
-        assert!(notif_matcher_cmd(
-            "auth_success|elicitation_complete|elicitation_response|agent_completed"
-        )
-        .unwrap()
-        .ends_with("box-status.sh notify-ignore"));
+        let has = |m: &str, frag: &str| -> bool {
+            notif.iter().any(|e| {
+                e["matcher"] == m
+                    && e["hooks"][0]["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains(frag))
+            })
+        };
+        assert!(has(
+            "permission_prompt|elicitation_dialog|agent_needs_input",
+            r#"box-status.sh" notify-blocked"#
+        ));
+        assert!(
+            has(
+                "permission_prompt|elicitation_dialog|agent_needs_input",
+                r#"box-session.sh" ask"#
+            ),
+            "session ask hook must ride the same blocked matcher"
+        );
+        assert!(has("idle_prompt", r#"box-status.sh" notify-waiting"#));
+        assert!(has(
+            "auth_success|elicitation_complete|elicitation_response|agent_completed",
+            r#"box-status.sh" notify-ignore"#
+        ));
+        assert!(notif.iter().any(|e| e.get("matcher").is_none()
+            && e["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|c| c.contains("notify-auto"))));
         // sub-agent tracking: PreToolUse is scoped to the Task tool
         assert_eq!(merged["hooks"]["PreToolUse"][0]["matcher"], "Task");
         // a default status line is wired when the store doesn't set one
@@ -3648,8 +4696,8 @@ mod tests {
         let notif = merged["hooks"]["Notification"].as_array().unwrap();
         assert_eq!(
             notif.len(),
-            3,
-            "the stale unconditional entry must be removed, leaving only the 3 matcher-scoped ones"
+            5,
+            "the stale entry must be replaced by matcher hooks plus the safe payload fallback"
         );
         assert!(
             notif
@@ -3657,14 +4705,101 @@ mod tests {
                 .all(|e| e["hooks"][0]["command"] != stale_cmd.as_str()),
             "stale entry should be gone"
         );
-        assert!(
-            notif.iter().all(|e| e.get("matcher").is_some()),
-            "every remaining Notification entry must be matcher-scoped"
+        assert_eq!(
+            notif.iter().filter(|e| e.get("matcher").is_none()).count(),
+            1
         );
+        assert!(notif.iter().any(|e| e["hooks"][0]["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("notify-auto"))));
 
         // Idempotent from here on: re-running doesn't reintroduce or duplicate anything.
         let again = settings_with_probe(&merged);
-        assert_eq!(again["hooks"]["Notification"].as_array().unwrap().len(), 3);
+        assert_eq!(again["hooks"]["Notification"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn codex_hooks_cover_attention_session_telemetry_and_handoff() {
+        let h = codex_hooks_with_probe();
+        let hooks = h["hooks"].as_object().unwrap();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PermissionRequest",
+            "PostToolUse",
+            "SubagentStart",
+            "SubagentStop",
+            "PreCompact",
+            "PostCompact",
+            "Stop",
+        ] {
+            assert!(
+                hooks
+                    .get(event)
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty()),
+                "missing Codex {event}"
+            );
+        }
+        let commands = |event: &str| -> Vec<&str> {
+            hooks[event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e["hooks"][0]["command"].as_str())
+                .collect()
+        };
+        assert!(commands("PermissionRequest")
+            .iter()
+            .any(|c| c.contains("notify-blocked")));
+        assert!(commands("UserPromptSubmit")
+            .iter()
+            .any(|c| c.contains("box-codex-task.sh")));
+        assert!(commands("Stop")
+            .iter()
+            .any(|c| c.contains("box-session.sh")));
+        assert!(commands("Stop")
+            .iter()
+            .any(|c| c.contains("box-codex-telemetry.sh")));
+        assert!(commands("SessionStart")
+            .iter()
+            .any(|c| c.contains("box-handoff.sh")));
+    }
+
+    #[test]
+    fn settings_with_probe_upgrades_bare_path_commands_to_bash_wrapped() {
+        // A store provisioned before the exec-bit hardening carries bare-path commands. The merge
+        // must RETIRE those (they're skein's own, now re-wired via `bash "<script>" <args>`) —
+        // additive-only merging would leave both forms and fire every hook twice per event.
+        let existing = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    { "hooks": [ { "type": "command", "command": format!("{PROBE_STATUS_CMD} waiting") } ] },
+                    { "hooks": [ { "type": "command", "command": PROBE_DIFF_CMD } ] },
+                    // a user's own Stop hook must survive the upgrade untouched
+                    { "hooks": [ { "type": "command", "command": "my-own-stop-hook.sh" } ] }
+                ]
+            }
+        });
+        let merged = settings_with_probe(&existing);
+        let stop_cmds: Vec<&str> = merged["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["hooks"][0]["command"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            stop_cmds.contains(&"my-own-stop-hook.sh"),
+            "user hook must survive"
+        );
+        assert!(
+            !stop_cmds
+                .iter()
+                .any(|c| *c == format!("{PROBE_STATUS_CMD} waiting") || *c == PROBE_DIFF_CMD),
+            "bare-path skein commands must be retired, not duplicated"
+        );
+        // 6 skein Stop hooks (all bash-wrapped) + 1 user hook
+        assert_eq!(stop_cmds.len(), 7);
     }
 
     #[test]
@@ -3714,6 +4849,47 @@ mod tests {
         env::set_var("HOME", "/home/me");
         assert_eq!(shorten("/home/me/work/x"), "~/work/x");
         assert_eq!(shorten("/other/x"), "/other/x");
+    }
+
+    #[test]
+    fn file_api_lists_reads_and_guards_the_workspace() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().join("ws");
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        fs::create_dir_all(dir.join(".git")).unwrap(); // must be hidden from listings
+        fs::write(dir.join("README.md"), "# hi").unwrap();
+        fs::write(dir.join("docs").join("a.txt"), "aaa").unwrap();
+        // a symlink pointing OUTSIDE the workspace must not be traversable
+        let _ = std::os::unix::fs::symlink("/etc", dir.join("esc"));
+        let reg = dir.parent().unwrap().join("sandboxes.json");
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"bx":{{"branch":"b","dir":"{}","lastSeen":"2026-01-01T00:00:00Z","status":""}}}}"#,
+                dir.display()
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::set_var("SKEIN_LS_CMD", "false"); // no sbx here — registry is the lookup path
+
+        let l = list_box_files("bx", "").unwrap();
+        let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&".git"), ".git must be omitted");
+        assert_eq!(names[0], "docs", "dirs sort first");
+        assert!(names.contains(&"README.md"));
+        let (bytes, truncated) = read_box_file("bx", "README.md").unwrap();
+        assert!(!truncated);
+        assert_eq!(bytes, b"# hi");
+        assert_eq!(list_box_files("bx", "docs").unwrap().entries.len(), 1);
+        // traversal / absolute / symlink-escape / bad-name are all rejected
+        assert!(read_box_file("bx", "../sandboxes.json").is_err());
+        assert!(read_box_file("bx", "/etc/passwd").is_err());
+        assert!(list_box_files("bx", "esc").is_err());
+        assert!(read_box_file("../bx", "README.md").is_err());
+
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_LS_CMD");
     }
 
     #[test]
@@ -4039,7 +5215,11 @@ mod tests {
         assert!(a.last().unwrap().contains("claude --continue"));
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
         assert_eq!(agent_resume_cmd("claude"), "claude --continue");
+        assert!(agent_resume_cmd("codex").contains("codex resume --last"));
         assert_eq!(agent_resume_cmd("shell"), "shell");
+        let codex = attach_argv_as("thing-x", "/d", "codex");
+        assert!(codex.last().unwrap().contains("skein-agent-codex"));
+        assert!(codex.last().unwrap().contains("codex resume --last"));
         // shell prefers a persistent tmux session but falls back to a plain shell when tmux is absent.
         let sh = shell_argv("thing-x");
         assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
@@ -4275,12 +5455,28 @@ mod tests {
     fn resume_box_guards_name_and_launches() {
         let _g = ENV_LOCK.lock().unwrap();
         assert!(resume_box("../escape", "go").is_err()); // name guard
-                                                         // a stub command stands in for `sbx run …` so the test never spawns a real agent; the
-                                                         // fire-and-forget wrapper returns Ok once it has *launched*, regardless of agent outcome.
+        let dir = tempdir();
+        let registry = dir.join("sandboxes.json");
+        fs::write(
+            &registry,
+            r#"{"thing-x":{"branch":"x","dir":"/d","lastSeen":"","status":"waiting"}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &registry);
+        env::set_var(
+            "SKEIN_LS_CMD",
+            r#"printf '%s\n' '[{"name":"thing-x","agent":"claude","status":"running"}]'"#,
+        );
+        // A stub stands in for the runtime. Resume now verifies liveness and records a durable log
+        // before reporting success, rather than merely proving that a detached shell forked.
         env::set_var("SKEIN_RESUME_CMD", "true {name} {prompt}");
         env::remove_var("SKEIN_REPO");
-        assert!(resume_box("thing-x", "").is_ok());
+        let result = resume_box("thing-x", "");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(dir.join("status/thing-x.resume.log").is_file());
         env::remove_var("SKEIN_RESUME_CMD");
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
     }
 
     // A stub standing in for the `claude` CLI: it reads the prompt (its last arg) and echoes a
@@ -4363,6 +5559,10 @@ mod tests {
         env::remove_var("SKEIN_SHARED");
         env::set_var("SKEIN_CLAUDE_BIN", write_claude_stub(&dir));
         env::set_var("SKEIN_RESUME_CMD", "true {name} {prompt}"); // don't spawn a real agent
+        env::set_var(
+            "SKEIN_LS_CMD",
+            r#"printf '%s\n' '{"name":"box-route","agent":"claude","status":"running"}' '{"name":"box-decide","agent":"claude","status":"running"}'"#,
+        );
         env::remove_var("SKEIN_REPO");
 
         env::set_var("SKEIN_AI", "on");
@@ -4373,6 +5573,7 @@ mod tests {
         env::remove_var("SKEIN_AI");
         env::remove_var("SKEIN_CLAUDE_BIN");
         env::remove_var("SKEIN_RESUME_CMD");
+        env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
     }
 

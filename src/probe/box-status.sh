@@ -6,6 +6,8 @@
 #   working      (UserPromptSubmit) you gave it work; new turn → reset the sub-agent counter,
 #                                    refresh the registry's branch, and mark the turn's start time
 #                                    (see refresh_branch / mark_turn_start below)
+#   working-tool (Codex PostToolUse) an approved tool completed → clear a permission-blocked state
+#                                    without resetting the turn timer/counter
 #   agent-start  (PreToolUse Task)  it delegated to a sub-agent; still WORKING; counter++
 #   agent-stop   (SubagentStop)     a sub-agent finished; counter--; still working
 #   waiting      (Stop)             the turn ended, your move; also refreshes the registry's branch
@@ -40,6 +42,10 @@ payload="$(cat 2>/dev/null || true)"   # the hook's JSON on stdin (used by notif
 cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
 store="$root/.claude"
+# Merged layout: when the repo ships its own .claude/, the kit links only skein/ into it — the
+# shared store is that link's target parent, NOT the repo dir. Writing here without this hop
+# would land signals in the box-local clone where the host can never see them.
+if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || exit 0
 
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
@@ -49,6 +55,19 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
 dir="$store/status"
 mkdir -p "$dir" 2>/dev/null || exit 0
 cfile="$dir/$vmid.agents"   # in-flight sub-agent counter (parallel Tasks → may exceed 1)
+
+# Heartbeat before any real work: one appended line proves the hook fired, so a box whose probes
+# are broken (store not linked, jq missing, script failing) is distinguishable from a box that's
+# merely quiet. Rotated at ~256KB (keep the newest half) so a long-lived box can't grow it forever.
+hl="$store/hook-log"
+if mkdir -p "$hl" 2>/dev/null; then
+  hf="$hl/$vmid.jsonl"
+  printf '{"ts":"%s","script":"box-status","event":"%s","ok":true}\n' "$ts" "$mode" >>"$hf" 2>/dev/null || true
+  if [ "$(wc -c <"$hf" 2>/dev/null || echo 0)" -gt 262144 ]; then
+    n="$(wc -l <"$hf" 2>/dev/null || echo 0)"
+    tail -n "$((n / 2))" "$hf" >"$hf.tmp" 2>/dev/null && mv "$hf.tmp" "$hf" 2>/dev/null || rm -f "$hf.tmp" 2>/dev/null
+  fi
+fi
 
 # Adjust the counter under a lock so parallel Task/SubagentStop hooks don't clobber it.
 # $1 = "reset" | a signed integer delta. Clamps at 0. No stdout.
@@ -73,8 +92,11 @@ inflight() {
   case "$n" in '' | *[!0-9]*) echo 0 ;; *) echo "$n" ;; esac
 }
 
-# Pull a string field out of the hook payload (empty if jq/field absent).
-field() { command -v jq >/dev/null 2>&1 && printf '%s' "$payload" | jq -r --arg k "$1" '.[$k] // ""' 2>/dev/null || true; }
+# Pull a simple top-level string field out of the hook payload. jq is installed by the Skein kit;
+# a failed install is surfaced through the boot report and cockpit health banner.
+field() {
+  command -v jq >/dev/null 2>&1 && printf '%s' "$payload" | jq -r --arg k "$1" '.[$k] // ""' 2>/dev/null || true
+}
 
 # Refresh this box's branch in the shared registry (sandboxes.json) on every turn boundary. Without
 # this, the board's branch column is whatever sandbox-bootstrap.sh captured once at SessionStart (or
@@ -90,9 +112,16 @@ refresh_branch() {
   (
     flock -w 5 9 || exit 0
     [ -s "$reg" ] || echo '{}' >"$reg"
-    tmp="$(mktemp "${TMPDIR:-/tmp}/sbxreg.XXXXXX")" || exit 0
-    if jq --arg v "$vmid" --arg b "$b" \
-          '.[$v] = ((.[$v] // {}) + {branch:$b})' \
+    # mktemp in the registry's OWN directory: a temp under $TMPDIR (in-guest) makes the mv a
+    # cross-device copy-then-unlink — NOT atomic — and the host reads this file every 2s; a reader
+    # mid-copy sees a torn registry. Same-dir rename is atomic (matches write_status below and the
+    # host's write_atomic).
+    tmp="$(mktemp "$store/.sbxreg.XXXXXX")" || exit 0
+    # also stamp lastSeen: without it the registry's timestamp is frozen at SessionStart, so the
+    # board's age column reads hours-old on an actively working box whenever the status file is
+    # missing — exactly when hooks are already in trouble, compounding the confusion.
+    if jq --arg v "$vmid" --arg b "$b" --arg t "$ts" \
+          '.[$v] = ((.[$v] // {}) + {branch:$b, lastSeen:$t})' \
           "$reg" >"$tmp" 2>/dev/null; then mv "$tmp" "$reg"; else rm -f "$tmp"; fi
   ) 9>"$store/.sandboxes.lock" 2>/dev/null || true
 }
@@ -126,6 +155,9 @@ case "$mode" in
     mark_turn_start
     write_status working
     ;;
+  working-tool)
+    write_status working
+    ;;
   agent-start)
     adjust 1
     write_status working
@@ -150,6 +182,21 @@ case "$mode" in
     ;;
   notify-ignore)
     : # informational only; leave the current status alone
+    ;;
+  notify-auto)
+    # Some Claude releases expose notification_type in the JSON payload, while others route only
+    # through hook matchers. This unconditional fallback acts only for the former shape.
+    nt="$(field notification_type)"
+    case "$nt" in
+      permission_prompt|elicitation_dialog|agent_needs_input)
+        if [ "$(inflight)" -gt 0 ]; then write_status working; else write_status blocked; fi
+        ;;
+      idle_prompt)
+        if [ "$(inflight)" -gt 0 ]; then write_status working; else write_status waiting; fi
+        ;;
+      auth_success|elicitation_complete|elicitation_response|agent_completed|"") : ;;
+      *) : ;; # unknown future notification types are informational until an adapter classifies them
+    esac
     ;;
   error)
     adjust reset

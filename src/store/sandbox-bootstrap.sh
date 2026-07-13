@@ -17,11 +17,34 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [ -z "$cwd" ] && cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
 store="$root/.claude"
+# Merged layout: when the repo ships its own .claude/, the kit links only skein/ into it — the
+# shared store is that link's target parent, NOT the repo dir. Writing here without this hop
+# would land signals in the box-local clone where the host can never see them.
+if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || { echo "[skein-bootstrap] no .claude store at $store — skipping" >&2; exit 0; }
 
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
 vmid="${vmid//\//-}"
 mirror="/run/sandbox/source"   # the RO host repo mirror — present only in --clone mode
+
+# Echo the exact installed probe contract from SessionStart. The host compares this with the current
+# store revision and can offer a targeted agent-session restart when a long-running process is old.
+boot_dir="$store/skein/boot"
+boot="$boot_dir/$vmid.json"
+revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
+mkdir -p "$boot_dir" 2>/dev/null || true
+if command -v jq >/dev/null 2>&1; then
+  tmp="$(mktemp "$boot_dir/.boot.XXXXXX" 2>/dev/null || true)"
+  if [ -n "$tmp" ]; then
+    [ -s "$boot" ] || printf '{}\n' >"$boot"
+    jq --arg r "$revision" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
+      '. + {probe_revision:$r,ts:$t,jq:true}' "$boot" >"$tmp" 2>/dev/null \
+      && mv "$tmp" "$boot" || rm -f "$tmp" 2>/dev/null
+  fi
+elif [ ! -s "$boot" ]; then
+  printf '{"ts":"%s","jq":false,"probe_revision":""}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" >"$boot" 2>/dev/null || true
+fi
 
 # --- surface gitignored shared paths from the RO mirror (clone mode) -----------------------------
 # A clone carries only TRACKED files, so gitignored ones the project needs (CLAUDE.md, .env, …) are
@@ -117,7 +140,9 @@ if command -v jq >/dev/null 2>&1; then
   (
     flock -w 5 9 || exit 0
     [ -s "$reg" ] || echo '{}' > "$reg"
-    tmp="$(mktemp "${TMPDIR:-/tmp}/sbxreg.XXXXXX")" || exit 0
+    # same-dir mktemp: a $TMPDIR temp makes the mv a cross-device copy (not atomic) and the host
+    # reads this registry every 2s — a reader mid-copy sees a torn file. Same-dir rename is atomic.
+    tmp="$(mktemp "$store/.sbxreg.XXXXXX")" || exit 0
     if jq --arg v "$vmid" --arg b "$branch" --arg d "$root" --arg t "$ts" \
           '.[$v] = ((.[$v] // {started:$t}) + {branch:$b, dir:$d, lastSeen:$t})' \
           "$reg" > "$tmp" 2>/dev/null; then mv "$tmp" "$reg"; else rm -f "$tmp"; fi

@@ -1,15 +1,20 @@
 # skein shared store
 
-This `.claude` folder is **one project's shared data**. Every sandbox skein launches
+This folder (kept at `.claude` for backward-compatible mounting) is **one project's shared data**.
+It serves Claude, Codex, and future runtime adapters; it is not a Claude-only transcript store. Every sandbox skein launches
 for this repo mounts it live, so memory and the mailbox are shared across the
 project's parallel boxes — and stay scoped to *this* project (see "Talking across
 projects" below for the one exception).
 
 **You don't have to put anything here for it to work.** skein installs and maintains
-all the machinery itself (under `skein/`): the turn-state probe, a SessionStart
+all the machinery itself (under `skein/`): provider-neutral probes, runtime hook adapters, a startup
 bootstrap that bridges memory and surfaces mailbox hand-offs, the mailbox, and a
 default status line — all wired into `settings.json` automatically. An empty folder
 comes up fully working.
+
+Skein installs `jq` during box setup as the single JSON dependency. It does not install Python or a
+second agent CLI. A failed `jq` install is recorded in `skein/boot/<vmid>.json` and shown by the
+cockpit health banner instead of silently pretending signals work.
 
 **Mailbox delivery is turn-boundary, not just SessionStart.** `mailbox.sh inbox` runs
 on every `UserPromptSubmit` (surfaces unread mail as context at the start of a turn)
@@ -64,6 +69,17 @@ Managed by skein (don't edit):
                    lifetime — feeds the same cross-run learn-loop as journals/diffs. Never deleted
                    when a box is torn down (a --clone's own transcript dies with it; this is the
                    only durable record).
+    sessions/      sessions/<vmid>.json — the box's narrative signal (box-session.sh): the last
+                   assistant message at Stop, or the prompt it's blocked on at Notification. This
+                   is what the cockpit's inbox headline, fork-detector, and session digest read.
+    hook-log/      hook-log/<vmid>.jsonl — one heartbeat line per probe firing (appended before any
+                   real work, size-rotated). How the cockpit tells "hooks broken" apart from "box
+                   quiet": a Running box with no heartbeat and no status has dark hooks and gets a
+                   "⚠ no signals" badge.
+    handoffs/      durable provider-neutral takeover briefs plus one-shot pending copies per target
+                   runtime. Native provider transcripts remain separate; the worktree and brief move.
+    skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found and
+                   how .claude was linked (linked | merged | no-store | failed), jq presence, branch.
     shared-rw/     the writable copies of `rw`-flagged shared-paths.txt entries.
 
 Everything under `journals/`, `diffs/`, `tasks/`, and `telemetry/` deliberately **outlives** the box

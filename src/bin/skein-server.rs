@@ -5,8 +5,9 @@
 //!   GET /api/boxes/:name/terminal  WebSocket ↔ PTY running `sbx run --name <box>`  (the single-pane bit)
 //!
 //! The terminal reuses wheels: portable-pty (server PTY) + xterm.js (browser). We write only the
-//! WS↔PTY bridge. Bind is loopback-only; remote access = `tailscale serve` (the tailnet is the
-//! auth boundary) proxying to this loopback port. See README "Remote access".
+//! WS↔PTY bridge. Bind is loopback-only by default; for remote access either `tailscale serve`
+//! proxies to this loopback port, or `$SKEIN_ADDR` binds off-loopback and the box is reached at its
+//! tailnet address directly. The tailnet is the auth boundary either way. See README "Remote access".
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
@@ -33,6 +34,8 @@ const FIT_JS: &str = include_str!("../web/vendor/addon-fit.min.js");
 // WebGL renderer addon — keeps the agent TUI's heavy redraws off the main thread so typed
 // keystrokes echo without competing with the spinner/repaint churn of the DOM renderer.
 const WEBGL_JS: &str = include_str!("../web/vendor/addon-webgl.min.js");
+// marked.js renders repo markdown in the Files tab — the "read the docs without leaving skein" bit.
+const MARKED_JS: &str = include_str!("../web/vendor/marked.min.js");
 const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 
 /// Cap concurrent embedded terminals so a flood of WS connections can't exhaust PTYs / file
@@ -77,8 +80,11 @@ async fn main() {
             }
         }
     });
-    // Bind is loopback-only by default; $SKEIN_ADDR overrides it. For remote access prefer
-    // `tailscale serve` proxying to this loopback port (see README) over an off-loopback bind.
+    // Bind is loopback-only by default; $SKEIN_ADDR overrides it — e.g. `SKEIN_ADDR=0.0.0.0:7878`
+    // to listen on every interface (reachable at the box's tailnet IP/hostname), or a specific host
+    // like `SKEIN_ADDR=<tailnet-ip>:7878`. The terminal's origin guard already trusts `*.ts.net` and
+    // tailnet IPs, so either the `tailscale serve` hostname or a raw off-loopback bind works with no
+    // per-host config; the tailnet is the auth boundary in both cases (see README "Remote access").
     let addr = std::env::var("SKEIN_ADDR")
         .ok()
         .filter(|s| !s.is_empty())
@@ -89,7 +95,12 @@ async fn main() {
         .route("/vendor/xterm.css", get(vendor_xterm_css))
         .route("/vendor/addon-fit.js", get(vendor_fit_js))
         .route("/vendor/addon-webgl.js", get(vendor_webgl_js))
+        .route("/vendor/marked.js", get(vendor_marked_js))
+        .route("/api/boxes/:name/files", get(api_files))
+        .route("/api/boxes/:name/file", get(api_file))
         .route("/api/boxes", get(api_boxes))
+        .route("/api/health", get(api_health))
+        .route("/api/runtimes", get(api_runtimes))
         .route("/api/repos", get(api_repos).post(api_add_repo))
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
@@ -103,6 +114,7 @@ async fn main() {
         .route("/api/boxes/:name/merge", post(api_merge))
         .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
+        .route("/api/boxes/:name/restart-agent", post(api_restart_agent))
         .route("/api/boxes/:name/narrate", get(api_narrate))
         .route("/api/resume-batch", post(api_resume_batch))
         .route("/api/collisions", get(api_collisions))
@@ -120,6 +132,13 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("skein-server: cannot bind {addr}: {e}"));
     println!("skein-server → http://{addr}");
+    // Flag an off-loopback bind so it's never a surprise that the port is reachable from the network.
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
+        println!(
+            "  bound off-loopback — reachable from the network; rely on the tailnet/ACLs as the auth boundary"
+        );
+    }
 
     // Our own accept loop instead of `axum::serve`, solely so we can set TCP_NODELAY per
     // connection. The terminal sends one keystroke per packet; with Nagle's algorithm on, those
@@ -162,6 +181,9 @@ async fn vendor_fit_js() -> Response {
 async fn vendor_webgl_js() -> Response {
     static_asset(WEBGL_JS, "application/javascript; charset=utf-8")
 }
+async fn vendor_marked_js() -> Response {
+    static_asset(MARKED_JS, "application/javascript; charset=utf-8")
+}
 async fn vendor_xterm_css() -> Response {
     static_asset(XTERM_CSS, "text/css; charset=utf-8")
 }
@@ -172,10 +194,10 @@ fn static_asset(body: &'static str, ct: &'static str) -> Response {
 /// Origin guard for the terminal upgrade. Browsers always send `Origin` on a WebSocket handshake
 /// and page JS cannot forge it, so rejecting unexpected origins blocks drive-by cross-origin
 /// connections (WS is exempt from same-origin policy) and DNS-rebinding against the terminal.
-/// Allowed: loopback (local use); any `*.ts.net` host (Tailscale `serve`/`funnel`, which terminates
-/// TLS and proxies to our loopback bind, so the page origin is the tailnet name); and any host in
-/// `$SKEIN_ALLOWED_ORIGINS` (comma-separated) for other reverse proxies. Non-browser clients send
-/// no `Origin` and are allowed — they can't reach an off-loopback bind without being on the tailnet.
+/// Allowed: loopback (local use); any `*.ts.net` host and any Tailscale IP (the tailnet is the auth
+/// boundary — reached either via `tailscale serve`, whose origin is the `.ts.net` name, or by hitting
+/// an off-loopback bind at the box's raw tailnet address); and any host in `$SKEIN_ALLOWED_ORIGINS`
+/// (comma-separated) for other reverse proxies. Non-browser clients send no `Origin` and are allowed.
 fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
     let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
@@ -190,7 +212,10 @@ fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
     } else {
         authority.split(':').next().unwrap_or(authority)
     };
-    if matches!(host, "localhost" | "127.0.0.1" | "::1") || host.ends_with(".ts.net") {
+    if matches!(host, "localhost" | "127.0.0.1" | "::1")
+        || host.ends_with(".ts.net")
+        || is_tailnet_ip(host)
+    {
         return true;
     }
     std::env::var("SKEIN_ALLOWED_ORIGINS").is_ok_and(|list| {
@@ -198,6 +223,24 @@ fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
             .map(str::trim)
             .any(|h| !h.is_empty() && h == host)
     })
+}
+
+/// Is `host` an IP literal inside Tailscale's assigned ranges — CGNAT `100.64.0.0/10` (IPv4) or the
+/// `fd7a:115c:a1e0::/48` ULA prefix (IPv6)? Lets a raw tailnet address be a valid terminal origin
+/// when the operator binds off-loopback, without listing each box's IP in `$SKEIN_ALLOWED_ORIGINS`.
+/// A non-IP host (e.g. `evil.com`) never parses, so this only ever widens access to the tailnet.
+fn is_tailnet_ip(host: &str) -> bool {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            o[0] == 100 && (64..=127).contains(&o[1]) // 100.64.0.0/10
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0 // fd7a:115c:a1e0::/48
+        }
+        Err(_) => false,
+    }
 }
 
 /// Snapshot of the fleet. `load_views` is blocking (subprocess `sbx ls` + per-box `git` + journal
@@ -230,6 +273,61 @@ async fn api_diff(Path(name): Path<String>) -> Response {
         .into_response()
 }
 
+/// List a directory in a box's host-side workspace (`?path=rel/dir`, default root). Traversal,
+/// absolute paths, and symlink escapes are rejected in the lib (resolve_in_workspace).
+async fn api_files(Path(name): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let rel = q.get("path").cloned().unwrap_or_default();
+    let res = tokio::task::spawn_blocking(move || skein::list_box_files(&name, &rel))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(listing) => Json(listing).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
+    }
+}
+
+/// Read a file in a box's host-side workspace (`?path=rel/file`). Text-ish types are served as
+/// text/plain (the UI renders markdown itself), images with their own type so <img> works, and
+/// anything else as octet-stream. `X-Truncated: 1` marks a read capped at FILE_READ_CAP.
+async fn api_file(Path(name): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let rel = q.get("path").cloned().unwrap_or_default();
+    let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let res = tokio::task::spawn_blocking(move || skein::read_box_file(&name, &rel))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    let (bytes, truncated) = match res {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
+    };
+    let ct = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        _ if bytes.contains(&0) => "application/octet-stream", // NUL byte ⇒ not text
+        _ => "text/plain; charset=utf-8",
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, ct),
+            (
+                axum::http::HeaderName::from_static("x-truncated"),
+                if truncated { "1" } else { "0" },
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// The free session digest for a box — "what happened here" assembled from commits, diff,
 /// the agent's journal, and its last reported message. No model tokens spent. 404 if unknown.
 async fn api_session(Path(name): Path<String>) -> Response {
@@ -258,6 +356,48 @@ struct SendReq {
 /// List the repos skein manages.
 async fn api_repos() -> Json<Vec<skein::Repo>> {
     Json(skein::load_repos())
+}
+
+/// Runtime choices come from the core adapter registry so every client stays in sync when a new
+/// provider is added.
+async fn api_runtimes() -> Json<Vec<skein::RuntimeInfo>> {
+    Json(skein::supported_runtimes())
+}
+
+async fn api_health() -> Json<skein::HealthReport> {
+    Json(
+        tokio::task::spawn_blocking(skein::health_report)
+            .await
+            .unwrap_or_else(|error| skein::HealthReport {
+                ok: false,
+                registry: skein::HealthCheck {
+                    ok: false,
+                    detail: error.to_string(),
+                },
+                sbx: skein::HealthCheck {
+                    ok: false,
+                    detail: "health task failed".into(),
+                },
+                git: skein::HealthCheck {
+                    ok: false,
+                    detail: "health task failed".into(),
+                },
+                gh: skein::HealthCheck {
+                    ok: false,
+                    detail: "health task failed".into(),
+                },
+                probes: skein::HealthCheck {
+                    ok: false,
+                    detail: "health task failed".into(),
+                },
+                mailbox: skein::HealthCheck {
+                    ok: false,
+                    detail: "health task failed".into(),
+                },
+                stale_boxes: Vec::new(),
+                runtimes: skein::supported_runtimes(),
+            }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -458,6 +598,33 @@ async fn api_resume(
     })
 }
 
+#[derive(Deserialize, Default)]
+struct RestartAgentReq {
+    #[serde(default)]
+    runtime: String,
+}
+
+async fn api_restart_agent(
+    Path(name): Path<String>,
+    body: Option<Json<RestartAgentReq>>,
+) -> Json<serde_json::Value> {
+    if !skein::valid_name(&name) {
+        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    }
+    let runtime = body
+        .map(|Json(value)| value.runtime)
+        .filter(|value| !value.trim().is_empty());
+    let result = tokio::task::spawn_blocking(move || {
+        skein::restart_agent_session(&name, runtime.as_deref())
+    })
+    .await;
+    Json(match result {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(error)) => serde_json::json!({ "ok": false, "error": error }),
+        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }),
+    })
+}
+
 /// Lazy AI narration of a box's last turn — the rationed Haiku fallback for the digest when the box
 /// keeps no journal (step 7). Returns {summary} (null when AI is off / unavailable). Called on demand
 /// only (Session-tab open), cached per turn-end; never per fleet tick.
@@ -593,7 +760,13 @@ async fn terminal(
         .get("shell")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
-    ws.on_upgrade(move |socket| terminal_session(socket, name, launch, shell))
+    let agent = q.get("agent").filter(|a| skein::valid_runtime(a)).cloned();
+    let handoff = q
+        .get("handoff")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let from = q.get("from").filter(|a| skein::valid_runtime(a)).cloned();
+    ws.on_upgrade(move |socket| terminal_session(socket, name, launch, shell, agent, handoff, from))
 }
 
 /// The WS↔PTY bridge: spawn `sbx run --name <box>` in a PTY, pipe bytes both ways, honour resizes.
@@ -603,6 +776,9 @@ async fn terminal_session(
     name: String,
     launch: Option<String>,
     shell: bool,
+    agent: Option<String>,
+    handoff: bool,
+    from: Option<String>,
 ) {
     // Hold a permit for the whole session; reject (rather than queue) when the cap is hit so a
     // hung browser can't silently stall new terminals. Dropped on every return → released.
@@ -617,6 +793,32 @@ async fn terminal_session(
             return;
         }
     };
+    let target_agent = agent.unwrap_or_else(|| skein::agent_for_box(&name));
+    if handoff && !shell {
+        let hn = name.clone();
+        let ht = target_agent.clone();
+        let hf = from.clone();
+        match tokio::task::spawn_blocking(move || skein::prepare_handoff(&hn, hf.as_deref(), &ht))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                let _ = socket
+                    .send(Message::Text(format!(
+                        "skein: handoff brief failed: {e}\r\n"
+                    )))
+                    .await;
+            }
+            Err(e) => {
+                let _ = socket
+                    .send(Message::Text(format!(
+                        "skein: handoff task failed: {e}\r\n"
+                    )))
+                    .await;
+            }
+        }
+    }
+
     let pair = match native_pty_system().openpty(PtySize {
         rows: 30,
         cols: 100,
@@ -652,7 +854,11 @@ async fn terminal_session(
         // create-a-box mode: run the launch command in a PTY so the user watches it come up
         let mut b = CommandBuilder::new("sh");
         b.arg("-c");
-        b.arg(skein::launch_command(&name, branch));
+        b.arg(skein::launch_command_with_agent(
+            &name,
+            branch,
+            Some(&target_agent),
+        ));
         b
     } else {
         match std::env::var(override_var) {
@@ -670,7 +876,7 @@ async fn terminal_session(
                 let argv = if shell {
                     skein::shell_argv(&name)
                 } else {
-                    skein::attach_argv(&name, &dir)
+                    skein::attach_argv_as(&name, &dir, &target_agent)
                 };
                 for a in argv {
                     b.arg(a);
@@ -817,6 +1023,22 @@ mod tests {
         assert!(!origin_ok(&with_origin(Some(
             "https://box.ts.net.evil.com"
         ))));
+    }
+
+    #[test]
+    fn origin_guard_allows_raw_tailnet_ip_but_not_public_ip() {
+        // A box reached by its raw Tailscale address (off-loopback bind) — CGNAT 100.64.0.0/10 v4
+        // and the fd7a:115c:a1e0::/48 v6 prefix — is a valid origin without any per-IP allowlisting.
+        assert!(origin_ok(&with_origin(Some("http://100.64.0.30:7878"))));
+        assert!(origin_ok(&with_origin(Some("http://100.64.0.1:7878"))));
+        assert!(origin_ok(&with_origin(Some(
+            "http://[fd7a:115c:a1e0::1]:7878"
+        ))));
+        // 100.x outside the /10, ordinary LAN/public IPs, and non-tailnet v6 must still be blocked.
+        assert!(!origin_ok(&with_origin(Some("http://100.128.0.1:7878"))));
+        assert!(!origin_ok(&with_origin(Some("http://192.168.1.10:7878"))));
+        assert!(!origin_ok(&with_origin(Some("http://8.8.8.8"))));
+        assert!(!origin_ok(&with_origin(Some("http://[2001:db8::1]:7878"))));
     }
 
     #[test]

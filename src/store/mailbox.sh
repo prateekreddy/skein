@@ -31,6 +31,10 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")/../.." && pwd)"   # .claude (script lives in .claude/skein/bin)
+command -v jq >/dev/null 2>&1 || {
+  echo "[skein-mailbox] jq is unavailable; mailbox delivery is disabled (visible in /api/health)" >&2
+  exit 0
+}
 box="$here/mailbox"
 mkdir -p "$box"
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
@@ -38,6 +42,31 @@ vmid="${vmid//\//-}"   # slash-safe identity (matches the registry/journal shard
 cmd="${1:-inbox}"; shift || true
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?'; }
+
+# Delete only messages whose intended recipients have all seen them. A direct message is complete
+# once its target has seen it; a broadcast is complete once every currently registered box other
+# than its sender has seen it. Corrupt/ambiguous messages are retained for inspection.
+prune_seen() { # $1 = age in days, $2 = noisy (0/1)
+  local days="${1:-30}" noisy="${2:-0}" cutoff boxes mt f
+  cutoff="$(date -u -d "-$days days" +%s 2>/dev/null || echo 0)"
+  [ "$cutoff" -gt 0 ] || return 0
+  boxes="$(jq -c 'keys' "$here/sandboxes.json" 2>/dev/null || echo '[]')"
+  for f in "$box"/*.json; do
+    [ -e "$f" ] || break
+    mt="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
+    [ "$mt" -lt "$cutoff" ] || continue
+    if jq -e --argjson boxes "$boxes" '
+      (.seenBy // []) as $seen | (.from // "") as $from | (.to // "broadcast") as $to
+      | if ($to == "broadcast" or $to == "all-projects") then
+          ([$boxes[] | select(. != $from)]) as $recipients
+          | ($recipients | length) > 0 and (($recipients - $seen) | length) == 0
+        else $seen | index($to) != null end
+    ' "$f" >/dev/null 2>&1; then
+      rm -f "$f" "$f.lock" 2>/dev/null || true
+      [ "$noisy" = "1" ] && echo "pruned $(basename "$f")"
+    fi
+  done
+}
 
 case "$cmd" in
   send)
@@ -64,41 +93,51 @@ case "$cmd" in
     [ -z "$body" ] && { echo "send: --body or --body-file required" >&2; exit 2; }
     id="$(date -u +%s%N 2>/dev/null || echo 0)-$vmid-$$"
     f="$box/$id.json"
+    tmp="$(mktemp "$box/.mail.XXXXXX" 2>/dev/null)" || exit 1
     jq -n --arg from "$vmid" --arg to "$to" --arg kind "$kind" --arg branch "$branch" \
           --arg body "$body" --arg t "$(ts)" \
           '{from:$from, to:$to, kind:$kind, branch:$branch, body:$body, ts:$t, seenBy:[], relayedTo:[], originProject:""}' \
-          > "$f" 2>/dev/null && echo "sent → $to [$kind]: $body" || { echo "send failed" >&2; exit 1; }
+          > "$tmp" 2>/dev/null && mv "$tmp" "$f" \
+          && echo "sent → $to [$kind]: $body" || { rm -f "$tmp"; echo "send failed" >&2; exit 1; }
     ;;
 
   inbox|stop-check)
+    if [ "$cmd" = "stop-check" ]; then
+      payload="$(cat 2>/dev/null || true)"
+      # A Stop hook that already caused a continuation must not block recursively.
+      printf '%s' "$payload" | jq -e '.stop_hook_active == true' >/dev/null 2>&1 && exit 0
+    fi
     found=0
     out=""
     for f in "$box"/*.json; do
       [ -e "$f" ] || break
-      to="$(jq -r '.to // "broadcast"' "$f" 2>/dev/null)"
-      [ "$(jq -r '.from // ""' "$f" 2>/dev/null)" = "$vmid" ] && continue   # don't deliver to the sender
-      [ "$to" = "broadcast" ] || [ "$to" = "all-projects" ] || [ "$to" = "$vmid" ] || continue
-      [ "$(jq -r --arg v "$vmid" '(.seenBy // []) | index($v)' "$f" 2>/dev/null)" = "null" ] || continue
+      # Lock/read/mark/rename before surfacing. If marking fails, emit nothing: showing an unmarked
+      # message would make it repeat forever and could trap Stop in a continuation loop.
+      line="$({
+        flock -w 5 8 || exit 1
+        jq -e --arg v "$vmid" '
+          (.from // "") != $v
+          and ((.to // "broadcast") as $to | $to == "broadcast" or $to == "all-projects" or $to == $v)
+          and (((.seenBy // []) | index($v)) == null)
+        ' "$f" >/dev/null 2>&1 || exit 1
+        tmp="$(mktemp "$box/.mail-seen.XXXXXX" 2>/dev/null)" || exit 1
+        jq --arg v "$vmid" '.seenBy = ((.seenBy // []) + [$v] | unique)' "$f" >"$tmp" 2>/dev/null \
+          && mv "$tmp" "$f" || { rm -f "$tmp"; exit 1; }
+        jq -r '"  • [\(.kind // "note")] from \(.from // "?") on \(.branch // "?"): \(.body // "")"' "$f" 2>/dev/null
+      } 8>"$f.lock")" || { rm -f "$f.lock" 2>/dev/null || true; continue; }
+      rm -f "$f.lock" 2>/dev/null || true
       if [ "$found" -eq 0 ] && [ "$cmd" = "inbox" ]; then
         echo "[mailbox] unread hand-off for $vmid:"
       fi
       found=$((found+1))
-      line="$(jq -r '"  • [\(.kind)] from \(.from) on \(.branch): \(.body)"' "$f" 2>/dev/null)"
       if [ "$cmd" = "inbox" ]; then
         printf '%s\n' "$line"
       else
         out="$out$line
 "
       fi
-      # mark seen (flock per file so concurrent readers don't clobber seenBy)
-      (
-        flock -w 5 8 || exit 0
-        tmp="$(mktemp "${TMPDIR:-/tmp}/mbx.XXXXXX")" || exit 0
-        jq --arg v "$vmid" '.seenBy = ((.seenBy // []) + [$v] | unique)' "$f" > "$tmp" 2>/dev/null \
-          && mv "$tmp" "$f" || rm -f "$tmp"
-      ) 8>"$f.lock" 2>/dev/null || true
-      rm -f "$f.lock" 2>/dev/null || true
     done
+    prune_seen 30 0
     if [ "$cmd" = "stop-check" ] && [ "$found" -gt 0 ]; then
       {
         echo "[mailbox] you have $found unread hand-off(s) — read them before stopping:"
@@ -118,12 +157,7 @@ case "$cmd" in
 
   prune)
     days="${1:-14}"
-    cutoff="$(date -u -d "-$days days" +%s 2>/dev/null || echo 0)"
-    for f in "$box"/*.json; do
-      [ -e "$f" ] || break
-      mt="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
-      [ "$mt" -lt "$cutoff" ] && rm -f "$f" && echo "pruned $(basename "$f")"
-    done
+    prune_seen "$days" 1
     ;;
 
   *) echo "usage: mailbox.sh {send|inbox|stop-check|list|prune}" >&2; exit 2;;

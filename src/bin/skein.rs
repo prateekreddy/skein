@@ -26,7 +26,7 @@ fn main() {
         "ls" | "status" => cmd_ls(),
         "add" => match rest.first() {
             Some(src) => cmd_add(src, &rest[1..]),
-            None => Err("usage: skein add <git-url|path> [--id <id>] [--agent <claude>]".into()),
+            None => Err("usage: skein add <git-url|path> [--id <id>] [--agent <runtime>]".into()),
         },
         "repos" => cmd_repos(),
         "remove" | "rm" => match rest.first() {
@@ -35,7 +35,7 @@ fn main() {
         },
         "doctor" => cmd_doctor(),
         "attach" => match rest.first() {
-            Some(name) => cmd_attach(name),
+            Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
         "version" | "--version" | "-v" => {
@@ -63,7 +63,7 @@ skein [ls]            show the fleet (default)\n  \
 skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  \
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
-skein attach <box>    reconnect to the box's running agent session\n  \
+skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein doctor          check registry + required tools (sbx/git/gh)\n  \
 skein version\n  \
 skein help\n\n\
@@ -75,7 +75,7 @@ $SKEIN_SHARED/sandboxes.json\n  \
     );
 }
 
-/// `skein add <git-url|path> [--id <id>] [--agent <claude>] [--store <shared-data-folder>]` — register
+/// `skein add <git-url|path> [--id <id>] [--agent <runtime>] [--store <shared-data-folder>]` — register
 /// a repo so skein can launch + observe boxes for it with zero repo-side setup. `--store` points the
 /// repo at an existing shared `.claude` folder (e.g. thing's `skein-shared/.claude`) so its
 /// memory/skills/mailbox/statusline are live across the repo's boxes; omit it to let skein manage one.
@@ -306,8 +306,13 @@ fn cmd_doctor() -> Result<(), String> {
     }
 
     // The sbx-dependent facts skein can't verify itself — surface them so they're not silent.
+    let runtimes = skein::supported_runtimes()
+        .iter()
+        .map(|runtime| runtime.id)
+        .collect::<Vec<_>>()
+        .join(", ");
     println!(
-        "\n{DIM}host notes:{RESET}\n  {DIM}· reconnect = `sbx run --name <box> -- --continue` (resumes the agent's last session so it shows\n    up). sbx has no live-process attach, so this resumes the transcript in a fresh session.\n  · the shell tab uses a persistent tmux session when tmux is present, else a plain shell;\n    skein auto-installs tmux unless disabled in settings.\n  · push from a box: HTTPS uses the proxy's creds + the seeded gh token (no setup); SSH remotes use\n    your forwarded host SSH agent (works iff it has the key loaded), per sbx's credentials docs.{RESET}"
+        "\n{DIM}host notes:{RESET}\n  {DIM}· runtimes: {runtimes}; each uses its native resume command and its own tmux session.\n  · jq is installed as the probe dependency; tmux is optional in Settings.\n  · HTTPS uses seeded gh credentials. GitHub SSH first needs host trust in the box, then the\n    forwarded host agent (`ssh-add -l`); private keys never enter a box.{RESET}"
     );
     Ok(())
 }
@@ -328,10 +333,27 @@ fn have(prog: &str) -> bool {
     )
 }
 
-fn cmd_attach(name: &str) -> Result<(), String> {
+fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // Reconnect to the box's existing agent session (same command the web cockpit uses).
     let dir = skein::lookup_dir(name).unwrap_or_default();
-    let argv = skein::attach_argv(name, &dir);
+    let configured = skein::agent_for_box(name);
+    let agent = flag(opts, "--agent").unwrap_or(configured.clone());
+    if !skein::valid_runtime(&agent) {
+        let available = skein::supported_runtimes()
+            .iter()
+            .map(|runtime| runtime.id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "unsupported runtime {agent:?}; available: {available}"
+        ));
+    }
+    if opts.iter().any(|o| o == "--handoff") {
+        let from = (configured != agent).then_some(configured.as_str());
+        let path = skein::prepare_handoff(name, from, &agent)?;
+        eprintln!("{DIM}skein:{RESET} handoff prepared at {}", path.display());
+    }
+    let argv = skein::attach_argv_as(name, &dir, &agent);
     match Command::new("sbx").args(&argv).status() {
         Ok(s) if s.success() => Ok(()),
         Ok(_) => Err("sbx exited non-zero".into()),

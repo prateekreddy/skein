@@ -103,12 +103,117 @@ commands:
         if [ -n "$need" ] && command -v apt-get >/dev/null 2>&1; then
           sudo apt-get update -qq 2>/dev/null && sudo apt-get install -y -qq $need 2>/dev/null \
             || echo "[skein-kit] could not install:$need (continuing)" >&2
+          # Package indexes dwarf jq itself and are useless after the one setup pass.
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
         fi
 
         # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
-        if [ -d "$store" ] && [ ! -e "$clone_root/.claude" ] && [ ! -L "$clone_root/.claude" ]; then
-          ln -s "$store" "$clone_root/.claude" 2>/dev/null \
-            || echo "[skein-kit] could not link $store -> $clone_root/.claude" >&2
+        # Three cases — and every one leaves a boot report, because a silent miss here is the #1 way
+        # a box ends up with zero hooks while looking perfectly healthy:
+        #   1. no .claude in the clone  → symlink the whole store (the original path);
+        #   2. the repo SHIPS a real .claude/ (committed settings/commands — common!) → the old code
+        #      silently skipped the link and the box ran hookless forever. Now: link the store's
+        #      skein/ into the repo's .claude (probe scripts resolve the true store through that
+        #      link) and MERGE the store's hook wiring into the repo's own settings.json (additive,
+        #      dedup by whole entry, repo's own hooks preserved — jq, which the apt step above ensures);
+        #   3. .claude is already the store symlink → nothing to do.
+        link_state="failed"
+        if [ ! -d "$store" ]; then
+          link_state="no-store"
+          echo "[skein-kit] no store found — probes will not report; check the launch spec mount" >&2
+        elif [ -L "$clone_root/.claude" ]; then
+          link_state="linked"
+        elif [ ! -e "$clone_root/.claude" ]; then
+          if ln -s "$store" "$clone_root/.claude" 2>/dev/null; then link_state="linked"; else
+            echo "[skein-kit] could not link $store -> $clone_root/.claude" >&2
+          fi
+        else
+          # case 2: repo ships its own .claude directory — merge, don't skip
+          rc="$clone_root/.claude"
+          [ -e "$rc/skein" ] || ln -s "$store/skein" "$rc/skein" 2>/dev/null || true
+          if [ -L "$rc/skein" ] && command -v jq >/dev/null 2>&1; then
+            [ -f "$rc/settings.json" ] || echo '{}' > "$rc/settings.json"
+            merged="$(jq -s '
+              .[0] as $c | .[1] as $s | ($c.hooks // {}) as $ch |
+              $c
+              | .hooks = (($s.hooks // {}) | to_entries
+                  | reduce .[] as $e ($ch;
+                      .[$e.key] = ((.[$e.key] // []) + ($e.value | map(. as $x
+                        | select(((($ch[$e.key]) // []) | index($x)) == null))))))
+              | (if .tui == null and $s.tui != null then .tui = $s.tui else . end)
+              | (if .statusLine == null and $s.statusLine != null then .statusLine = $s.statusLine else . end)
+            ' "$rc/settings.json" "$store/settings.json" 2>/dev/null)"
+            if [ -n "$merged" ]; then
+              tmp="$(mktemp "$rc/.settings.XXXXXX" 2>/dev/null)" \
+                && printf '%s\n' "$merged" > "$tmp" && mv "$tmp" "$rc/settings.json" \
+                && link_state="merged"
+            fi
+          fi
+          [ "$link_state" = "merged" ] \
+            || echo "[skein-kit] repo ships .claude/ and the settings merge failed — probes will not report" >&2
+        fi
+        # Codex adapter: install Skein's generated hooks at the USER layer. Project-local .codex
+        # hooks are suppressed until the clone is trusted; the user layer is independent of project
+        # trust, and Skein launches Codex with --dangerously-bypass-hook-trust for these vetted
+        # generated commands. Preserve unrelated user hooks, while replacing older Skein entries so
+        # upgrades don't double-fire. jq is preferred for the additive merge; a fresh file can be
+        # installed without it.
+        codex_hooks_state="absent"
+        codex_source="$store/skein/codex-hooks.json"
+        codex_home="$HOME/.codex"
+        codex_target="$codex_home/hooks.json"
+        if [ -r "$codex_source" ]; then
+          mkdir -p "$codex_home" 2>/dev/null || true
+          if [ ! -s "$codex_target" ]; then
+            cp "$codex_source" "$codex_target.tmp" 2>/dev/null \
+              && mv "$codex_target.tmp" "$codex_target" && codex_hooks_state="installed"
+          elif command -v jq >/dev/null 2>&1; then
+            merged="$(jq -s '
+              .[0] as $c | .[1] as $s
+              | (($c.hooks // {}) | with_entries(
+                  .value |= map(select(
+                    (((.hooks // []) | any((.command // "") | contains("/.claude/skein/bin/"))) | not)
+                  ))) as $clean
+              | $c
+              | .hooks = (reduce (($s.hooks // {}) | to_entries[]) as $e ($clean;
+                  .[$e.key] = ((.[$e.key] // []) + $e.value)))
+            ' "$codex_target" "$codex_source" 2>/dev/null)"
+            if [ -n "$merged" ]; then
+              tmp="$(mktemp "$codex_home/.hooks.XXXXXX" 2>/dev/null)" \
+                && printf '%s\n' "$merged" >"$tmp" && mv "$tmp" "$codex_target" \
+                && codex_hooks_state="merged"
+            fi
+          fi
+        fi
+
+        # The same project skills should be available to both runtimes. Claude reads them through
+        # .claude/skills; Codex discovers user skills under ~/.codex/skills. Link each project skill
+        # without replacing Codex's own/system skills.
+        if [ -d "$store/skills" ]; then
+          mkdir -p "$codex_home/skills" 2>/dev/null || true
+          for skill in "$store/skills"/*; do
+            [ -e "$skill" ] || continue
+            dst="$codex_home/skills/$(basename "$skill")"
+            [ -e "$dst" ] || [ -L "$dst" ] || ln -s "$skill" "$dst" 2>/dev/null || true
+          done
+        fi
+
+        # Boot report: one small JSON the cockpit (and `skein doctor`) can read instead of guessing
+        # why a box is dark. Written into the store when reachable, best-effort.
+        if [ -d "$store" ]; then
+          mkdir -p "$store/skein/boot" 2>/dev/null || true
+          jqp="false"; command -v jq >/dev/null 2>&1 && jqp="true"
+          cap=""
+          if [ -r "$store/skein/runtimes.tsv" ]; then
+            while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe; do
+              [ -n "$runtime_id" ] && [ -n "$runtime_exe" ] || continue
+              command -v "$runtime_exe" >/dev/null 2>&1 && cap="${cap:+$cap,}$runtime_id"
+            done < "$store/skein/runtimes.tsv"
+          fi
+          revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
+          printf '{"ts":"%s","claude_link":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"probe_revision":"%s","branch":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$codex_hooks_state" "$cap" "$jqp" "$revision" "$branch" \
+            > "$store/skein/boot/$vmid.json" 2>/dev/null || true
         fi
         exit 0
 
@@ -123,7 +228,28 @@ memory: |
   This sandbox is a private `--clone` of the repo (isolated code, full git); the
   `.claude` store (memory/skills/hooks/mailbox + skein's turn-state probe) is a
   shared mount linked in at startup and is LIVE across every parallel sandbox.
-  Re-opening a box attaches to a persistent tmux session — `skein-agent` for the
-  agent, `skein-shell` for the shell — so the live process survives disconnects;
-  the agent resumes its transcript via `claude --continue` when the session needs
-  (re)creating. Coordinate with sibling boxes via the shared mailbox.
+  Re-opening a box attaches to a persistent tmux session — `skein-agent` for its
+  configured runtime, a provider-specific session for a Claude/Codex takeover, and
+  `skein-shell` for the shell. Native conversations survive switching: Claude resumes
+  with `claude --continue`, Codex with `codex resume --last`, and Skein injects a
+  provider-neutral handoff brief when one takes over the other's working tree.
+
+  ## Git authentication in this box
+
+  Before retrying a failed fetch, push, or PR, inspect the configured path:
+
+  1. Run `git remote -v`.
+  2. For an HTTPS remote, run `gh auth status`. If `gh` is authenticated but Git is not, run
+     `gh auth setup-git` once, then retry `git push -u origin HEAD`.
+  3. For a GitHub SSH remote, establish host trust once with
+     `mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh -o StrictHostKeyChecking=accept-new -T git@github.com`.
+     GitHub normally prints "successfully authenticated, but does not provide shell access" and
+     exits 1; that means SSH works. Do not misdiagnose that expected exit code as missing auth.
+  4. Then run `test -S "$SSH_AUTH_SOCK" && ssh-add -l`. Skein forwards the host SSH agent; the
+     private key must remain on the host and must never be copied into this box.
+  5. If HTTPS has no `gh` session, ask the user to enable "Seed gh token into sbx" in Skein
+     Settings (and run `gh auth login` on the host if needed). If SSH has no identities, ask them
+     to set the host SSH key path in Skein Settings or switch `origin` to HTTPS.
+
+  State the failing command and its exact stderr when asking. Do not loop on `gh auth login`, create
+  keys, rewrite the remote, or copy credentials without the user's explicit direction.

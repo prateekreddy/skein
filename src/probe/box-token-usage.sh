@@ -32,6 +32,10 @@ command -v jq >/dev/null 2>&1 || exit 0
 cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
 root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || echo "$cwd")"
 store="$root/.claude"
+# Merged layout: when the repo ships its own .claude/, the kit links only skein/ into it — the
+# shared store is that link's target parent, NOT the repo dir. Writing here without this hop
+# would land signals in the box-local clone where the host can never see them.
+if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || exit 0
 
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
