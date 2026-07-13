@@ -5,10 +5,10 @@ displayName: skein workspace
 description: >-
   skein's own repo-agnostic kit. Wires each --clone sandbox to the skein-managed
   shared .claude store (mailbox + skein's turn-state probe) that lives outside the
-  repo, checks out the box's branch before the agent starts, and installs tmux (for
-  the persistent shell tab). Installed by skein (ensure_kit); used by
-  `sbx run --clone --kit <skein-home>/kit --name <repo>-<branch> <agent> <work> <store>`.
-  Agent reconnect is sbx-native (`sbx run --name <box>`), so no in-box session wrapper.
+  repo, checks out the box's branch before the agent starts, and installs jq + tmux
+  as the minimal probe/session substrate. Installed by skein (ensure_kit); used by
+  `sbx create --clone --kit <skein-home>/kit --name <repo>-<branch> <agent> <work> <store>`.
+  Skein starts and reconnects the agent through one persistent tmux session.
 
 commands:
   initFiles:
@@ -65,20 +65,17 @@ commands:
         [ -n "$store" ] && [ -d "$store" ] || store="$(printenv SKEIN_STORE 2>/dev/null || true)"
         [ -n "$store" ] && [ -d "$store" ] || store="$(dirname "$clone_root")/store/.claude"
 
-        # Read the launch spec skein recorded for this box (branch + the install-tmux toggle).
+        # Read the launch spec skein recorded for this box.
         # jq-free by design: the agent image may not ship jq, and a missed branch here is exactly the
         # "box stuck on the base branch" failure — so parse the small skein-written JSON with sed/grep
         # when jq is absent rather than silently skipping the checkout.
         spec="$store/skein/launch/$vmid.json"
         branch=""
-        want_tmux="true"
         if [ -r "$spec" ]; then
           if command -v jq >/dev/null 2>&1; then
             branch="$(jq -r '.branch // ""' "$spec" 2>/dev/null)"
-            want_tmux="$(jq -r 'if .install_tmux == false then "false" else "true" end' "$spec" 2>/dev/null)"
           else
             branch="$(sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$spec" | head -n1)"
-            grep -q '"install_tmux"[[:space:]]*:[[:space:]]*false' "$spec" && want_tmux="false" || want_tmux="true"
           fi
         else
           echo "[skein-kit] no launch spec at $spec — staying on the clone's default branch" >&2
@@ -104,20 +101,19 @@ commands:
         #   jq   — the bootstrap's registry writer (sandboxes.json) and the launch-spec read both use
         #          it; the sed/grep fallback above only covers the branch, so without jq a box still
         #          never registers. Always ensure it.
-        #   tmux — the persistent shell/agent sessions (`tmux new-session -A`); only when enabled.
-        # Fail-soft: a box still works without them (shell falls back to a plain shell). tmux is
-        # gated by the cockpit setting (skein writes install_tmux:false into the spec above).
+        #   tmux — the persistent shell/agent sessions (`tmux new-session -A`). Without it, a UI
+        #          reload would kill or fork in-progress work, so it is part of the box contract.
+        # Installation is best-effort until the boot report is written, then missing tools fail the
+        # startup. That keeps the failure diagnosable without ever launching an unsafe direct agent.
         need=""
         command -v jq >/dev/null 2>&1 || need="$need jq"
-        if [ "$want_tmux" = "true" ]; then
-          command -v tmux >/dev/null 2>&1 || need="$need tmux"
-        fi
+        command -v tmux >/dev/null 2>&1 || need="$need tmux"
         if [ -n "$need" ] && command -v apt-get >/dev/null 2>&1; then
           installed=0
-          # The base Codex kit starts apt update in the background. Retry briefly instead of losing
+          # The base Codex kit starts apt update in the background. Retry long enough to outwait
           # tmux to that package-manager lock race on every fresh Codex box.
-          for pause in 2 4 8; do
-            sleep "$pause"
+          for pause in 0 2 4 8 16 30; do
+            [ "$pause" = "0" ] || sleep "$pause"
             if sudo apt-get update -qq 2>/dev/null \
               && sudo apt-get install -y -qq $need 2>/dev/null; then installed=1; break; fi
           done
@@ -125,9 +121,19 @@ commands:
             # Package indexes dwarf jq itself and are useless after the one setup pass.
             sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
           else
-            echo "[skein-kit] could not install:$need (continuing)" >&2
+            echo "[skein-kit] could not install required tools:$need" >&2
           fi
         fi
+        tools_ok="true"
+        missing=""
+        for tool in jq tmux; do
+          if ! command -v "$tool" >/dev/null 2>&1; then
+            tools_ok="false"
+            missing="$missing $tool"
+          fi
+        done
+        [ "$tools_ok" = "true" ] \
+          || echo "[skein-kit] required box tools unavailable:$missing" >&2
 
         # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
         # Three cases — and every one leaves a boot report, because a silent miss here is the #1 way
@@ -234,21 +240,24 @@ commands:
         if [ -d "$store" ]; then
           mkdir -p "$store/skein/boot" 2>/dev/null || true
           jqp="false"; command -v jq >/dev/null 2>&1 && jqp="true"
+          tmuxp="false"; command -v tmux >/dev/null 2>&1 && tmuxp="true"
           cap=""
           if [ -r "$store/skein/runtimes.tsv" ]; then
             while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe; do
               [ -n "$runtime_id" ] && [ -n "$runtime_exe" ] || continue
-              if command -v "$runtime_exe" >/dev/null 2>&1; then
+              if command -v "$runtime_exe" >/dev/null 2>&1 \
+                || bash -lc 'command -v "$1" >/dev/null 2>&1' bash "$runtime_exe"; then
                 [ -n "$cap" ] && cap="$cap,"
                 cap="$cap$runtime_id"
               fi
             done < "$store/skein/runtimes.tsv"
           fi
           revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
-          printf '{"ts":"%s","claude_link":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"probe_revision":"%s","branch":"%s"}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$codex_hooks_state" "$cap" "$jqp" "$revision" "$branch" \
+          printf '{"ts":"%s","claude_link":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
             > "$store/skein/boot/$vmid.json" 2>/dev/null || true
         fi
+        [ "$tools_ok" = "true" ] || exit 1
         exit 0
 
   startup:
@@ -264,9 +273,9 @@ memory: |
   shared mount linked in at startup and is LIVE across every parallel sandbox.
   Re-opening a box attaches to a persistent tmux session — `skein-agent` for its
   configured runtime, a provider-specific session for a Claude/Codex takeover, and
-  `skein-shell` for the shell. Native conversations survive switching: Claude resumes
-  with `claude --continue`, Codex with `codex resume --last`, and Skein injects a
-  provider-neutral handoff brief when one takes over the other's working tree.
+  `skein-shell` for the shell. UI reloads reattach to the live process; only a missing
+  tmux process falls back to Claude's `--continue` or Codex's `resume --last`. Skein
+  injects a provider-neutral handoff brief when one takes over the other's working tree.
 
   ## Git authentication in this box
 

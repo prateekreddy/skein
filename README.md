@@ -28,7 +28,7 @@ inbox**: boxes sort "who needs you first" (a decision-blocked box, then a turn t
 question, then work in flight), and each row carries a one-line **headline** — the prompt it's
 blocked on, or the gist of its last message — with a chip from the **fork-detector**
 (`decision` / `asks` / `proceed?`) so a real fork stands out from a rote "shall I proceed?". Click any
-box to open its **embedded terminal** (xterm.js ↔ a server-side PTY running `sbx run --name <box>`),
+box to open its **embedded terminal** (xterm.js ↔ `sbx exec` ↔ a persistent per-runtime tmux session),
 its **diff**, or a **Session** digest — "what happened here" assembled for free from the branch's
 commits, the agent's `.skein/journal.md`, and its last message, so you can catch up without reading the
 scrollback. No model tokens are spent building any of this. Each box also gets a second **Shell** tab
@@ -118,7 +118,7 @@ it keeps the bind on loopback and gives you real HTTPS.
 
 ```sh
 skein                 # = skein ls — the fleet, live boxes first
-skein attach <box>    # reconnect (runs: sbx run --name <box>)
+skein attach <box>    # reattach to the live provider tmux session
 skein attach <box> --agent codex --handoff   # Codex takes over a Claude box
 skein attach <box> --agent claude --handoff  # Claude takes over a Codex box
 skein version · help
@@ -160,15 +160,15 @@ one from the **New box** dialog (which gains a repo selector once you manage mor
 
 The registry lives at `~/.skein/repos.json` (override the home with `$SKEIN_HOME`). The kit is
 embedded in the binary and written to `~/.skein/kit/` — no repo-side `dev-sandbox/kit` needed. The
-agent runs inside a `skein` tmux session, so reconnecting (attach) re-joins the **same** live
+agent runs inside a `skein-agent` tmux session, so reconnecting (attach) re-joins the **same** live
 terminal instead of spawning a parallel `claude --continue`.
 
 **Branch names with slashes just work.** Type `feat/auth` in the New box dialog: the sbx box is
 named with a slug (`<repo>-feat-auth`, since sbx names can't contain `/`) while the box actually
 checks out the real `feat/auth` branch.
 
-**Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): auto-install tmux in boxes,
-seed/force the gh token, default agent, base branch for PRs, confirm-before-Destroy, and an SSH key
+**Settings** (⌘K → "Settings…", stored in `~/.skein/config.json`): seed/force the gh token,
+default agent, base branch for PRs, confirm-before-Destroy, and an SSH key
 path. Each matching `$SKEIN_*` env var still overrides the saved value for headless use.
 
 **Git auth inside boxes.** HTTPS remotes push with no setup — the sbx proxy injects GitHub

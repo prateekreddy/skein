@@ -51,7 +51,8 @@ Lift the dev-sandbox subsystem out of thing into `skein/sandbox/` (skein repo), 
   `statusline-command.sh`, `settings.json`. None of thing's app skills/gates or `.env` seeding.
 - **`skein init <repo>`** — scaffold the sibling store from the template, register the project in the
   projects config, and emit the launch command:
-  `sbx run --clone --kit <skein-kit> --name <prefix><branch> claude . <store>`
+  `sbx create --clone --kit <skein-kit> --name <prefix><branch> claude . <store>`, followed by the
+  persistent `sbx exec` + tmux attach
 - **Configurable naming:** box-name prefix per project (default = derived from repo dir, e.g. repo
   name). The prefix is a contract: `setup` names `--name <prefix><branch>`, `sandbox-bootstrap.sh`
   recovers the branch by stripping it, and skein groups/labels by it. Store the prefix in the project

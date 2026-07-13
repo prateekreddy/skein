@@ -285,8 +285,7 @@ fn cmd_doctor() -> Result<(), String> {
     }
     let cfg = skein::load_config();
     println!(
-        "{DIM}·{RESET} settings      tmux-install:{} gh-seed:{} ssh-key:{} {DIM}(~/.skein/config.json){RESET}",
-        on_off(cfg.install_tmux),
+        "{DIM}·{RESET} settings      gh-seed:{} ssh-key:{} {DIM}(~/.skein/config.json){RESET}",
         on_off(cfg.seed_gh_secret),
         if cfg.ssh_key.is_empty() { "—" } else { "set" },
     );
@@ -312,7 +311,7 @@ fn cmd_doctor() -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(", ");
     println!(
-        "\n{DIM}host notes:{RESET}\n  {DIM}· runtimes: {runtimes}; each uses its native resume command and its own tmux session.\n  · jq is installed as the probe dependency; tmux is optional in Settings.\n  · HTTPS uses seeded gh credentials. GitHub SSH first needs host trust in the box, then the\n    forwarded host agent (`ssh-add -l`); private keys never enter a box.{RESET}"
+        "\n{DIM}host notes:{RESET}\n  {DIM}· runtimes: {runtimes}; each uses its native resume command and its own tmux session.\n  · jq and tmux are required managed-box dependencies; creation fails if either cannot be installed.\n  · HTTPS uses seeded gh credentials. GitHub SSH first needs host trust in the box, then the\n    forwarded host agent (`ssh-add -l`); private keys never enter a box.{RESET}"
     );
     Ok(())
 }

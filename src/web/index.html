@@ -639,9 +639,6 @@
         <div id="set-repos" class="set-repos"></div>
         <button class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>add repository</button>
 
-        <div class="set-sec">Boxes</div>
-        <label class="set-row"><span class="set-txt"><span class="set-title">Auto-install tmux</span><span class="desc">a shared shell session that survives reconnects</span></span><input type="checkbox" id="set-tmux" class="switch"></label>
-
         <div class="set-sec">GitHub</div>
         <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">so boxes can fetch, push, and open PRs</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
         <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">refresh the sbx secret after a rotation</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
@@ -1857,7 +1854,7 @@ const newbox = document.getElementById("newbox"), nbBranch = document.getElement
 const nbRepo = document.getElementById("nb-repo"), nbRepoLbl = document.getElementById("nb-repo-lbl");
 const nbAgent = document.getElementById("nb-agent");
 let repos = [];
-let settings = { install_tmux: true };
+let settings = {};
 function fillRuntimeSelects() {
   for (const id of ["nb-agent", "ar-agent", "set-agent"]) {
     const select = document.getElementById(id);
@@ -1881,14 +1878,13 @@ function loadRuntimes() {
     return runtimes;
   }).catch(() => []);
 }
-// Load skein's app settings (the cockpit toggles, e.g. auto-install tmux in boxes).
+// Load skein's app settings.
 function loadSettings() {
   return fetch("/api/settings").then(r => r.json()).then(s => { settings = s || settings; }).catch(() => {});
 }
 const settingsModal = () => document.getElementById("settings");
 function openSettings() {
   Promise.all([loadRuntimes(), loadSettings(), loadRepos()]).then(() => {
-    document.getElementById("set-tmux").checked = settings.install_tmux !== false;
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret !== false;
     document.getElementById("set-forcegh").checked = !!settings.force_gh_secret;
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
@@ -1929,7 +1925,6 @@ function removeRepo(id) {
 function closeSettings() { settingsModal().classList.remove("open"); }
 function saveSettings() {
   const next = {
-    install_tmux: document.getElementById("set-tmux").checked,
     seed_gh_secret: document.getElementById("set-seedgh").checked,
     force_gh_secret: document.getElementById("set-forcegh").checked,
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,

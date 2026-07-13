@@ -96,7 +96,7 @@ from thing's light Fluent product chrome.
   fleet stream, and a self-contained **dark web board** (no build step). Read-only + live.
 - **Phase 1 — web actions + embedded session + ⌘K (the single-pane milestone):** endpoints for
   launch / diff / merge / archive + a command palette; **attach opens a terminal *in the browser***
-  (xterm.js over a `ttyd`/`coder/agentapi` wrapper of `sbx run`), so you converse with each agent
+  (xterm.js over `sbx exec` into a persistent provider-specific tmux session), so you converse with each agent
   without leaving the page; **Svelte** for the syntax-highlighted diff viewer. After this, the browser
   is the only surface a dev touches day-to-day.
 - **Phase 2 — real status:** a Claude `Stop`/`Notification` hook writes `status` into the registry;

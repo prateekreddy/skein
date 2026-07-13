@@ -30,11 +30,11 @@ using only the host's `sbx` / `git` / `gh` and its own injected probe. If a capa
 The current launch line is the map of what's generic vs project:
 
 ```
-sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
-        └clone┘ └─project──┘ └──skein owns───┘ └agent┘   └skein owns┘
+sbx create --clone --kit "$kit" --name "thing-$1" claude . "$shared"
+           └clone┘ └─project──┘ └──skein owns───┘ └agent┘   └skein owns┘
 ```
 
-- **Launch** (`sbx run --clone …`) → skein constructs and runs it.
+- **Launch** (`sbx create --clone …` + tmux attach) → skein constructs and runs it.
 - **Shared store** (`$shared`) → skein provisions the minimal skein-needed store itself
   (empty `sandboxes.json`, `mailbox/`, skein's own hooks). Repo's project store-template layers on
   top *only if present*.
@@ -43,7 +43,8 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
 
 ## Components to build in skein
 
-1. **Launcher** — `sbx run --clone --name <box> [--kit <opt>] <agent> . <store>`, from
+1. **Launcher** — `sbx create --clone --name <box> [--kit <opt>] <agent> . <store>`, then
+   `sbx exec` into the provider's persistent tmux session, from
    `{repo (url|path), branch, agent}`. Replaces `SKEIN_LAUNCH_CMD` → `setup-sandbox.sh`.
 2. **Store provisioner** — create the sibling `.claude` store with registry + mailbox + skein hooks;
    detect & apply an optional repo store-template/kit.
@@ -82,9 +83,9 @@ sbx run --clone --kit "$kit" --name "thing-$1" claude . "$shared"
   Overridable via `SKEIN_LS_CMD`; falls back to `lastSeen` when sbx can't be consulted. Unit-tested;
   needs host verification of the real `sbx ls --json` shape.
 - **Phase 2 — skein-owned launch. ✅ DONE (launch); store-provisioning deferred.** When
-  `$SKEIN_LAUNCH_CMD` is unset, `launch_command` builds `sbx run --clone [--kit $SKEIN_KIT] --name
-  <name> <$SKEIN_AGENT|claude> . <store>` itself — a faithful copy of `setup-sandbox.sh`'s launch
-  line — so the repo needs no launch script. Branch isn't passed: the box's bootstrap derives it from
+  `$SKEIN_LAUNCH_CMD` is unset, `launch_command` builds `sbx create --clone [--kit $SKEIN_KIT]
+  --name <name> <$SKEIN_AGENT|claude> . <store>`, followed by the persistent agent attach, so the
+  repo needs no launch script. Branch isn't passed: the box's bootstrap derives it from
   the name (`thing-<branch>` → checkout `<branch>`). `$SKEIN_LAUNCH_CMD` still overrides (fallback).
   Unit-tested; **needs host verification** (no sbx here). Pinned the per-runtime seam via `$SKEIN_AGENT`.
   REMAINING: provisioning a store *from scratch* (for fresh/any-repo setups with no existing
@@ -227,21 +228,20 @@ All four landed together (Opus, one pass). Code map:
   installs tmux (for the shell tab) if missing + allowed. brace-free reads only (the kit resolver
   rejects unknown `${...}`).
 - **`ensure_store`** — provisions `mailbox/ status/ tasks/ skein/launch/ skein/bin/` + runs the probe.
-- **Launch** — `repo_launch_command` builds `sbx run --clone --kit ~/.skein/kit --name <id>-<branch>
-  <agent> <work> <store>`, writing `<store>/skein/launch/<box>.json` first. The agent positional is a
-  **registered sbx agent name** (claude/codex/…; `sbx run` only accepts those, each has its own image
-  — it can't be a path/wrapper). `native_launch_command` routes repo-managed boxes here; the old
-  `$SKEIN_REPO/$SKEIN_KIT` env path stays as the fallback.
+- **Launch** — `repo_launch_command` builds `sbx create --clone --kit ~/.skein/kit --name
+  <id>-<branch> <agent> <work> <store>`, then `sbx exec`s the agent into `skein-agent` tmux, writing
+  `<store>/skein/launch/<box>.json` first. The agent positional is a **registered sbx agent name**
+  (claude/codex/…; each selects its image, so it can't be a path/wrapper).
+  `native_launch_command` routes repo-managed boxes here; the old `$SKEIN_REPO/$SKEIN_KIT` env path
+  stays as the fallback.
 - **Branch slugging** — `feat/auth` can't be a box name (sbx rejects `/`), so the *name* is a slug
   (`<repo>-feat-auth`) while the **real** branch (`feat/auth`) rides in the launch spec and is what
   the kit checks out. `slug`/`box_name` in lib; mirrored in the cockpit JS.
-- **Reconnect** — `attach_argv` = `sbx run --name <box> -- --continue` (claude). sbx starts a *fresh*
-  agent session on each run (no live-process attach), so the agent's own resume flag is what makes a
-  prior session show up; the flag is per-agent (`resume_args`: claude → `--continue`, others bare).
+- **Reconnect** — creation starts the provider inside `skein-agent` tmux via `sbx exec`; every UI or
+  CLI reconnect attaches to that exact live process. The provider's native resume command is used
+  only if the tmux process no longer exists, avoiding parallel/forked sessions during ordinary reloads.
   `shell_argv` = `sbx exec -it <box> bash -lc '… tmux new-session -A -s skein-shell || bash -li'`
-  (persistent shell tab when tmux's there, plain shell otherwise — never breaks). **Known gap:** a
-  *single shared live* PTY (partial command in flight visible across reconnects) would need the agent
-  running inside tmux, which the registered-agent + per-agent-image model blocks today — see below.
+  (persistent shell tab; managed-box creation requires tmux).
 - **gh auth** — `ensure_gh_secret` runs `sbx secret set -g github -t "$(gh auth token)"` once
   (global). "already exists" is treated as success; `$SKEIN_FORCE_GH_SECRET` / the force setting add
   `-f`. `$SKEIN_NO_GH_SECRET` / the seed setting skip it.
@@ -249,8 +249,8 @@ All four landed together (Opus, one pass). Code map:
   `ssh-add`s the configured key (`$SKEIN_SSH_KEY` / settings) so it's available to forward;
   `ssh_remote_warning` flags an SSH `origin` at add-time (with the HTTPS-switch command when no key
   is set). Called at server startup, on settings-save, and before an SSH-URL clone.
-- **Settings** — `~/.skein/config.json` (`Config`): install_tmux, seed/force gh secret, default
-  agent, base branch, confirm_destroy, ssh_key. `GET/POST /api/settings`; cockpit Settings modal;
+- **Settings** — `~/.skein/config.json` (`Config`): seed/force gh secret, default agent, base branch,
+  confirm_destroy, ssh_key. `GET/POST /api/settings`; cockpit Settings modal;
   each has a `$SKEIN_*` env override.
 - **Surfaces** — CLI `skein add <url|path> [--id] [--agent]` + `skein repos`; HTTP `GET/POST
   /api/repos`, `/api/settings`; cockpit "Add a repo…" + "Settings…" palette, repo selector in the
@@ -259,19 +259,17 @@ All four landed together (Opus, one pass). Code map:
   notes.
 
 **Confirmed against the host this round (was: open assumptions):**
-- `sbx run` agent positional must be a registered **name** (claude/codex/copilot/cursor/…/shell), not
-  a path → dropped the `skein-agent` wrapper; reconnect is now sbx-native `sbx run --name`.
-- `sbx run --name <box>` (no agent, no `--continue`) is the documented re-attach → fixes the
-  parallel-session bug directly.
+- `sbx create` can provision the selected registered agent image without attaching; Skein then uses
+  `sbx exec` for its own persistent tmux process rather than asking `sbx run` to fork an agent session.
 - gh secret `-f` overwrites; "already exists" without `-f` is benign.
 - SSH works inside boxes via host **agent forwarding** (per the sbx Credentials docs) — no in-box key
   needed; skein just loads the key into the host agent.
 
 **Still needs host verification:**
-1. **tmux in the image** — the shell tab installs it if missing+allowed; falls back to a plain shell.
+1. **Required tool install** — the kit installs jq + tmux and fails creation if either remains absent.
 2. **Mount visibility** — kit assumes the store mount shows in `/proc/self/mountinfo` and the clone is
    `WORKSPACE_DIR` (both hold for the thing kit); sibling-path + `$SKEIN_STORE` fallbacks exist.
-3. **`--kit` accepts a directory** of this shape, and `sbx run --clone --kit … <agent> <work> <store>`
+3. **`--kit` accepts a directory** of this shape, and `sbx create --clone --kit … <agent> <work> <store>`
    mounts `<store>` at its host path so the marker scan finds it.
 
 ## Open items / risks

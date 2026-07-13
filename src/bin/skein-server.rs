@@ -2,7 +2,7 @@
 //!   GET /                          the dark web board (self-contained, no build)
 //!   GET /api/boxes                 fleet snapshot (JSON)
 //!   GET /api/events                live fleet stream (SSE)
-//!   GET /api/boxes/:name/terminal  WebSocket ↔ PTY running `sbx run --name <box>`  (the single-pane bit)
+//!   GET /api/boxes/:name/terminal  WebSocket ↔ PTY ↔ persistent in-box tmux session
 //!
 //! The terminal reuses wheels: portable-pty (server PTY) + xterm.js (browser). We write only the
 //! WS↔PTY bridge. Bind is loopback-only by default; for remote access either `tailscale serve`
@@ -743,7 +743,7 @@ async fn api_events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
 }
 
 /// Upgrade to a WebSocket that bridges the browser terminal to a PTY.
-/// `?launch=<branch>` runs the box-creation command instead of attaching to an existing box.
+/// `?launch=<branch>` creates the box, then attaches to its first persistent agent session.
 async fn terminal(
     ws: WebSocketUpgrade,
     Path(name): Path<String>,
@@ -770,7 +770,8 @@ async fn terminal(
     ws.on_upgrade(move |socket| terminal_session(socket, name, launch, shell, agent, handoff, from))
 }
 
-/// The WS↔PTY bridge: spawn `sbx run --name <box>` in a PTY, pipe bytes both ways, honour resizes.
+/// The WS↔PTY bridge: attach to an in-box tmux session through `sbx exec`, pipe bytes both ways,
+/// and honour resizes.
 /// Override the spawned command with $SKEIN_ATTACH_CMD (run via `sh -c`) for local testing.
 async fn terminal_session(
     mut socket: WebSocket,
@@ -836,12 +837,12 @@ async fn terminal_session(
     };
 
     // Build the command. Propagate env + cwd so `sbx`/`sh` resolve on PATH.
-    // Default: reconnect to the box's *existing* agent session (tmux + `claude --continue`),
+    // Default: reconnect to the box's *existing* provider-specific tmux session,
     // rooted at the dir the box registered.
     //
     // $SKEIN_ATTACH_CMD fully overrides it (run via `sh -c`) — `{name}` and `{dir}` in the
     // value are substituted first, so you can tune the exact sbx invocation per box without
-    // recompiling, e.g.  SKEIN_ATTACH_CMD='sbx run --name {name} -- claude --continue'
+    // recompiling, e.g. SKEIN_ATTACH_CMD='sbx exec -it {name} tmux attach -t skein-agent'
     let dir = skein::lookup_dir(&name).unwrap_or_default();
     // $SKEIN_SHELL_CMD overrides the shell command, $SKEIN_ATTACH_CMD the agent attach (both run via
     // `sh -c`, `{name}`/`{dir}` substituted). Default agent: reconnect to the box's tmux+`claude
@@ -852,7 +853,8 @@ async fn terminal_session(
         "SKEIN_ATTACH_CMD"
     };
     let mut cmd = if let Some(branch) = &launch {
-        // create-a-box mode: run the launch command in a PTY so the user watches it come up
+        // create-a-box mode: provision without an agent attach, then enter the same tmux-backed
+        // agent session all future UI reloads reconnect to.
         let mut b = CommandBuilder::new("sh");
         b.arg("-c");
         b.arg(skein::launch_command_with_agent(

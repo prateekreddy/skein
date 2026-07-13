@@ -1063,8 +1063,8 @@ pub struct HealthReport {
 /// consume these definitions. Provider quirks belong here, not at their call sites.
 struct RuntimeAdapter {
     info: RuntimeInfo,
-    /// Extra arguments passed through `sbx run` to the agent on first launch.
-    launch_args: &'static [&'static str],
+    /// Shell command used to create this runtime's first persistent tmux process.
+    interactive_start: &'static str,
     /// Shell command used when creating a provider-specific persistent tmux session.
     interactive_resume: &'static str,
     /// Headless command run inside an existing box; `{prompt}` is replaced with a shell-quoted value.
@@ -1080,7 +1080,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             supports_resume: true,
             supports_handoff: true,
         },
-        launch_args: &[],
+        interactive_start: "claude",
         interactive_resume: "claude --continue",
         headless_resume: "claude --continue --print {prompt}",
     },
@@ -1094,7 +1094,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         },
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
-        launch_args: &["--dangerously-bypass-hook-trust"],
+        interactive_start: "codex --dangerously-bypass-hook-trust",
         interactive_resume: "codex resume --last --dangerously-bypass-hook-trust || codex --dangerously-bypass-hook-trust",
         headless_resume: "codex exec resume --last --dangerously-bypass-hook-trust {prompt} || codex exec --dangerously-bypass-hook-trust {prompt}",
     },
@@ -1162,6 +1162,12 @@ pub fn health_report() -> HealthReport {
     let gh = tool("gh", false);
 
     let repos = load_repos();
+    let fleet_names = fleet.as_ref().map(|boxes| {
+        boxes
+            .iter()
+            .map(|box_| box_.name.as_str())
+            .collect::<BTreeSet<_>>()
+    });
     let mut probe_errors = Vec::new();
     let mut mailbox_errors = Vec::new();
     for repo in &repos {
@@ -1182,15 +1188,23 @@ pub fn health_report() -> HealthReport {
         let boot_dir = store.join("skein/boot");
         if let Ok(entries) = fs::read_dir(boot_dir) {
             for path in entries.flatten().map(|entry| entry.path()) {
-                let jq_available = fs::read_to_string(&path)
+                let box_name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("box");
+                if fleet_names
+                    .as_ref()
+                    .is_some_and(|names| !names.contains(box_name))
+                {
+                    continue;
+                }
+                let boot = fs::read_to_string(&path)
                     .ok()
-                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                    .and_then(|value| value.get("jq")?.as_bool());
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+                let jq_available = boot.as_ref().and_then(|value| value.get("jq")?.as_bool());
                 if jq_available == Some(false) {
-                    mailbox_errors.push(format!(
-                        "{} is missing jq",
-                        path.file_stem().and_then(|s| s.to_str()).unwrap_or("box")
-                    ));
+                    mailbox_errors.push(format!("{box_name} is missing required jq"));
+                }
+                let tmux_available = boot.as_ref().and_then(|value| value.get("tmux")?.as_bool());
+                if tmux_available == Some(false) {
+                    probe_errors.push(format!("{box_name} is missing required tmux"));
                 }
             }
         }
@@ -1206,7 +1220,7 @@ pub fn health_report() -> HealthReport {
     let mailbox = HealthCheck {
         ok: mailbox_errors.is_empty(),
         detail: if mailbox_errors.is_empty() {
-            "shared stores and jq available in reporting boxes".into()
+            "shared stores and required jq available in reporting boxes".into()
         } else {
             mailbox_errors.join("; ")
         },
@@ -1269,10 +1283,6 @@ fn repos_json() -> PathBuf {
 /// vars still override these at runtime (env wins) for headless/CI use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Have the kit `apt-get install tmux` in a box when it's missing (so the agent gets a shared
-    /// session and reconnects re-attach the same terminal). Off ⇒ the box uses whatever's installed.
-    #[serde(default = "default_true")]
-    pub install_tmux: bool,
     /// Seed the host `gh` token into sbx (global) at startup so boxes can fetch/push/open PRs.
     /// Off is the UI equivalent of `$SKEIN_NO_GH_SECRET`.
     #[serde(default = "default_true")]
@@ -1306,7 +1316,6 @@ fn default_true() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            install_tmux: true,
             seed_gh_secret: true,
             force_gh_secret: false,
             default_agent: default_agent(),
@@ -1860,7 +1869,6 @@ fn write_launch_spec_for_agent(
     let body = serde_json::json!({
         "branch": branch,
         "agent": agent,
-        "install_tmux": load_config().install_tmux,
     });
     let bytes = serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?;
     write_atomic(&dir.join(format!("{name}.json")), &dir, &bytes)
@@ -1909,8 +1917,9 @@ pub fn launch_command_with_agent(name: &str, branch: &str, agent: Option<&str>) 
 }
 
 /// skein's own launch command, used when `$SKEIN_LAUNCH_CMD` is unset — so a box can be created
-/// without the repo shipping a `setup-sandbox.sh`. Faithful to that script's launch line:
-///   `sbx run --clone [--kit <kit>] --name <name> <agent> . <store>`
+/// without the repo shipping a `setup-sandbox.sh`. It creates without attaching, then opens the
+/// runtime in Skein's persistent tmux session:
+///   `sbx create --clone [--kit <kit>] --name <name> <agent> . <store> && sbx exec … tmux …`
 /// The box's bootstrap derives the branch from the name (`thing-<branch>` → `<branch>`) and checks
 /// it out, so no branch arg is needed. `agent` (`$SKEIN_AGENT`, default `claude`) is the per-runtime
 /// seam; `kit` (`$SKEIN_KIT`, resolved under `$SKEIN_REPO`) wires the shared store into the clone and
@@ -1926,7 +1935,7 @@ fn native_launch_command(name: &str, branch: &str, agent_override: Option<&str>)
         .map(str::to_string)
         .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "claude".into());
-    let mut parts: Vec<String> = vec!["sbx".into(), "run".into(), "--clone".into()];
+    let mut parts: Vec<String> = vec!["sbx".into(), "create".into(), "--clone".into()];
     if let Some(kit) = env::var("SKEIN_KIT").ok().filter(|s| !s.is_empty()) {
         parts.push("--kit".into());
         parts.push(sh_quote(&resolve_under_repo(&kit)));
@@ -1938,31 +1947,20 @@ fn native_launch_command(name: &str, branch: &str, agent_override: Option<&str>)
     if let Some(store) = launch_store() {
         parts.push(sh_quote(&store));
     }
-    let runtime = resolve_runtime(&agent);
-    if !runtime.launch_args.is_empty() {
-        parts.push("--".into());
-        parts.extend(runtime.launch_args.iter().map(|arg| (*arg).to_string()));
-    }
-    parts.join(" ")
+    persistent_launch_command(parts, name, &agent)
 }
 
 /// Launch line for a registered repo, built from `repos.json` + skein's embedded kit:
-///   `sbx run --clone --kit <home>/kit --name <id>-<branch> <wrapper> <work> <store>`
-/// The agent positional is a registered sbx agent **name** (`sbx run` only accepts the built-in set:
+///   `sbx create --clone --kit <home>/kit --name <id>-<branch> <agent> <work> <store>`
+/// The agent positional is a registered sbx agent **name** (`sbx create` only accepts the built-in set:
 /// claude, codex, …; each has its own image, so it can't be a path or a wrapper command). It's the
 /// repo's `agent` (`$SKEIN_AGENT` overrides). `<work>` is the host clone; `<store>` is mounted at its
 /// host path so the kit links it in. The kit checks out the branch (from the launch spec) before the
-/// agent starts. This `sbx run` *creates* the box (its first agent session); re-opens go through
-/// [`attach_argv`], which runs the agent inside a persistent `skein-agent` tmux session so it survives
-/// disconnects. Side effect: writes the launch spec + ensures kit/store (best-effort; a failure only
-/// logs, the command still builds).
-///
-/// TODO(first-session-persistence): this first session runs claude *directly* (not in tmux), so a
-/// disconnect during the very first launch loses it — persistence only kicks in from the first
-/// re-open. Wrap the first session in the same `skein-agent` tmux session so the user never sees a
-/// non-persistent session. Needs a way to boot the claude *image* without `sbx run` auto-starting
-/// claude (so we can `exec` the tmux-wrapped agent like [`attach_argv`] does); revisit once sbx's
-/// agent/boot model is confirmed to allow it.
+/// agent starts. `sbx create` provisions the image without starting its entrypoint; Skein then uses
+/// `sbx exec` to start the agent in the same `skein-agent` tmux session used by every later attach.
+/// Closing or reloading the creation terminal therefore cannot kill or fork an in-progress turn.
+/// Side effect: writes the launch spec + ensures kit/store (best-effort; a failure only logs, the
+/// command still builds).
 fn repo_launch_command_as(
     name: &str,
     repo: &Repo,
@@ -1991,9 +1989,9 @@ fn repo_launch_command_as(
     if let Err(e) = write_launch_spec_for_agent(name, &branch, repo, &agent) {
         eprintln!("skein: write_launch_spec: {e}");
     }
-    let mut parts = vec![
+    let parts = vec![
         "sbx".to_string(),
-        "run".into(),
+        "create".into(),
         "--clone".into(),
         "--kit".into(),
         sh_quote(&kit.to_string_lossy()),
@@ -2003,12 +2001,18 @@ fn repo_launch_command_as(
         sh_quote(&repo.work),
         sh_quote(&repo.store),
     ];
-    let runtime = resolve_runtime(&agent);
-    if !runtime.launch_args.is_empty() {
-        parts.push("--".into());
-        parts.extend(runtime.launch_args.iter().map(|arg| (*arg).to_string()));
-    }
-    parts.join(" ")
+    persistent_launch_command(parts, name, &agent)
+}
+
+/// Join a completed `sbx create` argv with the first tmux-backed agent attach. Each argument is
+/// shell-quoted because the terminal launch path executes this compound command via `sh -c`.
+fn persistent_launch_command(create: Vec<String>, name: &str, agent: &str) -> String {
+    let attach = initial_attach_argv_as(name, agent)
+        .into_iter()
+        .map(|arg| sh_quote(&arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{} && sbx {attach}", create.join(" "))
 }
 
 /// Resolve a possibly-relative path against `$SKEIN_REPO` (the dir launches run in), so a relative
@@ -3089,11 +3093,13 @@ pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<P
 /// browser disconnect — sbx has no live-process attach of its own, so without this a closed tab kills
 /// the agent mid-turn. `tmux new-session -A` is the seam: on open it *re-attaches* to that session if
 /// it's still running (you land exactly where the agent is, mid-stream output and all), and only
-/// *creates* it — running the agent's resume command — when there's none yet (a fresh box, or one
-/// that was restarted). The resume command is per-agent: claude → `claude --continue` (picks the
-/// transcript back up); other agents start bare until their resume flag is wired in. Falls back to
-/// running the agent directly on an image without tmux. Mirror of [`shell_argv`], which backs the
-/// shell tab the same way. Override wholesale with `$SKEIN_ATTACH_CMD`.
+/// *creates* it — running the agent's resume command — when an existing box lost the process or was
+/// restarted. The resume command is per-agent: claude → `claude --continue` (picks the
+/// transcript back up); Codex uses `resume --last`. If the tmux process is still alive, this command
+/// is not run at all — the client attaches directly to the in-progress process.
+/// A missing tmux is a broken Skein box contract, not a reason to start a second direct process.
+/// Mirror of [`shell_argv`], which backs the shell tab the same way. Override wholesale with
+/// `$SKEIN_ATTACH_CMD`.
 pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
     let agent = agent_for_box(name);
     attach_argv_as(name, _dir, &agent)
@@ -3106,11 +3112,29 @@ pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
     let runtime = resolve_runtime(agent);
     let agent = runtime.info.id;
     let tmux_name = agent_session_name(name, agent);
-    let resume = runtime.interactive_resume.to_string();
+    agent_attach_argv(name, runtime, &tmux_name, runtime.interactive_resume)
+}
+
+/// The first agent attach after `sbx create`. It deliberately uses the same primary tmux session
+/// name as all future reconnects, but starts a new native conversation instead of asking the
+/// provider to resume some unrelated prior transcript.
+fn initial_attach_argv_as(name: &str, agent: &str) -> Vec<String> {
+    let runtime = resolve_runtime(agent);
+    agent_attach_argv(name, runtime, "skein-agent", runtime.interactive_start)
+}
+
+fn agent_attach_argv(
+    name: &str,
+    runtime: &RuntimeAdapter,
+    tmux_name: &str,
+    command: &str,
+) -> Vec<String> {
+    let agent = runtime.info.id;
     let executable = runtime.info.executable;
     let shell = format!(
         "if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
-         if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {tmux_name} {resume:?}; else exec bash -lc {resume:?}; fi"
+         if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
+         exec tmux new-session -A -s {tmux_name} {command:?}"
     );
     vec![
         "exec".into(),
@@ -3164,8 +3188,8 @@ pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), St
 }
 
 /// The shell command that (re)starts an agent, resuming prior history when the runtime supports it —
-/// run inside the `skein-agent` tmux session by [`attach_argv`] (the per-runtime seam). claude resumes
-/// with `--continue`; other agents start bare (their binary name) until a resume flag is wired in.
+/// run inside the `skein-agent` tmux session by [`attach_argv`] (the per-runtime seam). Claude uses
+/// `--continue`; Codex uses `resume --last`; future runtimes add their command in the adapter table.
 #[cfg(test)]
 fn agent_resume_cmd(agent: &str) -> String {
     runtime_adapter(agent)
@@ -3175,8 +3199,9 @@ fn agent_resume_cmd(agent: &str) -> String {
 
 /// `sbx` argv for an interactive *shell* in the box — a plain terminal to run commands in, separate
 /// from the agent session. Uses a persistent `skein-shell` tmux session when tmux is present (so this
-/// terminal survives reconnects), and falls back to a plain login shell when it isn't — so it never
-/// breaks on an image without tmux. Override the whole command with $SKEIN_SHELL_CMD (`sh -c`).
+/// terminal survives reconnects). tmux is part of the managed-box contract; refusing to open a
+/// direct shell avoids presenting a terminal whose process dies on reload. Override the whole
+/// command with $SKEIN_SHELL_CMD (`sh -c`).
 pub fn shell_argv(name: &str) -> Vec<String> {
     vec![
         "exec".into(),
@@ -3184,8 +3209,7 @@ pub fn shell_argv(name: &str) -> Vec<String> {
         name.into(),
         "bash".into(),
         "-lc".into(),
-        "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s skein-shell || exec bash -li"
-            .into(),
+        "if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; exec tmux new-session -A -s skein-shell".into(),
     ]
 }
 
@@ -4346,7 +4370,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_launch_command_uses_skein_kit_and_wrapper() {
+    fn repo_launch_command_uses_skein_kit_and_persistent_session() {
         let _g = ENV_LOCK.lock().unwrap();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
@@ -4361,11 +4385,13 @@ mod tests {
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
         let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None);
-        assert!(cmd.contains("sbx run --clone --kit"));
+        assert!(cmd.contains("sbx create --clone --kit"));
         assert!(cmd.contains("kit'") || cmd.contains("/kit"));
         assert!(cmd.contains("--name 'thing-feat-auth'"));
         assert!(cmd.contains("'claude'")); // registered sbx agent name as the positional
         assert!(cmd.contains("'/work/thing'"));
+        assert!(cmd.contains("&& sbx 'exec' '-it' 'thing-feat-auth'"));
+        assert!(cmd.contains("tmux new-session -A -s skein-agent"));
         // the launch spec carries the real branch (feat/auth) for the kit to check out — not the slug
         let spec = store
             .join("skein")
@@ -4390,7 +4416,9 @@ mod tests {
         };
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
         assert!(cmd.contains("'codex'"));
-        assert!(cmd.ends_with("-- --dangerously-bypass-hook-trust"));
+        assert!(cmd.contains("tmux new-session -A -s skein-agent"));
+        assert!(cmd.contains("codex --dangerously-bypass-hook-trust"));
+        assert!(!cmd.contains("codex resume --last"));
         assert_eq!(
             launch_spec_agent(&repo, "skein-codex").as_deref(),
             Some("codex")
@@ -4822,16 +4850,18 @@ mod tests {
     }
 
     #[test]
-    fn native_launch_command_builds_sbx_run() {
+    fn native_launch_command_builds_create_then_persistent_attach() {
         let _g = ENV_LOCK.lock().unwrap();
         env::remove_var("SKEIN_LAUNCH_CMD");
         env::set_var("SKEIN_KIT", "/abs/kit");
         env::set_var("SKEIN_AGENT", "claude");
         env::set_var("SKEIN_STORE", "/abs/store");
-        assert_eq!(
-            launch_command("thing-feat-x", "feat-x"),
-            "sbx run --clone --kit '/abs/kit' --name 'thing-feat-x' 'claude' . '/abs/store'"
-        );
+        let cmd = launch_command("thing-feat-x", "feat-x");
+        assert!(cmd.starts_with(
+            "sbx create --clone --kit '/abs/kit' --name 'thing-feat-x' 'claude' . '/abs/store'"
+        ));
+        assert!(cmd.contains("&& sbx 'exec' '-it' 'thing-feat-x'"));
+        assert!(cmd.contains("tmux new-session -A -s skein-agent"));
         // agent override is the per-runtime seam.
         env::set_var("SKEIN_AGENT", "codex");
         assert!(launch_command("thing-x", "x").contains(" 'codex' . "));
@@ -5232,6 +5262,15 @@ mod tests {
             .unwrap()
             .contains("tmux new-session -A -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --continue"));
+        assert!(a.last().unwrap().contains("tmux is required"));
+        assert!(!a.last().unwrap().contains("else exec bash"));
+        let first = initial_attach_argv_as("thing-x", "claude");
+        assert!(first
+            .last()
+            .unwrap()
+            .contains("tmux new-session -A -s skein-agent"));
+        assert!(first.last().unwrap().contains(r#""claude""#));
+        assert!(!first.last().unwrap().contains("--continue"));
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
         assert_eq!(agent_resume_cmd("claude"), "claude --continue");
         assert!(agent_resume_cmd("codex").contains("codex resume --last"));
@@ -5239,14 +5278,15 @@ mod tests {
         let codex = attach_argv_as("thing-x", "/d", "codex");
         assert!(codex.last().unwrap().contains("skein-agent-codex"));
         assert!(codex.last().unwrap().contains("codex resume --last"));
-        // shell prefers a persistent tmux session but falls back to a plain shell when tmux is absent.
+        // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
         assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
         assert!(sh
             .last()
             .unwrap()
             .contains("tmux new-session -A -s skein-shell"));
-        assert!(sh.last().unwrap().contains("exec bash -li"));
+        assert!(sh.last().unwrap().contains("tmux is required"));
+        assert!(!sh.last().unwrap().contains("exec bash -li"));
         env::remove_var("SKEIN_HOME");
     }
 
