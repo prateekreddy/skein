@@ -1100,6 +1100,11 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
     },
 ];
 
+/// `sbx create` returns before its durable startup hooks finish. The first `sbx exec` keeps the box
+/// alive and waits for the kit's provider-neutral handshake; later attaches skip this entirely and
+/// go straight to tmux. A bounded wait makes a broken kit visible instead of hanging the terminal.
+const INITIAL_SETUP_WAIT: &str = "echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt 180 ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ";
+
 fn runtime_adapter(id: &str) -> Option<&'static RuntimeAdapter> {
     RUNTIME_ADAPTERS
         .iter()
@@ -3112,7 +3117,7 @@ pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
     let runtime = resolve_runtime(agent);
     let agent = runtime.info.id;
     let tmux_name = agent_session_name(name, agent);
-    agent_attach_argv(name, runtime, &tmux_name, runtime.interactive_resume)
+    agent_attach_argv(name, runtime, &tmux_name, runtime.interactive_resume, false)
 }
 
 /// The first agent attach after `sbx create`. It deliberately uses the same primary tmux session
@@ -3120,7 +3125,13 @@ pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
 /// provider to resume some unrelated prior transcript.
 fn initial_attach_argv_as(name: &str, agent: &str) -> Vec<String> {
     let runtime = resolve_runtime(agent);
-    agent_attach_argv(name, runtime, "skein-agent", runtime.interactive_start)
+    agent_attach_argv(
+        name,
+        runtime,
+        "skein-agent",
+        runtime.interactive_start,
+        true,
+    )
 }
 
 fn agent_attach_argv(
@@ -3128,11 +3139,17 @@ fn agent_attach_argv(
     runtime: &RuntimeAdapter,
     tmux_name: &str,
     command: &str,
+    wait_for_setup: bool,
 ) -> Vec<String> {
     let agent = runtime.info.id;
     let executable = runtime.info.executable;
+    let setup_wait = if wait_for_setup {
+        INITIAL_SETUP_WAIT
+    } else {
+        ""
+    };
     let shell = format!(
-        "if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
+        "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
          exec tmux new-session -A -s {tmux_name} {command:?}"
     );
@@ -5271,6 +5288,8 @@ mod tests {
             .contains("tmux new-session -A -s skein-agent"));
         assert!(first.last().unwrap().contains(r#""claude""#));
         assert!(!first.last().unwrap().contains("--continue"));
+        assert!(first.last().unwrap().contains("waiting for box setup"));
+        assert!(!a.last().unwrap().contains("waiting for box setup"));
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
         assert_eq!(agent_resume_cmd("claude"), "claude --continue");
         assert!(agent_resume_cmd("codex").contains("codex resume --last"));

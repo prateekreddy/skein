@@ -17,19 +17,31 @@ commands:
       description: Link the skein store into the clone and check out the box branch
       content: |
         #!/usr/bin/env bash
-        # skein-startup.sh — kit startup hook (runs every `sbx run`, BEFORE the agent positional).
+        # skein-startup.sh — durable kit startup hook (runs whenever the sandbox starts).
         # Repo-agnostic: finds the skein-managed shared store (mounted at its absolute host path),
         # checks out the branch skein recorded for this box, and links the store into the clone so
-        # Claude loads the project settings/skills/hooks + skein's probe. Idempotent, fail-soft: a
-        # startup problem must never block the session.
+        # Claude loads the project settings/skills/hooks + skein's probe. Idempotent; missing required
+        # session/probe tools block agent startup with a diagnostic rather than degrading silently.
         #
         # brace-free reads only: the sbx kit resolver scans initFiles content for dollar-brace
         # placeholders and rejects any it doesn't recognise (it supports only WORKDIR). printenv
         # reads the env without braces and exits nonzero when unset, safe under `set -u`.
         set -uo pipefail
 
-        # Direct (non-clone) mode already has an in-repo .claude → nothing to do.
-        [ -d /run/sandbox/source ] || exit 0
+        # `sbx create` returns while durable startup is still running. The first Skein attach waits
+        # on this provider-neutral handshake so it cannot race dependency or hook installation.
+        startup_ready="/tmp/skein-startup.ready"
+        startup_failed="/tmp/skein-startup.failed"
+        startup_done="false"
+        rm -f "$startup_ready" "$startup_failed"
+        trap '[ "$startup_done" = "true" ] || touch "$startup_failed" 2>/dev/null || true' EXIT
+
+        # Direct (non-clone) mode already has an in-repo .claude → nothing to provision.
+        if [ ! -d /run/sandbox/source ]; then
+          touch "$startup_ready"
+          startup_done="true"
+          exit 0
+        fi
 
         # The clone root. The durable-startup dispatcher runs this hook from /home/agent/workspace,
         # not the clone, so prefer sandboxd's WORKSPACE_DIR; fall back to git/pwd.
@@ -258,6 +270,8 @@ commands:
             > "$store/skein/boot/$vmid.json" 2>/dev/null || true
         fi
         [ "$tools_ok" = "true" ] || exit 1
+        touch "$startup_ready"
+        startup_done="true"
         exit 0
 
   startup:
