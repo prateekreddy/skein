@@ -1132,11 +1132,11 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // Skein's exact footer needs bars and projections that Codex's native item list cannot
         // express. Disable only the default Skein previously seeded; an explicit `/statusline`
         // choice remains authoritative and suppresses the adapted footer below.
-        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; marker='status_line = null # skein custom statusline'; if grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = null # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi"#,
+        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; broken='status_line = null # skein custom statusline'; marker='status_line = [] # skein custom statusline'; if grep -Fqx "$broken" "$cfg"; then sed -i 's/^status_line = null # skein custom statusline$/status_line = [] # skein custom statusline/' "$cfg"; elif grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = [] # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi"#,
         // Codex records the same live data used by `/status` in token_count events. Select limits
         // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
         // both providers share the renderer below. The marker makes `/statusline` an opt-out.
-        statusline_input: Some(r####"grep -Fq 'status_line = null # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload] | last) as $t | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$t.rate_limits.primary, $t.rate_limits.secondary, $t.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
+        statusline_input: Some(r####"grep -Fq 'status_line = [] # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload] | last) as $t | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$t.rate_limits.primary, $t.rate_limits.secondary, $t.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
         // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
@@ -5062,13 +5062,13 @@ mod tests {
         let config = codex.join("config.toml");
         let generated = fs::read_to_string(&config).unwrap();
         assert!(generated.contains("[tui]"));
-        assert!(generated.contains("status_line = null # skein custom statusline"));
+        assert!(generated.contains("status_line = [] # skein custom statusline"));
 
         fs::write(&config, "[tui]\nanimations = false\n").unwrap();
         assert!(run().success());
         let extended = fs::read_to_string(&config).unwrap();
         assert!(extended.contains("animations = false"));
-        assert!(extended.contains("status_line = null # skein custom statusline"));
+        assert!(extended.contains("status_line = [] # skein custom statusline"));
 
         fs::write(
             &config,
@@ -5078,9 +5078,19 @@ mod tests {
         assert!(run().success());
         assert!(fs::read_to_string(&config)
             .unwrap()
-            .contains("status_line = null # skein custom statusline"));
+            .contains("status_line = [] # skein custom statusline"));
 
-        let chosen = "[tui]\nstatus_line = null\n";
+        fs::write(
+            &config,
+            "[tui]\nstatus_line = null # skein custom statusline\n",
+        )
+        .unwrap();
+        assert!(run().success());
+        assert!(fs::read_to_string(&config)
+            .unwrap()
+            .contains("status_line = [] # skein custom statusline"));
+
+        let chosen = "[tui]\nstatus_line = [\"model\"]\n";
         fs::write(&config, chosen).unwrap();
         assert!(run().success());
         assert_eq!(fs::read_to_string(config).unwrap(), chosen);
