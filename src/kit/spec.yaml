@@ -83,11 +83,14 @@ commands:
         # when jq is absent rather than silently skipping the checkout.
         spec="$store/skein/launch/$vmid.json"
         branch=""
+        selected_agent=""
         if [ -r "$spec" ]; then
           if command -v jq >/dev/null 2>&1; then
             branch="$(jq -r '.branch // ""' "$spec" 2>/dev/null)"
+            selected_agent="$(jq -r '.agent // ""' "$spec" 2>/dev/null)"
           else
             branch="$(sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$spec" | head -n1)"
+            selected_agent="$(sed -n 's/.*"agent"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$spec" | head -n1)"
           fi
         else
           echo "[skein-kit] no launch spec at $spec — staying on the clone's default branch" >&2
@@ -257,7 +260,8 @@ commands:
           if [ -r "$store/skein/runtimes.tsv" ]; then
             while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe; do
               [ -n "$runtime_id" ] && [ -n "$runtime_exe" ] || continue
-              if command -v "$runtime_exe" >/dev/null 2>&1 \
+              if [ "$runtime_id" = "$selected_agent" ] \
+                || command -v "$runtime_exe" >/dev/null 2>&1 \
                 || bash -lc 'command -v "$1" >/dev/null 2>&1' bash "$runtime_exe"; then
                 [ -n "$cap" ] && cap="$cap,"
                 cap="$cap$runtime_id"

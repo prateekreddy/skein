@@ -3409,6 +3409,7 @@ const PROBE_TOKEN_USAGE_SH: &str = include_str!("probe/box-token-usage.sh");
 // token_count events + PostToolUse hooks provide telemetry.
 const PROBE_CODEX_TASK_SH: &str = include_str!("probe/box-codex-task.sh");
 const PROBE_CODEX_TELEMETRY_SH: &str = include_str!("probe/box-codex-telemetry.sh");
+const PROBE_CODEX_HOOK_SH: &str = include_str!("probe/box-codex-hook.sh");
 // Provider-neutral one-shot context bridge used when Claude takes over Codex work or vice versa.
 const PROBE_HANDOFF_SH: &str = include_str!("probe/box-handoff.sh");
 // box-session.sh writes the narrative signal (<store>/sessions/<vmid>.json) that session_signal()
@@ -3454,6 +3455,7 @@ fn probe_revision() -> String {
         PROBE_TOKEN_USAGE_SH,
         PROBE_CODEX_TASK_SH,
         PROBE_CODEX_TELEMETRY_SH,
+        PROBE_CODEX_HOOK_SH,
         PROBE_HANDOFF_SH,
         PROBE_SESSION_SH,
         BOOTSTRAP_SH,
@@ -3504,6 +3506,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("box-token-usage.sh", PROBE_TOKEN_USAGE_SH),
         ("box-codex-task.sh", PROBE_CODEX_TASK_SH),
         ("box-codex-telemetry.sh", PROBE_CODEX_TELEMETRY_SH),
+        ("box-codex-hook.sh", PROBE_CODEX_HOOK_SH),
         ("box-handoff.sh", PROBE_HANDOFF_SH),
         ("box-session.sh", PROBE_SESSION_SH),
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
@@ -3754,13 +3757,15 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
 fn codex_hooks_with_probe() -> serde_json::Value {
     use serde_json::{json, Map, Value};
 
-    let command = |file: &str, args: &str| {
+    let command = |event: &str, file: &str, args: &str| {
         let suffix = if args.is_empty() {
             String::new()
         } else {
             format!(" {args}")
         };
-        format!("bash \"$(git rev-parse --show-toplevel)/.claude/skein/bin/{file}\"{suffix}")
+        format!(
+            "bash \"$(git rev-parse --show-toplevel)/.claude/skein/bin/box-codex-hook.sh\" {event} {file}{suffix}"
+        )
     };
     let mut hooks = Map::<String, Value>::new();
     let mut add = |event: &str, matcher: Option<&str>, cmd: String| {
@@ -3784,53 +3789,69 @@ fn codex_hooks_with_probe() -> serde_json::Value {
     add(
         "SessionStart",
         Some("startup|resume|clear|compact"),
-        command("sandbox-bootstrap.sh", ""),
+        command("SessionStart", "sandbox-bootstrap.sh", ""),
     );
     add(
         "SessionStart",
         Some("startup|resume|clear|compact"),
-        command("box-handoff.sh", "codex"),
+        command("SessionStart", "box-handoff.sh", "codex"),
     );
     add(
         "UserPromptSubmit",
         None,
-        command("box-status.sh", "working"),
+        command("UserPromptSubmit", "box-status.sh", "working"),
     );
-    add("UserPromptSubmit", None, command("box-codex-task.sh", ""));
-    add("UserPromptSubmit", None, command("mailbox.sh", "inbox"));
-    add("UserPromptSubmit", None, command("box-handoff.sh", "codex"));
+    add(
+        "UserPromptSubmit",
+        None,
+        command("UserPromptSubmit", "box-codex-task.sh", ""),
+    );
+    add(
+        "UserPromptSubmit",
+        None,
+        command("UserPromptSubmit", "mailbox.sh", "inbox"),
+    );
+    add(
+        "UserPromptSubmit",
+        None,
+        command("UserPromptSubmit", "box-handoff.sh", "codex"),
+    );
     add(
         "PermissionRequest",
         None,
-        command("box-status.sh", "notify-blocked"),
+        command("PermissionRequest", "box-status.sh", "notify-blocked"),
     );
     // Clear a permission-blocked state once the approved tool actually completes, without resetting
     // the turn timer/subagent count as a fresh UserPromptSubmit would.
     add(
         "PostToolUse",
         Some("*"),
-        command("box-status.sh", "working-tool"),
+        command("PostToolUse", "box-status.sh", "working-tool"),
     );
     add(
         "PostToolUse",
         Some("*"),
-        command("box-codex-telemetry.sh", "tool"),
+        command("PostToolUse", "box-codex-telemetry.sh", "tool"),
     );
     add(
         "SubagentStart",
         None,
-        command("box-status.sh", "agent-start"),
+        command("SubagentStart", "box-status.sh", "agent-start"),
     );
-    add("SubagentStop", None, command("box-status.sh", "agent-stop"));
+    add(
+        "SubagentStop",
+        None,
+        command("SubagentStop", "box-status.sh", "agent-stop"),
+    );
     add(
         "PreCompact",
         Some("manual|auto"),
-        command("box-status.sh", "compacting"),
+        command("PreCompact", "box-status.sh", "compacting"),
     );
     add(
         "PostCompact",
         Some("manual|auto"),
-        command("box-status.sh", "compacted"),
+        command("PostCompact", "box-status.sh", "compacted"),
     );
     for (file, args) in [
         ("box-status.sh", "waiting"),
@@ -3840,7 +3861,7 @@ fn codex_hooks_with_probe() -> serde_json::Value {
         ("box-codex-telemetry.sh", "stop"),
         ("mailbox.sh", "stop-check"),
     ] {
-        add("Stop", None, command(file, args));
+        add("Stop", None, command("Stop", file, args));
     }
     json!({ "hooks": hooks })
 }
@@ -4157,6 +4178,7 @@ pub fn shorten(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
@@ -4828,6 +4850,46 @@ mod tests {
         assert!(commands("SessionStart")
             .iter()
             .any(|c| c.contains("box-handoff.sh")));
+        assert!(commands("SessionStart")
+            .iter()
+            .all(|c| c.contains("box-codex-hook.sh") && c.contains("SessionStart")));
+    }
+
+    #[test]
+    fn codex_hook_adapter_wraps_context_and_silent_probes() {
+        let dir = tempdir();
+        let wrapper = dir.join("box-codex-hook.sh");
+        fs::write(&wrapper, PROBE_CODEX_HOOK_SH).unwrap();
+        fs::write(
+            dir.join("emit.sh"),
+            "#!/bin/sh\nprintf 'handoff context\\n'\n",
+        )
+        .unwrap();
+        fs::write(dir.join("silent.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+
+        let contextual = Command::new("bash")
+            .args([wrapper.to_str().unwrap(), "SessionStart", "emit.sh"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(contextual.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&contextual.stdout).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "handoff context"
+        );
+
+        let silent = Command::new("bash")
+            .args([wrapper.to_str().unwrap(), "UserPromptSubmit", "silent.sh"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(silent.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&silent.stdout).unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

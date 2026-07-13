@@ -40,6 +40,8 @@ Signals come through thin runtime adapters writing the same shared contract. Cla
 `Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,
 `UserPromptSubmit`, `PostToolUse`, and `Stop`. Both produce the same status, task, session, diff,
 telemetry, mailbox, and handoff files; skein only reads and ranks that provider-neutral data.
+Codex hooks pass through one Bash/`jq` adapter that converts probe stdout into Codex's required
+event-specific JSON response, so the shared probes do not acquire provider branches.
 
 More attention helpers, all free unless noted:
 - **One-click continue** — boxes paused on a trivial "shall I proceed?" get a `proceed?` chip; **▸ Continue N**

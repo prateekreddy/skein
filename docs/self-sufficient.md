@@ -53,7 +53,9 @@ sbx create --clone --kit "$kit" --name "thing-$1" claude . "$shared"
 4. **Turn-state adapters** — Skein owns the provider-neutral probe contract. Claude maps
    Notification/TodoWrite lifecycle events; Codex maps PermissionRequest/UserPromptSubmit/PostToolUse
    and Stop. Both write the same status/task/session/diff/telemetry files. Claude's wiring is merged
-   into project settings and Codex's generated user-level hooks are installed by the kit.
+   into project settings and Codex's generated user-level hooks are installed by the kit. A single
+   Codex Bash/`jq` wrapper translates plain probe context into the event-specific hook JSON envelope;
+   provider-neutral scripts remain unchanged.
    The original Claude path uses `box-status.sh` + `box-task.sh` (embedded via
    `include_str!`); installs them into the box and **additively merges** the
    `UserPromptSubmit`/`Stop`/`Notification`/`PostToolUse` entries into the box's `settings.json`
