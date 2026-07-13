@@ -1141,7 +1141,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // Codex records the same live data used by `/status` in token_count events. Select limits
         // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
         // both providers share the renderer below. The marker makes `/statusline` an opt-out.
-        statusline_input: Some(r####"grep -Fq 'status_line = [] # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload] | last) as $t | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$t.rate_limits.primary, $t.rate_limits.secondary, $t.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
+        statusline_input: Some(r####"grep -Fq 'status_line = [] # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload]) as $tokens | ($tokens | last) as $t | (([$tokens[] | select((.rate_limits.limit_name // "") == "")] | last) // $t) as $quota | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$quota.rate_limits.primary, $quota.rate_limits.secondary, $quota.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
         // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
@@ -5161,6 +5161,52 @@ mod tests {
         assert!(!partial.contains("7D"));
         assert!(!partial.contains('$'));
         assert!(!partial.contains(" │ "));
+    }
+
+    #[test]
+    fn codex_statusline_uses_default_quota_when_named_pool_arrives_last() {
+        let home = tempdir();
+        let sessions = home.join(".codex/sessions/2026/07/14");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            home.join(".codex/config.toml"),
+            "[tui]\nstatus_line = [] # skein custom statusline\n",
+        )
+        .unwrap();
+        fs::write(
+            sessions.join("rollout.jsonl"),
+            concat!(
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":100},"model_context_window":1000},"rate_limits":{"limit_id":"default-pool","limit_name":null,"primary":{"used_percent":18,"window_minutes":10080,"resets_at":2000000000},"secondary":null,"individual_limit":null}}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":200},"model_context_window":1000},"rate_limits":{"limit_id":"named-pool","limit_name":"Future Model Pool","primary":{"used_percent":0,"window_minutes":10080,"resets_at":2100000000},"secondary":null,"individual_limit":null}}}"#,
+                "\n",
+                r#"{"type":"turn_context","payload":{"model":"future-model","effort":"medium"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let command = runtime_adapter("codex").unwrap().statusline_input.unwrap();
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+        assert_eq!(payload["rate_limits"]["seven_day"]["used_percentage"], 18);
+        assert_eq!(
+            payload["rate_limits"]["seven_day"]["resets_at"],
+            2000000000_i64
+        );
+        // Context remains tied to the newest token event, independent of quota-pool selection.
+        assert_eq!(payload["context_window"]["total_input_tokens"], 200);
     }
 
     #[test]
