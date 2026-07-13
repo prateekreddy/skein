@@ -193,6 +193,10 @@ session. If a legacy direct process has no tmux parent, Skein stops the box once
 provider's native resume command (`claude --continue` or `codex resume --last`) inside tmux. No
 replacement, transcript export, or context conversion is involved.
 
+tmux is deliberately invisible: its status bar is disabled, mouse/copy scrolling is enabled, and
+pane history is enlarged. Codex is launched with its documented `--no-alt-screen` option so browser
+wheel scrolling moves through conversation output instead of cycling prompt history.
+
 Native transcripts are provider-specific and are not converted. A takeover preserves unpushed commits,
 the staged and unstaged tree, untracked files, branch, shared memory, skills, and user hooks. It also
 injects a durable brief containing the active task, last outcome, journal, diff, changed files, and a

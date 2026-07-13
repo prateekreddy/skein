@@ -1120,8 +1120,11 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         },
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
-        interactive_start: "codex --dangerously-bypass-hook-trust",
-        interactive_resume: "codex resume --last --dangerously-bypass-hook-trust || codex --dangerously-bypass-hook-trust",
+        // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
+        // tmux + xterm.js, alternate-screen wheel events otherwise become Up/Down and cycle prompt
+        // history instead of scrolling the conversation.
+        interactive_start: "codex --no-alt-screen --dangerously-bypass-hook-trust",
+        interactive_resume: "codex --no-alt-screen --dangerously-bypass-hook-trust resume --last || codex --no-alt-screen --dangerously-bypass-hook-trust",
         headless_resume: "codex exec resume --last --dangerously-bypass-hook-trust {prompt} || codex exec --dangerously-bypass-hook-trust {prompt}",
         context_export: r####"latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'select(.type == "response_item" and .payload.type == "message") | .payload as $m | (($m.content // []) | map(.text // .input_text // .output_text // empty) | join("\n")) as $body | select($body != "") | "### \($m.role // "agent")\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
@@ -1131,6 +1134,12 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
 /// alive and waits for the kit's provider-neutral handshake; later attaches skip this entirely and
 /// go straight to tmux. A bounded wait makes a broken kit visible instead of hanging the terminal.
 const INITIAL_SETUP_WAIT: &str = "echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt 600 ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ";
+
+/// Make tmux a persistence layer rather than visible UI. These are server-global because the box has
+/// one Skein-owned tmux server; applying after detached session creation works on both first launch
+/// and reconnect, and remains compatible with older boxes whose server already exists.
+const TMUX_CONFIGURE: &str = "tmux set-option -g status off; tmux set-option -g mouse on; tmux set-option -g history-limit 100000; tmux set-option -g focus-events on; tmux set-option -g set-clipboard on; ";
+const TMUX_AGENT_CONTRACT: &str = "inline-scrollback-v1";
 
 fn runtime_adapter(id: &str) -> Option<&'static RuntimeAdapter> {
     RUNTIME_ADAPTERS
@@ -3660,8 +3669,8 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         ));
     }
     let shell = format!(
-        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; tmux new-session -d -s skein-agent {:?}",
-        runtime.info.executable, runtime.interactive_start
+        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
+        runtime.info.executable, runtime.interactive_start,
     );
     sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
 }
@@ -3683,7 +3692,9 @@ pub fn ensure_native_tmux(name: &str) -> Result<String, String> {
     let runtime = runtime_adapter(&runtime_id).ok_or("runtime adapter unavailable")?;
     if sbx_guest_output(
         name,
-        "tmux has-session -t skein-agent 2>/dev/null",
+        &format!(
+            "tmux has-session -t skein-agent 2>/dev/null && [ \"$(tmux show-option -t skein-agent -v @skein-agent-contract 2>/dev/null)\" = {TMUX_AGENT_CONTRACT:?} ]"
+        ),
         Duration::from_secs(30),
     )
     .is_ok()
@@ -3693,8 +3704,8 @@ pub fn ensure_native_tmux(name: &str) -> Result<String, String> {
     ensure_source_migration_tools(name)?;
     stop_box(name)?;
     let shell = format!(
-        "command -v tmux >/dev/null 2>&1 || exit 1; command -v {} >/dev/null 2>&1 || exit 1; tmux new-session -d -s skein-agent {:?}",
-        runtime.info.executable, runtime.interactive_resume
+        "command -v tmux >/dev/null 2>&1 || exit 1; command -v {} >/dev/null 2>&1 || exit 1; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
+        runtime.info.executable, runtime.interactive_resume,
     );
     sbx_guest_output(name, &shell, Duration::from_secs(180))?;
     Ok(format!(
@@ -3769,10 +3780,10 @@ pub fn migrate_fleet(target_runtime: &str) -> Result<FleetMigrationResult, Strin
 ///
 /// The agent runs inside a persistent `skein-agent` tmux session so its live process survives a
 /// browser disconnect — sbx has no live-process attach of its own, so without this a closed tab kills
-/// the agent mid-turn. `tmux new-session -A` is the seam: on open it *re-attaches* to that session if
-/// it's still running (you land exactly where the agent is, mid-stream output and all), and only
-/// *creates* it — running the agent's resume command — when an existing box lost the process or was
-/// restarted. The resume command is per-agent: claude → `claude --continue` (picks the
+/// the agent mid-turn. A has-session → detached-create → configure → attach sequence is the seam: it
+/// reattaches when alive and creates with the adapter's resume command only when missing. Detached
+/// creation lets Skein hide tmux chrome and configure scrolling before the browser attaches. The
+/// resume command is per-agent: claude → `claude --continue` (picks the
 /// transcript back up); Codex uses `resume --last`. If the tmux process is still alive, this command
 /// is not run at all — the client attaches directly to the in-progress process.
 /// A missing tmux is a broken Skein box contract, not a reason to start a second direct process.
@@ -3824,7 +3835,9 @@ fn agent_attach_argv(
     let shell = format!(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
-         exec tmux new-session -A -s {tmux_name} {command:?}"
+         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
+         if [ \"$created\" = 1 ]; then tmux set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
+         {TMUX_CONFIGURE}exec tmux attach-session -t {tmux_name}"
     );
     vec![
         "exec".into(),
@@ -3899,7 +3912,7 @@ pub fn shell_argv(name: &str) -> Vec<String> {
         name.into(),
         "bash".into(),
         "-lc".into(),
-        "if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; exec tmux new-session -A -s skein-shell".into(),
+        format!("if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; if ! tmux has-session -t skein-shell 2>/dev/null; then tmux new-session -d -s skein-shell; fi; {TMUX_CONFIGURE}exec tmux attach-session -t skein-shell"),
     ]
 }
 
@@ -5160,7 +5173,7 @@ mod tests {
         assert!(cmd.contains("'claude'")); // registered sbx agent name as the positional
         assert!(cmd.contains("'/work/thing'"));
         assert!(cmd.contains("&& sbx 'exec' '-it' 'thing-feat-auth'"));
-        assert!(cmd.contains("tmux new-session -A -s skein-agent"));
+        assert!(cmd.contains("tmux new-session -d -s skein-agent"));
         // the launch spec carries the real branch (feat/auth) for the kit to check out — not the slug
         let spec = store
             .join("skein")
@@ -5185,8 +5198,8 @@ mod tests {
         };
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
         assert!(cmd.contains("'codex'"));
-        assert!(cmd.contains("tmux new-session -A -s skein-agent"));
-        assert!(cmd.contains("codex --dangerously-bypass-hook-trust"));
+        assert!(cmd.contains("tmux new-session -d -s skein-agent"));
+        assert!(cmd.contains("codex --no-alt-screen --dangerously-bypass-hook-trust"));
         assert!(!cmd.contains("codex resume --last"));
         assert_eq!(
             launch_spec_agent(&repo, "skein-codex").as_deref(),
@@ -5670,7 +5683,7 @@ mod tests {
             "sbx create --clone --kit '/abs/kit' --name 'thing-feat-x' 'claude' . '/abs/store'"
         ));
         assert!(cmd.contains("&& sbx 'exec' '-it' 'thing-feat-x'"));
-        assert!(cmd.contains("tmux new-session -A -s skein-agent"));
+        assert!(cmd.contains("tmux new-session -d -s skein-agent"));
         // agent override is the per-runtime seam.
         env::set_var("SKEIN_AGENT", "codex");
         assert!(launch_command("thing-x", "x").contains(" 'codex' . "));
@@ -6069,7 +6082,7 @@ mod tests {
         assert!(a
             .last()
             .unwrap()
-            .contains("tmux new-session -A -s skein-agent"));
+            .contains("tmux new-session -d -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --continue"));
         assert!(a.last().unwrap().contains("tmux is required"));
         assert!(!a.last().unwrap().contains("else exec bash"));
@@ -6077,25 +6090,26 @@ mod tests {
         assert!(first
             .last()
             .unwrap()
-            .contains("tmux new-session -A -s skein-agent"));
+            .contains("tmux new-session -d -s skein-agent"));
         assert!(first.last().unwrap().contains(r#""claude""#));
         assert!(!first.last().unwrap().contains("--continue"));
         assert!(first.last().unwrap().contains("waiting for box setup"));
         assert!(!a.last().unwrap().contains("waiting for box setup"));
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
         assert_eq!(agent_resume_cmd("claude"), "claude --continue");
-        assert!(agent_resume_cmd("codex").contains("codex resume --last"));
+        assert!(agent_resume_cmd("codex").contains("resume --last"));
         assert_eq!(agent_resume_cmd("shell"), "shell");
         let codex = attach_argv_as("thing-x", "/d", "codex");
         assert!(codex.last().unwrap().contains("skein-agent-codex"));
-        assert!(codex.last().unwrap().contains("codex resume --last"));
+        assert!(codex.last().unwrap().contains("resume --last"));
+        assert!(codex.last().unwrap().contains("--no-alt-screen"));
         // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
         assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
         assert!(sh
             .last()
             .unwrap()
-            .contains("tmux new-session -A -s skein-shell"));
+            .contains("tmux new-session -d -s skein-shell"));
         assert!(sh.last().unwrap().contains("tmux is required"));
         assert!(!sh.last().unwrap().contains("exec bash -li"));
         env::remove_var("SKEIN_HOME");
