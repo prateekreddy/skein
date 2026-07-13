@@ -207,7 +207,10 @@ commands:
           if [ -r "$store/skein/runtimes.tsv" ]; then
             while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe; do
               [ -n "$runtime_id" ] && [ -n "$runtime_exe" ] || continue
-              command -v "$runtime_exe" >/dev/null 2>&1 && cap="${cap:+$cap,}$runtime_id"
+              if command -v "$runtime_exe" >/dev/null 2>&1; then
+                [ -n "$cap" ] && cap="$cap,"
+                cap="$cap$runtime_id"
+              fi
             done < "$store/skein/runtimes.tsv"
           fi
           revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"

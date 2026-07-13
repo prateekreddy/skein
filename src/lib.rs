@@ -4485,6 +4485,11 @@ mod tests {
             .contains("sandbox-bootstrap.sh"));
         let kit = ensure_kit().unwrap();
         assert!(kit.join("spec.yaml").is_file());
+        let kit_text = fs::read_to_string(kit.join("spec.yaml")).unwrap();
+        assert!(
+            !kit_text.contains("${"),
+            "sbx treats dollar-brace shell expansions as kit placeholders"
+        );
         env::remove_var("SKEIN_HOME");
     }
 
