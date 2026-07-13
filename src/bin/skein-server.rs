@@ -31,9 +31,6 @@ const INDEX: &str = include_str!("../web/index.html");
 const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
 const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
 const FIT_JS: &str = include_str!("../web/vendor/addon-fit.min.js");
-// WebGL renderer addon — keeps the agent TUI's heavy redraws off the main thread so typed
-// keystrokes echo without competing with the spinner/repaint churn of the DOM renderer.
-const WEBGL_JS: &str = include_str!("../web/vendor/addon-webgl.min.js");
 // marked.js renders repo markdown in the Files tab — the "read the docs without leaving skein" bit.
 const MARKED_JS: &str = include_str!("../web/vendor/marked.min.js");
 const DEFAULT_ADDR: &str = "127.0.0.1:7878";
@@ -94,7 +91,6 @@ async fn main() {
         .route("/vendor/xterm.js", get(vendor_xterm_js))
         .route("/vendor/xterm.css", get(vendor_xterm_css))
         .route("/vendor/addon-fit.js", get(vendor_fit_js))
-        .route("/vendor/addon-webgl.js", get(vendor_webgl_js))
         .route("/vendor/marked.js", get(vendor_marked_js))
         .route("/api/boxes/:name/files", get(api_files))
         .route("/api/boxes/:name/file", get(api_file))
@@ -179,9 +175,6 @@ async fn vendor_xterm_js() -> Response {
 }
 async fn vendor_fit_js() -> Response {
     static_asset(FIT_JS, "application/javascript; charset=utf-8")
-}
-async fn vendor_webgl_js() -> Response {
-    static_asset(WEBGL_JS, "application/javascript; charset=utf-8")
 }
 async fn vendor_marked_js() -> Response {
     static_asset(MARKED_JS, "application/javascript; charset=utf-8")

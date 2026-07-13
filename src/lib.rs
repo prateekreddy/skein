@@ -6690,7 +6690,8 @@ mod tests {
         assert!(html.trim_end().ends_with("</html>"));
         assert!(html.contains("id=\"fleet\""));
         assert!(html.contains("/vendor/xterm.js")); // vendored, not CDN
-        assert!(html.contains("/vendor/addon-webgl.js"));
+        assert!(!html.contains("/vendor/addon-webgl.js"));
+        assert!(html.contains("customGlyphs:true"));
         assert!(!html.contains("cdn.jsdelivr"));
         assert!(html.contains("id=\"drestart\""));
         assert!(!html.contains(">Create PR</button>"));

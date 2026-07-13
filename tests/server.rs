@@ -86,10 +86,6 @@ fn server_serves_ui_vendor_and_guards_routes() {
     assert_eq!(st, 200);
     assert!(body.contains("application/javascript"));
 
-    let (st, body) = http_get(&addr, "/vendor/addon-webgl.js");
-    assert_eq!(st, 200);
-    assert!(body.contains("application/javascript"));
-
     let (st, body) = http_get(&addr, "/api/boxes");
     assert_eq!(st, 200);
     assert!(body.contains("thing-a"));
