@@ -394,6 +394,7 @@ async fn api_health() -> Json<skein::HealthReport> {
                     ok: false,
                     detail: "health task failed".into(),
                 },
+                dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
                 runtimes: skein::supported_runtimes(),
             }),

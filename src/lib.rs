@@ -1053,6 +1053,7 @@ pub struct HealthReport {
     pub gh: HealthCheck,
     pub probes: HealthCheck,
     pub mailbox: HealthCheck,
+    pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
 }
@@ -1194,7 +1195,7 @@ pub fn health_report() -> HealthReport {
             }
         }
     }
-    let probes = HealthCheck {
+    let mut probes = HealthCheck {
         ok: probe_errors.is_empty(),
         detail: if probe_errors.is_empty() {
             format!("installed for {} managed repos", repos.len())
@@ -1210,12 +1211,24 @@ pub fn health_report() -> HealthReport {
             mailbox_errors.join("; ")
         },
     };
-    let stale_boxes = load_views()
-        .unwrap_or_default()
+    let views = load_views().unwrap_or_default();
+    let dark_boxes = views
+        .iter()
+        .filter(|view| view.hook_health == "never")
+        .map(|view| view.name.clone())
+        .collect::<Vec<_>>();
+    let stale_boxes = views
         .into_iter()
         .filter(|view| view.hook_health == "stale")
         .map(|view| view.name)
         .collect::<Vec<_>>();
+    if !dark_boxes.is_empty() {
+        probes.ok = false;
+        probes.detail.push_str(&format!(
+            "; no signals from running boxes: {}",
+            dark_boxes.join(", ")
+        ));
+    }
     let ok = registry.ok && sbx.ok && git.ok && probes.ok && mailbox.ok && stale_boxes.is_empty();
     HealthReport {
         ok,
@@ -1225,6 +1238,7 @@ pub fn health_report() -> HealthReport {
         gh,
         probes,
         mailbox,
+        dark_boxes,
         stale_boxes,
         runtimes: supported_runtimes(),
     }

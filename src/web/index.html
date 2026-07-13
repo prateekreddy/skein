@@ -2257,10 +2257,11 @@ function loadHealth() {
       banner.onclick = openSettings; document.body.append(banner);
     }
     const failed = ["registry","sbx","git","probes","mailbox"].filter(key => !health[key]?.ok);
-    const stale = health.stale_boxes?.length || 0;
-    banner.textContent = `environment: ${failed.join(", ") || "probe updates"}${stale ? ` · ${stale} stale` : ""}`;
+    const stale = health.stale_boxes?.length || 0, dark = health.dark_boxes?.length || 0;
+    banner.textContent = `environment: ${failed.join(", ") || "probe updates"}${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}`;
     banner.title = [
       ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}`),
+      ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
       ...(stale ? [`stale sessions: ${health.stale_boxes.join(", ")}`] : [])
     ].join("\n");
   }).catch(() => {});
