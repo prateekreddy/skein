@@ -655,6 +655,7 @@
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/addon-webgl.js"></script>
 <script src="/vendor/marked.js"></script>
 <script>
 // ---------- model ----------
@@ -1022,11 +1023,15 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   // a character that rendered instantly can sit next to a cursor that's mid-blink-off for up to
   // ~300ms, reading as "my typing lagged" even though nothing did. A solid cursor removes that.
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
-    cursorBlink:false, customGlyphs:true, scrollback:8000,
-    theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
+    cursorBlink:false, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
-  // Keep xterm's built-in renderer. The WebGL add-on clips fallback Unicode glyphs in agent TUIs
-  // (prompt chevrons, arrows and block gauges collapse into underscore-like bottom strokes).
+  // GPU renderer: keeps the agent TUI's constant repaints off the layout/DOM path so keystrokes
+  // echo crisply. Fall back to the DOM renderer if WebGL is unavailable or its context is lost.
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => { try { webgl.dispose(); } catch {} });
+    term.loadAddon(webgl);
+  } catch {}
   // OSC 52 clipboard: TUIs like Claude Code run with mouse mode on, so a drag is consumed by the app
   // (neither xterm nor the browser sees a selection — that's the x=0/w=0). The app copies by emitting
   // an OSC 52 escape ("sent N chars via OSC 52"); xterm ignores OSC 52 by default, so it never reached
@@ -1200,7 +1205,7 @@ function renderDockbar() {
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
   const takeover = dockbar.querySelector("#dtake"); if (takeover) takeover.onclick = () => takeOver(view.box, otherRuntime);
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
-  const pr = dockbar.querySelector("#dpr"); if (pr) pr.onclick = () => createPR(view.box);
+  const restart = dockbar.querySelector("#drestart"); if (restart) restart.onclick = () => restartAgent(view.box);
   const ar = dockbar.querySelector("#dstop"); if (ar) ar.onclick = () => stopBox(view.box);
   const ds = dockbar.querySelector("#ddestroy"); if (ds) ds.onclick = () => destroyBox(view.box);
   const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
@@ -1210,7 +1215,8 @@ function renderDockbar() {
 
 // ---------- ship: PR · checks · stop · destroy (host-side via gh/sbx) ----------
 const shipState = new Map();   // box -> ShipStatus
-// Constructive ship actions (PR · checks · merge · stop). Destroy lives in renderDockbar, fenced off.
+// Constructive ship actions (PR status · checks · merge · restart · stop). Destroy lives in
+// renderDockbar, fenced off.
 // `demote` drops the accent when a review is staged — then "Send" is the one highlighted action.
 function shipHtml(box, demote) {
   const s = shipState.get(box);
@@ -1223,9 +1229,8 @@ function shipHtml(box, demote) {
     h += `<a class="prlink" href="${esc(s.pr_url)}" target="_blank" title="${esc(s.pr_state||"")} — open on GitHub">PR ${esc((s.pr_state||"").toLowerCase())}</a>${ck}`;
     if ((s.pr_state||"").toUpperCase() === "OPEN")
       h += `<button class="${pcls}" id="dmerge" title="gh pr merge — finish the loop">Merge</button>`;
-  } else {
-    h += `<button class="${pcls}" id="dpr" title="gh pr create for this branch">Create PR</button>`;
   }
+  h += `<button class="kbtn" id="drestart" title="restart the active agent process and resume its native session inside tmux">Restart</button>`;
   h += `<button class="kbtn" id="dstop" title="stop — halt the sandbox to free compute; resume later via attach">Stop</button>`;
   return h;
 }
@@ -1238,13 +1243,6 @@ function loadShip(name, force) {
   fetch(`/api/boxes/${encodeURIComponent(name)}/ship`).then(r => r.json()).then(s => {
     shipState.set(name, Object.assign(s || {}, { _at: Date.now() })); if (view.box === name) renderDockbar();
   }).catch(() => {});
-}
-function createPR(name) {
-  toast("opening PR…");
-  fetch(`/api/boxes/${encodeURIComponent(name)}/pr`, { method:"POST" }).then(r => r.json()).then(d => {
-    if (d.ok) { toast("PR ready ↗", d.url); shipState.delete(name); loadShip(name, true); }
-    else toast("PR failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("PR failed"));
 }
 function stopBox(name) {
   if (!confirm(`Stop ${name}? This halts the sandbox to free its compute. Nothing is lost — resume it later via attach.`)) return;

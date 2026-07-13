@@ -1085,8 +1085,8 @@ pub struct HealthReport {
 /// consume these definitions. Provider quirks belong here, not at their call sites.
 struct RuntimeAdapter {
     info: RuntimeInfo,
-    /// Idempotent provider-specific setup run immediately before creating its tmux session.
-    /// Existing live sessions are never disturbed. User choices must win over Skein defaults.
+    /// Idempotent provider setup run on attach and before first launch. It may provide defaults but
+    /// must preserve explicit user configuration. Provider quirks remain centralized here.
     interactive_setup: &'static str,
     /// Shell command used to create this runtime's first persistent tmux process.
     interactive_start: &'static str,
@@ -1122,10 +1122,8 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             supports_resume: true,
             supports_handoff: true,
         },
-        // Codex owns and renders this footer. Add a useful default only when the user has not
-        // configured (or explicitly disabled) status_line; `/statusline` can replace it normally.
-        // Keep this in the adapter so another runtime can provide its own setup without call-site
-        // conditionals. The identifiers are Codex's documented kebab-case status-line fields.
+        // Codex owns and renders this footer. Seed the richer default the user requested while
+        // preserving any existing choice (including `null`). `/statusline` remains authoritative.
         interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; if ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i '/^[[:space:]]*\[tui\][[:space:]]*$/a status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]' "$cfg"; else printf '\n[tui]\nstatus_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]\n' >> "$cfg"; fi; fi"#,
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
@@ -3623,7 +3621,8 @@ fn agent_attach_argv(
     let shell = format!(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
-         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then {setup}; tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
+         {setup}; \
+         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then tmux set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
          {TMUX_CONFIGURE}exec tmux attach-session -t {tmux_name}",
         setup = runtime.interactive_setup
@@ -6547,6 +6546,9 @@ mod tests {
         assert!(html.trim_end().ends_with("</html>"));
         assert!(html.contains("id=\"fleet\""));
         assert!(html.contains("/vendor/xterm.js")); // vendored, not CDN
+        assert!(html.contains("/vendor/addon-webgl.js"));
         assert!(!html.contains("cdn.jsdelivr"));
+        assert!(html.contains("id=\"drestart\""));
+        assert!(!html.contains(">Create PR</button>"));
     }
 }
