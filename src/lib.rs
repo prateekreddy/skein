@@ -4815,7 +4815,7 @@ mod tests {
             store: store.display().to_string(),
             agent: "claude".into(),
         };
-        save_repos(&[repo.clone()]).unwrap();
+        save_repos(std::slice::from_ref(&repo)).unwrap();
         write_launch_spec_for_agent("demo-task", "feat/started", &repo, "claude").unwrap();
 
         assert_eq!(branch_of("demo-task").as_deref(), Some("feat/current"));
