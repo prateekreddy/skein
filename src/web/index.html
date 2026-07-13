@@ -1109,7 +1109,9 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
 function statuslineHtml(line) {
   const classes = new Set(); let out = "", at = 0;
   const colour = code => { for (const c of ["sl-red","sl-yellow","sl-green"]) classes.delete(c); if (code) classes.add(code); };
-  const append = text => { if (!text) return; const value = esc(text); out += classes.size ? `<span class="${[...classes].join(" ")}">${value}</span>` : value; };
+  // Keep layout-significant spaces as content, not whitespace-only DOM nodes. Flexbox discards
+  // bare whitespace nodes, and an older cached stylesheet can otherwise collapse the whole line.
+  const append = text => { if (!text) return; const value = esc(text).replace(/ /g,"&nbsp;"); out += classes.size ? `<span class="${[...classes].join(" ")}">${value}</span>` : value; };
   const sgr = /\x1b\[([0-9;]*)m/g; let match;
   while ((match = sgr.exec(line))) {
     append(line.slice(at, match.index)); at = sgr.lastIndex;

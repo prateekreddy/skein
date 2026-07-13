@@ -13,7 +13,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -166,8 +166,17 @@ async fn main() {
     }
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX)
+async fn index() -> Response {
+    // The UI is embedded in and version-coupled to this binary. Reusing an older document after a
+    // server restart mixes stale JS/CSS with new API behaviour, so the browser must revalidate it.
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        INDEX,
+    )
+        .into_response()
 }
 
 async fn vendor_xterm_js() -> Response {

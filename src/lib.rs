@@ -6740,6 +6740,7 @@ mod tests {
         assert!(html.contains("customGlyphs:true"));
         assert!(html.contains(".agent-statusline"));
         assert!(html.contains("white-space:pre;"));
+        assert!(html.contains("replace(/ /g,\"&nbsp;\")"));
         assert!(html.contains(".agent-statusline { display:block; }"));
         assert!(!html.contains("cdn.jsdelivr"));
         assert!(html.contains("id=\"drestart\""));

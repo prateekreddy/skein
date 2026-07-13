@@ -77,6 +77,11 @@ fn server_serves_ui_vendor_and_guards_routes() {
     let (st, body) = http_get(&addr, "/");
     assert_eq!(st, 200);
     assert!(
+        body.to_ascii_lowercase()
+            .contains("cache-control: no-store"),
+        "embedded UI must not survive a binary upgrade in the browser cache"
+    );
+    assert!(
         body.contains("/vendor/xterm.js"),
         "UI must reference vendored xterm"
     );
