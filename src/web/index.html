@@ -338,9 +338,11 @@
   .thost.on { display:block; }
   .thost.adapted-status { padding-bottom:36px; }
   .agent-statusline { display:none; position:absolute; left:10px; right:10px; bottom:5px; height:25px;
-                      align-items:center; overflow:hidden; white-space:pre; border-top:1px solid var(--border-2);
+                      overflow:hidden; white-space:pre; border-top:1px solid var(--border-2);
                       padding-top:5px; color:var(--dim); background:#08090b; font:13px var(--mono); z-index:4; }
-  .thost.adapted-status .agent-statusline { display:flex; }
+  /* Inline formatting is intentional: flex discards the whitespace-only text nodes between the
+     ANSI-derived spans, collapsing `CTX <bar> 53% ... │ ...` into one unreadable run. */
+  .thost.adapted-status .agent-statusline { display:block; }
   .agent-statusline .sl-bold { font-weight:700; color:var(--text-2); }
   .agent-statusline .sl-dim { color:var(--faint); }
   .agent-statusline .sl-red { color:#f85149; }
