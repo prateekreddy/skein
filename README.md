@@ -193,9 +193,11 @@ conversion is involved.
 
 tmux is deliberately invisible: its status bar is disabled, mouse/copy scrolling is enabled, and
 pane history is enlarged. Codex is launched with its documented `--no-alt-screen` option so browser
-wheel scrolling moves through conversation output instead of cycling prompt history. Skein gives
-Codex a native context/limits/tokens/branch/model status line when the user has not configured one;
-it remains customizable with Codex's `/statusline` command.
+wheel scrolling moves through conversation output instead of cycling prompt history. Claude feeds
+its native status-line JSON into Skein's renderer; Codex maps the live `token_count` data behind
+`/status` into the same schema. The cockpit shows the same CTX/5H/7D/cost/model footer for both,
+refreshing every 30 seconds and omitting unavailable segments. An explicit Codex `/statusline`
+choice disables Skein's adapted footer.
 
 Native transcripts are provider-specific and are not converted. A takeover preserves unpushed commits,
 the staged and unstaged tree, untracked files, branch, shared memory, skills, and user hooks. It also

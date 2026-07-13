@@ -336,6 +336,16 @@
   .sess .meta { color:var(--faint); font-size:12px; margin-top:2px; }
   .thost { position:absolute; inset:0; padding:8px 10px; display:none; }
   .thost.on { display:block; }
+  .thost.adapted-status { padding-bottom:36px; }
+  .agent-statusline { display:none; position:absolute; left:10px; right:10px; bottom:5px; height:25px;
+                      align-items:center; overflow:hidden; white-space:nowrap; border-top:1px solid var(--border-2);
+                      padding-top:5px; color:var(--dim); background:#08090b; font:13px var(--mono); z-index:4; }
+  .thost.adapted-status .agent-statusline { display:flex; }
+  .agent-statusline .sl-bold { font-weight:700; color:var(--text-2); }
+  .agent-statusline .sl-dim { color:var(--faint); }
+  .agent-statusline .sl-red { color:#f85149; }
+  .agent-statusline .sl-yellow { color:#e3b341; }
+  .agent-statusline .sl-green { color:#3fb950; }
   .disco { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
            background:rgba(8,9,11,.82); cursor:pointer; z-index:6; }
   .thost.dead .disco { display:flex; }
@@ -978,7 +988,7 @@ function showBox(name, mode, kind = "agent", runtime, handoff = false) {
     // One visible agent tab per box, while each provider's process survives in its own tmux session.
     // Replacing the websocket/terminal here does not kill that provider's tmux server-side session.
     if (s && kind === "agent" && s.runtime !== want) {
-      clearTimeout(s.timer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
+      clearTimeout(s.timer); clearInterval(s.statusTimer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
       s.host.remove(); sessions.delete(id); s = null;
     }
     if (!s) createSession(name, kind, null, want, handoff, previousRuntime);
@@ -1019,6 +1029,10 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   disco.innerHTML = `<div class="disco-card"><div class="disco-t">session not connected</div><div class="disco-b">click to reconnect</div></div>`;
   disco.addEventListener("click", () => reconnectSession(box, kind));
   host.append(disco);
+  const adaptedStatus = kind === "agent" && !!runtimeInfo(runtime)?.adapted_statusline;
+  const statusEl = document.createElement("div"); statusEl.className = "agent-statusline";
+  statusEl.setAttribute("aria-label", "agent usage status"); host.append(statusEl);
+  if (adaptedStatus) host.classList.add("adapted-status");
   // cursorBlink is OFF on purpose: a blinking cursor doesn't reset its on/off phase on keypress, so
   // a character that rendered instantly can sit next to a cursor that's mid-blink-off for up to
   // ~300ms, reading as "my typing lagged" even though nothing did. A solid cursor removes that.
@@ -1061,11 +1075,16 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   const qs = params.toString() ? `?${params}` : "";
   const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(box)}/terminal${qs}`);
   ws.binaryType = "arraybuffer";
-  const s = { term, fit, ws, host, box, kind, runtime, sid: id, streaming:false, timer:0 };
+  const s = { term, fit, ws, host, statusEl, box, kind, runtime, sid: id,
+    streaming:false, timer:0, statusTimer:0, adaptedStatus };
   sessions.set(id, s);
   const isActive = () => view.mode === "term" && activeSid() === id;
   ws.onopen = () => {
     if (isActive()) sendResize(id);
+    if (s.adaptedStatus) {
+      setTimeout(() => refreshAgentStatusline(s), 500);
+      s.statusTimer = setInterval(() => refreshAgentStatusline(s), 30000);
+    }
     if (s.pending) { ws.send(s.pending); s.pending = null; }
     if (handoff && kind === "agent") {
       // Existing provider tmux session: SessionStart may not fire, so submit a real prompt. The
@@ -1089,6 +1108,37 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   });
   term.onResize(() => { if (isActive()) sendResize(id); });
 }
+function statuslineHtml(line) {
+  const classes = new Set(); let out = "", at = 0;
+  const colour = code => { for (const c of ["sl-red","sl-yellow","sl-green"]) classes.delete(c); if (code) classes.add(code); };
+  const append = text => { if (!text) return; const value = esc(text); out += classes.size ? `<span class="${[...classes].join(" ")}">${value}</span>` : value; };
+  const sgr = /\x1b\[([0-9;]*)m/g; let match;
+  while ((match = sgr.exec(line))) {
+    append(line.slice(at, match.index)); at = sgr.lastIndex;
+    const codes = (match[1] || "0").split(";").map(Number);
+    for (const code of codes) {
+      if (code === 0) classes.clear();
+      else if (code === 1) classes.add("sl-bold");
+      else if (code === 2) classes.add("sl-dim");
+      else if (code === 22) { classes.delete("sl-bold"); classes.delete("sl-dim"); }
+      else if (code === 31) colour("sl-red");
+      else if (code === 32) colour("sl-green");
+      else if (code === 33) colour("sl-yellow");
+      else if (code === 39) colour(null);
+    }
+  }
+  append(line.slice(at)); return out;
+}
+function refreshAgentStatusline(s) {
+  fetch(`/api/boxes/${encodeURIComponent(s.box)}/statusline`).then(r => r.ok ? r.json() : null).then(data => {
+    const line = data?.line || "", active = !!line;
+    s.statusEl.innerHTML = active ? statuslineHtml(line) : "";
+    if (s.host.classList.contains("adapted-status") !== active) {
+      s.host.classList.toggle("adapted-status", active);
+      requestAnimationFrame(() => { s.fit.fit(); if (activeSid() === s.sid) sendResize(s.sid); });
+    }
+  }).catch(() => {});
+}
 function markStreaming(id) {
   const s = sessions.get(id); if (!s) return;
   // DOM work only on the false→true transition: this runs on EVERY websocket frame, potentially
@@ -1101,7 +1151,7 @@ function sendResize(id) { const s = sessions.get(id); if (s && s.ws.readyState =
 function closeSession(id) {
   const s = sessions.get(id); if (!s) return;
   const box = s.box;
-  clearTimeout(s.timer);   // don't let a streaming-flag timer fire on a disposed session
+  clearTimeout(s.timer); clearInterval(s.statusTimer); // no callbacks on a disposed session
   try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
   s.host.remove(); sessions.delete(id);
   if (activeSid() === id) {   // closed the active terminal → fall back to any other open session
@@ -1144,7 +1194,7 @@ function reconnectSession(box, kind) {
   const id = sidOf(box, kind);
   const s = sessions.get(id);
   const runtime = s?.runtime;
-  if (s) { clearTimeout(s.timer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(id); }
+  if (s) { clearTimeout(s.timer); clearInterval(s.statusTimer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(id); }
   createSession(box, kind, null, runtime);
   view = { box, mode: "term", kind };
   applyView();
@@ -1874,7 +1924,7 @@ function fillRuntimeSelects() {
 }
 function loadRuntimes() {
   if (DEMO) {
-    runtimes = [{id:"claude",label:"Claude"},{id:"codex",label:"Codex"}];
+    runtimes = [{id:"claude",label:"Claude",adapted_statusline:false},{id:"codex",label:"Codex",adapted_statusline:true}];
     fillRuntimeSelects();
     return Promise.resolve(runtimes);
   }

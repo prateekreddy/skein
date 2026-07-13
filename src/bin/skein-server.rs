@@ -108,6 +108,7 @@ async fn main() {
         .route("/api/pick-path", post(api_pick_path))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/session", get(api_session))
+        .route("/api/boxes/:name/statusline", get(api_statusline))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
         .route("/api/boxes/:name/ship", get(api_ship))
         .route("/api/boxes/:name/pr", post(api_pr))
@@ -252,6 +253,19 @@ async fn api_boxes() -> Json<Vec<BoxView>> {
         .await
         .unwrap_or_default();
     Json(views)
+}
+
+/// Provider-neutral custom footer. Claude renders it natively from stdin; Codex maps its latest
+/// token_count event (the `/status` data source) through the same renderer for the browser terminal.
+async fn api_statusline(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::agent_statusline(&name)).await {
+        Ok(Ok(line)) => Json(serde_json::json!({ "line": line })).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]

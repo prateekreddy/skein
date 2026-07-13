@@ -53,7 +53,7 @@ fmt_left() {  # seconds → "3d15h" / "1h4m" / "12m" / "resetting"
   fi
 }
 
-now=$(date +%s)
+now=${SKEIN_STATUSLINE_NOW:-$(date +%s)}
 
 # limit_block <LABEL> <pct> <resets_at> <window_secs> : a "5H ▓▒░ 79%→100% 3d15h left" segment
 limit_block() {
@@ -63,12 +63,11 @@ limit_block() {
   local left=$(( reset - now ))
   local elapsed=$(( window - left )); [ "$elapsed" -le 0 ] && elapsed=1
 
-  # Project to end of window only once >=15% has elapsed; before that the rate
-  # is too noisy (a tiny burst would extrapolate to "100%"), so show current.
-  # Projected level can exceed 100% (e.g. 79%→165%) — that overshoot is the signal.
+  # Linear projection to the end of the provider-reported window. Projected level can exceed
+  # 100% (e.g. 79%→165%) — that overshoot is the signal.
   # The number/colour use the true value; the bar itself clamps to full (make_bar).
   local proj=$int
-  if [ "$int" -gt 0 ] && [ "$elapsed" -ge $(( window * 15 / 100 )) ]; then
+  if [ "$int" -gt 0 ]; then
     proj=$(awk "BEGIN{printf \"%.0f\", ($int/$elapsed)*$window}")
   fi
 
@@ -94,12 +93,14 @@ week_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at       // em
 # Persist the limit gauge so a running agent can poll it (statusline gets this on
 # stdin only; the CLI does not write it to disk). Pure side-effect; display below
 # is unchanged. Safe to delete this block.
-printf '{"written_at":%s,"five_pct":%s,"five_reset":%s,"week_pct":%s,"week_reset":%s,"ctx_pct":%s}\n' \
-  "$now" "${five_pct:-null}" "${five_reset:-null}" "${week_pct:-null}" "${week_reset:-null}" \
-  "$(echo "$input" | jq -r '.context_window.used_percentage // null')" \
-  > "${HOME:-/tmp}/.claude/rate-limits.json" 2>/dev/null
+if [ -d "${HOME:-/tmp}/.claude" ]; then
+  printf '{"written_at":%s,"five_pct":%s,"five_reset":%s,"week_pct":%s,"week_reset":%s,"ctx_pct":%s}\n' \
+    "$now" "${five_pct:-null}" "${five_reset:-null}" "${week_pct:-null}" "${week_reset:-null}" \
+    "$(echo "$input" | jq -r '.context_window.used_percentage // null')" \
+    > "${HOME:-/tmp}/.claude/rate-limits.json" 2>/dev/null
+fi
 
-model=$(     echo "$input" | jq -r '.model.display_name // .model.id // "Claude"')
+model=$(     echo "$input" | jq -r '.model.display_name // .model.id // empty')
 model="${model// context)/)}"   # "Opus 4.8 (1M context)" → "Opus 4.8 (1M)"
 model="${model// (/(}"          # → "Opus 4.8(1M)"
 cost=$(      echo "$input" | jq -r '.cost.total_cost_usd // empty')
@@ -118,7 +119,8 @@ five_line=$(limit_block "5H" "$five_pct" "$five_reset" 18000)
 week_line=$(limit_block "7D" "$week_pct" "$week_reset" 604800)
 cost_line=""
 [ -n "$cost" ] && cost_line="${DIM}\$$(printf '%.2f' "$cost")${RST}"
-model_line="${DIM}${model}${RST}"
+model_line=""
+[ -n "$model" ] && model_line="${DIM}${model}${RST}"
 
 # ── assemble ──────────────────────────────────────────────────────────────────
 
@@ -127,7 +129,7 @@ parts=()
 [ -n "$five_line" ] && parts+=("$five_line")
 [ -n "$week_line" ] && parts+=("$week_line")
 [ -n "$cost_line" ] && parts+=("$cost_line")
-parts+=("$model_line")
+[ -n "$model_line" ] && parts+=("$model_line")
 
 out=""; sep="${DIM} │ ${RST}"
 for part in "${parts[@]}"; do

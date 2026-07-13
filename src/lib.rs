@@ -1058,6 +1058,7 @@ pub struct RuntimeInfo {
     pub executable: &'static str,
     pub supports_resume: bool,
     pub supports_handoff: bool,
+    pub adapted_statusline: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1088,6 +1089,9 @@ struct RuntimeAdapter {
     /// Idempotent provider setup run on attach and before first launch. It may provide defaults but
     /// must preserve explicit user configuration. Provider quirks remain centralized here.
     interactive_setup: &'static str,
+    /// Emits the Claude-compatible status-line JSON model on stdout. `None` means the provider
+    /// supplies its own command-driven status line and needs no browser footer adapter.
+    statusline_input: Option<&'static str>,
     /// Shell command used to create this runtime's first persistent tmux process.
     interactive_start: &'static str,
     /// Shell command used when creating a provider-specific persistent tmux session.
@@ -1107,8 +1111,10 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             executable: "claude",
             supports_resume: true,
             supports_handoff: true,
+            adapted_statusline: false,
         },
         interactive_setup: ":",
+        statusline_input: None,
         interactive_start: "claude",
         interactive_resume: "claude --continue",
         headless_resume: "claude --continue --print {prompt}",
@@ -1121,10 +1127,16 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             executable: "codex",
             supports_resume: true,
             supports_handoff: true,
+            adapted_statusline: true,
         },
-        // Codex owns and renders this footer. Seed the richer default the user requested while
-        // preserving any existing choice (including `null`). `/statusline` remains authoritative.
-        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; if ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i '/^[[:space:]]*\[tui\][[:space:]]*$/a status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]' "$cfg"; else printf '\n[tui]\nstatus_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]\n' >> "$cfg"; fi; fi"#,
+        // Skein's exact footer needs bars and projections that Codex's native item list cannot
+        // express. Disable only the default Skein previously seeded; an explicit `/statusline`
+        // choice remains authoritative and suppresses the adapted footer below.
+        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; marker='status_line = null # skein custom statusline'; if grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = null # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi"#,
+        // Codex records the same live data used by `/status` in token_count events. Select limits
+        // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
+        // both providers share the renderer below. The marker makes `/statusline` an opt-out.
+        statusline_input: Some(r####"grep -Fq 'status_line = null # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload] | last) as $t | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$t.rate_limits.primary, $t.rate_limits.secondary, $t.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
         // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
@@ -3224,6 +3236,33 @@ fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Render the provider-neutral one-line footer for a box whose runtime needs an adapter. Claude
+/// invokes the same renderer natively with its status-line stdin, so it returns `None` here. Codex
+/// maps its latest token_count event into that schema and is polled by the cockpit every 30 seconds.
+pub fn agent_statusline(name: &str) -> Result<Option<String>, String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let runtime_id = agent_for_box(name);
+    let runtime = runtime_adapter(&runtime_id).ok_or("runtime adapter unavailable")?;
+    let Some(input) = runtime.statusline_input else {
+        return Ok(None);
+    };
+    let store = store_for_box(name).ok_or("can't locate the box's shared store")?;
+    let renderer = sh_quote(
+        &store
+            .join("skein/bin/statusline-command.sh")
+            .to_string_lossy(),
+    );
+    let setup = runtime.interactive_setup;
+    let shell = format!(
+        r#"set -o pipefail; {setup}; payload="$({input})"; [ -n "$payload" ] || exit 0; renderer={renderer}; [ -r "$renderer" ] || exit 0; printf '%s\n' "$payload" | bash "$renderer""#
+    );
+    let rendered = sbx_guest_output(name, &shell, Duration::from_secs(30))?;
+    let rendered = rendered.trim_end_matches(['\r', '\n']).to_string();
+    Ok((!rendered.is_empty()).then_some(rendered))
+}
+
 /// Stream a possibly-large guest artifact straight to a host file. This avoids base64, Python, and
 /// holding a repository bundle in the server's memory.
 fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
@@ -4215,8 +4254,17 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     root.entry("tui").or_insert_with(|| json!("fullscreen"));
     // A default status line so a box shows context/usage out of the box. `or_insert` — a store that
     // already sets its own `statusLine` keeps it.
-    root.entry("statusLine")
-        .or_insert_with(|| json!({ "type": "command", "command": STATUSLINE_CMD }));
+    let status_line = root.entry("statusLine").or_insert_with(
+        || json!({ "type": "command", "command": STATUSLINE_CMD, "refreshIntervalMs": 30_000 }),
+    );
+    // Upgrade only Skein's generated default. A user-owned status-line object remains untouched.
+    if status_line.get("command").and_then(Value::as_str) == Some(STATUSLINE_CMD) {
+        status_line
+            .as_object_mut()
+            .expect("generated statusLine is an object")
+            .entry("refreshIntervalMs")
+            .or_insert_with(|| json!(30_000));
+    }
     out
 }
 
@@ -5014,20 +5062,86 @@ mod tests {
         let config = codex.join("config.toml");
         let generated = fs::read_to_string(&config).unwrap();
         assert!(generated.contains("[tui]"));
-        assert!(generated.contains(
-            r#"status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]"#
-        ));
+        assert!(generated.contains("status_line = null # skein custom statusline"));
 
         fs::write(&config, "[tui]\nanimations = false\n").unwrap();
         assert!(run().success());
         let extended = fs::read_to_string(&config).unwrap();
         assert!(extended.contains("animations = false"));
-        assert!(extended.contains("status_line = ["));
+        assert!(extended.contains("status_line = null # skein custom statusline"));
+
+        fs::write(
+            &config,
+            "[tui]\nstatus_line = [\"context-used\", \"five-hour-limit\", \"weekly-limit\", \"used-tokens\", \"git-branch\", \"model-with-reasoning\"]\n",
+        )
+        .unwrap();
+        assert!(run().success());
+        assert!(fs::read_to_string(&config)
+            .unwrap()
+            .contains("status_line = null # skein custom statusline"));
 
         let chosen = "[tui]\nstatus_line = null\n";
         fs::write(&config, chosen).unwrap();
         assert!(run().success());
         assert_eq!(fs::read_to_string(config).unwrap(), chosen);
+    }
+
+    #[test]
+    fn statusline_renderer_matches_bars_projection_colours_and_optional_segments() {
+        use std::io::Write as _;
+
+        let dir = tempdir();
+        let script = dir.join("statusline.sh");
+        fs::write(&script, STATUSLINE_SH).unwrap();
+        let render = |input: &str| {
+            let mut child = Command::new("bash")
+                .arg(&script)
+                .env("SKEIN_STATUSLINE_NOW", "1000000")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let input = r#"{
+          "context_window":{"used_percentage":25,"total_input_tokens":12345,"context_window_size":1000000},
+          "rate_limits":{
+            "five_hour":{"used_percentage":40,"resets_at":1009000},
+            "seven_day":{"used_percentage":70,"resets_at":1302400}
+          },
+          "cost":{"total_cost_usd":1.234},
+          "model":{"display_name":"Opus 4.8 (1M context)"}
+        }"#;
+        let line = render(input);
+
+        assert!(line.contains("\x1b[0;32m███░░░░░░░░░"));
+        assert!(line.contains("25%\x1b[0m \x1b[2m12.3k/1.0M"));
+        assert!(line.contains("\x1b[0;31m████▒▒▒▒▒░░░"));
+        assert!(line.contains("40%\x1b[0m→80%"));
+        assert!(line.contains("2h30m left"));
+        assert!(line.contains("\x1b[0;31m████████▒▒▒▒"));
+        assert!(line.contains("70%\x1b[0m→140%"));
+        assert!(line.contains("3d12h left"));
+        assert!(line.contains("$1.23"));
+        assert!(line.contains("Opus 4.8(1M)"));
+        assert_eq!(line.matches(" │ ").count(), 4);
+
+        let partial = render(
+            r#"{"context_window":{"used_percentage":70,"total_input_tokens":70,"context_window_size":100}}"#,
+        );
+        assert!(partial.contains("\x1b[0;33m████████░░░░"));
+        assert!(!partial.contains("5H"));
+        assert!(!partial.contains("7D"));
+        assert!(!partial.contains('$'));
+        assert!(!partial.contains(" │ "));
     }
 
     #[test]
@@ -5111,6 +5225,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("statusline-command.sh"));
+        assert_eq!(s["statusLine"]["refreshIntervalMs"], 30_000);
         assert!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
@@ -5169,6 +5284,7 @@ mod tests {
         let merged = settings_with_probe(&existing);
         // existing hooks are preserved …
         assert_eq!(merged["statusLine"]["command"], "statusline.sh");
+        assert!(merged["statusLine"]["refreshIntervalMs"].is_null());
         let ups = merged["hooks"]["UserPromptSubmit"].as_array().unwrap();
         assert!(ups
             .iter()
