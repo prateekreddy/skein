@@ -3244,6 +3244,8 @@ fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String
 /// Render the provider-neutral one-line footer for a box whose runtime needs an adapter. Claude
 /// invokes the same renderer natively with its status-line stdin, so it returns `None` here. Codex
 /// maps its latest token_count event into that schema and is polled by the cockpit every 30 seconds.
+/// The renderer is embedded in the guest command rather than addressed through the shared store:
+/// direct-workspace and older boxes may not mount that store, but every managed box has Bash + jq.
 pub fn agent_statusline(name: &str) -> Result<Option<String>, String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
@@ -3253,15 +3255,10 @@ pub fn agent_statusline(name: &str) -> Result<Option<String>, String> {
     let Some(input) = runtime.statusline_input else {
         return Ok(None);
     };
-    let store = store_for_box(name).ok_or("can't locate the box's shared store")?;
-    let renderer = sh_quote(
-        &store
-            .join("skein/bin/statusline-command.sh")
-            .to_string_lossy(),
-    );
+    let renderer = sh_quote(STATUSLINE_SH);
     let setup = runtime.interactive_setup;
     let shell = format!(
-        r#"set -o pipefail; {setup}; payload="$({input})"; [ -n "$payload" ] || exit 0; renderer={renderer}; [ -r "$renderer" ] || exit 0; printf '%s\n' "$payload" | bash "$renderer""#
+        r#"set -o pipefail; {setup}; payload="$({input})"; [ -n "$payload" ] || exit 0; printf '%s\n' "$payload" | bash -c {renderer}"#
     );
     let rendered = sbx_guest_output(name, &shell, Duration::from_secs(30))?;
     let rendered = rendered.trim_end_matches(['\r', '\n']).to_string();
@@ -5111,12 +5108,13 @@ mod tests {
     fn statusline_renderer_matches_bars_projection_colours_and_optional_segments() {
         use std::io::Write as _;
 
-        let dir = tempdir();
-        let script = dir.join("statusline.sh");
-        fs::write(&script, STATUSLINE_SH).unwrap();
         let render = |input: &str| {
-            let mut child = Command::new("bash")
-                .arg(&script)
+            // Exercise the same shell-quoted embedded form used by the Codex browser adapter.
+            // Direct-workspace boxes do not necessarily mount the shared store, so a file-backed
+            // test would miss the failure this path is designed to prevent.
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(format!("bash -c {}", sh_quote(STATUSLINE_SH)))
                 .env("SKEIN_STATUSLINE_NOW", "1000000")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
