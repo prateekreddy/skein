@@ -125,13 +125,25 @@ commands:
         command -v tmux >/dev/null 2>&1 || need="$need tmux"
         if [ -n "$need" ] && command -v apt-get >/dev/null 2>&1; then
           installed=0
-          # The base Codex kit starts apt update in the background. Retry long enough to outwait
-          # tmux to that package-manager lock race on every fresh Codex box.
-          for pause in 0 2 4 8 16 30; do
-            [ "$pause" = "0" ] || sleep "$pause"
-            if sudo apt-get update -qq 2>/dev/null \
-              && sudo apt-get install -y -qq $need 2>/dev/null; then installed=1; break; fi
+          # Agent images start apt update in the background. Serialize with that process rather than
+          # racing it with another updater: use its fresh indexes first, and update ourselves only
+          # when a direct install says they are insufficient. Every network/package step is bounded.
+          apt_busy() {
+            ps -eo comm= 2>/dev/null \
+              | grep -Eq '^[[:space:]]*(apt|apt-get|dpkg)[[:space:]]*$'
+          }
+          waited=0
+          while apt_busy && [ "$waited" -lt 240 ]; do
+            sleep 2
+            waited=$((waited + 2))
           done
+          if ! apt_busy; then
+            if timeout 120 sudo apt-get install -y -qq $need 2>/dev/null \
+              || { timeout 120 sudo apt-get update -qq 2>/dev/null \
+                && timeout 120 sudo apt-get install -y -qq $need 2>/dev/null; }; then
+              installed=1
+            fi
+          fi
           if [ "$installed" = "1" ]; then
             # Package indexes dwarf jq itself and are useless after the one setup pass.
             sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true

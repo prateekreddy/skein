@@ -1103,7 +1103,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
 /// `sbx create` returns before its durable startup hooks finish. The first `sbx exec` keeps the box
 /// alive and waits for the kit's provider-neutral handshake; later attaches skip this entirely and
 /// go straight to tmux. A bounded wait makes a broken kit visible instead of hanging the terminal.
-const INITIAL_SETUP_WAIT: &str = "echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt 180 ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ";
+const INITIAL_SETUP_WAIT: &str = "echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt 600 ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ";
 
 fn runtime_adapter(id: &str) -> Option<&'static RuntimeAdapter> {
     RUNTIME_ADAPTERS
