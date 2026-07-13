@@ -655,7 +655,6 @@
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
-<script src="/vendor/addon-webgl.js"></script>
 <script src="/vendor/marked.js"></script>
 <script>
 // ---------- model ----------
@@ -1023,15 +1022,11 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   // a character that rendered instantly can sit next to a cursor that's mid-blink-off for up to
   // ~300ms, reading as "my typing lagged" even though nothing did. A solid cursor removes that.
   const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
-    cursorBlink:false, scrollback:8000, theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
+    cursorBlink:false, customGlyphs:true, scrollback:8000,
+    theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
   const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
-  // GPU renderer: keeps the agent TUI's constant repaints off the layout/DOM path so keystrokes
-  // echo crisply. Fall back to the DOM renderer if WebGL is unavailable or its context is lost.
-  try {
-    const webgl = new WebglAddon.WebglAddon();
-    webgl.onContextLoss(() => { try { webgl.dispose(); } catch {} });
-    term.loadAddon(webgl);
-  } catch {}
+  // Keep xterm's built-in renderer. The WebGL add-on clips fallback Unicode glyphs in agent TUIs
+  // (prompt chevrons, arrows and block gauges collapse into underscore-like bottom strokes).
   // OSC 52 clipboard: TUIs like Claude Code run with mouse mode on, so a drag is consumed by the app
   // (neither xterm nor the browser sees a selection — that's the x=0/w=0). The app copies by emitting
   // an OSC 52 escape ("sent N chars via OSC 52"); xterm ignores OSC 52 by default, so it never reached

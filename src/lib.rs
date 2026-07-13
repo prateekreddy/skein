@@ -1085,6 +1085,9 @@ pub struct HealthReport {
 /// consume these definitions. Provider quirks belong here, not at their call sites.
 struct RuntimeAdapter {
     info: RuntimeInfo,
+    /// Idempotent provider-specific setup run immediately before creating its tmux session.
+    /// Existing live sessions are never disturbed. User choices must win over Skein defaults.
+    interactive_setup: &'static str,
     /// Shell command used to create this runtime's first persistent tmux process.
     interactive_start: &'static str,
     /// Shell command used when creating a provider-specific persistent tmux session.
@@ -1105,6 +1108,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             supports_resume: true,
             supports_handoff: true,
         },
+        interactive_setup: ":",
         interactive_start: "claude",
         interactive_resume: "claude --continue",
         headless_resume: "claude --continue --print {prompt}",
@@ -1118,6 +1122,11 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             supports_resume: true,
             supports_handoff: true,
         },
+        // Codex owns and renders this footer. Add a useful default only when the user has not
+        // configured (or explicitly disabled) status_line; `/statusline` can replace it normally.
+        // Keep this in the adapter so another runtime can provide its own setup without call-site
+        // conditionals. The identifiers are Codex's documented kebab-case status-line fields.
+        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; if ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i '/^[[:space:]]*\[tui\][[:space:]]*$/a status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]' "$cfg"; else printf '\n[tui]\nstatus_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]\n' >> "$cfg"; fi; fi"#,
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
         // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
@@ -3542,8 +3551,8 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         ));
     }
     let shell = format!(
-        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
-        runtime.info.executable, runtime.interactive_start,
+        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
+        runtime.info.executable, runtime.interactive_setup, runtime.interactive_start,
     );
     sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
 }
@@ -3614,9 +3623,10 @@ fn agent_attach_argv(
     let shell = format!(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
-         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
+         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then {setup}; tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then tmux set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
-         {TMUX_CONFIGURE}exec tmux attach-session -t {tmux_name}"
+         {TMUX_CONFIGURE}exec tmux attach-session -t {tmux_name}",
+        setup = runtime.interactive_setup
     );
     vec![
         "exec".into(),
@@ -4985,6 +4995,40 @@ mod tests {
             Some("codex")
         );
         env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn codex_status_line_setup_defaults_without_overriding_user_choice() {
+        let home = tempdir();
+        let codex = home.join(".codex");
+        let setup = runtime_adapter("codex").unwrap().interactive_setup;
+        let run = || {
+            Command::new("bash")
+                .arg("-c")
+                .arg(setup)
+                .env("HOME", &home)
+                .status()
+                .unwrap()
+        };
+
+        assert!(run().success());
+        let config = codex.join("config.toml");
+        let generated = fs::read_to_string(&config).unwrap();
+        assert!(generated.contains("[tui]"));
+        assert!(generated.contains(
+            r#"status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]"#
+        ));
+
+        fs::write(&config, "[tui]\nanimations = false\n").unwrap();
+        assert!(run().success());
+        let extended = fs::read_to_string(&config).unwrap();
+        assert!(extended.contains("animations = false"));
+        assert!(extended.contains("status_line = ["));
+
+        let chosen = "[tui]\nstatus_line = null\n";
+        fs::write(&config, chosen).unwrap();
+        assert!(run().success());
+        assert_eq!(fs::read_to_string(config).unwrap(), chosen);
     }
 
     #[test]
