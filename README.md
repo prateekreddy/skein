@@ -123,6 +123,8 @@ skein                 # = skein ls — the fleet, live boxes first
 skein attach <box>    # reattach to the live provider tmux session
 skein attach <box> --agent codex --handoff   # Codex takes over a Claude box
 skein attach <box> --agent claude --handoff  # Claude takes over a Codex box
+skein migrate --to codex                     # fleet-wide replacement dry run
+skein migrate --to codex --apply             # execute only safe rows; preserve sources
 skein version · help
 ```
 
@@ -182,18 +184,19 @@ Settings and skein `ssh-add`s it so it's available to forward. `skein add` warns
 ## Claude and Codex runtimes
 
 Choose the default runtime when adding a repo, override it when launching a box, or use the cockpit's
-`↔` action to hand the current sandbox to another supported runtime. Skein keeps a separate tmux and
-native conversation for each provider, so switching back resumes that provider's own history.
+`↔` action to create a replacement box in another supported runtime. Each box remains single-runtime:
+Skein snapshots the source, launches the target runtime's own image, and keeps the source intact as
+rollback. This keeps images light and avoids cross-provider authentication inside the wrong image.
 
-Native transcripts are provider-specific and are not converted. A takeover shares the exact sandbox,
-branch, commits, and uncommitted working tree, then injects a durable brief containing the active task,
-last outcome, journal, diff summary, and changed files. The target CLI must already exist and be
-authenticated in that sandbox image; Skein deliberately does not install both large agent CLIs into
-every box. If it is absent, the terminal explains the missing capability and leaves a shell open.
+Native transcripts are provider-specific and are not converted. A takeover preserves unpushed commits,
+the staged and unstaged tree, untracked files, branch, shared memory, skills, and user hooks. It also
+injects a durable brief containing the active task, last outcome, journal, diff, changed files, and a
+bounded Markdown export of the source conversation. The export provides continuity, but only the source
+provider can natively resume its original session.
 
-Skein installs `jq` as its one required probe dependency. `tmux` is installed only when persistent
-sessions are enabled. Probe scripts and handoff data live once in the mounted shared store, not as a
-copy in every box. `GET /api/health` and the cockpit banner make a failed dependency/hook setup visible.
+Skein installs `jq` and mandates `tmux` as the minimal box substrate. Provider-neutral probe scripts,
+handoffs, and immutable migration snapshots live once in the mounted shared store; Skein never installs
+both large agent CLIs into every box. `GET /api/health` exposes dependency/hook failures.
 
 ## Configuration
 

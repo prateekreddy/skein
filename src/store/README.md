@@ -77,7 +77,10 @@ Managed by skein (don't edit):
                    quiet": a Running box with no heartbeat and no status has dark hooks and gets a
                    "⚠ no signals" badge.
     handoffs/      durable provider-neutral takeover briefs plus one-shot pending copies per target
-                   runtime. Native provider transcripts remain separate; the worktree and brief move.
+                   runtime. Native provider transcripts remain separate; replacement boxes receive
+                   a bounded context export while the original remains natively resumable.
+    skein/migrations/ immutable replacement snapshots: Git bundle, staged/unstaged patches,
+                   untracked archive, shared memory/skills/hooks backup, transcript export, manifest.
     skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found and
                    how .claude was linked (linked | merged | no-store | failed), jq presence, branch.
     shared-rw/     the writable copies of `rw`-flagged shared-paths.txt entries.

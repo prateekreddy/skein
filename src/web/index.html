@@ -948,7 +948,20 @@ const termarea = document.getElementById("termarea"), diffpane = document.getEle
       tabsEl = document.getElementById("tabs"), dockbar = document.getElementById("dockbar");
 
 function openTerminal(name, runtime) { showBox(name, "term", "agent", runtime || agentOf(name)); }
-function takeOver(name, runtime) { showBox(name, "term", "agent", runtime, true); }
+function takeOver(name, runtime) {
+  if (!confirm(`Create a ${runtime} replacement for ${name}?\n\nSkein will snapshot commits, staged/unstaged edits, untracked files, and bounded conversation context. The source box remains intact as rollback.`)) return;
+  toast(`snapshotting ${name} and creating its ${runtime} replacement…`);
+  fetch(`/api/boxes/${encodeURIComponent(name)}/takeover`, {
+    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({target:runtime})
+  }).then(async r => {
+    const text = await r.text();
+    if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
+    return JSON.parse(text);
+  }).then(replacement => {
+    toast(`replacement ready: ${replacement.target}`);
+    showBox(replacement.target, "term", "agent", runtime);
+  }).catch(error => toast("takeover failed: " + String(error.message || error).split("\n")[0]));
+}
 function openShell(name) { showBox(name, "term", "shell"); }
 function openDiff(name) { showBox(name, "diff"); }
 function openSession(name) { showBox(name, "session"); }
@@ -1175,7 +1188,7 @@ function renderDockbar() {
          <button data-m="files" class="${m==='files'?'on':''}">Files</button>
        </div>`
     + `<div class="dock-right">`
-    + (otherRuntime ? `<button class="kbtn ghost" id="dtake" title="hand this exact sandbox and working tree to ${esc(otherLabel)}">↔ ${esc(otherLabel)}</button>` : "")
+    + (otherRuntime ? `<button class="kbtn ghost" id="dtake" title="create a lightweight ${esc(otherLabel)} replacement; preserve this source as rollback">↔ ${esc(otherLabel)}</button>` : "")
     + (m==='diff' ? `<button class="kbtn ghost" id="dref" title="refresh diff"><svg class="ic" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>` : "")
     + (hasReview
         ? `<button class="kbtn primary" id="dsend" title="paste the review into the agent prompt">Send ${hasReview}</button>` : "")

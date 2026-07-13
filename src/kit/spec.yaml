@@ -162,6 +162,41 @@ commands:
         [ "$tools_ok" = "true" ] \
           || echo "[skein-kit] required box tools unavailable:$missing" >&2
 
+        # A cross-runtime replacement carries an immutable snapshot in the mounted store. Restore it
+        # before either provider starts: the bundle preserves unpushed commits, separate patches
+        # preserve index vs worktree state, and the archive preserves untracked files. This runs once
+        # in the NEW target clone only; the source box is never reset, stopped, or destroyed.
+        migration_dir=""
+        if [ -r "$spec" ] && command -v jq >/dev/null 2>&1; then
+          migration_dir="$(jq -r '.migration.dir // ""' "$spec" 2>/dev/null)"
+        fi
+        migration_marker="$clone_root/.git/skein-migration-restored"
+        if [ -n "$migration_dir" ] && [ ! -e "$migration_marker" ]; then
+          case "$migration_dir" in
+            skein/migrations/*) snapshot="$store/$migration_dir" ;;
+            *) echo "[skein-kit] refusing unsafe migration path: $migration_dir" >&2; exit 1 ;;
+          esac
+          [ -s "$snapshot/repo.bundle" ] || { echo "[skein-kit] migration bundle missing" >&2; exit 1; }
+          git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD \
+            && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD \
+            || { echo "[skein-kit] could not restore migration commit" >&2; exit 1; }
+          if [ -s "$snapshot/index.patch" ]; then
+            git -C "$clone_root" apply --binary --index "$snapshot/index.patch" \
+              || { echo "[skein-kit] could not restore staged changes" >&2; exit 1; }
+          fi
+          if [ -s "$snapshot/worktree.patch" ]; then
+            git -C "$clone_root" apply --binary "$snapshot/worktree.patch" \
+              || { echo "[skein-kit] could not restore unstaged changes" >&2; exit 1; }
+          fi
+          if [ -s "$snapshot/untracked.tgz" ]; then
+            tar -C "$clone_root" -xzf "$snapshot/untracked.tgz" \
+              || { echo "[skein-kit] could not restore untracked files" >&2; exit 1; }
+          fi
+          cp "$snapshot/manifest.json" "$migration_marker" 2>/dev/null \
+            || printf '%s\n' "$migration_dir" > "$migration_marker"
+          echo "[skein-kit] restored replacement snapshot from $migration_dir"
+        fi
+
         # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
         # Three cases — and every one leaves a boot report, because a silent miss here is the #1 way
         # a box ends up with zero hooks while looking perfectly healthy:
@@ -301,11 +336,11 @@ memory: |
   This sandbox is a private `--clone` of the repo (isolated code, full git); the
   `.claude` store (memory/skills/hooks/mailbox + skein's turn-state probe) is a
   shared mount linked in at startup and is LIVE across every parallel sandbox.
-  Re-opening a box attaches to a persistent tmux session — `skein-agent` for its
-  configured runtime, a provider-specific session for a Claude/Codex takeover, and
-  `skein-shell` for the shell. UI reloads reattach to the live process; only a missing
-  tmux process falls back to Claude's `--continue` or Codex's `resume --last`. Skein
-  injects a provider-neutral handoff brief when one takes over the other's working tree.
+  Re-opening a box attaches to its persistent `skein-agent` tmux session; `skein-shell`
+  is the separate persistent shell. UI reloads reattach to the live process; only a
+  missing tmux process falls back to Claude's `--continue` or Codex's `resume --last`.
+  Cross-provider takeover creates a single-runtime replacement box and restores an
+  immutable worktree/context snapshot before its agent starts; the source remains intact.
 
   ## Git authentication in this box
 

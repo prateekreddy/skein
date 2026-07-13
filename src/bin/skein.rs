@@ -38,6 +38,7 @@ fn main() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
+        "migrate" => cmd_migrate(rest),
         "version" | "--version" | "-v" => {
             println!("skein {VERSION}");
             Ok(())
@@ -64,6 +65,7 @@ skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
+skein migrate --to <runtime> [--apply]  dry-run or execute replacement-box migration\n  \
 skein doctor          check registry + required tools (sbx/git/gh)\n  \
 skein version\n  \
 skein help\n\n\
@@ -73,6 +75,46 @@ $SKEIN_REGISTRY                 full path to sandboxes.json\n  \
 $SKEIN_SHARED/sandboxes.json\n  \
 <git-toplevel>/../skein-shared/.claude/sandboxes.json\n"
     );
+}
+
+fn cmd_migrate(opts: &[String]) -> Result<(), String> {
+    let target = flag(opts, "--to").unwrap_or_else(|| "codex".into());
+    if opts.iter().any(|arg| arg == "--apply") {
+        let result = skein::migrate_fleet(&target)?;
+        for row in result.outcomes {
+            println!(
+                "{} {}{} — {}",
+                if row.ok { "✓" } else { "✗" },
+                row.source,
+                row.target
+                    .as_deref()
+                    .map(|target| format!(" → {target}"))
+                    .unwrap_or_default(),
+                row.detail
+            );
+        }
+        return Ok(());
+    }
+    let plan = skein::migration_plan(&target)?;
+    println!("{BOLD}replacement migration dry run → {target}{RESET}\n");
+    for row in plan.candidates {
+        let destination = row
+            .target
+            .as_deref()
+            .map(|value| format!(" → {value}"))
+            .unwrap_or_default();
+        println!(
+            "{:<8} {}{}  {DIM}{} · {} · {}{RESET}",
+            row.action, row.source, destination, row.source_runtime, row.branch, row.state
+        );
+        if let Some(reason) = row.reason {
+            println!("         {DIM}{reason}{RESET}");
+        }
+    }
+    println!(
+        "\n{DIM}No boxes were changed. Execute with: skein migrate --to {target} --apply{RESET}"
+    );
+    Ok(())
 }
 
 /// `skein add <git-url|path> [--id <id>] [--agent <runtime>] [--store <shared-data-folder>]` — register
@@ -334,7 +376,6 @@ fn have(prog: &str) -> bool {
 
 fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // Reconnect to the box's existing agent session (same command the web cockpit uses).
-    let dir = skein::lookup_dir(name).unwrap_or_default();
     let configured = skein::agent_for_box(name);
     let agent = flag(opts, "--agent").unwrap_or(configured.clone());
     if !skein::valid_runtime(&agent) {
@@ -347,12 +388,26 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
             "unsupported runtime {agent:?}; available: {available}"
         ));
     }
-    if opts.iter().any(|o| o == "--handoff") {
-        let from = (configured != agent).then_some(configured.as_str());
-        let path = skein::prepare_handoff(name, from, &agent)?;
-        eprintln!("{DIM}skein:{RESET} handoff prepared at {}", path.display());
-    }
-    let argv = skein::attach_argv_as(name, &dir, &agent);
+    let handoff = opts.iter().any(|o| o == "--handoff");
+    let attach_name = if handoff && configured != agent {
+        eprintln!(
+            "{DIM}skein:{RESET} snapshotting {name} and creating a lightweight {agent} replacement…"
+        );
+        let replacement = skein::replace_box(name, &agent)?;
+        eprintln!(
+            "{DIM}skein:{RESET} source preserved; replacement is {}",
+            replacement.target
+        );
+        replacement.target
+    } else {
+        if handoff {
+            let path = skein::prepare_handoff(name, None, &agent)?;
+            eprintln!("{DIM}skein:{RESET} handoff prepared at {}", path.display());
+        }
+        name.to_string()
+    };
+    let dir = skein::lookup_dir(&attach_name).unwrap_or_default();
+    let argv = skein::attach_argv_as(&attach_name, &dir, &agent);
     match Command::new("sbx").args(&argv).status() {
         Ok(s) if s.success() => Ok(()),
         Ok(_) => Err("sbx exited non-zero".into()),

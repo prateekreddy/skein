@@ -101,6 +101,10 @@ async fn main() {
         .route("/api/boxes", get(api_boxes))
         .route("/api/health", get(api_health))
         .route("/api/runtimes", get(api_runtimes))
+        .route(
+            "/api/migration",
+            get(api_migration_plan).post(api_migrate_fleet),
+        )
         .route("/api/repos", get(api_repos).post(api_add_repo))
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
@@ -115,6 +119,7 @@ async fn main() {
         .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
         .route("/api/boxes/:name/restart-agent", post(api_restart_agent))
+        .route("/api/boxes/:name/takeover", post(api_takeover))
         .route("/api/boxes/:name/narrate", get(api_narrate))
         .route("/api/resume-batch", post(api_resume_batch))
         .route("/api/collisions", get(api_collisions))
@@ -251,6 +256,64 @@ async fn api_boxes() -> Json<Vec<BoxView>> {
         .await
         .unwrap_or_default();
     Json(views)
+}
+
+async fn api_migration_plan(Query(q): Query<HashMap<String, String>>) -> Response {
+    let target = q.get("target").map(String::as_str).unwrap_or("codex");
+    match tokio::task::spawn_blocking({
+        let target = target.to_string();
+        move || skein::migration_plan(&target)
+    })
+    .await
+    {
+        Ok(Ok(plan)) => Json(plan).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct FleetMigrationReq {
+    #[serde(default = "default_codex_runtime")]
+    target: String,
+    #[serde(default)]
+    confirm: bool,
+}
+
+fn default_codex_runtime() -> String {
+    "codex".into()
+}
+
+async fn api_migrate_fleet(Json(request): Json<FleetMigrationReq>) -> Response {
+    if !request.confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            "confirmation required; GET /api/migration first, then send {confirm:true}",
+        )
+            .into_response();
+    }
+    let target = request.target;
+    match tokio::task::spawn_blocking(move || skein::migrate_fleet(&target)).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TakeoverReq {
+    target: String,
+}
+
+async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>) -> Response {
+    if !skein::valid_name(&name) || !skein::valid_runtime(&request.target) {
+        return (StatusCode::BAD_REQUEST, "invalid box or target runtime").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::replace_box(&name, &request.target)).await {
+        Ok(Ok(replacement)) => Json(replacement).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
 }
 
 /// The branch-vs-base patch a box last reported (plain text; empty when none yet).

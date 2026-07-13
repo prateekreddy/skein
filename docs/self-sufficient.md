@@ -244,6 +244,11 @@ All four landed together (Opus, one pass). Code map:
   only if the tmux process no longer exists, avoiding parallel/forked sessions during ordinary reloads.
   `shell_argv` = `sbx exec -it <box> bash -lc '… tmux new-session -A -s skein-shell || bash -li'`
   (persistent shell tab; managed-box creation requires tmux).
+- **Cross-runtime replacement** — takeover never installs a second CLI into the source image. Skein
+  exports an immutable Git bundle, separate staged/unstaged patches, untracked archive, shared
+  memory/skills/hooks backup, and bounded native transcript Markdown into
+  `<store>/skein/migrations/`. A new target-runtime box restores that snapshot before its mandatory
+  `skein-agent` tmux starts. The old box and native transcript remain intact as rollback.
 - **gh auth** — `ensure_gh_secret` runs `sbx secret set -g github -t "$(gh auth token)"` once
   (global). "already exists" is treated as success; `$SKEIN_FORCE_GH_SECRET` / the force setting add
   `-f`. `$SKEIN_NO_GH_SECRET` / the seed setting skip it.

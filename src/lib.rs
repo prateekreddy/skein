@@ -95,7 +95,7 @@ pub struct BoxView {
     #[serde(default)]
     pub repo: String,
     /// Runtime configured for this sandbox (`claude` or `codex`). The cockpit uses this as the
-    /// default agent and offers the other runtime as an explicit takeover target.
+    /// default agent and offers the other runtime as a replacement-box takeover target.
     #[serde(default = "default_agent")]
     pub agent: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,7 +271,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
     // branch, run-state, diff) comes from sbx + host git, so a box no longer has to register itself
     // to be seen. See docs/self-sufficient.md.
     let sbx = fleet_boxes();
-    let reg = load_registry().map(|(b, _)| b).unwrap_or_default();
+    let reg = all_sandboxes();
     // skein-server may run *inside* one box; that box is provably up, so keep it live even when sbx
     // can't confirm it. Set $SKEIN_SELF to override the detected vmid.
     let self_box = env::var("SKEIN_SELF")
@@ -318,11 +318,9 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 .or_else(|| repo.as_ref().map(|rp| rp.agent.clone()))
                 .filter(|a| valid_runtime(a))
                 .unwrap_or_else(default_agent);
-            // Branch resolution, most-authoritative first. For a repo (clone-mode) box, `dir` on the
-            // host is the *shared* clone (on its own branch, often master) — NOT the box's private
-            // clone — so `git_branch_for(dir)` would mislabel every box. Prefer the launch spec skein
-            // recorded (the box's real branch, host-readable) and the box-name slug; only fall back to
-            // host git for a box that belongs to no managed repo.
+            // Branch resolution, most-authoritative first. Lifecycle probes refresh the per-store
+            // registry after an in-box checkout. The launch spec is only the creation fallback; the
+            // host clone is a different worktree (often on main) and must never override box state.
             let branch = r
                 .map(|x| x.branch.clone())
                 .filter(|b| !b.is_empty() && b != "?")
@@ -832,6 +830,30 @@ fn sandboxes_in(store: &Path) -> BTreeMap<String, Sandbox> {
         .unwrap_or_default()
 }
 
+/// Aggregate every project registry. Managed boxes report their *current* branch into their own
+/// mounted store; consulting only the legacy global registry made the board fall back to the launch
+/// branch forever after an in-box checkout. For duplicate legacy entries, the newest lastSeen wins.
+fn all_sandboxes() -> BTreeMap<String, Sandbox> {
+    let mut boxes: BTreeMap<String, Sandbox> = BTreeMap::new();
+    for store in all_stores() {
+        for (name, sandbox) in sandboxes_in(&store) {
+            let replace = boxes
+                .get(&name)
+                .is_none_or(|current| sandbox.last_seen >= current.last_seen);
+            if replace {
+                boxes.insert(name, sandbox);
+            }
+        }
+    }
+    boxes
+}
+
+fn registry_entry_for_box(name: &str) -> Option<Sandbox> {
+    store_for_box(name)
+        .and_then(|store| sandboxes_in(&store).remove(name))
+        .or_else(|| all_sandboxes().remove(name))
+}
+
 /// Sweep every managed store's mailbox for box-authored messages addressed across a project
 /// boundary — `to: "all-projects"`, `to: "project:<repo-id>"`, or a bare vmid that belongs to a
 /// DIFFERENT project's registry than the one the message was found in — and copy them into the
@@ -1069,6 +1091,9 @@ struct RuntimeAdapter {
     interactive_resume: &'static str,
     /// Headless command run inside an existing box; `{prompt}` is replaced with a shell-quoted value.
     headless_resume: &'static str,
+    /// Best-effort, bounded provider-native transcript export. It emits Markdown to stdout and is
+    /// used only for cross-runtime replacement; native transcript files never leave the source box.
+    context_export: &'static str,
 }
 
 static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
@@ -1083,6 +1108,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         interactive_start: "claude",
         interactive_resume: "claude --continue",
         headless_resume: "claude --continue --print {prompt}",
+        context_export: r####"project="$HOME/.claude/projects/$(printf '%s' "$root" | sed 's#/#-#g')"; latest="$(find "$project" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'def text: if type == "string" then . elif type == "array" then map(if type == "string" then . elif .type == "text" then (.text // empty) else empty end) | join("\n") else "" end; select(.type == "user" or .type == "assistant") | (.message.role // .type) as $role | ((.message.content // empty) | text) as $body | select($body != "") | "### \($role)\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
     RuntimeAdapter {
         info: RuntimeInfo {
@@ -1097,6 +1123,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         interactive_start: "codex --dangerously-bypass-hook-trust",
         interactive_resume: "codex resume --last --dangerously-bypass-hook-trust || codex --dangerously-bypass-hook-trust",
         headless_resume: "codex exec resume --last --dangerously-bypass-hook-trust {prompt} || codex exec --dangerously-bypass-hook-trust {prompt}",
+        context_export: r####"latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'select(.type == "response_item" and .payload.type == "message") | .payload as $m | (($m.content // []) | map(.text // .input_text // .output_text // empty) | join("\n")) as $body | select($body != "") | "### \($m.role // "agent")\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
 ];
 
@@ -2041,21 +2068,18 @@ fn launch_store() -> Option<String> {
     store_dir().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// The box's branch, from the registry.
+/// The box's current branch from its project registry, with launch branch only as a fallback.
 pub fn branch_of(name: &str) -> Option<String> {
-    // SAME cascade as the board (load_views): registry → launch spec → box-name slug → host git.
+    // SAME cascade as the board (load_views): live registry → launch spec → box-name slug → host git.
     // This feeds *write* actions (gh pr create/merge --head), where the old registry-else-host-git
     // shortcut was dangerous: for a clone-mode box, `lookup_dir` is the SHARED host clone (often
     // sitting on master) — a missing registry branch meant creating/merging a PR for master, not
     // the box's real branch. The board never made that mistake; now the actions can't either.
-    if let Ok((boxes, _)) = load_registry() {
-        if let Some(b) = boxes
-            .get(name)
-            .map(|b| b.branch.clone())
-            .filter(|b| !b.is_empty() && b != "?")
-        {
-            return Some(b);
-        }
+    if let Some(branch) = registry_entry_for_box(name)
+        .map(|box_| box_.branch)
+        .filter(|branch| !branch.is_empty() && branch != "?")
+    {
+        return Some(branch);
     }
     if let Some(rp) = repo_for_box(name) {
         if let Some(b) = launch_spec_branch(&rp, name) {
@@ -2801,14 +2825,11 @@ fn read_diffstat_file(name: &str) -> Option<DiffStat> {
 pub fn lookup_dir(name: &str) -> Option<String> {
     // registry first (no subprocess); else the box's workspace from sbx, for boxes the registry
     // doesn't know about (sbx-only / not-yet-registered).
-    if let Ok((boxes, _)) = load_registry() {
-        if let Some(d) = boxes
-            .get(name)
-            .map(|b| b.dir.clone())
-            .filter(|d| !d.is_empty())
-        {
-            return Some(d);
-        }
+    if let Some(dir) = registry_entry_for_box(name)
+        .map(|box_| box_.dir)
+        .filter(|dir| !dir.is_empty())
+    {
+        return Some(dir);
     }
     fleet_boxes()?
         .into_iter()
@@ -2999,10 +3020,7 @@ pub fn collisions() -> Vec<Collision> {
 }
 
 fn compute_collisions() -> Vec<Collision> {
-    let boxes = match load_registry() {
-        Ok((b, _)) => b,
-        Err(_) => return vec![],
-    };
+    let boxes = all_sandboxes();
     let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in boxes.keys() {
         for f in changed_files(name) {
@@ -3023,12 +3041,28 @@ fn compute_collisions() -> Vec<Collision> {
 }
 
 /// Write a durable, provider-neutral takeover brief plus a one-shot copy for `target`. Native
-/// Claude and Codex transcripts remain separate, but the receiving runtime gets the same sandbox,
-/// branch, uncommitted tree, commits, task, journal, diff summary, and last turn outcome. The
-/// box-handoff hook adds this brief (and authoritative in-box git status) as developer context.
+/// transcripts remain separate; replacement migration adds worktree/context artifacts around this
+/// core brief. The box-handoff hook injects it with authoritative in-box git status.
 pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<PathBuf, String> {
+    prepare_handoff_for(name, name, from, target, None, None)
+}
+
+/// Replacement-box variant of [`prepare_handoff`]. The source supplies the digest, while the
+/// pending filename is addressed to the destination vm id so its first SessionStart consumes it.
+fn prepare_handoff_for(
+    source_name: &str,
+    destination_name: &str,
+    from: Option<&str>,
+    target: &str,
+    native_context: Option<&str>,
+    store_override: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let name = source_name;
     if !valid_name(name) {
         return Err("invalid box name".into());
+    }
+    if !valid_name(destination_name) {
+        return Err("invalid destination box name".into());
     }
     if !valid_runtime(target) {
         return Err(format!("unsupported handoff runtime {target:?}"));
@@ -3038,12 +3072,15 @@ pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<P
         .map(str::to_string)
         .unwrap_or_else(|| agent_for_box(name));
     let digest = session_digest(name).ok_or_else(|| format!("no such box: {name}"))?;
-    let store = store_for_box(name).ok_or("can't locate the box's shared store")?;
+    let store = store_override
+        .map(Path::to_path_buf)
+        .or_else(|| store_for_box(name))
+        .ok_or("can't locate the box's shared store")?;
     let dir = store.join("handoffs");
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
 
     let mut brief = format!(
-        "# Skein cross-agent handoff\n\n- box: `{name}`\n- from: `{source}`\n- to: `{target}`\n- branch: `{}`\n- state: `{}`\n- prepared: `{}`\n\nContinue the existing work in this same sandbox. Preserve the current working tree; inspect it before editing and do not redo completed work.\n",
+        "# Skein cross-agent handoff\n\n- source box: `{name}`\n- destination box: `{destination_name}`\n- from: `{source}`\n- to: `{target}`\n- branch: `{}`\n- state: `{}`\n- prepared: `{}`\n\nContinue the existing work in this replacement sandbox. Its commits and working tree were restored from the source snapshot; inspect them before editing and do not redo completed work. The source box remains intact as rollback.\n",
         digest.branch,
         digest.state,
         Utc::now().to_rfc3339()
@@ -3084,11 +3121,545 @@ pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<P
         brief.push('\n');
     }
 
-    let durable = dir.join(format!("{name}.md"));
+    if let Some(context) = native_context.filter(|text| !text.trim().is_empty()) {
+        brief.push_str("\n## Bounded native conversation export\n\nThis is continuity context, not a native resumable session. Provider-specific metadata and tool state may be omitted.\n\n");
+        brief.push_str(context.trim());
+        brief.push('\n');
+    }
+
+    let durable = dir.join(format!("{destination_name}.md"));
     write_atomic(&durable, &dir, brief.as_bytes())?;
-    let pending = dir.join(format!("{name}.{target}.pending.md"));
+    let pending = dir.join(format!("{destination_name}.{target}.pending.md"));
     write_atomic(&pending, &dir, brief.as_bytes())?;
     Ok(pending)
+}
+
+// ───────────────────────── replacement-box migration ─────────────────────────
+
+/// Read-only row used by both the CLI/API dry run and the one-time fleet migration. A source that
+/// cannot be mapped to a managed repo is deliberately blocked: guessing a store would risk moving
+/// code into the wrong project's shared memory and hooks.
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrationCandidate {
+    pub source: String,
+    pub source_runtime: String,
+    pub target_runtime: String,
+    pub target: Option<String>,
+    pub repo: Option<String>,
+    pub branch: String,
+    pub state: String,
+    pub action: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrationPlan {
+    pub target_runtime: String,
+    pub candidates: Vec<MigrationCandidate>,
+}
+
+/// Result of preparing and launching one immutable source snapshot in a new single-runtime box.
+#[derive(Debug, Clone, Serialize)]
+pub struct Replacement {
+    pub source: String,
+    pub target: String,
+    pub source_runtime: String,
+    pub target_runtime: String,
+    pub repo: String,
+    pub branch: String,
+    pub snapshot: String,
+    pub context_exported: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrationOutcome {
+    pub source: String,
+    pub target: Option<String>,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetMigrationResult {
+    pub target_runtime: String,
+    pub outcomes: Vec<MigrationOutcome>,
+}
+
+/// Resolve legacy names by workspace as well as by the modern `<repo>-<branch>` convention. This
+/// lets old boxes such as a pre-registry custom name migrate without teaching takeover about any
+/// particular repository.
+fn migration_repo(name: &str) -> Option<Repo> {
+    if let Some(repo) = repo_for_box(name) {
+        return Some(repo);
+    }
+    let dir = fleet_boxes()?
+        .into_iter()
+        .find(|box_| box_.name == name)?
+        .dir;
+    let wanted = PathBuf::from(expand_tilde(&dir));
+    let wanted = wanted.canonicalize().unwrap_or(wanted);
+    load_repos().into_iter().find(|repo| {
+        let work = PathBuf::from(&repo.work);
+        work.canonicalize().unwrap_or(work) == wanted
+    })
+}
+
+fn replacement_name(repo: &Repo, branch: &str, runtime: &str) -> String {
+    let base = format!("{}-{runtime}", box_name(&repo.id, branch));
+    let existing = fleet_boxes()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|box_| box_.name)
+        .collect::<BTreeSet<_>>();
+    if !existing.contains(&base) {
+        return base;
+    }
+    for n in 2..10_000 {
+        let candidate = format!("{base}-{n}");
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{base}-{}", Utc::now().timestamp())
+}
+
+/// Inventory only: no box commands, writes, starts, or stops.
+pub fn migration_plan(target_runtime: &str) -> Result<MigrationPlan, String> {
+    if !valid_runtime(target_runtime) {
+        return Err(format!("unsupported target runtime {target_runtime:?}"));
+    }
+    let mut candidates = Vec::new();
+    for view in load_views()? {
+        let repo = migration_repo(&view.name);
+        let (action, reason, target) = if view.agent == target_runtime {
+            (
+                "keep".to_string(),
+                Some("already uses the target runtime".to_string()),
+                None,
+            )
+        } else if repo.is_none() {
+            (
+                "blocked".to_string(),
+                Some("workspace is not registered with Skein; register it before replacement so its store is explicit".to_string()),
+                None,
+            )
+        } else {
+            (
+                "replace".to_string(),
+                None,
+                Some(replacement_name(
+                    repo.as_ref().expect("repo checked above"),
+                    &view.branch,
+                    target_runtime,
+                )),
+            )
+        };
+        candidates.push(MigrationCandidate {
+            source: view.name,
+            source_runtime: view.agent,
+            target_runtime: target_runtime.to_string(),
+            target,
+            repo: repo.map(|value| value.id),
+            branch: view.branch,
+            state: view.state,
+            action,
+            reason,
+        });
+    }
+    Ok(MigrationPlan {
+        target_runtime: target_runtime.to_string(),
+        candidates,
+    })
+}
+
+fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String, String> {
+    let mut command = Command::new("sbx");
+    command.args(["exec", name, "bash", "-lc", shell]);
+    let out = bounded_output(&mut command, "sbx exec", timeout)?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("sbx exec exited {}", out.status)
+        } else {
+            detail
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Stream a possibly-large guest artifact straight to a host file. This avoids base64, Python, and
+/// holding a repository bundle in the server's memory.
+fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
+    let parent = host.parent().ok_or("snapshot path has no parent")?;
+    fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    let tmp = parent.join(format!(
+        ".{}.tmp",
+        host.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("artifact")
+    ));
+    let err = parent.join(format!(
+        ".{}.stderr",
+        host.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("artifact")
+    ));
+    let stdout = fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    let stderr = fs::File::create(&err).map_err(|e| format!("create {}: {e}", err.display()))?;
+    let mut child = Command::new("sbx")
+        .args(["exec", name, "cat", guest])
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .map_err(|e| format!("sbx exec not runnable: {e}"))?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= Duration::from_secs(300) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&tmp);
+                let _ = fs::remove_file(&err);
+                return Err(format!("copying {guest} exceeded 300s"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("waiting for artifact copy: {e}"));
+            }
+        }
+    };
+    let stderr = fs::read_to_string(&err).unwrap_or_default();
+    let _ = fs::remove_file(&err);
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("copying {guest}: {}", stderr.trim()));
+    }
+    fs::rename(&tmp, host).map_err(|e| format!("install {}: {e}", host.display()))
+}
+
+fn ensure_source_migration_tools(name: &str) -> Result<(), String> {
+    let script = r#"need=""; command -v jq >/dev/null 2>&1 || need="$need jq"; command -v tmux >/dev/null 2>&1 || need="$need tmux"; if [ -n "$need" ]; then command -v apt-get >/dev/null 2>&1 || { echo "missing required tools:$need and no supported package manager" >&2; exit 1; }; waited=0; while ps -eo comm= 2>/dev/null | grep -Eq '^[[:space:]]*(apt|apt-get|dpkg)[[:space:]]*$' && [ "$waited" -lt 240 ]; do sleep 2; waited=$((waited + 2)); done; timeout 120 sudo apt-get install -y -qq $need 2>/dev/null || { timeout 120 sudo apt-get update -qq && timeout 120 sudo apt-get install -y -qq $need; }; sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true; fi; command -v jq >/dev/null && command -v tmux >/dev/null"#;
+    sbx_guest_output(name, script, Duration::from_secs(520)).map(|_| ())
+}
+
+fn write_replacement_launch_spec(
+    target: &str,
+    branch: &str,
+    repo: &Repo,
+    runtime: &str,
+    snapshot_relative: &str,
+    source: &str,
+) -> Result<(), String> {
+    let dir = Path::new(&repo.store).join("skein").join("launch");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let body = serde_json::json!({
+        "branch": branch,
+        "agent": runtime,
+        "migration": { "source": source, "dir": snapshot_relative },
+    });
+    let bytes = serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join(format!("{target}.json")), &dir, &bytes)
+}
+
+fn copy_tree_additive(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(destination).map_err(|e| format!("mkdir {}: {e}", destination.display()))?;
+    for entry in fs::read_dir(source).map_err(|e| format!("read {}: {e}", source.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        let to = destination.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree_additive(&entry.path(), &to)?;
+        } else if kind.is_file() && !to.exists() {
+            fs::copy(entry.path(), &to).map_err(|e| format!("copy {}: {e}", to.display()))?;
+        }
+        // Do not reproduce symlinks from another sandbox/store: their absolute target is commonly
+        // box-specific. The underlying shared files/directories are copied through normal entries.
+    }
+    Ok(())
+}
+
+fn sanitized_user_hooks(value: &serde_json::Value) -> serde_json::Value {
+    let mut hooks = value.as_object().cloned().unwrap_or_default();
+    for groups in hooks.values_mut() {
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+        for group in groups.iter_mut() {
+            if let Some(commands) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+                commands.retain(|command| {
+                    !command
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|command| command.contains("/.claude/skein/bin/"))
+                });
+            }
+        }
+        groups.retain(|group| {
+            group
+                .get("hooks")
+                .and_then(|v| v.as_array())
+                .is_none_or(|commands| !commands.is_empty())
+        });
+    }
+    serde_json::Value::Object(hooks)
+}
+
+/// Import only user-owned shared context from a legacy store snapshot. Existing target files and
+/// settings win; generated Skein hook commands are removed and regenerated from the current probe.
+fn merge_shared_context(snapshot: &Path, target_store: &Path) -> Result<(), String> {
+    let archive = snapshot.join("shared-context.tgz");
+    if fs::metadata(&archive).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Ok(());
+    }
+    let staging = snapshot.join("shared-context");
+    fs::create_dir_all(&staging).map_err(|e| format!("mkdir {}: {e}", staging.display()))?;
+    let mut tar = Command::new("tar");
+    tar.args(["-xzf"]).arg(&archive).arg("-C").arg(&staging);
+    let out = bounded_output(&mut tar, "extract shared context", Duration::from_secs(120))?;
+    if !out.status.success() {
+        return Err(format!(
+            "extracting shared context: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    for directory in ["memory", "skills", "hooks"] {
+        copy_tree_additive(&staging.join(directory), &target_store.join(directory))?;
+    }
+    let source_settings = fs::read_to_string(staging.join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    if let Some(mut source) = source_settings {
+        let settings_path = target_store.join("settings.json");
+        let mut target = fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(source_obj), Some(target_obj)) =
+            (source.as_object_mut(), target.as_object_mut())
+        {
+            let user_hooks = source_obj
+                .remove("hooks")
+                .map(|hooks| sanitized_user_hooks(&hooks));
+            for (key, value) in source_obj.iter() {
+                target_obj
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            if let Some(serde_json::Value::Object(source_hooks)) = user_hooks {
+                let target_hooks = target_obj
+                    .entry("hooks")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(target_hooks) = target_hooks.as_object_mut() {
+                    for (event, groups) in source_hooks {
+                        let target_groups = target_hooks
+                            .entry(event)
+                            .or_insert_with(|| serde_json::json!([]));
+                        if let (Some(target_groups), Some(source_groups)) =
+                            (target_groups.as_array_mut(), groups.as_array())
+                        {
+                            for group in source_groups {
+                                if !target_groups.contains(group) {
+                                    target_groups.push(group.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let bytes = serde_json::to_vec_pretty(&target).map_err(|e| e.to_string())?;
+        write_atomic(&settings_path, target_store, &bytes)?;
+    }
+    ensure_probe_in(target_store)
+}
+
+/// Snapshot one source and prepare a target launch spec. The source sandbox and its native session
+/// are not modified beyond installing the mandatory jq/tmux substrate when absent.
+pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replacement, String> {
+    if !valid_name(source) || !valid_runtime(target_runtime) {
+        return Err("invalid source box or target runtime".into());
+    }
+    let source_runtime = agent_for_box(source);
+    if source_runtime == target_runtime {
+        return Err(format!("{source} already uses {target_runtime}"));
+    }
+    let repo = migration_repo(source).ok_or_else(|| {
+        format!("{source} is not mapped to a managed repo; register its workspace first")
+    })?;
+    ensure_store(Path::new(&repo.store))?;
+    ensure_kit()?;
+    ensure_source_migration_tools(source)?;
+
+    let branch = sbx_guest_output(
+        source,
+        "git rev-parse --abbrev-ref HEAD",
+        Duration::from_secs(30),
+    )?
+    .trim()
+    .to_string();
+    let head = sbx_guest_output(source, "git rev-parse HEAD", Duration::from_secs(30))?
+        .trim()
+        .to_string();
+    if branch.is_empty() || branch == "HEAD" || head.is_empty() {
+        return Err("source must have an attached branch and at least one commit".into());
+    }
+    let target = replacement_name(&repo, &branch, target_runtime);
+
+    static SNAPSHOT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SNAPSHOT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let run = format!(
+        "{}-{}-{seq}",
+        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        std::process::id()
+    );
+    let relative = format!("skein/migrations/{target}/{run}");
+    let snapshot = Path::new(&repo.store).join(&relative);
+    fs::create_dir_all(&snapshot).map_err(|e| format!("mkdir {}: {e}", snapshot.display()))?;
+    let guest = format!("/tmp/skein-migration-{}-{seq}", std::process::id());
+    let export = runtime_adapter(&source_runtime)
+        .map(|adapter| adapter.context_export)
+        .unwrap_or(":");
+    let build = format!(
+        "set -e; root=\"$(git rev-parse --show-toplevel)\"; rm -rf {guest}; mkdir -p {guest}; git -C \"$root\" bundle create {guest}/repo.bundle HEAD; git -C \"$root\" diff --cached --binary HEAD > {guest}/index.patch; git -C \"$root\" diff --binary > {guest}/worktree.patch; git -C \"$root\" ls-files --others --exclude-standard -z -- . ':(exclude).claude' ':(exclude).claude/**' > {guest}/untracked.list; if [ -s {guest}/untracked.list ]; then tar -C \"$root\" --null -T {guest}/untracked.list -czf {guest}/untracked.tgz; else tar -czf {guest}/untracked.tgz --files-from /dev/null; fi; shared=\"$root/.claude\"; if [ -L \"$shared/skein\" ]; then shared=\"$(dirname \"$(readlink \"$shared/skein\")\")\"; elif [ -L \"$shared\" ]; then shared=\"$(readlink -f \"$shared\")\"; fi; names=\"\"; for item in memory skills hooks settings.json; do [ -e \"$shared/$item\" ] && names=\"$names $item\"; done; if [ -n \"$names\" ]; then tar -C \"$shared\" -czf {guest}/shared-context.tgz $names; else tar -czf {guest}/shared-context.tgz --files-from /dev/null; fi; ({export}) > {guest}/context.md 2>/dev/null || true"
+    );
+    sbx_guest_output(source, &build, Duration::from_secs(300))?;
+    for file in [
+        "repo.bundle",
+        "index.patch",
+        "worktree.patch",
+        "untracked.tgz",
+        "shared-context.tgz",
+        "context.md",
+    ] {
+        copy_guest_file(source, &format!("{guest}/{file}"), &snapshot.join(file))?;
+    }
+    let _ = sbx_guest_output(source, &format!("rm -rf {guest}"), Duration::from_secs(30));
+    let context = fs::read(snapshot.join("context.md"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    merge_shared_context(&snapshot, Path::new(&repo.store))?;
+    prepare_handoff_for(
+        source,
+        &target,
+        Some(&source_runtime),
+        target_runtime,
+        Some(&context),
+        Some(Path::new(&repo.store)),
+    )?;
+    write_replacement_launch_spec(&target, &branch, &repo, target_runtime, &relative, source)?;
+    let manifest = serde_json::json!({
+        "source": source, "target": target, "from": source_runtime.clone(), "to": target_runtime,
+        "repo": repo.id.clone(), "branch": branch.clone(), "head": head, "created": Utc::now().to_rfc3339(),
+        "artifacts": ["repo.bundle", "index.patch", "worktree.patch", "untracked.tgz", "shared-context.tgz", "context.md"]
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+    write_atomic(&snapshot.join("manifest.json"), &snapshot, &bytes)?;
+    Ok(Replacement {
+        source: source.to_string(),
+        target,
+        source_runtime,
+        target_runtime: target_runtime.to_string(),
+        repo: repo.id,
+        branch,
+        snapshot: snapshot.to_string_lossy().into_owned(),
+        context_exported: !context.trim().is_empty(),
+    })
+}
+
+/// Create the prepared single-runtime box and start its mandatory tmux session detached. The kit
+/// restores the snapshot before this returns; any failure leaves the source untouched and the
+/// immutable snapshot available for retry/inspection.
+pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
+    let repo = load_repos()
+        .into_iter()
+        .find(|repo| repo.id == replacement.repo)
+        .ok_or_else(|| format!("repo {} is no longer registered", replacement.repo))?;
+    let runtime = runtime_adapter(&replacement.target_runtime)
+        .ok_or_else(|| "target runtime adapter disappeared".to_string())?;
+    let kit = ensure_kit()?;
+    let kit_path = kit.to_string_lossy().into_owned();
+    let _ = ensure_gh_secret();
+    let mut create = Command::new("sbx");
+    create.args([
+        "create",
+        "--clone",
+        "--kit",
+        &kit_path,
+        "--name",
+        &replacement.target,
+        &replacement.target_runtime,
+        &repo.work,
+        &repo.store,
+    ]);
+    let out = bounded_output(
+        &mut create,
+        "sbx create replacement",
+        Duration::from_secs(600),
+    )?;
+    if !out.status.success() {
+        return Err(format!(
+            "sbx create failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let shell = format!(
+        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; tmux new-session -d -s skein-agent {:?}",
+        runtime.info.executable, runtime.interactive_start
+    );
+    sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
+}
+
+pub fn replace_box(source: &str, target_runtime: &str) -> Result<Replacement, String> {
+    let replacement = prepare_replacement(source, target_runtime)?;
+    launch_replacement(&replacement)?;
+    Ok(replacement)
+}
+
+/// Execute only the `replace` rows from a fresh plan. `keep` and `blocked` rows are reported, never
+/// coerced. Each source is independent, so one failure does not prevent safe migrations continuing.
+pub fn migrate_fleet(target_runtime: &str) -> Result<FleetMigrationResult, String> {
+    let plan = migration_plan(target_runtime)?;
+    let mut outcomes = Vec::new();
+    for candidate in plan.candidates {
+        if candidate.action != "replace" {
+            outcomes.push(MigrationOutcome {
+                source: candidate.source,
+                target: candidate.target,
+                ok: candidate.action == "keep",
+                detail: candidate.reason.unwrap_or(candidate.action),
+            });
+            continue;
+        }
+        let source = candidate.source;
+        match replace_box(&source, target_runtime) {
+            Ok(replacement) => outcomes.push(MigrationOutcome {
+                source,
+                target: Some(replacement.target),
+                ok: true,
+                detail: format!(
+                    "restored {} and started skein-agent tmux",
+                    replacement.snapshot
+                ),
+            }),
+            Err(error) => outcomes.push(MigrationOutcome {
+                source,
+                target: candidate.target,
+                ok: false,
+                detail: error,
+            }),
+        }
+    }
+    Ok(FleetMigrationResult {
+        target_runtime: target_runtime.to_string(),
+        outcomes,
+    })
 }
 
 /// The `sbx` argv (sans the leading `sbx`, which the server prepends) that opens box `name`'s agent
@@ -3110,9 +3681,9 @@ pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
     attach_argv_as(name, _dir, &agent)
 }
 
-/// Attach using an explicit runtime. The configured runtime keeps the legacy `skein-agent` tmux
-/// name; a takeover runtime gets `skein-agent-<runtime>`, so both native conversations survive and
-/// switching back reattaches the original agent rather than replacing it.
+/// Attach using an explicit runtime. Normal operation uses the configured runtime in `skein-agent`.
+/// A different runtime remains available as a low-level compatibility path; product takeover uses
+/// [`replace_box`] so boxes stay single-runtime.
 pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
     let runtime = resolve_runtime(agent);
     let agent = runtime.info.id;
@@ -4108,7 +4679,7 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
     }
     // Registry-independent: dir/branch from sbx + host git, state from sbx liveness + skein's probe,
     // the registry only a fallback. The box must be known to sbx or the registry (else nothing to show).
-    let reg = load_registry().ok().and_then(|(b, _)| b.get(name).cloned());
+    let reg = registry_entry_for_box(name);
     let live = box_liveness(name);
     let dir = lookup_dir(name).unwrap_or_default();
     if reg.is_none() && live.is_none() && dir.is_empty() {
@@ -4215,6 +4786,63 @@ mod tests {
             assert!(!valid_name(bad), "should reject {bad:?}");
         }
         assert!(!valid_name(&"x".repeat(200)));
+    }
+
+    #[test]
+    fn managed_registry_current_branch_beats_launch_branch() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let root = tempdir();
+        let home = root.join("home");
+        let work = root.join("work");
+        let store = root.join("store/.claude");
+        let legacy = root.join("legacy/.claude");
+        for dir in [&home, &work, &store, &legacy] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::create_dir_all(work.join(".git")).unwrap();
+        fs::write(legacy.join("sandboxes.json"), "{}").unwrap();
+        fs::write(
+            store.join("sandboxes.json"),
+            r#"{"demo-task":{"branch":"feat/current","dir":"/box/work","lastSeen":"2026-07-13T12:00:00Z"}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_REGISTRY", legacy.join("sandboxes.json"));
+        let repo = Repo {
+            id: "demo".into(),
+            source: work.display().to_string(),
+            work: work.display().to_string(),
+            store: store.display().to_string(),
+            agent: "claude".into(),
+        };
+        save_repos(&[repo.clone()]).unwrap();
+        write_launch_spec_for_agent("demo-task", "feat/started", &repo, "claude").unwrap();
+
+        assert_eq!(branch_of("demo-task").as_deref(), Some("feat/current"));
+        assert_eq!(
+            all_sandboxes()
+                .get("demo-task")
+                .map(|box_| box_.branch.as_str()),
+            Some("feat/current")
+        );
+
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_REGISTRY");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    #[test]
+    fn migration_keeps_user_hooks_and_drops_generated_legacy_hooks() {
+        let hooks = serde_json::json!({
+            "Stop": [{"hooks": [
+                {"type":"command", "command":"$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh waiting"},
+                {"type":"command", "command":"$CLAUDE_PROJECT_DIR/.claude/hooks/user.sh"}
+            ]}]
+        });
+        let clean = sanitized_user_hooks(&hooks);
+        let text = clean.to_string();
+        assert!(!text.contains("skein/bin"));
+        assert!(text.contains("hooks/user.sh"));
     }
 
     #[test]
