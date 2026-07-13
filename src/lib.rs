@@ -3671,7 +3671,7 @@ fn agent_attach_argv(
          {setup}; \
          created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then {update}; tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then tmux set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
-         {TMUX_CONFIGURE}exec tmux attach-session -t {tmux_name}",
+         {TMUX_CONFIGURE}exec tmux -u attach-session -t {tmux_name}",
         setup = runtime.interactive_setup,
         update = runtime.update_before_start,
     );
@@ -3748,7 +3748,7 @@ pub fn shell_argv(name: &str) -> Vec<String> {
         name.into(),
         "bash".into(),
         "-lc".into(),
-        format!("if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; if ! tmux has-session -t skein-shell 2>/dev/null; then tmux new-session -d -s skein-shell; fi; {TMUX_CONFIGURE}exec tmux attach-session -t skein-shell"),
+        format!("if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; if ! tmux has-session -t skein-shell 2>/dev/null; then tmux new-session -d -s skein-shell; fi; {TMUX_CONFIGURE}exec tmux -u attach-session -t skein-shell"),
     ]
 }
 
@@ -6050,6 +6050,7 @@ mod tests {
             "the updater must run only inside the missing-session branch"
         );
         assert!(a.last().unwrap().contains("tmux is required"));
+        assert!(a.last().unwrap().contains("tmux -u attach-session"));
         assert!(!a.last().unwrap().contains("else exec bash"));
         let first = initial_attach_argv_as("thing-x", "claude");
         assert!(first
@@ -6077,6 +6078,7 @@ mod tests {
             .unwrap()
             .contains("tmux new-session -d -s skein-shell"));
         assert!(sh.last().unwrap().contains("tmux is required"));
+        assert!(sh.last().unwrap().contains("tmux -u attach-session"));
         assert!(!sh.last().unwrap().contains("exec bash -li"));
         env::remove_var("SKEIN_HOME");
     }
