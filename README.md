@@ -189,7 +189,8 @@ rollback. This keeps images light and avoids cross-provider authentication insid
 Same-provider reconnects reuse the existing `skein-agent` tmux session. If the tmux process no
 longer exists, Skein runs the provider's native resume command (`claude --continue` or
 `codex resume --last`) inside a new tmux session. No replacement, transcript export, or context
-conversion is involved.
+conversion is involved. Immediately before creating a new agent process, Skein runs that runtime's
+native updater with a two-minute bound; update failures are reported but never block the installed CLI.
 
 tmux is deliberately invisible: its status bar is disabled, mouse/copy scrolling is enabled, and
 pane history is enlarged. Codex is launched with its documented `--no-alt-screen` option so browser

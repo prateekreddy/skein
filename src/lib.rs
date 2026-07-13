@@ -1089,6 +1089,9 @@ struct RuntimeAdapter {
     /// Idempotent provider setup run on attach and before first launch. It may provide defaults but
     /// must preserve explicit user configuration. Provider quirks remain centralized here.
     interactive_setup: &'static str,
+    /// Best-effort, bounded native updater run immediately before creating a new agent process.
+    /// Reattaching to a live tmux session skips it so an in-progress agent is never replaced.
+    update_before_start: &'static str,
     /// Emits the Claude-compatible status-line JSON model on stdout. `None` means the provider
     /// supplies its own command-driven status line and needs no browser footer adapter.
     statusline_input: Option<&'static str>,
@@ -1114,6 +1117,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             adapted_statusline: false,
         },
         interactive_setup: ":",
+        update_before_start: "timeout 120 claude update </dev/null || echo 'skein: Claude update failed; starting installed version' >&2",
         statusline_input: None,
         interactive_start: "claude",
         interactive_resume: "claude --continue",
@@ -1133,6 +1137,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // express. Disable only the default Skein previously seeded; an explicit `/statusline`
         // choice remains authoritative and suppresses the adapted footer below.
         interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; broken='status_line = null # skein custom statusline'; marker='status_line = [] # skein custom statusline'; if grep -Fqx "$broken" "$cfg"; then sed -i 's/^status_line = null # skein custom statusline$/status_line = [] # skein custom statusline/' "$cfg"; elif grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = [] # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi"#,
+        update_before_start: "timeout 120 codex update </dev/null || echo 'skein: Codex update failed; starting installed version' >&2",
         // Codex records the same live data used by `/status` in token_count events. Select limits
         // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
         // both providers share the renderer below. The marker makes `/statusline` an opt-out.
@@ -3588,8 +3593,11 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         ));
     }
     let shell = format!(
-        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
-        runtime.info.executable, runtime.interactive_setup, runtime.interactive_start,
+        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {}; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
+        runtime.info.executable,
+        runtime.interactive_setup,
+        runtime.update_before_start,
+        runtime.interactive_start,
     );
     sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
 }
@@ -3661,10 +3669,11 @@ fn agent_attach_argv(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
          {setup}; \
-         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
+         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then {update}; tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then tmux set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
          {TMUX_CONFIGURE}exec tmux attach-session -t {tmux_name}",
-        setup = runtime.interactive_setup
+        setup = runtime.interactive_setup,
+        update = runtime.update_before_start,
     );
     vec![
         "exec".into(),
@@ -5010,6 +5019,7 @@ mod tests {
         assert!(cmd.contains("'/work/thing'"));
         assert!(cmd.contains("&& sbx 'exec' '-it' 'thing-feat-auth'"));
         assert!(cmd.contains("tmux new-session -d -s skein-agent"));
+        assert!(cmd.contains("timeout 120 claude update"));
         // the launch spec carries the real branch (feat/auth) for the kit to check out — not the slug
         let spec = store
             .join("skein")
@@ -5035,6 +5045,7 @@ mod tests {
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
         assert!(cmd.contains("'codex'"));
         assert!(cmd.contains("tmux new-session -d -s skein-agent"));
+        assert!(cmd.contains("timeout 120 codex update"));
         assert!(cmd.contains("codex --no-alt-screen --dangerously-bypass-hook-trust"));
         assert!(!cmd.contains("codex resume --last"));
         assert_eq!(
@@ -6032,6 +6043,12 @@ mod tests {
             .unwrap()
             .contains("tmux new-session -d -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --continue"));
+        assert!(a.last().unwrap().contains("timeout 120 claude update"));
+        assert!(
+            a.last().unwrap().find("tmux has-session").unwrap()
+                < a.last().unwrap().find("timeout 120 claude update").unwrap(),
+            "the updater must run only inside the missing-session branch"
+        );
         assert!(a.last().unwrap().contains("tmux is required"));
         assert!(!a.last().unwrap().contains("else exec bash"));
         let first = initial_attach_argv_as("thing-x", "claude");
@@ -6051,6 +6068,7 @@ mod tests {
         assert!(codex.last().unwrap().contains("skein-agent-codex"));
         assert!(codex.last().unwrap().contains("resume --last"));
         assert!(codex.last().unwrap().contains("--no-alt-screen"));
+        assert!(codex.last().unwrap().contains("timeout 120 codex update"));
         // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
         assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
