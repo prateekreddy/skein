@@ -3230,6 +3230,38 @@ fn replacement_name(repo: &Repo, source: &str, branch: &str, target_runtime: &st
     format!("{base}-{}", Utc::now().timestamp())
 }
 
+/// A completed replacement is identified by durable launch metadata plus a live target box. This
+/// makes fleet migration resumable after an HTTP client/server restart instead of creating `-2`
+/// duplicates for sources that already crossed the boundary.
+fn existing_replacement(repo: &Repo, source: &str, target_runtime: &str) -> Option<String> {
+    let live = fleet_boxes()?
+        .into_iter()
+        .map(|box_| box_.name)
+        .collect::<BTreeSet<_>>();
+    let launch = Path::new(&repo.store).join("skein/launch");
+    for entry in fs::read_dir(launch).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let value = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let matches = value.as_ref().is_some_and(|value| {
+            value.get("agent").and_then(|value| value.as_str()) == Some(target_runtime)
+                && value
+                    .pointer("/migration/source")
+                    .and_then(|value| value.as_str())
+                    == Some(source)
+        });
+        let name = path.file_stem().and_then(|value| value.to_str());
+        if matches && name.is_some_and(|name| live.contains(name)) {
+            return name.map(str::to_string);
+        }
+    }
+    None
+}
+
 /// Inventory only: no box commands, writes, starts, or stops.
 pub fn migration_plan(target_runtime: &str) -> Result<MigrationPlan, String> {
     if !valid_runtime(target_runtime) {
@@ -3251,16 +3283,23 @@ pub fn migration_plan(target_runtime: &str) -> Result<MigrationPlan, String> {
                 Some("workspace is not registered with Skein; register it before replacement so its store is explicit".to_string()),
                 None,
                 ),
-                Some(repo) => (
-                    "replace".to_string(),
-                    None,
-                    Some(replacement_name(
-                        repo,
-                        &view.name,
-                        &view.branch,
-                        target_runtime,
-                    )),
-                ),
+                Some(repo) => match existing_replacement(repo, &view.name, target_runtime) {
+                    Some(target) => (
+                        "migrated".to_string(),
+                        Some("a live replacement manifest already records this source".to_string()),
+                        Some(target),
+                    ),
+                    None => (
+                        "replace".to_string(),
+                        None,
+                        Some(replacement_name(
+                            repo,
+                            &view.name,
+                            &view.branch,
+                            target_runtime,
+                        )),
+                    ),
+                },
             }
         };
         candidates.push(MigrationCandidate {
@@ -3703,6 +3742,14 @@ pub fn migrate_fleet(target_runtime: &str) -> Result<FleetMigrationResult, Strin
                     detail: error,
                 }),
             },
+            "migrated" => outcomes.push(MigrationOutcome {
+                source,
+                target: candidate.target,
+                ok: true,
+                detail: candidate
+                    .reason
+                    .unwrap_or_else(|| "already migrated".into()),
+            }),
             _ => outcomes.push(MigrationOutcome {
                 source,
                 target: candidate.target,
