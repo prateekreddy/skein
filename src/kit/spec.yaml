@@ -36,6 +36,18 @@ commands:
         clone_root="$(printenv WORKSPACE_DIR 2>/dev/null || true)"
         [ -n "$clone_root" ] || clone_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
+        # A repo launched through Skein was explicitly selected by the user, so record that one
+        # workspace as trusted before Codex starts. This bypasses Codex's separate first-run project
+        # prompt (hook trust is a different gate) without weakening trust for any other directory.
+        codex_cfg="$HOME/.codex/config.toml"
+        if [ -f "$codex_cfg" ]; then
+          toml_root="$(printf '%s' "$clone_root" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+          project_header="[projects.\"$toml_root\"]"
+          if ! grep -Fqx "$project_header" "$codex_cfg" 2>/dev/null; then
+            printf '\n%s\ntrust_level = "trusted"\n' "$project_header" >> "$codex_cfg"
+          fi
+        fi
+
         vmid="$(printenv SANDBOX_VM_ID 2>/dev/null || hostname 2>/dev/null || echo unknown)"
         vmid="$(printf '%s' "$vmid" | tr / -)"
 
@@ -101,10 +113,20 @@ commands:
           command -v tmux >/dev/null 2>&1 || need="$need tmux"
         fi
         if [ -n "$need" ] && command -v apt-get >/dev/null 2>&1; then
-          sudo apt-get update -qq 2>/dev/null && sudo apt-get install -y -qq $need 2>/dev/null \
-            || echo "[skein-kit] could not install:$need (continuing)" >&2
-          # Package indexes dwarf jq itself and are useless after the one setup pass.
-          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          installed=0
+          # The base Codex kit starts apt update in the background. Retry briefly instead of losing
+          # tmux to that package-manager lock race on every fresh Codex box.
+          for pause in 2 4 8; do
+            sleep "$pause"
+            if sudo apt-get update -qq 2>/dev/null \
+              && sudo apt-get install -y -qq $need 2>/dev/null; then installed=1; break; fi
+          done
+          if [ "$installed" = "1" ]; then
+            # Package indexes dwarf jq itself and are useless after the one setup pass.
+            sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          else
+            echo "[skein-kit] could not install:$need (continuing)" >&2
+          fi
         fi
 
         # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.
@@ -151,6 +173,15 @@ commands:
           fi
           [ "$link_state" = "merged" ] \
             || echo "[skein-kit] repo ships .claude/ and the settings merge failed — probes will not report" >&2
+        fi
+        # The mounted store is infrastructure, never a worktree change. Exclude it immediately;
+        # waiting for SessionStart is too late when a runtime blocks on first-run trust.
+        git_dir="$(git -C "$clone_root" rev-parse --git-dir 2>/dev/null || true)"
+        case "$git_dir" in "") ;; /*) ;; *) git_dir="$clone_root/$git_dir" ;; esac
+        if [ -n "$git_dir" ]; then
+          mkdir -p "$git_dir/info" 2>/dev/null || true
+          grep -qxF '/.claude' "$git_dir/info/exclude" 2>/dev/null \
+            || printf '/.claude\n' >> "$git_dir/info/exclude"
         fi
         # Codex adapter: install Skein's generated hooks at the USER layer. Project-local .codex
         # hooks are suppressed until the clone is trusted; the user layer is independent of project
