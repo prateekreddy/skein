@@ -188,6 +188,11 @@ Choose the default runtime when adding a repo, override it when launching a box,
 Skein snapshots the source, launches the target runtime's own image, and keeps the source intact as
 rollback. This keeps images light and avoids cross-provider authentication inside the wrong image.
 
+Same-provider migration is intentionally simpler: Skein reuses an existing `skein-agent` tmux
+session. If a legacy direct process has no tmux parent, Skein stops the box once and runs the
+provider's native resume command (`claude --continue` or `codex resume --last`) inside tmux. No
+replacement, transcript export, or context conversion is involved.
+
 Native transcripts are provider-specific and are not converted. A takeover preserves unpushed commits,
 the staged and unstaged tree, untracked files, branch, shared memory, skills, and user hooks. It also
 injects a durable brief containing the active task, last outcome, journal, diff, changed files, and a
