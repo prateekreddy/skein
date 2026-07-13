@@ -166,20 +166,20 @@ commands:
         # before either provider starts: the bundle preserves unpushed commits, separate patches
         # preserve index vs worktree state, and the archive preserves untracked files. This runs once
         # in the NEW target clone only; the source box is never reset, stopped, or destroyed.
-        migration_dir=""
+        handoff_dir=""
         if [ -r "$spec" ] && command -v jq >/dev/null 2>&1; then
-          migration_dir="$(jq -r '.migration.dir // ""' "$spec" 2>/dev/null)"
+          handoff_dir="$(jq -r '.handoff.dir // ""' "$spec" 2>/dev/null)"
         fi
-        migration_marker="$clone_root/.git/skein-migration-restored"
-        if [ -n "$migration_dir" ] && [ ! -e "$migration_marker" ]; then
-          case "$migration_dir" in
-            skein/migrations/*) snapshot="$store/$migration_dir" ;;
-            *) echo "[skein-kit] refusing unsafe migration path: $migration_dir" >&2; exit 1 ;;
+        handoff_marker="$clone_root/.git/skein-handoff-restored"
+        if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
+          case "$handoff_dir" in
+            skein/handoff-snapshots/*) snapshot="$store/$handoff_dir" ;;
+            *) echo "[skein-kit] refusing unsafe handoff path: $handoff_dir" >&2; exit 1 ;;
           esac
-          [ -s "$snapshot/repo.bundle" ] || { echo "[skein-kit] migration bundle missing" >&2; exit 1; }
+          [ -s "$snapshot/repo.bundle" ] || { echo "[skein-kit] handoff bundle missing" >&2; exit 1; }
           git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD \
             && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD \
-            || { echo "[skein-kit] could not restore migration commit" >&2; exit 1; }
+            || { echo "[skein-kit] could not restore handoff commit" >&2; exit 1; }
           if [ -s "$snapshot/index.patch" ]; then
             git -C "$clone_root" apply --binary --index "$snapshot/index.patch" \
               || { echo "[skein-kit] could not restore staged changes" >&2; exit 1; }
@@ -192,9 +192,9 @@ commands:
             tar -C "$clone_root" -xzf "$snapshot/untracked.tgz" \
               || { echo "[skein-kit] could not restore untracked files" >&2; exit 1; }
           fi
-          cp "$snapshot/manifest.json" "$migration_marker" 2>/dev/null \
-            || printf '%s\n' "$migration_dir" > "$migration_marker"
-          echo "[skein-kit] restored replacement snapshot from $migration_dir"
+          cp "$snapshot/manifest.json" "$handoff_marker" 2>/dev/null \
+            || printf '%s\n' "$handoff_dir" > "$handoff_marker"
+          echo "[skein-kit] restored replacement snapshot from $handoff_dir"
         fi
 
         # Link the shared store into the clone (idempotent) so project .claude + skein's probe resolve.

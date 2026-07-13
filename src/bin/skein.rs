@@ -38,7 +38,6 @@ fn main() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
-        "migrate" => cmd_migrate(rest),
         "version" | "--version" | "-v" => {
             println!("skein {VERSION}");
             Ok(())
@@ -65,7 +64,6 @@ skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
-skein migrate --to <runtime> [--apply]  dry-run or execute replacement-box migration\n  \
 skein doctor          check registry + required tools (sbx/git/gh)\n  \
 skein version\n  \
 skein help\n\n\
@@ -75,46 +73,6 @@ $SKEIN_REGISTRY                 full path to sandboxes.json\n  \
 $SKEIN_SHARED/sandboxes.json\n  \
 <git-toplevel>/../skein-shared/.claude/sandboxes.json\n"
     );
-}
-
-fn cmd_migrate(opts: &[String]) -> Result<(), String> {
-    let target = flag(opts, "--to").unwrap_or_else(|| "codex".into());
-    if opts.iter().any(|arg| arg == "--apply") {
-        let result = skein::migrate_fleet(&target)?;
-        for row in result.outcomes {
-            println!(
-                "{} {}{} — {}",
-                if row.ok { "✓" } else { "✗" },
-                row.source,
-                row.target
-                    .as_deref()
-                    .map(|target| format!(" → {target}"))
-                    .unwrap_or_default(),
-                row.detail
-            );
-        }
-        return Ok(());
-    }
-    let plan = skein::migration_plan(&target)?;
-    println!("{BOLD}replacement migration dry run → {target}{RESET}\n");
-    for row in plan.candidates {
-        let destination = row
-            .target
-            .as_deref()
-            .map(|value| format!(" → {value}"))
-            .unwrap_or_default();
-        println!(
-            "{:<8} {}{}  {DIM}{} · {} · {}{RESET}",
-            row.action, row.source, destination, row.source_runtime, row.branch, row.state
-        );
-        if let Some(reason) = row.reason {
-            println!("         {DIM}{reason}{RESET}");
-        }
-    }
-    println!(
-        "\n{DIM}No boxes were changed. Execute with: skein migrate --to {target} --apply{RESET}"
-    );
-    Ok(())
 }
 
 /// `skein add <git-url|path> [--id <id>] [--agent <runtime>] [--store <shared-data-folder>]` — register

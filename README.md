@@ -123,8 +123,6 @@ skein                 # = skein ls — the fleet, live boxes first
 skein attach <box>    # reattach to the live provider tmux session
 skein attach <box> --agent codex --handoff   # Codex takes over a Claude box
 skein attach <box> --agent claude --handoff  # Claude takes over a Codex box
-skein migrate --to codex                     # fleet-wide replacement dry run
-skein migrate --to codex --apply             # execute only safe rows; preserve sources
 skein version · help
 ```
 
@@ -188,10 +186,10 @@ Choose the default runtime when adding a repo, override it when launching a box,
 Skein snapshots the source, launches the target runtime's own image, and keeps the source intact as
 rollback. This keeps images light and avoids cross-provider authentication inside the wrong image.
 
-Same-provider migration is intentionally simpler: Skein reuses an existing `skein-agent` tmux
-session. If a legacy direct process has no tmux parent, Skein stops the box once and runs the
-provider's native resume command (`claude --continue` or `codex resume --last`) inside tmux. No
-replacement, transcript export, or context conversion is involved.
+Same-provider reconnects reuse the existing `skein-agent` tmux session. If the tmux process no
+longer exists, Skein runs the provider's native resume command (`claude --continue` or
+`codex resume --last`) inside a new tmux session. No replacement, transcript export, or context
+conversion is involved.
 
 tmux is deliberately invisible: its status bar is disabled, mouse/copy scrolling is enabled, and
 pane history is enlarged. Codex is launched with its documented `--no-alt-screen` option so browser
@@ -204,7 +202,7 @@ bounded Markdown export of the source conversation. The export provides continui
 provider can natively resume its original session.
 
 Skein installs `jq` and mandates `tmux` as the minimal box substrate. Provider-neutral probe scripts,
-handoffs, and immutable migration snapshots live once in the mounted shared store; Skein never installs
+handoffs, and immutable takeover snapshots live once in the mounted shared store; Skein never installs
 both large agent CLIs into every box. `GET /api/health` exposes dependency/hook failures.
 
 ## Configuration

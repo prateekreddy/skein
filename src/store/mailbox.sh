@@ -2,7 +2,7 @@
 # mailbox.sh — thin file-per-message hand-off between a project's parallel sandboxes.
 #
 # One sandbox = one branch, but work crosses boxes: "A finished feat/export → B should review it",
-# "whoever is free, pick up the migration". The mailbox is the coordination surface: a flat dir of
+# "whoever is free, pick up the task". The mailbox is the coordination surface: a flat dir of
 # JSON messages under the shared .claude store, so any box sees any message. No daemon, no broker —
 # just files on the shared mount, which keeps it runtime-independent. Each message is addressed to one
 # vmid, "broadcast" (this project only), "all-projects" (this project + every other project skein

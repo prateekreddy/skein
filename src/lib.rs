@@ -3050,7 +3050,7 @@ fn compute_collisions() -> Vec<Collision> {
 }
 
 /// Write a durable, provider-neutral takeover brief plus a one-shot copy for `target`. Native
-/// transcripts remain separate; replacement migration adds worktree/context artifacts around this
+/// transcripts remain separate; replacement takeover adds worktree/context artifacts around this
 /// core brief. The box-handoff hook injects it with authoritative in-box git status.
 pub fn prepare_handoff(name: &str, from: Option<&str>, target: &str) -> Result<PathBuf, String> {
     prepare_handoff_for(name, name, from, target, None, None)
@@ -3143,29 +3143,7 @@ fn prepare_handoff_for(
     Ok(pending)
 }
 
-// ───────────────────────── replacement-box migration ─────────────────────────
-
-/// Read-only row used by both the CLI/API dry run and the one-time fleet migration. A source that
-/// cannot be mapped to a managed repo is deliberately blocked: guessing a store would risk moving
-/// code into the wrong project's shared memory and hooks.
-#[derive(Debug, Clone, Serialize)]
-pub struct MigrationCandidate {
-    pub source: String,
-    pub source_runtime: String,
-    pub target_runtime: String,
-    pub target: Option<String>,
-    pub repo: Option<String>,
-    pub branch: String,
-    pub state: String,
-    pub action: String,
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MigrationPlan {
-    pub target_runtime: String,
-    pub candidates: Vec<MigrationCandidate>,
-}
+// ───────────────────────── cross-runtime takeover ─────────────────────────
 
 /// Result of preparing and launching one immutable source snapshot in a new single-runtime box.
 #[derive(Debug, Clone, Serialize)]
@@ -3180,24 +3158,9 @@ pub struct Replacement {
     pub context_exported: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct MigrationOutcome {
-    pub source: String,
-    pub target: Option<String>,
-    pub ok: bool,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct FleetMigrationResult {
-    pub target_runtime: String,
-    pub outcomes: Vec<MigrationOutcome>,
-}
-
-/// Resolve legacy names by workspace as well as by the modern `<repo>-<branch>` convention. This
-/// lets old boxes such as a pre-registry custom name migrate without teaching takeover about any
-/// particular repository.
-fn migration_repo(name: &str) -> Option<Repo> {
+/// Resolve custom box names by workspace as well as by the modern `<repo>-<branch>` convention.
+/// The store must remain explicit because a takeover copies shared agent state into it.
+fn takeover_repo(name: &str) -> Option<Repo> {
     if let Some(repo) = repo_for_box(name) {
         return Some(repo);
     }
@@ -3237,96 +3200,6 @@ fn replacement_name(repo: &Repo, source: &str, branch: &str, target_runtime: &st
         }
     }
     format!("{base}-{}", Utc::now().timestamp())
-}
-
-/// A completed replacement is identified by durable launch metadata plus a live target box. This
-/// makes fleet migration resumable after an HTTP client/server restart instead of creating `-2`
-/// duplicates for sources that already crossed the boundary.
-fn existing_replacement(repo: &Repo, source: &str, target_runtime: &str) -> Option<String> {
-    let live = fleet_boxes()?
-        .into_iter()
-        .map(|box_| box_.name)
-        .collect::<BTreeSet<_>>();
-    let launch = Path::new(&repo.store).join("skein/launch");
-    for entry in fs::read_dir(launch).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let value = fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
-        let matches = value.as_ref().is_some_and(|value| {
-            value.get("agent").and_then(|value| value.as_str()) == Some(target_runtime)
-                && value
-                    .pointer("/migration/source")
-                    .and_then(|value| value.as_str())
-                    == Some(source)
-        });
-        let name = path.file_stem().and_then(|value| value.to_str());
-        if matches && name.is_some_and(|name| live.contains(name)) {
-            return name.map(str::to_string);
-        }
-    }
-    None
-}
-
-/// Inventory only: no box commands, writes, starts, or stops.
-pub fn migration_plan(target_runtime: &str) -> Result<MigrationPlan, String> {
-    if !valid_runtime(target_runtime) {
-        return Err(format!("unsupported target runtime {target_runtime:?}"));
-    }
-    let mut candidates = Vec::new();
-    for view in load_views()? {
-        let repo = migration_repo(&view.name);
-        let (action, reason, target) = if view.agent == target_runtime {
-            (
-                "ensure-tmux".to_string(),
-                Some("same provider: reuse skein-agent if present, otherwise restart once and natively resume inside tmux".to_string()),
-                None,
-            )
-        } else {
-            match repo.as_ref() {
-                None => (
-                "blocked".to_string(),
-                Some("workspace is not registered with Skein; register it before replacement so its store is explicit".to_string()),
-                None,
-                ),
-                Some(repo) => match existing_replacement(repo, &view.name, target_runtime) {
-                    Some(target) => (
-                        "migrated".to_string(),
-                        Some("a live replacement manifest already records this source".to_string()),
-                        Some(target),
-                    ),
-                    None => (
-                        "replace".to_string(),
-                        None,
-                        Some(replacement_name(
-                            repo,
-                            &view.name,
-                            &view.branch,
-                            target_runtime,
-                        )),
-                    ),
-                },
-            }
-        };
-        candidates.push(MigrationCandidate {
-            source: view.name,
-            source_runtime: view.agent,
-            target_runtime: target_runtime.to_string(),
-            target,
-            repo: repo.map(|value| value.id),
-            branch: view.branch,
-            state: view.state,
-            action,
-            reason,
-        });
-    }
-    Ok(MigrationPlan {
-        target_runtime: target_runtime.to_string(),
-        candidates,
-    })
 }
 
 fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String, String> {
@@ -3398,7 +3271,7 @@ fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
     fs::rename(&tmp, host).map_err(|e| format!("install {}: {e}", host.display()))
 }
 
-fn ensure_source_migration_tools(name: &str) -> Result<(), String> {
+fn ensure_source_takeover_tools(name: &str) -> Result<(), String> {
     let script = r#"need=""; command -v jq >/dev/null 2>&1 || need="$need jq"; command -v tmux >/dev/null 2>&1 || need="$need tmux"; if [ -n "$need" ]; then command -v apt-get >/dev/null 2>&1 || { echo "missing required tools:$need and no supported package manager" >&2; exit 1; }; waited=0; while ps -eo comm= 2>/dev/null | grep -Eq '^[[:space:]]*(apt|apt-get|dpkg)[[:space:]]*$' && [ "$waited" -lt 240 ]; do sleep 2; waited=$((waited + 2)); done; timeout 120 sudo apt-get install -y -qq $need 2>/dev/null || { timeout 120 sudo apt-get update -qq && timeout 120 sudo apt-get install -y -qq $need; }; sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true; fi; command -v jq >/dev/null && command -v tmux >/dev/null"#;
     sbx_guest_output(name, script, Duration::from_secs(520)).map(|_| ())
 }
@@ -3416,7 +3289,7 @@ fn write_replacement_launch_spec(
     let body = serde_json::json!({
         "branch": branch,
         "agent": runtime,
-        "migration": { "source": source, "dir": snapshot_relative },
+        "handoff": { "source": source, "dir": snapshot_relative },
     });
     let bytes = serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?;
     write_atomic(&dir.join(format!("{target}.json")), &dir, &bytes)
@@ -3549,12 +3422,12 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
             "{source} already uses {target_runtime}; use the same-provider tmux restart path"
         ));
     }
-    let repo = migration_repo(source).ok_or_else(|| {
+    let repo = takeover_repo(source).ok_or_else(|| {
         format!("{source} is not mapped to a managed repo; register its workspace first")
     })?;
     ensure_store(Path::new(&repo.store))?;
     ensure_kit()?;
-    ensure_source_migration_tools(source)?;
+    ensure_source_takeover_tools(source)?;
 
     let branch = sbx_guest_output(
         source,
@@ -3578,10 +3451,10 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
         Utc::now().format("%Y%m%dT%H%M%SZ"),
         std::process::id()
     );
-    let relative = format!("skein/migrations/{target}/{run}");
+    let relative = format!("skein/handoff-snapshots/{target}/{run}");
     let snapshot = Path::new(&repo.store).join(&relative);
     fs::create_dir_all(&snapshot).map_err(|e| format!("mkdir {}: {e}", snapshot.display()))?;
-    let guest = format!("/tmp/skein-migration-{}-{seq}", std::process::id());
+    let guest = format!("/tmp/skein-handoff-{}-{seq}", std::process::id());
     let export = runtime_adapter(&source_runtime)
         .map(|adapter| adapter.context_export)
         .unwrap_or(":");
@@ -3679,100 +3552,6 @@ pub fn replace_box(source: &str, target_runtime: &str) -> Result<Replacement, St
     let replacement = prepare_replacement(source, target_runtime)?;
     launch_replacement(&replacement)?;
     Ok(replacement)
-}
-
-/// Put an existing provider back inside the mandatory tmux boundary without changing providers.
-/// tmux cannot adopt a direct child, so the only non-trivial case is a controlled box stop followed
-/// by the adapter's native resume command. Native transcript state remains provider-owned.
-pub fn ensure_native_tmux(name: &str) -> Result<String, String> {
-    if !valid_name(name) {
-        return Err("invalid box name".into());
-    }
-    let runtime_id = agent_for_box(name);
-    let runtime = runtime_adapter(&runtime_id).ok_or("runtime adapter unavailable")?;
-    if sbx_guest_output(
-        name,
-        &format!(
-            "tmux has-session -t skein-agent 2>/dev/null && [ \"$(tmux show-option -t skein-agent -v @skein-agent-contract 2>/dev/null)\" = {TMUX_AGENT_CONTRACT:?} ]"
-        ),
-        Duration::from_secs(30),
-    )
-    .is_ok()
-    {
-        return Ok("existing skein-agent tmux session retained".into());
-    }
-    ensure_source_migration_tools(name)?;
-    stop_box(name)?;
-    let shell = format!(
-        "command -v tmux >/dev/null 2>&1 || exit 1; command -v {} >/dev/null 2>&1 || exit 1; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
-        runtime.info.executable, runtime.interactive_resume,
-    );
-    sbx_guest_output(name, &shell, Duration::from_secs(180))?;
-    Ok(format!(
-        "restarted and resumed {runtime_id} inside skein-agent tmux"
-    ))
-}
-
-/// Execute cross-provider `replace` rows and same-provider `ensure-tmux` rows from a fresh plan.
-/// Blocked rows are reported, never coerced. Each source is independent, so one failure does not
-/// prevent safe migrations continuing.
-pub fn migrate_fleet(target_runtime: &str) -> Result<FleetMigrationResult, String> {
-    let plan = migration_plan(target_runtime)?;
-    let mut outcomes = Vec::new();
-    for candidate in plan.candidates {
-        let source = candidate.source;
-        match candidate.action.as_str() {
-            "replace" => match replace_box(&source, target_runtime) {
-                Ok(replacement) => outcomes.push(MigrationOutcome {
-                    source,
-                    target: Some(replacement.target),
-                    ok: true,
-                    detail: format!(
-                        "restored {} and started skein-agent tmux",
-                        replacement.snapshot
-                    ),
-                }),
-                Err(error) => outcomes.push(MigrationOutcome {
-                    source,
-                    target: candidate.target,
-                    ok: false,
-                    detail: error,
-                }),
-            },
-            "ensure-tmux" => match ensure_native_tmux(&source) {
-                Ok(detail) => outcomes.push(MigrationOutcome {
-                    source,
-                    target: None,
-                    ok: true,
-                    detail,
-                }),
-                Err(error) => outcomes.push(MigrationOutcome {
-                    source,
-                    target: None,
-                    ok: false,
-                    detail: error,
-                }),
-            },
-            "migrated" => outcomes.push(MigrationOutcome {
-                source,
-                target: candidate.target,
-                ok: true,
-                detail: candidate
-                    .reason
-                    .unwrap_or_else(|| "already migrated".into()),
-            }),
-            _ => outcomes.push(MigrationOutcome {
-                source,
-                target: candidate.target,
-                ok: false,
-                detail: candidate.reason.unwrap_or(candidate.action),
-            }),
-        }
-    }
-    Ok(FleetMigrationResult {
-        target_runtime: target_runtime.to_string(),
-        outcomes,
-    })
 }
 
 /// The `sbx` argv (sans the leading `sbx`, which the server prepends) that opens box `name`'s agent
@@ -4947,7 +4726,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_keeps_user_hooks_and_drops_generated_legacy_hooks() {
+    fn takeover_keeps_user_hooks_and_drops_generated_legacy_hooks() {
         let hooks = serde_json::json!({
             "Stop": [{"hooks": [
                 {"type":"command", "command":"$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh waiting"},
