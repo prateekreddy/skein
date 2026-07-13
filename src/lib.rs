@@ -3204,8 +3204,23 @@ fn migration_repo(name: &str) -> Option<Repo> {
     })
 }
 
-fn replacement_name(repo: &Repo, branch: &str, runtime: &str) -> String {
-    let base = format!("{}-{runtime}", box_name(&repo.id, branch));
+fn replacement_name(
+    repo: &Repo,
+    source: &str,
+    branch: &str,
+    source_runtime: &str,
+    target_runtime: &str,
+) -> String {
+    let base = if source_runtime == target_runtime {
+        format!("{source}-managed")
+    } else if source == repo.id {
+        format!("{}-{target_runtime}", box_name(&repo.id, branch))
+    } else if source.starts_with(&format!("{}-", repo.id)) {
+        format!("{source}-{target_runtime}")
+    } else {
+        format!("{}-{source}-{target_runtime}", repo.id)
+    };
+    let base = slug(&base);
     let existing = fleet_boxes()
         .unwrap_or_default()
         .into_iter()
@@ -3223,6 +3238,39 @@ fn replacement_name(repo: &Repo, branch: &str, runtime: &str) -> String {
     format!("{base}-{}", Utc::now().timestamp())
 }
 
+fn managed_contract(repo: &Repo, name: &str, runtime: &str) -> bool {
+    let store = Path::new(&repo.store);
+    let boot = fs::read_to_string(store.join("skein/boot").join(format!("{name}.json")))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let current_revision = fs::read_to_string(store.join("skein/probe-revision"))
+        .ok()
+        .map(|text| text.trim().to_string());
+    let boot_revision = boot
+        .as_ref()
+        .and_then(|value| value.get("probe_revision"))
+        .and_then(|value| value.as_str());
+    let agents = boot
+        .as_ref()
+        .and_then(|value| value.get("agents"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    boot.as_ref()
+        .and_then(|value| value.get("jq"))
+        .and_then(|value| value.as_bool())
+        == Some(true)
+        && boot
+            .as_ref()
+            .and_then(|value| value.get("tmux"))
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        && agents.split(',').any(|agent| agent == runtime)
+        && current_revision
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        && current_revision.as_deref() == boot_revision
+}
+
 /// Inventory only: no box commands, writes, starts, or stops.
 pub fn migration_plan(target_runtime: &str) -> Result<MigrationPlan, String> {
     if !valid_runtime(target_runtime) {
@@ -3231,28 +3279,35 @@ pub fn migration_plan(target_runtime: &str) -> Result<MigrationPlan, String> {
     let mut candidates = Vec::new();
     for view in load_views()? {
         let repo = migration_repo(&view.name);
-        let (action, reason, target) = if view.agent == target_runtime {
-            (
-                "keep".to_string(),
-                Some("already uses the target runtime".to_string()),
-                None,
-            )
-        } else if repo.is_none() {
-            (
+        let (action, reason, target) = match repo.as_ref() {
+            None => (
                 "blocked".to_string(),
                 Some("workspace is not registered with Skein; register it before replacement so its store is explicit".to_string()),
                 None,
-            )
-        } else {
-            (
-                "replace".to_string(),
+            ),
+            Some(repo)
+                if view.agent == target_runtime
+                    && managed_contract(repo, &view.name, &view.agent) => (
+                "keep".to_string(),
+                Some("already uses the target runtime and satisfies the managed jq/tmux/probe contract".to_string()),
                 None,
-                Some(replacement_name(
-                    repo.as_ref().expect("repo checked above"),
-                    &view.branch,
-                    target_runtime,
-                )),
-            )
+            ),
+            Some(repo) => {
+                let reason = (view.agent == target_runtime).then(|| {
+                    "target runtime matches, but the box lacks a current managed jq/tmux/probe boot report; rehome it without changing providers".to_string()
+                });
+                (
+                    "replace".to_string(),
+                    reason,
+                    Some(replacement_name(
+                        repo,
+                        &view.name,
+                        &view.branch,
+                        &view.agent,
+                        target_runtime,
+                    )),
+                )
+            }
         };
         candidates.push(MigrationCandidate {
             source: view.name,
@@ -3487,9 +3542,6 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
         return Err("invalid source box or target runtime".into());
     }
     let source_runtime = agent_for_box(source);
-    if source_runtime == target_runtime {
-        return Err(format!("{source} already uses {target_runtime}"));
-    }
     let repo = migration_repo(source).ok_or_else(|| {
         format!("{source} is not mapped to a managed repo; register its workspace first")
     })?;
@@ -3510,7 +3562,7 @@ pub fn prepare_replacement(source: &str, target_runtime: &str) -> Result<Replace
     if branch.is_empty() || branch == "HEAD" || head.is_empty() {
         return Err("source must have an attached branch and at least one commit".into());
     }
-    let target = replacement_name(&repo, &branch, target_runtime);
+    let target = replacement_name(&repo, source, &branch, &source_runtime, target_runtime);
 
     static SNAPSHOT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SNAPSHOT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
