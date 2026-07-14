@@ -232,8 +232,9 @@ skein shared import gadget-demo-feat-topic-research \
 ```
 
 Hidden state, workspaces/repos, symlinks, sockets/devices, credentials, dependencies, and build
-outputs are excluded. Apply never overwrites or merges an existing destination and records a receipt
-under `<repo-store>/skein/imports/`.
+outputs are excluded. Unreadable source files are skipped and reported without privilege escalation.
+Apply never overwrites or merges an existing destination and records imported names plus warnings in
+a receipt under `<repo-store>/skein/imports/`.
 
 ## Configuration
 

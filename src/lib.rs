@@ -3311,7 +3311,77 @@ pub fn shared_home_inventory(name: &str) -> Result<Vec<SharedHomeCandidate>, Str
         .collect()
 }
 
-const SHARED_HOME_IMPORT: &str = r####"set -euo pipefail; root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi; canonical="$store/shared-home"; [ -d "$canonical" ] && [ -w "$canonical" ] || { echo "shared-home unavailable or not writable: $canonical" >&2; exit 1; }; [ "$#" -gt 0 ] || { echo 'no import entries selected' >&2; exit 1; }; for name in "$@"; do src="$HOME/$name"; [ -f "$src" ] || [ -d "$src" ] || { echo "source entry unavailable: $name" >&2; exit 1; }; [ ! -L "$src" ] || { echo "source entry became a symlink: $name" >&2; exit 1; }; [ ! -e "$canonical/$name" ] && [ ! -L "$canonical/$name" ] || { echo "destination already exists: $name" >&2; exit 1; }; unsafe="$(find "$src" -mindepth 1 \( -type l -o -type s -o -type b -o -type c -o -type p \) -print -quit 2>/dev/null || true)"; [ -z "$unsafe" ] || { echo "unsafe nested entry blocks import: $unsafe" >&2; exit 1; }; done; stage="$store/.shared-home-import.$(printf '%s' "${SANDBOX_VM_ID:-box}" | tr / -).$$"; mkdir -p "$stage"; trap 'rm -rf "$stage"' EXIT; tar -C "$HOME" -cf - --exclude='*/.*' --exclude='*/node_modules' --exclude='*/node_modules/*' --exclude='*/target' --exclude='*/target/*' --exclude='*/build' --exclude='*/build/*' --exclude='*/dist' --exclude='*/dist/*' --exclude='*/vendor' --exclude='*/vendor/*' --exclude='*/venv' --exclude='*/venv/*' --exclude='*/__pycache__' --exclude='*/__pycache__/*' --exclude='*/credentials' --exclude='*/credentials/*' --exclude='*/credentials.json' --exclude='*/secrets' --exclude='*/secrets/*' --exclude='*/secrets.*' --exclude='*/auth.json' --exclude='*/token.json' --exclude='*/id_rsa*' --exclude='*/id_ed25519*' --exclude='*.pem' --exclude='*.key' -- "$@" | tar -C "$stage" -xf -; for name in "$@"; do [ -e "$stage/$name" ] || { echo "nothing importable remained for: $name" >&2; exit 1; }; done; for name in "$@"; do mv "$stage/$name" "$canonical/$name"; done; mkdir -p "$store/skein/imports"; items="$(printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]')"; jq -cn --arg from "${SANDBOX_VM_ID:-unknown}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson items "$items" '{from:$from,ts:$ts,items:$items}' > "$store/skein/imports/$(date -u +%Y%m%dT%H%M%SZ)-${SANDBOX_VM_ID:-box}.json"; printf 'imported %s item(s) into %s\n' "$#" "$canonical""####;
+const SHARED_HOME_IMPORT: &str = r####"
+set -euo pipefail
+root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"
+store="$root/.claude"
+if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
+canonical="$store/shared-home"
+[ -d "$canonical" ] && [ -w "$canonical" ] \
+  || { echo "shared-home unavailable or not writable: $canonical" >&2; exit 1; }
+[ "$#" -gt 0 ] || { echo 'no import entries selected' >&2; exit 1; }
+
+# Structural safety remains strict. Read failures are handled separately by tar below: the user may
+# choose a best-effort import, but a symlink/device or destination collision is never safe to guess.
+for name in "$@"; do
+  src="$HOME/$name"
+  [ -f "$src" ] || [ -d "$src" ] || { echo "source entry unavailable: $name" >&2; exit 1; }
+  [ ! -L "$src" ] || { echo "source entry became a symlink: $name" >&2; exit 1; }
+  [ ! -e "$canonical/$name" ] && [ ! -L "$canonical/$name" ] \
+    || { echo "destination already exists: $name" >&2; exit 1; }
+  unsafe="$(find "$src" -mindepth 1 \( -type l -o -type s -o -type b -o -type c -o -type p \) -print -quit 2>/dev/null || true)"
+  [ -z "$unsafe" ] || { echo "unsafe nested entry blocks import: $unsafe" >&2; exit 1; }
+done
+
+stage="$store/.shared-home-import.$(printf '%s' "${SANDBOX_VM_ID:-box}" | tr / -).$$"
+mkdir -p "$stage"
+trap 'rm -rf "$stage"' EXIT
+warnings="$stage/.tar-warnings"
+
+# `--ignore-failed-read` skips only source entries tar cannot stat/read. Capture every warning so the
+# import is explicitly best-effort rather than silently claiming parity with the old home.
+tar -C "$HOME" -cf - --ignore-failed-read \
+  --exclude='*/.*' \
+  --exclude='*/node_modules' --exclude='*/node_modules/*' \
+  --exclude='*/target' --exclude='*/target/*' \
+  --exclude='*/build' --exclude='*/build/*' \
+  --exclude='*/dist' --exclude='*/dist/*' \
+  --exclude='*/vendor' --exclude='*/vendor/*' \
+  --exclude='*/venv' --exclude='*/venv/*' \
+  --exclude='*/__pycache__' --exclude='*/__pycache__/*' \
+  --exclude='*/credentials' --exclude='*/credentials/*' --exclude='*/credentials.json' \
+  --exclude='*/secrets' --exclude='*/secrets/*' --exclude='*/secrets.*' \
+  --exclude='*/auth.json' --exclude='*/token.json' \
+  --exclude='*/id_rsa*' --exclude='*/id_ed25519*' --exclude='*.pem' --exclude='*.key' \
+  -- "$@" 2>"$warnings" | tar -C "$stage" -xf -
+
+imported_list="$stage/.imported"
+: >"$imported_list"
+imported=0
+for name in "$@"; do
+  if [ -e "$stage/$name" ]; then
+    mv "$stage/$name" "$canonical/$name"
+    printf '%s\n' "$name" >>"$imported_list"
+    imported=$((imported + 1))
+  else
+    printf 'skipped entirely (nothing readable): %s\n' "$name" >>"$warnings"
+  fi
+done
+[ "$imported" -gt 0 ] || { cat "$warnings" >&2; echo 'nothing readable was imported' >&2; exit 1; }
+
+mkdir -p "$store/skein/imports"
+items="$(jq -Rsc 'split("\n")[:-1]' <"$imported_list")"
+warning_text="$(cat "$warnings")"
+jq -cn --arg from "${SANDBOX_VM_ID:-unknown}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --argjson items "$items" --arg warnings "$warning_text" \
+  '{from:$from,ts:$ts,items:$items,warnings:$warnings}' \
+  > "$store/skein/imports/$(date -u +%Y%m%dT%H%M%SZ)-${SANDBOX_VM_ID:-box}.json"
+printf 'imported %s item(s) into %s\n' "$imported" "$canonical"
+if [ -s "$warnings" ]; then
+  echo 'Skipped source entries:'
+  cat "$warnings"
+fi
+"####;
 
 /// Copy explicitly selected, inventory-approved top-level entries from one box's private home into
 /// the repo's canonical shared home. Existing destinations never get merged or overwritten. Nested
@@ -5469,6 +5539,12 @@ mod tests {
         fs::write(box_home.join("CASE_PREP.md"), "questions").unwrap();
         fs::create_dir_all(box_home.join("samples/target")).unwrap();
         fs::write(box_home.join("samples/reference.pdf"), "pdf").unwrap();
+        fs::write(box_home.join("samples/locked.json"), "unreadable").unwrap();
+        fs::set_permissions(
+            box_home.join("samples/locked.json"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
         fs::write(box_home.join("samples/.env"), "SECRET=never").unwrap();
         fs::write(box_home.join("samples/target/build.bin"), "large").unwrap();
         fs::create_dir_all(box_home.join(".ssh")).unwrap();
@@ -5516,16 +5592,21 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(!candidate("shortcut").eligible);
         assert!(!store.join("shared-home/CASE_PREP.md").exists());
 
-        import_shared_home(
+        let result = import_shared_home(
             "demo-old-claude",
             &["CASE_PREP.md".into(), "samples".into()],
         )
         .unwrap();
+        assert!(
+            result.contains("locked.json"),
+            "skipped path must be reported"
+        );
         assert_eq!(
             fs::read_to_string(store.join("shared-home/CASE_PREP.md")).unwrap(),
             "questions"
         );
         assert!(store.join("shared-home/samples/reference.pdf").is_file());
+        assert!(!store.join("shared-home/samples/locked.json").exists());
         assert!(!store.join("shared-home/samples/.env").exists());
         assert!(!store.join("shared-home/samples/target").exists());
         assert!(store
