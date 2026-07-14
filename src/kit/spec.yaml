@@ -293,31 +293,10 @@ commands:
         # upgrades don't double-fire. jq is preferred for the additive merge; a fresh file can be
         # installed without it.
         codex_hooks_state="absent"
-        codex_source="$store/skein/codex-hooks.json"
         codex_home="$HOME/.codex"
-        codex_target="$codex_home/hooks.json"
-        if [ -r "$codex_source" ]; then
-          mkdir -p "$codex_home" 2>/dev/null || true
-          if [ ! -s "$codex_target" ]; then
-            cp "$codex_source" "$codex_target.tmp" 2>/dev/null \
-              && mv "$codex_target.tmp" "$codex_target" && codex_hooks_state="installed"
-          elif command -v jq >/dev/null 2>&1; then
-            merged="$(jq -s '
-              .[0] as $c | .[1] as $s
-              | (($c.hooks // {}) | with_entries(
-                  .value |= map(select(
-                    (((.hooks // []) | any((.command // "") | contains("/.claude/skein/bin/"))) | not)
-                  ))) as $clean
-              | $c
-              | .hooks = (reduce (($s.hooks // {}) | to_entries[]) as $e ($clean;
-                  .[$e.key] = ((.[$e.key] // []) + $e.value)))
-            ' "$codex_target" "$codex_source" 2>/dev/null)"
-            if [ -n "$merged" ]; then
-              tmp="$(mktemp "$codex_home/.hooks.XXXXXX" 2>/dev/null)" \
-                && printf '%s\n' "$merged" >"$tmp" && mv "$tmp" "$codex_target" \
-                && codex_hooks_state="merged"
-            fi
-          fi
+        codex_installer="$store/skein/bin/install-codex-hooks.sh"
+        if [ -r "$codex_installer" ] && bash "$codex_installer" "$store"; then
+          codex_hooks_state="installed"
         fi
 
         # The same project skills should be available to both runtimes. Claude reads them through

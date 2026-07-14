@@ -1212,7 +1212,7 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // Skein's exact footer needs bars and projections that Codex's native item list cannot
         // express. Disable only the default Skein previously seeded; an explicit `/statusline`
         // choice remains authoritative and suppresses the adapted footer below.
-        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; broken='status_line = null # skein custom statusline'; marker='status_line = [] # skein custom statusline'; if grep -Fqx "$broken" "$cfg"; then sed -i 's/^status_line = null # skein custom statusline$/status_line = [] # skein custom statusline/' "$cfg"; elif grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = [] # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi"#,
+        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; broken='status_line = null # skein custom statusline'; marker='status_line = [] # skein custom statusline'; if grep -Fqx "$broken" "$cfg"; then sed -i 's/^status_line = null # skein custom statusline$/status_line = [] # skein custom statusline/' "$cfg"; elif grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = [] # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi; root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi; installer="$store/skein/bin/install-codex-hooks.sh"; [ ! -r "$installer" ] || bash "$installer" "$store""#,
         update_before_start: "timeout 120 codex update </dev/null || echo 'skein: Codex update failed; starting installed version' >&2",
         // Codex records the same live data used by `/status` in token_count events. Select limits
         // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
@@ -1327,6 +1327,7 @@ pub fn health_report() -> HealthReport {
             "skein/bin/mailbox.sh",
             "skein/bin/shared-home.sh",
             "skein/bin/agent-guide.sh",
+            "skein/bin/install-codex-hooks.sh",
         ] {
             if !store.join(relative).is_file() {
                 probe_errors.push(format!("{} missing {relative}", repo.id));
@@ -4204,6 +4205,7 @@ const BOOTSTRAP_SH: &str = include_str!("store/sandbox-bootstrap.sh");
 const SHARED_HOME_SH: &str = include_str!("store/shared-home.sh");
 const SHARED_HOME_GUIDE: &str = include_str!("store/SHARED-HOME.md");
 const AGENT_GUIDE_SH: &str = include_str!("store/agent-guide.sh");
+const INSTALL_CODEX_HOOKS_SH: &str = include_str!("store/install-codex-hooks.sh");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
 const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 // Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
@@ -4224,30 +4226,16 @@ const STATUSLINE_CMD: &str = "bash $CLAUDE_PROJECT_DIR/.claude/skein/bin/statusl
 const MAILBOX_INBOX_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh inbox";
 const MAILBOX_STOPCHECK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/mailbox.sh stop-check";
 
-/// Content-derived revision for the box-side contract. It deliberately covers scripts and both
-/// lifecycle adapters, so a running session can be compared with what the host currently serves.
-/// FNV-1a keeps this dependency-free and deterministic; cryptographic strength is unnecessary.
+/// Content-derived revision for lifecycle *wiring* loaded when an agent starts. Probe scripts live
+/// on the shared mount and update in place, so hashing their bodies made harmless docs/implementation
+/// edits demand agent restarts. Only generated Claude/Codex hook configuration belongs here.
 fn probe_revision() -> String {
     let mut hash = 0xcbf29ce484222325u64;
-    for body in [
-        PROBE_STATUS_SH,
-        PROBE_TASK_SH,
-        PROBE_DIFF_SH,
-        PROBE_JOURNAL_SH,
-        PROBE_TOKEN_USAGE_SH,
-        PROBE_CODEX_TASK_SH,
-        PROBE_CODEX_TELEMETRY_SH,
-        PROBE_CODEX_HOOK_SH,
-        PROBE_HANDOFF_SH,
-        PROBE_SESSION_SH,
-        BOOTSTRAP_SH,
-        MAILBOX_SH,
-        STATUSLINE_SH,
-        SHARED_HOME_SH,
-        SHARED_HOME_GUIDE,
-        AGENT_GUIDE_SH,
-    ] {
-        for byte in body.as_bytes() {
+    let claude =
+        serde_json::to_vec(&settings_with_probe(&serde_json::json!({}))).unwrap_or_default();
+    let codex = serde_json::to_vec(&codex_hooks_with_probe()).unwrap_or_default();
+    for body in [&claude, &codex] {
+        for byte in body {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -4266,7 +4254,9 @@ fn probe_revision() -> String {
 pub fn ensure_probe_all() -> Result<(), String> {
     let mut errs = Vec::new();
     for store in all_stores() {
-        if let Err(e) = ensure_probe_in(&store) {
+        // Existing repos must receive newly-required store directories as Skein evolves, not just
+        // refreshed scripts. `ensure_store` is idempotent and delegates back to `ensure_probe_in`.
+        if let Err(e) = ensure_store(&store) {
             errs.push(format!("{}: {e}", store.display()));
         }
     }
@@ -4297,6 +4287,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
         ("shared-home.sh", SHARED_HOME_SH),
         ("agent-guide.sh", AGENT_GUIDE_SH),
+        ("install-codex-hooks.sh", INSTALL_CODEX_HOOKS_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
     ] {
@@ -5144,7 +5135,11 @@ mod tests {
         let arr = r#"[{"name":"x","state":"running","workspace":"/repo/x"}]"#;
         assert_eq!(by_name(&parse_boxes(arr), "x").dir, "/repo/x");
         assert_eq!(
-            by_name(&parse_boxes(r#"{"name":"solo","status":"running"}"#), "solo").live,
+            by_name(
+                &parse_boxes(r#"{"name":"solo","status":"running"}"#),
+                "solo"
+            )
+            .live,
             Some(Liveness::Running)
         );
 
@@ -5584,6 +5579,7 @@ mod tests {
             "skein/bin/sandbox-bootstrap.sh",
             "skein/bin/shared-home.sh",
             "skein/bin/agent-guide.sh",
+            "skein/bin/install-codex-hooks.sh",
             "skein/SHARED-HOME.md",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
@@ -5729,6 +5725,40 @@ mod tests {
             .unwrap();
         assert!(handoff.status.success());
         assert!(handoff.stdout.is_empty());
+    }
+
+    #[test]
+    fn codex_hook_installer_preserves_user_hooks_and_is_idempotent() {
+        let store = tempdir().join("store/.claude");
+        let home = tempdir().join("home");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex/hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"hooks/user.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let installer = store.join("skein/bin/install-codex-hooks.sh");
+        let run = || {
+            Command::new("bash")
+                .arg(&installer)
+                .arg(&store)
+                .env("HOME", &home)
+                .status()
+                .unwrap()
+        };
+        assert!(run().success());
+        let once: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert!(run().success());
+        let twice: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(once, twice);
+        let text = twice.to_string();
+        assert!(text.contains("hooks/user.sh"));
+        assert!(text.contains("box-status.sh"));
     }
 
     #[test]
@@ -6675,6 +6705,16 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(codex.last().unwrap().contains("resume --last"));
         assert!(codex.last().unwrap().contains("--no-alt-screen"));
         assert!(codex.last().unwrap().contains("timeout 120 codex update"));
+        assert!(codex.last().unwrap().contains("install-codex-hooks.sh"));
+        assert!(
+            codex
+                .last()
+                .unwrap()
+                .find("install-codex-hooks.sh")
+                .unwrap()
+                < codex.last().unwrap().find("tmux new-session").unwrap(),
+            "Codex hooks must be installed before the resumed process starts"
+        );
         assert!(codex.last().unwrap().contains("agent-guide.sh"));
         assert!(
             codex.last().unwrap().find("agent-guide.sh").unwrap()
