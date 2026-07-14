@@ -355,6 +355,14 @@ memory: |
   Cross-provider takeover creates a single-runtime replacement box and restores an
   immutable worktree/context snapshot before its agent starts; the source remains intact.
 
+  ## Durable shared working files
+
+  `$HOME/shared` is the repo's project-scoped durable working-data directory and is live across
+  every Claude/Codex box for this repo. Use it for reference documents, samples, and working notes
+  that must outlive or cross boxes. Real `$HOME` remains private; never move credentials, agent
+  runtime state, caches, repositories, build outputs, sockets, or locks into `shared`. Concurrent
+  writes have normal last-writer-wins filesystem semantics, so coordinate edits to the same file.
+
   ## Git authentication in this box
 
   Before retrying a failed fetch, push, or PR, inspect the configured path:

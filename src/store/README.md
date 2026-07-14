@@ -41,6 +41,9 @@ What you *optionally* add is your own project content:
                    empty and accumulates as boxes work; drop in notes to seed it.
     skills/        project skills (one dir per skill).
     hooks/         your own hook scripts, if you reference them from settings.json.
+    shared-home/   durable project working files, exposed as $HOME/shared in every Claude/Codex
+                   box. Real $HOME remains box-private. Writes are live across the repo's boxes;
+                   coordinate concurrent edits (ordinary last-writer-wins filesystem semantics).
     shared-paths.txt   one repo-relative path per line of GITIGNORED files/dirs the box
                    needs (CLAUDE.md, .env, local config, …). A --clone carries only
                    tracked files, so the bootstrap symlinks each of these from the
@@ -57,6 +60,7 @@ What you *optionally* add is your own project content:
 Managed by skein (don't edit):
 
     skein/         the probe + machinery scripts + launch specs.
+                   skein/imports/ contains audit receipts for explicit shared-home imports.
     mailbox/  status/  tasks/  journals/   per-box runtime. journals/<vmid>.md is a Stop-hook copy
                    of that box's own .skein/journal.md — the only way the host can see it for a
                    clone-mode box (its private clone isn't otherwise visible to the host at all).
@@ -81,8 +85,9 @@ Managed by skein (don't edit):
                    a bounded context export while the original remains natively resumable.
     skein/handoff-snapshots/ immutable replacement snapshots: Git bundle, staged/unstaged patches,
                    untracked archive, shared memory/skills/hooks backup, transcript export, manifest.
-    skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found and
-                   how .claude was linked (linked | merged | no-store | failed), jq presence, branch.
+    skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found,
+                   how .claude was linked (linked | merged | no-store | failed), whether shared-home
+                   was linked, jq/tmux presence, and branch.
     shared-rw/     the writable copies of `rw`-flagged shared-paths.txt entries.
 
 Everything under `journals/`, `diffs/`, `tasks/`, and `telemetry/` deliberately **outlives** the box

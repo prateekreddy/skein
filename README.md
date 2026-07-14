@@ -210,6 +210,31 @@ Skein installs `jq` and mandates `tmux` as the minimal box substrate. Provider-n
 handoffs, and immutable takeover snapshots live once in the mounted shared store; Skein never installs
 both large agent CLIs into every box. `GET /api/health` exposes dependency/hook failures.
 
+## Shared working files
+
+Every managed Claude and Codex box exposes the repo's durable working-data directory at
+`/home/agent/shared` (`$HOME/shared`). Its canonical host location is `<repo-store>/shared-home/`,
+inside the same project-scoped mount used for memory and mailbox. Writes are visible live in every
+box for that repo; concurrent edits use ordinary filesystem/last-writer-wins semantics.
+
+Real `$HOME` remains private to each box. Skein never shares agent/auth state (`.claude`, `.codex`),
+credentials (`.ssh`, `.aws`, gh config), caches, toolchains, sockets, or locks. Startup creates or
+repairs the `shared` symlink but refuses to replace a real file/directory at that path, and box startup
+fails visibly if the canonical mount is unavailable or unwritable.
+
+To rescue durable files from an older box, inventory first (read-only), review, then name every
+top-level entry explicitly:
+
+```sh
+skein shared import gadget-demo-feat-topic-research
+skein shared import gadget-demo-feat-topic-research \
+  --include CASE_PREP.md --include reference-documents --apply
+```
+
+Hidden state, workspaces/repos, symlinks, sockets/devices, credentials, dependencies, and build
+outputs are excluded. Apply never overwrites or merges an existing destination and records a receipt
+under `<repo-store>/skein/imports/`.
+
 ## Configuration
 
 `skein doctor` reports the resolved registry, bind address, and whether `sbx`/`git`/`gh`

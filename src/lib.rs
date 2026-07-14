@@ -1242,6 +1242,7 @@ pub fn health_report() -> HealthReport {
             "skein/runtimes.tsv",
             "skein/bin/box-status.sh",
             "skein/bin/mailbox.sh",
+            "skein/bin/shared-home.sh",
         ] {
             if !store.join(relative).is_file() {
                 probe_errors.push(format!("{} missing {relative}", repo.id));
@@ -1249,6 +1250,9 @@ pub fn health_report() -> HealthReport {
         }
         if !store.join("mailbox").is_dir() {
             mailbox_errors.push(format!("{} mailbox directory missing", repo.id));
+        }
+        if !store.join("shared-home").is_dir() {
+            probe_errors.push(format!("{} shared-home directory missing", repo.id));
         }
         let boot_dir = store.join("skein/boot");
         if let Ok(entries) = fs::read_dir(boot_dir) {
@@ -1270,6 +1274,13 @@ pub fn health_report() -> HealthReport {
                 let tmux_available = boot.as_ref().and_then(|value| value.get("tmux")?.as_bool());
                 if tmux_available == Some(false) {
                     probe_errors.push(format!("{box_name} is missing required tmux"));
+                }
+                if boot
+                    .as_ref()
+                    .and_then(|value| value.get("shared_home")?.as_str())
+                    .is_some_and(|state| state != "linked")
+                {
+                    probe_errors.push(format!("{box_name} shared home is unavailable"));
                 }
             }
         }
@@ -3266,6 +3277,80 @@ pub fn agent_statusline(name: &str) -> Result<Option<String>, String> {
     let rendered = sbx_guest_output(name, &shell, Duration::from_secs(30))?;
     let rendered = rendered.trim_end_matches(['\r', '\n']).to_string();
     Ok((!rendered.is_empty()).then_some(rendered))
+}
+
+/// One top-level entry found while inspecting a box's private home for an explicit shared-home
+/// import. Inventory is read-only; excluded entries remain visible with the reason so the safety
+/// boundary is reviewable rather than hidden in implementation details.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SharedHomeCandidate {
+    pub name: String,
+    pub kind: String,
+    pub bytes: u64,
+    pub eligible: bool,
+    pub reason: String,
+}
+
+const SHARED_HOME_INVENTORY: &str = r####"set -o pipefail; command -v jq >/dev/null 2>&1 || { echo 'jq is required for shared-home inventory' >&2; exit 1; }; find "$HOME" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | sort -z | while IFS= read -r -d '' path; do name="${path##*/}"; kind="other"; [ -f "$path" ] && kind="file"; [ -d "$path" ] && kind="directory"; [ -L "$path" ] && kind="symlink"; eligible=true; reason=""; if [ -L "$path" ]; then eligible=false; reason="symlinks are never imported"; elif [ ! -f "$path" ] && [ ! -d "$path" ]; then eligible=false; reason="sockets/devices/FIFOs are never imported"; else case "$name" in .* ) eligible=false; reason="hidden credential/runtime/cache path" ;; workspace|work|project|projects|src|repos|repositories|node_modules|target|build|dist|vendor|venv ) eligible=false; reason="workspace, dependency, or build-output path" ;; esac; fi; if [ "$eligible" = true ] && [ -d "$path" ] && find "$path" -type d -name .git -print -quit 2>/dev/null | grep -q .; then eligible=false; reason="contains a Git repository"; fi; bytes=0; if [ "$eligible" = true ]; then kb="$(du -sk "$path" 2>/dev/null | awk 'NR==1 {print $1}')"; case "$kb" in ''|*[!0-9]*) kb=0 ;; esac; bytes=$((kb * 1024)); fi; jq -cn --arg name "$name" --arg kind "$kind" --argjson bytes "$bytes" --argjson eligible "$eligible" --arg reason "$reason" '{name:$name,kind:$kind,bytes:$bytes,eligible:$eligible,reason:$reason}'; done"####;
+
+/// Inspect a source box's private `$HOME` without copying anything. Hidden state, workspaces,
+/// repositories, dependencies/build outputs, symlinks, and special files are explicitly ineligible.
+pub fn shared_home_inventory(name: &str) -> Result<Vec<SharedHomeCandidate>, String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
+    ensure_store(Path::new(&repo.store))?;
+    let raw = sbx_guest_output(name, SHARED_HOME_INVENTORY, Duration::from_secs(120))?;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .map_err(|error| format!("invalid inventory response from {name}: {error}"))
+        })
+        .collect()
+}
+
+const SHARED_HOME_IMPORT: &str = r####"set -euo pipefail; root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi; canonical="$store/shared-home"; [ -d "$canonical" ] && [ -w "$canonical" ] || { echo "shared-home unavailable or not writable: $canonical" >&2; exit 1; }; [ "$#" -gt 0 ] || { echo 'no import entries selected' >&2; exit 1; }; for name in "$@"; do src="$HOME/$name"; [ -f "$src" ] || [ -d "$src" ] || { echo "source entry unavailable: $name" >&2; exit 1; }; [ ! -L "$src" ] || { echo "source entry became a symlink: $name" >&2; exit 1; }; [ ! -e "$canonical/$name" ] && [ ! -L "$canonical/$name" ] || { echo "destination already exists: $name" >&2; exit 1; }; unsafe="$(find "$src" -mindepth 1 \( -type l -o -type s -o -type b -o -type c -o -type p \) -print -quit 2>/dev/null || true)"; [ -z "$unsafe" ] || { echo "unsafe nested entry blocks import: $unsafe" >&2; exit 1; }; done; stage="$store/.shared-home-import.$(printf '%s' "${SANDBOX_VM_ID:-box}" | tr / -).$$"; mkdir -p "$stage"; trap 'rm -rf "$stage"' EXIT; tar -C "$HOME" -cf - --exclude='*/.*' --exclude='*/node_modules' --exclude='*/node_modules/*' --exclude='*/target' --exclude='*/target/*' --exclude='*/build' --exclude='*/build/*' --exclude='*/dist' --exclude='*/dist/*' --exclude='*/vendor' --exclude='*/vendor/*' --exclude='*/venv' --exclude='*/venv/*' --exclude='*/__pycache__' --exclude='*/__pycache__/*' --exclude='*/credentials' --exclude='*/credentials/*' --exclude='*/credentials.json' --exclude='*/secrets' --exclude='*/secrets/*' --exclude='*/secrets.*' --exclude='*/auth.json' --exclude='*/token.json' --exclude='*/id_rsa*' --exclude='*/id_ed25519*' --exclude='*.pem' --exclude='*.key' -- "$@" | tar -C "$stage" -xf -; for name in "$@"; do [ -e "$stage/$name" ] || { echo "nothing importable remained for: $name" >&2; exit 1; }; done; for name in "$@"; do mv "$stage/$name" "$canonical/$name"; done; mkdir -p "$store/skein/imports"; items="$(printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]')"; jq -cn --arg from "${SANDBOX_VM_ID:-unknown}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson items "$items" '{from:$from,ts:$ts,items:$items}' > "$store/skein/imports/$(date -u +%Y%m%dT%H%M%SZ)-${SANDBOX_VM_ID:-box}.json"; printf 'imported %s item(s) into %s\n' "$#" "$canonical""####;
+
+/// Copy explicitly selected, inventory-approved top-level entries from one box's private home into
+/// the repo's canonical shared home. Existing destinations never get merged or overwritten. Nested
+/// hidden state, credentials, dependencies, and build outputs remain excluded during the copy.
+pub fn import_shared_home(name: &str, selected: &[String]) -> Result<String, String> {
+    if selected.is_empty() {
+        return Err("choose at least one inventory entry to import".into());
+    }
+    let inventory = shared_home_inventory(name)?;
+    let repo = repo_for_box(name).ok_or_else(|| format!("no registered repo for box {name}"))?;
+    let canonical = Path::new(&repo.store).join("shared-home");
+    let mut unique = BTreeSet::new();
+    for entry in selected {
+        if entry.contains(['\n', '\r', '\0']) {
+            return Err(format!("unsafe control character in entry name: {entry:?}"));
+        }
+        if !unique.insert(entry) {
+            return Err(format!("duplicate import entry: {entry:?}"));
+        }
+        let candidate = inventory
+            .iter()
+            .find(|candidate| candidate.name == *entry)
+            .ok_or_else(|| format!("{entry:?} is not a top-level entry in {name}"))?;
+        if !candidate.eligible {
+            return Err(format!("{entry:?} is excluded: {}", candidate.reason));
+        }
+        if canonical.join(entry).exists() || canonical.join(entry).is_symlink() {
+            return Err(format!(
+                "shared-home destination already exists: {entry:?} (nothing was copied)"
+            ));
+        }
+    }
+    let selection = selected
+        .iter()
+        .map(|entry| sh_quote(entry))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let command = format!("set -- {selection}; {SHARED_HOME_IMPORT}");
+    sbx_guest_output(name, &command, Duration::from_secs(600))
 }
 
 /// Stream a possibly-large guest artifact straight to a host file. This avoids base64, Python, and
@@ -5360,6 +5445,100 @@ mod tests {
             fs::read_to_string(home_b.join("shared/do-not-clobber")).unwrap(),
             "mine"
         );
+    }
+
+    #[test]
+    fn shared_home_import_is_dry_run_first_explicit_and_filtered() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let _g = ENV_LOCK.lock().unwrap();
+        let skein_home = tempdir();
+        let work = tempdir().join("work");
+        let store = tempdir().join("store/.claude");
+        let box_home = tempdir().join("box-home");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&box_home).unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(&work)
+            .status()
+            .unwrap()
+            .success());
+        ensure_store(&store).unwrap();
+        symlink(&store, work.join(".claude")).unwrap();
+        fs::write(box_home.join("CASE_PREP.md"), "questions").unwrap();
+        fs::create_dir_all(box_home.join("samples/target")).unwrap();
+        fs::write(box_home.join("samples/reference.pdf"), "pdf").unwrap();
+        fs::write(box_home.join("samples/.env"), "SECRET=never").unwrap();
+        fs::write(box_home.join("samples/target/build.bin"), "large").unwrap();
+        fs::create_dir_all(box_home.join(".ssh")).unwrap();
+        fs::write(box_home.join(".ssh/id_ed25519"), "private").unwrap();
+        fs::create_dir_all(box_home.join("workspace")).unwrap();
+        symlink("CASE_PREP.md", box_home.join("shortcut")).unwrap();
+
+        env::set_var("SKEIN_HOME", &skein_home);
+        save_repos(&[Repo {
+            id: "demo".into(),
+            source: work.to_string_lossy().into_owned(),
+            work: work.to_string_lossy().into_owned(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "codex".into(),
+        }])
+        .unwrap();
+
+        let bin = tempdir().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let sbx = bin.join("sbx");
+        fs::write(
+            &sbx,
+            r#"#!/usr/bin/env bash
+set -e
+[ "$1" = exec ]
+box="$2"
+shell="$5"
+cd "$FAKE_BOX_WORK"
+HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&sbx, fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+        env::set_var("FAKE_BOX_HOME", &box_home);
+        env::set_var("FAKE_BOX_WORK", &work);
+
+        let inventory = shared_home_inventory("demo-old-claude").unwrap();
+        let candidate = |name: &str| inventory.iter().find(|item| item.name == name).unwrap();
+        assert!(candidate("CASE_PREP.md").eligible);
+        assert!(candidate("samples").eligible);
+        assert!(!candidate(".ssh").eligible);
+        assert!(!candidate("workspace").eligible);
+        assert!(!candidate("shortcut").eligible);
+        assert!(!store.join("shared-home/CASE_PREP.md").exists());
+
+        import_shared_home(
+            "demo-old-claude",
+            &["CASE_PREP.md".into(), "samples".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(store.join("shared-home/CASE_PREP.md")).unwrap(),
+            "questions"
+        );
+        assert!(store.join("shared-home/samples/reference.pdf").is_file());
+        assert!(!store.join("shared-home/samples/.env").exists());
+        assert!(!store.join("shared-home/samples/target").exists());
+        assert!(store
+            .join("skein/imports")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some());
+
+        env::set_var("PATH", old_path);
+        env::remove_var("FAKE_BOX_HOME");
+        env::remove_var("FAKE_BOX_WORK");
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]

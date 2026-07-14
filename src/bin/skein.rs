@@ -34,6 +34,7 @@ fn main() {
             None => Err("usage: skein remove <repo-id>".into()),
         },
         "doctor" => cmd_doctor(),
+        "shared" => cmd_shared(rest),
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
@@ -64,6 +65,8 @@ skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
+skein shared import <box> [--include <name> ...] [--apply]\n  \
+                       inspect/import durable files from a box's private home\n  \
 skein doctor          check registry + required tools (sbx/git/gh)\n  \
 skein version\n  \
 skein help\n\n\
@@ -104,6 +107,78 @@ fn flag(opts: &[String], name: &str) -> Option<String> {
         .position(|a| a == name)
         .and_then(|i| opts.get(i + 1))
         .cloned()
+}
+
+fn flags(opts: &[String], name: &str) -> Vec<String> {
+    opts.iter()
+        .enumerate()
+        .filter_map(|(index, value)| (value == name).then_some(opts.get(index + 1)).flatten())
+        .cloned()
+        .collect()
+}
+
+fn cmd_shared(args: &[String]) -> Result<(), String> {
+    let Some(action) = args.first().map(String::as_str) else {
+        return Err("usage: skein shared import <box> [--include <name> ...] [--apply]".into());
+    };
+    if action != "import" {
+        return Err(format!(
+            "unknown shared action {action:?}; usage: skein shared import <box>"
+        ));
+    }
+    let Some(box_name) = args.get(1) else {
+        return Err("usage: skein shared import <box> [--include <name> ...] [--apply]".into());
+    };
+    let opts = &args[2..];
+    let selected = flags(opts, "--include");
+    let apply = opts.iter().any(|arg| arg == "--apply");
+    if apply {
+        if selected.is_empty() {
+            return Err("--apply requires at least one explicit --include <top-level-name>".into());
+        }
+        let result = skein::import_shared_home(box_name, &selected)?;
+        print!("{result}");
+        return Ok(());
+    }
+
+    let inventory = skein::shared_home_inventory(box_name)?;
+    println!("{BOLD}shared-home import inventory{RESET}  {CYAN}{box_name}{RESET}");
+    println!("{DIM}read-only: nothing has been copied{RESET}\n");
+    for item in inventory {
+        if item.eligible {
+            println!(
+                "  {BOLD}✓{RESET} {:<36} {:<9} {}",
+                item.name,
+                item.kind,
+                human_bytes(item.bytes)
+            );
+        } else {
+            println!(
+                "  {DIM}— {:<36} {:<9} excluded: {}{RESET}",
+                item.name, item.kind, item.reason
+            );
+        }
+    }
+    println!(
+        "\n{DIM}Apply only after reviewing the list:{RESET}\n  skein shared import {box_name} --include <name> [--include <name> ...] --apply\n\n{DIM}Nested hidden files, credentials, dependencies, and build outputs remain excluded. Existing destinations are never overwritten.{RESET}"
+    );
+    Ok(())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0} B")
+    }
 }
 
 fn cmd_remove(id: &str) -> Result<(), String> {
