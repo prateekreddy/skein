@@ -1095,6 +1095,10 @@ struct RuntimeAdapter {
     /// Emits the Claude-compatible status-line JSON model on stdout. `None` means the provider
     /// supplies its own command-driven status line and needs no browser footer adapter.
     statusline_input: Option<&'static str>,
+    /// Runtime-native durable instruction file, relative to HOME. Skein adds one managed block.
+    instruction_file: &'static str,
+    /// Optional higher-precedence instruction file used only when the user already created it.
+    instruction_override: &'static str,
     /// Shell command used to create this runtime's first persistent tmux process.
     interactive_start: &'static str,
     /// Shell command used when creating a provider-specific persistent tmux session.
@@ -1119,6 +1123,8 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         interactive_setup: ":",
         update_before_start: "timeout 120 claude update </dev/null || echo 'skein: Claude update failed; starting installed version' >&2",
         statusline_input: None,
+        instruction_file: ".claude/CLAUDE.md",
+        instruction_override: "",
         interactive_start: "claude",
         interactive_resume: "claude --continue",
         headless_resume: "claude --continue --print {prompt}",
@@ -1142,6 +1148,8 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
         // both providers share the renderer below. The marker makes `/statusline` an opt-out.
         statusline_input: Some(r####"grep -Fq 'status_line = [] # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload]) as $tokens | ($tokens | last) as $t | (([$tokens[] | select((.rate_limits.limit_name // "") == "")] | last) // $t) as $quota | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$quota.rate_limits.primary, $quota.rate_limits.secondary, $quota.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
+        instruction_file: ".codex/AGENTS.md",
+        instruction_override: ".codex/AGENTS.override.md",
         // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
         // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
         // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
@@ -1243,6 +1251,7 @@ pub fn health_report() -> HealthReport {
             "skein/bin/box-status.sh",
             "skein/bin/mailbox.sh",
             "skein/bin/shared-home.sh",
+            "skein/bin/agent-guide.sh",
         ] {
             if !store.join(relative).is_file() {
                 probe_errors.push(format!("{} missing {relative}", repo.id));
@@ -1281,6 +1290,13 @@ pub fn health_report() -> HealthReport {
                     .is_some_and(|state| state != "linked")
                 {
                     probe_errors.push(format!("{box_name} shared home is unavailable"));
+                }
+                if boot
+                    .as_ref()
+                    .and_then(|value| value.get("agent_guide")?.as_str())
+                    .is_some_and(|state| state != "installed")
+                {
+                    probe_errors.push(format!("{box_name} durable agent guidance is unavailable"));
                 }
             }
         }
@@ -4101,6 +4117,7 @@ const PROBE_SESSION_SH: &str = include_str!("probe/box-session.sh");
 const BOOTSTRAP_SH: &str = include_str!("store/sandbox-bootstrap.sh");
 const SHARED_HOME_SH: &str = include_str!("store/shared-home.sh");
 const SHARED_HOME_GUIDE: &str = include_str!("store/SHARED-HOME.md");
+const AGENT_GUIDE_SH: &str = include_str!("store/agent-guide.sh");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
 const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 // Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
@@ -4142,6 +4159,7 @@ fn probe_revision() -> String {
         STATUSLINE_SH,
         SHARED_HOME_SH,
         SHARED_HOME_GUIDE,
+        AGENT_GUIDE_SH,
     ] {
         for byte in body.as_bytes() {
             hash ^= u64::from(*byte);
@@ -4192,6 +4210,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("box-session.sh", PROBE_SESSION_SH),
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
         ("shared-home.sh", SHARED_HOME_SH),
+        ("agent-guide.sh", AGENT_GUIDE_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
     ] {
@@ -4225,8 +4244,12 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         .iter()
         .map(|runtime| {
             format!(
-                "{}\t{}\t{}",
-                runtime.info.id, runtime.info.label, runtime.info.executable
+                "{}\t{}\t{}\t{}\t{}",
+                runtime.info.id,
+                runtime.info.label,
+                runtime.info.executable,
+                runtime.instruction_file,
+                runtime.instruction_override
             )
         })
         .collect::<Vec<_>>()
@@ -5441,6 +5464,7 @@ mod tests {
             "skein/bin/box-handoff.sh",
             "skein/bin/sandbox-bootstrap.sh",
             "skein/bin/shared-home.sh",
+            "skein/bin/agent-guide.sh",
             "skein/SHARED-HOME.md",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
@@ -5523,6 +5547,69 @@ mod tests {
             fs::read_to_string(home_b.join("shared/do-not-clobber")).unwrap(),
             "mine"
         );
+    }
+
+    #[test]
+    fn agent_guide_uses_native_instruction_files_without_prompt_hook_bloat() {
+        use std::os::unix::fs::symlink;
+
+        let store = tempdir().join("store/.claude");
+        let home = tempdir().join("home");
+        let work = tempdir().join("work");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        symlink(&store, work.join(".claude")).unwrap();
+        fs::write(home.join(".codex/AGENTS.md"), "# My existing guidance\n").unwrap();
+        let helper = store.join("skein/bin/agent-guide.sh");
+        let run = |normal: &str, override_: &str| {
+            Command::new("bash")
+                .arg(&helper)
+                .arg(&store)
+                .arg(normal)
+                .arg(override_)
+                .env("HOME", &home)
+                .output()
+                .unwrap()
+        };
+
+        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+            .status
+            .success());
+        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+            .status
+            .success());
+        let agents = fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap();
+        assert!(agents.contains("My existing guidance"));
+        assert_eq!(agents.matches("skein:shared-home:start").count(), 1);
+
+        fs::write(
+            home.join(".codex/AGENTS.override.md"),
+            "# My temporary override\n",
+        )
+        .unwrap();
+        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+            .status
+            .success());
+        let override_ = fs::read_to_string(home.join(".codex/AGENTS.override.md")).unwrap();
+        assert!(override_.contains("My temporary override"));
+        assert_eq!(override_.matches("skein:shared-home:start").count(), 1);
+
+        assert!(run(".claude/CLAUDE.md", "").status.success());
+        assert!(fs::read_to_string(home.join(".claude/CLAUDE.md"))
+            .unwrap()
+            .contains("$HOME/shared"));
+
+        // Without a real takeover, the turn-scoped handoff hook must emit no context at all.
+        let handoff = Command::new("bash")
+            .arg(store.join("skein/bin/box-handoff.sh"))
+            .arg("codex")
+            .env("CLAUDE_PROJECT_DIR", &work)
+            .env("SANDBOX_VM_ID", "box-a")
+            .output()
+            .unwrap();
+        assert!(handoff.status.success());
+        assert!(handoff.stdout.is_empty());
     }
 
     #[test]

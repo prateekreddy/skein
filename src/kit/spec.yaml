@@ -263,6 +263,29 @@ commands:
           echo "[skein-kit] shared home unavailable — agent startup is blocked" >&2
         fi
 
+        # Put persistent product guidance in the runtime's native instruction file, not a turn hook.
+        # The adapter manifest owns the paths, so a future runtime adds one registry row rather than
+        # another provider conditional here. Existing user instructions are preserved around one
+        # replaceable Skein-managed block.
+        agent_guide_state="failed"
+        instruction_file=""
+        instruction_override=""
+        if [ -r "$store/skein/runtimes.tsv" ]; then
+          while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe runtime_instruction runtime_override; do
+            if [ "$runtime_id" = "$selected_agent" ]; then
+              instruction_file="$runtime_instruction"
+              instruction_override="$runtime_override"
+              break
+            fi
+          done < "$store/skein/runtimes.tsv"
+        fi
+        if [ -n "$instruction_file" ] && [ -r "$store/skein/bin/agent-guide.sh" ] \
+          && bash "$store/skein/bin/agent-guide.sh" "$store" "$instruction_file" "$instruction_override"; then
+          agent_guide_state="installed"
+        else
+          echo "[skein-kit] durable agent guidance unavailable — check runtime manifest" >&2
+        fi
+
         # Codex adapter: install Skein's generated hooks at the USER layer. Project-local .codex
         # hooks are suppressed until the clone is trusted; the user layer is independent of project
         # trust, and Skein launches Codex with --dangerously-bypass-hook-trust for these vetted
@@ -317,7 +340,7 @@ commands:
           tmuxp="false"; command -v tmux >/dev/null 2>&1 && tmuxp="true"
           cap=""
           if [ -r "$store/skein/runtimes.tsv" ]; then
-            while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe; do
+            while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe runtime_instruction runtime_override; do
               [ -n "$runtime_id" ] && [ -n "$runtime_exe" ] || continue
               if [ "$runtime_id" = "$selected_agent" ] \
                 || command -v "$runtime_exe" >/dev/null 2>&1 \
@@ -328,8 +351,8 @@ commands:
             done < "$store/skein/runtimes.tsv"
           fi
           revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
-          printf '{"ts":"%s","claude_link":"%s","shared_home":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$shared_home_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
+          printf '{"ts":"%s","claude_link":"%s","shared_home":"%s","agent_guide":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
             > "$store/skein/boot/$vmid.json" 2>/dev/null || true
         fi
         [ "$tools_ok" = "true" ] || exit 1

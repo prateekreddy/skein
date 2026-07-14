@@ -33,7 +33,18 @@ shared_home="$store/skein/bin/shared-home.sh"
   exit 1
 }
 bash "$shared_home" "$store" || exit 1
-echo "[skein] Durable project files are live at $HOME/shared across this repo's Claude/Codex boxes. Use it for reference documents, samples, and working notes; real HOME remains private. Guide: $root/.claude/skein/SHARED-HOME.md"
+
+# Materialise each runtime's native durable-instruction file. This hook self-heals older boxes; the
+# kit performs the same step before a newly-created agent starts. No prompt-hook context is emitted.
+agent_guide="$store/skein/bin/agent-guide.sh"
+runtime_manifest="$store/skein/runtimes.tsv"
+if [ -r "$agent_guide" ] && [ -r "$runtime_manifest" ]; then
+  while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe instruction_file instruction_override; do
+    [ -n "$instruction_file" ] || continue
+    bash "$agent_guide" "$store" "$instruction_file" "$instruction_override" \
+      || echo "[skein-bootstrap] could not install $runtime_id agent guidance" >&2
+  done <"$runtime_manifest"
+fi
 
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
 vmid="${vmid//\//-}"

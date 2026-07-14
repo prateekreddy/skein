@@ -19,16 +19,6 @@ vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
 vmid="${vmid//\//-}"
 pending="$store/handoffs/$vmid.$target.pending.md"
 
-# Codex does not natively consume Claude's project memory/skills conventions. This short context
-# makes the same shared brain discoverable without dumping the whole store into every prompt.
-if [ "$target" = "codex" ]; then
-  echo "[skein] Shared project context is mounted at $root/.claude: memory/ is live team memory, skills/ contains reusable workflows, and mailbox/ contains cross-box hand-offs. Read the relevant files when needed."
-  if [ -r "$root/CLAUDE.md" ]; then
-    echo "[skein] This project also has CLAUDE.md direction; treat it as project guidance alongside AGENTS.md:"
-    sed -n '1,220p' "$root/CLAUDE.md"
-  fi
-fi
-
 [ -r "$pending" ] || exit 0
 echo
 echo "----- BEGIN SKEIN CROSS-AGENT HANDOFF -----"

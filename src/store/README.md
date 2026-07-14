@@ -87,7 +87,7 @@ Managed by skein (don't edit):
                    untracked archive, shared memory/skills/hooks backup, transcript export, manifest.
     skein/boot/    skein/boot/<vmid>.json — the kit's boot report: whether the store was found,
                    how .claude was linked (linked | merged | no-store | failed), whether shared-home
-                   was linked, jq/tmux presence, and branch.
+                   and durable agent guidance were installed, jq/tmux presence, and branch.
     shared-rw/     the writable copies of `rw`-flagged shared-paths.txt entries.
 
 Everything under `journals/`, `diffs/`, `tasks/`, and `telemetry/` deliberately **outlives** the box
