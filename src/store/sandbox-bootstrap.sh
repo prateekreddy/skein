@@ -8,8 +8,9 @@
 #   - materialises the settings' enabled plugins once;
 #   - surfaces unread mailbox hand-offs addressed to this box.
 #
-# Repo-agnostic and fail-soft — a bootstrap problem must never block the session. Branch checkout is
-# the kit's job (skein-startup.sh), not this.
+# Repo-agnostic. Observability helpers remain fail-soft, but the shared-home contract fails loudly:
+# silently presenting a private directory as shared would risk data loss. Branch checkout is the
+# kit's job (skein-startup.sh), not this.
 set -uo pipefail
 
 input="$(cat 2>/dev/null || true)"
@@ -22,6 +23,16 @@ store="$root/.claude"
 # would land signals in the box-local clone where the host can never see them.
 if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || { echo "[skein-bootstrap] no .claude store at $store — skipping" >&2; exit 0; }
+
+# --- durable project workspace: private $HOME/shared -> mounted store/shared-home ----------------
+# The same provider-neutral helper runs during durable kit startup. Running it again here self-heals
+# boxes created with an older kit as soon as their live shared probe refreshes.
+shared_home="$store/skein/bin/shared-home.sh"
+[ -r "$shared_home" ] || {
+  echo "[skein-bootstrap] shared-home helper missing at $shared_home" >&2
+  exit 1
+}
+bash "$shared_home" "$store" || exit 1
 
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
 vmid="${vmid//\//-}"

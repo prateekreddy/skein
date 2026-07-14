@@ -1900,6 +1900,9 @@ pub fn ensure_store(store: &Path) -> Result<(), String> {
         // a genuinely writable host directory, unlike the RO clone-mode source mirror. See
         // sandbox-bootstrap.sh's surfacing loop.
         "shared-rw",
+        // Project-scoped durable user workspace, surfaced as $HOME/shared in every box. Real $HOME
+        // remains private so credentials, caches, and concurrent runtime state cannot collide.
+        "shared-home",
     ] {
         let p = store.join(d);
         fs::create_dir_all(&p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
@@ -3941,6 +3944,7 @@ const PROBE_SESSION_SH: &str = include_str!("probe/box-session.sh");
 // the SessionStart bootstrap (memory bridge + mailbox inbox + box registration), the mailbox, and a
 // default status line. They live in `<store>/skein/bin/` (skein-owned namespace), refreshed each run.
 const BOOTSTRAP_SH: &str = include_str!("store/sandbox-bootstrap.sh");
+const SHARED_HOME_SH: &str = include_str!("store/shared-home.sh");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
 const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 // Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
@@ -3980,6 +3984,7 @@ fn probe_revision() -> String {
         BOOTSTRAP_SH,
         MAILBOX_SH,
         STATUSLINE_SH,
+        SHARED_HOME_SH,
     ] {
         for byte in body.as_bytes() {
             hash ^= u64::from(*byte);
@@ -4029,6 +4034,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("box-handoff.sh", PROBE_HANDOFF_SH),
         ("box-session.sh", PROBE_SESSION_SH),
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
+        ("shared-home.sh", SHARED_HOME_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
     ] {
@@ -5259,6 +5265,7 @@ mod tests {
             "skills",
             "hooks",
             "shared-rw",
+            "shared-home",
         ] {
             assert!(store.join(d).is_dir(), "missing {d}");
         }
@@ -5271,6 +5278,7 @@ mod tests {
             "skein/bin/box-codex-telemetry.sh",
             "skein/bin/box-handoff.sh",
             "skein/bin/sandbox-bootstrap.sh",
+            "skein/bin/shared-home.sh",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
         ] {
@@ -5303,6 +5311,55 @@ mod tests {
             "sbx treats dollar-brace shell expansions as kit placeholders"
         );
         env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn shared_home_links_two_private_homes_and_refuses_real_path() {
+        let store = tempdir().join("store/.claude");
+        ensure_store(&store).unwrap();
+        let helper = store.join("skein/bin/shared-home.sh");
+        let home_a = tempdir().join("home-a");
+        let home_b = tempdir().join("home-b");
+        fs::create_dir_all(&home_a).unwrap();
+        fs::create_dir_all(&home_b).unwrap();
+
+        let run = |home: &Path| {
+            Command::new("bash")
+                .arg(&helper)
+                .arg(&store)
+                .env("HOME", home)
+                .output()
+                .unwrap()
+        };
+        assert!(run(&home_a).status.success());
+        assert!(run(&home_b).status.success());
+        assert_eq!(
+            fs::read_link(home_a.join("shared")).unwrap(),
+            store.join("shared-home")
+        );
+        assert_eq!(
+            fs::read_link(home_b.join("shared")).unwrap(),
+            store.join("shared-home")
+        );
+
+        fs::write(home_a.join("shared/from-a.txt"), "visible in b").unwrap();
+        assert_eq!(
+            fs::read_to_string(home_b.join("shared/from-a.txt")).unwrap(),
+            "visible in b"
+        );
+        fs::write(home_a.join("private-sentinel"), "private").unwrap();
+        assert!(!home_b.join("private-sentinel").exists());
+
+        fs::remove_file(home_b.join("shared")).unwrap();
+        fs::create_dir(home_b.join("shared")).unwrap();
+        fs::write(home_b.join("shared/do-not-clobber"), "mine").unwrap();
+        let conflict = run(&home_b);
+        assert!(!conflict.status.success());
+        assert!(String::from_utf8_lossy(&conflict.stderr).contains("refusing to replace real path"));
+        assert_eq!(
+            fs::read_to_string(home_b.join("shared/do-not-clobber")).unwrap(),
+            "mine"
+        );
     }
 
     #[test]

@@ -251,6 +251,18 @@ commands:
           grep -qxF '/.claude' "$git_dir/info/exclude" 2>/dev/null \
             || printf '/.claude\n' >> "$git_dir/info/exclude"
         fi
+
+        # Expose the project-scoped durable workspace without sharing literal HOME. The helper is
+        # provider-neutral, lives on the mounted store, and refuses to overwrite a real HOME/shared
+        # path. Keep startup gated on its verified result: silent non-sharing would risk data loss.
+        shared_home_state="failed"
+        shared_home_helper="$store/skein/bin/shared-home.sh"
+        if [ -r "$shared_home_helper" ] && bash "$shared_home_helper" "$store"; then
+          shared_home_state="linked"
+        else
+          echo "[skein-kit] shared home unavailable — agent startup is blocked" >&2
+        fi
+
         # Codex adapter: install Skein's generated hooks at the USER layer. Project-local .codex
         # hooks are suppressed until the clone is trusted; the user layer is independent of project
         # trust, and Skein launches Codex with --dangerously-bypass-hook-trust for these vetted
@@ -316,11 +328,12 @@ commands:
             done < "$store/skein/runtimes.tsv"
           fi
           revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
-          printf '{"ts":"%s","claude_link":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
+          printf '{"ts":"%s","claude_link":"%s","shared_home":"%s","codex_hooks":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$shared_home_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
             > "$store/skein/boot/$vmid.json" 2>/dev/null || true
         fi
         [ "$tools_ok" = "true" ] || exit 1
+        [ "$shared_home_state" = "linked" ] || exit 1
         touch "$startup_ready"
         startup_done="true"
         exit 0
