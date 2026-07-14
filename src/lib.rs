@@ -342,6 +342,16 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             };
             let live = s.and_then(|x| x.live);
             let (mut state, mut tier) = sb.state_with(live);
+            // Cold-start fallback has no authoritative existence/liveness signal. Old outcome files
+            // must not resurrect destroyed boxes in "needs you": once the registry heartbeat is
+            // stale (or absent), show the record as stale regardless of its sticky error/wait state.
+            if sbx.is_none()
+                && self_box.as_deref() != Some(name.as_str())
+                && sb.age_secs().is_none_or(|seconds| seconds >= 30 * 60)
+            {
+                state = "stale".into();
+                tier = 5;
+            }
             // Self-box stays live when sbx can't confirm it (e.g. skein running outside sbx).
             if live.is_none()
                 && sb.status.is_empty()
@@ -469,6 +479,8 @@ pub struct SbxBox {
 /// `fleet_boxes`) — an N-box fleet paid 1+N subprocess spawns per 2s tick, times open browser tabs.
 static FLEET_CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<Vec<SbxBox>>)>> =
     std::sync::Mutex::new(None);
+static FLEET_LAST_GOOD: std::sync::Mutex<Option<Vec<SbxBox>>> = std::sync::Mutex::new(None);
+static FLEET_DEGRADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Enumerate the fleet from sbx. `None` when sbx can't be consulted (not installed, errored,
 /// unparseable, or hung past the timeout) — callers then fall back to the registry. Override with
@@ -500,13 +512,37 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
     // Bounded: a wedged sbx daemon used to hang this .output() forever — and with it every
     // fleet-snapshot task, accumulating stuck blocking threads until the board went permanently
     // blank. A timeout degrades to the registry fallback instead.
-    let boxes = output_with_timeout(&mut cmd, Duration::from_secs(5))
+    let fresh = output_with_timeout(&mut cmd, Duration::from_secs(5))
         .filter(|o| o.status.success())
-        .map(|o| parse_boxes(&String::from_utf8_lossy(&o.stdout)))
-        .filter(|b| !b.is_empty());
+        .and_then(|o| parse_boxes_checked(&String::from_utf8_lossy(&o.stdout)));
+    // Unit tests deliberately swap the command between cases. Keep their calls isolated; exercise
+    // last-known-good selection through its pure helper below instead of leaking global state.
+    let boxes = if cfg!(test) {
+        fresh
+    } else {
+        let mut last_good = FLEET_LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner());
+        let (resolved, degraded) = resolve_fleet(fresh, &mut last_good);
+        FLEET_DEGRADED.store(degraded, std::sync::atomic::Ordering::Relaxed);
+        resolved
+    };
     *FLEET_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
         Some((std::time::Instant::now(), boxes.clone()));
     boxes
+}
+
+/// A successful response (including an empty fleet) replaces last-known-good. A transport/command/
+/// parse failure reuses last-known-good instead of resurrecting stale registry-only boxes.
+fn resolve_fleet(
+    fresh: Option<Vec<SbxBox>>,
+    last_good: &mut Option<Vec<SbxBox>>,
+) -> (Option<Vec<SbxBox>>, bool) {
+    match fresh {
+        Some(boxes) => {
+            *last_good = Some(boxes.clone());
+            (Some(boxes), false)
+        }
+        None => (last_good.clone(), true),
+    }
 }
 
 /// Run a command with a hard wall-clock bound: kill + reap on expiry, `None` on timeout/spawn
@@ -595,21 +631,41 @@ const LS_WS_KEYS: &[&str] = &[
 /// Parse `sbx ls --json` defensively: tolerate NDJSON (one object per line — a common Docker-CLI
 /// `--json` shape) or a single array / `{sandboxes:[..]}` / `{name:{..}}` document, and varied key
 /// casings. Boxes without a (valid) name are skipped.
+#[cfg(test)]
 fn parse_boxes(json: &str) -> Vec<SbxBox> {
+    parse_boxes_checked(json).unwrap_or_default()
+}
+
+/// Parse a syntactically valid sbx fleet response. `Some([])` is materially different from `None`:
+/// an empty array/map authoritatively says no boxes exist, while `None` means the command output was
+/// not a fleet document and callers may use last-known-good/cold-start fallback.
+fn parse_boxes_checked(json: &str) -> Option<Vec<SbxBox>> {
     use serde_json::Value;
-    // NDJSON first: each non-empty line an object. If that yields <2 objects it isn't NDJSON, so
-    // parse the whole payload as one document instead.
-    let mut entries: Vec<Value> = json
+    let lines = json
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(Value::is_object)
-        .collect();
-    if entries.len() < 2 {
-        if let Ok(v) = serde_json::from_str::<Value>(json) {
-            entries = collect_ls_entries(v);
-        }
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
     }
+    // Multi-line NDJSON is valid only when every line is an object. Do not silently discard an API
+    // error/malformed line and present the remainder as an authoritative fleet.
+    let entries = if lines.len() > 1 {
+        let ndjson = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<Value>(line)
+                    .ok()
+                    .filter(Value::is_object)
+            })
+            .collect::<Option<Vec<_>>>();
+        match ndjson {
+            Some(entries) => entries,
+            None => collect_ls_entries_checked(serde_json::from_str::<Value>(json).ok()?)?,
+        }
+    } else {
+        collect_ls_entries_checked(serde_json::from_str::<Value>(json).ok()?)?
+    };
     let mut out = Vec::new();
     for e in entries {
         let obj = match e.as_object() {
@@ -652,7 +708,7 @@ fn parse_boxes(json: &str) -> Vec<SbxBox> {
             dir,
         });
     }
-    out
+    Some(out)
 }
 
 /// Pick the repo workspace from a box's `workspaces` value: the path that isn't the shared `.claude`
@@ -690,25 +746,39 @@ fn git_branch_for(dir: &str) -> Option<String> {
 
 /// Reduce a single `sbx ls --json` document to a flat list of per-box objects, covering an array,
 /// an `{key: [..]}` wrapper, or a `{name: {..}}` map (the box name is injected as `name`).
-fn collect_ls_entries(v: serde_json::Value) -> Vec<serde_json::Value> {
+fn collect_ls_entries_checked(v: serde_json::Value) -> Option<Vec<serde_json::Value>> {
     use serde_json::Value;
     match v {
-        Value::Array(a) => a,
+        Value::Array(a) => Some(a),
         Value::Object(o) => {
-            if let Some(arr) = o.values().find_map(Value::as_array) {
-                return arr.clone();
+            if o.is_empty() {
+                return Some(vec![]);
             }
-            o.into_iter()
-                .filter_map(|(k, mut val)| match val {
-                    Value::Object(ref mut m) => {
-                        m.insert("name".into(), Value::String(k));
-                        Some(val)
-                    }
-                    _ => None,
-                })
-                .collect()
+            if LS_NAME_KEYS
+                .iter()
+                .any(|key| o.get(*key).and_then(Value::as_str).is_some())
+            {
+                return Some(vec![Value::Object(o)]); // one-line NDJSON with exactly one box
+            }
+            if let Some(arr) = o.values().find_map(Value::as_array) {
+                return Some(arr.clone());
+            }
+            if !o.values().all(Value::is_object) {
+                return None; // e.g. {"error":"API error"} is not an empty fleet
+            }
+            Some(
+                o.into_iter()
+                    .filter_map(|(k, mut val)| match val {
+                        Value::Object(ref mut m) => {
+                            m.insert("name".into(), Value::String(k));
+                            Some(val)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            )
         }
-        _ => vec![],
+        _ => None,
     }
 }
 
@@ -1213,9 +1283,14 @@ pub fn health_report() -> HealthReport {
         },
     };
     let fleet = fleet_boxes();
+    let fleet_degraded = FLEET_DEGRADED.load(std::sync::atomic::Ordering::Relaxed);
     let sbx = HealthCheck {
-        ok: program_on_path("sbx") && fleet.is_some(),
+        ok: program_on_path("sbx") && fleet.is_some() && !fleet_degraded,
         detail: match &fleet {
+            Some(boxes) if fleet_degraded => format!(
+                "`sbx ls` temporarily unavailable; showing last successful snapshot ({} boxes)",
+                boxes.len()
+            ),
             Some(boxes) => format!("available ({} boxes)", boxes.len()),
             None if program_on_path("sbx") => "installed, but `sbx ls` failed or timed out".into(),
             None => "not found on PATH".into(),
@@ -5068,6 +5143,10 @@ mod tests {
         // A single JSON array document with a workspace path.
         let arr = r#"[{"name":"x","state":"running","workspace":"/repo/x"}]"#;
         assert_eq!(by_name(&parse_boxes(arr), "x").dir, "/repo/x");
+        assert_eq!(
+            by_name(&parse_boxes(r#"{"name":"solo","status":"running"}"#), "solo").live,
+            Some(Liveness::Running)
+        );
 
         // A name-keyed object map: {name: {..}}.
         let obj = r#"{"z":{"status":"running"}}"#;
@@ -5076,9 +5155,13 @@ mod tests {
             Some(Liveness::Running)
         );
 
-        // Garbage / empty → no boxes, so fleet_boxes() returns None and the caller falls back.
+        // Garbage is unavailable; a valid empty document is authoritative.
         assert!(parse_boxes("not json").is_empty());
         assert!(parse_boxes("[]").is_empty());
+        assert!(parse_boxes_checked("not json").is_none());
+        assert_eq!(parse_boxes_checked("[]").unwrap().len(), 0);
+        assert_eq!(parse_boxes_checked(r#"{"sandboxes":[]}"#).unwrap().len(), 0);
+        assert!(parse_boxes_checked(r#"{"error":"API error"}"#).is_none());
         // Invalid names are skipped.
         assert!(parse_boxes(r#"[{"name":"../escape","status":"running"}]"#).is_empty());
     }
@@ -5110,6 +5193,31 @@ mod tests {
             Some(Liveness::Stopped)
         );
         assert_eq!(by_name(&v, "thing-master").dir, "/x/thing");
+    }
+
+    #[test]
+    fn transient_fleet_failure_reuses_last_good_and_empty_success_replaces_it() {
+        let box_ = SbxBox {
+            name: "live-box".into(),
+            agent: "codex".into(),
+            live: Some(Liveness::Running),
+            dir: "/work".into(),
+        };
+        let mut last_good = None;
+        let (fresh, degraded) = resolve_fleet(Some(vec![box_]), &mut last_good);
+        assert_eq!(fresh.unwrap().len(), 1);
+        assert!(!degraded);
+
+        let (retained, degraded) = resolve_fleet(None, &mut last_good);
+        assert_eq!(retained.unwrap()[0].name, "live-box");
+        assert!(degraded);
+
+        let (empty, degraded) = resolve_fleet(Some(vec![]), &mut last_good);
+        assert!(empty.unwrap().is_empty());
+        assert!(!degraded);
+        let (retained_empty, degraded) = resolve_fleet(None, &mut last_good);
+        assert!(retained_empty.unwrap().is_empty());
+        assert!(degraded);
     }
 
     #[test]
@@ -6198,7 +6306,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             &reg,
             format!(
                 r#"{{"thing-self":{{"branch":"s","dir":"/d","lastSeen":"{}","status":""}},
-                    "thing-other":{{"branch":"o","dir":"/d","lastSeen":"{}","status":""}}}}"#,
+                    "thing-other":{{"branch":"o","dir":"/d","lastSeen":"{}","status":"error"}}}}"#,
                 secs_ago(7200),
                 secs_ago(7200)
             ),
@@ -6215,7 +6323,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let self_v = v.iter().find(|b| b.name == "thing-self").unwrap();
         let other_v = v.iter().find(|b| b.name == "thing-other").unwrap();
         assert_eq!(self_v.state, "live"); // promoted despite a 2h-old lastSeen
-        assert_eq!(other_v.state, "stale"); // a peer is never promoted
+        assert_eq!(other_v.state, "stale"); // stale sticky error cannot resurrect a dead peer
 
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_SELF");
@@ -6253,6 +6361,36 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(
             !v.iter().any(|b| b.name == "thing-ghost"),
             "a destroyed box that sbx no longer lists must not linger on the board"
+        );
+
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn load_views_treats_successful_empty_sbx_fleet_as_authoritative() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"dead-box":{{"branch":"old","dir":"/d","lastSeen":"{}","status":"error"}}}}"#,
+                secs_ago(86_400)
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+        env::remove_var("SKEIN_SELF");
+        env::set_var("SKEIN_LS_CMD", "printf '[]'");
+
+        assert!(
+            !load_views()
+                .unwrap()
+                .iter()
+                .any(|view| view.name == "dead-box"),
+            "a valid empty sbx response must not resurrect a registry-only box"
         );
 
         env::remove_var("SKEIN_LS_CMD");
