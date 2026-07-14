@@ -4100,6 +4100,7 @@ const PROBE_SESSION_SH: &str = include_str!("probe/box-session.sh");
 // default status line. They live in `<store>/skein/bin/` (skein-owned namespace), refreshed each run.
 const BOOTSTRAP_SH: &str = include_str!("store/sandbox-bootstrap.sh");
 const SHARED_HOME_SH: &str = include_str!("store/shared-home.sh");
+const SHARED_HOME_GUIDE: &str = include_str!("store/SHARED-HOME.md");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
 const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 // Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
@@ -4140,6 +4141,7 @@ fn probe_revision() -> String {
         MAILBOX_SH,
         STATUSLINE_SH,
         SHARED_HOME_SH,
+        SHARED_HOME_GUIDE,
     ] {
         for byte in body.as_bytes() {
             hash ^= u64::from(*byte);
@@ -4209,6 +4211,11 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     write_atomic(&settings, store, &bytes)?;
 
     let skein_dir = store.join("skein");
+    write_atomic(
+        &skein_dir.join("SHARED-HOME.md"),
+        &skein_dir,
+        SHARED_HOME_GUIDE.as_bytes(),
+    )?;
     write_atomic(
         &skein_dir.join("probe-revision"),
         &skein_dir,
@@ -5434,6 +5441,7 @@ mod tests {
             "skein/bin/box-handoff.sh",
             "skein/bin/sandbox-bootstrap.sh",
             "skein/bin/shared-home.sh",
+            "skein/SHARED-HOME.md",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
         ] {

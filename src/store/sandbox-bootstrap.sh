@@ -33,6 +33,7 @@ shared_home="$store/skein/bin/shared-home.sh"
   exit 1
 }
 bash "$shared_home" "$store" || exit 1
+echo "[skein] Durable project files are live at $HOME/shared across this repo's Claude/Codex boxes. Use it for reference documents, samples, and working notes; real HOME remains private. Guide: $root/.claude/skein/SHARED-HOME.md"
 
 vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
 vmid="${vmid//\//-}"
