@@ -3836,11 +3836,12 @@ fn agent_attach_argv(
     } else {
         ""
     };
+    let instruction = agent_instruction_setup(runtime);
     let shell = format!(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
          {setup}; \
-         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then {update}; tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
+         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then {instruction}; {update}; tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then tmux set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
          {TMUX_CONFIGURE}exec tmux -u attach-session -t {tmux_name}",
         setup = runtime.interactive_setup,
@@ -3854,6 +3855,16 @@ fn agent_attach_argv(
         "-lc".into(),
         shell,
     ]
+}
+
+/// Refresh the concise Skein-managed block in a runtime's native durable instruction file before
+/// creating its agent process. Reattaching to a live tmux session skips this entire branch.
+fn agent_instruction_setup(runtime: &RuntimeAdapter) -> String {
+    let instruction = sh_quote(runtime.instruction_file);
+    let override_ = sh_quote(runtime.instruction_override);
+    format!(
+        r#"root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi; helper="$store/skein/bin/agent-guide.sh"; if [ -r "$helper" ]; then bash "$helper" "$store" {instruction} {override_} || echo 'skein: durable agent guidance could not be refreshed' >&2; else echo 'skein: agent guide helper is unavailable; restart the host server to refresh this store' >&2; fi"#
+    )
 }
 
 fn agent_session_name(name: &str, runtime: &str) -> String {
@@ -6526,6 +6537,12 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(codex.last().unwrap().contains("resume --last"));
         assert!(codex.last().unwrap().contains("--no-alt-screen"));
         assert!(codex.last().unwrap().contains("timeout 120 codex update"));
+        assert!(codex.last().unwrap().contains("agent-guide.sh"));
+        assert!(
+            codex.last().unwrap().find("agent-guide.sh").unwrap()
+                < codex.last().unwrap().find("tmux new-session").unwrap(),
+            "durable instructions must be installed before Codex starts"
+        );
         // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
         assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
