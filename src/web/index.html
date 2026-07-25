@@ -221,6 +221,8 @@
   /* ---- terminal dock (persistent multi-session) ---- */
   #dock { display:none; flex-direction:column; background:var(--inset); border-left:1px solid var(--border-2); }
   body.docked #dock { display:flex; flex:1 1 0; min-width:0; }
+  /* dragging files over a fleet row: ring the row it would attach to */
+  #fleet [data-name].dropping { box-shadow:inset 0 0 0 2px var(--accent); border-radius:8px; }
   /* dragging files over the dock: an inset ring + label, so it's clear the drop lands in *this* box */
   #dock.dropping { position:relative; }
   #dock.dropping::after { content:"drop to attach — files or a folder go into this box"; position:absolute; inset:0;
@@ -2232,6 +2234,11 @@ function cycleSession(d) {
 // the directory alone.
 const MAX_ATTACH = 200;            // per drop — a stray Downloads folder shouldn't upload for an hour
 let attachSeq = 0;
+// Append, never overwrite: two drops onto a still-connecting terminal must both survive to onopen.
+function concatBytes(a, b) {
+  if (!a) return b;
+  const out = new Uint8Array(a.length + b.length); out.set(a); out.set(b, a.length); return out;
+}
 
 // Turn a DataTransferItem list into [{rel, file}], expanding dropped directories (webkitGetAsEntry is
 // the only way a browser exposes a folder's contents; `rel` keeps each file's path inside it).
@@ -2265,12 +2272,21 @@ async function collectEntries(items) {
   return out;
 }
 
+// Show `box`'s terminal and return its session id. Called *before* the uploads so the socket is
+// connecting while bytes move, and so a drop made on the diff tab, on a fleet row, or with no session
+// open still ends up in the agent's prompt instead of being refused.
+function ensureTerminal(box) {
+  if (view.box === box && view.mode === "term") return activeSid();
+  openTerminal(box);
+  return sidOf(box, "agent");
+}
+
 // Upload every file of one drop, then paste the resulting in-box path(s) into the box's terminal.
 async function attachFiles(box, files, dropped) {
   if (!files.length) { toast("nothing to attach"); return; }
   if (dropped > files.length)                       // never let a cap look like full coverage
     toast(`attaching the first ${files.length} of ${dropped} files`);
-  const ses = activeSession();
+  const sid = ensureTerminal(box);
   const batch = Date.now().toString(36) + "-" + (attachSeq++).toString(36);
   const many = files.length > 1;
   toast(many ? `uploading ${files.length} files…` : "uploading " + files[0].rel + "…");
@@ -2305,9 +2321,11 @@ async function attachFiles(box, files, dropped) {
   // The separating space goes *after* the closing marker, as a keystroke: inside the paste it becomes
   // part of the pasted text and a provider matching "the paste is a path" stops recognising it.
   const text = [...dirs, ...loose].join(" ");
-  if (ses && ses.ws.readyState === 1)
-    ses.ws.send(new TextEncoder().encode("\x1b[200~" + text + "\x1b[201~ "));
-  else { copyText(text); toast("no live terminal — paths copied to clipboard"); }
+  const payload = new TextEncoder().encode("\x1b[200~" + text + "\x1b[201~ ");
+  const s = sessions.get(sid);
+  if (s && s.ws.readyState === 1) s.ws.send(payload);
+  else if (s) s.pending = concatBytes(s.pending, payload);   // still connecting: onopen flushes it
+  else { copyText(text); toast("no terminal for " + box + " — paths copied to clipboard"); return; }
   toast((failed ? `${paths.length} attached, ${failed} failed → ` : "attached → ") + text);
 }
 
@@ -2321,35 +2339,40 @@ document.addEventListener("paste", e => {
   collectEntries(fileItems).then(files => attachFiles(box, files, files.length));
 }, true);
 
-// Drag-and-drop onto the dock: same path as paste, and the only way to hand over a folder.
+// Drag-and-drop: the same path as paste, and the only way to hand over a folder. Handled at the
+// document, not just the dock — a drop that lands slightly off (the fleet rail, the gutter, the diff
+// tab) must still attach rather than silently do nothing, and it must never be left to the browser,
+// which treats a file drop as navigation and would replace the cockpit with the file.
 (function () {
-  const dock = document.getElementById("dock");
-  let depth = 0;
-  const clear = () => { depth = 0; dock.classList.remove("dropping"); };
+  let depth = 0, hot = null;
   const isFiles = e => [...(e.dataTransfer?.types || [])].includes("Files");
-  const live = () => view.mode === "term" && view.box;
-  dock.addEventListener("dragenter", e => {
+  // A fleet row targets *that* box (drop straight onto the box you mean); anywhere else targets the
+  // box the dock is already showing.
+  const target = e => e.target?.closest?.("#fleet [data-name]")?.dataset.name || view.box || null;
+  const mark = el => {
+    if (hot === el) return;
+    hot?.classList.remove("dropping");
+    hot = el; el?.classList.add("dropping");
+  };
+  const clear = () => { depth = 0; mark(null); };
+  document.addEventListener("dragenter", e => {
     if (!isFiles(e)) return;
-    e.preventDefault(); depth++; if (live()) dock.classList.add("dropping");
+    e.preventDefault(); depth++;
+    const row = e.target?.closest?.("#fleet [data-name]");
+    mark(row || (target(e) ? document.getElementById("dock") : null));
   });
-  dock.addEventListener("dragover", e => {
+  document.addEventListener("dragover", e => {
     if (!isFiles(e)) return;
-    // preventDefault on *every* file dragover, not just an attachable one: without it the browser
-    // treats the drop as navigation and replaces the cockpit with the dropped file.
-    e.preventDefault(); e.dataTransfer.dropEffect = live() ? "copy" : "none";
+    e.preventDefault(); e.dataTransfer.dropEffect = target(e) ? "copy" : "none";
   });
-  dock.addEventListener("dragleave", () => { if (depth > 0 && --depth <= 0) clear(); });
-  dock.addEventListener("drop", e => {
+  document.addEventListener("dragleave", e => { if (isFiles(e) && depth > 0 && --depth <= 0) clear(); });
+  document.addEventListener("drop", e => {
     if (!isFiles(e)) return;
     e.preventDefault(); clear();
-    if (!live()) { toast("open the box's terminal tab to attach files"); return; }
-    const box = view.box;
+    const box = target(e);
+    if (!box) { toast("open a box first — a drop attaches to the box you're looking at"); return; }
     collectEntries([...(e.dataTransfer.items || [])]).then(files => attachFiles(box, files, files.length));
   });
-  // Same navigation guard for everywhere else on the page (the fleet rail, the gutter, a modal): a
-  // stray drop should be a no-op, never "goodbye cockpit, hello file:// view".
-  for (const type of ["dragover", "drop"])
-    document.addEventListener(type, e => { if (isFiles(e)) e.preventDefault(); });
 })();
 
 // Attach button (dockbar) — a file picker for touch/remote use where dragging isn't possible.
