@@ -2247,15 +2247,27 @@ async function collectEntries(items) {
   const entries = [];
   for (const it of items) {
     if (it.kind !== "file") continue;
+    // Read both now: a clipboard/drag item is neutered the moment this event's handler returns, so
+    // nothing after the first `await` below can come back for it.
     const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
-    if (entry) entries.push(entry);
-    else { const f = it.getAsFile(); if (f) out.push({ rel: f.name || "paste", file: f }); }
+    const file = it.getAsFile();
+    // Only a *folder* needs the entry API. For a plain file getAsFile() is the read that works
+    // everywhere: some browsers hand back an entry for a pasted or copied file whose .file() then
+    // fails, and preferring the entry is what made a pasted screenshot attach nothing at all.
+    if (file && !(entry && entry.isDirectory)) out.push({ rel: file.name || (entry && entry.name) || "paste", file });
+    else if (entry) entries.push(entry);
   }
   const walk = async (entry, prefix) => {
     if (out.length >= MAX_ATTACH) return;
     const rel = prefix ? prefix + "/" + entry.name : entry.name;
     if (entry.isFile) {
-      const file = await new Promise(res => entry.file(res, () => res(null)));
+      // Timed: .file() only builds the File object, so it is quick when it answers at all — but a
+      // callback that never fires would hang the whole attach silently.
+      const file = await new Promise(res => {
+        const t = setTimeout(() => res(null), 5000);
+        const done = f => { clearTimeout(t); res(f); };
+        entry.file(done, () => done(null));
+      });
       if (file) out.push({ rel, file });
       return;
     }
@@ -2336,7 +2348,13 @@ document.addEventListener("paste", e => {
   if (!fileItems.length) return;              // plain text → let xterm handle the paste
   e.preventDefault(); e.stopPropagation();    // don't let xterm paste binary as text
   const box = view.box;
-  collectEntries(fileItems).then(files => attachFiles(box, files, files.length));
+  // Same list by another road, taken here and now while the event is still live: if the item reads
+  // come back empty (they are the fussier API), a pasted file is still attached rather than dropped.
+  const direct = [...(e.clipboardData.files || [])].map(f => ({ rel: f.name || "paste", file: f }));
+  collectEntries(fileItems).then(files => {
+    const use = files.length ? files : direct;
+    attachFiles(box, use, use.length);
+  });
 }, true);
 
 // Drag-and-drop: the same path as paste, and the only way to hand over a folder. Handled at the
