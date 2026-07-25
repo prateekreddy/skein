@@ -1196,8 +1196,14 @@ static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         instruction_file: ".claude/CLAUDE.md",
         instruction_override: "",
         interactive_start: "claude",
-        interactive_resume: "claude --continue",
-        headless_resume: "claude --continue --print {prompt}",
+        // `|| claude` is not belt-and-braces: a box can legitimately have nothing to continue — a
+        // cross-runtime replacement box whose new agent was never spoken to, a box whose transcript
+        // was cleared, a session killed before its first turn. There `claude --continue` exits with
+        // "No conversation found", the tmux session dies with it, and every reconnect replayed that
+        // same failure. Fall back to a fresh conversation (the takeover brief is on disk, so the new
+        // agent still picks up the context). Mirrors Codex's `resume --last || codex` below.
+        interactive_resume: "claude --continue || claude",
+        headless_resume: "claude --continue --print {prompt} || claude --print {prompt}",
         context_export: r####"project="$HOME/.claude/projects/$(printf '%s' "$root" | sed 's#/#-#g')"; latest="$(find "$project" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'def text: if type == "string" then . elif type == "array" then map(if type == "string" then . elif .type == "text" then (.text // empty) else empty end) | join("\n") else "" end; select(.type == "user" or .type == "assistant") | (.message.role // .type) as $role | ((.message.content // empty) | text) as $body | select($body != "") | "### \($role)\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
     RuntimeAdapter {
@@ -3926,7 +3932,7 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         runtime.info.executable,
         runtime.interactive_setup,
         runtime.update_before_start,
-        runtime.interactive_start,
+        guarded_agent_command(runtime.info.id, runtime.interactive_start),
     );
     sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
 }
@@ -3995,6 +4001,7 @@ fn agent_attach_argv(
         ""
     };
     let instruction = agent_instruction_setup(runtime);
+    let command = guarded_agent_command(agent, command);
     let shell = format!(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
@@ -4013,6 +4020,18 @@ fn agent_attach_argv(
         "-lc".into(),
         shell,
     ]
+}
+
+/// Wrap the command that becomes a tmux session's agent process so a *failure to start* leaves the
+/// window alive as a shell with the provider's error still on screen. Without it the window exits
+/// instantly and the attach right behind it dies on tmux's own "can't find session", the real cause
+/// already scrolled away — the shape the cross-runtime replacement path kept hitting.
+/// Contains no `$`: this string is embedded double-quoted in the outer shell, which would expand a
+/// variable itself instead of leaving it for tmux's shell.
+fn guarded_agent_command(agent: &str, command: &str) -> String {
+    format!(
+        "{command} || {{ echo; echo 'skein: {agent} could not start — see the error above; keeping this session as a shell'; exec bash -li; }}"
+    )
 }
 
 /// Refresh the concise Skein-managed block in a runtime's native durable instruction file before
@@ -6774,13 +6793,26 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             .last()
             .unwrap()
             .contains("tmux new-session -d -s skein-agent"));
-        assert!(first.last().unwrap().contains(r#""claude""#));
+        assert!(first.last().unwrap().contains(r#""claude ||"#));
         assert!(!first.last().unwrap().contains("--continue"));
+        // a start that fails outright holds the session open as a shell instead of vanishing and
+        // leaving the next attach to die on tmux's "can't find session".
+        for cmd in [a.last().unwrap(), first.last().unwrap()] {
+            assert!(cmd.contains("keeping this session as a shell"));
+        }
+        // the guard is embedded double-quoted in the outer shell, so it must hold no variable for
+        // that shell to expand before tmux ever sees it.
+        let guard = guarded_agent_command("claude", "claude --continue");
+        assert!(guard.starts_with("claude --continue || {"));
+        assert!(!guard.contains('$'), "{guard}");
         assert!(first.last().unwrap().contains("waiting for box setup"));
         assert!(!a.last().unwrap().contains("waiting for box setup"));
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
-        assert_eq!(agent_resume_cmd("claude"), "claude --continue");
+        // Both real runtimes fall back to a fresh conversation: a replacement/cleared box has no
+        // transcript, and without the fallback "No conversation found" killed the session on attach.
+        assert_eq!(agent_resume_cmd("claude"), "claude --continue || claude");
         assert!(agent_resume_cmd("codex").contains("resume --last"));
+        assert!(agent_resume_cmd("codex").contains("||"));
         assert_eq!(agent_resume_cmd("shell"), "shell");
         let codex = attach_argv_as("thing-x", "/d", "codex");
         assert!(codex.last().unwrap().contains("skein-agent-codex"));
