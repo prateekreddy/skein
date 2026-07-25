@@ -221,6 +221,12 @@
   /* ---- terminal dock (persistent multi-session) ---- */
   #dock { display:none; flex-direction:column; background:var(--inset); border-left:1px solid var(--border-2); }
   body.docked #dock { display:flex; flex:1 1 0; min-width:0; }
+  /* dragging files over the dock: an inset ring + label, so it's clear the drop lands in *this* box */
+  #dock.dropping { position:relative; }
+  #dock.dropping::after { content:"drop to attach — files or a folder go into this box"; position:absolute; inset:0;
+          z-index:40; display:flex; align-items:center; justify-content:center; pointer-events:none;
+          font-size:13px; color:var(--text); background:color-mix(in srgb, var(--accent) 12%, transparent);
+          box-shadow:inset 0 0 0 2px var(--accent); }
   .tabs { display:flex; align-items:stretch; gap:0; border-bottom:1px solid var(--border); background:var(--panel);
           overflow-x:auto; scrollbar-width:thin; }
   .tab { display:flex; align-items:center; gap:8px; padding:9px 12px; cursor:pointer; white-space:nowrap;
@@ -1238,6 +1244,7 @@ function renderDockbar() {
          <button data-m="files" class="${m==='files'?'on':''}">Files</button>
        </div>`
     + `<div class="dock-right">`
+    + (m==='term' ? `<button class="kbtn ghost" id="dattach" title="attach files or a folder for the agent to read (or just paste / drag them onto the terminal)"><svg class="ic" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>` : "")
     + (otherRuntime ? `<button class="kbtn ghost" id="dtake" title="create a lightweight ${esc(otherLabel)} replacement; preserve this source as rollback">↔ ${esc(otherLabel)}</button>` : "")
     + (m==='diff' ? `<button class="kbtn ghost" id="dref" title="refresh diff"><svg class="ic" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>` : "")
     + (hasReview
@@ -1253,6 +1260,8 @@ function renderDockbar() {
   dockbar.querySelector('[data-m=diff]').onclick = () => openDiff(view.box);
   dockbar.querySelector('[data-m=files]').onclick = () => openFiles(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
+  // plain click = files, shift-click = a whole folder (the picker can only do one or the other).
+  const at = dockbar.querySelector("#dattach"); if (at) at.onclick = e => pickAttachment(e.shiftKey);
   const takeover = dockbar.querySelector("#dtake"); if (takeover) takeover.onclick = () => takeOver(view.box, otherRuntime);
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
   const restart = dockbar.querySelector("#drestart"); if (restart) restart.onclick = () => restartAgent(view.box);
@@ -2214,31 +2223,150 @@ function cycleSession(d) {
   showBox(ns.box, "term", ns.kind);
 }
 
-// ---------- image paste ----------
-// The agent runs inside the sandbox and can't see your clipboard, so a pasted image is uploaded into
-// the box (server streams it to /tmp via sbx exec) and its path is typed into the active terminal for
-// the agent to read. Text paste is untouched — it flows through to xterm as before.
+// ---------- attachments: paste · drag-and-drop · attach button ----------
+// The agent runs inside the sandbox and can't see your clipboard or your disk, so anything you want
+// it to look at — screenshot, PDF, spreadsheet, video, a whole folder of samples — is uploaded into
+// the box (the server streams it to /tmp/skein-drop-<batch>/ via sbx exec) and its in-box path is
+// pasted into the active terminal for the agent to open. Text paste is untouched: it flows through to
+// xterm as before. One drop = one batch dir, so a folder keeps its structure and can be referenced by
+// the directory alone.
+const MAX_ATTACH = 200;            // per drop — a stray Downloads folder shouldn't upload for an hour
+let attachSeq = 0;
+
+// Turn a DataTransferItem list into [{rel, file}], expanding dropped directories (webkitGetAsEntry is
+// the only way a browser exposes a folder's contents; `rel` keeps each file's path inside it).
+async function collectEntries(items) {
+  const out = [];
+  const entries = [];
+  for (const it of items) {
+    if (it.kind !== "file") continue;
+    const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+    if (entry) entries.push(entry);
+    else { const f = it.getAsFile(); if (f) out.push({ rel: f.name || "paste", file: f }); }
+  }
+  const walk = async (entry, prefix) => {
+    if (out.length >= MAX_ATTACH) return;
+    const rel = prefix ? prefix + "/" + entry.name : entry.name;
+    if (entry.isFile) {
+      const file = await new Promise(res => entry.file(res, () => res(null)));
+      if (file) out.push({ rel, file });
+      return;
+    }
+    const reader = entry.createReader();
+    // readEntries returns at most ~100 per call — keep reading until it comes back empty.
+    for (;;) {
+      const chunk = await new Promise(res => reader.readEntries(res, () => res([])));
+      if (!chunk.length) break;
+      for (const child of chunk) await walk(child, rel);
+      if (out.length >= MAX_ATTACH) break;
+    }
+  };
+  for (const entry of entries) await walk(entry, "");
+  return out;
+}
+
+// Upload every file of one drop, then paste the resulting in-box path(s) into the box's terminal.
+async function attachFiles(box, files, dropped) {
+  if (!files.length) { toast("nothing to attach"); return; }
+  if (dropped > files.length)                       // never let a cap look like full coverage
+    toast(`attaching the first ${files.length} of ${dropped} files`);
+  const ses = activeSession();
+  const batch = Date.now().toString(36) + "-" + (attachSeq++).toString(36);
+  const many = files.length > 1;
+  toast(many ? `uploading ${files.length} files…` : "uploading " + files[0].rel + "…");
+  const paths = [];
+  let failed = 0, dir = null;
+  for (let i = 0; i < files.length; i++) {
+    const { rel, file } = files[i];
+    if (many && i && i % 10 === 0) toast(`uploading ${i}/${files.length}…`);
+    try {
+      const r = await fetch(`/api/boxes/${encodeURIComponent(box)}/upload`, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream",
+                   "X-Skein-Drop": batch, "X-Skein-Name": encodeURIComponent(rel) },
+        body: file });
+      const d = await r.json();
+      if (d.ok) { paths.push(d.path); dir = dir || d.path.split("/").slice(0, 3).join("/"); }
+      else { failed++; if (failed === 1) toast("attach failed: " + (d.error||"").split("\n")[0]); }
+    } catch { failed++; }
+  }
+  if (!paths.length) { toast("attach failed"); return; }
+  // Collapse each attached *folder* to its directory — one path beats three hundred, and the agent can
+  // list it itself. Derived from the paths the server returned (it sanitises names), not from the local
+  // names, so what we hand over is exactly what exists in the box.
+  const dirs = new Set(), loose = [];
+  for (const p of paths) {
+    const rest = dir && p.startsWith(dir + "/") ? p.slice(dir.length + 1) : "";
+    if (rest.includes("/")) dirs.add(dir + "/" + rest.split("/")[0]); else loose.push(p);
+  }
+  // Claude Code only auto-detects an image path when it arrives as a *paste*, so send it via bracketed
+  // paste rather than typing — that's what turns it into an inline [Image #N], and it's equally what
+  // Codex reads as a file reference.
+  // The separating space goes *after* the closing marker, as a keystroke: inside the paste it becomes
+  // part of the pasted text and a provider matching "the paste is a path" stops recognising it.
+  const text = [...dirs, ...loose].join(" ");
+  if (ses && ses.ws.readyState === 1)
+    ses.ws.send(new TextEncoder().encode("\x1b[200~" + text + "\x1b[201~ "));
+  else { copyText(text); toast("no live terminal — paths copied to clipboard"); }
+  toast((failed ? `${paths.length} attached, ${failed} failed → ` : "attached → ") + text);
+}
+
 document.addEventListener("paste", e => {
   if (view.mode !== "term" || !view.box) return;
   const items = e.clipboardData && e.clipboardData.items; if (!items) return;
-  const item = [...items].find(it => it.kind === "file" && it.type.startsWith("image/"));
-  if (!item) return;                         // not an image → let xterm handle the (text) paste
-  const file = item.getAsFile(); if (!file) return;
-  e.preventDefault(); e.stopPropagation();   // don't let xterm paste binary as text
-  const box = view.box, ses = activeSession();
-  toast("uploading image…");
-  fetch(`/api/boxes/${encodeURIComponent(box)}/paste-image`,
-        { method:"POST", headers:{ "Content-Type": file.type || "image/png" }, body: file })
-    .then(r => r.json()).then(d => {
-      if (d.ok) {
-        // Claude Code auto-detects an image path only when it arrives as a *paste*, so send it via
-        // bracketed paste (not raw typing) — that's what converts it to an inline [Image #N].
-        if (ses && ses.ws.readyState === 1)
-          ses.ws.send(new TextEncoder().encode("\x1b[200~" + d.path + "\x1b[201~ "));
-        toast("image added → " + d.path);
-      } else toast("image upload failed: " + (d.error||"").split("\n")[0]);
-    }).catch(() => toast("image upload failed"));
+  const fileItems = [...items].filter(it => it.kind === "file");
+  if (!fileItems.length) return;              // plain text → let xterm handle the paste
+  e.preventDefault(); e.stopPropagation();    // don't let xterm paste binary as text
+  const box = view.box;
+  collectEntries(fileItems).then(files => attachFiles(box, files, files.length));
 }, true);
+
+// Drag-and-drop onto the dock: same path as paste, and the only way to hand over a folder.
+(function () {
+  const dock = document.getElementById("dock");
+  let depth = 0;
+  const clear = () => { depth = 0; dock.classList.remove("dropping"); };
+  const isFiles = e => [...(e.dataTransfer?.types || [])].includes("Files");
+  const live = () => view.mode === "term" && view.box;
+  dock.addEventListener("dragenter", e => {
+    if (!isFiles(e)) return;
+    e.preventDefault(); depth++; if (live()) dock.classList.add("dropping");
+  });
+  dock.addEventListener("dragover", e => {
+    if (!isFiles(e)) return;
+    // preventDefault on *every* file dragover, not just an attachable one: without it the browser
+    // treats the drop as navigation and replaces the cockpit with the dropped file.
+    e.preventDefault(); e.dataTransfer.dropEffect = live() ? "copy" : "none";
+  });
+  dock.addEventListener("dragleave", () => { if (depth > 0 && --depth <= 0) clear(); });
+  dock.addEventListener("drop", e => {
+    if (!isFiles(e)) return;
+    e.preventDefault(); clear();
+    if (!live()) { toast("open the box's terminal tab to attach files"); return; }
+    const box = view.box;
+    collectEntries([...(e.dataTransfer.items || [])]).then(files => attachFiles(box, files, files.length));
+  });
+  // Same navigation guard for everywhere else on the page (the fleet rail, the gutter, a modal): a
+  // stray drop should be a no-op, never "goodbye cockpit, hello file:// view".
+  for (const type of ["dragover", "drop"])
+    document.addEventListener(type, e => { if (isFiles(e)) e.preventDefault(); });
+})();
+
+// Attach button (dockbar) — a file picker for touch/remote use where dragging isn't possible.
+// `webkitdirectory` is how a browser lets you pick a whole folder; shift-click chooses that mode.
+function pickAttachment(folder) {
+  const box = view.box; if (!box) return;
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.multiple = true;
+  if (folder) { inp.webkitdirectory = true; inp.directory = true; }
+  inp.onchange = () => {
+    const picked = [...inp.files];
+    // webkitRelativePath is "<folder>/…" for a folder pick, so the box mirrors the same tree.
+    const files = picked.slice(0, MAX_ATTACH).map(f => ({ rel: f.webkitRelativePath || f.name, file: f }));
+    attachFiles(box, files, picked.length);
+  };
+  inp.click();
+}
 
 // ---------- resizable fleet sidebar ----------
 // Drag the gutter to set --fleet-w (the docked fleet width); persisted across reloads. Keeps the

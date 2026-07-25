@@ -29,7 +29,17 @@ axum = { version = "0.7", features = ["ws"] }
 # without it Nagle's algorithm coalesces single-keystroke packets and the terminal echo stutters.
 hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
 tower = { version = "0.5" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "sync",
+    # attachment uploads stream from the socket into `sbx exec`'s stdin — async child + async writes,
+    # so a multi-GB video never lands in host memory.
+    "process",
+    "io-util",
+] }
 tokio-stream = { version = "0.1", features = ["time"] }
 # reuse the wheel: wezterm's PTY layer for the embedded terminal (xterm.js handles the browser side)
 portable-pty = "0.8"

@@ -34,6 +34,30 @@ fn http_get(addr: &str, path: &str) -> (u16, String) {
     (status, text)
 }
 
+/// One POST with a raw body + headers → (status, full raw response).
+fn http_post(addr: &str, path: &str, headers: &str, body: &[u8]) -> (u16, String) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.write_all(
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n",
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    s.write_all(body).unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).unwrap();
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .unwrap();
+    (status, text)
+}
+
 /// Kill the server when the test ends, however it ends.
 struct Kid(Child);
 impl Drop for Kid {
@@ -97,6 +121,45 @@ fn server_serves_ui_vendor_and_guards_routes() {
 
     let (st, _) = http_get(&addr, "/api/boxes/x..y/diff");
     assert_eq!(st, 400, "path-traversal name must be rejected");
+
+    // Attachments: the route is wired for any content type (not just images) and rejects a bad box
+    // name before it can stream a byte into a sandbox. `sbx` is never invoked here.
+    let (st, body) = http_post(
+        &addr,
+        "/api/boxes/x..y/upload",
+        "Content-Type: video/mp4\r\nX-Skein-Name: clip.mp4\r\nX-Skein-Drop: b1\r\n",
+        b"\0\0not-really-a-video",
+    );
+    assert_eq!(st, 200);
+    assert!(
+        body.contains("invalid box name"),
+        "upload must guard the name: {body}"
+    );
+
+    // The default 2 MB body cap must be off on that route — a screenshot, let alone a video, is
+    // bigger. axum rejects an over-cap upload from Content-Length alone, before the handler runs, so
+    // announcing 3 MB and sending nothing is enough: with the cap this answers 413 immediately;
+    // without it the request is either still waiting for the body or already failed on the *box*.
+    // (Announce-only, so the test never races a 3 MB write against an early error response.)
+    let mut s = TcpStream::connect(&addr).unwrap();
+    s.write_all(
+        format!(
+            "POST /api/boxes/thing-a/upload HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+             Content-Type: application/octet-stream\r\nX-Skein-Name: big.bin\r\n\
+             Content-Length: {}\r\n\r\n",
+            3 * 1024 * 1024
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut buf = Vec::new();
+    let _ = s.read_to_end(&mut buf); // times out when the server is (correctly) awaiting the body
+    let reply = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+    assert!(
+        !reply.contains(" 413 ") && !reply.contains("length limit exceeded"),
+        "body cap must be disabled on the upload route: {reply}"
+    );
 }
 
 /// Regression guard for the "typing lags only when the box is idle" freeze.

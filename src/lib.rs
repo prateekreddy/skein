@@ -2279,58 +2279,140 @@ fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
     run_capture("sh", &["-c", cmd])
 }
 
-/// Save a pasted image into the box and return its in-box path. The agent runs *inside* the sandbox
-/// (and can't see the user's clipboard), so the bytes are streamed through `sbx exec -i <box> sh -c
-/// 'cat > <path>'` to land at `/tmp/skein-paste-<unique>.<ext>`, which the agent can then read. Only
-/// `-i` (no `-t`) so the binary isn't mangled by a pty. `ext` is sanitised to a short alnum suffix.
-pub fn save_pasted_image(name: &str, ext: &str, bytes: &[u8]) -> Result<String, String> {
-    use std::io::Write as _;
-    if !valid_name(name) {
-        return Err("invalid box name".into());
-    }
-    if bytes.is_empty() {
-        return Err("empty image".into());
-    }
-    let ext: String = ext
+// ───────────────────────────── attachments: paste / drop into a box ─────────────────────────────
+//
+// The agent runs *inside* the sandbox: it can't see the user's clipboard, their Downloads folder, or
+// anything else on the host. Anything the user wants to hand it — a screenshot, a PDF, a video, a
+// whole folder of samples — has to be copied into the box first, then referenced by its in-box path.
+// One drop (paste, drag-and-drop, file picker) becomes one `/tmp/skein-drop-<batch>/` directory:
+// per-batch so a folder keeps its structure and the agent can be handed the directory itself, and so
+// same-named files from different drops never clobber each other.
+
+/// Sanitise one browser-supplied path component into a plain, single-segment filename. Letters and
+/// digits of any script are kept — `née deed.pdf` and CJK names stay readable rather than turning into
+/// hyphen soup — and everything else collapses to `-`: no separator, quote, glob, space, or control
+/// character survives, so the name is safe both as a path and as a bare token pasted into a prompt.
+/// Leading dots are stripped (kills `..` and dotfiles that would hide the drop) and the name is capped
+/// at 80 chars **keeping its extension**, since the suffix is what tells the agent it got an `.mp4`.
+fn safe_component(s: &str) -> String {
+    let mut out: String = s
         .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(5)
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
-    let ext = if ext.is_empty() {
-        "png".into()
-    } else {
-        ext.to_ascii_lowercase()
-    };
-    // unique-enough: millis-since-epoch + a process-local counter (no collisions within a run).
+    while out.starts_with('.') {
+        out.remove(0);
+    }
+    if out.chars().count() > 80 {
+        let ext = out
+            .rsplit_once('.')
+            .map(|(_, e)| e)
+            .filter(|e| !e.is_empty() && e.chars().count() <= 8)
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        // char-wise, not `truncate`: a multibyte name would panic on a byte boundary.
+        let stem: String = out.chars().take(80 - ext.chars().count()).collect();
+        out = stem + &ext;
+    }
+    out
+}
+
+/// A fresh drop-batch id: millis-since-epoch + a process-local counter (no collisions within a run).
+fn next_drop_id() -> String {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let path = format!("/tmp/skein-paste-{ms}-{n}.{ext}");
-    let inner = format!("cat > {}", sh_quote(&path));
-    let mut child = Command::new("sbx")
-        .args(["exec", "-i", name, "sh", "-c", &inner])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("sbx exec not runnable: {e}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or("no stdin pipe")?
-        .write_all(bytes)
-        .map_err(|e| format!("writing image to box: {e}"))?; // ChildStdin drops here → EOF for cat
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "sbx exec failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    format!("{ms}-{n}")
+}
+
+/// Where a dropped file lands in the box: `(dir, path)` under `/tmp/skein-drop-<batch>/`. `rel` is
+/// the client's name for it and may carry subdirectories (a dropped folder arrives one file at a
+/// time, each with its path relative to the folder); every component is sanitised, so the result is
+/// always inside the batch dir. An empty/unusable `batch` gets a fresh id.
+pub fn drop_dest(batch: &str, rel: &str) -> Result<(String, String), String> {
+    // The batch id is skein's own (the UI mints `<millis>-<n>` in base36), so it's held to a stricter
+    // alphabet than a user's filename: no dots at all, which keeps the drop root a plain single name.
+    let batch: String = batch
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(40)
+        .collect();
+    let batch = if batch.trim_matches(['-', '_']).is_empty() {
+        next_drop_id()
+    } else {
+        batch
+    };
+    let mut parts: Vec<String> = rel
+        .split(['/', '\\'])
+        .map(safe_component)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() > 24 {
+        return Err("drop path too deep".into());
     }
-    Ok(path)
+    let file = parts.pop().unwrap_or_default();
+    let file = if file.is_empty() {
+        "file".to_string()
+    } else {
+        file
+    };
+    let mut dir = format!("/tmp/skein-drop-{batch}");
+    for p in &parts {
+        dir.push('/');
+        dir.push_str(p);
+    }
+    let path = format!("{dir}/{file}");
+    if path.len() > 512 {
+        return Err("drop path too long".into());
+    }
+    Ok((dir, path))
+}
+
+/// The argv that streams stdin into `path` inside `name`'s sandbox, creating `dir` first (that's how
+/// a folder drop recreates its tree). `-i` and *not* `-t`: a pty would mangle the binary bytes.
+pub fn box_write_argv(name: &str, dir: &str, path: &str) -> Result<Vec<String>, String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let inner = format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path));
+    Ok(vec![
+        "exec".into(),
+        "-i".into(),
+        name.into(),
+        "sh".into(),
+        "-c".into(),
+        inner,
+    ])
+}
+
+/// Percent-decode a header value. Filenames are arbitrary UTF-8 (`née.pdf`, CJK, emoji) but HTTP
+/// headers are ASCII, so the UI sends `encodeURIComponent(name)` and this reverses it. Invalid
+/// escapes are left verbatim rather than erroring — `safe_component` sanitises whatever comes out.
+pub fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Merge-readiness for a box: does a PR exist, its state, and CI checks. All host-side via `gh`.
@@ -6735,10 +6817,84 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     }
 
     #[test]
-    fn save_pasted_image_guards_before_spawning() {
-        // both reject before any sbx exec — so the test never shells out.
-        assert!(save_pasted_image("../escape", "png", b"x").is_err()); // name guard
-        assert!(save_pasted_image("thing-x", "png", b"").is_err()); // empty image
+    fn drop_dest_keeps_names_and_stays_inside_the_batch_dir() {
+        let (dir, path) = drop_dest("b1", "notes.pdf").unwrap();
+        assert_eq!(dir, "/tmp/skein-drop-b1");
+        assert_eq!(path, "/tmp/skein-drop-b1/notes.pdf"); // real filename survives
+                                                          // a dropped folder keeps its structure under the batch dir
+        let (dir, path) = drop_dest("b1", "corpus/2026/deed.docx").unwrap();
+        assert_eq!(dir, "/tmp/skein-drop-b1/corpus/2026");
+        assert_eq!(path, "/tmp/skein-drop-b1/corpus/2026/deed.docx");
+        // traversal, absolute paths, separators and shell metacharacters can't escape or inject
+        for rel in [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "..\\..\\win.ini",
+            "a b; rm -rf ~/'x'.mp4",
+        ] {
+            let (_, p) = drop_dest("b1", rel).unwrap();
+            assert!(
+                p.starts_with("/tmp/skein-drop-b1/") && !p.contains("..") && !p.contains('\''),
+                "{rel} → {p}"
+            );
+        }
+        // an unusable batch id still yields a usable (generated) one
+        for batch in ["", "../..", "..", "-"] {
+            let (dir, _) = drop_dest(batch, "x.txt").unwrap();
+            assert!(
+                dir.starts_with("/tmp/skein-drop-") && !dir.contains("..") && dir.len() > 16,
+                "batch {batch:?} → {dir}"
+            );
+        }
+        assert!(drop_dest("b1", &"d/".repeat(30)).is_err()); // depth-capped
+    }
+
+    #[test]
+    fn safe_component_caps_length_but_keeps_extension() {
+        let long = format!("{}.mp4", "n".repeat(200));
+        let s = safe_component(&long);
+        assert_eq!(s.chars().count(), 80);
+        assert!(
+            s.ends_with(".mp4"),
+            "extension tells the agent the type: {s}"
+        );
+        // a multibyte name must truncate on a char boundary, never panic
+        let s = safe_component(&format!("{}.pdf", "é".repeat(120)));
+        assert_eq!(s.chars().count(), 80);
+        assert!(s.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn safe_component_keeps_readable_names() {
+        // letters of any script survive; only the shell/path-hostile characters collapse to '-'
+        assert_eq!(safe_component("née deed.pdf"), "née-deed.pdf");
+        assert_eq!(safe_component("契約書.docx"), "契約書.docx");
+        assert_eq!(safe_component("a'b\"c;d|e$f*g.txt"), "a-b-c-d-e-f-g.txt");
+        assert_eq!(safe_component(".hidden"), "hidden");
+    }
+
+    #[test]
+    fn box_write_argv_creates_the_dir_and_avoids_a_pty() {
+        let argv = box_write_argv(
+            "thing-x",
+            "/tmp/skein-drop-b1",
+            "/tmp/skein-drop-b1/a b.pdf",
+        )
+        .unwrap();
+        assert_eq!(&argv[..5], ["exec", "-i", "thing-x", "sh", "-c"]);
+        assert_eq!(
+            argv[5],
+            "mkdir -p '/tmp/skein-drop-b1' && cat > '/tmp/skein-drop-b1/a b.pdf'"
+        );
+        assert!(box_write_argv("../escape", "/tmp/x", "/tmp/x/y").is_err());
+    }
+
+    #[test]
+    fn pct_decode_recovers_unicode_filenames() {
+        assert_eq!(pct_decode("n%C3%A9e%20deed.pdf"), "née deed.pdf");
+        assert_eq!(pct_decode("plain.txt"), "plain.txt");
+        assert_eq!(pct_decode("100%"), "100%"); // dangling escape left verbatim
+        assert_eq!(pct_decode("a%zz"), "a%zz");
     }
 
     #[test]

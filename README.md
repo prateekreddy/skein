@@ -32,9 +32,12 @@ box to open its **embedded terminal** (xterm.js ↔ `sbx exec` ↔ a persistent 
 its **diff**, or a **Session** digest — "what happened here" assembled for free from the branch's
 commits, the agent's `.skein/journal.md`, and its last message, so you can catch up without reading the
 scrollback. No model tokens are spent building any of this. Each box also gets a second **Shell** tab
-(`sbx exec -it <box> /bin/bash`) for running commands yourself, and **pasting an image** into a terminal
-uploads it into the box (the agent can't see your clipboard — it runs in the microVM) and types the
-in-box path in for the agent to read.
+(`sbx exec -it <box> /bin/bash`) for running commands yourself, and **attachments** — paste, drag-and-drop,
+or the 📎 button — hand the agent any file or folder: a screenshot, a PDF, a spreadsheet, a video, a whole
+sample corpus. The agent can't see your clipboard or your disk (it runs in the microVM), so skein streams
+each one into the box under `/tmp/skein-drop-<batch>/` (one directory per drop, so a dropped folder keeps
+its structure) and pastes the in-box path — the folder's path for a folder — into the prompt for the agent
+to open. Streamed, not buffered, so a large video costs the host no memory.
 
 Signals come through thin runtime adapters writing the same shared contract. Claude maps
 `Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,
@@ -66,7 +69,7 @@ everything else shows as text. Served from the box's host-side workspace, path-t
 
 API: `GET /api/{boxes,health,runtimes}`, `GET /api/events` (SSE), `GET /api/boxes/:name/{diff,session,narrate,ship}`,
 `GET /api/boxes/:name/files?path=` + `GET /api/boxes/:name/file?path=` (the Files tab),
-`GET /api/{collisions,repos,settings,mailbox}`, `POST /api/boxes/:name/{resume,stop,destroy,pr,merge,repin,paste-image}`,
+`GET /api/{collisions,repos,settings,mailbox}`, `POST /api/boxes/:name/{resume,stop,destroy,pr,merge,repin,upload}`,
 `POST /api/{resume-batch,repos,settings,mailbox,pick-path}`, `GET /api/boxes/:name/terminal` (WebSocket).
 xterm.js and marked.js are vendored into the binary (served from `/vendor/`), so everything works
 with no CDN — important in the firewalled sbx network.

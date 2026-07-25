@@ -119,9 +119,11 @@ async fn main() {
         .route("/api/boxes/:name/stop", post(api_stop))
         .route("/api/boxes/:name/destroy", post(api_destroy))
         .route(
-            "/api/boxes/:name/paste-image",
-            // screenshots are bigger than axum's 2 MB default body cap — allow up to 25 MB.
-            post(api_paste_image).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+            "/api/boxes/:name/upload",
+            // Attachments (screenshots, PDFs, videos, whole folders) dwarf axum's 2 MB default body
+            // cap. The handler streams the body straight into the box instead of buffering it, so the
+            // cap is disabled here and enforced per-upload by UPLOAD_CAP as the bytes go past.
+            post(api_upload).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
@@ -725,32 +727,127 @@ async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Value> {
     })
 }
 
-/// Receive a pasted image (raw bytes, `Content-Type: image/*`) and stream it into the box, returning
-/// its in-box path for the agent to read. The agent can't see the user's clipboard (it's in the
-/// microVM), so this bridges a browser paste to a file the agent can open.
-async fn api_paste_image(
+/// Receive one attachment — pasted, dropped, or picked — and stream it into the box, returning its
+/// in-box path for the agent to reference. The agent lives in the microVM: it can't see the user's
+/// clipboard or filesystem, so this is the only bridge from "a file on my laptop" to "a path the
+/// agent can open". Any type: image, PDF, video, archive, source file.
+///
+/// Raw body (not multipart) so the bytes go straight from the socket to `sbx exec -i … cat >` with no
+/// buffering — a 2 GB video costs the host no memory. `X-Skein-Name` carries the file's name
+/// (percent-encoded; may include a relative dir when a folder is dropped) and `X-Skein-Drop` groups
+/// every file of one drop into a single `/tmp/skein-drop-<batch>/` tree.
+async fn api_upload(
     Path(name): Path<String>,
     headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
+    body: axum::body::Body,
 ) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
-        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
+    match stream_upload(&name, &headers, body).await {
+        Ok(path) => serde_json::json!({ "ok": true, "path": path }).into(),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }).into(),
     }
-    let ext = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|ct| ct.split(';').next())
-        .and_then(|ct| ct.trim().strip_prefix("image/"))
-        .unwrap_or("png")
-        .to_string();
-    let bytes = body.to_vec();
-    let r =
-        tokio::task::spawn_blocking(move || skein::save_pasted_image(&name, &ext, &bytes)).await;
-    Json(match r {
-        Ok(Ok(path)) => serde_json::json!({ "ok": true, "path": path }),
-        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    })
+}
+
+/// Per-attachment ceiling. Streaming means the *host* never buffers the upload, but the box's /tmp is
+/// finite — this keeps a runaway (or fat-fingered) upload from filling the sandbox's disk.
+const UPLOAD_CAP: u64 = 2 * 1024 * 1024 * 1024;
+
+async fn stream_upload(
+    name: &str,
+    headers: &axum::http::HeaderMap,
+    body: axum::body::Body,
+) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt as _;
+    let hdr = |k: &'static str| {
+        headers
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let batch = hdr("x-skein-drop");
+    let mut rel = skein::pct_decode(&hdr("x-skein-name"));
+    if rel.trim().is_empty() {
+        // A clipboard paste often has no filename. Name it from the content type so the suffix still
+        // says what it is (an agent keys off `.png` to treat it as an image).
+        let ext = hdr("content-type")
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let ext = if ext.is_empty() { "bin".into() } else { ext };
+        rel = format!("paste.{ext}");
+    }
+    let (dir, path) = skein::drop_dest(&batch, &rel)?;
+    let argv = skein::box_write_argv(name, &dir, &path)?;
+    let mut child = tokio::process::Command::new("sbx")
+        .args(&argv)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("sbx exec not runnable: {e}"))?;
+    let mut sink = child.stdin.take().ok_or("no stdin pipe")?;
+    let mut stream = body.into_data_stream();
+    let mut total: u64 = 0;
+    // Collect the failure instead of returning from inside the loop: the partial file has to be
+    // cleaned up on the way out. An over-cap upload is exactly the case that would otherwise leave
+    // gigabytes of junk in the box's /tmp — the thing the cap exists to prevent.
+    let mut failed: Option<String> = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                failed = Some(format!("upload interrupted: {e}"));
+                break;
+            }
+        };
+        total += chunk.len() as u64;
+        if total > UPLOAD_CAP {
+            failed = Some(format!("too large (cap {} MB)", UPLOAD_CAP / (1024 * 1024)));
+            break;
+        }
+        if let Err(e) = sink.write_all(&chunk).await {
+            failed = Some(format!("writing file to box: {e}"));
+            break;
+        }
+    }
+    sink.shutdown().await.ok();
+    drop(sink); // EOF for `cat`
+    if let Some(e) = failed {
+        let _ = child.kill().await;
+        discard_partial(name, &path).await;
+        return Err(e);
+    }
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("sbx exec failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "sbx exec failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(path)
+}
+
+/// Best-effort removal of a half-written attachment, so a failed upload leaves nothing for the agent
+/// to mistake for the real file. Bounded: a wedged box must not hold the response open.
+async fn discard_partial(name: &str, path: &str) {
+    let inner = format!("rm -f {}", skein::sh_quote(path));
+    let child = tokio::process::Command::new("sbx")
+        .args(["exec", name, "sh", "-c", &inner])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn();
+    if let Ok(mut child) = child {
+        let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+    }
 }
 
 /// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.
