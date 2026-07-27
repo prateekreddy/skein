@@ -100,6 +100,7 @@ async fn main() {
         .route("/api/repos", get(api_repos).post(api_add_repo))
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
+        .route("/api/repos/:id/check", post(api_set_repo_check))
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/pick-path", post(api_pick_path))
         .route("/api/boxes/:name/diff", get(api_diff))
@@ -109,6 +110,10 @@ async fn main() {
         .route("/api/boxes/:name/ship", get(api_ship))
         .route("/api/boxes/:name/pr", post(api_pr))
         .route("/api/boxes/:name/merge", post(api_merge))
+        .route(
+            "/api/boxes/:name/verify",
+            get(api_verify_last).post(api_verify_run),
+        )
         .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
         .route("/api/boxes/:name/restart-agent", post(api_restart_agent))
@@ -285,6 +290,44 @@ async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>
         Ok(Ok(replacement)) => Json(replacement).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RepoCheckReq {
+    check: String,
+}
+
+/// Set a repo's own check command (empty clears it back to the global default).
+async fn api_set_repo_check(Path(id): Path<String>, Json(req): Json<RepoCheckReq>) -> Response {
+    match skein::set_repo_check(&id, &req.check) {
+        Ok(repo) => Json(repo).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+/// Run the box's check command inside it and report the outcome. Slow by nature (it's a test
+/// suite), single-flight fleet-wide, and refused while the agent is mid-turn — see
+/// [`skein::run_verify`]. Only ever reached by a click: nothing schedules this.
+async fn api_verify_run(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::run_verify(&name)).await {
+        Ok(Ok(record)) => Json(record).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// The last check recorded for a box, output and all. 404 when none has ever run.
+async fn api_verify_last(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    match skein::read_verify(&name) {
+        Some(record) => Json(record).into_response(),
+        None => (StatusCode::NOT_FOUND, "no check has run in this box yet").into_response(),
     }
 }
 

@@ -35,13 +35,32 @@ function makeFixture() {
   fs.writeFileSync(path.join(root, "sandboxes.json"), JSON.stringify({
     [BOX]: { branch: "main", dir: ws, lastSeen: new Date().toISOString(), status: "" },
   }));
-  // stand-in for sbx: the cockpit asks it for the fleet, and must never reach the real one
+  // a real git repo, so a verify can fingerprint what it checked the way it would in a box
+  const git = (...a) => spawnSync("git", ["-C", ws, ...a], { stdio: "ignore" });
+  git("init", "-q");
+  git("-c", "user.email=smoke@test", "-c", "user.name=smoke", "add", "-A");
+  git("-c", "user.email=smoke@test", "-c", "user.name=smoke", "commit", "-qm", "fixture");
+  // Stand-in for sbx: the cockpit asks it for the fleet, and must never reach the real one. It
+  // serves `exec` too, running the command in the fixture workspace the way a box would — so the
+  // verify path (wrapper script, exit-code marker, stored record) runs for real, without a sandbox.
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, `#!/bin/sh\n[ "$1" = ls ] && { echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0; }\nexit 0\n`);
+  fs.writeFileSync(sbx, `#!/bin/sh
+case "$1" in
+  ls)   echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
+  exec) shift; shift; cd "${ws}" || exit 1; exec "$@" ;;
+esac
+exit 0
+`);
   fs.chmodSync(sbx, 0o755);
-  return { root, ws, sbx };
+  // the check command a Verify runs — fails on purpose, and writes to BOTH streams, so the test
+  // proves the exit code survives and stderr is folded into what you read
+  fs.mkdirSync(path.join(root, "home"), { recursive: true });
+  fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({
+    check_command: "echo building the thing; echo 'boom: the wheels came off' >&2; exit 3",
+  }));
+  return { root, ws, sbx, bin };
 }
 
 const freePort = () => new Promise(res => {
@@ -59,9 +78,10 @@ async function startServer(fx, port) {
       ...process.env,
       SKEIN_ADDR: `127.0.0.1:${port}`,
       SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
-      SKEIN_LS_CMD: fx.sbx,
+      SKEIN_LS_CMD: `${fx.sbx} ls --json`,   // verbatim through `sh -c` — the args matter
       SKEIN_HOME: path.join(fx.root, "home"),   // keep probe/kit installs out of the real store
       SKEIN_NO_GH_SECRET: "1",
+      PATH: `${fx.bin}:${process.env.PATH}`,    // `sbx` resolves to the stub, never the real CLI
     },
   });
   let log = "";
@@ -197,6 +217,33 @@ await check("settings opens, and its panes switch to fields you can see", async 
   await page.click('.set-navi[data-pane="github"]');
   await settle(300);
   await mustSee("#set-sshkey", "the SSH key field on the GitHub pane");
+  await page.keyboard.press("Escape");
+});
+
+console.log("\nverify");
+await check("Verify is offered on the box, and nothing ran it for me", async () => {
+  await openTab("diff");
+  await mustSee("#dverify", "the Verify button");
+  if (await page.$(`#fleet .row[data-name="${BOX}"] .vchip:not([style*='none'])`))
+    throw new Error("a check result appeared without anyone asking for one — verify must never self-trigger");
+});
+await check("a failing check reports its exit code and both output streams", async () => {
+  await page.click("#dverify");
+  await page.waitForSelector("#vout.open", { timeout: 20000 });
+  const meta = await text("#vout-meta"), body = await text("#vout-body");
+  if (!/exit 3/.test(meta)) throw new Error(`expected the check's own exit code, got "${meta}"`);
+  if (!/building the thing/.test(body)) throw new Error("stdout is missing from the output");
+  if (!/wheels came off/.test(body)) throw new Error("stderr was not folded in — the useful half of a failure");
+  await page.keyboard.press("Escape");
+});
+await check("the result lands on the row as a chip you can reopen", async () => {
+  // scope to OUR box: skein keeps the sandbox it runs inside on the board too, and that row is first
+  const sel = `#fleet .row[data-name="${BOX}"] .vchip`;
+  await page.waitForFunction(s => document.querySelector(s)?.textContent?.includes("failed"), sel, { timeout: 8000 });
+  const chip = await mustSee(sel, "the check chip");
+  if (!(await chip.getAttribute("title")).includes("echo building")) throw new Error("the chip must name the command behind it");
+  await chip.click();
+  await page.waitForSelector("#vout.open", { timeout: 8000 });
   await page.keyboard.press("Escape");
 });
 

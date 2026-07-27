@@ -124,6 +124,11 @@ pub struct BoxView {
     /// falling back to hook-only turn state looks exactly like everything working.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub screen_health: String,
+    /// the last check that ran in this box, and whether the box has worked since — "who needs me"
+    /// is only half of triage; "whose work stands up" is the other half. Absent when no check has
+    /// ever run here (which is not a failure, and must not read as one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifySummary>,
 }
 
 impl Sandbox {
@@ -467,6 +472,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 task,
                 pause,
                 blocked_kind: blocked_kind.to_string(),
+                verify: verify_summary(&name),
                 hook_health,
                 screen_health: screen.to_string(),
             }
@@ -1152,6 +1158,11 @@ pub struct Repo {
     pub store: String,  // host shared `.claude` store
     #[serde(default = "default_agent")]
     pub agent: String, // runtime adapter id (see `supported_runtimes`)
+    /// Command a **verify** runs inside a box of this repo (`cargo test`, `npm test`, a script).
+    /// Empty ⇒ fall back to the global default in [`Config::check_command`]. Per-repo because a
+    /// fleet spanning a Rust service and a web app has no single right answer.
+    #[serde(default)]
+    pub check: String,
 }
 
 fn default_agent() -> String {
@@ -1524,6 +1535,10 @@ pub struct Config {
     /// `$SKEIN_SSH_KEY` overrides. The key never enters a box — only the agent socket is forwarded.
     #[serde(default)]
     pub ssh_key: String,
+    /// Default command a **verify** runs inside a box (`cargo test`). A repo's own `check` wins.
+    /// Empty ⇒ verification is simply unavailable, which is the honest state until someone sets it.
+    #[serde(default)]
+    pub check_command: String,
 }
 
 fn default_true() -> bool {
@@ -1539,6 +1554,7 @@ impl Default for Config {
             base_branch: String::new(),
             confirm_destroy: true,
             ssh_key: String::new(),
+            check_command: String::new(),
         }
     }
 }
@@ -1643,6 +1659,20 @@ pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(repos).map_err(|e| e.to_string())?;
     write_atomic(&repos_json(), &home, &bytes)
+}
+
+/// Set (or clear, with an empty string) a repo's own check command — what a **verify** runs in that
+/// repo's boxes. Empty falls back to [`Config::check_command`]; see [`verify_command`].
+pub fn set_repo_check(id: &str, check: &str) -> Result<Repo, String> {
+    let mut repos = load_repos();
+    let repo = repos
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("no repo with id {id:?}"))?;
+    repo.check = check.trim().to_string();
+    let updated = repo.clone();
+    save_repos(&repos)?;
+    Ok(updated)
 }
 
 /// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
@@ -1915,6 +1945,7 @@ pub fn add_repo(
         agent: agent
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),
+        check: String::new(), // set later, per repo, in Settings → Repositories
     };
     let mut repos = load_repos();
     repos.retain(|r| r.id != id); // replace any existing entry with the same id
@@ -3480,6 +3511,240 @@ fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// ---------- verification: does a box's work actually build and pass? ----------
+// The board says who needs you. It can't say whose work stands up — a row reading "waiting, 238
+// files changed, 'both bugs fixed'" tells you nothing about whether it compiles, so every box is
+// guilty until you personally re-run it. A verify runs the repo's own check command INSIDE the box
+// (`sbx_guest_output` — the captured-output primitive the handoff flow already leans on), records
+// the outcome beside the other per-box signals, and the row reports it.
+//
+// **Nothing triggers this.** No tick, no turn-end hook, no schedule calls `run_verify` — it is a
+// click, deliberately, because a check is a real `cargo test` burning cores on the dev's own Mac
+// and six boxes verifying at once would be six of them. The guards below (single-flight, liveness,
+// mid-turn) are exactly what an automatic trigger would have to satisfy, so turning one on later is
+// a call site, not a redesign. The one place it would go: the transition into `waiting` in
+// `load_views`, gated on a setting that does not exist yet.
+
+/// Cap on the stored output. Enough to see which test failed and why; not enough to bloat a store
+/// that syncs into every box.
+const VERIFY_TAIL_BYTES: usize = 6000;
+/// A check that hasn't finished in 15 minutes is a hang, not a slow suite.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(900);
+const VERIFY_FP: &str = "SKEIN_VERIFY_FP ";
+const VERIFY_EXIT: &str = "SKEIN_VERIFY_EXIT ";
+
+/// One recorded check, in `<store>/verify/<name>.json` — same shape and place as every other
+/// per-box signal, so it survives a cockpit restart and is readable by anything else that wants it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyRecord {
+    /// what was run, verbatim — a green tick means nothing without it
+    pub cmd: String,
+    pub exit: i32,
+    pub ok: bool,
+    /// RFC3339, when the run finished
+    pub ts: String,
+    pub secs: u64,
+    /// the box's HEAD + worktree checksum at the moment of the run: *what* was checked
+    #[serde(default)]
+    pub fingerprint: String,
+    /// tail of the combined output (stdout+stderr interleaved, as a human would have seen it)
+    #[serde(default)]
+    pub tail: String,
+}
+
+/// What a fleet row shows: the outcome, and whether the box has moved on since.
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifySummary {
+    pub ok: bool,
+    /// the box has ended a turn since this check ran — the result describes older work
+    pub stale: bool,
+    pub age: String,
+    pub cmd: String,
+}
+
+/// The check command for a box: its repo's override, else the global default. None ⇒ unconfigured,
+/// which is not an error — most repos won't have one until someone sets it.
+pub fn verify_command(name: &str) -> Option<String> {
+    let per_repo = repo_for_box(name)
+        .map(|r| r.check.trim().to_string())
+        .filter(|c| !c.is_empty());
+    per_repo.or_else(|| {
+        let global = load_config().check_command.trim().to_string();
+        (!global.is_empty()).then_some(global)
+    })
+}
+
+fn verify_path(name: &str) -> Option<PathBuf> {
+    valid_name(name)
+        .then(|| store_for_box(name))
+        .flatten()
+        .map(|store| store.join("verify").join(format!("{name}.json")))
+}
+
+/// The last recorded check for a box, if any.
+pub fn read_verify(name: &str) -> Option<VerifyRecord> {
+    let raw = fs::read_to_string(verify_path(name)?).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// The row's version: outcome + whether the box has worked since. Staleness comes free from the
+/// turn-state edge we already read — no second exec to re-fingerprint the tree, which is the whole
+/// reason the check is worth doing at all.
+fn verify_summary(name: &str) -> Option<VerifySummary> {
+    let rec = read_verify(name)?;
+    let at = DateTime::parse_from_rfc3339(&rec.ts).ok()?.timestamp();
+    let moved = status_edge(name).map(|(_, ts)| ts).unwrap_or(0);
+    let secs = (Utc::now().timestamp() - at).max(0);
+    Some(VerifySummary {
+        ok: rec.ok,
+        stale: moved > at,
+        age: match secs {
+            s if s < 60 => format!("{s}s ago"),
+            s if s < 3600 => format!("{}m ago", s / 60),
+            s if s < 86400 => format!("{}h ago", s / 3600),
+            s => format!("{}d ago", s / 86400),
+        },
+        cmd: rec.cmd,
+    })
+}
+
+/// Split the guest's combined output into (fingerprint, exit code, what a human should read). The
+/// check's own exit code can't come from the process status — `sbx exec` reports the wrapper
+/// shell's — so the wrapper prints it on a marker line. A missing marker means the run never
+/// reached the end (killed, timed out, box died mid-check), which is NOT a failing test and must
+/// never be recorded as one.
+fn parse_verify_output(raw: &str) -> (String, Option<i32>, String) {
+    let mut fingerprint = String::new();
+    let mut exit = None;
+    let mut body = String::new();
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix(VERIFY_FP) {
+            fingerprint = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix(VERIFY_EXIT) {
+            exit = rest.trim().parse().ok();
+        } else {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    (fingerprint, exit, body)
+}
+
+/// Keep the END of the output — a test suite says what failed at the bottom.
+fn tail_of(text: &str, bytes: usize) -> String {
+    if text.len() <= bytes {
+        return text.to_string();
+    }
+    let mut cut = text.len() - bytes;
+    while cut < text.len() && !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let rest = &text[cut..];
+    let from_line = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or(rest);
+    format!("… earlier output trimmed …\n{from_line}")
+}
+
+/// Why a verify must not start right now, if it must not. A check while the agent is mid-turn would
+/// have the two of them writing the same tree — and a red result would be the collision, not the code.
+fn verify_is_unsafe_now(name: &str) -> Option<String> {
+    let agent = agent_for_box(name);
+    let level = read_pane(name).map(|obs| (classify_pane(&agent, &obs), obs.ts));
+    let (fused, _) = fuse_status(status_edge(name), level);
+    let state = fused?;
+    matches!(state.as_str(), "working" | "running" | "compacting").then(|| {
+        format!("{name} is mid-turn ({state}) — verify when it stops, or the check and the agent fight over the same files")
+    })
+}
+
+/// One verify at a time, fleet-wide. Not a queue: a second request is refused immediately and says
+/// which box holds the slot, because silently queueing a 15-minute suite behind another is worse
+/// than saying no. This is the guard that keeps "verify" from ever becoming a fork bomb of test runs.
+static VERIFY_INFLIGHT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[derive(Debug)]
+struct VerifyFlight;
+
+impl VerifyFlight {
+    fn take(name: &str) -> Result<Self, String> {
+        let mut slot = VERIFY_INFLIGHT
+            .lock()
+            .map_err(|_| "verify lock poisoned".to_string())?;
+        if let Some(other) = slot.as_deref() {
+            return Err(if other == name {
+                format!("{name} is already being verified")
+            } else {
+                format!("a verify is already running in {other} — one at a time, so checks don't fight your own work for cores")
+            });
+        }
+        *slot = Some(name.to_string());
+        Ok(VerifyFlight)
+    }
+}
+
+impl Drop for VerifyFlight {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = VERIFY_INFLIGHT.lock() {
+            *slot = None;
+        }
+    }
+}
+
+/// Run the box's check command inside the box and record what happened. Blocking and slow by
+/// nature (it is a test suite) — callers run it off the request thread.
+pub fn run_verify(name: &str) -> Result<VerifyRecord, String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let cmd = verify_command(name).ok_or_else(|| {
+        "no check command for this box — set one in Settings → Workflow, or per repo".to_string()
+    })?;
+    if box_liveness(name) != Some(Liveness::Running) {
+        return Err(format!("{name} is not running — start it before verifying"));
+    }
+    if let Some(reason) = verify_is_unsafe_now(name) {
+        return Err(reason);
+    }
+    let _flight = VerifyFlight::take(name)?;
+    // The wrapper: fingerprint what we're about to check, run the command with stderr folded in
+    // (a failing suite says the useful part there), then report its exit code on a marker line.
+    // The check runs in a SUBSHELL, not a brace group: a command containing `exit 1` — or any
+    // `set -e` script — would otherwise exit the wrapper itself, taking the marker with it and
+    // turning an honest failure into "the check never reported an exit code".
+    let script = format!(
+        "root=\"$(git rev-parse --show-toplevel 2>/dev/null)\"; [ -n \"$root\" ] && cd \"$root\"; \
+         printf '{VERIFY_FP}%s\\n' \"$(git rev-parse --short HEAD 2>/dev/null)+$(git status --porcelain 2>/dev/null | cksum | tr -d ' ')\"; \
+         ( {cmd} ) 2>&1; printf '{VERIFY_EXIT}%s\\n' \"$?\""
+    );
+    let started = std::time::Instant::now();
+    let raw = sbx_guest_output(name, &script, VERIFY_TIMEOUT)?;
+    let (fingerprint, exit, body) = parse_verify_output(&raw);
+    let exit = exit.ok_or_else(|| {
+        format!(
+            "the check never reported an exit code — it was killed, or ran past the {}s limit",
+            VERIFY_TIMEOUT.as_secs()
+        )
+    })?;
+    let record = VerifyRecord {
+        cmd,
+        exit,
+        ok: exit == 0,
+        ts: Utc::now().to_rfc3339(),
+        secs: started.elapsed().as_secs(),
+        fingerprint,
+        tail: tail_of(body.trim_end(), VERIFY_TAIL_BYTES),
+    };
+    let path = verify_path(name).ok_or("no store for this box")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(record)
 }
 
 /// Render the provider-neutral one-line footer for a box whose runtime needs an adapter. Claude
@@ -5654,6 +5919,7 @@ mod tests {
             work: work.display().to_string(),
             store: store.display().to_string(),
             agent: "claude".into(),
+            check: String::new(),
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
         write_launch_spec_for_agent("demo-task", "feat/started", &repo, "claude").unwrap();
@@ -5859,6 +6125,7 @@ mod tests {
                 work: "/w".into(),
                 store: "/s".into(),
                 agent: "claude".into(),
+                check: String::new(),
             },
             Repo {
                 id: "web-api".into(),
@@ -5866,6 +6133,7 @@ mod tests {
                 work: "/w".into(),
                 store: "/s".into(),
                 agent: "claude".into(),
+                check: String::new(),
             },
         ];
         save_repos(&repos).unwrap();
@@ -5893,6 +6161,7 @@ mod tests {
             work: "/w".into(),
             store: store.to_string_lossy().to_string(),
             agent: "claude".into(),
+            check: String::new(),
         }];
         save_repos(&repos).unwrap();
         // box created on the wrong branch (its creation branch)…
@@ -5926,6 +6195,7 @@ mod tests {
             work: "/work/thing".into(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
+            check: String::new(),
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
         let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None);
@@ -5958,6 +6228,7 @@ mod tests {
             work: "/work/skein".into(),
             store: home.join("store/.claude").to_string_lossy().into_owned(),
             agent: "claude".into(),
+            check: String::new(),
         };
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
         assert!(cmd.contains("'codex'"));
@@ -6418,6 +6689,7 @@ mod tests {
             work: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),
             agent: "codex".into(),
+            check: String::new(),
         }])
         .unwrap();
 
@@ -6899,6 +7171,142 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::set_var("HOME", "/home/me");
         assert_eq!(shorten("/home/me/work/x"), "~/work/x");
         assert_eq!(shorten("/other/x"), "/other/x");
+    }
+
+    #[test]
+    fn a_checks_exit_code_comes_from_the_marker_not_the_shell() {
+        // `sbx exec` reports the wrapper shell's status, so the check's own code rides a marker line.
+        let raw = format!(
+            "{VERIFY_FP}abc1234+992 1\nrunning 3 tests\ntest result: FAILED\n{VERIFY_EXIT}101\n"
+        );
+        let (fp, exit, body) = parse_verify_output(&raw);
+        assert_eq!(fp, "abc1234+992 1");
+        assert_eq!(exit, Some(101));
+        assert!(body.contains("test result: FAILED"));
+        assert!(
+            !body.contains("SKEIN_VERIFY"),
+            "markers are protocol, not output"
+        );
+        // A run that never reached the marker was killed or timed out — that is NOT a failing test,
+        // and run_verify refuses to record it as one.
+        let (_, none, _) = parse_verify_output("running 3 tests\n");
+        assert_eq!(none, None);
+    }
+
+    #[test]
+    fn the_stored_output_keeps_the_end_where_the_failure_is() {
+        assert_eq!(tail_of("short", 100), "short");
+        let long = format!("{}\nFAILED: the last line\n", "noise\n".repeat(4000));
+        let cut = tail_of(&long, 200);
+        assert!(cut.contains("FAILED: the last line"));
+        assert!(cut.starts_with("… earlier output trimmed …"));
+        assert!(cut.len() < 400);
+        // never splits a line in half — the first kept line is a whole one
+        assert!(cut.lines().nth(1).is_some_and(|l| l == "noise"));
+    }
+
+    #[test]
+    fn a_repos_own_check_command_beats_the_global_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
+        save_config(&Config {
+            check_command: "make test".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "/src/web".into(),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+        }])
+        .unwrap();
+        assert_eq!(verify_command("web-main").as_deref(), Some("make test"));
+        set_repo_check("web", "npm test").unwrap();
+        assert_eq!(verify_command("web-main").as_deref(), Some("npm test"));
+        // clearing it falls back, and clearing BOTH means verification is simply unavailable —
+        // which the UI must show as "unconfigured", never as a failure.
+        set_repo_check("web", "").unwrap();
+        assert_eq!(verify_command("web-main").as_deref(), Some("make test"));
+        save_config(&Config::default()).unwrap();
+        assert_eq!(verify_command("web-main"), None);
+        assert!(run_verify("web-main").is_err(), "no command ⇒ no run");
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    #[test]
+    fn a_pass_goes_stale_the_moment_the_box_works_again() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            r#"{"bx":{"branch":"b","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::set_var("SKEIN_LS_CMD", "false");
+        fs::create_dir_all(dir.join("verify")).unwrap();
+        fs::create_dir_all(dir.join("status")).unwrap();
+        let checked_at = Utc::now() - chrono::Duration::seconds(300);
+        fs::write(
+            dir.join("verify/bx.json"),
+            serde_json::to_string(&VerifyRecord {
+                cmd: "cargo test".into(),
+                exit: 0,
+                ok: true,
+                ts: checked_at.to_rfc3339(),
+                secs: 42,
+                fingerprint: "abc1234+0".into(),
+                tail: "test result: ok".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        // nothing has happened in the box since: the pass stands
+        let fresh = verify_summary("bx").expect("a record was written");
+        assert!(fresh.ok && !fresh.stale);
+        assert_eq!(fresh.age, "5m ago");
+        assert_eq!(
+            fresh.cmd, "cargo test",
+            "a tick is meaningless without the command"
+        );
+        // the agent ended another turn after the check — the result now describes older code
+        fs::write(
+            dir.join("status/bx.json"),
+            format!(
+                r#"{{"status":"waiting","ts":"{}"}}"#,
+                Utc::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+        assert!(verify_summary("bx").unwrap().stale);
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    #[test]
+    fn only_one_check_runs_at_a_time_across_the_whole_fleet() {
+        // The guard that keeps a "verify" from ever becoming N test suites fighting the dev's own
+        // machine for cores. Held by an RAII flight, so a panicking run can't wedge the slot.
+        let first = VerifyFlight::take("bx-one").unwrap();
+        let same = VerifyFlight::take("bx-one").unwrap_err();
+        assert!(same.contains("already being verified"));
+        let other = VerifyFlight::take("bx-two").unwrap_err();
+        assert!(
+            other.contains("bx-one"),
+            "say which box holds the slot: {other}"
+        );
+        drop(first);
+        assert!(
+            VerifyFlight::take("bx-two").is_ok(),
+            "the slot frees on drop"
+        );
     }
 
     #[test]
@@ -7932,6 +8340,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 work: "a".into(),
                 store: store_a.to_string_lossy().into_owned(),
                 agent: "claude".into(),
+                check: String::new(),
             },
             Repo {
                 id: "b".into(),
@@ -7939,6 +8348,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 work: "b".into(),
                 store: store_b.to_string_lossy().into_owned(),
                 agent: "claude".into(),
+                check: String::new(),
             },
         ])
         .unwrap();

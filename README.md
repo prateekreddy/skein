@@ -209,6 +209,21 @@ your **host SSH agent** into the box (the private key stays on the host); set an
 Settings and skein `ssh-add`s it so it's available to forward. `skein add` warns up-front if a repo's
 `origin` is SSH so you can switch it to HTTPS or load the key.
 
+## Verify — does the work actually stand up?
+
+The board tells you who needs you. **Verify** tells you whose work compiles. Set a check command in
+Settings → Workflow (`cargo test`), or override it per repo on that repo's row, and the ✓ Verify
+button in a box's toolbar runs it **inside the box** (`sbx exec`, no model tokens) and keeps the
+result: a green or red chip on the fleet row, the command it ran in the tooltip, and the output —
+stdout and stderr together, which is where a failing suite says the useful part — one click away.
+
+Two things it deliberately does *not* do. It never runs itself: no schedule, no turn-end trigger, no
+"auto-verify" setting, because a check is a real test suite burning cores on your machine and six
+boxes doing it at once is six test suites competing with your own work. And it never lets a pass
+outlive its code — once the box ends another turn, the chip is struck through, because the result now
+describes work that has moved on. One check runs at a time fleet-wide, and a box that is mid-turn
+refuses (the check and the agent would be writing the same files).
+
 ## Claude and Codex runtimes
 
 Choose the default runtime when adding a repo, override it when launching a box, or use the cockpit's
