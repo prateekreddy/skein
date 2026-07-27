@@ -209,12 +209,82 @@ classify from that stream with no exec at all.
 - **Testability.** The classifier is a pure function from pane text → state, so the grammar gets
   unit tests with the captured fixtures in §4.1 — including the exact 20-minute-stale case.
 
+## 6a. Decisions taken (2026-07-27)
+
+Answered by the user; these are settled, not open:
+
+1. **Codex grammar** — capture it from a real box rather than guess (done below).
+2. **Live task text** — surface the terminal title's activity text as the row's "what it's doing",
+   ranked *below* the TodoWrite probe, and only while the box is busy (the title keeps the last
+   tool's text after it finishes, so on an idle box it would lie).
+3. **Decision kinds** — `decision` carries which dialog is blocking: **permission · question ·
+   trust · auth-or-quota**. Each needs a different action from the human, and the inbox can then
+   rank on fact instead of classifying headline text.
+4. **Staging** — land as one complete change, not a stopgap first.
+
+## 6b. Codex pane grammar (captured from `skein-codex-test`, Codex 0.145.0)
+
+Captured by attaching to the box's **shell** session through the cockpit's terminal WebSocket and
+running `tmux capture-pane` against its `skein-agent` session — so nothing was ever typed into
+Codex's own composer to get these:
+
+| state | evidence |
+| --- | --- |
+| busy | `pane_title` = `⠋ skein` (braille spinner + dir) **and** a pane line `• Working (1s • esc to interrupt)` |
+| idle / waiting | `pane_title` = `skein` (no glyph); composer `› Use /skills to list available skills`; footer `? for shortcuts` + `NN% context left` |
+| modal / question | a bordered list with a `›`-marked numbered option (`› 1. gpt-5.6-sol (current)`) and the footer **`Press enter to confirm or esc to go back`** |
+| error | a line starting `■ ` carrying JSON, e.g. `■ {"detail":"The 'gpt-5.6-sol' model is not supported…"}` |
+| tool result / hook | lines starting `• ` (`• bin, kit, lib.rs, probe, store, web`, `• SessionStart hook (completed)`) |
+
+So both runtimes share two robust markers — a spinner glyph in the terminal **title** and the string
+**`esc to interrupt`** on screen — which is what makes a single `busy` predicate viable across
+providers, with only the dialog/idle grammars needing per-runtime tables.
+
+Still missing: **the approval dialog itself.** That box runs Codex in YOLO mode, so it never asks;
+`/approvals` does not exist in 0.145.0. The way to get it is a throwaway session beside the agent's
+(never touching `skein-agent`):
+
+```
+tmux new-session -d -s captest -x 120 -y 34 \
+  'codex -m gpt-5.6-terra -a untrusted -s read-only --dangerously-bypass-hook-trust'
+# then prompt: "run the shell command: date"  → the escalation prompt appears
+```
+
+`-a untrusted` is the correct flag (`--ask-for-approval` values are `untrusted|on-request|never`;
+the earlier attempt failed because it passed `--sandbox`/`--ask-for-approval` spellings this build
+rejects, so the tmux session died instantly).
+
+Two environment notes from that box, worth knowing before blaming a probe: **`/tmp` and `$HOME` are
+read-only** there (Codex warns `Failed to save the conversation transcript … Read-only file system
+(os error 30)` and `could not create PATH aliases`), so nothing may be written outside the workspace
+and the shared store. And `#{pane_current_command}` reads `bash`, not `codex`/`claude`, because
+skein launches the agent through a `||` fallback wrapper — the classifier must not depend on it.
+
 ## 7. Open questions
 
-1. Do tmux `alert-silence` hooks fire for the *attached* window? If yes, the 1s loop becomes
-   event-driven. (One experiment.)
-2. Codex grammar needs the same capture treatment its Claude counterpart just got.
-3. Is `pane_title`'s activity text worth surfacing as the row's "what it's doing" (`Run bash
-   command true`) — cheaper and fresher than the TodoWrite probe?
-4. Should `decision` carry *which* dialog (permission vs question vs trust vs auth)? The inbox
-   already ranks pauses; this would make the ranking real rather than text-classified.
+1. ~~Do tmux `alert-silence` hooks fire for the *attached* window?~~ **Answered: no — don't build on
+   them.** With `monitor-silence 2` plus an `alert-silence` hook on a live session, no alert fired
+   even in the easier unattached case; tmux suppresses activity/silence alerts for a session's
+   *current* window, and skein's session has exactly one window, always current. The 1s sampler in
+   §4.4 stands (and costs ~0.3% of a core).
+2. ~~Codex grammar~~ — captured, see §6b. Only its approval dialog is still missing.
+3. ~~Title activity text~~ — decided, see §6a.2.
+4. ~~Decision kinds~~ — decided, see §6a.3.
+
+## 8. Where this stands
+
+Implemented: `src/probe/box-pane.sh` — the in-box observer (§4.4). It is deliberately dumb: it
+records activity age, title, dead-ness and the visible tail into
+`<store>/status/<vmid>.pane.json`, and does not classify.
+
+Not yet built:
+
+- wiring the observer into the attach command (`agent_attach_argv`, `nice`d + `setsid` so it
+  outlives the attach), and into `ensure_probe_in`'s installed-script list;
+- `classify_pane(runtime, snapshot) -> PaneState` in Rust, with the §4.2/§6b grammars and unit tests
+  built from the captures in this document (Claude's are in §4.1, Codex's in §6b);
+- the four fusion rules in `load_views`/`current_status` (§4.3), including "no observation ⇒ exactly
+  today's behaviour" so older boxes are unaffected;
+- `BoxView` carrying the decision kind, and the cockpit's chips for permission/question/trust/auth;
+- title-derived task text ranked below the TodoWrite probe, shown only while busy;
+- deleting the pane file alongside the status file on delist.
