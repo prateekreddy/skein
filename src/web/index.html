@@ -215,6 +215,8 @@
   .empty { color:var(--dim); padding:52px 16px; text-align:center; border:1px dashed var(--border-2); border-radius:var(--radius); }
   .empty code { font-family:var(--mono); color:var(--text); }
   footer { margin-top:24px; color:var(--faint); font-size:12px; }
+  footer .lk { color:var(--dim); cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; }
+  footer .lk:hover { color:var(--text-2); }
   kbd { font-family:var(--mono); font-size:11px; background:var(--panel); border:1px solid var(--border-2);
         border-bottom-width:2px; border-radius:5px; padding:1px 6px; color:var(--dim); }
 
@@ -422,31 +424,102 @@
   .ar-msg.err  { color:#ffb4ae; background:color-mix(in srgb,var(--attn) 12%,transparent); border-color:color-mix(in srgb,var(--attn) 35%,transparent); }
   .ar-msg.warn { color:#f0d28a; background:color-mix(in srgb,var(--waiting) 11%,transparent); border-color:color-mix(in srgb,var(--waiting) 32%,transparent); }
   .ar-msg.ok   { color:#9ae6b0; background:color-mix(in srgb,var(--done) 11%,transparent); border-color:color-mix(in srgb,var(--done) 30%,transparent); }
-  .set-row .desc { color:var(--faint); font-size:11px; }
   /* an input paired with a native "Browse…" picker button (folder/file paths) */
   .path-row { display:flex; gap:8px; align-items:stretch; }
   .path-row input { flex:1; min-width:0; }
   .path-row .kbtn { flex:none; height:auto; }
-  .set-repos { display:flex; flex-direction:column; gap:4px; max-height:160px; overflow:auto; margin:2px 0; }
-  .set-repos .rrow { display:flex; align-items:baseline; gap:8px; font-size:12px; padding:3px 6px; border:1px solid var(--line); border-radius:6px; }
-  .set-repos .rrow .rid { font-family:var(--mono); color:var(--accent); }
-  .set-repos .rrow .rsrc { color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
-  .set-repos .rrow .rx { color:var(--dim); cursor:pointer; } .set-repos .rrow .rx:hover { color:var(--attn); }
-  .set-repos .none { color:var(--faint); font-size:12px; }
-  /* settings: sectioned card with a scrolling body, pinned header/footer, and real toggle switches */
-  .set-card { max-width:540px; max-height:84vh; padding:0; gap:0; }
-  .set-card .nb-head { padding:14px 18px; border-bottom:1px solid var(--line); }
-  .set-body { overflow-y:auto; padding:4px 18px 12px; display:flex; flex-direction:column; }
-  .set-sec { font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
-             color:var(--faint); margin:16px 0 4px; }
-  .set-sec:first-child { margin-top:10px; }
-  .set-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:9px 0;
-             border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); cursor:pointer; font-size:13px; }
-  .set-row:last-of-type { border-bottom:0; }
-  .set-txt { display:flex; flex-direction:column; gap:2px; min-width:0; }
+
+  /* ---------- settings: a two-pane preferences surface ---------- */
+  .set-shell { width:min(860px,94vw); height:min(560px,86vh); display:flex; overflow:hidden;
+    background:var(--panel); border:1px solid var(--border-3); border-radius:14px;
+    box-shadow:0 30px 90px rgba(0,0,0,.66); animation:rise var(--dur-med) var(--ease); }
+  .set-nav { flex:0 0 198px; display:flex; flex-direction:column; gap:2px; padding:14px 10px;
+             background:var(--inset); border-right:1px solid var(--line); }
+  .set-brand { display:flex; flex-direction:column; gap:1px; padding:6px 10px 15px;
+               font-family:var(--mono); font-size:13px; color:var(--text); }
+  .set-brand span { font-family:var(--ui); font-size:10px; color:var(--faint);
+                    text-transform:uppercase; letter-spacing:.14em; }
+  .set-navi { display:flex; align-items:center; gap:9px; width:100%; text-align:left; font:inherit; font-size:13px;
+    color:var(--text-2); background:none; border:0; border-radius:8px; padding:8px 10px; cursor:pointer;
+    transition:background var(--dur-fast), color var(--dur-fast); }
+  .set-navi .ic { width:15px; height:15px; flex:none; opacity:.75; }
+  .set-navi:hover { background:var(--panel); color:var(--text); }
+  .set-navi.on { background:var(--accent-bg); color:var(--text); box-shadow:inset 2px 0 0 var(--accent); }
+  .set-navi.on .ic { opacity:1; color:var(--accent); }
+  .set-navi .pill { margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--dim); }
+  .set-navfoot { margin-top:auto; padding:10px; font-size:10px; color:var(--faint); }
+  .set-main { flex:1; min-width:0; display:flex; flex-direction:column; }
+  /* the page-level `header`/`footer` rules carry layout margins; they must not leak into a dialog's
+     own chrome (they were adding 20px under the title bar and 24px above the footer) */
+  .set-top, .set-foot { margin:0; flex-wrap:nowrap; }
+  .set-top { display:flex; align-items:flex-start; gap:12px; padding:17px 22px 13px; border-bottom:1px solid var(--line); }
+  .set-h { display:flex; flex-direction:column; gap:3px; min-width:0; }
+  .set-h b { font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  .set-h span { font-size:12px; color:var(--dim); }
+  .set-x { margin-left:auto; flex:none; width:26px; height:26px; border:0; border-radius:7px;
+           background:none; color:var(--dim); font-size:12px; cursor:pointer; }
+  .set-x:hover { background:var(--elevated); color:var(--text); }
+  .set-scroll { flex:1; overflow-y:auto; padding:4px 22px 20px; }
+  .set-pane { display:none; flex-direction:column; }
+  .set-pane.on { display:flex; }
+  /* one row: name + explanation on the left, its control hard-right */
+  .set-row { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:14px 0;
+             border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); cursor:pointer; }
+  .set-row:last-child, .set-field:last-child { border-bottom:0; }
+  .set-txt { display:flex; flex-direction:column; gap:3px; min-width:0; }
   .set-title { font-size:13px; color:var(--text); }
-  .set-field { display:flex; flex-direction:column; gap:5px; padding:9px 0; cursor:default; }
-  .set-field input { width:100%; }
+  .set-row .desc, .set-field .desc { color:var(--faint); font-size:11.5px; line-height:1.45; }
+  .set-field { display:flex; flex-direction:column; gap:7px; padding:14px 0; cursor:default;
+               border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); }
+  .set-field input, .set-field select { width:100%; }
+  .set-field input { font-family:var(--mono); font-size:12.5px; }
+  .set-field.narrow input, .set-field.narrow select { max-width:300px; }
+  /* repositories: a real list — the id reads as an identifier, the path stays subordinate, and the
+     unregister control only appears on the row you are pointing at */
+  .set-repos { display:flex; flex-direction:column; gap:6px; margin:12px 0 14px; }
+  .set-repos .rrow { display:flex; align-items:center; gap:11px; padding:10px 12px; background:var(--card);
+    border:1px solid var(--border); border-radius:10px; transition:border-color var(--dur-fast); }
+  .set-repos .rrow:hover { border-color:var(--border-2); }
+  .set-repos .rrow .rid { flex:none; font-family:var(--mono); font-size:12.5px; color:var(--accent); }
+  .set-repos .rrow .rsrc { flex:1; min-width:0; font-family:var(--mono); font-size:11.5px; color:var(--dim);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .set-repos .rrow .rx { flex:none; opacity:0; padding:2px 7px; border-radius:6px; color:var(--dim); cursor:pointer;
+    transition:opacity var(--dur-fast), color var(--dur-fast); }
+  .set-repos .rrow:hover .rx, .set-repos .rrow .rx:focus-visible { opacity:1; }
+  .set-repos .rrow .rx:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  .set-repos .none { padding:22px; text-align:center; font-size:12.5px; color:var(--faint);
+    border:1px dashed var(--border-2); border-radius:10px; }
+  .set-add { display:inline-flex; align-items:center; gap:7px; align-self:flex-start; font:inherit; font-size:12.5px;
+    color:var(--accent); background:var(--accent-bg); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+    border-radius:9px; padding:8px 13px; cursor:pointer; transition:background var(--dur-fast), border-color var(--dur-fast); }
+  .set-add:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 18%,transparent); }
+  /* shortcuts pane — rendered from KEYMAP, so it can't fall out of date */
+  .set-keys { display:flex; flex-direction:column; gap:16px; padding-top:6px; }
+  .set-kgrp > b { display:block; font-size:10px; font-weight:600; letter-spacing:.12em;
+                  text-transform:uppercase; color:var(--faint); margin-bottom:4px; }
+  .set-krow { display:flex; align-items:baseline; gap:16px; padding:5px 0;
+              border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
+  .set-kgrp .set-krow:last-child { border-bottom:0; }
+  .set-krow .kk { flex:0 0 150px; display:flex; flex-wrap:wrap; gap:5px; }
+  .set-krow .kd { color:var(--text-2); font-size:12.5px; }
+  .set-foot { display:flex; align-items:center; gap:12px; padding:13px 22px;
+              background:var(--inset); border-top:1px solid var(--line); }
+  .set-foot .hint { flex:1; color:var(--faint); font-size:11px; }
+  .set-foot .kbtn { font-family:var(--ui); font-size:13px; height:auto; padding:8px 15px; }
+  .set-foot.readonly .kbtn, .set-foot.readonly .primary { display:none; }   /* nothing to save here */
+  .set-dirty { display:none; align-items:center; gap:6px; font-size:11px; color:var(--waiting); }
+  .set-dirty.on { display:inline-flex; }
+  .set-dirty::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--waiting); }
+  #settings button.primary { background:var(--accent); border:1px solid var(--accent); color:#0b0d10; font-weight:600;
+    border-radius:8px; padding:8px 18px; font:inherit; font-size:13px; cursor:pointer; }
+  #settings button.primary:hover { background:var(--accent-2); }
+  @media (max-width: 720px) {   /* narrow: the rail becomes a top strip */
+    .set-shell { flex-direction:column; height:min(88vh,720px); }
+    .set-nav { flex:none; flex-direction:row; gap:4px; overflow-x:auto; padding:8px;
+               border-right:0; border-bottom:1px solid var(--line); }
+    .set-brand, .set-navfoot, .set-navi .pill { display:none; }
+    .set-navi { width:auto; white-space:nowrap; }
+  }
   /* toggle switch (replaces bare checkboxes) */
   .switch { appearance:none; -webkit-appearance:none; position:relative; width:34px; height:20px; flex:none; margin:0;
             background:var(--border-2); border:1px solid var(--border-3); border-radius:999px; cursor:pointer;
@@ -482,9 +555,19 @@
   .mbx-compose { border-top:1px solid var(--border); padding:10px 12px; display:flex; flex-direction:column; gap:8px; background:var(--panel); }
   .mbx-compose .row1 { display:flex; gap:8px; } .mbx-compose .row2 { display:flex; align-items:center; gap:10px; }
   .mbx-compose .hint { color:var(--faint); font-size:11px; flex:1; }
-  select, .nb-card input, .mbx-compose textarea { background:var(--inset); color:var(--text); border:1px solid var(--border-2);
-    border-radius:7px; padding:7px 9px; font:inherit; font-size:13px; outline:none; }
-  select:focus, .nb-card input:focus, .mbx-compose textarea:focus { border-color:var(--accent); }
+  select, .nb-card input, #settings input:not([type=checkbox]), .mbx-compose textarea { background:var(--inset); color:var(--text); border:1px solid var(--border-2);
+    border-radius:7px; padding:7px 9px; font:inherit; font-size:13px; outline:none;
+    transition:border-color var(--dur-fast), box-shadow var(--dur-fast); }
+  select:focus, .nb-card input:focus, #settings input:not([type=checkbox]):focus, .mbx-compose textarea:focus {
+    border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-bg); }
+  /* the native dropdown arrow is the one control that reads as "unstyled browser widget" */
+  select { appearance:none; -webkit-appearance:none; padding-right:30px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23828d99' stroke-width='2' stroke-linecap='round'><polyline points='6 9 12 15 18 9'/></svg>");
+    background-repeat:no-repeat; background-position:right 9px center; background-size:13px; }
+  /* one visible focus ring for every interactive control (keyboard users, and it sharpens the feel) */
+  button:focus-visible, .kbtn:focus-visible, .set-navi:focus-visible, .set-add:focus-visible,
+  .switch:focus-visible, .rx:focus-visible, .x:focus-visible {
+    outline:2px solid color-mix(in srgb,var(--accent) 75%,transparent); outline-offset:2px; }
   .mbx-compose textarea { resize:vertical; min-height:54px; }
   .mbx-compose select { flex:1; }
   .nb-lbl { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
@@ -562,7 +645,7 @@
           </div>
         </header>
         <div id="fleet"></div>
-        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌥1</kbd>–<kbd>⌥9</kbd> tab · <kbd>⌥[</kbd>/<kbd>⌥]</kbd> cycle · <kbd>⌘N</kbd> new box · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
+        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
       </div>
     </div>
     <div id="gutter" title="drag to resize"></div>
@@ -653,25 +736,48 @@
     </div>
   </div>
 
+  <!-- Settings: a two-pane preferences surface. Sections are navigated, not scrolled past, so each
+       pane stays short enough to read; the Shortcuts pane is generated from one table (KEYMAP) so the
+       keys documented here cannot drift from the keys the app binds. -->
   <div id="settings" aria-hidden="true">
-    <div class="nb-card set-card">
-      <div class="nb-head"><b>Settings</b><span class="x" onclick="closeSettings()">✕</span></div>
-      <div class="set-body">
-        <div class="set-sec">Repositories</div>
-        <div id="set-repos" class="set-repos"></div>
-        <button class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>add repository</button>
-
-        <div class="set-sec">GitHub</div>
-        <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">so boxes can fetch, push, and open PRs</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
-        <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">refresh the sbx secret after a rotation</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
-        <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key never enters a box</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
-
-        <div class="set-sec">Workflow</div>
-        <label class="set-field"><span class="set-title">Default agent</span><select id="set-agent"></select></label>
-        <label class="set-field"><span class="set-title">Base branch for PRs</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
-        <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
+    <div class="set-shell" tabindex="-1" role="dialog" aria-modal="true" aria-label="Settings">
+      <nav class="set-nav">
+        <div class="set-brand">skein<span>settings</span></div>
+        <button type="button" class="set-navi on" data-pane="repos"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Repositories<span class="pill" id="set-repon"></span></button>
+        <button type="button" class="set-navi" data-pane="github"><svg class="ic" viewBox="0 0 24 24"><path d="M9 19c-4 1.5-4-2.5-6-3m12 5v-3.9a3.4 3.4 0 0 0-1-2.6c3-.3 6-1.5 6-6.5a5 5 0 0 0-1.4-3.5 4.7 4.7 0 0 0-.1-3.5s-1.4-.4-4.5 1.7a12 12 0 0 0-6 0C4.4 1.6 3 2 3 2a4.7 4.7 0 0 0-.1 3.5A5 5 0 0 0 1.5 9c0 5 3 6.2 6 6.5a3.4 3.4 0 0 0-1 2.6V22"/></svg>GitHub &amp; keys</button>
+        <button type="button" class="set-navi" data-pane="workflow"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Workflow</button>
+        <button type="button" class="set-navi" data-pane="keys"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="10" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="14" y2="10"/><line x1="18" y1="10" x2="18" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>Shortcuts</button>
+        <div class="set-navfoot"><code>~/.skein/config.json</code></div>
+      </nav>
+      <div class="set-main">
+        <header class="set-top">
+          <span class="set-h"><b id="set-htitle">Repositories</b><span id="set-hsub"></span></span>
+          <button type="button" class="set-x" onclick="closeSettings()" title="Close (esc)">✕</button>
+        </header>
+        <div class="set-scroll">
+          <section class="set-pane on" data-pane="repos">
+            <div id="set-repos" class="set-repos"></div>
+            <button type="button" class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add a repository</button>
+          </section>
+          <section class="set-pane" data-pane="github">
+            <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">so boxes can fetch, push, and open PRs</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">refresh the sbx secret after a rotation</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
+            <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
+          </section>
+          <section class="set-pane" data-pane="workflow">
+            <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
+            <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
+          </section>
+          <section class="set-pane" data-pane="keys"><div id="set-keys" class="set-keys"></div></section>
+        </div>
+        <footer class="set-foot">
+          <span class="set-dirty" id="set-dirty">unsaved changes</span>
+          <span class="hint"><code>$SKEIN_*</code> env vars override these</span>
+          <button type="button" class="kbtn" onclick="closeSettings()">Cancel</button>
+          <button type="button" class="primary" id="set-go">Save</button>
+        </footer>
       </div>
-      <div class="nb-foot"><span class="hint">saved to <code>~/.skein/config.json</code> · <code>$SKEIN_*</code> env overrides</span><button class="primary" id="set-go">Save</button></div>
     </div>
   </div>
 
@@ -1437,7 +1543,7 @@ function renderTabs() {
     const cls = `tab t-${g}` + (id === aid && view.mode === "term" ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "") + (s.kind === "shell" ? " shell" : "");
     if (t.className !== cls) t.className = cls;
     const what = s.kind === "shell" ? `${s.box} — shell` : `${s.box} — ${s.runtime || "agent"}`;
-    const title = s.dead ? `${what} — disconnected · click to reconnect` : what;
+    const title = (s.dead ? `${what} — disconnected · click to reconnect` : what) + `\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`;
     if (t.title !== title) t.title = title;
     const lead = s.dead ? `<span class="trc" title="reconnect">↻</span>` : `<span class="td"></span>`;
     const label = esc(s.box) + (s.kind === "shell"
@@ -1908,7 +2014,8 @@ function commands() {
   const acts = [
     { sec:"Actions", label:"New box…", run:openNewBox, meta:"⌘N" },
     { sec:"Actions", label:"Add a repo…", run:addRepoPrompt },
-    { sec:"Actions", label:"Settings…", run:openSettings },
+    { sec:"Actions", label:"Settings…", run:() => openSettings("repos") },
+    { sec:"Actions", label:"Keyboard shortcuts…", run:() => openSettings("keys"), meta:"?" },
     { sec:"Actions", label:"Open mailbox", run:openMailbox },
     { sec:"Actions", label:"Broadcast to all boxes…", run:()=>{ openMailbox(); setTimeout(()=>{ document.getElementById("mbx-to").value="broadcast"; document.getElementById("mbx-body").focus(); },50); } },
     { sec:"Actions", label:"Jump to next box that needs you", run:nextNeedsYou, meta:"]" },
@@ -2034,7 +2141,66 @@ function loadSettings() {
   return fetch("/api/settings").then(r => r.json()).then(s => { settings = s || settings; }).catch(() => {});
 }
 const settingsModal = () => document.getElementById("settings");
-function openSettings() {
+// The one place keys are documented. Rendered into Settings → Shortcuts (and reachable with `?`), so
+// what the UI claims and what the app binds are the same list.
+const KEYMAP = [
+  { sec:"Fleet", items:[
+    [["j","k"], "move the selection"],
+    [["↵"], "open the selected box's terminal"],
+    [["d"], "open its diff"],
+    [["]"], "jump to the next box that needs you"],
+  ]},
+  { sec:"Tabs", items:[
+    [["⌥1","…","⌥9"], "switch to the nth open tab (⌥9 is always the last)"],
+    [["⌥["],           "previous tab"],
+    [["⌥]"],           "next tab"],
+    [["⌥⇧[","⌥⇧]"],    "move the current tab left / right"],
+    [["drag"],         "reorder tabs by dragging one — esc cancels, and the order is remembered"],
+  ]},
+  { sec:"Anywhere", items:[
+    [["⌘K"], "command palette"],
+    [["⌘N"], "new box"],
+    [["?"],  "this list"],
+    [["esc"],"leave the terminal / close a dialog"],
+  ]},
+  { sec:"In a terminal", items:[
+    [["⌘C"], "copy the selection"],
+    [["⌘V"], "paste"],
+    [["⌃C"], "interrupt — goes through to the agent, never intercepted"],
+    [["⌘V","file"], "paste a file, or drag one in, to hand it to the agent"],
+  ]},
+];
+// ⌘/⌥/⇧/⌃ are Mac glyphs; away from a Mac the same bindings are Ctrl/Alt/Shift (the handlers already
+// accept either), so print what that keyboard actually has on it.
+const MAC = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
+const glyph = k => MAC ? k
+  : k.replace("⌘", "Ctrl+").replace("⌃", "Ctrl+").replace("⌥", "Alt+").replace("⇧", "Shift+");
+function renderKeys() {
+  document.getElementById("set-keys").innerHTML = KEYMAP.map(g =>
+    `<div class="set-kgrp"><b>${esc(g.sec)}</b>` + g.items.map(([keys, what]) =>
+      `<div class="set-krow"><span class="kk">${keys.map(k => k === "…" ? "…" : `<kbd>${esc(glyph(k))}</kbd>`).join("")}</span><span class="kd">${esc(glyph(what))}</span></div>`
+    ).join("") + `</div>`).join("");
+}
+const SET_PANES = {
+  repos:    "the repos skein can launch boxes into",
+  github:   "how boxes authenticate to GitHub",
+  workflow: "defaults for new boxes and their pull requests",
+  keys:     "every shortcut the cockpit binds",
+};
+function setPane(pane) {
+  if (!SET_PANES[pane]) pane = "repos";
+  for (const el of settingsModal().querySelectorAll(".set-navi")) el.classList.toggle("on", el.dataset.pane === pane);
+  for (const el of settingsModal().querySelectorAll(".set-pane")) el.classList.toggle("on", el.dataset.pane === pane);
+  const nav = settingsModal().querySelector(`.set-navi[data-pane="${pane}"]`);
+  document.getElementById("set-htitle").textContent = nav ? nav.textContent.replace(/\d+$/, "").trim() : pane;
+  document.getElementById("set-hsub").textContent = SET_PANES[pane];
+  settingsModal().querySelector(".set-scroll").scrollTop = 0;
+  // Shortcuts is a reference, not a form — offering Save/Cancel there is noise.
+  settingsModal().querySelector(".set-foot").classList.toggle("readonly", pane === "keys");
+}
+// Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
+function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
+function openSettings(pane = "repos") {
   Promise.all([loadRuntimes(), loadSettings(), loadRepos()]).then(() => {
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret !== false;
     document.getElementById("set-forcegh").checked = !!settings.force_gh_secret;
@@ -2042,15 +2208,20 @@ function openSettings() {
     document.getElementById("set-agent").value = settings.default_agent || "";
     document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
-    renderRepoList();
+    renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
     settingsModal().classList.add("open");
+    // Focus the dialog itself so esc/⏎ reach its handler; focusing the nav button instead would
+    // paint a focus ring that then contradicts the active section once you switch panes.
+    settingsModal().querySelector(".set-shell")?.focus();
   });
 }
 function renderRepoList() {
   const el = document.getElementById("set-repos");
-  if (!repos.length) { el.innerHTML = `<div class="none">no repos yet — add one below</div>`; return; }
+  const n = document.getElementById("set-repon");
+  if (n) n.textContent = repos.length || "";
+  if (!repos.length) { el.innerHTML = `<div class="none">No repositories yet — add one below to launch boxes into it.</div>`; return; }
   el.innerHTML = repos.map(r =>
-    `<div class="rrow"><span class="rid">${esc(r.id)}</span><span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span><span class="rx" data-id="${esc(r.id)}" title="Unregister (files left on disk)">✕</span></div>`
+    `<div class="rrow"><span class="rid">${esc(r.id)}</span><span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span><span class="rx" tabindex="0" data-id="${esc(r.id)}" title="Unregister (files left on disk)">✕</span></div>`
   ).join("");
   el.querySelectorAll(".rx").forEach(x => x.addEventListener("click", () => removeRepo(x.dataset.id)));
 }
@@ -2191,10 +2362,16 @@ function launchBox(branch) {
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
 settingsModal().addEventListener("keydown", e => {
-  if (e.key === "Enter") { e.preventDefault(); saveSettings(); }
+  if (e.key === "Enter" && !e.target.closest(".set-navi")) { e.preventDefault(); saveSettings(); }
   else if (e.key === "Escape") { e.preventDefault(); closeSettings(); }
   e.stopPropagation();
 });
+// Section nav, and any edit flips the footer's unsaved-changes flag.
+for (const b of settingsModal().querySelectorAll(".set-navi")) b.addEventListener("click", () => setPane(b.dataset.pane));
+settingsModal().addEventListener("input", e => { if (e.target.closest(".set-pane")) markDirty(true); });
+settingsModal().addEventListener("change", e => { if (e.target.closest(".set-pane")) markDirty(true); });
+// Click the backdrop (not the dialog) to dismiss — expected of a modal, and it was missing.
+settingsModal().addEventListener("mousedown", e => { if (e.target === settingsModal()) closeSettings(); });
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }
@@ -2284,6 +2461,9 @@ document.addEventListener("keydown", e => {
   if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
   if (newbox.classList.contains("open")) return;
   if (pal.classList.contains("open")) return;
+  // Settings owns its own keys (esc closes, ⏎ saves, arrows walk the section rail); a key that leaks
+  // to the fleet keymap from an open dialog moves the selection behind it.
+  if (settingsModal().classList.contains("open")) { if (e.key === "Escape") closeSettings(); return; }
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
   // the agent (claude/vim/less/fzf) needs. This guard MUST precede the Esc handler below.
   const inTerm = view.mode === "term" && activeSession()?.host.contains(document.activeElement);
@@ -2297,6 +2477,7 @@ document.addEventListener("keydown", e => {
     case "k": case "ArrowUp":   e.preventDefault(); move(-1); break;
     case "Enter": case "o": if (sel) { e.preventDefault(); openTerminal(sel); } break;
     case "d": if (sel) { e.preventDefault(); openDiff(sel); } break;
+    case "?": e.preventDefault(); openSettings("keys"); break;
     case "]": e.preventDefault(); nextNeedsYou(); break;
     case "[": e.preventDefault(); cycleSession(-1); break;
     case "}": e.preventDefault(); cycleSession(1); break;

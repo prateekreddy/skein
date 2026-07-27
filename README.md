@@ -40,7 +40,8 @@ its structure) and pastes the in-box path — the folder's path for a folder —
 to open. Streamed, not buffered, so a large video costs the host no memory. Open sessions stay live as
 **tabs** in the dock: drag them into the order you want (it survives a reload), or move between them with
 `⌥1`–`⌥9` / `⌥[` `⌥]` — chords that work while you are typing in the agent, since the browser reserves
-`⌘1`–`⌘9` and the agents use `⌥←`/`⌥→` for word movement.
+`⌘1`–`⌘9` and the agents use `⌥←`/`⌥→` for word movement. Press `?` for the full key list (it lives in
+**Settings → Shortcuts**, rendered from the same table the app binds, so it can't drift).
 
 Signals come through thin runtime adapters writing the same shared contract. Claude maps
 `Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,
