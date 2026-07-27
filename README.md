@@ -50,8 +50,10 @@ now: a `nice`d in-box observer samples the agent's tmux pane (0.11% of one core)
 back, so a chip clears itself within a second or two of you answering — and states no hook can report
 (a trust prompt before any session exists, an expired login, a crashed agent, a dialog dismissed with
 esc) become visible at all. A blocking dialog says *which* kind it is: `decision` (a tool wants
-approval), `asks` (a question), `trust?`, `sign in`. With no observation present, turn state is exactly
-the edge signal it always was, so older boxes are unaffected.
+approval), `asks` (a question), `trust?`, `sign in`. Both runtimes' screens are read from live
+captures — Codex even states its blocked-ness in the terminal title (`[ ! ] Action Required`), which
+clears the instant you answer either way. With no observation present, or a screen the grammar does
+not recognise, turn state is exactly the edge signal it always was, so nothing regresses.
 
 Signals come through thin runtime adapters writing the same shared contract. Claude maps
 `Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,

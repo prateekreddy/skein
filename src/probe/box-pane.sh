@@ -96,7 +96,12 @@ shape() {                # sets $SIG; deliberately not echo + $(…), which fork
   local dialog=0 interrupt=0 last="" line
   while IFS= read -r line; do
     [ -n "${line//[[:space:]]/}" ] && last=$line
-    case $line in *'❯ 1.'* | *'› 1.'* | *'❯ 1)'*) dialog=1 ;; esac
+    # A numbered option, in every marker either runtime uses (Codex's onboarding switches to a plain
+    # `> 1.`), or the footer Codex puts under every dialog.
+    case $line in
+      *'❯ 1.'* | *'› 1.'* | *'❯ 1)'* | *'> 1.'*) dialog=1 ;;
+      *'Press enter to confirm'* | *'Press enter to continue'*) dialog=1 ;;
+    esac
     case $line in *'esc to interrupt'* | *'Esc to interrupt'*) interrupt=1 ;; esac
   done <<<"$1"
   SIG="$dialog$interrupt|$last"
@@ -107,12 +112,13 @@ shape() {                # sets $SIG; deliberately not echo + $(…), which fork
 # (observed: Claude Code kept "Fetch and quote robots.txt file" in the title through an unrelated
 # later turn). Until a change is actually witnessed the age is reported as -1, "unknown", and the
 # host will not use the title's text.
-prev_activity=""; prev_moving=-1; prev_title=""; prev_tail=""; prev_sig=""; last_write=0
-title_at=0; first=1; prev_text=""; title_text=""
+prev_activity=""; prev_moving=-1; prev_tail=""; prev_sig=""; last_write=0
+title_at=0; first=1; prev_text=""; prev_text_w=""; title_text=""; lead=""
 while :; do
   # One tmux round-trip carries everything cheap: when the pane last produced output (the spinner
-  # redraw — that IS the "working" signal), whether the pane is dead, and the title, which Claude
-  # Code sets to the tool it is running.
+  # redraw — that IS the "working" signal), whether the pane is dead, and the title, which carries a
+  # spinner glyph in both runtimes, the running tool in Claude Code, and `[ ! ] Action Required` in
+  # Codex — the only place either provider says outright that a human has to act.
   if ! meta="$(tmux display-message -p -t "$sess" '#{window_activity}|#{pane_dead}|#{pane_current_command}|#{pane_title}' 2>/dev/null)"; then
     meta=""
   fi
@@ -133,10 +139,15 @@ while :; do
   moving=0
   [ -n "$prev_activity" ] && [ "$activity" != "$prev_activity" ] && moving=1
 
-  # Freshness has to be measured on the title's TEXT, not the raw title: the spinner glyph is part
-  # of the string and changes every frame, so the raw title always looks like it just changed —
-  # which made a ten-minute-old tool description look like current work.
-  case $title in [[:alnum:]]*) title_text=$title ;; *) title_text=${title#* } ;; esac
+  # Freshness — and the decision to write at all — has to be measured on the title's TEXT, never the
+  # raw title: the animated part is part of the string and changes every frame, so the raw title
+  # always looks like it just changed. That made a ten-minute-old tool description look like current
+  # work (Claude's `⠂ `), and it would make an unanswered Codex dialog (`[ ! ] ` → `[ . ] `) rewrite
+  # the observation file once a second for as long as it went unanswered.
+  # Strip the whole leading run of non-alphanumerics, so `[ ! ] Action Required | skein` and
+  # `⠂ Claude Code` both reduce to something stable.
+  lead=${title%%[[:alnum:]]*}
+  title_text=${title#"$lead"}
   if [ "$first" = 1 ]; then first=0
   elif [ "$title_text" != "$prev_text" ]; then title_at=$EPOCHSECONDS
   fi
@@ -151,20 +162,22 @@ while :; do
   due=0
   [ "$age" -lt 15 ] && due=1
   [ "$moving" != "$prev_moving" ] && due=1
-  [ "$title" != "$prev_title" ] && due=1
+  [ "$title_text" != "$prev_text_w" ] && due=1
   [ $((EPOCHSECONDS - last_write)) -ge "$HEARTBEAT" ] && due=1
   if [ "$due" = 1 ]; then
     tail_text="$(tmux capture-pane -p -t "$sess" -S -"$TAIL_LINES" 2>/dev/null | tr '\t' ' ')"
     shape "$tail_text"; sig=$SIG
     since=$((EPOCHSECONDS - last_write))
-    if [ "$sig" != "$prev_sig" ] || [ "$title" != "$prev_title" ] || [ "$since" -ge "$HEARTBEAT" ] \
+    # The raw title still goes into the file — the animated glyph IS the host's spinner evidence —
+    # but only a change in its text counts as a reason to write.
+    if [ "$sig" != "$prev_sig" ] || [ "$title_text" != "$prev_text_w" ] || [ "$since" -ge "$HEARTBEAT" ] \
        || { [ "$tail_text" != "$prev_tail" ] && [ "$since" -ge "$MIN_WRITE" ]; }; then
       write_obs "$activity" "$age" "$moving" "$dead" "$title" "$cmd" "$tail_text" "$title_age"
       last_write=$EPOCHSECONDS
     fi
     prev_tail=$tail_text; prev_sig=$sig
   fi
-  prev_activity=$activity; prev_moving=$moving; prev_title=$title
+  prev_activity=$activity; prev_moving=$moving; prev_text_w=$title_text
 
   # Cadence: responsive while things move, lazy when they don't. A box nobody is watching and nothing
   # is happening in costs one tmux call every 5 seconds.

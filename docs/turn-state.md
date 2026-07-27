@@ -233,27 +233,56 @@ Codex's own composer to get these:
 | --- | --- |
 | busy | `pane_title` = `⠋ skein` (braille spinner + dir) **and** a pane line `• Working (1s • esc to interrupt)` |
 | idle / waiting | `pane_title` = `skein` (no glyph); composer `› Use /skills to list available skills`; footer `? for shortcuts` + `NN% context left` |
-| modal / question | a bordered list with a `›`-marked numbered option (`› 1. gpt-5.6-sol (current)`) and the footer **`Press enter to confirm or esc to go back`** |
-| error | a line starting `■ ` carrying JSON, e.g. `■ {"detail":"The 'gpt-5.6-sol' model is not supported…"}` |
+| decision (command) | title **`[ ! ] Action Required \| skein`**; body `Would you like to run the following command?` + `Environment: local` + `$ date`; options `› 1. Yes, proceed (y)` / `2. … don't ask again for commands that start with …(p)` / `3. No, and tell Codex what to do differently (esc)`; footer **`Press enter to confirm or esc to cancel`** |
+| decision (edit) | same title and footer; body `Would you like to make the following edits?` above an `• Added <file> (+1 -0)` diff; option 2 becomes `… don't ask again for these files (a)` |
+| trust | `Hooks need review` / `19 hooks are new or changed.` / `Hooks can run outside the sandbox after you trust them.` + `› 1. Review hooks` / `2. Trust all and continue` / `3. Continue without trusting (hooks won't run)`, footer `…esc to go back` |
+| auth | onboarding: `Welcome to Codex…` / `Sign in with ChatGPT to use Codex as part of your paid plan`; options switch to a plain **`> 1.`**; footer `Press enter to continue` |
+| question | a bordered list with a `›`-marked numbered option (`› 1. gpt-5.6-sol (current)`) and the footer `Press enter to confirm or esc to go back` |
+| error | a line starting `■ ` carrying **JSON**, e.g. `■ {"detail":"The 'gpt-5.6-sol' model is not supported…"}` |
+| *not* an error | a prose `■ ` line — `■ Conversation interrupted - tell the model what to do differently.` — and `⚠ Heads up, you have less than 25% of your monthly limit left.`, both of which sit beside a perfectly live composer |
 | tool result / hook | lines starting `• ` (`• bin, kit, lib.rs, probe, store, web`, `• SessionStart hook (completed)`) |
 
 So both runtimes share two robust markers — a spinner glyph in the terminal **title** and the string
 **`esc to interrupt`** on screen — which is what makes a single `busy` predicate viable across
 providers, with only the dialog/idle grammars needing per-runtime tables.
 
-Still missing: **the approval dialog itself.** That box runs Codex in YOLO mode, so it never asks;
-`/approvals` does not exist in 0.145.0. The way to get it is a throwaway session beside the agent's
-(never touching `skein-agent`):
+Three things worth more than the table:
+
+1. **Codex states its blocked-ness in the terminal title**: `[ ! ] Action Required | <dir>`. Captured
+   through a full cycle, it appears when the dialog opens and clears on *both* answers (approve `y`
+   and `esc`), and stays clear through the rest of a finished turn — so it is a decision marker, not
+   an attention-grabber, and it is the best single signal either provider offers. It is the classifier's
+   fallback when a body is worded in a way we have never seen, honest that it can't name the kind.
+2. **The marker animates** (`[ ! ]` → `[ . ]`, ~1Hz). Anything that treats a title change as news
+   would have rewritten the observation file every second for as long as the dialog went unanswered.
+   The observer therefore compares the title's *text* with the entire leading run of
+   non-alphanumerics stripped (which also reduces `⠂ Claude Code` and `✳ …` to something stable) and
+   writes the raw title for the host to read the spinner from. Measured after the fix: one write per
+   10s (the heartbeat) while blocked.
+3. **A dialog replaces the composer, but working does not.** Codex keeps `? for shortcuts` on screen
+   while it works, so "composer present" cannot mean idle for either runtime — `esc to interrupt`
+   outranks it.
+
+Two false friends the fixtures now pin down: the user's own submitted prompt is echoed with the same
+`› ` glyph the options use (so a dialog needs the numbered form *and* the confirm footer), and Codex's
+hook-trust gate blocks **before any hook can fire** — which is precisely the wall a skein box hits,
+since skein installs its probes into every store ("19 hooks are new or changed" was skein's own).
+
+How the captures were taken — a throwaway session beside the agent's, never touching `skein-agent`:
 
 ```
-tmux new-session -d -s captest -x 120 -y 34 \
+tmux new-session -d -s captest -x 120 -y 40 \
   'codex -m gpt-5.6-terra -a untrusted -s read-only --dangerously-bypass-hook-trust'
-# then prompt: "run the shell command: date"  → the escalation prompt appears
+# then: "run the shell command: date"        → the command escalation
+#       "create a file called … "            → the edit escalation
+# CODEX_HOME=<fresh dir> codex               → the sign-in screen
+# codex --cd <dir it has never seen>         → the hook-review screen
 ```
 
 `-a untrusted` is the correct flag (`--ask-for-approval` values are `untrusted|on-request|never`;
 the earlier attempt failed because it passed `--sandbox`/`--ask-for-approval` spellings this build
-rejects, so the tmux session died instantly).
+rejects, so the tmux session died instantly). That box's default model (`gpt-5.6-sol`) is rejected for
+its account — `■ {"detail":"… not supported when using Codex with a ChatGPT account"}` — hence `-m`.
 
 Two environment notes from that box, worth knowing before blaming a probe: **`/tmp` and `$HOME` are
 read-only** there (Codex warns `Failed to save the conversation transcript … Read-only file system
@@ -268,14 +297,14 @@ skein launches the agent through a `||` fallback wrapper — the classifier must
    even in the easier unattached case; tmux suppresses activity/silence alerts for a session's
    *current* window, and skein's session has exactly one window, always current. The 1s sampler in
    §4.4 stands (and costs ~0.3% of a core).
-2. ~~Codex grammar~~ — captured, see §6b. Only its approval dialog is still missing.
+2. ~~Codex grammar~~ — captured in full, including every dialog, see §6b.
 3. ~~Title activity text~~ — decided, see §6a.2.
 4. ~~Decision kinds~~ — decided, see §6a.3.
 
 ## 8. Where this stands — built and verified live (2026-07-27)
 
-Shipped for **Claude**; Codex returns `Unknown` (i.e. today's hook-only behaviour) until its approval
-dialog is captured, per "Claude first".
+Shipped for **Claude and Codex**; any other runtime returns `Unknown`, i.e. today's hook-only
+behaviour, rather than a guess at a grammar nobody has read.
 
 - `src/probe/box-pane.sh` — the in-box observer. Records activity age, title (+ measured title
   freshness), dead-ness and the visible tail into `<store>/status/<vmid>.pane.json`. Installed by
@@ -316,10 +345,27 @@ Cost, measured in-box over a 61s window spanning a live turn: **0.11% of one cor
    Net effect: correct but usually silent. Worth revisiting if a later Claude Code tracks the title
    per tool.
 
+### Verified against a live Codex TUI
+
+Same method: a throwaway `codex -a untrusted -s read-only` session in a box, watched by this
+observer under its own vmid, classified from the file it wrote:
+
+| moment | classifier said |
+| --- | --- |
+| idle composer | `Waiting` |
+| real command-approval dialog | `Blocked(Permission)` (title `[ ! ] Action Required \| skein`) |
+| after `esc` | `Waiting` — cleared, with nothing firing an event |
+| while blocked | one observation write per 10s, not one per second (§6b.2) |
+
+### One correction the Codex run forced on the Claude path
+
+An error string sitting in the visible tail is *history* unless the screen is otherwise idle, so
+`busy` now outranks `Error` for both runtimes. Before, an `API Error` from the previous turn — still
+within the 24-line tail — read as `error` while the next turn was visibly running, which is the same
+fault as latching an edge, just with text instead of an event.
+
 ### Still open
 
-- Codex: busy/idle/modal/error grammar is captured (§6b); its **approval dialog** is not. Recipe in
-  §6b — needs a box running `-a untrusted -s read-only`.
 - The optimistic path (O5: skein knows it delivered your keystroke, so it could clear an attention
   chip instantly rather than within a second) is not wired; the sampler is fast enough that it has
   not been worth the extra moving part.
