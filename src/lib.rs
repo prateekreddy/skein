@@ -4417,12 +4417,28 @@ pub enum Screen {
     Unknown,
 }
 
-/// True when `line` is one of a dialog's numbered options (`❯ 1. Yes`, `2. No…`).
-fn is_option_line(line: &str) -> bool {
-    let l = line.trim_start().trim_start_matches(['❯', '>', '›']).trim();
-    let mut chars = l.chars();
-    let first = chars.next();
-    matches!(first, Some(c) if c.is_ascii_digit())
+/// True when `line` is a dialog's **selected** option — the numbered row carrying the runtime's
+/// selection marker (`❯ 1. Yes`, `› 1. Yes, proceed (y)`, `> 1. Sign in with ChatGPT`).
+///
+/// Two deliberate narrowings, both of which false-positived before:
+///
+/// * `markers` is one runtime's glyph set, never the union. skein already knows which agent a box
+///   runs (`load_views` resolves it from sbx metadata, then the box's launch spec, then the repo
+///   default), so nothing here has to guess — and a Claude pane displaying a pasted *Codex* dialog,
+///   which happens routinely in this repo, must not read as a live one.
+/// * the marker is required. An unmarked numbered row is just a numbered list, and agents write those
+///   constantly ("2. The observer was capturing scrollback"); only the selected row is decorated, and
+///   one selected row is all the evidence a dialog needs.
+fn is_option_line(line: &str, markers: &[char]) -> bool {
+    let trimmed = line.trim_start();
+    let Some(l) = markers
+        .iter()
+        .find_map(|m| trimmed.strip_prefix(*m))
+        .map(str::trim_start)
+    else {
+        return false;
+    };
+    matches!(l.chars().next(), Some(c) if c.is_ascii_digit())
         && l.split_once('.')
             .is_some_and(|(n, rest)| n.chars().all(|c| c.is_ascii_digit()) && rest.starts_with(' '))
 }
@@ -4527,7 +4543,7 @@ fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
         || any("manual mode on")
         || any("bypass permissions on")
         || obs.tail.iter().any(|l| matches!(l.trim(), "❯" | ">"));
-    let options = obs.tail.iter().any(|l| is_option_line(l));
+    let options = obs.tail.iter().any(|l| is_option_line(l, &['❯', '>']));
     if options && !composer {
         // "Do you want to …?" is a permission ask; anything else with options is a question or a
         // plan approval — a judgement call rather than a yes/no on a tool.
@@ -4595,7 +4611,8 @@ fn classify_codex(obs: &PaneObs, lower: &[String]) -> Screen {
     // Every dialog — approval, picker, onboarding — ends in a confirm footer: "Press enter to
     // confirm or esc to cancel" / "…or esc to go back" / "Press enter to continue".
     let confirm = any("press enter to confirm") || any("press enter to continue");
-    let options = obs.tail.iter().any(|l| is_option_line(l));
+    // `›` in dialogs, plain `>` in the onboarding screens.
+    let options = obs.tail.iter().any(|l| is_option_line(l, &['›', '>']));
     if confirm && options && !composer {
         // "Would you like to run …?" / "… make the following edits?" is a yes/no on a tool.
         if any("would you like to") {
@@ -8120,6 +8137,34 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // …but a dead window needs no grammar, so that still reports across runtimes.
         assert_eq!(classify_pane("gemini", &dead), Screen::Dead);
         assert_eq!(classify_pane("codex", &dead), Screen::Dead);
+    }
+
+    #[test]
+    fn each_runtimes_grammar_owns_its_glyphs_because_skein_knows_the_runtime() {
+        // The runtime is never inferred from the screen — `load_views` resolves it from sbx metadata,
+        // the box's launch spec, or the repo default, and hands it to `classify_pane`. So each table
+        // reads only its own selection glyph, and one agent showing the *other's* dialog — pasted into
+        // a message, or quoted in a doc, both routine in this repo — is not a live dialog.
+        let codex_dialog = &[
+            "  Would you like to run the following command?",
+            "› 1. Yes, proceed (y)",
+            "  2. No, and tell Codex what to do differently (esc)",
+            "  Press enter to confirm or esc to cancel",
+        ];
+        assert_eq!(
+            classify_pane("codex", &obs(codex_dialog)),
+            Screen::Blocked(Blocked::Permission)
+        );
+        assert_eq!(classify_pane("claude", &obs(codex_dialog)), Screen::Unknown);
+        assert!(is_option_line("› 1. Yes, proceed (y)", &['›', '>']));
+        assert!(!is_option_line("› 1. Yes, proceed (y)", &['❯', '>']));
+        // And the marker itself is required: an unmarked numbered row is just a numbered list, which
+        // agents write all the time — including in the message this test was written from.
+        assert!(!is_option_line("  2. No, keep planning", &['❯', '>']));
+        assert!(!is_option_line(
+            "  2. The observer was capturing scrollback, so a status line stayed current.",
+            &['❯', '>']
+        ));
     }
 
     #[test]
