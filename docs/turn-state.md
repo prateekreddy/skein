@@ -357,6 +357,57 @@ observer under its own vmid, classified from the file it wrote:
 | after `esc` | `Waiting` — cleared, with nothing firing an event |
 | while blocked | one observation write per 10s, not one per second (§6b.2) |
 
+### 8a. Two defects a real box found that a throwaway one could not (2026-07-27)
+
+Reported: *"when the session is waiting on a tool call you say waiting, so the statuses keep switching
+regularly — but for this scenario you show working"* (a screenshot of an idle pane just after
+`/compact`). Both halves were real, and neither could have shown up in the clean-room verification
+above, because both need a **configured statusline** and a **tall pane with history** — i.e. an actual
+box.
+
+**1. The busy predicate matched a part of the status line that changes every two seconds.** Sampled
+from a live box every 2s through four minutes of continuous work:
+
+```
+✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)                    ← old predicate `tokens)` matched → working
+✽ Beboppin'… (3m 43s · ↓ 12.9k tokens · thinking)         ← no match                        → waiting
+✻ Beboppin'… (4m 6s · ↓ 13.7k tokens · thought for 10s)   ← no match                        → waiting
+```
+
+Same state, three renderings — so the board alternated. Both backstops were absent too: `esc to
+interrupt` appeared **nowhere on screen** in that build, and the title's glyph was sometimes braille
+and sometimes `_`. What *is* invariant is the line's shape: a spinner glyph, a verb ending in an
+ellipsis, then a parenthesised **elapsed time**. `is_working_status_line` matches that and nothing
+else — tool announcements (`● Running 4 shell commands…`) have the ellipsis but no elapsed time, and
+the completion marker (`✻ Sautéed for 24m 3s`) has neither, which matters because it sits above an
+idle composer for the whole of the next turn.
+
+The animation cycles `· ✢ * ✶ ✻ ✽` — including a plain ASCII `*`. An allowlist of glyphs was drafted
+and thrown out: it would have flapped again the day a release adds a frame, and it *did* reject `*`
+until live sampling caught it. The guard is a denylist of things a status line is never (`●` message
+bullet, `⎿` tool result, composer prompt, quote, alphanumeric prose).
+
+**2. The observer was capturing scrollback, so a finished turn's status line stayed "current".**
+`capture-pane -S -24` does not mean "the last 24 lines": its coordinates are relative to the top of
+the *visible* pane, so a negative `-S` reaches into history — `-S -24` meant "24 lines of scrollback
+**plus the whole screen**", 54 lines on the reporting box. `/compact` redraws the screen and pushes
+the pre-compact bottom — including its status line — into exactly that region, which is why an idle
+post-compact box read as `working` and stayed there. Fixed by asking for `#{pane_height}` in the same
+round-trip and starting the capture at `height - 24`; verified on the same live pane, 54 lines → 24.
+
+Belt and braces, since the same class of mistake keeps recurring: a status line only counts within the
+last 10 non-empty lines (it lives directly above the composer). Anything higher is the agent
+*displaying* one — a log, a capture, a fixture in a diff. This file's own test fixtures were on screen
+while being written, which is how that hazard was noticed.
+
+One hypothesis was wrong and is worth recording: the missing `? for shortcuts` footer in the
+screenshot was **not** the cause. A live idle pane with a statusline configured still shows its mode
+line (`⏸ manual mode on · ← for agents`) *below* the statusline, so the composer was detected all
+along. A bare-prompt check was added anyway, but the bug was the two defects above.
+
+Verified live after the fix: this box's own pane, mid-turn → `Busy` on ten consecutive samples over
+20s; a real idle Claude with a statusline → `Waiting`.
+
 ### One correction the Codex run forced on the Claude path
 
 An error string sitting in the visible tail is *history* unless the screen is otherwise idle, so

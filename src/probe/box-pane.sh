@@ -33,8 +33,9 @@
 set -uo pipefail
 
 sess="${1:-skein-agent}"
-TAIL_LINES=24          # the composer/dialog region — never scrollback, so the agent's own prose
-                       # cannot be mistaken for a dialog (see classify_pane in lib.rs)
+TAIL_LINES=24          # the bottom of the VISIBLE pane, never scrollback (see `start` below), so
+                       # neither the agent's own prose nor a previous turn's status line can be
+                       # mistaken for the current one (see classify_pane in lib.rs)
 HEARTBEAT=10           # seconds: proves the observation is fresh even when nothing changes, which is
                        # what lets the host expire a stale one instead of trusting it forever
 MIN_WRITE=2            # seconds: floor between writes for cosmetic churn (streaming output). A real
@@ -119,7 +120,7 @@ while :; do
   # redraw — that IS the "working" signal), whether the pane is dead, and the title, which carries a
   # spinner glyph in both runtimes, the running tool in Claude Code, and `[ ! ] Action Required` in
   # Codex — the only place either provider says outright that a human has to act.
-  if ! meta="$(tmux display-message -p -t "$sess" '#{window_activity}|#{pane_dead}|#{pane_current_command}|#{pane_title}' 2>/dev/null)"; then
+  if ! meta="$(tmux display-message -p -t "$sess" '#{window_activity}|#{pane_dead}|#{pane_current_command}|#{pane_height}|#{pane_title}' 2>/dev/null)"; then
     meta=""
   fi
   if [ -z "$meta" ]; then
@@ -130,9 +131,18 @@ while :; do
   fi
   activity=${meta%%|*}; rest=${meta#*|}
   dead=${rest%%|*};     rest=${rest#*|}
-  cmd=${rest%%|*}
+  cmd=${rest%%|*};      rest=${rest#*|}
+  height=${rest%%|*}
   title=${rest#*|}
   case $activity in '' | *[!0-9]*) activity=0 ;; esac
+  case $height in '' | *[!0-9]*) height=0 ;; esac
+
+  # Where the visible pane's bottom TAIL_LINES start. capture-pane's coordinates are relative to the
+  # top of the VISIBLE pane, so a negative `-S` reaches into scrollback: `-S -24` means "24 lines of
+  # history plus the whole screen", which on a tall pane handed the classifier ~70 lines including
+  # the previous turn's status line. That is how an idle box could still read as working.
+  start=$((height - TAIL_LINES))
+  [ "$start" -lt 0 ] && start=0
 
   age=$((EPOCHSECONDS - activity))
   [ "$age" -lt 0 ] && age=0
@@ -165,7 +175,7 @@ while :; do
   [ "$title_text" != "$prev_text_w" ] && due=1
   [ $((EPOCHSECONDS - last_write)) -ge "$HEARTBEAT" ] && due=1
   if [ "$due" = 1 ]; then
-    tail_text="$(tmux capture-pane -p -t "$sess" -S -"$TAIL_LINES" 2>/dev/null | tr '\t' ' ')"
+    tail_text="$(tmux capture-pane -p -t "$sess" -S "$start" 2>/dev/null | tr '\t' ' ')"
     shape "$tail_text"; sig=$SIG
     since=$((EPOCHSECONDS - last_write))
     # The raw title still goes into the file — the animated glyph IS the host's spinner evidence —

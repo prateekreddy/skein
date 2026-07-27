@@ -4427,9 +4427,44 @@ fn is_option_line(line: &str) -> bool {
             .is_some_and(|(n, rest)| n.chars().all(|c| c.is_ascii_digit()) && rest.starts_with(' '))
 }
 
+/// Claude Code's status line while a turn is running, matched on its **shape**:
+///
+/// ```text
+/// ✽ Beboppin'… (3m 43s · ↓ 12.9k tokens · thinking)
+/// ✻ Beboppin'… (4m 6s · ↓ 13.7k tokens · thought for 10s)
+/// ✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)
+/// ```
+///
+/// A spinner glyph, a present-tense verb ending in an ellipsis, then a parenthesised **elapsed
+/// time**. Only that much is invariant: everything after the elapsed time comes and goes between
+/// consecutive samples, which is why the old predicate (`tokens)`, i.e. the *end* of the line)
+/// flipped a real box between `working` and `waiting` every couple of seconds.
+///
+/// Deliberately excluded: tool announcements (`● Running 4 shell commands…`) carry the ellipsis but
+/// no elapsed time, and the completion marker (`✻ Sautéed for 24m 3s`) carries neither — it sits
+/// above an idle composer for the whole of the following turn.
+fn is_working_status_line(line: &str) -> bool {
+    let l = line.trim();
+    // Status lines open with a spinner glyph — never a message bullet (`●`), a tool result (`⎿`), a
+    // composer prompt, a quotation, or ordinary prose. Deliberately a *denylist*: the animation
+    // cycles through at least `· ✢ * ✶ ✻ ✽` — all six observed live, including the plain ASCII `*` —
+    // and an allowlist would quietly start flapping again the day a release adds a frame.
+    let spinner =
+        matches!(l.chars().next(), Some(c) if !c.is_alphanumeric() && !"●⎿>❯›\"'".contains(c));
+    if !spinner {
+        return false;
+    }
+    let Some((_, rest)) = l.split_once("… (") else {
+        return false;
+    };
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && matches!(rest[digits..].chars().next(), Some('s' | 'm' | 'h'))
+}
+
 /// A spinner glyph in the terminal title is how both runtimes say "busy" — Claude Code writes
 /// `⠂ Claude Code` while working and `✳ Claude Code` when idle, Codex writes `⠋ <dir>`. Braille is
-/// the animated set in both.
+/// the animated set in both. A bonus signal only: Claude Code's glyph is braille in some frames and
+/// `_` in others while working, so nothing may depend on it alone.
 fn title_is_spinning(title: &str) -> bool {
     matches!(title.trim().chars().next(), Some(c) if ('\u{2800}'..='\u{28FF}').contains(&c))
 }
@@ -4483,11 +4518,15 @@ fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
     if any("do you trust the files") {
         return Screen::Blocked(Blocked::Trust);
     }
-    // The composer and its hint line are present exactly when no dialog is up.
+    // The composer: proof the TUI is alive and accepting input — *not* proof that it is idle, since
+    // Claude Code keeps the composer on screen while it works. Its footer says which mode is on, and
+    // `? for shortcuts` when none is; a configured statusline can push those around, so the bare
+    // prompt line between the two rules (`❯` and a non-breaking space, nothing else) counts too.
     let composer = any("? for shortcuts")
         || any("auto mode on")
         || any("manual mode on")
-        || any("bypass permissions on");
+        || any("bypass permissions on")
+        || obs.tail.iter().any(|l| matches!(l.trim(), "❯" | ">"));
     let options = obs.tail.iter().any(|l| is_option_line(l));
     if options && !composer {
         // "Do you want to …?" is a permission ask; anything else with options is a question or a
@@ -4497,13 +4536,26 @@ fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
         }
         return Screen::Blocked(Blocked::Question);
     }
-    // Busy: the spinner. `esc to interrupt` and the token counter are on-screen proof; a braille
-    // glyph in the title is the same claim from the other side. `Baked for…`/`Worked for…` are
-    // *completion* markers and deliberately not matched — they sit above an idle composer.
+    // Busy: the status line's *shape* (see `is_working_status_line`), which is the only signal that
+    // survived contact with a real box. `esc to interrupt` and a braille title glyph say the same
+    // thing from other angles, but neither is dependable: across four minutes of continuous work in a
+    // real box, `esc to interrupt` never appeared on screen at all, and the title's glyph was
+    // sometimes braille and sometimes `_`. `Baked for…`/`Sautéed for…` are *completion* markers and
+    // deliberately not matched: they sit above an idle composer for the whole of the next turn.
     // Ranked ABOVE the error line on purpose: a turn that is visibly running outranks an error
     // string still sitting in the tail from the *previous* turn (or from a retry in this one).
-    if any("esc to interrupt")
-        || any("tokens)")
+    // Only the bottom of the screen counts: the status line lives directly above the composer, so
+    // anything matching further up is the agent *displaying* one — a captured fixture in a diff, a
+    // log being catted — not the pane's own. (Caught on live data: this file's own test fixtures were
+    // on screen while being edited.)
+    let status_region = obs
+        .tail
+        .iter()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(10);
+    if status_region.clone().any(|l| is_working_status_line(l))
+        || any("esc to interrupt")
         || any("compacting")
         || title_is_spinning(&obs.title)
     {
@@ -8068,6 +8120,122 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // …but a dead window needs no grammar, so that still reports across runtimes.
         assert_eq!(classify_pane("gemini", &dead), Screen::Dead);
         assert_eq!(classify_pane("codex", &dead), Screen::Dead);
+    }
+
+    #[test]
+    fn claude_busy_holds_still_across_the_status_lines_shifting_tail() {
+        // Sampled from a real skein box every 2s through four minutes of continuous work. The old
+        // predicate matched the *end* of this line (`tokens)`), so consecutive samples classified
+        // Busy / Waiting / Waiting / Busy — the board flapping the user reported. All four are the
+        // same state and must classify identically.
+        for line in [
+            "✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)",
+            "✽ Beboppin'… (3m 43s · ↓ 12.9k tokens · thinking)",
+            "✻ Beboppin'… (4m 6s · ↓ 13.7k tokens · thought for 10s)",
+            "· Beboppin'… (1m 16s · ↓ 500 tokens · thought for 70s)",
+            "✢ Whirlpooling… (5m 13s · ↓ 16.1k tokens)",
+            "✻ Thinking… (2s)",
+            // The animation's whole observed frame set — `· ✢ * ✶ ✻ ✽`, including the plain ASCII
+            // `*`, which an earlier draft of this predicate threw out as "markdown, not a spinner".
+            "* Beboppin'… (13m 7s · ↓ 40.4k tokens)",
+            "✶ Beboppin'… (13m 19s · ↓ 40.6k tokens)",
+        ] {
+            assert!(
+                is_working_status_line(line),
+                "should read as working: {line}"
+            );
+        }
+        // …and the whole pane, as the observer really recorded it mid-turn: a configured statusline,
+        // no `esc to interrupt` anywhere on screen, and a title whose glyph is `_`, not braille. Every
+        // other busy signal is absent, so the status line has to carry this alone.
+        let mut real = obs(&[
+            "✻ Sautéed for 24m 3s",
+            "● Running 4 shell commands…",
+            "  ⎿  $ python3 -c \"import json\"",
+            "✽ Beboppin'… (3m 43s · ↓ 12.9k tokens · thinking)",
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  CTX █░░░░ 16% 163.4k/1.0M │ 5H ░░░░ 0%→0% 4h50m left │ $8.80 │ Opus 5",
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]);
+        real.title = "_ Claude Code".into();
+        real.title_age = 2000;
+        assert_eq!(classify_pane("claude", &real), Screen::Busy);
+    }
+
+    #[test]
+    fn claude_is_waiting_once_the_status_line_becomes_a_completion_marker() {
+        // The same pane after the turn ends: the status line is replaced in place by `… for <time>`,
+        // which must NOT read as working — it stays on screen for the whole of the next turn.
+        let mut idle = obs(&[
+            "● Right. First, evidence from a real skein box — my own.",
+            "✻ Sautéed for 24m 3s",
+            "● Running 4 shell commands…",
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  CTX █░░░░ 16% 163.4k/1.0M │ $8.80 │ Opus 5",
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]);
+        idle.title = "_ Claude Code".into();
+        assert_eq!(classify_pane("claude", &idle), Screen::Waiting);
+        // A tool announcement carries the ellipsis but no elapsed time, so it is not the status line.
+        assert!(!is_working_status_line("● Running 4 shell commands…"));
+        assert!(!is_working_status_line(
+            "● Searching for 2 patterns, running 5 shell commands…"
+        ));
+        assert!(!is_working_status_line("✻ Sautéed for 24m 3s"));
+        // The agent's own prose about elapsed times is not a status line either.
+        assert!(!is_working_status_line(
+            "  and the sampler ran… (30s of wall clock) before I stopped it"
+        ));
+        // Nor is a captured status line the agent is *displaying* — a quoted fixture, or a diff line
+        // (both were on this box's screen while this very test was being written).
+        assert!(!is_working_status_line(
+            "            \"✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)\","
+        ));
+        assert!(!is_working_status_line(
+            "      8171 +            \"✽ Beboppin'… (3m 39s)\""
+        ));
+    }
+
+    #[test]
+    fn a_status_line_scrolled_up_the_screen_is_not_the_current_one() {
+        // Same line, two positions. Directly above the composer it is the pane's own status line;
+        // twelve lines up it is the agent showing one — a log, a capture, an earlier turn left on a
+        // screen that has since gone quiet.
+        let composer = [
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ];
+        let mut live: Vec<&str> =
+            vec!["● reading a file", "✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)"];
+        live.extend(composer);
+        assert_eq!(classify_pane("claude", &obs(&live)), Screen::Busy);
+        let mut displayed: Vec<&str> = vec!["✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)"];
+        displayed.extend([
+            "● one", "  two", "  three", "  four", "  five", "  six", "  seven",
+        ]);
+        displayed.extend(composer);
+        assert_eq!(classify_pane("claude", &obs(&displayed)), Screen::Waiting);
+    }
+
+    #[test]
+    fn claude_composer_survives_a_configured_statusline() {
+        // A box whose statusline replaces the hint line, and whose mode footer is off screen: the
+        // bare prompt row between the rules is still proof the TUI is alive and taking input, so the
+        // box reads `waiting` instead of falling back to a stale edge that says `working`.
+        let bare = &[
+            "✻ Sautéed for 14m 21s",
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  CTX █░░░ 0% 0/1.0M │ 5H ███ 53%→54% 4m left │ 7D ███ 28%→31%",
+        ];
+        assert_eq!(classify_pane("claude", &obs(bare)), Screen::Waiting);
     }
 
     #[test]
