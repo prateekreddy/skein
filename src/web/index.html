@@ -245,6 +245,8 @@
   .tab .tl { overflow:hidden; text-overflow:ellipsis; font-size:13px; }
   .tab .tx { color:var(--faint); font-size:13px; padding:0 2px; border-radius:4px; }
   .tab.dead { opacity:.85; }
+  /* mid-drag: the tab being moved stays visible but recedes, so the gap it opens reads as the target */
+  .tab.dragging { opacity:.4; background:var(--inset); }
   .tab.dead .tl { color:var(--dim); }
   .tab .trc { color:var(--accent); font-size:13px; flex:none; line-height:1; }
   .tab .tk { font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--working);
@@ -560,7 +562,7 @@
           </div>
         </header>
         <div id="fleet"></div>
-        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘N</kbd> new box · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
+        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌥1</kbd>–<kbd>⌥9</kbd> tab · <kbd>⌥[</kbd>/<kbd>⌥]</kbd> cycle · <kbd>⌘N</kbd> new box · <kbd>⌘K</kbd> palette · sessions stay live in the dock</footer>
       </div>
     </div>
     <div id="gutter" title="drag to resize"></div>
@@ -1161,9 +1163,11 @@ function closeSession(id) {
   const box = s.box;
   clearTimeout(s.timer); clearInterval(s.statusTimer); // no callbacks on a disposed session
   try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
+  const wasAt = orderedSids().indexOf(id);
   s.host.remove(); sessions.delete(id);
-  if (activeSid() === id) {   // closed the active terminal → fall back to any other open session
-    const nextId = sessions.keys().next().value;
+  if (activeSid() === id) {   // closed the active terminal → fall back to the tab that took its place
+    const rest = orderedSids();
+    const nextId = rest[Math.min(Math.max(wasAt, 0), rest.length - 1)];
     const ns = nextId ? sessions.get(nextId) : null;
     view = ns ? { box: ns.box, mode:"term", kind: ns.kind } : { box:null, mode:"term", kind:"agent" };
   }
@@ -1173,7 +1177,8 @@ function closeSession(id) {
 // session lives inside the sandbox (tmux + `claude --continue`), so reattaching just continues it.
 function persistView() {
   try { localStorage.setItem("skein.view", JSON.stringify({
-    open: [...sessions.values()].map(s => ({ box: s.box, kind: s.kind, runtime: s.runtime })),
+    // In tab order, not open order: restoreSessions replays this list, so the arrangement survives.
+    open: orderedSessions().map(s => ({ box: s.box, kind: s.kind, runtime: s.runtime })),
     box: view.box, mode: view.mode, kind: view.kind })); } catch {}
 }
 // On the first fleet snapshot, reopen whatever was open before the reload (filtered to boxes that
@@ -1361,11 +1366,52 @@ function toast(msg, url) {
 // rebuilt — rebuilding every 2s tick dropped hover state on the ✕ and swallowed clicks whose
 // mousedown straddled a tick (the mouseup landed on a detached node).
 const tabEls = new Map();   // sid -> tab element
+// Tab order is the user's, not the Map's: `sessions` is keyed by sid and its insertion order says
+// "when you opened it", which is not the order you want to read a fleet in. Drag a tab, or ⌥⇧[ / ⌥⇧],
+// to move it. Self-healing rather than bookkept — unknown sids are appended and closed ones fall out,
+// so nothing can desync this from `sessions`, and persistView writes tabs in this order so a reload
+// comes back the way you arranged it.
+const tabOrder = [];
+function orderedSids() {
+  const live = new Set(sessions.keys());
+  const out = tabOrder.filter(id => live.has(id));
+  for (const id of sessions.keys()) if (!out.includes(id)) out.push(id);
+  tabOrder.length = 0; tabOrder.push(...out);
+  return out;
+}
+function orderedSessions() { return orderedSids().map(id => sessions.get(id)); }
+// Move `id` to visual index `to` (clamped). Returns whether anything actually moved.
+function moveTab(id, to) {
+  const ids = orderedSids(), from = ids.indexOf(id);
+  if (from < 0) return false;
+  to = Math.max(0, Math.min(ids.length - 1, to));
+  if (to === from) return false;
+  ids.splice(to, 0, ...ids.splice(from, 1));
+  tabOrder.length = 0; tabOrder.push(...ids);
+  renderTabs(); persistView();
+  return true;
+}
+// Drag state. The move is applied on `drop` and previewed with an insertion caret until then —
+// reordering live on dragover looks nicer but cannot be undone: the browser sends no key events
+// during a drag, so an Esc cancel arrives only as a `dragend`, indistinguishable from a release over
+// a gap in the tab bar. Committing on drop makes Esc a true cancel and costs nothing.
+let dragSid = null, dropAt = -1;       // sid being dragged + the insertion slot the caret marks
+// The caret is an inline style, not a class: renderTabs rewrites className on every fleet tick and
+// would wipe it mid-drag.
+function markInsert(slot) {
+  const els = [...tabsEl.querySelectorAll(".tab")];
+  els.forEach(el => { el.style.boxShadow = ""; });
+  dropAt = slot;
+  if (slot < 0 || !els.length) return;
+  const edge = "inset 2px 0 0 var(--accent)", el = els[Math.min(slot, els.length - 1)];
+  el.style.boxShadow = slot >= els.length ? edge.replace("2px 0", "-2px 0") : edge;
+}
 function renderTabs() {
   const aid = activeSid();
   for (const [id, el] of tabEls) if (!sessions.has(id)) { el.remove(); tabEls.delete(id); }
   let pos = 0;
-  for (const [id, s] of sessions) {
+  for (const id of orderedSids()) {
+    const s = sessions.get(id);
     let t = tabEls.get(id);
     if (!t) {
       t = document.createElement("div");
@@ -1374,6 +1420,17 @@ function renderTabs() {
         const cs = sessions.get(id); if (!cs) return;
         if (e.target.classList.contains("tx")) closeSession(id); else showBox(cs.box, "term", cs.kind);
       });
+      // Drag to reorder — dragover/drop live on the tab strip (see below) so releasing in the gap
+      // after the last tab still lands. A custom dataTransfer type keeps this drag out of the
+      // file-attachment handler, which only acts on types containing "Files"; Firefox also refuses
+      // to start a drag with no data set at all.
+      t.draggable = true;
+      t.addEventListener("dragstart", e => {
+        dragSid = id; t.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        try { e.dataTransfer.setData("application/x-skein-tab", id); } catch {}
+      });
+      t.addEventListener("dragend", () => { t.classList.remove("dragging"); dragSid = null; markInsert(-1); });
       tabEls.set(id, t);
     }
     const g = groupOf(stateOf(s.box));
@@ -1401,6 +1458,33 @@ function renderTabs() {
     if (tabsEl.lastElementChild !== da) tabsEl.appendChild(da);
   } else da?.remove();
 }
+// Which insertion slot an x coordinate means: the first tab whose midpoint it hasn't passed, else
+// "after the last one".
+function slotFor(x) {
+  const els = [...tabsEl.querySelectorAll(".tab")];
+  for (let i = 0; i < els.length; i++) {
+    const r = els[i].getBoundingClientRect();
+    if (x < r.left + r.width / 2) return i;
+  }
+  return els.length;
+}
+// The reorder gestures live on the strip, not the individual tabs, so the gap past the last tab and
+// the "close all" corner are valid places to release. Capture phase, and no-ops unless a tab drag is
+// in flight — the file-attachment handler on the same events only acts on drags carrying Files.
+document.addEventListener("dragover", e => {
+  if (!dragSid || !tabsEl || !e.target?.closest?.("#tabs")) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = "move";
+  markInsert(slotFor(e.clientX));
+}, true);
+document.addEventListener("drop", e => {
+  if (!dragSid || !tabsEl || !e.target?.closest?.("#tabs")) return;
+  e.preventDefault();
+  const ids = orderedSids(), from = ids.indexOf(dragSid), slot = dropAt;
+  markInsert(-1);
+  // The slot counts positions in the list *including* the dragged tab, so a rightward move loses one
+  // index when that tab vacates its own slot.
+  if (slot >= 0 && from >= 0) moveTab(dragSid, slot > from ? slot - 1 : slot);
+}, true);
 function renderTabFlag(id) {
   tabEls.get(id)?.classList.toggle("streaming", !!sessions.get(id)?.streaming);
 }
@@ -2219,11 +2303,36 @@ document.addEventListener("keydown", e => {
   }
 });
 function cycleSession(d) {
-  const ks = [...sessions.keys()]; if (!ks.length) return;
+  const ks = orderedSids(); if (!ks.length) return;
   const i = ks.indexOf(activeSid());
   const ns = sessions.get(ks[(i+d+ks.length)%ks.length]);
   showBox(ns.box, "term", ns.kind);
 }
+// Select the nth open tab (1-based; n beyond the end selects the last, so ⌥9 is always "the last one").
+function selectTab(n) {
+  const ks = orderedSids(); if (!ks.length) return;
+  const s = sessions.get(ks[Math.min(n, ks.length) - 1]);
+  showBox(s.box, "term", s.kind);
+}
+// Tab keys that must work *while you are typing in the agent*, so they can't live in the fleet's
+// keymap (which yields every key to a focused terminal). ⌥ chords only: the browser reserves ⌘1-9 and
+// ⌃Tab, and the agents' own composers use ⌥←/⌥→ for word movement — brackets are free in all of them.
+// Matched on e.code, since ⌥[ on macOS reports e.key as "“".
+document.addEventListener("keydown", e => {
+  if (!e.altKey || e.metaKey || e.ctrlKey) return;
+  const digit = /^Digit([1-9])$/.exec(e.code);
+  const step = e.code === "BracketRight" ? 1 : e.code === "BracketLeft" ? -1 : 0;
+  if (!digit && !step) return;
+  if (!sessions.size) return;
+  e.preventDefault(); e.stopPropagation();
+  if (digit) { selectTab(+digit[1]); return; }
+  if (e.shiftKey) {                                  // ⌥⇧[ / ⌥⇧] — move the tab, don't switch to it
+    const id = activeSid(); const ids = orderedSids();
+    if (id && ids.includes(id)) moveTab(id, ids.indexOf(id) + step);
+    return;
+  }
+  cycleSession(step);
+}, true);
 
 // ---------- attachments: paste · drag-and-drop · attach button ----------
 // The agent runs inside the sandbox and can't see your clipboard or your disk, so anything you want

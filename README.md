@@ -37,7 +37,10 @@ or the 📎 button — hand the agent any file or folder: a screenshot, a PDF, a
 sample corpus. The agent can't see your clipboard or your disk (it runs in the microVM), so skein streams
 each one into the box under `/tmp/skein-drop-<batch>/` (one directory per drop, so a dropped folder keeps
 its structure) and pastes the in-box path — the folder's path for a folder — into the prompt for the agent
-to open. Streamed, not buffered, so a large video costs the host no memory.
+to open. Streamed, not buffered, so a large video costs the host no memory. Open sessions stay live as
+**tabs** in the dock: drag them into the order you want (it survives a reload), or move between them with
+`⌥1`–`⌥9` / `⌥[` `⌥]` — chords that work while you are typing in the agent, since the browser reserves
+`⌘1`–`⌘9` and the agents use `⌥←`/`⌥→` for word movement.
 
 Signals come through thin runtime adapters writing the same shared contract. Claude maps
 `Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,
