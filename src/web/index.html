@@ -66,7 +66,7 @@
   /* compact rows in the rail: drop the path, age and chevron; tighten padding */
   body.docked .row { grid-template-columns:16px 1fr auto; gap:10px; padding:9px 11px; }
   body.docked .row .age, body.docked .row .chev { display:none; }
-  body.docked .dir { display:none; }
+  body.docked .row .dir { display:none; }   /* scoped: .dir is a row's path, not any other "dir" */
   body.docked .ghead { padding:10px 4px 5px; }
 
   header { display:flex; align-items:center; gap:14px; row-gap:10px; flex-wrap:wrap; margin-bottom:20px; }
@@ -326,7 +326,7 @@
   .fent:hover { background:var(--row-hover, rgba(255,255,255,.04)); }
   .fent.on { background:rgba(124,124,240,.12); }
   .fent .fi { flex:none; width:14px; text-align:center; color:var(--dim); }
-  .fent.dir { color:var(--working); }
+  .fent.fdir { color:var(--working); }
   .fent .fsz { margin-left:auto; color:var(--faint); font-size:10.5px; }
   .fview { flex:1; overflow:auto; padding:18px 26px; }
   .fview img { max-width:100%; }
@@ -1697,13 +1697,16 @@ const filesState = new Map();   // box -> { path, file }   (persists across tab 
 marked.use({ renderer: { html(t) { return esc(t.text ?? t.raw ?? ""); } } });
 function fmtSize(n) { return n < 1024 ? `${n}B` : n < 1048576 ? `${(n/1024).toFixed(0)}K` : `${(n/1048576).toFixed(1)}M`; }
 function fileUrl(box, path) { return `/api/boxes/${encodeURIComponent(box)}/file?path=${encodeURIComponent(path)}`; }
+// the server's own words when it refuses, trimmed to one line; "unreachable" when fetch never landed
+function reason(e) { const m = String((e && e.message) || e || "").trim().split("\n")[0]; return m && m !== "Failed to fetch" ? m.slice(0, 160) : "the host is not answering"; }
 function loadFiles(name, path, file) {
   const st = filesState.get(name) || { path:"", file:null };
+  const prev = st.path;
   if (path !== undefined) st.path = path;
   if (file !== undefined) st.file = file;
   filesState.set(name, st);
   fetch(`/api/boxes/${encodeURIComponent(name)}/files?path=${encodeURIComponent(st.path)}`)
-    .then(r => { if (!r.ok) throw 0; return r.json(); })
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
     .then(d => {
       if (view.box !== name || view.mode !== "files") return;
       // first visit at the root: auto-open the README if one exists
@@ -1714,7 +1717,16 @@ function loadFiles(name, path, file) {
       renderFiles(name, d, st);
       if (st.file) loadFileContent(name, st.file);
     })
-    .catch(() => { filespane.innerHTML = `<div class="fview"><div class="note">could not list files — is the box's workspace reachable from the host?</div></div>`; });
+    // A refusal must not strand you: stay where you were browsing and say WHY in the view pane
+    // ("path escapes the workspace" — e.g. the .claude store link — and "workspace unavailable"
+    // are different problems). Only a first load with nothing on screen takes the whole pane.
+    .catch(e => {
+      if (view.box !== name || view.mode !== "files") return;
+      const want = st.path; st.path = prev; filesState.set(name, st);
+      const note = `<div class="note">could not open ${esc(want || "the workspace")} — ${esc(reason(e))}</div>`;
+      const fv = filespane.querySelector("#fview");
+      if (fv) fv.innerHTML = note; else filespane.innerHTML = `<div class="fview">${note}</div>`;
+    });
 }
 function renderFiles(name, d, st) {
   const crumbs = [`<a href="#" data-p="">${esc(name)}</a>`];
@@ -1727,7 +1739,7 @@ function renderFiles(name, d, st) {
     const p = d.path ? `${d.path}/${e.name}` : e.name;
     const on = st.file === p ? " on" : "";
     return e.dir
-      ? `<div class="fent dir" data-d="${esc(p)}"><span class="fi">▸</span>${esc(e.name)}/</div>`
+      ? `<div class="fent fdir" data-d="${esc(p)}"><span class="fi">▸</span>${esc(e.name)}/</div>`
       : `<div class="fent${on}" data-f="${esc(p)}"><span class="fi">·</span>${esc(e.name)}<span class="fsz">${fmtSize(e.size)}</span></div>`;
   }).join("");
   filespane.innerHTML =
@@ -1758,7 +1770,7 @@ function loadFileContent(name, path) {
     return;
   }
   fetch(fileUrl(name, path))
-    .then(r => { if (!r.ok) throw 0; return r.text().then(t => ({ t, trunc: r.headers.get("x-truncated") === "1" })); })
+    .then(r => r.text().then(t => { if (!r.ok) throw new Error(t); return { t, trunc: r.headers.get("x-truncated") === "1" }; }))
     .then(({ t, trunc }) => {
       if (view.box !== name || view.mode !== "files") return;
       const note = trunc ? `<div class="ftrunc">truncated at 2MB — showing the beginning</div>` : "";
@@ -1782,7 +1794,7 @@ function loadFileContent(name, path) {
         fv.innerHTML = note + `<pre class="fraw">${esc(t)}</pre>`;
       }
     })
-    .catch(() => { fv.innerHTML = `<div class="note">could not read ${esc(path)}</div>`; });
+    .catch(e => { fv.innerHTML = `<div class="note">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });
 }
 
 function loadDiff(name) {

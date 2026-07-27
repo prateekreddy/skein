@@ -3170,7 +3170,10 @@ pub fn list_box_files(name: &str, rel: &str) -> Result<FileListing, String> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name() != ".git")
         .filter_map(|e| {
-            let md = e.metadata().ok()?;
+            // follow symlinks for the type: a linked directory (skein's own `.claude` store link is
+            // one) must read as a directory, not as a few-byte "file". A broken link falls back to
+            // the link's own metadata so it still appears rather than vanishing.
+            let md = fs::metadata(e.path()).or_else(|_| e.metadata()).ok()?;
             Some(FileEntry {
                 name: e.file_name().to_string_lossy().into_owned(),
                 dir: md.is_dir(),
@@ -6908,6 +6911,8 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         fs::write(dir.join("docs").join("a.txt"), "aaa").unwrap();
         // a symlink pointing OUTSIDE the workspace must not be traversable
         let _ = std::os::unix::fs::symlink("/etc", dir.join("esc"));
+        // one pointing INSIDE it is an ordinary directory, and must list as one
+        let _ = std::os::unix::fs::symlink(dir.join("docs"), dir.join("linked"));
         let reg = dir.parent().unwrap().join("sandboxes.json");
         fs::write(
             &reg,
@@ -6929,6 +6934,9 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(!truncated);
         assert_eq!(bytes, b"# hi");
         assert_eq!(list_box_files("bx", "docs").unwrap().entries.len(), 1);
+        // a symlinked directory reads as a directory (type follows the link), and opens
+        assert!(l.entries.iter().any(|e| e.name == "linked" && e.dir));
+        assert_eq!(list_box_files("bx", "linked").unwrap().entries.len(), 1);
         // traversal / absolute / symlink-escape / bad-name are all rejected
         assert!(read_box_file("bx", "../sandboxes.json").is_err());
         assert!(read_box_file("bx", "/etc/passwd").is_err());
