@@ -43,6 +43,16 @@ to open. Streamed, not buffered, so a large video costs the host no memory. Open
 `⌘1`–`⌘9` and the agents use `⌥←`/`⌥→` for word movement. Press `?` for the full key list (it lives in
 **Settings → Shortcuts**, rendered from the same table the app binds, so it can't drift).
 
+Turn state has two halves. **Edges** are the runtime's lifecycle hooks — fast, but no runtime fires
+anything when you answer a permission prompt, dismiss a dialog, interrupt a turn, or when the agent
+dies, so a state nobody clears used to be shown forever. **Level** is what the box's screen says right
+now: a `nice`d in-box observer samples the agent's tmux pane (0.11% of one core) and the host reads it
+back, so a chip clears itself within a second or two of you answering — and states no hook can report
+(a trust prompt before any session exists, an expired login, a crashed agent, a dialog dismissed with
+esc) become visible at all. A blocking dialog says *which* kind it is: `decision` (a tool wants
+approval), `asks` (a question), `trust?`, `sign in`. With no observation present, turn state is exactly
+the edge signal it always was, so older boxes are unaffected.
+
 Signals come through thin runtime adapters writing the same shared contract. Claude maps
 `Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,
 `UserPromptSubmit`, `PostToolUse`, and `Stop`. Both produce the same status, task, session, diff,

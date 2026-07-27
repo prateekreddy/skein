@@ -197,6 +197,9 @@
   .pchip.needs-input { color:var(--attn); background:color-mix(in srgb,var(--attn) 16%,transparent); }
   .pchip.fork { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 16%,transparent); }
   .pchip.proceed { color:var(--accent); background:var(--accent-bg); }
+  .pchip.k-permission, .pchip.k-trust { color:var(--attn); background:color-mix(in srgb,var(--attn) 16%,transparent); }
+  .pchip.k-question { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 16%,transparent); }
+  .pchip.k-auth { color:var(--error); background:color-mix(in srgb,var(--error) 16%,transparent); }
 
   /* state word — a quiet right-aligned annotation. The dot is the colour anchor; this just names it.
      It's hidden on rows that show an actionable pause chip (decision / proceed?) so state isn't
@@ -934,7 +937,10 @@ function updateRow(el, b, showRepo) {
   // falls back to the box's current task — so a working tab still shows what it's doing (peripheral
   // awareness). The task also gets its own sub-line when there's a distinct ask above it, so a real
   // question shows both "what it asked" and "what it was doing".
-  const p = b.pause, chip = PCHIP[p];
+  // The chip prefers `blocked_kind` — what the box's screen actually shows — over the pause the
+  // fork-detector guessed from the headline text. Each kind asks something different of you:
+  // approve a tool, answer a question, trust a folder, or go fix auth/quota.
+  const p = b.pause, chip = KCHIP[b.blocked_kind] || PCHIP[p];
   // error/ended carry their reason in the headline (the backend put it there); show it even though
   // they have no pause chip, so the row reads e.g. "API error: rate limit".
   const outcome = b.state === "error" || b.state === "ended";
@@ -948,17 +954,28 @@ function updateRow(el, b, showRepo) {
   el.classList.toggle("has-task", !!showTask);
   el.querySelector(".ttext").textContent = showTask ? task : "";
   const pc = el.querySelector(".pchip");
-  const showChip = !!(chip && pauseHead);
-  pc.className = "pchip" + (showChip ? " " + p : "");
+  // A screen-observed block is worth showing even with no headline: a trust prompt or an expired
+  // login has no "last message" at all, and those are exactly the boxes that used to look fine.
+  const showChip = !!(chip && (pauseHead || b.blocked_kind));
+  pc.className = "pchip" + (showChip ? " " + (b.blocked_kind ? "k-" + b.blocked_kind : p) : "");
   pc.textContent = showChip ? chip : "";
   pc.style.display = showChip ? "" : "none";
-  pc.title = showChip && p === "proceed" ? "click to continue this box" : "";
+  pc.title = showChip ? (KTIP[b.blocked_kind] || (p === "proceed" ? "click to continue this box" : "")) : "";
   // dedupe: the actionable chip (decision / proceed?) already names what's owed, so drop the
   // right-side state word on those rows — no printing "decision" twice.
   el.querySelector(".pill").style.display = showChip ? "none" : "";
 }
 // pause → row-chip label (the fork-detector's verdict; statement/none get no chip)
 const PCHIP = { "needs-input":"decision", fork:"asks", proceed:"proceed?" };
+// blocked_kind → chip label + tooltip. Observed from the box's screen rather than inferred, so these
+// win over PCHIP above; `trust` and `auth` are states no hook can report at all.
+const KCHIP = { permission:"decision", question:"asks", trust:"trust?", auth:"sign in" };
+const KTIP = {
+  permission: "a tool is waiting for your approval",
+  question:   "it asked you something and is waiting",
+  trust:      "it can't start until you trust this folder",
+  auth:       "signed out or out of quota — nothing will run until that's fixed",
+};
 // Full-board re-render, fired on each 2s SSE "boxes" tick.
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));

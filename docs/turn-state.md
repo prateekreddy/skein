@@ -1,7 +1,8 @@
 # Turn state: why it goes stale, and the primitives it should be built from
 
-Status: design note, not yet implemented. Written from evidence collected on a live box
-(`example-box-6`) on 2026-07-27.
+Status: **implemented for Claude** (§8), Codex pending its approval-dialog capture. Written from
+evidence collected on a live box (`example-box-6`) on 2026-07-27, and revised by what a live
+Claude TUI actually did.
 
 ## 1. The symptom
 
@@ -271,20 +272,56 @@ skein launches the agent through a `||` fallback wrapper — the classifier must
 3. ~~Title activity text~~ — decided, see §6a.2.
 4. ~~Decision kinds~~ — decided, see §6a.3.
 
-## 8. Where this stands
+## 8. Where this stands — built and verified live (2026-07-27)
 
-Implemented: `src/probe/box-pane.sh` — the in-box observer (§4.4). It is deliberately dumb: it
-records activity age, title, dead-ness and the visible tail into
-`<store>/status/<vmid>.pane.json`, and does not classify.
+Shipped for **Claude**; Codex returns `Unknown` (i.e. today's hook-only behaviour) until its approval
+dialog is captured, per "Claude first".
 
-Not yet built:
+- `src/probe/box-pane.sh` — the in-box observer. Records activity age, title (+ measured title
+  freshness), dead-ness and the visible tail into `<store>/status/<vmid>.pane.json`. Installed by
+  `ensure_probe_in`, started `setsid`+`nice -n 19` by the attach command, single-instance via a
+  box-local lock, exits when its tmux session goes.
+- `classify_pane` / `read_pane` / `fuse_status` in `lib.rs` — the grammar and the four rules, with
+  unit tests built from the captures in §4.1.
+- `BoxView.blocked_kind` + cockpit chips: `decision` · `asks` · `trust?` · `sign in`.
+- Pane file removed alongside the status file on delist.
 
-- wiring the observer into the attach command (`agent_attach_argv`, `nice`d + `setsid` so it
-  outlives the attach), and into `ensure_probe_in`'s installed-script list;
-- `classify_pane(runtime, snapshot) -> PaneState` in Rust, with the §4.2/§6b grammars and unit tests
-  built from the captures in this document (Claude's are in §4.1, Codex's in §6b);
-- the four fusion rules in `load_views`/`current_status` (§4.3), including "no observation ⇒ exactly
-  today's behaviour" so older boxes are unaffected;
-- `BoxView` carrying the decision kind, and the cockpit's chips for permission/question/trust/auth;
-- title-derived task text ranked below the TodoWrite probe, shown only while busy;
-- deleting the pane file alongside the status file on delist.
+### Verified against a live Claude TUI (not fixtures)
+
+A throwaway `claude` in its own tmux session, its own fake store, **no hooks installed at all** — so
+every state below came from the screen alone:
+
+| moment | board said |
+| --- | --- |
+| idle composer | `waiting` |
+| real WebFetch permission dialog on screen | `needs-input` (kind `permission`) |
+| 4s after pressing esc | `waiting` — **the twenty-minute bug, gone** |
+| 2s into a turn | `working` (`esc to interrupt` + braille title glyph) |
+| turn ended | `waiting` within 1s |
+
+Cost, measured in-box over a 61s window spanning a live turn: **0.11% of one core** (nice 19).
+
+### Two things the live run corrected
+
+1. **Transition latency.** Capturing only on `moving`/title change or the 10s heartbeat meant a turn
+   *starting* — which changes only the tail — could take ten seconds to show. The observer now
+   captures every tick while the screen is live and writes the moment the screen's *shape* changes
+   (dialog present, busy marker present, last line), with a 2s floor for streaming churn.
+2. **The terminal title is not "what it is doing".** It froze on `Fetch and quote robots.txt file`
+   for fifteen minutes across unrelated turns, including while running a different tool — it appears
+   to be set when Claude Code wants attention (so a background tab shows it), not per tool call. The
+   title-derived task line (§6a.2) is therefore gated on freshness the observer has *witnessed*: the
+   text part must have changed within 90s, and the spinner glyph does not count as a change (it is
+   part of the title and changes every frame — which is what made a stale description look fresh).
+   Net effect: correct but usually silent. Worth revisiting if a later Claude Code tracks the title
+   per tool.
+
+### Still open
+
+- Codex: busy/idle/modal/error grammar is captured (§6b); its **approval dialog** is not. Recipe in
+  §6b — needs a box running `-a untrusted -s read-only`.
+- The optimistic path (O5: skein knows it delivered your keystroke, so it could clear an attention
+  chip instantly rather than within a second) is not wired; the sampler is fast enough that it has
+  not been worth the extra moving part.
+- A `screen_health` badge for panes that classify as `Unknown` repeatedly — the drift alarm §6 asks
+  for. Currently an unparsed screen silently falls back to hook edges.

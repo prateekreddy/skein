@@ -20,14 +20,16 @@
 # COST BUDGET — this runs forever beside a human's editor, so it is bounded on purpose:
 #   · one `tmux display-message` per tick: ~2-4ms of CPU, no pipes, no jq, no `date` (bash's
 #     $EPOCHSECONDS is a builtin);
-#   · a `capture-pane` only when something changed or the heartbeat is due — not every tick;
-#   · a WRITE only on a real change or every HEARTBEAT seconds, so the host-mounted store sees ~6
-#     writes a minute rather than one a second;
+#   · a `capture-pane` every tick only while the screen is live (age < 15s), else on change or
+#     the 10s heartbeat — a quiet box costs one tmux call every few seconds and nothing else;
+#   · a WRITE only when the screen's *shape* changes (a dialog appearing or clearing, the busy
+#     marker arriving or going, the last line moving), on a 2s floor for streaming churn, or on the
+#     heartbeat — so the host-mounted store sees a handful of writes a minute, not one a second;
 #   · adaptive cadence: 1s while the screen is moving, 2s when it has been quiet a while, 5s when
 #     it has been quiet for minutes;
 #   · `nice`d by the caller, single-instance via a box-local lock, and it exits the moment its tmux
 #     session is gone.
-# Measured: ~0.35% of one core while an agent works, ~0.1% idle (example-box-6, 60s samples).
+# Measured: 0.11% of one core over a 61s window spanning a live turn (nice 19, in-box, 100Hz ticks).
 set -uo pipefail
 
 sess="${1:-skein-agent}"
@@ -35,6 +37,8 @@ TAIL_LINES=24          # the composer/dialog region — never scrollback, so the
                        # cannot be mistaken for a dialog (see classify_pane in lib.rs)
 HEARTBEAT=10           # seconds: proves the observation is fresh even when nothing changes, which is
                        # what lets the host expire a stale one instead of trusting it forever
+MIN_WRITE=2            # seconds: floor between writes for cosmetic churn (streaming output). A real
+                       # state transition ignores this floor and is reported on the next tick.
 MAX_QUIET=5            # cadence in seconds once the screen has been still for QUIET_LONG
 QUIET_LONG=300
 
@@ -68,12 +72,12 @@ esc() {
   printf '%s' "$s"
 }
 
-write_obs() { # $1 = activity epoch, $2 = age, $3 = moving(0|1), $4 = dead(0|1), $5 = title, $6 = cmd, $7 = tail
+write_obs() { # $1 = activity epoch, $2 = age, $3 = moving(0|1), $4 = dead(0|1), $5 = title, $6 = cmd, $7 = tail, $8 = title_age
   local tmp lines line first=1
   tmp="$(mktemp "$dir/.pane.XXXXXX" 2>/dev/null)" || return 0
   {
-    printf '{"contract":1,"ts":%s,"activity":%s,"age":%s,"moving":%s,"dead":%s,"session":"%s","title":"%s","cmd":"%s","tail":[' \
-      "$EPOCHSECONDS" "$1" "$2" "$3" "$4" "$(esc "$sess")" "$(esc "$5")" "$(esc "$6")"
+    printf '{"contract":1,"ts":%s,"activity":%s,"age":%s,"moving":%s,"dead":%s,"session":"%s","title":"%s","title_age":%s,"cmd":"%s","tail":[' \
+      "$EPOCHSECONDS" "$1" "$2" "$3" "$4" "$(esc "$sess")" "$(esc "$5")" "${8:--1}" "$(esc "$6")"
     while IFS= read -r line; do
       [ "$first" = 1 ] || printf ','
       first=0
@@ -84,7 +88,27 @@ write_obs() { # $1 = activity epoch, $2 = age, $3 = moving(0|1), $4 = dead(0|1),
   mv "$tmp" "$out" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 }
 
-prev_activity=""; prev_moving=-1; prev_title=""; prev_tail=""; last_write=0
+# The part of the screen a reader could act on: is a dialog up, is the busy marker present, and what
+# is the last non-empty line. Pure bash over ~24 lines — no forks. A change here is a state
+# transition and is reported at once; anything else is cosmetic churn.
+SIG=""
+shape() {                # sets $SIG; deliberately not echo + $(…), which forks a subshell per tick
+  local dialog=0 interrupt=0 last="" line
+  while IFS= read -r line; do
+    [ -n "${line//[[:space:]]/}" ] && last=$line
+    case $line in *'❯ 1.'* | *'› 1.'* | *'❯ 1)'*) dialog=1 ;; esac
+    case $line in *'esc to interrupt'* | *'Esc to interrupt'*) interrupt=1 ;; esac
+  done <<<"$1"
+  SIG="$dialog$interrupt|$last"
+}
+
+# `title_at` is when this observer SAW the title change — deliberately not set from the first sample,
+# because a title inherited from a turn that ended ten minutes ago is not evidence of current work
+# (observed: Claude Code kept "Fetch and quote robots.txt file" in the title through an unrelated
+# later turn). Until a change is actually witnessed the age is reported as -1, "unknown", and the
+# host will not use the title's text.
+prev_activity=""; prev_moving=-1; prev_title=""; prev_tail=""; prev_sig=""; last_write=0
+title_at=0; first=1; prev_text=""; title_text=""
 while :; do
   # One tmux round-trip carries everything cheap: when the pane last produced output (the spinner
   # redraw — that IS the "working" signal), whether the pane is dead, and the title, which Claude
@@ -109,22 +133,36 @@ while :; do
   moving=0
   [ -n "$prev_activity" ] && [ "$activity" != "$prev_activity" ] && moving=1
 
-  # Capture (and write) only when the picture actually changed, or when the heartbeat is due. A
-  # transition is exactly when the tail matters: output just started, or just settled.
+  # Freshness has to be measured on the title's TEXT, not the raw title: the spinner glyph is part
+  # of the string and changes every frame, so the raw title always looks like it just changed —
+  # which made a ten-minute-old tool description look like current work.
+  case $title in [[:alnum:]]*) title_text=$title ;; *) title_text=${title#* } ;; esac
+  if [ "$first" = 1 ]; then first=0
+  elif [ "$title_text" != "$prev_text" ]; then title_at=$EPOCHSECONDS
+  fi
+  prev_text=$title_text
+  title_age=-1
+  [ "$title_at" != 0 ] && title_age=$((EPOCHSECONDS - title_at))
+
+  # Look every tick while the screen is live: a turn starting, or a dialog appearing or being
+  # answered, changes the tail without changing anything cheaper — and those are exactly the
+  # transitions the host must see within a second or two. Waiting for the heartbeat made "working"
+  # arrive up to ten seconds late (caught in a live test, not in review).
   due=0
+  [ "$age" -lt 15 ] && due=1
   [ "$moving" != "$prev_moving" ] && due=1
   [ "$title" != "$prev_title" ] && due=1
   [ $((EPOCHSECONDS - last_write)) -ge "$HEARTBEAT" ] && due=1
   if [ "$due" = 1 ]; then
     tail_text="$(tmux capture-pane -p -t "$sess" -S -"$TAIL_LINES" 2>/dev/null | tr '\t' ' ')"
-    # Skip the write when nothing a reader could act on differs — but never skip past the heartbeat,
-    # which is what proves the observation is still live.
-    if [ "$tail_text" != "$prev_tail" ] || [ "$moving" != "$prev_moving" ] \
-       || [ "$title" != "$prev_title" ] || [ $((EPOCHSECONDS - last_write)) -ge "$HEARTBEAT" ]; then
-      write_obs "$activity" "$age" "$moving" "$dead" "$title" "$cmd" "$tail_text"
+    shape "$tail_text"; sig=$SIG
+    since=$((EPOCHSECONDS - last_write))
+    if [ "$sig" != "$prev_sig" ] || [ "$title" != "$prev_title" ] || [ "$since" -ge "$HEARTBEAT" ] \
+       || { [ "$tail_text" != "$prev_tail" ] && [ "$since" -ge "$MIN_WRITE" ]; }; then
+      write_obs "$activity" "$age" "$moving" "$dead" "$title" "$cmd" "$tail_text" "$title_age"
       last_write=$EPOCHSECONDS
     fi
-    prev_tail=$tail_text
+    prev_tail=$tail_text; prev_sig=$sig
   fi
   prev_activity=$activity; prev_moving=$moving; prev_title=$title
 
