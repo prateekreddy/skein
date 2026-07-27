@@ -415,10 +415,35 @@ An error string sitting in the visible tail is *history* unless the screen is ot
 within the 24-line tail — read as `error` while the next turn was visibly running, which is the same
 fault as latching an edge, just with text instead of an event.
 
+### 8b. Saying when only half the signal is running
+
+A missing level signal is invisible by construction: turn state reverts to hook edges and the board
+looks entirely normal — which is the behaviour this whole document exists to fix. So `screen_health`
+(on `BoxView`, computed in `load_views`) names which half is contributing, and why not:
+
+| value | meaning | the move |
+| --- | --- | --- |
+| `""` | reading the screen (or the box isn't running, where a screen means nothing) | — |
+| `none` | nothing has ever been written: no observer | reattach the box |
+| `stale` | observations stopped (>35s): the session or observer is gone | reattach the box |
+| `unreadable` | a *fresh* sample the grammar doesn't recognise — a TUI change | report it; the sample is at `<store>/status/<box>.pane.json` |
+| `unsupported` | the runtime has no screen grammar | nothing; hooks only by design |
+
+`stale` and `unreadable` are deliberately distinct: both fall back to hooks, but one is a box to
+reattach and the other is a skein bug to fix. Shown as a half-filled dot on the state pill (with the
+explanation as its tooltip), on the tab, and as a `hooks only` / `screen lost` / `screen unread` badge
+in the open tab's header. Drawn in CSS, not as `◐` — that glyph only renders in the mono face, and in
+the UI's sans font it fell back to a stray mark.
+
+Deliberately *not* in `skein doctor`'s environment banner: a box on hook-only turn state is not
+unhealthy, it is exactly its pre-observer self, and an alarm that fires for every box until the fleet
+is reattached teaches you to ignore alarms.
+
 ### Still open
 
 - The optimistic path (O5: skein knows it delivered your keystroke, so it could clear an attention
   chip instantly rather than within a second) is not wired; the sampler is fast enough that it has
   not been worth the extra moving part.
-- A `screen_health` badge for panes that classify as `Unknown` repeatedly — the drift alarm §6 asks
-  for. Currently an unparsed screen silently falls back to hook edges.
+- ~~A `screen_health` badge~~ — built, see §8b. What it does *not* do yet is remember: an
+  `unreadable` screen is reported while it lasts, but nothing keeps a history, so a grammar that
+  breaks for two seconds every turn would only ever flicker the badge.

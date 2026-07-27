@@ -276,6 +276,17 @@
   .dockbar .br { font-family:var(--mono); font-size:11px; color:var(--accent-2); background:var(--accent-bg);
                  border-radius:5px; padding:2px 7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:20vw; }
   .dockbar .dstat { font-family:var(--mono); font-size:12px; color:var(--dim); white-space:nowrap; }
+  /* half-signal marker: this box's turn state is coming from hooks alone. Deliberately quiet — it is
+     a caveat on the state pill, not an alarm about the box. Drawn in CSS rather than set as `◐`,
+     which only renders in the mono face: in the UI's sans font it fell back to a stray glyph. */
+  .hdot { display:inline-block; width:.62em; height:.62em; border-radius:50%; border:1px solid currentColor;
+          background:linear-gradient(90deg, currentColor 50%, transparent 50%); vertical-align:baseline;
+          margin-left:.4em; opacity:.9; }
+  .dockbar .scrw { font-size:11px; font-weight:600; color:var(--stale); background:var(--inset);
+                   border:1px solid var(--border); border-radius:5px; padding:2px 7px; white-space:nowrap;
+                   cursor:help; flex:none; }
+  .dockbar .scrw .hdot { margin:0 .45em 0 0; }
+  .tab .thalf { color:var(--stale); }
   .dstat .pos { color:var(--done); } .dstat .neg { color:var(--attn); }
   /* the focal control — a calm, centred segmented toggle */
   .seg-toggle { margin:0 auto; display:flex; gap:2px; background:var(--inset); border:1px solid var(--border);
@@ -919,7 +930,13 @@ function updateRow(el, b, showRepo) {
   rt.style.display = tag ? "" : "none";
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
-  el.querySelector(".pill").textContent = labelOf(b.state);
+  // The state pill, plus a `◐` when only half the signal produced it (hook edges, no screen). One
+  // glyph rather than a sentence: on a fleet of older boxes this is true of every row, and it is a
+  // caveat on how the state was derived, not a problem with the box.
+  const pill = el.querySelector(".pill"), half = SHALF[b.screen_health];
+  const pillHtml = esc(labelOf(b.state)) + (half ? ` <i class="hdot"></i>` : "");
+  if (pill.dataset.html !== pillHtml) { pill.dataset.html = pillHtml; pill.innerHTML = pillHtml; }
+  pill.title = half ? `${half[0]} — ${half[1]}\n\n${half[2]}` : "";
   el.querySelector(".age").textContent = b.age;
   el.querySelector(".chev").textContent = wired ? "▣" : "›";
   el.querySelector(".dstat").innerHTML = diffBadge(b.diff);
@@ -1349,6 +1366,22 @@ function refreshDock() {
   if (sig !== dockSig) { dockSig = sig; renderDockbar(); }
   loadShip(view.box);   // TTL-gated below — a no-op unless the cached ship status went stale
 }
+// Turn state has two halves (hook edges + the box's own screen). When the screen half isn't
+// contributing the board silently falls back to edges alone and looks completely normal — which is
+// how an answered decision could sit there for twenty minutes. So say which halves are live.
+// `SHALF[kind] = [label, what it means, what to do]`.
+const SHALF = {
+  none:        ["hooks only",     "no screen observation for this box, so turn state is coming from hook events alone: a dialog you answer may linger until the next event.", "Reattach the box to start its screen observer."],
+  stale:       ["screen lost",    "this box's screen observer stopped reporting (its last sample is over 35s old), so turn state has fallen back to hook events alone.", "Reattach the box to restart it."],
+  unreadable:  ["screen unread",  "skein does not recognise what is on this box's screen, so turn state has fallen back to hook events alone — usually a change in the agent's TUI.", "The unrecognised sample is saved in the store as <box>.pane.json; worth reporting."],
+  unsupported: ["hooks only",     "skein has no screen grammar for this runtime, so turn state uses hook events alone.", "Expected, not a fault."],
+};
+function screenBadge(b, isShell) {
+  // A shell tab has no agent screen to read, so the caveat would be meaningless there.
+  const h = !isShell && SHALF[b.screen_health];
+  if (!h) return "";
+  return `<span class="scrw" title="${esc(h[1] + "\n\n" + h[2])}"><i class="hdot"></i>${esc(h[0])}</span>`;
+}
 function renderDockbar() {
   if (!view.box) { dockbar.innerHTML = ""; return; }
   const b = boxes.find(x => x.name === view.box) || { name: view.box };
@@ -1366,6 +1399,7 @@ function renderDockbar() {
     + `<span class="bdot"></span><span class="nm">${esc(view.box)}</span>`
     + (b.branch ? `<span class="br">${esc(b.branch)}</span>` : "")
     + `<span class="dstat">${diffBadge(b.diff)}</span>`
+    + screenBadge(b, isShell)
     + `<div class="seg-toggle">
          <button data-m="term" class="${m==='term'&&!isShell?'on':''}">${esc(activeRuntimeLabel)}</button>
          <button data-m="shell" class="${m==='term'&&isShell?'on':''}">Shell</button>
@@ -1560,12 +1594,17 @@ function renderTabs() {
     const cls = `tab t-${g}` + (id === aid && view.mode === "term" ? " on" : "") + (s.streaming ? " streaming" : "") + (s.dead ? " dead" : "") + (s.kind === "shell" ? " shell" : "");
     if (t.className !== cls) t.className = cls;
     const what = s.kind === "shell" ? `${s.box} — shell` : `${s.box} — ${s.runtime || "agent"}`;
-    const title = (s.dead ? `${what} — disconnected · click to reconnect` : what) + `\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`;
+    // Half-signal caveat, so it's visible per tab rather than only in the tab you happen to open.
+    const half = s.kind === "shell" ? null : SHALF[(boxes.find(x => x.name === s.box) || {}).screen_health];
+    const title = (s.dead ? `${what} — disconnected · click to reconnect` : what)
+      + (half ? `\n\n${half[0]} — ${half[1]}` : "")
+      + `\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`;
     if (t.title !== title) t.title = title;
     const lead = s.dead ? `<span class="trc" title="reconnect">↻</span>` : `<span class="td"></span>`;
     const label = esc(s.box) + (s.kind === "shell"
       ? ` <span class="tk">sh</span>`
-      : ` <span class="tk">${esc((s.runtime || "agent").slice(0,2))}</span>`);
+      : ` <span class="tk">${esc((s.runtime || "agent").slice(0,2))}</span>`)
+      + (half ? ` <i class="hdot thalf"></i>` : "");
     const html = `${lead}<span class="tl">${label}</span><span class="tx" title="close">✕</span>`;
     if (t.dataset.html !== html) { t.dataset.html = html; t.innerHTML = html; }
     if (tabsEl.children[pos] !== t) tabsEl.insertBefore(t, tabsEl.children[pos] || null);

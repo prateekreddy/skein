@@ -53,7 +53,10 @@ esc) become visible at all. A blocking dialog says *which* kind it is: `decision
 approval), `asks` (a question), `trust?`, `sign in`. Both runtimes' screens are read from live
 captures — Codex even states its blocked-ness in the terminal title (`[ ! ] Action Required`), which
 clears the instant you answer either way. With no observation present, or a screen the grammar does
-not recognise, turn state is exactly the edge signal it always was, so nothing regresses.
+not recognise, turn state is exactly the edge signal it always was, so nothing regresses — and because
+that fallback is otherwise invisible, a box running on hook edges alone says so: a half-filled dot on
+its state pill and its tab, and `hooks only` / `screen lost` / `screen unread` in the tab's header,
+each explaining what's missing and whether reattaching fixes it.
 
 Signals come through thin runtime adapters writing the same shared contract. Claude maps
 `Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,

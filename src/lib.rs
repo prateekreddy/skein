@@ -119,6 +119,11 @@ pub struct BoxView {
     /// reported (no heartbeat, no status file) — hooks dark for this box; the cockpit badges it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hook_health: String,
+    /// the *other* half's health — whether this box's own screen is being read, and if not why:
+    /// "" | "none" | "stale" | "unreadable" | "unsupported". See [`screen_health`]. Without it,
+    /// falling back to hook-only turn state looks exactly like everything working.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub screen_health: String,
 }
 
 impl Sandbox {
@@ -338,7 +343,8 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             // Turn-state: the level observation of the box's own screen, fused with the hook edges
             // (docs/turn-state.md §4.3). With no observation this is exactly the edge signal, so a
             // box running an older probe behaves as it always did.
-            let pane = read_pane(&name);
+            let raw_pane = read_pane_raw(&name);
+            let pane = raw_pane.clone().filter(pane_is_fresh);
             let level = pane
                 .as_ref()
                 .map(|obs| (classify_pane(&agent, obs), obs.ts));
@@ -443,6 +449,10 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             } else {
                 String::new()
             };
+            // The other half's health: a box can be perfectly wired for hooks and still be blind to
+            // its own screen (no observer, an observer that stopped, a screen we can't parse), which
+            // is invisible unless we say it.
+            let screen = screen_health(&agent, raw_pane.as_ref(), live == Some(Liveness::Running));
             BoxView {
                 name: name.clone(),
                 state,
@@ -458,6 +468,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 pause,
                 blocked_kind: blocked_kind.to_string(),
                 hook_health,
+                screen_health: screen.to_string(),
             }
         })
         .collect();
@@ -1446,6 +1457,9 @@ pub fn health_report() -> HealthReport {
             dark_boxes.join(", ")
         ));
     }
+    // Deliberately NOT reported here: a box on hook-only turn state (see `screen_health`) is not
+    // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment
+    // banner would be crying wolf; the caveat belongs on the row and tab it applies to.
     let ok = registry.ok && sbx.ok && git.ok && probes.ok && mailbox.ok && stale_boxes.is_empty();
     HealthReport {
         ok,
@@ -4363,20 +4377,58 @@ const PANE_FRESH_SECS: i64 = 35;
 /// now". Beyond this it is the residue of an earlier tool call.
 const TITLE_FRESH_SECS: i64 = 90;
 
-/// The level observation for a box, or `None` when there is no observer, it died, or its last
-/// sample is too old to trust.
-pub fn read_pane(name: &str) -> Option<PaneObs> {
+/// The last observation as written, freshness *not* applied. For callers that must tell "no observer
+/// at all" apart from "an observer that stopped" — see [`screen_health`].
+pub fn read_pane_raw(name: &str) -> Option<PaneObs> {
     if !valid_name(name) {
         return None;
     }
     let p = store_for_box(name)?
         .join("status")
         .join(format!("{name}.pane.json"));
-    let obs: PaneObs = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
-    let now = Utc::now().timestamp();
-    // Clock skew between host and guest would otherwise silently disable the whole layer, so a
-    // future-dated sample is accepted; only genuinely *old* ones are dropped.
-    (obs.ts > 0 && now - obs.ts <= PANE_FRESH_SECS).then_some(obs)
+    serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
+}
+
+/// True when the sample is recent enough to act on. Clock skew between host and guest would otherwise
+/// silently disable the whole layer, so a future-dated sample is accepted; only genuinely *old* ones
+/// are dropped.
+fn pane_is_fresh(obs: &PaneObs) -> bool {
+    obs.ts > 0 && Utc::now().timestamp() - obs.ts <= PANE_FRESH_SECS
+}
+
+/// The level observation for a box, or `None` when there is no observer, it died, or its last
+/// sample is too old to trust.
+pub fn read_pane(name: &str) -> Option<PaneObs> {
+    read_pane_raw(name).filter(pane_is_fresh)
+}
+
+/// Whether the **screen** half of turn-state is contributing for this box, and if not, why.
+///
+/// This exists because a missing level signal is invisible by construction: the board simply reverts
+/// to hook edges and looks entirely normal, which is the behaviour that showed an answered decision
+/// for twenty minutes. If half the signal is off, the row should say so rather than imply a
+/// confidence it doesn't have.
+///
+/// * `""` — reading the screen (or the box isn't running, where a screen means nothing)
+/// * `"none"` — nothing has ever been written: the observer isn't running. Reattach the box.
+/// * `"stale"` — observations stopped arriving: the agent session or the observer is gone. Reattach.
+/// * `"unreadable"` — a fresh sample the grammar does not recognise: a TUI change, worth reporting.
+///   The sample itself is on disk at `<store>/status/<box>.pane.json`.
+/// * `"unsupported"` — this runtime has no screen grammar at all, so hooks only, by design.
+pub fn screen_health(runtime: &str, raw: Option<&PaneObs>, running: bool) -> &'static str {
+    if !running {
+        return "";
+    }
+    if !has_screen_grammar(runtime) {
+        return "unsupported";
+    }
+    match raw {
+        None => "none",
+        Some(obs) if !pane_is_fresh(obs) => "stale",
+        // A dead pane is a real answer ("the agent is gone"), not a failure to read one.
+        Some(obs) if classify_pane(runtime, obs) == Screen::Unknown => "unreadable",
+        Some(_) => "",
+    }
 }
 
 /// Which kind of dialog is blocking. Each wants a different move from the human, which is why the
@@ -4504,6 +4556,12 @@ pub fn title_activity(title: &str) -> Option<String> {
 /// Both runtimes are implemented from live captures (docs/turn-state.md §6, §6b); anything else
 /// returns `Unknown`, which defers to the hook edges — i.e. exactly the old behaviour — rather than
 /// guess at a grammar nobody has read.
+/// The runtimes whose screens skein can read. Kept next to `classify_pane`'s dispatch so the two
+/// cannot drift, and used by [`screen_health`] to say "hooks only, by design" rather than "broken".
+pub fn has_screen_grammar(runtime: &str) -> bool {
+    matches!(runtime, "claude" | "codex")
+}
+
 pub fn classify_pane(runtime: &str, obs: &PaneObs) -> Screen {
     // A gone window needs no grammar, so it reports for every runtime.
     if obs.dead == 1 {
@@ -8137,6 +8195,46 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // …but a dead window needs no grammar, so that still reports across runtimes.
         assert_eq!(classify_pane("gemini", &dead), Screen::Dead);
         assert_eq!(classify_pane("codex", &dead), Screen::Dead);
+    }
+
+    #[test]
+    fn screen_health_says_which_half_of_turn_state_is_actually_running() {
+        let fresh = || PaneObs {
+            ts: Utc::now().timestamp(),
+            tail: ANSWERED_TAIL.iter().map(|l| l.to_string()).collect(),
+            ..Default::default()
+        };
+        // Reading the screen: no caveat to show.
+        assert_eq!(screen_health("claude", Some(&fresh()), true), "");
+        // No observer has ever written: the common case until a box is reattached.
+        assert_eq!(screen_health("claude", None, true), "none");
+        // An observer that stopped — the agent session went away, or it was killed.
+        let stopped = PaneObs {
+            ts: Utc::now().timestamp() - (PANE_FRESH_SECS + 5),
+            ..fresh()
+        };
+        assert_eq!(screen_health("claude", Some(&stopped), true), "stale");
+        // A screen the grammar does not recognise. Distinct from "stale" because the fix is
+        // different: this one is a skein bug to report, not a box to reattach.
+        let unreadable = PaneObs {
+            tail: vec!["something no grammar has ever seen".into()],
+            ..fresh()
+        };
+        assert_eq!(
+            screen_health("claude", Some(&unreadable), true),
+            "unreadable"
+        );
+        // A runtime with no grammar at all is hooks-only by design, not by fault.
+        assert_eq!(screen_health("gemini", None, true), "unsupported");
+        assert!(has_screen_grammar("claude") && has_screen_grammar("codex"));
+        assert!(!has_screen_grammar("gemini"));
+        // A box that isn't running has no screen to read, so there is nothing to caveat.
+        for h in [None, Some(&fresh()), Some(&stopped)] {
+            assert_eq!(screen_health("claude", h, false), "");
+        }
+        // A crashed agent is a real reading, not a failure to read one.
+        let dead = PaneObs { dead: 1, ..fresh() };
+        assert_eq!(screen_health("claude", Some(&dead), true), "");
     }
 
     #[test]
