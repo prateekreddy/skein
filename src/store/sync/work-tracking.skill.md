@@ -8,8 +8,8 @@ user-invocable: true
 
 Two halves live on one MCP server. Do not confuse them:
 
-- **Coordination tools** (`capture`, `next`, `claim`, `heartbeat`, `complete`, `release`, `link`,
-  `held`) exist because Plane has no equivalent. They are the only safe way to take work.
+- **Coordination tools** (`capture`, `next`, `why`, `claim`, `heartbeat`, `complete`, `release`,
+  `link`, `held`) exist because Plane has no equivalent. They are the only safe way to take work.
 - **Plane's own tools** — currently 47 — are a faithful wrapper over Plane's API and have **no
   notion of a lease**. Everything below the coordination loop is theirs.
 
@@ -25,6 +25,8 @@ token's binding. Pass one explicitly only when working outside your default proj
 
 ```
 held  →  claim  →  …work…  →  heartbeat every ~TTL/3  →  complete
+                 ↑
+        why(id) — when claim refuses or `next` looks empty
 ```
 
 1. **`held`** — call it first after any restart, compaction, or when you are unsure. It tells you
@@ -76,10 +78,48 @@ when you noticed it; that is history and constrains nothing.
 **Deliberately unclaimable is a feature.** Label a capture `needs-human` when it needs a decision
 you should not make alone — that is how you ask a question the fleet will not accidentally answer.
 
+**Capture before you fix, however small — and whoever found it.** The rule is easiest to skip on
+a bug a human just pointed at, because it feels already tracked: you both saw it, you are both
+looking at it, writing it down reads as ceremony. It is not. The conversation ends and the board
+is what remains, so a fix that was never captured leaves a commit nobody can account for. If you
+notice the omission only after finishing, still capture it, close it with the evidence, and say
+plainly that it was logged retroactively.
+
+**What does not belong on the board.** The project tracks the product. Improvements to how *you*
+work — capture discipline, harness settings, prompt or tooling habits — are not project work, and
+filing them turns your own slip into someone else's backlog item. They belong in this skill, in
+`CLAUDE.md` / `AGENTS.md`, or in agent memory. The test: would this task still exist if a human
+were doing the work by hand? If not, it is not a project task.
+
 ## Decomposition and relations
+
+**The levels you actually have** (measured against Plane 1.3.1, not assumed):
+
+| Level | Nests? | Use it for |
+|---|---|---|
+| Module | **no** — one flat layer | the epic: a feature or workstream |
+| Work item → sub-item | **yes, arbitrarily deep** | decomposition; verified three levels, a child can itself be a parent |
+| Label | n/a — many per item | cross-cutting dimensions: area, capability, risk |
+
+Modules are the epic layer. They do not nest — `parent` on a module is accepted and silently
+dropped, so code written against "sub-modules" looks like it worked and did nothing. Depth below the
+epic comes from sub-items, which do nest and which the readiness gate understands transitively.
+
+**A module has to earn its existence.** One per feature or workstream, never one per task. The
+threshold: would a human ask "how far along is *that*?" as a question in its own right, over weeks
+rather than hours? If not, it is a parent work item with sub-items, or just a label. Forty modules
+is not an epic layer — it is a second copy of the backlog with worse tooling, and it makes the
+progress rollup that justifies modules meaningless. Check `list_modules` before creating one; a
+near-duplicate module is worse than none.
+
+**Modules and labels are orthogonal, and that is the point.** An item sits in exactly one module and
+one parent chain, but carries as many labels as apply. So "which feature is this part of" is a
+module, "what kind of work is it" is a label. Reaching for a module because you want two groupings
+at once is the mistake — that is what labels are for.
 
 - **`capture(parentId: …)`** makes a sub-item. Use it for real decomposition. A parent with
   unfinished children stops being claimable, which is what you want: it is a container, not a task.
+  This composes up the tree — a grandparent stays unclaimable while any leaf under it is open.
 - **`discoveredFrom`** is provenance, not structure. If you use it where you meant `parentId`, the
   fleet will happily claim the parent as well as the child.
 - **`link`** records `blocking`, `blocked_by`, `duplicate`, `relates_to`. Plane's vocabulary is
@@ -106,9 +146,16 @@ stranded in a closed cycle.
 under a module before you fan it out into sub-items; it is how anyone later answers "how far along
 is this feature?".
 
-**Labels — `list_labels`, `get_label`, `create_label`, `update_label`.** Labels are routing. Reuse
-what exists (`list_labels` first — a near-duplicate label is worse than none). Remember four of them
-are load-bearing: `needs-human`, `needs-refinement`, `blocked`, `wontfix` make an item unclaimable.
+**Labels — `list_labels`, `get_label`, `create_label`, `update_label`.** Labels are routing, and the
+most under-used surface here. Reuse what exists (`list_labels` first — a near-duplicate label is
+worse than none). Four are load-bearing: `needs-human`, `needs-refinement`, `blocked`, `wontfix`
+make an item unclaimable. A token's `capabilities` are matched against label names too, so labels
+are how work reaches the agent equipped for it.
+
+`capture(labels: ["backend"])` takes names and creates the label if the project lacks it, so
+labelling costs nothing. A name one character from a load-bearing label (`needs-humans`, `blockd`)
+is refused rather than created — that failure would be silent, withholding nothing while looking
+right. Plane's own tools still take uuids; only `capture` resolves names.
 
 **States — `list_states`, `get_state`.** Read them to understand a project's workflow. Creating,
 updating or deleting a state needs the `destructive` capability you almost certainly do not have,
@@ -145,7 +192,9 @@ Two consequences worth knowing before you act on what you see:
 
 ## When `next` or `claim` comes back empty
 
-`NO_WORK` is not a fault. Before assuming the backlog is empty, check in this order:
+`NO_WORK` is not a fault. **Call `why` on an item you expected to be offered** — it answers with
+the reasons the gate itself used, including the two you cannot see from the item: a live lease, and
+a capability mismatch. Guess only if that is somehow unavailable, in this order:
 
 1. Everything ready is **already leased** by another agent.
 2. Items exist but **fail the readiness gate** — most often no description, or a parent whose
@@ -175,8 +224,8 @@ Every refusal carries a code and a recovery line. The ones that change what you 
 
 | Code | What it means | Do |
 |---|---|---|
-| `NO_WORK` | nothing ready matched | back off, poll later — not an error |
-| `NOT_CLAIMABLE` | someone holds it, or it is not ready | pick a different item |
+| `NO_WORK` | nothing ready matched | call `why` on an item you expected, then back off — not an error |
+| `NOT_CLAIMABLE` | someone holds it, or it is not ready | call `why` to find out which, then pick another item |
 | `NOT_HOLDER` | you do not hold this lease | stop working the item; retrying cannot help |
 | `STALE_EPOCH` | **your lease lapsed and someone else reclaimed it** | **discard the work — do not submit it** — and claim fresh |
 | `LEASE_EXPIRED` | lapsed, nobody took it | claim it again before continuing |
