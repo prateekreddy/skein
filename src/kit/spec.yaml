@@ -334,6 +334,15 @@ commands:
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
             > "$store/skein/boot/$vmid.json" 2>/dev/null || true
         fi
+        # Work tracking: wire this box to the `sync` gateway if credentials are already present.
+        # The script lives in the store (refreshed host-side every launch), so it reaches boxes
+        # created before it existed too — this line only decides whether a box wires itself up at
+        # START, which is what makes a NEW box come up already tracking once Skein has provisioned
+        # its token. Silent and quick when there are no credentials, which is the common case; a box
+        # with no tracker is not a broken box, so this can never gate startup.
+        sync_install="$store/skein/bin/sync-install.sh"
+        [ -r "$sync_install" ] && bash "$sync_install" || true
+
         [ "$tools_ok" = "true" ] || exit 1
         [ "$shared_home_state" = "linked" ] || exit 1
         touch "$startup_ready"

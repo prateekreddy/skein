@@ -3827,24 +3827,37 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
                   chmod 600 \"$HOME/.config/sync/env\"";
     guest_write(name, script, &env_file, Duration::from_secs(30))?;
 
-    // Now let the kit's own installer do the registration, rather than a second copy of that logic
-    // here: it is the thing that knows both runtimes, and FORCE is exactly the "a new token has
-    // arrived" case it exists for.
-    let install = "AGENT_STARTER_FORCE=1 bash /home/agent/.local/bin/sync-work-tracking-install.sh 2>&1 || true";
+    // Registration itself is the store installer's job, not a second copy of that logic here: it is
+    // the thing that knows both runtimes, and it is the same script the kit runs at startup, so a
+    // box wired up by hand and one wired up on creation cannot end up differently configured. FORCE
+    // is exactly the "a new token has arrived" case it exists for.
+    //
+    // Resolved through the box's own `.claude`, because that is the store however it got mounted —
+    // a symlinked store, a repo that ships its own `.claude` with `skein/` linked inside it, or a
+    // direct-mode checkout all land here.
+    let install = "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
+         store=\"$root/.claude\"; \
+         if [ -L \"$store/skein\" ]; then store=\"$(dirname \"$(readlink \"$store/skein\")\")\"; \
+         elif [ -L \"$store\" ]; then store=\"$(readlink -f \"$store\")\"; fi; \
+         script=\"$store/skein/bin/sync-install.sh\"; \
+         if [ -r \"$script\" ]; then SKEIN_SYNC_FORCE=1 bash \"$script\" 2>&1; \
+         else echo 'skein: no sync installer in this box'\\''s store'; fi";
     let report = sbx_guest_output(name, install, Duration::from_secs(60)).unwrap_or_default();
     if report.contains("work tracking ready") {
-        Ok(format!("{} is tracking work as {}", name, minted.agent))
-    } else if report.trim().is_empty() {
-        // The token is in place, so the next box start will pick it up — say exactly that rather
-        // than reporting a success the agent cannot yet act on.
-        Err(format!(
-            "token written, but this box has no starter-kit installer — restart it, or register by hand against {}",
-            sync_mcp_url(&status.gateway_url)
-        ))
+        Ok(format!("{name} is tracking work as {}", minted.agent))
     } else {
+        // The token is in place either way, so say what is true: the credential landed, the
+        // registration did not confirm. Reporting success here would be the exact silent-wrong-
+        // result this whole surface exists to avoid.
+        let last = report.trim().lines().last().unwrap_or("").trim();
         Err(format!(
-            "token written, but registration did not confirm: {}",
-            report.trim().lines().last().unwrap_or("").trim()
+            "token written, but registration did not confirm{} — the box can still be registered by hand against {}",
+            if last.is_empty() {
+                String::new()
+            } else {
+                format!(": {last}")
+            },
+            sync_mcp_url(&status.gateway_url)
         ))
     }
 }
@@ -5467,6 +5480,16 @@ pub fn current_status_detail(name: &str) -> Option<String> {
 // skein ships these hook scripts and wires them into the store's settings.json, so a box reports
 // working/waiting/needs-input + its current task without the *repo* providing anything. The store is
 // linked into every box by the kit, so every box's Claude loads these hooks. See docs/self-sufficient.md.
+/// Wires a box to the `sync` work tracker and installs the discipline for it. Lives in the store
+/// rather than the kit on purpose: a kit only reaches boxes created after it changed, and an
+/// existing box has to be wireable too. See `sync_provision_box`.
+const SYNC_INSTALL_SH: &str = include_str!("store/sync-install.sh");
+/// The three documents that installer places, once a box is actually registered: the always-on
+/// rules, the memory, and the on-demand skill for Plane's full surface.
+const SYNC_BLOCK_MD: &str = include_str!("store/sync/work-tracking.block.md");
+const SYNC_MEMORY_MD: &str = include_str!("store/sync/work-tracking.memory.md");
+const SYNC_SKILL_MD: &str = include_str!("store/sync/work-tracking.skill.md");
+
 const PROBE_STATUS_SH: &str = include_str!("probe/box-status.sh");
 // box-pane.sh: NOT hook-driven. Started detached by the attach command (see agent_attach_argv)
 // and it outlives the attach, because the states it exists to catch — a crashed agent, a trust
@@ -5592,12 +5615,25 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("install-codex-hooks.sh", INSTALL_CODEX_HOOKS_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
+        ("sync-install.sh", SYNC_INSTALL_SH),
     ] {
         let p = bin.join(file);
         // temp + rename, not a bare write: these scripts are EXECUTED by live boxes through the
         // shared mount — a box invoking one mid-rewrite would run a truncated file.
         write_atomic(&p, &bin, body.as_bytes())?;
         let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o755));
+    }
+    // The work-tracking documents the installer copies into place. Not executable, and not written
+    // into memory/ or skills/ directly — those are the box's to curate, and the installer only
+    // seeds them once a box is genuinely registered.
+    let sync = store.join("skein").join("sync");
+    fs::create_dir_all(&sync).map_err(|e| format!("mkdir {}: {e}", sync.display()))?;
+    for (file, body) in [
+        ("work-tracking.block.md", SYNC_BLOCK_MD),
+        ("work-tracking.memory.md", SYNC_MEMORY_MD),
+        ("work-tracking.skill.md", SYNC_SKILL_MD),
+    ] {
+        write_atomic(&sync.join(file), &sync, body.as_bytes())?;
     }
     let settings = store.join("settings.json");
     let current: serde_json::Value = fs::read_to_string(&settings)
@@ -6897,6 +6933,12 @@ mod tests {
             "skein/SHARED-HOME.md",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
+            // Work tracking rides the store, not the kit — that is what lets a box created before
+            // the feature existed still be wired up.
+            "skein/bin/sync-install.sh",
+            "skein/sync/work-tracking.block.md",
+            "skein/sync/work-tracking.memory.md",
+            "skein/sync/work-tracking.skill.md",
         ] {
             assert!(store.join(f).is_file(), "missing {f}");
         }
@@ -7871,6 +7913,221 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             sync_revoke_token("web-main").is_err(),
             "an unreachable gateway must be reported, not silently treated as revoked"
         );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // The installer is shell that runs inside a box, so reading it proves nothing. Run it against a
+    // real store, a real project and a fake `claude`, and check what it actually did.
+    #[test]
+    fn the_store_installer_registers_the_box_then_writes_the_rules() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+
+        // An ESTABLISHED box: a CLAUDE.md the team has evolved, memories they curated with their
+        // own index, a skills dir, and a Codex config with hand-written entries. Wiring up work
+        // tracking must add to all of it and replace none of it.
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("CLAUDE.md"), "# proj\n\nsome direction\n").unwrap();
+        fs::write(
+            store.join("memory").join("MEMORY.md"),
+            "- [Our own note](ours.md) — hard-won\n",
+        )
+        .unwrap();
+        fs::write(store.join("memory").join("ours.md"), "the note itself\n").unwrap();
+        fs::create_dir_all(store.join("skills").join("ours")).unwrap();
+        fs::write(store.join("skills").join("ours").join("SKILL.md"), "ours\n").unwrap();
+
+        // A `claude` that records how it was called. The registration is an argv claim — the URL,
+        // the bearer, the scope — and argv is the only place that claim is observable.
+        let bin = home.join("fakebin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = home.join("claude.log");
+        fs::write(
+            bin.join("claude"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let boxhome = home.join("boxhome");
+        fs::create_dir_all(boxhome.join(".codex")).unwrap();
+        fs::write(
+            boxhome.join(".codex").join("config.toml"),
+            "[mcp_servers.something_else]\nurl = \"https://theirs.test\"\n",
+        )
+        .unwrap();
+        let run = || {
+            Command::new("bash")
+                .arg(store.join("skein").join("bin").join("sync-install.sh"))
+                .env("HOME", &boxhome)
+                .env("WORKSPACE_DIR", &project)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("SYNC_GATEWAY_URL", "https://gw.test/")
+                .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+                .output()
+                .unwrap()
+        };
+        assert!(run().status.success());
+
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains("mcp add --transport http sync https://gw.test/mcp"),
+            "the endpoint is <base>/mcp, exactly once: {calls}"
+        );
+        assert!(calls.contains("Bearer sync_agent_abc"), "{calls}");
+        assert!(calls.contains("--scope user"), "{calls}");
+
+        // The rules land only after registration, and they land in the STORE — this repo's
+        // `.claude` — so every box of the repo sees them, not just the one that was wired up.
+        let claude_md = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
+        assert!(claude_md.contains("## Work tracking"), "{claude_md}");
+        assert!(
+            claude_md.contains("some direction"),
+            "it appends, never replaces"
+        );
+        assert!(store.join("memory/work-tracking.md").is_file());
+        assert!(store.join("skills/work-tracking/SKILL.md").is_file());
+        let index = fs::read_to_string(store.join("memory/MEMORY.md")).unwrap();
+        assert!(index.contains("(work-tracking.md)"));
+
+        // Nothing the box already had is touched. This is the whole contract for an existing box:
+        // every write is an append or a create, never a replace.
+        assert!(
+            index.contains("[Our own note](ours.md)"),
+            "the index was rewritten: {index}"
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("memory/ours.md")).unwrap(),
+            "the note itself\n"
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("skills/ours/SKILL.md")).unwrap(),
+            "ours\n"
+        );
+        let codex = fs::read_to_string(boxhome.join(".codex/config.toml")).unwrap();
+        assert!(
+            codex.contains("[mcp_servers.something_else]") && codex.contains("https://theirs.test"),
+            "a hand-written Codex entry was lost: {codex}"
+        );
+        assert_eq!(
+            codex.matches("[mcp_servers.sync]").count(),
+            1,
+            "the Codex block was written more than once: {codex}"
+        );
+
+        // Once, then hands off: the box may delete what it does not want, and a later start must
+        // not restore it. Re-running is also how a box start behaves, so this is the common path.
+        fs::remove_file(store.join("skills/work-tracking/SKILL.md")).unwrap();
+        assert!(run().status.success());
+        assert_eq!(
+            fs::read_to_string(project.join("CLAUDE.md"))
+                .unwrap()
+                .matches("## Work tracking")
+                .count(),
+            1,
+            "a second run appended the section again"
+        );
+        assert!(
+            !store.join("skills/work-tracking/SKILL.md").exists(),
+            "a deleted skill came back — the box cannot make its own edits stick"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // The ordering claim, which until this test was only a comment: rules are written only AFTER a
+    // runtime actually registered. An instruction to "call capture" in a box whose registration
+    // failed is a rule the agent cannot follow and will learn to read past — and it would sit in
+    // CLAUDE.md looking exactly like a working one.
+    #[test]
+    fn a_failed_registration_installs_no_rules_for_tools_that_are_not_there() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("CLAUDE.md"), "# proj\n").unwrap();
+
+        // A `claude` that refuses — a bad URL, an unreachable gateway, a rejected token all land
+        // here. No codex either, so nothing registers.
+        let bin = home.join("fakebin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("claude"), "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+        let boxhome = home.join("boxhome");
+        fs::create_dir_all(&boxhome).unwrap();
+
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-install.sh"))
+            .env("HOME", &boxhome)
+            .env("WORKSPACE_DIR", &project)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("SYNC_GATEWAY_URL", "https://gw.test")
+            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "still must not gate startup");
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            said.contains("no runtime registered"),
+            "it has to say so: {said}"
+        );
+        assert!(
+            !fs::read_to_string(project.join("CLAUDE.md"))
+                .unwrap()
+                .contains("Work tracking"),
+            "rules were written for tools the box does not have"
+        );
+        assert!(!store.join("memory/work-tracking.md").exists());
+        assert!(!store.join("skills/work-tracking/SKILL.md").exists());
+        // And nothing was stamped, so fixing the cause and starting again still works.
+        assert!(!boxhome.join(".local/state/skein").exists());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // A box with no credentials is not a broken box: startup runs this on every box, so it has to
+    // be silent and change nothing until there is something to register.
+    #[test]
+    fn the_store_installer_does_nothing_at_all_without_credentials() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("CLAUDE.md"), "# proj\n").unwrap();
+        let boxhome = home.join("boxhome");
+        fs::create_dir_all(&boxhome).unwrap();
+
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-install.sh"))
+            .env("HOME", &boxhome)
+            .env("WORKSPACE_DIR", &project)
+            .env_remove("SYNC_GATEWAY_URL")
+            .env_remove("SYNC_AGENT_TOKEN")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "it must never gate a box's startup");
+        assert!(
+            out.stderr.is_empty(),
+            "a box without a tracker should start silently: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!fs::read_to_string(project.join("CLAUDE.md"))
+            .unwrap()
+            .contains("Work tracking"));
+        assert!(!store.join("memory/work-tracking.md").exists());
         env::remove_var("SKEIN_HOME");
     }
 

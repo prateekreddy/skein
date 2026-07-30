@@ -247,6 +247,16 @@ own token, writes it into the box over stdin at `~/.config/sync/env`, and regist
 server there for whichever runtime the box runs. Like Verify, nothing triggers it: it spends a
 network round trip and creates a real credential, so it is always your click.
 
+**Existing boxes work too, and nothing of theirs is overwritten.** The installer rides the *store* —
+mounted live into every box for the repo — rather than the kit, because a kit only reaches boxes
+created after it changed. On a box that has been running for weeks, every write is an append or a
+create, never a replace: the Work tracking section is appended to `CLAUDE.md` only if it isn't
+already there; the memory and the skill are copied only if absent; one line is appended to
+`MEMORY.md`; and a hand-written `[mcp_servers.…]` in Codex's config is left exactly as it was. Then
+it stamps itself and stops — the box owns all of it from that point, including deleting the parts it
+doesn't want, and a later start will not put them back. The single exception is the box's own `sync`
+MCP registration, which a re-apply deliberately replaces: that is how a rotated token gets in.
+
 **Every box writes to Plane as you.** The gateway keeps your PAT against each agent it mints, so
 Plane's activity log shows your name, not a per-box user — `<you>/<box>` is the gateway's *holder*
 string, not a Plane account. What one token per box buys is the lease: a distinct holder, so two
