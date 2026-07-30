@@ -1163,6 +1163,12 @@ pub struct Repo {
     /// fleet spanning a Rust service and a web app has no single right answer.
     #[serde(default)]
     pub check: String,
+    /// The Plane project this repo's work is tracked in — a project URL or a bare uuid, kept
+    /// verbatim so the cockpit can link to the board. Per-repo because a project is what an agent
+    /// token binds to; empty ⇒ this repo's boxes get a tracker token with no default project, and
+    /// must name a project on every call.
+    #[serde(default)]
+    pub plane_project: String,
 }
 
 fn default_agent() -> String {
@@ -1539,6 +1545,12 @@ pub struct Config {
     /// Empty ⇒ verification is simply unavailable, which is the honest state until someone sets it.
     #[serde(default)]
     pub check_command: String,
+    /// Base URL of the `sync` work-tracking gateway (e.g. `https://plane.example.com`).
+    /// Empty ⇒ boxes get no tracker, which is the honest default. The matching Plane personal
+    /// token is deliberately NOT here: it is a credential, and this file is written 0644 and
+    /// round-trips through the browser on every settings save. See [`plane_token`].
+    #[serde(default)]
+    pub sync_gateway_url: String,
 }
 
 fn default_true() -> bool {
@@ -1555,6 +1567,7 @@ impl Default for Config {
             confirm_destroy: true,
             ssh_key: String::new(),
             check_command: String::new(),
+            sync_gateway_url: String::new(),
         }
     }
 }
@@ -1670,6 +1683,27 @@ pub fn set_repo_check(id: &str, check: &str) -> Result<Repo, String> {
         .find(|r| r.id == id)
         .ok_or_else(|| format!("no repo with id {id:?}"))?;
     repo.check = check.trim().to_string();
+    let updated = repo.clone();
+    save_repos(&repos)?;
+    Ok(updated)
+}
+
+/// Set a repo's Plane project (a project URL or a bare uuid). Refuses anything no uuid can be read
+/// out of, rather than storing a value that would only fail later inside an agent session — a
+/// mistyped project surfaces as a token that authenticates and then 403s on the first write.
+pub fn set_repo_plane_project(id: &str, project: &str) -> Result<Repo, String> {
+    let project = project.trim();
+    if !project.is_empty() && plane_project_id(project).is_none() {
+        return Err(
+            "that isn't a Plane project — paste the project URL, or the uuid from it".to_string(),
+        );
+    }
+    let mut repos = load_repos();
+    let repo = repos
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("no repo with id {id:?}"))?;
+    repo.plane_project = project.to_string();
     let updated = repo.clone();
     save_repos(&repos)?;
     Ok(updated)
@@ -1946,6 +1980,7 @@ pub fn add_repo(
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),
         check: String::new(), // set later, per repo, in Settings → Repositories
+        plane_project: String::new(), // set later, per repo, in Settings → Repositories
     };
     let mut repos = load_repos();
     repos.retain(|r| r.id != id); // replace any existing entry with the same id
@@ -3511,6 +3546,327 @@ fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// ---------- work tracking: wiring a box to the sync gateway ----------
+// Boxes share a backlog through `sync` — Plane as the system of record, behind a gateway that adds
+// the one thing Plane cannot do: an atomic claim, so two boxes never work the same item. An agent
+// reaches it as an MCP server, which needs two values: the gateway URL and an agent token.
+//
+// The token is per box and is minted here, from the operator's Plane personal token, because the
+// alternative is worse in both directions: a shared token makes Plane's activity log say "robot"
+// for every box, and handing a box the Plane PAT itself would let it set `assignees` directly —
+// bypassing the lease, which is the entire reason the gateway exists.
+//
+// Nothing here runs on a tick. Provisioning is an explicit act (`sync_provision_box`), for the same
+// reason verification is: it spends a network round trip and mints a real credential.
+
+/// The Plane personal token, in its own 0600 file rather than `config.json`.
+///
+/// `config.json` is written 0644 and — more to the point — is the exact object the settings screen
+/// GETs and POSTs, so a field there would be handed to every browser tab that opens Settings. A
+/// credential should never make that trip; the cockpit only ever learns whether one is set.
+fn plane_token_path() -> PathBuf {
+    skein_home().join("plane-token")
+}
+
+/// The operator's Plane personal token, or `None` when unset.
+pub fn plane_token() -> Option<String> {
+    fs::read_to_string(plane_token_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether a Plane token is stored — the only thing about it the cockpit is told.
+pub fn plane_token_is_set() -> bool {
+    plane_token().is_some()
+}
+
+/// Store (or, with an empty value, clear) the Plane personal token.
+///
+/// The mode is set on the temp file *before* the rename, not after: chmod-after-rename leaves a
+/// window in which the real path is world-readable, and the whole point of this function is that
+/// the window does not exist.
+pub fn set_plane_token(token: &str) -> Result<(), String> {
+    let path = plane_token_path();
+    let token = token.trim();
+    if token.is_empty() {
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("clearing the Plane token: {e}")),
+        };
+    }
+    let home = skein_home();
+    fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
+    let tmp = home.join(format!(".plane-token.tmp.{}", std::process::id()));
+    fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing the Plane token: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("securing the Plane token: {e}"))?;
+    }
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("storing the Plane token: {e}")
+    })
+}
+
+/// The gateway's MCP endpoint for a configured base URL. Accepts either spelling, so a pasted
+/// `/mcp` endpoint does not silently become `/mcp/mcp`.
+pub fn sync_mcp_url(base: &str) -> String {
+    let base = base.trim().trim_end_matches('/');
+    if base.ends_with("/mcp") {
+        base.to_string()
+    } else {
+        format!("{base}/mcp")
+    }
+}
+
+/// Pull the project uuid out of whatever the user pasted — a full Plane project URL
+/// (`https://plane.host/<workspace>/projects/<uuid>/issues`) or the bare uuid.
+///
+/// Scanning for the shape rather than parsing the URL is deliberate: the uuid is the only part
+/// skein needs, and Plane's URL layout is not skein's to depend on.
+pub fn plane_project_id(raw: &str) -> Option<String> {
+    let bytes: Vec<char> = raw.chars().collect();
+    let is_hex = |c: char| c.is_ascii_hexdigit();
+    // 8-4-4-4-12
+    let groups = [8usize, 4, 4, 4, 12];
+    'start: for start in 0..bytes.len() {
+        let mut i = start;
+        for (g, len) in groups.iter().enumerate() {
+            if g > 0 {
+                if bytes.get(i) != Some(&'-') {
+                    continue 'start;
+                }
+                i += 1;
+            }
+            for _ in 0..*len {
+                match bytes.get(i) {
+                    Some(&c) if is_hex(c) => i += 1,
+                    _ => continue 'start,
+                }
+            }
+        }
+        // Reject a longer hex run that merely contains a uuid-shaped prefix.
+        if bytes.get(i).is_some_and(|&c| is_hex(c) || c == '-') {
+            continue 'start;
+        }
+        if start > 0 && bytes.get(start - 1).is_some_and(|&c| is_hex(c) || c == '-') {
+            continue 'start;
+        }
+        return Some(bytes[start..i].iter().collect::<String>().to_lowercase());
+    }
+    None
+}
+
+/// What the cockpit is told about work tracking. No secret crosses this line — only whether one is
+/// present, because "is it configured?" is the whole question a settings screen has to answer.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncStatus {
+    pub gateway_url: String,
+    pub token_set: bool,
+    /// Both halves present, so a box can actually be wired up.
+    pub ready: bool,
+}
+
+pub fn sync_status() -> SyncStatus {
+    let gateway_url = load_config().sync_gateway_url.trim().to_string();
+    let token_set = plane_token_is_set();
+    SyncStatus {
+        ready: token_set && !gateway_url.is_empty(),
+        gateway_url,
+        token_set,
+    }
+}
+
+/// A minted per-agent gateway token. The token is returned once and never stored by skein — it goes
+/// straight into the box that will use it.
+#[derive(Debug, Clone)]
+pub struct MintedToken {
+    pub token: String,
+    /// The namespaced name the gateway gave this agent (`<owner>/<box>`).
+    pub agent: String,
+}
+
+/// Mint a gateway token for one box, from the operator's Plane personal token.
+///
+/// curl rather than an HTTP crate: skein already shells out to `gh` and `sbx`, and a work-tracking
+/// setting is not worth a TLS stack in the dependency tree. The PAT travels in the child's
+/// environment, not its argv — argv is world-readable in `ps`, and this is the one credential whose
+/// leak would let someone bypass every lease in the fleet.
+pub fn sync_mint_token(agent: &str, project_id: Option<&str>) -> Result<MintedToken, String> {
+    let cfg = load_config();
+    let base = cfg
+        .sync_gateway_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if base.is_empty() {
+        return Err("no sync gateway configured — set it in Settings".into());
+    }
+    let token = plane_token().ok_or("no Plane token stored — add it in Settings")?;
+    let body = match project_id {
+        Some(p) => format!(
+            r#"{{"agent":{},"projectId":{}}}"#,
+            json_str(agent),
+            json_str(p)
+        ),
+        None => format!(r#"{{"agent":{}}}"#, json_str(agent)),
+    };
+    let script = format!(
+        "curl -sS -m 30 -X POST {}/v1/agent-tokens \
+         -H \"Authorization: Bearer $SKEIN_PLANE_TOKEN\" \
+         -H 'Content-Type: application/json' -d {}",
+        sh_quote(&base),
+        sh_quote(&body)
+    );
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(&script)
+        .env("SKEIN_PLANE_TOKEN", &token);
+    let out = bounded_output(&mut command, "curl", Duration::from_secs(45))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("the gateway could not be reached ({})", out.status)
+        } else {
+            detail
+        });
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).map_err(|_| gateway_said(&stdout))?;
+    match parsed.get("token").and_then(|v| v.as_str()) {
+        Some(token) => Ok(MintedToken {
+            token: token.to_string(),
+            agent: parsed
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or(agent)
+                .to_string(),
+        }),
+        // A refusal is JSON too, and its `message` is written for a human — surface that rather
+        // than "unexpected response", which sends the reader to the wrong place entirely.
+        None => Err(gateway_said(&stdout)),
+    }
+}
+
+/// The gateway's own words when it refuses, trimmed to something a toast can hold.
+fn gateway_said(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
+            let recovery = v.get("recovery").and_then(|r| r.as_str()).unwrap_or("");
+            return if recovery.is_empty() {
+                m.to_string()
+            } else {
+                format!("{m} — {recovery}")
+            };
+        }
+    }
+    let one = body.trim().lines().next().unwrap_or("").trim();
+    if one.is_empty() {
+        "the gateway returned nothing".into()
+    } else {
+        one.chars().take(200).collect()
+    }
+}
+
+/// JSON-quote a string without building a Value for it.
+fn json_str(s: &str) -> String {
+    serde_json::Value::String(s.to_string()).to_string()
+}
+
+/// Wire one box to the work tracker: mint its token, write it into the box, and register the MCP
+/// server there.
+///
+/// The credential is written over the box's stdin, never as a command argument — `sbx exec`'s argv
+/// is visible in `ps` on the host, and a token pasted into a shell history is a token that outlives
+/// the box. Inside the box it lands in the box-private `~/.config/sync/env` at 0600, deliberately
+/// not in the shared `.claude` store, which is mounted live into every other box for the repo.
+pub fn sync_provision_box(name: &str) -> Result<String, String> {
+    let status = sync_status();
+    if !status.ready {
+        return Err(if status.gateway_url.is_empty() {
+            "no sync gateway configured — set it in Settings".into()
+        } else {
+            "no Plane token stored — add it in Settings".into()
+        });
+    }
+    if box_liveness(name) != Some(Liveness::Running) {
+        return Err(format!("{name} is not running"));
+    }
+    let project = repo_for_box(name)
+        .map(|r| r.plane_project)
+        .and_then(|p| plane_project_id(&p));
+    let minted = sync_mint_token(name, project.as_deref())?;
+
+    // One heredoc-free write: the shell reads the file body from its own stdin, so nothing about
+    // the token appears in any argument list on either side of the boundary.
+    let env_file = format!(
+        "# written by skein — box-private, never the shared store\nexport SYNC_GATEWAY_URL={}\nexport SYNC_AGENT_TOKEN={}\n",
+        sh_quote(&status.gateway_url),
+        sh_quote(&minted.token)
+    );
+    let script = "umask 077; mkdir -p \"$HOME/.config/sync\"; cat > \"$HOME/.config/sync/env\"; \
+                  chmod 600 \"$HOME/.config/sync/env\"";
+    guest_write(name, script, &env_file, Duration::from_secs(30))?;
+
+    // Now let the kit's own installer do the registration, rather than a second copy of that logic
+    // here: it is the thing that knows both runtimes, and FORCE is exactly the "a new token has
+    // arrived" case it exists for.
+    let install = "AGENT_STARTER_FORCE=1 bash /home/agent/.local/bin/sync-work-tracking-install.sh 2>&1 || true";
+    let report = sbx_guest_output(name, install, Duration::from_secs(60)).unwrap_or_default();
+    if report.contains("work tracking ready") {
+        Ok(format!("{} is tracking work as {}", name, minted.agent))
+    } else if report.trim().is_empty() {
+        // The token is in place, so the next box start will pick it up — say exactly that rather
+        // than reporting a success the agent cannot yet act on.
+        Err(format!(
+            "token written, but this box has no starter-kit installer — restart it, or register by hand against {}",
+            sync_mcp_url(&status.gateway_url)
+        ))
+    } else {
+        Err(format!(
+            "token written, but registration did not confirm: {}",
+            report.trim().lines().last().unwrap_or("").trim()
+        ))
+    }
+}
+
+/// Run a command in a box with `stdin` fed from a string. The captured-output sibling of
+/// [`sbx_guest_output`], for the case where the payload must not be an argument.
+fn guest_write(name: &str, shell: &str, stdin: &str, timeout: Duration) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = Command::new("sbx")
+        .args(["exec", "-i", name, "bash", "-lc", shell])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("sbx exec: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("sbx exec: no stdin")?
+        .write_all(stdin.as_bytes())
+        .map_err(|e| format!("sbx exec: writing stdin: {e}"))?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => return Err(format!("sbx exec exited {status}")),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                return Err("sbx exec timed out".into());
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }
 
 // ---------- verification: does a box's work actually build and pass? ----------
@@ -5920,6 +6276,7 @@ mod tests {
             store: store.display().to_string(),
             agent: "claude".into(),
             check: String::new(),
+            plane_project: String::new(),
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
         write_launch_spec_for_agent("demo-task", "feat/started", &repo, "claude").unwrap();
@@ -6126,6 +6483,7 @@ mod tests {
                 store: "/s".into(),
                 agent: "claude".into(),
                 check: String::new(),
+                plane_project: String::new(),
             },
             Repo {
                 id: "web-api".into(),
@@ -6134,6 +6492,7 @@ mod tests {
                 store: "/s".into(),
                 agent: "claude".into(),
                 check: String::new(),
+                plane_project: String::new(),
             },
         ];
         save_repos(&repos).unwrap();
@@ -6162,6 +6521,7 @@ mod tests {
             store: store.to_string_lossy().to_string(),
             agent: "claude".into(),
             check: String::new(),
+            plane_project: String::new(),
         }];
         save_repos(&repos).unwrap();
         // box created on the wrong branch (its creation branch)…
@@ -6196,6 +6556,7 @@ mod tests {
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             check: String::new(),
+            plane_project: String::new(),
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
         let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None);
@@ -6229,6 +6590,7 @@ mod tests {
             store: home.join("store/.claude").to_string_lossy().into_owned(),
             agent: "claude".into(),
             check: String::new(),
+            plane_project: String::new(),
         };
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
         assert!(cmd.contains("'codex'"));
@@ -6690,6 +7052,7 @@ mod tests {
             store: store.to_string_lossy().into_owned(),
             agent: "codex".into(),
             check: String::new(),
+            plane_project: String::new(),
         }])
         .unwrap();
 
@@ -7223,6 +7586,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             check: String::new(),
+            plane_project: String::new(),
         }])
         .unwrap();
         assert_eq!(verify_command("web-main").as_deref(), Some("make test"));
@@ -7235,6 +7599,177 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         save_config(&Config::default()).unwrap();
         assert_eq!(verify_command("web-main"), None);
         assert!(run_verify("web-main").is_err(), "no command ⇒ no run");
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    // A project id is what an agent token binds to, and the only place a human ever sees one is
+    // the Plane URL they are already looking at — so pasting that URL has to work.
+    #[test]
+    fn a_plane_project_is_read_out_of_whatever_was_pasted() {
+        let id = "1e2a3b4c-5d6e-4f70-8912-abcdefabcdef";
+        assert_eq!(plane_project_id(id).as_deref(), Some(id));
+        assert_eq!(
+            plane_project_id(&format!(
+                "https://plane.example.net/acme/projects/{id}/issues"
+            ))
+            .as_deref(),
+            Some(id)
+        );
+        assert_eq!(plane_project_id(&id.to_uppercase()).as_deref(), Some(id));
+        assert_eq!(plane_project_id("  \n").as_deref(), None);
+        assert_eq!(plane_project_id("my-project").as_deref(), None);
+        // The dangerous near-miss: a longer hex run whose first 36 chars are uuid-shaped. Accepting
+        // it would store a project that authenticates and then 403s inside a session hours later.
+        assert_eq!(plane_project_id(&format!("{id}0")).as_deref(), None);
+        assert_eq!(plane_project_id(&format!("0{id}")).as_deref(), None);
+    }
+
+    #[test]
+    fn a_repo_refuses_a_project_no_uuid_can_be_read_from() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "/src/web".into(),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+        }])
+        .unwrap();
+        assert!(set_repo_plane_project("web", "the backlog one").is_err());
+        assert_eq!(
+            load_repos()[0].plane_project,
+            "",
+            "a refusal stores nothing"
+        );
+        // The URL is kept verbatim — the uuid is derived, so a board link stays possible.
+        let url =
+            "https://plane.example.net/acme/projects/1e2a3b4c-5d6e-4f70-8912-abcdefabcdef/issues";
+        set_repo_plane_project("web", url).unwrap();
+        assert_eq!(load_repos()[0].plane_project, url);
+        set_repo_plane_project("web", "").unwrap();
+        assert_eq!(load_repos()[0].plane_project, "", "empty clears it");
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // The Plane token is the one credential whose leak would let someone bypass every lease in the
+    // fleet, so where it lives and who can read it is a claim worth a test rather than a comment.
+    #[test]
+    fn the_plane_token_is_private_to_this_host_and_never_in_the_config() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        assert!(!plane_token_is_set());
+        assert!(!sync_status().ready, "no token, no gateway ⇒ not ready");
+
+        set_plane_token("  plane_api_secret  ").unwrap();
+        assert_eq!(
+            plane_token().as_deref(),
+            Some("plane_api_secret"),
+            "trimmed"
+        );
+        assert!(plane_token_is_set());
+
+        // Not in config.json — the object the settings screen GETs and POSTs.
+        save_config(&Config {
+            sync_gateway_url: "https://plane.example.com".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let config = fs::read_to_string(dir.join("config.json")).unwrap();
+        assert!(
+            !config.contains("plane_api_secret"),
+            "the token must never be written where the settings form can read it: {config}"
+        );
+        // ...and not in what the cockpit is told either.
+        let status = sync_status();
+        assert!(status.ready && status.token_set);
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("plane_api_secret"),
+            "leaked to the browser: {json}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.join("plane-token"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the token file must be owner-only");
+        }
+
+        set_plane_token("").unwrap();
+        assert!(!plane_token_is_set(), "empty forgets it");
+        assert!(
+            set_plane_token("").is_ok(),
+            "forgetting twice is not an error"
+        );
+        assert!(!sync_status().ready, "a gateway alone cannot mint anything");
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn the_gateway_endpoint_is_the_same_whichever_url_was_pasted() {
+        let want = "https://plane.example.com/mcp";
+        for pasted in [
+            "https://plane.example.com",
+            "https://plane.example.com/",
+            "https://plane.example.com/mcp",
+            "  https://plane.example.com/mcp  ",
+        ] {
+            assert_eq!(sync_mcp_url(pasted), want, "for {pasted:?}");
+        }
+    }
+
+    // A refusal from the gateway is JSON written for a human. Showing "unexpected response" instead
+    // sends the reader to the wrong place entirely — usually to the network, when the real problem
+    // is that they pasted an agent token where a Plane one belongs.
+    #[test]
+    fn a_gateway_refusal_is_reported_in_the_gateways_own_words() {
+        let body = r#"{"error":"UNAUTHENTICATED","message":"Plane rejected that personal token","recovery":"Create a new one under your profile"}"#;
+        let said = gateway_said(body);
+        assert!(
+            said.contains("Plane rejected that personal token"),
+            "{said}"
+        );
+        assert!(said.contains("Create a new one"), "{said}");
+        // Not JSON at all — usually an HTML error page from something that is not the gateway.
+        assert!(gateway_said("<html><body>404</body></html>").contains("html"));
+        assert_eq!(gateway_said("   "), "the gateway returned nothing");
+    }
+
+    #[test]
+    fn wiring_a_box_up_refuses_before_it_spends_anything() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
+        // Nothing configured: the error has to name which half is missing, because "not configured"
+        // sends someone to re-check the field they already filled in.
+        let e = sync_provision_box("web-main").unwrap_err();
+        assert!(e.contains("gateway"), "{e}");
+        save_config(&Config {
+            sync_gateway_url: "https://plane.example.com".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let e = sync_provision_box("web-main").unwrap_err();
+        assert!(e.contains("Plane token"), "{e}");
+        // Configured, but the box is not running — refuse before minting a credential for a box
+        // that cannot receive it.
+        set_plane_token("plane_api_x").unwrap();
+        let e = sync_provision_box("web-main").unwrap_err();
+        assert!(e.contains("not running"), "{e}");
+        assert!(
+            sync_mint_token("web-main", None).is_err(),
+            "minting must not be attempted against an unreachable gateway in a test"
+        );
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_LS_CMD");
     }
@@ -8341,6 +8876,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 store: store_a.to_string_lossy().into_owned(),
                 agent: "claude".into(),
                 check: String::new(),
+                plane_project: String::new(),
             },
             Repo {
                 id: "b".into(),
@@ -8349,6 +8885,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 store: store_b.to_string_lossy().into_owned(),
                 agent: "claude".into(),
                 check: String::new(),
+                plane_project: String::new(),
             },
         ])
         .unwrap();

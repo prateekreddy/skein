@@ -220,6 +220,37 @@ await check("settings opens, and its panes switch to fields you can see", async 
   await page.keyboard.press("Escape");
 });
 
+console.log("\nwork tracking");
+await check("work tracking is configurable, and says which half is missing", async () => {
+  await page.click('header .kbtn[title^="Settings"]');
+  await settle();
+  await page.click('.set-navi[data-pane="tracking"]');
+  await settle(300);
+  await mustSee("#set-syncurl", "the gateway URL field");
+  await mustSee("#set-planetok", "the Plane token field");
+  const note = await text("#set-syncnote");
+  if (!/not configured/i.test(note)) throw new Error(`unconfigured should say so plainly, got "${note}"`);
+});
+await check("the stored Plane token is never handed to the browser", async () => {
+  // The one credential whose leak bypasses every lease in the fleet. It must not arrive here at
+  // all — not in the field, not in the status, not anywhere in the settings response.
+  const field = await page.$eval("#set-planetok", el => el.value);
+  if (field) throw new Error(`the token field was pre-filled with "${field}" — it must never round-trip`);
+  const type = await page.$eval("#set-planetok", el => el.type);
+  if (type !== "password") throw new Error(`the token field is type="${type}", so it is shoulder-readable`);
+  const [sync, settings] = await page.evaluate(async () =>
+    Promise.all([fetch("/api/sync").then(r => r.text()), fetch("/api/settings").then(r => r.text())]));
+  if (/plane_api_/.test(sync + settings))
+    throw new Error("a Plane token reached the browser through /api/sync or /api/settings");
+  if (!/"token_set"/.test(sync)) throw new Error(`/api/sync must report whether one is stored: ${sync}`);
+  await page.keyboard.press("Escape");
+});
+await check("nothing offers to spend a token before one is configured", async () => {
+  await openTab("diff");
+  if (await page.$("#dtrack"))
+    throw new Error("Track work is offered with no gateway configured — it can only fail");
+});
+
 console.log("\nverify");
 await check("Verify is offered on the box, and nothing ran it for me", async () => {
   await openTab("diff");

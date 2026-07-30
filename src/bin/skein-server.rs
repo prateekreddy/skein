@@ -101,7 +101,11 @@ async fn main() {
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/repos/:id/check", post(api_set_repo_check))
+        .route("/api/repos/:id/plane-project", post(api_set_repo_project))
         .route("/api/settings", get(api_settings).post(api_set_settings))
+        .route("/api/settings/plane-token", post(api_set_plane_token))
+        .route("/api/sync", get(api_sync_status))
+        .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/pick-path", post(api_pick_path))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/session", get(api_session))
@@ -303,6 +307,53 @@ async fn api_set_repo_check(Path(id): Path<String>, Json(req): Json<RepoCheckReq
     match skein::set_repo_check(&id, &req.check) {
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RepoProjectReq {
+    project: String,
+}
+
+/// Set a repo's Plane project — the project new boxes' tracker tokens bind to. Accepts the project
+/// URL or the bare uuid; empty clears it.
+async fn api_set_repo_project(Path(id): Path<String>, Json(req): Json<RepoProjectReq>) -> Response {
+    match skein::set_repo_plane_project(&id, &req.project) {
+        Ok(repo) => Json(repo).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+/// Whether work tracking is configured. Never carries the Plane token — only whether one is stored,
+/// which is the whole question the settings screen needs answered.
+async fn api_sync_status() -> Json<skein::SyncStatus> {
+    Json(skein::sync_status())
+}
+
+#[derive(Deserialize)]
+struct PlaneTokenReq {
+    token: String,
+}
+
+/// Store (or, with an empty value, clear) the Plane personal token. Write-only by design: there is
+/// no route that reads it back, so a token that reaches the host cannot leave it again.
+async fn api_set_plane_token(Json(req): Json<PlaneTokenReq>) -> Response {
+    match skein::set_plane_token(&req.token) {
+        Ok(()) => Json(skein::sync_status()).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+/// Mint this box a tracker token and register the `sync` MCP server inside it. Spends a network
+/// round trip and creates a real credential, so — like verify — it only ever happens on a click.
+async fn api_sync_provision(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    match tokio::task::spawn_blocking(move || skein::sync_provision_box(&name)).await {
+        Ok(Ok(note)) => Json(serde_json::json!({ "ok": true, "note": note })).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }
 

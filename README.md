@@ -224,6 +224,34 @@ outlive its code — once the box ends another turn, the chip is struck through,
 describes work that has moved on. One check runs at a time fleet-wide, and a box that is mid-turn
 refuses (the check and the agent would be writing the same files).
 
+## Work tracking — one backlog the whole fleet claims from
+
+Boxes each keep their intentions in their own context, which is exactly where an intention goes to
+die. **Settings → Work tracking** points the fleet at a [`sync`](https://github.com/prateekreddy/sync)
+gateway: Plane as the system of record, behind a gateway that adds the one thing Plane cannot do —
+an *atomic claim*, so two boxes never work the same item. Assigning yourself in Plane reserves
+nothing; both boxes read back their own name and both proceed.
+
+Two fields, and they do different jobs:
+
+- **Gateway URL** — `https://plane.example.com`. This is what a box talks to.
+- **Plane personal token** — used **only here, on the host**, to mint each box its own tracker
+  token. A box never receives this one, deliberately: a Plane token can set `assignees` directly,
+  which walks straight around the claim. It is stored in `~/.skein/plane-token` at mode 0600, never
+  in `config.json`, and there is no route that reads it back — the cockpit is only ever told
+  *whether* one is set.
+
+Give a repo its Plane project on its row in Settings → Repositories (paste the project URL; skein
+reads the uuid out of it), then open a box and press **◇ Track work**. The host mints that box a
+token named after it — so Plane's activity log says which box did the work — writes it into the box
+over stdin at `~/.config/sync/env`, and registers the `sync` MCP server there for whichever runtime
+the box runs. Like Verify, nothing triggers it: it spends a network round trip and creates a real
+credential, so it is always your click.
+
+The box then gets `capture` / `claim` / `heartbeat` / `complete` plus Plane's own 47 tools — cycles,
+modules, labels, comments, worklogs — and the agent-starter kit installs the discipline that goes
+with them (the rules in `CLAUDE.md`, and a `work-tracking` skill for the full surface).
+
 ## Claude and Codex runtimes
 
 Choose the default runtime when adding a repo, override it when launching a box, or use the cockpit's

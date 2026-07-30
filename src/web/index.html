@@ -520,6 +520,10 @@
   .set-repos .rrow .rsrc { flex:1; min-width:0; font-family:var(--mono); font-size:11.5px; color:var(--dim);
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .set-repos .rrow .rcheck { flex:0 1 190px; min-width:0; font-family:var(--mono); font-size:11.5px; padding:3px 7px; }
+  .set-repos .rrow .rproj { flex:0 1 150px; min-width:0; font-family:var(--mono); font-size:11.5px; padding:3px 7px; }
+  .set-note { margin:2px 0 0; font-size:11.5px; line-height:1.5; color:var(--faint); }
+  .set-note.ready { color:var(--done); }
+  .set-note.gap { color:var(--attn); }
   .set-repos .rrow .rx { flex:none; opacity:0; padding:2px 7px; border-radius:6px; color:var(--dim); cursor:pointer;
     transition:opacity var(--dur-fast), color var(--dur-fast); }
   .set-repos .rrow:hover .rx, .set-repos .rrow .rx:focus-visible { opacity:1; }
@@ -791,6 +795,7 @@
         <button type="button" class="set-navi on" data-pane="repos"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Repositories<span class="pill" id="set-repon"></span></button>
         <button type="button" class="set-navi" data-pane="github"><svg class="ic" viewBox="0 0 24 24"><path d="M9 19c-4 1.5-4-2.5-6-3m12 5v-3.9a3.4 3.4 0 0 0-1-2.6c3-.3 6-1.5 6-6.5a5 5 0 0 0-1.4-3.5 4.7 4.7 0 0 0-.1-3.5s-1.4-.4-4.5 1.7a12 12 0 0 0-6 0C4.4 1.6 3 2 3 2a4.7 4.7 0 0 0-.1 3.5A5 5 0 0 0 1.5 9c0 5 3 6.2 6 6.5a3.4 3.4 0 0 0-1 2.6V22"/></svg>GitHub &amp; keys</button>
         <button type="button" class="set-navi" data-pane="workflow"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>Workflow</button>
+        <button type="button" class="set-navi" data-pane="tracking"><svg class="ic" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 3h6v3H9z"/><path d="M8 12l2.5 2.5L16 9"/></svg>Work tracking<span class="pill" id="set-syncn"></span></button>
         <button type="button" class="set-navi" data-pane="keys"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="10" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="14" y2="10"/><line x1="18" y1="10" x2="18" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>Shortcuts</button>
         <div class="set-navfoot"><code>~/.skein/config.json</code></div>
       </nav>
@@ -814,6 +819,11 @@
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
             <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. A repo can override this on its own row.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
+          </section>
+          <section class="set-pane" data-pane="tracking">
+            <label class="set-field"><span class="set-title">Gateway URL</span><span class="desc">the <code>sync</code> gateway your boxes share a backlog through — Plane behind an atomic claim, so two boxes never take the same item</span><input id="set-syncurl" placeholder="https://plane.example.com" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field"><span class="set-title">Plane personal token</span><span class="desc">used <b>once per box</b>, here on the host, to mint that box its own tracker token — a box never receives this one, because a Plane token can bypass the claim. Plane → avatar → Settings → Personal access tokens.</span><div class="path-row"><input id="set-planetok" type="password" placeholder="plane_api_…" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-planetok-forget" title="Delete the stored token from this host">Forget</button></div></label>
+            <p class="set-note" id="set-syncnote"></p>
           </section>
           <section class="set-pane" data-pane="keys"><div id="set-keys" class="set-keys"></div></section>
         </div>
@@ -1449,6 +1459,7 @@ function renderDockbar() {
     // Verify lives beside Diff: the two halves of "should I trust this work" — what changed, and
     // whether it still passes. Disabled while a check is running anywhere (one at a time, by design).
     + `<button class="kbtn ghost" id="dverify"${verifying.has(view.box) ? " disabled" : ""} title="run this repo's check command inside the box (nothing runs it for you)">${verifying.has(view.box) ? "checking…" : "✓ Verify"}</button>`
+    + (syncStatus.ready ? `<button class="kbtn ghost" id="dtrack"${tracking.has(view.box) ? " disabled" : ""} title="mint this box its own tracker token and register the sync server inside it">${tracking.has(view.box) ? "wiring…" : "◇ Track work"}</button>` : "")
     + (hasReview
         ? `<button class="kbtn primary" id="dsend" title="paste the review into the agent prompt">Send ${hasReview}</button>` : "")
     + shipHtml(view.box, hasReview)
@@ -1463,6 +1474,7 @@ function renderDockbar() {
   dockbar.querySelector('[data-m=files]').onclick = () => openFiles(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
   const vf = dockbar.querySelector("#dverify"); if (vf) vf.onclick = () => runVerify(view.box);
+  const tk = dockbar.querySelector("#dtrack"); if (tk) tk.onclick = () => trackWork(view.box);
   // plain click = files, shift-click = a whole folder (the picker can only do one or the other).
   const at = dockbar.querySelector("#dattach"); if (at) at.onclick = e => pickAttachment(e.shiftKey);
   const takeover = dockbar.querySelector("#dtake"); if (takeover) takeover.onclick = () => takeOver(view.box, otherRuntime);
@@ -2337,6 +2349,7 @@ const SET_PANES = {
   repos:    "the repos skein can launch boxes into",
   github:   "how boxes authenticate to GitHub",
   workflow: "defaults for new boxes and their pull requests",
+  tracking: "the shared backlog boxes claim work from",
   keys:     "every shortcut the cockpit binds",
 };
 function setPane(pane) {
@@ -2353,7 +2366,7 @@ function setPane(pane) {
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
 function openSettings(pane = "repos") {
-  Promise.all([loadRuntimes(), loadSettings(), loadRepos()]).then(() => {
+  Promise.all([loadRuntimes(), loadSettings(), loadRepos(), loadSync()]).then(() => {
     document.getElementById("set-seedgh").checked = settings.seed_gh_secret !== false;
     document.getElementById("set-forcegh").checked = !!settings.force_gh_secret;
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
@@ -2361,12 +2374,51 @@ function openSettings(pane = "repos") {
     document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
     document.getElementById("set-check").value = settings.check_command || "";
-    renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
+    renderSync(); renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
     settingsModal().classList.add("open");
     // Focus the dialog itself so esc/⏎ reach its handler; focusing the nav button instead would
     // paint a focus ring that then contradicts the active section once you switch panes.
     settingsModal().querySelector(".set-shell")?.focus();
   });
+}
+// Work tracking. `syncStatus` is host state (is a gateway + token configured?), never the token
+// itself — there is no route that reads that back, by design.
+let syncStatus = { gateway_url: "", token_set: false, ready: false };
+const tracking = new Set();
+function loadSync() {
+  return fetch("/api/sync").then(r => r.json()).then(s => { if (s) syncStatus = s; }).catch(() => {});
+}
+// Wire one box up: the host mints it its own gateway token and registers the MCP server inside it.
+// A click, never a tick — it spends a network round trip and creates a real credential.
+function trackWork(name) {
+  if (!name || tracking.has(name)) return;
+  tracking.add(name); renderDockbar();
+  fetch(`/api/boxes/${encodeURIComponent(name)}/sync`, { method:"POST" })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(d => toast(d.note || `${name} is tracking work`))
+    .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
+    .finally(() => { tracking.delete(name); renderDockbar(); });
+}
+function renderSync() {
+  const url = document.getElementById("set-syncurl");
+  const tok = document.getElementById("set-planetok");
+  const note = document.getElementById("set-syncnote");
+  const pill = document.getElementById("set-syncn");
+  const forget = document.getElementById("set-planetok-forget");
+  url.value = settings.sync_gateway_url || "";
+  // The field is always blank: a stored token is never sent to a browser, so there is nothing to
+  // put in it. Leaving it blank on save means "unchanged", which is why Forget is a separate act.
+  tok.value = "";
+  tok.placeholder = syncStatus.token_set ? "•••••••••• stored on this host" : "plane_api_…";
+  forget.style.display = syncStatus.token_set ? "" : "none";
+  if (pill) pill.textContent = syncStatus.ready ? "on" : "";
+  note.className = "set-note" + (syncStatus.ready ? " ready" : (settings.sync_gateway_url || syncStatus.token_set) ? " gap" : "");
+  note.textContent = syncStatus.ready
+    ? "Ready. Each box is wired up on its own — open one and press Track work; it gets its own token, so Plane's activity log names the box that did the work."
+    : !settings.sync_gateway_url && !syncStatus.token_set
+      ? "Not configured. Boxes keep their to-do lists in their own heads until both fields are set."
+      : !settings.sync_gateway_url ? "A token is stored, but no gateway URL — nothing to point a box at yet."
+      : "A gateway is set, but no Plane token — the host cannot mint a box its token without one.";
 }
 function renderRepoList() {
   const el = document.getElementById("set-repos");
@@ -2376,6 +2428,7 @@ function renderRepoList() {
   el.innerHTML = repos.map(r =>
     `<div class="rrow"><span class="rid">${esc(r.id)}</span><span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span>`
     + `<input class="rcheck" data-id="${esc(r.id)}" value="${esc(r.check || "")}" placeholder="check: (default)" title="what Verify runs in this repo's boxes — blank uses the default above" autocomplete="off" spellcheck="false" />`
+    + `<input class="rproj" data-id="${esc(r.id)}" value="${esc(r.plane_project || "")}" placeholder="Plane project" title="paste this repo's Plane project URL (or its uuid) — new boxes get a tracker token bound to it" autocomplete="off" spellcheck="false" />`
     + `<span class="rx" tabindex="0" data-id="${esc(r.id)}" title="Unregister (files left on disk)">✕</span></div>`
   ).join("");
   el.querySelectorAll(".rx").forEach(x => x.addEventListener("click", () => removeRepo(x.dataset.id)));
@@ -2388,6 +2441,15 @@ function renderRepoList() {
       .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
       .then(rp => { toast(rp.check ? `${rp.id}: checks with "${rp.check}"` : `${rp.id}: uses the default check`); loadRepos(); })
       .catch(e => toast(`couldn't set check: ${e.message}`));
+  }));
+  // Same story for the Plane project: repos.json, not the config form.
+  el.querySelectorAll(".rproj").forEach(i => i.addEventListener("change", () => {
+    fetch(`/api/repos/${encodeURIComponent(i.dataset.id)}/plane-project`, {
+      method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ project: i.value.trim() }),
+    })
+      .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+      .then(rp => { toast(rp.plane_project ? `${rp.id}: tracks in Plane` : `${rp.id}: no Plane project`); loadRepos(); })
+      .catch(e => toast(`couldn't set the project: ${e.message}`));
   }));
 }
 // Sync a repo's working clone to its remote (git pull --ff-only). `x` is the clicked control; it
@@ -2419,10 +2481,21 @@ function saveSettings() {
     base_branch: document.getElementById("set-base").value.trim(),
     ssh_key: document.getElementById("set-sshkey").value.trim(),
     check_command: document.getElementById("set-check").value.trim(),
+    sync_gateway_url: document.getElementById("set-syncurl").value.trim(),
   };
-  fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(next) })
+  // The Plane token is not part of the config object and never round-trips, so it is saved on its
+  // own route — and only when one was actually typed. A blank field means "leave it alone", which
+  // is what you want when you opened Settings to change something else entirely.
+  const typed = document.getElementById("set-planetok").value.trim();
+  const token = typed ? fetch("/api/settings/plane-token", {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ token: typed }),
+  }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(s => { syncStatus = s; }) : Promise.resolve();
+  token
+    .then(() => fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(next) }))
     .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
-    .then(s => { settings = s; closeSettings(); toast("settings saved"); })
+    .then(s => { settings = s; return loadSync(); })
+    .then(() => { renderDockbar(); closeSettings(); toast("settings saved"); })
     .catch(e => toast(`couldn't save: ${e.message}`));
 }
 // Load the repos skein manages so the new-box dialog can prefix `<repo>-<branch>` and the palette
@@ -2564,6 +2637,17 @@ document.getElementById("ar-store-browse").addEventListener("click",
   () => pickPath("folder", document.getElementById("ar-store")));
 document.getElementById("set-sshkey-browse").addEventListener("click",
   () => pickPath("file", document.getElementById("set-sshkey")));
+// Forgetting the Plane token is its own act, not an empty field on Save — a blank field has to
+// mean "unchanged", or opening Settings to fix a typo elsewhere would silently delete it.
+document.getElementById("set-planetok-forget").addEventListener("click", () => {
+  if (!confirm("Delete the stored Plane token from this host?\n\nBoxes already wired up keep working — their own tokens are unaffected. You just can't mint any more until you paste it again.")) return;
+  fetch("/api/settings/plane-token", {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ token: "" }),
+  })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(s => { syncStatus = s; renderSync(); renderDockbar(); toast("Plane token forgotten"); })
+    .catch(e => toast(`couldn't forget it: ${e.message}`));
+});
 arModal().addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }
   else if (e.key === "Escape") { e.preventDefault(); closeAddRepo(); }
