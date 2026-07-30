@@ -138,7 +138,7 @@ if [ -f "$idx" ] && ! grep -Fq '(work-tracking.md)' "$idx" 2>/dev/null; then
 fi
 
 # 3. The skill. Loaded only when the model judges it relevant, which is why it can afford to be the
-# long one — Plane's whole 47-tool surface and what each answer is for.
+# long one — Plane's whole surface and what each tool answers.
 if mkdir -p "$store/skills/work-tracking" 2>/dev/null; then
   [ -e "$store/skills/work-tracking/SKILL.md" ] \
     || cp "$src/work-tracking.skill.md" "$store/skills/work-tracking/SKILL.md" 2>/dev/null || true

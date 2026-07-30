@@ -17,6 +17,9 @@ list is scratch. Three rules:
 After a restart, call `held` first to find out what you were in the middle of. Never take work by
 editing assignees or state in Plane directly — the gateway refuses it.
 
+To break a large item up, call `capture` once per child with `parentId` set to the large item. A
+parent with unfinished children is deliberately unclaimable: the work is in the children.
+
 Plane's own surface is on the same server: cycles, modules, labels, comments, worklogs, sub-items,
 relations. Use it rather than keeping the state in your head — the **`work-tracking` skill** is the
 playbook for which tool answers which question.

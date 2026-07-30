@@ -15,6 +15,7 @@ both believing you own it. Only `claim` is atomic.
 **How to apply:**
 - `capture` **before** deciding whether to act. It deduplicates and is safe to call freely, so there
   is no threshold to clear — no description means no one can pick it up later, so write the body.
+  Read the result: `deduped: true` means your text was dropped for an existing item, not added to it.
 - `claim` before non-trivial work; `heartbeat` at about a third of the lease TTL; end with
   `complete` (evidence: PR link, commit, what you verified) or `release`. Silence is not an ending.
 - After **any restart or compaction, call `held` first** — resuming what you hold beats claiming new

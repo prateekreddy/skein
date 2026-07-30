@@ -265,9 +265,12 @@ revocation that retires one box without disarming the fleet. Destroying a box re
 first; if the gateway can't be reached, the destroy still completes and says so on stderr, so you
 know to retire that one by hand.
 
-The box then gets `capture` / `claim` / `heartbeat` / `complete` plus Plane's own 47 tools — cycles,
-modules, labels, comments, worklogs — and the agent-starter kit installs the discipline that goes
-with them (the rules in `CLAUDE.md`, and a `work-tracking` skill for the full surface).
+The box then gets `capture` / `claim` / `heartbeat` / `complete` plus Plane's own tools — cycles,
+modules, labels, comments, worklogs — and the installer lays down the discipline that goes with them:
+the rules in `CLAUDE.md`, a memory so they survive a fresh session, and a `work-tracking` skill for
+the full surface. Those three documents are derived from the `sync` repo rather than invented here;
+`src/store/sync/UPSTREAM.md` records which upstream file each claim comes from, the commit they were
+last checked against, and what to re-read when the gateway moves.
 
 ## Claude and Codex runtimes
 
