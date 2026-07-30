@@ -242,11 +242,18 @@ Two fields, and they do different jobs:
   *whether* one is set.
 
 Give a repo its Plane project on its row in Settings → Repositories (paste the project URL; skein
-reads the uuid out of it), then open a box and press **◇ Track work**. The host mints that box a
-token named after it — so Plane's activity log says which box did the work — writes it into the box
-over stdin at `~/.config/sync/env`, and registers the `sync` MCP server there for whichever runtime
-the box runs. Like Verify, nothing triggers it: it spends a network round trip and creates a real
-credential, so it is always your click.
+reads the uuid out of it), then open a box and press **◇ Track work**. The host mints that box its
+own token, writes it into the box over stdin at `~/.config/sync/env`, and registers the `sync` MCP
+server there for whichever runtime the box runs. Like Verify, nothing triggers it: it spends a
+network round trip and creates a real credential, so it is always your click.
+
+**Every box writes to Plane as you.** The gateway keeps your PAT against each agent it mints, so
+Plane's activity log shows your name, not a per-box user — `<you>/<box>` is the gateway's *holder*
+string, not a Plane account. What one token per box buys is the lease: a distinct holder, so two
+boxes cannot both hold the same item, plus `held` telling a box what it was in the middle of, and
+revocation that retires one box without disarming the fleet. Destroying a box revokes its token
+first; if the gateway can't be reached, the destroy still completes and says so on stderr, so you
+know to retire that one by hand.
 
 The box then gets `capture` / `claim` / `heartbeat` / `complete` plus Plane's own 47 tools — cycles,
 modules, labels, comments, worklogs — and the agent-starter kit installs the discipline that goes

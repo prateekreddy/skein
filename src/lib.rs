@@ -2998,6 +2998,12 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
+    // Before the box goes: a bearer token outlives the filesystem it was written to, so a destroy
+    // that leaves it live hands the fleet a credential nobody is holding any more. Best-effort by
+    // design — an unreachable gateway must not strand a box on the board.
+    if let Err(e) = sync_revoke_token(name) {
+        eprintln!("skein: destroying {name}, but revoking its tracker token failed — revoke it by hand at the gateway: {e}");
+    }
     let (_out, err, code) = run_shell(&destroy_command(name))?;
     if code != 0 {
         return Err(format!("teardown failed (exit {code}): {}", err.trim()));
@@ -3553,10 +3559,15 @@ fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String
 // the one thing Plane cannot do: an atomic claim, so two boxes never work the same item. An agent
 // reaches it as an MCP server, which needs two values: the gateway URL and an agent token.
 //
-// The token is per box and is minted here, from the operator's Plane personal token, because the
-// alternative is worse in both directions: a shared token makes Plane's activity log say "robot"
-// for every box, and handing a box the Plane PAT itself would let it set `assignees` directly —
-// bypassing the lease, which is the entire reason the gateway exists.
+// The token is per box, and what that buys is the LEASE, not Plane attribution. The gateway stores
+// the minter's Plane token against each agent, so every box provisioned from one PAT writes to Plane
+// as that human — `<owner>/<box>` is the gateway's holder string, not a Plane user. What one token
+// per box gives you is a distinct *holder*: with a shared token two boxes would both hold every item
+// they claimed, which is precisely the failure the gateway exists to prevent. It also makes
+// revocation per box, so retiring one box does not disarm the fleet.
+//
+// A box is never handed the Plane PAT itself: that would let it set `assignees` directly and walk
+// around the claim.
 //
 // Nothing here runs on a tick. Provisioning is an explicit act (`sync_provision_box`), for the same
 // reason verification is: it spends a network round trip and mints a real credential.
@@ -3835,6 +3846,61 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
             "token written, but registration did not confirm: {}",
             report.trim().lines().last().unwrap_or("").trim()
         ))
+    }
+}
+
+/// Retire a box's tracker token at the gateway.
+///
+/// A destroyed box takes its filesystem with it but not its credential: the token stays valid
+/// wherever it was copied, and it is a bearer token — nothing about it is bound to the box. So
+/// teardown revokes it, from the same PAT that minted it (the gateway only lets you revoke your
+/// own).
+///
+/// Silent no-op when tracking is not configured, so a destroy stays quiet for anyone not using it.
+/// Never fatal: `sbx rm` has already succeeded by the time this runs, and refusing to finish a
+/// teardown over a failed revocation would leave a box on the board that no longer exists.
+pub fn sync_revoke_token(agent: &str) -> Result<(), String> {
+    let cfg = load_config();
+    let base = cfg
+        .sync_gateway_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let Some(token) = plane_token() else {
+        return Ok(());
+    };
+    if base.is_empty() {
+        return Ok(());
+    }
+    let script = format!(
+        "curl -sS -m 20 -X DELETE {}/v1/agent-tokens/{} \
+         -H \"Authorization: Bearer $SKEIN_PLANE_TOKEN\"",
+        sh_quote(&base),
+        sh_quote(agent)
+    );
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(&script)
+        .env("SKEIN_PLANE_TOKEN", &token);
+    let out = bounded_output(&mut command, "curl", Duration::from_secs(30))?;
+    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() {
+        return Err(format!("the gateway could not be reached ({})", out.status));
+    }
+    revocation_outcome(&body)
+}
+
+/// Did the gateway actually retire the token?
+///
+/// Its own function because curl exiting 0 is not the claim — the claim is that the *gateway* said
+/// it revoked something. A 404 for a box that was never wired up, an HTML error page from a proxy,
+/// or a refusal all arrive as a successful transfer, and reading any of them as "revoked" would let
+/// a live credential quietly outlive the box it was minted for.
+fn revocation_outcome(body: &str) -> Result<(), String> {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) if v.get("revoked").is_some() => Ok(()),
+        _ => Err(gateway_said(body)),
     }
 }
 
@@ -7772,6 +7838,126 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_LS_CMD");
+    }
+
+    // A destroyed box takes its disk with it, not its credential — the token is a bearer token and
+    // nothing about it is bound to the box. Teardown therefore revokes it, and must not depend on
+    // that succeeding: `sbx rm` has already run by then.
+    #[test]
+    fn retiring_a_box_retires_its_token_but_never_blocks_on_it() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        // Not configured at all ⇒ a silent no-op, so a destroy stays quiet for anyone not tracking.
+        assert!(sync_revoke_token("web-main").is_ok(), "nothing to revoke");
+        save_config(&Config {
+            sync_gateway_url: "https://plane.example.com".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            sync_revoke_token("web-main").is_ok(),
+            "a gateway with no stored PAT still has nothing to revoke"
+        );
+        // Configured, but pointed at nothing that answers: an error the caller LOGS rather than
+        // one that aborts the teardown. The distinction is the whole point of the test.
+        set_plane_token("plane_api_x").unwrap();
+        save_config(&Config {
+            sync_gateway_url: "http://127.0.0.1:9".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            sync_revoke_token("web-main").is_err(),
+            "an unreachable gateway must be reported, not silently treated as revoked"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // The wiring, not the helper: a correct `sync_revoke_token` that teardown never calls leaves
+    // exactly the live credential this exists to retire. Proven against a real socket, so the whole
+    // path — destroy → curl → method, URL and bearer — is what is asserted.
+    #[test]
+    fn destroying_a_box_actually_sends_the_revocation() {
+        use std::io::{Read, Write};
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Deadlined, not blocking: a regression here is "teardown stopped calling revoke", and a
+        // blocking accept() turns that into a hung suite instead of a red test — which is how a
+        // guard stops being read at all.
+        listener.set_nonblocking(true).unwrap();
+        let seen = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut buf = [0u8; 2048];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 22\r\n\r\n{\"revoked\":\"pro/gone\"}",
+                        );
+                        return String::from_utf8_lossy(&buf[..n]).into_owned();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return String::new(); // nothing ever asked to revoke
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) => return format!("accept failed: {e}"),
+                }
+            }
+        });
+
+        save_config(&Config {
+            sync_gateway_url: format!("http://127.0.0.1:{port}"),
+            ..Default::default()
+        })
+        .unwrap();
+        set_plane_token("plane_api_secret").unwrap();
+        env::set_var("SKEIN_DESTROY_CMD", "true"); // stand in for `sbx rm`
+        env::set_var("SKEIN_REGISTRY", dir.join("sandboxes.json"));
+        fs::write(dir.join("sandboxes.json"), "{}").unwrap();
+
+        destroy_box("gone").unwrap();
+        let request = seen.join().unwrap();
+        assert!(
+            !request.is_empty(),
+            "teardown never asked the gateway to revoke anything — the box is gone, its token is not"
+        );
+        assert!(
+            request.starts_with("DELETE /v1/agent-tokens/gone "),
+            "{request}"
+        );
+        assert!(
+            request.contains("Authorization: Bearer plane_api_secret"),
+            "the PAT is what authorises a revocation — the box's own token cannot: {request}"
+        );
+
+        env::remove_var("SKEIN_DESTROY_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // The transfer succeeding is not the claim; the gateway saying it revoked something is. Every
+    // case below arrives as a perfectly successful curl, and reading any of them as "done" would
+    // leave a live bearer token behind a box that no longer exists.
+    #[test]
+    fn only_the_gateway_saying_revoked_counts_as_revoked() {
+        assert!(revocation_outcome(r#"{"revoked":"pro/web-main"}"#).is_ok());
+        let e =
+            revocation_outcome(r#"{"error":"NOT_FOUND","message":"no such agent"}"#).unwrap_err();
+        assert!(e.contains("no such agent"), "{e}");
+        // A proxy or the wrong host answering 200 with a page.
+        assert!(revocation_outcome("<html>not the gateway</html>").is_err());
+        // The shape that would slip through a bare "is it JSON?" check.
+        assert!(revocation_outcome(r#"{"ok":true}"#).is_err());
+        assert!(revocation_outcome("").is_err());
     }
 
     #[test]

@@ -2414,7 +2414,7 @@ function renderSync() {
   if (pill) pill.textContent = syncStatus.ready ? "on" : "";
   note.className = "set-note" + (syncStatus.ready ? " ready" : (settings.sync_gateway_url || syncStatus.token_set) ? " gap" : "");
   note.textContent = syncStatus.ready
-    ? "Ready. Each box is wired up on its own — open one and press Track work; it gets its own token, so Plane's activity log names the box that did the work."
+    ? "Ready. Each box is wired up on its own — open one and press Track work. It gets its own token, which is what lets two boxes hold different items; Plane's activity log still shows your name, because the gateway writes as whoever's token minted it. Destroying a box revokes its token."
     : !settings.sync_gateway_url && !syncStatus.token_set
       ? "Not configured. Boxes keep their to-do lists in their own heads until both fields are set."
       : !settings.sync_gateway_url ? "A token is stored, but no gateway URL — nothing to point a box at yet."
