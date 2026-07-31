@@ -4,7 +4,7 @@ The three files beside this one come from `git@github.com:prateekreddy/sync.git`
 fronts Plane. It changes; these have to follow, or a box is drilled in a contract the server no
 longer honours.
 
-Last synced from: **`6e2ba24`**, 2026-07-31.
+Last synced from: **`d284b4e`**, 2026-07-31.
 
 This file stays in the skein repo. `ensure_probe_in` ships only the three documents into a store, so
 nothing here reaches a box.
@@ -16,6 +16,13 @@ nothing here reaches a box.
 | `work-tracking.skill.md` | `skills/work-tracking/SKILL.md` | **copied verbatim** |
 | `work-tracking.block.md` | `AGENTS.md` § Work tracking, `docs/onboarding.md` § Add the rules to CLAUDE.md, `server/src/mcphttp.ts` `INSTRUCTIONS` | derived — reworded, and it carries a line about the tracker being the record that upstream does not |
 | `work-tracking.memory.md` | the same three | derived — the subset that must fire unprompted, in skein's memory format, with `[[…]]` links to the starter-kit memories |
+
+**The block is not a convenience.** Upstream's own account of its channels (`docs/architecture.md`
+§ *Onboarding channels*) puts `CLAUDE.md` / `AGENTS.md` as the only one that fires *before* an agent
+has listed a single tool — and notes the gateway cannot ship it, because it is per-repo. Skein is
+what ships it. That makes the block skein's load-bearing contribution rather than a copy of
+something the server already sends, and it is why it gets its own guard
+(`the_always_on_block_names_every_tool_upstreams_own_rules_do`) rather than riding on the skill's.
 
 The skill used to be derived here too, from `toolspec.ts`, `errors.ts`, `readiness.ts`,
 `toolpolicy.ts`, `capture.ts` and `mirror.ts`. It was contributed upstream in
@@ -45,12 +52,20 @@ git add upstream/sync src/store/sync            # the bumped pin is part of the 
 
 Then check the two derived files, which no copy can keep current:
 
-1. **`AGENTS.md` § Work tracking** and **`server/src/mcphttp.ts` `INSTRUCTIONS`** — these are the
-   always-on channels. A rule added there belongs in `work-tracking.block.md`; putting it in the
-   skill instead loses it, because a skill only loads once the model already decided the topic was
-   relevant. That is upstream's own argument, in `docs/architecture.md` § *Onboarding channels*.
-2. **`server/src/errors.ts`** — a new code with a recovery an agent must act on unprompted may
-   deserve a line in the memory.
+1. **`server/src/toolspec.ts` descriptions** — the first place to look, and the one that is easy to
+   miss because it is code rather than a document. Upstream now treats tool descriptions as the
+   channel that cannot be skipped: they arrive as a set from `tools/list`, and a model cannot call a
+   tool it was never told about. This is not theoretical — `capture`'s description told agents to
+   decompose one child at a time long after `decompose` existed, and that is the form agents used.
+   A rule can change here with `AGENTS.md` and `INSTRUCTIONS` both untouched.
+2. **`AGENTS.md` § Work tracking** and **`server/src/mcphttp.ts` `INSTRUCTIONS`** — a rule added to
+   either belongs in `work-tracking.block.md`; putting it in the skill instead loses it, because a
+   skill only loads once the model already decided the topic was relevant. Note `INSTRUCTIONS` is
+   *not* guaranteed: MCP `2026-07-28` drops the `initialize` handshake and makes `server/discover`
+   optional, so upstream's rule is that nothing load-bearing may live there alone.
+3. **`server/src/errors.ts`** — a new code with a recovery an agent must act on unprompted may
+   deserve a line in the memory. Refusal messages are an unconditional channel too, arriving at the
+   exact moment a rule is broken.
 
 Then update the commit above and `cargo test`: the store tests assert the three files ship, and the
 UI smoke test asserts nothing here leaks a credential.
