@@ -23,11 +23,24 @@ The skill used to be derived here too, from `toolspec.ts`, `errors.ts`, `readine
 claim in it is derived from. That is the right home: a copy maintained here goes stale the first
 time an argument name changes, and nothing tells us.
 
+## The submodule, and why the copy still exists
+
+`upstream/sync` is the real repo, pinned. It is **not** what ships: `include_str!` runs at build
+time and sync is private, so a build that read from it would fail for anyone without access, and
+skein does not get to stop compiling over a work-tracking document.
+
+So the copy is what ships and the submodule is what it is checked against.
+`the_shipped_skill_is_upstreams_verbatim` fails the moment the two disagree — that is the whole
+point of vendoring being safe here. In a checkout without `--recursive` the test says so and passes;
+the copy is complete on its own.
+
 ## Refreshing
 
 ```bash
-git clone --depth 1 https://github.com/prateekreddy/sync.git
-cp sync/skills/work-tracking/SKILL.md src/store/sync/work-tracking.skill.md
+git submodule update --remote upstream/sync
+cp upstream/sync/skills/work-tracking/SKILL.md src/store/sync/work-tracking.skill.md
+cargo test the_shipped_skill                    # green means the copy matches the pin
+git add upstream/sync src/store/sync            # the bumped pin is part of the commit
 ```
 
 Then check the two derived files, which no copy can keep current:

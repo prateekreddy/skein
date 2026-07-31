@@ -8131,6 +8131,36 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::remove_var("SKEIN_HOME");
     }
 
+    // The skill is upstream's, vendored here because `include_str!` runs at build time and sync is a
+    // private repo — a build that needed it would fail for anyone without access, and skein does not
+    // get to stop compiling over a work-tracking document.
+    //
+    // So the copy is what ships and the submodule is what it is checked against. Drift is the whole
+    // risk of vendoring: a copy that silently falls behind teaches an agent a contract the gateway
+    // no longer honours, and nothing announces it. `git submodule update --remote` then this test is
+    // the upgrade.
+    #[test]
+    fn the_shipped_skill_is_upstreams_verbatim() {
+        let upstream = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("upstream/sync/skills/work-tracking/SKILL.md");
+        let Ok(theirs) = fs::read_to_string(&upstream) else {
+            // A checkout without `--recursive`. Not a failure — the vendored copy is complete on its
+            // own — but say so, because a guard that quietly checks nothing is worse than none.
+            eprintln!(
+                "skipping drift check: {} is absent — run `git submodule update --init`",
+                upstream.display()
+            );
+            return;
+        };
+        assert_eq!(
+            SYNC_SKILL_MD,
+            theirs,
+            "the vendored skill has drifted from upstream/sync. Do not edit the copy: change it in \
+             the sync repo, then `cp upstream/sync/skills/work-tracking/SKILL.md \
+             src/store/sync/work-tracking.skill.md` and update the commit in src/store/sync/UPSTREAM.md"
+        );
+    }
+
     // The wiring, not the helper: a correct `sync_revoke_token` that teardown never calls leaves
     // exactly the live credential this exists to retire. Proven against a real socket, so the whole
     // path — destroy → curl → method, URL and bearer — is what is asserted.
