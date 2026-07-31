@@ -355,6 +355,9 @@
   .flist { width:260px; flex:none; overflow-y:auto; border-right:1px solid var(--line); padding:8px 0; }
   .fcrumb { padding:4px 14px 8px; font:12px var(--mono); color:var(--dim); display:flex; flex-wrap:wrap; gap:2px; }
   .fcrumb a { color:var(--fg); text-decoration:none; } .fcrumb a:hover { text-decoration:underline; }
+  .fsrc { margin-left:auto; font-size:10px; padding:0 5px; border-radius:4px; }
+  .fsrc.host { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 14%,transparent); }
+  .fnote { padding:10px 14px; font-size:11.5px; line-height:1.5; color:var(--faint); }
   .fent { display:flex; align-items:center; gap:8px; padding:3px 14px; font:12.5px var(--mono);
           color:var(--fg); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .fent:hover { background:var(--row-hover, rgba(255,255,255,.04)); }
@@ -1945,8 +1948,13 @@ function renderFiles(name, d, st) {
       ? `<div class="fent fdir" data-d="${esc(p)}"><span class="fi">▸</span>${esc(e.name)}/</div>`
       : `<div class="fent${on}" data-f="${esc(p)}"><span class="fi">·</span>${esc(e.name)}<span class="fsz">${fmtSize(e.size)}</span></div>`;
   }).join("");
+  // Which tree answered is not a detail: a clone-mode box's host clone is a different branch, and
+  // a listing that doesn't say so is quietly showing you the wrong files.
+  const src = d.source === "host"
+    ? `<span class="fsrc host" title="${esc(d.note || "the box could not be asked")}">host clone</span>` : "";
+  const empty = d.note && !d.entries.length ? `<div class="fnote">${esc(d.note)}</div>` : `<div class="fent">empty</div>`;
   filespane.innerHTML =
-    `<div class="flist"><div class="fcrumb">${crumbs.join(" / ")}</div>${rows || `<div class="fent">empty</div>`}</div>`
+    `<div class="flist"><div class="fcrumb">${crumbs.join(" / ")}${src}</div>${rows || empty}</div>`
     + `<div class="fview" id="fview">${st.file ? `<div class="note">loading…</div>` : `<div class="note">select a file</div>`}</div>`;
   filespane.querySelector(".flist").addEventListener("click", e => {
     const c = e.target.closest("[data-p]"); if (c) { e.preventDefault(); loadFiles(name, c.dataset.p, null); return; }

@@ -3237,6 +3237,14 @@ pub struct FileEntry {
 pub struct FileListing {
     pub path: String,
     pub entries: Vec<FileEntry>,
+    /// "box" when this came from inside the sandbox, "host" when it came from the host-side clone.
+    /// The two are DIFFERENT TREES for a clone-mode box — different branch, sometimes no working
+    /// tree at all — so a reader that doesn't say which it read is quietly showing the wrong files.
+    #[serde(default)]
+    pub source: String,
+    /// why a listing is empty or came from the host instead of the box
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 /// Cap on file bytes served to the cockpit — larger than any doc/source file a human reads,
@@ -3267,10 +3275,128 @@ fn resolve_in_workspace(name: &str, rel: &str) -> Result<(PathBuf, PathBuf), Str
     Ok((root, target))
 }
 
+// Reading the box itself, not the host clone. A clone-mode box works on its OWN copy of the repo:
+// the host-side `dir` is a different checkout, usually on a different branch, and for a repo whose
+// host clone never got a working tree it is empty — which is exactly how "the Files tab shows
+// nothing" happened while the agent had a full tree three feet away. So: read the box when the box
+// is up, fall back to the host clone when it isn't, and always say which one you got.
+
+/// The guest half of a file operation: resolve `rel` against the box's repo root, refuse anything
+/// that escapes it (`realpath` first, then a prefix check — a symlink out is the case that matters),
+/// and emit a `SKEIN_FS` status line the host parses.
+fn guest_fs_preamble(rel: &str) -> String {
+    format!(
+        "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
+         target=\"$(realpath -m \"$root/{}\" 2>/dev/null)\"; \
+         case \"$target\" in \"$root\"|\"$root\"/*) ;; *) echo 'SKEIN_FS ESCAPE'; exit 0 ;; esac; ",
+        sh_quote(rel).trim_matches('\'')
+    )
+}
+
+/// One `SKEIN_FS <word> …` status line, then the payload.
+fn split_guest_fs(raw: &str) -> Result<(String, String), String> {
+    let (head, body) = raw.split_once('\n').unwrap_or((raw.trim_end(), ""));
+    let rest = head
+        .trim()
+        .strip_prefix("SKEIN_FS ")
+        .ok_or("the box did not answer with a listing")?;
+    match rest.split_once(' ').unwrap_or((rest, "")) {
+        ("OK", detail) => Ok((detail.to_string(), body.to_string())),
+        ("ESCAPE", _) => Err("path escapes the workspace".into()),
+        ("NOTDIR", _) => Err("not a directory".into()),
+        ("NOTFILE", _) => Err("not a file".into()),
+        (other, _) => Err(format!("the box could not read that ({other})")),
+    }
+}
+
+/// Parse `find -printf '%y\t%s\t%f\n'` output into entries. `%y` is the type of the entry itself and
+/// `%Y` the type after following a symlink; we ask for both so a linked directory reads as one while
+/// a link pointing nowhere still appears instead of vanishing.
+fn parse_guest_listing(body: &str) -> Vec<FileEntry> {
+    body.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(4, '\t');
+            let own = parts.next()?;
+            let followed = parts.next()?;
+            let size: u64 = parts.next()?.parse().unwrap_or(0);
+            let name = parts.next()?.to_string();
+            (name != ".git" && !name.is_empty()).then_some(FileEntry {
+                name,
+                dir: followed == "d" || (followed.is_empty() && own == "d"),
+                size,
+            })
+        })
+        .collect()
+}
+
+fn sort_entries(entries: &mut [FileEntry]) {
+    entries.sort_by(|a, b| {
+        b.dir
+            .cmp(&a.dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
+/// List a directory inside the box itself. `Err` when the box can't be asked — the caller then
+/// falls back to the host clone rather than showing nothing.
+fn list_files_in_box(name: &str, rel: &str) -> Result<FileListing, String> {
+    let script = format!(
+        "{}[ -d \"$target\" ] || {{ echo 'SKEIN_FS NOTDIR'; exit 0; }}; \
+         printf 'SKEIN_FS OK\\n'; \
+         find \"$target\" -maxdepth 1 -mindepth 1 -printf '%y\\t%Y\\t%s\\t%f\\n' 2>/dev/null",
+        guest_fs_preamble(rel)
+    );
+    let raw = sbx_guest_output(name, &script, Duration::from_secs(20))?;
+    let (_, body) = split_guest_fs(&raw)?;
+    let mut entries = parse_guest_listing(&body);
+    sort_entries(&mut entries);
+    Ok(FileListing {
+        path: rel.trim_matches('/').to_string(),
+        entries,
+        source: "box".into(),
+        note: String::new(),
+    })
+}
+
+/// Like [`sbx_guest_output`] but keeps stdout as BYTES. Images and PDFs come through here; a lossy
+/// UTF-8 conversion would silently corrupt every one of them.
+fn sbx_guest_bytes(name: &str, shell: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut command = Command::new("sbx");
+    command.args(["exec", name, "bash", "-lc", shell]);
+    let out = bounded_output(&mut command, "sbx exec", timeout)?;
+    if !out.status.success() {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("sbx exec exited {}", out.status)
+        } else {
+            detail
+        });
+    }
+    Ok(out.stdout)
+}
+
+/// Read a file inside the box. The status line comes first as text, the file's raw bytes after it.
+fn read_file_in_box(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
+    let script = format!(
+        "{}[ -f \"$target\" ] || {{ echo 'SKEIN_FS NOTFILE'; exit 0; }}; \
+         printf 'SKEIN_FS OK %s\\n' \"$(wc -c <\"$target\")\"; \
+         head -c {} \"$target\"",
+        guest_fs_preamble(rel),
+        FILE_READ_CAP
+    );
+    let raw = sbx_guest_bytes(name, &script, Duration::from_secs(30))?;
+    let split = raw.iter().position(|b| *b == b'\n').unwrap_or(raw.len());
+    let header = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let (size, _) = split_guest_fs(&header)?;
+    let bytes = raw.get(split + 1..).unwrap_or(&[]).to_vec();
+    let truncated = size.trim().parse::<usize>().unwrap_or(0) > FILE_READ_CAP;
+    Ok((bytes, truncated))
+}
+
 /// List a directory inside a box's workspace — dirs first, then files, both case-insensitively
 /// alphabetical. `.git` is omitted (never what a doc-reading dev wants and enormous); other
 /// dotfiles show, because .env/.github/.claude are exactly the things people check.
-pub fn list_box_files(name: &str, rel: &str) -> Result<FileListing, String> {
+fn list_host_files(name: &str, rel: &str) -> Result<FileListing, String> {
     let (root, dir) = resolve_in_workspace(name, rel)?;
     if !dir.is_dir() {
         return Err("not a directory".into());
@@ -3301,11 +3427,16 @@ pub fn list_box_files(name: &str, rel: &str) -> Result<FileListing, String> {
         .unwrap_or(Path::new(""))
         .to_string_lossy()
         .into_owned();
-    Ok(FileListing { path, entries })
+    Ok(FileListing {
+        path,
+        entries,
+        source: "host".into(),
+        note: String::new(),
+    })
 }
 
-/// Read a file inside a box's workspace, capped at FILE_READ_CAP. Returns (bytes, truncated).
-pub fn read_box_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
+/// Read a file from the box's HOST-side clone, capped at FILE_READ_CAP. Returns (bytes, truncated).
+fn read_host_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
     use std::io::Read as _;
     let (_, file) = resolve_in_workspace(name, rel)?;
     if !file.is_file() {
@@ -3320,6 +3451,58 @@ pub fn read_box_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
         .read_to_end(&mut buf)
         .map_err(|e| e.to_string())?;
     Ok((buf, truncated))
+}
+
+/// List a directory for the cockpit: the box's own tree when the box is up, the host clone when it
+/// isn't. Falling back is not a silent substitution — the listing says which tree answered, because
+/// for a clone-mode box those are different branches and one of them may have no working tree at all.
+pub fn list_box_files(name: &str, rel: &str) -> Result<FileListing, String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    if box_liveness(name) == Some(Liveness::Running) {
+        match list_files_in_box(name, rel) {
+            Ok(listing) => return Ok(annotate_listing(listing)),
+            // A refusal by the box (escape, not-a-directory) is an answer; only an inability to ask
+            // it falls through to the host clone.
+            Err(e) if e.contains("escapes") || e.contains("not a directory") => return Err(e),
+            Err(_) => {}
+        }
+    }
+    let mut listing = list_host_files(name, rel)?;
+    listing.note = if box_liveness(name) == Some(Liveness::Running) {
+        "read from the host clone — the box could not be asked".into()
+    } else {
+        "read from the host clone — this box isn't running".into()
+    };
+    Ok(annotate_listing(listing))
+}
+
+/// An empty directory and a checkout that was never populated look identical, and the second is the
+/// one that makes a dev say "files don't work". Only the root can tell them apart: a repo root with
+/// nothing but `.git` is a clone with no working tree.
+fn annotate_listing(mut listing: FileListing) -> FileListing {
+    if listing.entries.is_empty() && listing.path.is_empty() && listing.note.is_empty() {
+        listing.note = "this workspace has no files in it".into();
+    } else if listing.entries.is_empty() && listing.path.is_empty() {
+        listing.note = format!("{} — and it has no files in it", listing.note);
+    }
+    listing
+}
+
+/// Read a file for the cockpit, from the box when it's up and the host clone when it isn't.
+pub fn read_box_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    if box_liveness(name) == Some(Liveness::Running) {
+        match read_file_in_box(name, rel) {
+            Ok(v) => return Ok(v),
+            Err(e) if e.contains("escapes") || e.contains("not a file") => return Err(e),
+            Err(_) => {}
+        }
+    }
+    read_host_file(name, rel)
 }
 
 // ---------- step 9: collision radar — warn before two boxes' work overwrites the same file ----------
@@ -9103,6 +9286,83 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             VerifyFlight::take("bx-two").is_ok(),
             "the slot frees on drop"
         );
+    }
+
+    #[test]
+    fn a_listing_from_the_box_reads_types_the_way_the_box_sees_them() {
+        // `find -printf '%y\t%Y\t%s\t%f\n'`: %y is the entry's own type, %Y the type after following
+        // a symlink. A linked directory must read as a directory; a link pointing nowhere (%Y = N)
+        // must still appear, because a file you can see is debuggable and one that vanished is not.
+        let body = "d\td\t4096\tdocs\nf\tf\t120\tREADME.md\nl\td\t12\tlinked\nl\tN\t9\tbroken\nd\td\t4096\t.git\n";
+        let mut entries = parse_guest_listing(body);
+        sort_entries(&mut entries);
+        let seen: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("docs", true),
+                ("linked", true),
+                ("broken", false),
+                ("README.md", false)
+            ],
+            "dirs first (a symlinked dir among them), then files; .git omitted"
+        );
+        assert_eq!(entries[3].size, 120);
+        // a line the box couldn't format is skipped rather than becoming a nameless row
+        assert!(parse_guest_listing("garbage\n\n").is_empty());
+    }
+
+    #[test]
+    fn the_box_answering_no_is_different_from_the_box_not_answering() {
+        // OK carries its detail; a refusal is an ANSWER and must not fall through to the host clone
+        // (that is how you end up reading a different branch's files and never being told).
+        assert_eq!(
+            split_guest_fs("SKEIN_FS OK 42\nbody").unwrap(),
+            ("42".into(), "body".into())
+        );
+        assert_eq!(
+            split_guest_fs("SKEIN_FS OK\nrows").unwrap(),
+            ("".into(), "rows".into())
+        );
+        assert!(split_guest_fs("SKEIN_FS ESCAPE\n")
+            .unwrap_err()
+            .contains("escapes"));
+        assert!(split_guest_fs("SKEIN_FS NOTDIR\n")
+            .unwrap_err()
+            .contains("not a directory"));
+        assert!(split_guest_fs("bash: sbx: command not found").is_err());
+        // the preamble refuses traversal before it resolves anything
+        let pre = guest_fs_preamble("../../etc");
+        assert!(pre.contains("realpath -m") && pre.contains("SKEIN_FS ESCAPE"));
+    }
+
+    #[test]
+    fn an_empty_root_says_whether_the_checkout_is_the_problem() {
+        // The bug this whole path exists for: a host clone holding nothing but `.git` listed as
+        // "empty", so the Files tab looked broken while the box had a full tree.
+        let bare = annotate_listing(FileListing {
+            path: String::new(),
+            entries: vec![],
+            source: "host".into(),
+            note: String::new(),
+        });
+        assert_eq!(bare.note, "this workspace has no files in it");
+        // an empty SUBdirectory is just an empty directory — no alarming note
+        let sub = annotate_listing(FileListing {
+            path: "docs".into(),
+            entries: vec![],
+            source: "box".into(),
+            note: String::new(),
+        });
+        assert!(sub.note.is_empty());
+        // and a fallback keeps its own explanation, with the emptiness appended
+        let fell_back = annotate_listing(FileListing {
+            path: String::new(),
+            entries: vec![],
+            source: "host".into(),
+            note: "read from the host clone — this box isn't running".into(),
+        });
+        assert!(fell_back.note.contains("isn't running") && fell_back.note.contains("no files"));
     }
 
     #[test]

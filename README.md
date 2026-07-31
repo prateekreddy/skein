@@ -92,7 +92,12 @@ More attention helpers, all free unless noted:
 
 Each box also gets a **Files** tab — browse its workspace and read files without leaving skein:
 markdown renders (README auto-opens at the root, relative links navigate), images display inline,
-everything else shows as text. Served from the box's host-side workspace, path-traversal hardened.
+everything else shows as text. It reads **the box's own tree** (`sbx exec`, path-resolved and
+escape-guarded inside the box), because a clone-mode box works on its own copy: the host-side clone
+is a different checkout on a different branch, and for a repo whose host clone never got a working
+tree it is empty — which is how the tab could show nothing while the agent had a full tree. When the
+box is down it falls back to that host clone and labels the listing `host clone` rather than
+substituting one tree for the other silently.
 
 API: `GET /api/{boxes,health,runtimes}`, `GET /api/events` (SSE), `GET /api/boxes/:name/{diff,session,narrate,ship}`,
 `GET /api/boxes/:name/files?path=` + `GET /api/boxes/:name/file?path=` (the Files tab),

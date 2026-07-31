@@ -32,8 +32,14 @@ function makeFixture() {
   fs.writeFileSync(path.join(ws, "docs", "nested", "deep.md"), "# Deep\n");
   fs.symlinkSync(path.join(ws, "docs"), path.join(ws, "linked"));  // inside: an ordinary directory
   fs.symlinkSync("/etc", path.join(ws, "outside"));                // outside: must be refused
+  // A second box that `sbx ls` does NOT report (so: not running) whose host clone holds nothing but
+  // .git — exactly the shape that made the Files tab show a blank pane while the box had a tree.
+  const bare = path.join(root, "bare-clone");
+  fs.mkdirSync(path.join(bare, ".git", "refs"), { recursive: true });
+  fs.writeFileSync(path.join(bare, ".git", "HEAD"), "ref: refs/heads/master\n");
   fs.writeFileSync(path.join(root, "sandboxes.json"), JSON.stringify({
     [BOX]: { branch: "main", dir: ws, lastSeen: new Date().toISOString(), status: "" },
+    "bare-box": { branch: "master", dir: bare, lastSeen: new Date().toISOString(), status: "" },
   }));
   // a real git repo, so a verify can fingerprint what it checked the way it would in a box
   const git = (...a) => spawnSync("git", ["-C", ws, ...a], { stdio: "ignore" });
@@ -209,6 +215,22 @@ await check("the breadcrumb goes back to the root", async () => {
   await page.click('#filespane .fcrumb a[data-p=""]');
   await settle();
   await mustSee('#filespane .fent[data-f="README.md"]', "README at the root");
+});
+await check("the listing says the box's own tree answered", async () => {
+  await openTab("files");
+  const d = await page.evaluate(b => fetch(`/api/boxes/${b}/files?path=`).then(r => r.json()), BOX);
+  if (d.source !== "box") throw new Error(`a running box must be read from the box itself, got "${d.source}"`);
+  if (await page.$("#filespane .fsrc.host")) throw new Error("no host-clone badge should show for a live box");
+});
+await check("a clone with nothing but .git says so instead of looking broken", async () => {
+  await page.evaluate(() => showBox("bare-box", "files"));
+  await settle(1200);
+  const note = await text("#filespane .fnote");
+  if (!/no files in it/.test(note)) throw new Error(`an empty checkout must explain itself, got "${note}"`);
+  if (!/host clone/.test(await text("#filespane .fcrumb"))) throw new Error("it must say which tree it read");
+  await mustSee("#filespane .fsrc.host", "the host-clone badge");
+  await page.evaluate(b => showBox(b, "files"), BOX);
+  await settle(900);
 });
 await check("the open file survives leaving the tab and coming back", async () => {
   await page.click('#filespane .fent[data-f="notes.txt"]');
