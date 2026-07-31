@@ -4,7 +4,7 @@ The three files beside this one come from `git@github.com:prateekreddy/sync.git`
 fronts Plane. It changes; these have to follow, or a box is drilled in a contract the server no
 longer honours.
 
-Last synced from: **`b0c6ba1`**, 2026-07-30.
+Last synced from: **`4e2b3fc`**, 2026-07-31.
 
 This file stays in the skein repo. `ensure_probe_in` ships only the three documents into a store, so
 nothing here reaches a box.

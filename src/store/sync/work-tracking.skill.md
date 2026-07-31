@@ -8,8 +8,8 @@ user-invocable: true
 
 Two halves live on one MCP server. Do not confuse them:
 
-- **Coordination tools** (`capture`, `next`, `why`, `claim`, `heartbeat`, `complete`, `release`,
-  `link`, `held`) exist because Plane has no equivalent. They are the only safe way to take work.
+- **Coordination tools** (`capture`, `next`, `why`, `tree`, `claim`, `heartbeat`, `complete`,
+  `release`, `link`, `held`) exist because Plane has no equivalent. They are the only safe way to take work.
 - **Plane's own tools** — currently 47 — are a faithful wrapper over Plane's API and have **no
   notion of a lease**. Everything below the coordination loop is theirs.
 
@@ -48,6 +48,38 @@ held  →  claim  →  …work…  →  heartbeat every ~TTL/3  →  complete
    lease and record the outcome while leaving the item open for someone else's half. Use **`release`**
    with a reason when you are handing work back unfinished — silence is the one unacceptable ending.
 
+   **Name the work items you touched.** `Supersedes SYNC-32`, `follow-up captured as SYNC-40`,
+   `caused by SYNC-12` — a qualified reference in the outcome becomes a real relation in Plane, so
+   the reasoning survives as something navigable rather than prose. Use the `SYNC-NN` form; a bare
+   `#1` is left alone on purpose, because it usually means a GitHub pull request. A reference to an
+   item that does not exist is reported back to you rather than dropped.
+
+   **Harvest the rest from your commits.** Your commit messages already cross-reference more than
+   your outcome will — you are in the repository and the gateway is not, so gather them yourself
+   before completing:
+
+   ```bash
+   git log <base>..HEAD --format='%s%n%b' | grep -oE '\bSYNC-[0-9]+\b' | sort -u
+   ```
+
+   Use your own project's identifier in that pattern, not a generic one: matching any
+   `WORD-123` shape also catches `UTF-8` and `SHA-256`, which the gateway then rejects one by one
+   and reports back at you.
+
+   Pass what it finds as `refs: ["SYNC-32", ...]` rather than pasting them into `outcome`. Same
+   result — real relations — but the prose stays the part a human wants to read. A ref naming
+   nothing is reported back; refs and prose are merged, so naming an item in both is harmless.
+
+   This links everything your commits *mention*, which is usually right. Drop any item you only
+   named as an example — the relation is symmetric and shows up on that item too.
+
+   A cited commit or pull request is **checked against GitHub before the call returns**, so the
+   response tells you what it found: `landed`, `pending` (real, not merged yet — normal for a PR you
+   just opened), `absent`, or `unchecked`. Cite nothing and the item is labelled `unverified`; cite
+   something that does not exist and it is labelled `evidence-missing`. Both are visible on the
+   board, so a vague "done" or a half-remembered sha is not a way to move faster — it is a way to be
+   marked in public. Push your commit *before* you complete, and paste the sha you actually pushed.
+
 ## Capture: write it down before you decide
 
 Call `capture` the moment you notice something, not when you get round to it. It is idempotent
@@ -72,8 +104,20 @@ from `claim` when it:
 - is blocked by unfinished work (checked at claim time, not while browsing).
 
 So: always give `body` enough for someone else to act without you — what, where, and how anyone
-would know it is done. Set `priority` honestly. Use `discoveredFrom` to record the item you were on
-when you noticed it; that is history and constrains nothing.
+would know it is done. Set `priority` honestly.
+
+**Placement is automatic now.** Whatever you capture lands in the module of its `parentId`, or
+failing that of the item you are holding, and the reply says `moduleInherited: true`. Pass
+`moduleId` only to put work somewhere neither would have chosen. If the source is in no module,
+nothing is invented.
+
+**Provenance is automatic too.** If you hold exactly one item in the project, whatever you capture
+is linked back to it and the reply says `discoveredFromInferred: true`. You do not have to remember
+`discoveredFrom`, and you should not pass it just to be safe. Pass it only when the gateway cannot
+know: you noticed this while working something you have since released, or you are holding several
+items and only one is the real source. Holding two, it refuses to guess — a confidently wrong
+provenance edge is worse than none, because nobody reading the graph later can tell a guess from a
+fact.
 
 **Deliberately unclaimable is a feature.** Label a capture `needs-human` when it needs a decision
 you should not make alone — that is how you ask a question the fleet will not accidentally answer.
@@ -117,11 +161,17 @@ one parent chain, but carries as many labels as apply. So "which feature is this
 module, "what kind of work is it" is a label. Reaching for a module because you want two groupings
 at once is the mistake — that is what labels are for.
 
+- **`tree(workItemId)`** shows what is already under an item — every sub-item with its state and,
+  if someone is working it, the holder and lease expiry. Call it *before* decomposing: it is the
+  only way to see whether the work was already broken up, and "unfinished" without a holder is a
+  different thing from "unfinished and already being worked".
 - **`capture(parentId: …)`** makes a sub-item. Use it for real decomposition. A parent with
   unfinished children stops being claimable, which is what you want: it is a container, not a task.
   This composes up the tree — a grandparent stays unclaimable while any leaf under it is open.
-- **`discoveredFrom`** is provenance, not structure. If you use it where you meant `parentId`, the
-  fleet will happily claim the parent as well as the child.
+- **`discoveredFrom`** is provenance, not structure — usually derived from your lease rather than
+  passed. If you pass it where you meant `parentId`, the fleet will happily claim the parent as
+  well as the child. Giving `parentId` suppresses the provenance edge, because a parent already
+  places the item and says something stronger.
 - **`link`** records `blocking`, `blocked_by`, `duplicate`, `relates_to`. Plane's vocabulary is
   `blocking`, not "blocks" — anything else is accepted and then silently ignored. Link a blocker the
   moment you find one; the readiness gate reads it and will stop another agent burning a run on it.
