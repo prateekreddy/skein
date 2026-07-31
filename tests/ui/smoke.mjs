@@ -49,11 +49,28 @@ function makeFixture() {
   fs.writeFileSync(sbx, `#!/bin/sh
 case "$1" in
   ls)   echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
-  exec) shift; shift; cd "${ws}" || exit 1; exec "$@" ;;
+  exec) shift; shift; cd "${ws}" || exit 1; HOME="${root}/boxhome" exec "$@" ;;
 esac
 exit 0
 `);
   fs.chmodSync(sbx, 0o755);
+  // the box's own conversation record — what the Transcript tab reads instead of the screen
+  const proj = path.join(root, "boxhome", ".claude", "projects", "-fixture");
+  fs.mkdirSync(proj, { recursive: true });
+  // 300KB of bookkeeping FIRST, so a 256KB window lands mid-file: that exercises the partial-line
+  // drop and the "load older" paging, which a small fixture would silently skip
+  const filler = Array.from({ length: 4000 }, (_, i) =>
+    JSON.stringify({ type: "mode", mode: "default", n: i, pad: "y".repeat(50) })).join("\n") + "\n";
+  fs.writeFileSync(path.join(proj, "session.jsonl"), [
+    JSON.stringify({ type: "user", timestamp: "2026-07-31T07:00:00Z", message: { role: "user", content: "the oldest message in the record" } }),
+    filler.trimEnd(),
+    JSON.stringify({ type: "user", timestamp: "2026-07-31T08:10:00Z", message: { role: "user", content: "why did the board go blank" } }),
+    JSON.stringify({ type: "assistant", timestamp: "2026-07-31T08:10:04Z", message: { role: "assistant", content: [
+      { type: "thinking", thinking: "private reasoning that is not the conversation" },
+      { type: "text", text: "Because the **box rebooted** and tmux started fresh." },
+      { type: "tool_use", name: "Bash", input: { command: "uptime -s" } }] } }),
+    JSON.stringify({ type: "user", timestamp: "2026-07-31T08:10:05Z", message: { role: "user", content: [{ type: "tool_result", content: "X".repeat(5000) }] } }),
+  ].join("\n") + "\n");
   // the check command a Verify runs — fails on purpose, and writes to BOTH streams, so the test
   // proves the exit code survives and stderr is folded into what you read
   fs.mkdirSync(path.join(root, "home"), { recursive: true });
@@ -251,6 +268,37 @@ await check("nothing offers to spend a token before one is configured", async ()
     throw new Error("Track work is offered with no gateway configured — it can only fail");
 });
 
+console.log("\ntranscript");
+await check("the conversation renders from the box's own record, not the screen", async () => {
+  await openTab("tx");
+  await mustSee("#txpane .txwrap", "the transcript pane");
+  const body = await text("#txpane");
+  if (!/why did the board go blank/.test(body)) throw new Error("the human's message is missing");
+  if (!/box rebooted/.test(body)) throw new Error("the agent's reply is missing");
+  await mustSee("#txpane .txmsg.assistant .txtext strong", "markdown rendered in the reply");
+});
+await check("tool calls are summarised and their payloads left out", async () => {
+  const body = await text("#txpane");
+  if (!/Bash\(uptime -s\)/.test(body)) throw new Error("the tool call should be named with what it ran");
+  if (/XXXXXXXXXX/.test(body)) throw new Error("a tool_result payload leaked into the view");
+  if (/private reasoning/.test(body)) throw new Error("thinking is not the conversation and must not render");
+});
+await check("a record bigger than the window offers to page backwards", async () => {
+  if (!/on disk/.test(await text("#txpane .txhead"))) throw new Error("no size/what-was-read line");
+  await mustSee("#txpane .txmore", "the load-older button");
+  const body = await text("#txpane");
+  if (/the oldest message in the record/.test(body)) throw new Error("the first window should not reach the oldest message");
+});
+await check("loading older reaches the beginning and says so", async () => {
+  await page.click("#txpane .txmore");
+  await settle(1200);
+  const body = await text("#txpane");
+  if (!/the oldest message in the record/.test(body)) throw new Error("paging back did not reach the oldest message");
+  if (!/why did the board go blank/.test(body)) throw new Error("paging back lost the newest messages");
+  if (!/the beginning of this record/.test(await text("#txpane .txolder")))
+    throw new Error("a fully-read record must say so rather than keep offering more");
+});
+
 console.log("\nverify");
 await check("Verify is offered on the box, and nothing ran it for me", async () => {
   await openTab("diff");
@@ -295,5 +343,7 @@ if (failed.length) {
 }
 await browser.close();
 srv.kill();
-if (!failed.length) fs.rmSync(fx.root, { recursive: true, force: true });
+// SKEIN_KEEP=1 leaves the fixture behind so you can point a server at it and look at the thing
+if (!failed.length && !process.env.SKEIN_KEEP) fs.rmSync(fx.root, { recursive: true, force: true });
+else if (!failed.length) console.log(`fixture kept (SKEIN_KEEP): ${fx.root}`);
 process.exit(failed.length ? 1 : 0);

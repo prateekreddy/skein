@@ -209,6 +209,22 @@ your **host SSH agent** into the box (the private key stays on the host); set an
 Settings and skein `ssh-add`s it so it's available to forward. `skein add` warns up-front if a repo's
 `origin` is SSH so you can switch it to HTTPS or load the key.
 
+## Transcript — the conversation that survives
+
+The terminal is a *view* of a box's conversation, and the most fragile copy of it: it dies with the
+browser tab, with a skein-server restart, with the tmux session, and silently with the scrollback
+limit. When a box reboots, `claude --continue` restores the agent's memory from disk and the screen
+comes back empty — the agent remembers everything and you can read none of it.
+
+The **Transcript** tab reads the record instead: the JSONL the runtime itself writes inside the box
+(`~/.claude/projects/…`), discovered by mtime so it works on a box whose probes were never
+installed. Tail-first — these files reach tens of megabytes — with "load older" doubling the window
+back to the beginning. Tool calls are summarised as `Bash(cargo test)` rather than inlined, and
+tool results and thinking are left out, because the point is the conversation.
+
+Claude only for now. Codex's rollout files have a different shape, and skein captures a runtime's
+format from a real box before claiming to read it — the tab says so rather than guessing.
+
 ## Verify — does the work actually stand up?
 
 The board tells you who needs you. **Verify** tells you whose work compiles. Set a check command in

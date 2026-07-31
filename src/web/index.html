@@ -320,12 +320,36 @@
   #toast a { color:var(--accent); text-decoration:none; }
 
   .dockbody { position:relative; flex:1; min-height:0; }
-  .termarea, .diffpane, .sesspane, .filespane { position:absolute; inset:0; display:none; }
+  .termarea, .diffpane, .sesspane, .filespane, .txpane { position:absolute; inset:0; display:none; }
   .termarea.on { display:block; }
   .diffpane.on, .sesspane.on { display:block; overflow:auto; background:var(--inset); }
   /* Files: tree/list on the left, rendered content on the right — the "never leave skein to read
      a doc" pane. Same inset background family as diff/session. */
   .filespane.on { display:flex; background:var(--inset); }
+  /* transcript: a conversation, not a terminal — readable width, newest at the bottom */
+  .txpane.on { display:block; background:var(--inset); }
+  .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
+  .txhead { display:flex; align-items:center; gap:10px; position:sticky; top:-14px; z-index:1; margin:-14px -18px 10px;
+            padding:10px 18px; background:var(--inset); border-bottom:1px solid var(--line);
+            font:11.5px var(--mono); color:var(--dim); }
+  .txhead .txmeta { flex:1; color:var(--faint); }
+  .txolder { display:flex; justify-content:center; padding:6px 0 14px; }
+  .txend { font:11px var(--mono); color:var(--faint); }
+  .txmsg { max-width:860px; margin:0 auto 16px; }
+  .txmsg .txwho { display:flex; gap:8px; font:10.5px var(--mono); text-transform:uppercase; letter-spacing:.06em;
+                  color:var(--faint); margin-bottom:4px; }
+  .txmsg .txts { margin-left:auto; opacity:.7; }
+  .txmsg.user .txtext { background:var(--panel); border-left:2px solid var(--accent); border-radius:0 6px 6px 0;
+                        padding:8px 12px; white-space:pre-wrap; word-break:break-word; }
+  .txmsg.assistant .txtext { color:var(--text); }
+  .txmsg.side { opacity:.62; }
+  .txtext { font-size:13.5px; line-height:1.62; }
+  .txtext > :first-child { margin-top:0; } .txtext > :last-child { margin-bottom:0; }
+  .txtext pre { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:9px 11px;
+                overflow-x:auto; font:12px var(--mono); }
+  .txtext code { font:12px var(--mono); }
+  .txtool { display:inline-block; margin:4px 6px 0 0; padding:1px 7px; border-radius:4px; background:var(--panel);
+            border:1px solid var(--line); font:11px var(--mono); color:var(--dim); }
   .flist { width:260px; flex:none; overflow-y:auto; border-right:1px solid var(--line); padding:8px 0; }
   .fcrumb { padding:4px 14px 8px; font:12px var(--mono); color:var(--dim); display:flex; flex-wrap:wrap; gap:2px; }
   .fcrumb a { color:var(--fg); text-decoration:none; } .fcrumb a:hover { text-decoration:underline; }
@@ -698,6 +722,7 @@
         <div class="diffpane" id="diffpane"></div>
         <div class="sesspane" id="sesspane"></div>
         <div class="filespane" id="filespane"></div>
+        <div class="txpane" id="txpane"></div>
       </div>
       <div class="keybar" id="keybar">
         <button data-k="esc">esc</button>
@@ -1151,6 +1176,7 @@ const boxAnyStreaming = (box) => ["agent","shell"].some(k => sessions.get(sidOf(
 function closeBoxSessions(box) { for (const k of ["agent","shell"]) { const id = sidOf(box,k); if (sessions.has(id)) closeSession(id); } }
 const termarea = document.getElementById("termarea"), diffpane = document.getElementById("diffpane"),
       sesspane = document.getElementById("sesspane"), filespane = document.getElementById("filespane"),
+      txpane = document.getElementById("txpane"),
       tabsEl = document.getElementById("tabs"), dockbar = document.getElementById("dockbar");
 
 function openTerminal(name, runtime) { showBox(name, "term", "agent", runtime || agentOf(name)); }
@@ -1172,6 +1198,7 @@ function openShell(name) { showBox(name, "term", "shell"); }
 function openDiff(name) { showBox(name, "diff"); }
 function openSession(name) { showBox(name, "session"); }
 function openFiles(name) { showBox(name, "files"); }
+function openTranscript(name) { showBox(name, "tx"); }
 function showBox(name, mode, kind = "agent", runtime, handoff = false) {
   document.body.classList.remove("show-fleet");   // tapping a box leaves the mobile fleet view
   select(name);
@@ -1194,6 +1221,7 @@ function showBox(name, mode, kind = "agent", runtime, handoff = false) {
   if (mode === "diff") loadDiff(name);
   if (mode === "session") loadSession(name);
   if (mode === "files") loadFiles(name);
+  if (mode === "tx") loadTranscript(name);
   loadShip(name);
 }
 function applyView() {
@@ -1207,6 +1235,7 @@ function applyView() {
   diffpane.classList.toggle("on", view.mode === "diff");
   sesspane.classList.toggle("on", view.mode === "session");
   filespane.classList.toggle("on", view.mode === "files");
+  txpane.classList.toggle("on", view.mode === "tx");
   const aid = activeSid();
   for (const [id, s] of sessions) s.host.classList.toggle("on", termMode && id === aid);
   if (termMode && aid && sessions.has(aid)) {
@@ -1381,19 +1410,37 @@ function restoreSessions() {
     if (exist.has(box) && !sessions.has(sidOf(box, kind))) createSession(box, kind, null, runtime);
   }
   if (saved.box && exist.has(saved.box)) {
-    const mode = ["diff", "session", "files"].includes(saved.mode) ? saved.mode : "term";
+    const mode = ["diff", "session", "files", "tx"].includes(saved.mode) ? saved.mode : "term";
     showBox(saved.box, mode, saved.kind === "shell" ? "shell" : "agent");
   } else {
     applyView();
   }
 }
 // Reconnect a disconnected session: drop the dead one and open a fresh socket to the same box.
+// Reconnecting builds a fresh xterm (rewiring a live one risks double-registering onData, i.e.
+// every keystroke sent twice) — so carry the old buffer's text across by hand. Without this a
+// server restart or a reload wiped what you had already read: tmux repaints only the *visible*
+// pane to a re-attaching client, so nothing refills the gap. Colours are lost, the words are not.
+// The durable copy is the Transcript tab; this is just so the terminal doesn't blank.
+function carryOverBuffer(s) {
+  try {
+    const buf = s.term.buffer.active, lines = [];
+    for (let i = 0; i < buf.length; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    return lines.length ? lines.slice(-2000).join("\r\n") : "";
+  } catch { return ""; }
+}
 function reconnectSession(box, kind) {
   const id = sidOf(box, kind);
   const s = sessions.get(id);
   const runtime = s?.runtime;
+  const carried = s ? carryOverBuffer(s) : "";
   if (s) { clearTimeout(s.timer); clearInterval(s.statusTimer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(id); }
   createSession(box, kind, null, runtime);
+  if (carried) {
+    const next = sessions.get(sidOf(box, kind));
+    next?.term.write(carried + "\r\n\x1b[2m── reconnected ──\x1b[0m\r\n");
+  }
   view = { box, mode: "term", kind };
   applyView();
 }
@@ -1451,6 +1498,7 @@ function renderDockbar() {
          <button data-m="session" class="${m==='session'?'on':''}">Session</button>
          <button data-m="diff" class="${m==='diff'?'on':''}">Diff</button>
          <button data-m="files" class="${m==='files'?'on':''}">Files</button>
+         <button data-m="tx" class="${m==='tx'?'on':''}" title="the conversation as the box's own record has it — survives reboots, restarts and reloads">Transcript</button>
        </div>`
     + `<div class="dock-right">`
     + (m==='term' ? `<button class="kbtn ghost" id="dattach" title="attach files or a folder for the agent to read (or just paste / drag them onto the terminal)"><svg class="ic" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>` : "")
@@ -1475,6 +1523,7 @@ function renderDockbar() {
   dockbar.querySelector('[data-m=session]').onclick = () => openSession(view.box);
   dockbar.querySelector('[data-m=diff]').onclick = () => openDiff(view.box);
   dockbar.querySelector('[data-m=files]').onclick = () => openFiles(view.box);
+  dockbar.querySelector('[data-m=tx]').onclick = () => openTranscript(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
   const vf = dockbar.querySelector("#dverify"); if (vf) vf.onclick = () => runVerify(view.box);
   const tk = dockbar.querySelector("#dtrack"); if (tk) tk.onclick = () => trackWork(view.box);
@@ -1741,6 +1790,48 @@ function renderSession(d) {
   if (!d.blocked_on && !d.last_message && !d.journal && !d.commits?.length)
     h += `<div class="note">nothing reported yet — the box writes a digest when its agent pauses (Stop hook)</div>`;
   return h + `</div>`;
+}
+
+// ---------- transcript: the conversation from the box's own record ----------
+// The terminal is a view of the conversation and the most fragile copy of it — it dies with the tab,
+// the socket, the tmux session and the scrollback limit. This reads the JSONL the runtime itself
+// writes, so a box reboot costs you the colours and nothing else. Tail-first, because the record is
+// megabytes: "older" doubles the window rather than fetching the whole file.
+const TX_START = 256 * 1024, TX_CAP = 8 * 1024 * 1024;
+const txState = new Map();   // box -> bytes currently requested
+function loadTranscript(name, bytes) {
+  const want = bytes || txState.get(name) || TX_START;
+  txState.set(name, want);
+  if (!txpane.querySelector(".txmsg")) txpane.innerHTML = `<div class="txwrap"><div class="note">reading the record…</div></div>`;
+  fetch(`/api/boxes/${encodeURIComponent(name)}/transcript?bytes=${want}`)
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(d => { if (view.box === name && view.mode === "tx") renderTranscript(name, d); })
+    .catch(e => { txpane.innerHTML = `<div class="txwrap"><div class="note">could not read the record — ${esc(reason(e))}</div></div>`; });
+}
+const txTime = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) ? d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : ""; };
+function renderTranscript(name, d) {
+  if (d.note) { txpane.innerHTML = `<div class="txwrap"><div class="note">${esc(d.note)}</div></div>`; return; }
+  const kb = n => n < 1024*1024 ? `${Math.round(n/1024)}K` : `${(n/1048576).toFixed(1)}M`;
+  const older = d.complete
+    ? `<div class="txend">the beginning of this record</div>`
+    : `<button class="kbtn ghost txmore">load older (${kb(d.scanned)} of ${kb(d.size)} read)</button>`;
+  const body = d.messages.map(m => {
+    const tools = (m.tools || []).map(t => `<div class="txtool">${esc(t)}</div>`).join("");
+    const text = m.text ? `<div class="txtext">${m.role === "assistant" ? marked.parse(m.text) : esc(m.text)}</div>` : "";
+    return `<div class="txmsg ${m.role}${m.sidechain ? " side" : ""}">`
+      + `<div class="txwho">${m.role === "user" ? "you" : "claude"}${m.sidechain ? " · subagent" : ""}<span class="txts">${esc(txTime(m.ts))}</span></div>`
+      + text + tools + `</div>`;
+  }).join("");
+  txpane.innerHTML = `<div class="txwrap"><div class="txhead">${esc(d.path.split("/").pop() || "record")}`
+    + `<span class="txmeta">${d.messages.length} messages · ${kb(d.size)} on disk</span>`
+    + `<button class="kbtn ghost txref" title="re-read the record">↻</button></div>`
+    + `<div class="txolder">${older}</div>${body}</div>`;
+  const wrap = txpane.querySelector(".txwrap");
+  wrap.scrollTop = wrap.scrollHeight;   // newest last, like the terminal it replaces
+  // a link in a recorded message must not navigate the cockpit away from itself
+  txpane.querySelectorAll(".txtext a").forEach(a => { a.target = "_blank"; a.rel = "noopener"; });
+  txpane.querySelector(".txmore")?.addEventListener("click", () => loadTranscript(name, Math.min(d.scanned * 4, TX_CAP)));
+  txpane.querySelector(".txref")?.addEventListener("click", () => loadTranscript(name));
 }
 
 // ---------- verify: run the repo's own check INSIDE a box, and report what it said ----------

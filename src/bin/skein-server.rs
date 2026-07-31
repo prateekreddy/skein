@@ -119,6 +119,7 @@ async fn main() {
             "/api/boxes/:name/verify",
             get(api_verify_last).post(api_verify_run),
         )
+        .route("/api/boxes/:name/transcript", get(api_transcript))
         .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
         .route("/api/boxes/:name/restart-agent", post(api_restart_agent))
@@ -373,6 +374,27 @@ async fn api_sync_refresh(
     let force = q.get("replace").is_some_and(|v| v == "1" || v == "true");
     match tokio::task::spawn_blocking(move || skein::sync_refresh_box(&name, force)).await {
         Ok(Ok(note)) => Json(serde_json::json!({ "ok": true, "note": note })).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// The box's conversation as its own record has it — survives a reboot, a server restart, a page
+/// reload and the scrollback limit, none of which the rendered terminal does. `?bytes=` is how much
+/// of the tail to read; the cockpit doubles it to page backwards.
+async fn api_transcript(
+    Path(name): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let bytes = q
+        .get("bytes")
+        .and_then(|b| b.parse::<u64>().ok())
+        .unwrap_or(256 * 1024);
+    match tokio::task::spawn_blocking(move || skein::read_transcript(&name, bytes)).await {
+        Ok(Ok(view)) => Json(view).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
