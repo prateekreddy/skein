@@ -257,6 +257,17 @@ it stamps itself and stops — the box owns all of it from that point, including
 doesn't want, and a later start will not put them back. The single exception is the box's own `sync`
 MCP registration, which a re-apply deliberately replaces: that is how a rotated token gets in.
 
+**⟳ Update rules delivers a correction without taking the box's config back.** Installing once and
+handing off is what makes the config the box's — but it left no way to fix a rule that turned out to
+be wrong, and one did: upstream moved decomposition from `capture` per child to `decompose`, and
+every box already wired kept the superseded version. The button appears on a box only when this
+repo's store actually holds something newer, which the host answers from two file reads without
+waking a single box. One rule governs what it does: **skein never overwrites an edit it can see.**
+A document still byte-identical to what skein installed is replaced; one the box changed is reported
+and kept. Boxes wired up before skein recorded what it wrote are a genuine third case — stale and
+edited are indistinguishable there — so they are named rather than guessed at, and shift-click takes
+them once you say so.
+
 **Every box writes to Plane as you.** The gateway keeps your PAT against each agent it mints, so
 Plane's activity log shows your name, not a per-box user — `<you>/<box>` is the gateway's *holder*
 string, not a Plane account. What one token per box buys is the lease: a distinct holder, so two

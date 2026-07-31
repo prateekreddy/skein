@@ -112,6 +112,21 @@ fi
 
 # --- the discipline, now that the tools behind it exist -------------------------------------------
 
+# What we installed, by content hash, so a later correction can tell "skein put this here and
+# upstream has moved" from "the box rewrote it". Without this record the two are identical on disk,
+# and sync-refresh.sh would have to either touch nothing or overwrite the box's own edits.
+manifest="$state/sync-$slug.manifest"
+note() {
+  [ -r "$2" ] || return 0
+  local h
+  h="$(sha256sum < "$2" 2>/dev/null | cut -d' ' -f1)" || return 0
+  [ -n "$h" ] || return 0
+  mkdir -p "$state" 2>/dev/null || return 0
+  local tmp="$manifest.tmp.$$"
+  { [ -r "$manifest" ] && awk -F'\t' -v k="$1" '$1!=k' "$manifest"; printf '%s\t%s\n' "$1" "$h"; } \
+    > "$tmp" 2>/dev/null && mv "$tmp" "$manifest" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+}
+
 # 1. The always-in-context rules. Appended once to CLAUDE.md; AGENTS.md is normally the same file
 # through a symlink and is skipped as such. If they are two real files, both get it.
 for doc in CLAUDE.md AGENTS.md; do
@@ -120,16 +135,22 @@ for doc in CLAUDE.md AGENTS.md; do
   [ -L "$path" ] && continue
   grep -Fq '## Work tracking' "$path" 2>/dev/null && continue
   printf '\n---\n\n' >> "$path" 2>/dev/null || continue
-  cat "$src/work-tracking.block.md" >> "$path" 2>/dev/null \
-    && echo "[sync] added the Work tracking section to $doc" >&2
+  if cat "$src/work-tracking.block.md" >> "$path" 2>/dev/null; then
+    echo "[sync] added the Work tracking section to $doc" >&2
+    # Recorded only on the branch that actually wrote it. Noting a hash for a section we found
+    # already there would claim the box's own words as ours, and a later refresh would overwrite them.
+    note block "$src/work-tracking.block.md"
+  fi
 done
 
 # 2. The memory, plus its line in the index loaded every session. A memory file with no index entry
 # is never recalled, so the two are one step. Both land in the STORE, which is this repo's `.claude`
 # — so every box of the repo sees them, not just this one.
 mkdir -p "$store/memory" 2>/dev/null || true
-[ -e "$store/memory/work-tracking.md" ] \
-  || cp "$src/work-tracking.memory.md" "$store/memory/work-tracking.md" 2>/dev/null || true
+if [ ! -e "$store/memory/work-tracking.md" ] \
+   && cp "$src/work-tracking.memory.md" "$store/memory/work-tracking.md" 2>/dev/null; then
+  note memory "$src/work-tracking.memory.md"
+fi
 idx="$store/memory/MEMORY.md"
 [ -f "$idx" ] || printf '# Memory index\n' > "$idx" 2>/dev/null
 if [ -f "$idx" ] && ! grep -Fq '(work-tracking.md)' "$idx" 2>/dev/null; then
@@ -139,9 +160,10 @@ fi
 
 # 3. The skill. Loaded only when the model judges it relevant, which is why it can afford to be the
 # long one — Plane's whole surface and what each tool answers.
-if mkdir -p "$store/skills/work-tracking" 2>/dev/null; then
-  [ -e "$store/skills/work-tracking/SKILL.md" ] \
-    || cp "$src/work-tracking.skill.md" "$store/skills/work-tracking/SKILL.md" 2>/dev/null || true
+if mkdir -p "$store/skills/work-tracking" 2>/dev/null \
+   && [ ! -e "$store/skills/work-tracking/SKILL.md" ] \
+   && cp "$src/work-tracking.skill.md" "$store/skills/work-tracking/SKILL.md" 2>/dev/null; then
+  note skill "$src/work-tracking.skill.md"
 fi
 
 # Stamped last, and only on a run that got this far: a box left half-wired by a failure should be

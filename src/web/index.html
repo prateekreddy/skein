@@ -1460,6 +1460,9 @@ function renderDockbar() {
     // whether it still passes. Disabled while a check is running anywhere (one at a time, by design).
     + `<button class="kbtn ghost" id="dverify"${verifying.has(view.box) ? " disabled" : ""} title="run this repo's check command inside the box (nothing runs it for you)">${verifying.has(view.box) ? "checking…" : "✓ Verify"}</button>`
     + (syncStatus.ready ? `<button class="kbtn ghost" id="dtrack"${tracking.has(view.box) ? " disabled" : ""} title="mint this box its own tracker token and register the sync server inside it">${tracking.has(view.box) ? "wiring…" : "◇ Track work"}</button>` : "")
+    // Only when the store actually holds something newer. A button that is always there teaches you
+    // to ignore it, and this one has nothing to say on most days.
+    + (b.docs_update ? `<button class="kbtn ghost" id="drefreshdocs"${refreshingDocs.has(view.box) ? " disabled" : ""} title="the work-tracking rules in the store are newer than the ones this box installed — re-apply them. Only documents the box has not edited are rewritten; shift-click to also take ones installed before skein recorded what it wrote">${refreshingDocs.has(view.box) ? "applying…" : "⟳ Update rules"}</button>` : "")
     + (hasReview
         ? `<button class="kbtn primary" id="dsend" title="paste the review into the agent prompt">Send ${hasReview}</button>` : "")
     + shipHtml(view.box, hasReview)
@@ -1475,6 +1478,7 @@ function renderDockbar() {
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
   const vf = dockbar.querySelector("#dverify"); if (vf) vf.onclick = () => runVerify(view.box);
   const tk = dockbar.querySelector("#dtrack"); if (tk) tk.onclick = () => trackWork(view.box);
+  const rd = dockbar.querySelector("#drefreshdocs"); if (rd) rd.onclick = e => refreshDocs(view.box, e.shiftKey);
   // plain click = files, shift-click = a whole folder (the picker can only do one or the other).
   const at = dockbar.querySelector("#dattach"); if (at) at.onclick = e => pickAttachment(e.shiftKey);
   const takeover = dockbar.querySelector("#dtake"); if (takeover) takeover.onclick = () => takeOver(view.box, otherRuntime);
@@ -2398,6 +2402,20 @@ function trackWork(name) {
     .then(d => toast(d.note || `${name} is tracking work`))
     .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
     .finally(() => { tracking.delete(name); renderDockbar(); });
+}
+// Re-apply the work-tracking documents to a box that already has them. `replace` (shift-click) is
+// for boxes wired up before skein recorded what it installed, where stale and box-edited cannot be
+// told apart — even then the host refuses documents it can see were edited, so the promise that
+// skein never overwrites your changes holds either way.
+const refreshingDocs = new Set();
+function refreshDocs(name, replace) {
+  if (!name || refreshingDocs.has(name)) return;
+  refreshingDocs.add(name); renderDockbar();
+  fetch(`/api/boxes/${encodeURIComponent(name)}/sync/refresh${replace ? "?replace=1" : ""}`, { method:"POST" })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(d => toast(`${name}: ${d.note || "done"}`))
+    .catch(e => toast(`couldn't update ${name}: ${e.message}`))
+    .finally(() => { refreshingDocs.delete(name); renderDockbar(); });
 }
 function renderSync() {
   const url = document.getElementById("set-syncurl");

@@ -81,7 +81,7 @@ pub struct Sandbox {
 }
 
 /// A registry entry enriched for display — what the CLI table and the web API both render.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct BoxView {
     pub name: String,
     pub state: String,
@@ -129,6 +129,12 @@ pub struct BoxView {
     /// ever run here (which is not a failure, and must not read as one).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify: Option<VerifySummary>,
+    /// this repo's store holds work-tracking documents newer than the ones installed from it, so a
+    /// re-apply has something to deliver. Repo-scoped and host-side, because that half of the answer
+    /// is free; whether *this box's* CLAUDE.md is stale can only be read inside the box, and is not
+    /// worth waking one on every snapshot to find out. See [`sync_docs_available`].
+    #[serde(default)]
+    pub docs_update: bool,
 }
 
 impl Sandbox {
@@ -475,6 +481,11 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 verify: verify_summary(&name),
                 hook_health,
                 screen_health: screen.to_string(),
+                // Two file reads against the repo's store — no box is woken to answer this, which is
+                // what makes it affordable on a signal computed for every row on every snapshot.
+                docs_update: repo
+                    .as_ref()
+                    .is_some_and(|rp| sync_docs_available(Path::new(&rp.store))),
             }
         })
         .collect();
@@ -3862,6 +3873,103 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     }
 }
 
+/// Does this repo's store hold work-tracking documents newer than the ones installed from it?
+///
+/// Free, and host-side on purpose: the skill and the memory live in the store, so answering costs
+/// two file reads and never touches a box. That matters because this runs on every fleet snapshot,
+/// and a signal that woke every box to ask it a question would cost more than the correction it is
+/// advertising.
+///
+/// It cannot see the CLAUDE.md block, which lives inside each box's own clone. So this is "a newer
+/// version exists", not "this box is stale" — the box-level truth comes back from the refresh
+/// itself, which is the only thing that can read it.
+pub fn sync_docs_available(store: &Path) -> bool {
+    let newer =
+        |installed: PathBuf, reference: PathBuf| match (fs::read(&installed), fs::read(&reference))
+        {
+            // Absent means never installed here, which is Track work's job rather than a refresh's.
+            (Ok(a), Ok(b)) => a != b,
+            _ => false,
+        };
+    newer(
+        store.join("skills/work-tracking/SKILL.md"),
+        store.join("skein/sync/work-tracking.skill.md"),
+    ) || newer(
+        store.join("memory/work-tracking.md"),
+        store.join("skein/sync/work-tracking.memory.md"),
+    )
+}
+
+/// Re-apply the work-tracking documents to a box that already has them.
+///
+/// `sync_provision_box` installs once and hands off, which is what lets a box own its config — but
+/// it left corrections undeliverable. This is the delivery, under one rule the box can rely on:
+/// **skein never overwrites an edit it can see.** Only documents still byte-identical to what skein
+/// installed are rewritten; anything the box changed is reported and kept.
+///
+/// `force` covers boxes wired up before skein recorded what it installed. For those, "stale" and
+/// "edited" are genuinely indistinguishable, so the human pressing the button is the missing
+/// evidence. It still refuses documents known to be edited.
+pub fn sync_refresh_box(name: &str, force: bool) -> Result<String, String> {
+    if box_liveness(name) != Some(Liveness::Running) {
+        return Err(format!("{name} is not running"));
+    }
+    // Same store resolution as provisioning, for the same reason: whichever way this repo's `.claude`
+    // is mounted, the box's own view of it is the one that is right.
+    let script = format!(
+        "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
+         store=\"$root/.claude\"; \
+         if [ -L \"$store/skein\" ]; then store=\"$(dirname \"$(readlink \"$store/skein\")\")\"; \
+         elif [ -L \"$store\" ]; then store=\"$(readlink -f \"$store\")\"; fi; \
+         script=\"$store/skein/bin/sync-refresh.sh\"; \
+         if [ -r \"$script\" ]; then bash \"$script\"{}; \
+         else echo 'skein: no refresh script in this box'\\''s store' >&2; fi",
+        if force { " --force" } else { "" }
+    );
+    // stderr deliberately not merged: stdout is the machine-readable report and stderr is the prose.
+    let report = sbx_guest_output(name, &script, Duration::from_secs(60))?;
+    Ok(describe_refresh(&report, force))
+}
+
+/// Turn the script's `name<TAB>state` lines into one sentence for the cockpit.
+///
+/// Its own function so the wording is testable without a box. The states are the ones found *before
+/// the run acted*, so what counts as refreshed depends on what this run was willing to write —
+/// hence `force` here rather than a second pass in the script.
+///
+/// The `yours` count is never folded into the total. "3 refreshed" when one was declined would be a
+/// lie in the direction that costs most, since the whole promise is that skein left the box's edits
+/// alone.
+fn describe_refresh(report: &str, force: bool) -> String {
+    let (mut done, mut kept, mut unknown) = (0, 0, 0);
+    for line in report.lines() {
+        match line.trim().rsplit_once('\t').map(|(_, s)| s.trim()) {
+            Some("stale") => done += 1,
+            Some("yours") => kept += 1,
+            Some("unknown") if force => done += 1,
+            Some("unknown") => unknown += 1,
+            _ => {}
+        }
+    }
+    let mut parts = Vec::new();
+    if done > 0 {
+        parts.push(format!("refreshed {done}"));
+    }
+    if unknown > 0 {
+        parts.push(format!(
+            "{unknown} predates skein recording what it installed — use Replace to take those"
+        ));
+    }
+    if kept > 0 {
+        parts.push(format!("kept {kept} the box had edited"));
+    }
+    if parts.is_empty() {
+        "already up to date".into()
+    } else {
+        parts.join("; ")
+    }
+}
+
 /// Retire a box's tracker token at the gateway.
 ///
 /// A destroyed box takes its filesystem with it but not its credential: the token stays valid
@@ -5484,6 +5592,7 @@ pub fn current_status_detail(name: &str) -> Option<String> {
 /// rather than the kit on purpose: a kit only reaches boxes created after it changed, and an
 /// existing box has to be wireable too. See `sync_provision_box`.
 const SYNC_INSTALL_SH: &str = include_str!("store/sync-install.sh");
+const SYNC_REFRESH_SH: &str = include_str!("store/sync-refresh.sh");
 /// The three documents that installer places, once a box is actually registered: the always-on
 /// rules, the memory, and the on-demand skill for Plane's full surface.
 const SYNC_BLOCK_MD: &str = include_str!("store/sync/work-tracking.block.md");
@@ -5616,6 +5725,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
         ("sync-install.sh", SYNC_INSTALL_SH),
+        ("sync-refresh.sh", SYNC_REFRESH_SH),
     ] {
         let p = bin.join(file);
         // temp + rename, not a bare write: these scripts are EXECUTED by live boxes through the
@@ -7850,6 +7960,241 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // Not JSON at all — usually an HTML error page from something that is not the gateway.
         assert!(gateway_said("<html><body>404</body></html>").contains("html"));
         assert_eq!(gateway_said("   "), "the gateway returned nothing");
+    }
+
+    /// The same hash the scripts compute, so a fixture manifest says what a real install would have.
+    /// Shelling out to `sha256sum` on purpose: a Rust implementation could agree with itself while
+    /// disagreeing with the shell, which is the only thing that matters here.
+    fn sha256_of(bytes: &[u8]) -> String {
+        use std::io::Write;
+        let mut child = Command::new("sha256sum")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(bytes).unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Run sync-refresh.sh against a store + project laid out like a wired box, and return its
+    /// report (stdout is machine-readable, stderr is prose).
+    fn refresh_run(
+        store: &Path,
+        project: &Path,
+        boxhome: &Path,
+        args: &[&str],
+    ) -> (String, String) {
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-refresh.sh"))
+            .args(args)
+            .env("HOME", boxhome)
+            .env("WORKSPACE_DIR", project)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "refresh must never fail a box");
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// The whole promise of the re-apply action in one test: it delivers a correction to what skein
+    /// installed, and it does not touch what the box wrote.
+    ///
+    /// Worth doing end to end rather than unit-testing the classifier, because the failure that
+    /// matters — silently overwriting a box's own rules — lives in the file handling, not the
+    /// comparison. A box that finds its edits reverted has no reason to trust anything else here.
+    #[test]
+    fn a_refresh_replaces_what_skein_installed_and_keeps_what_the_box_wrote() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let boxhome = home.join("boxhome");
+        let state = boxhome.join(".local/state/skein");
+        fs::create_dir_all(&state).unwrap();
+
+        let slug = project.display().to_string().replace('/', "-");
+        fs::write(state.join(format!("sync-{slug}.done")), "").unwrap();
+        let src = store.join("skein").join("sync");
+
+        // The skill: installed by skein, then upstream moved. The manifest carries what was written.
+        fs::create_dir_all(store.join("skills/work-tracking")).unwrap();
+        fs::write(store.join("skills/work-tracking/SKILL.md"), "OLD SKILL\n").unwrap();
+        // The memory: the box rewrote it. No manifest entry can match, and it must survive.
+        fs::create_dir_all(store.join("memory")).unwrap();
+        fs::write(
+            store.join("memory/work-tracking.md"),
+            "the box's own words\n",
+        )
+        .unwrap();
+
+        // The block: installed verbatim from the store, so it is skein's to correct. `block_of` in
+        // the script reads the section without its trailing blank line, which is what is recorded.
+        let block_now = fs::read_to_string(src.join("work-tracking.block.md")).unwrap();
+        fs::write(
+            project.join("CLAUDE.md"),
+            format!("# proj\n\n---\n\n{block_now}\n## Later section\n\nkept\n"),
+        )
+        .unwrap();
+        fs::write(
+            state.join(format!("sync-{slug}.manifest")),
+            format!(
+                "skill\t{}\nmemory\t{}\nblock\t{}\n",
+                sha256_of(b"OLD SKILL\n"),
+                // A hash nothing can match: the box's memory is not what skein wrote.
+                "0".repeat(64),
+                sha256_of(block_now.trim_end().as_bytes()),
+            ),
+        )
+        .unwrap();
+
+        // Now move the reference on, exactly as a `git submodule update` + copy would.
+        fs::write(src.join("work-tracking.skill.md"), "NEW SKILL\n").unwrap();
+        fs::write(
+            src.join("work-tracking.block.md"),
+            "## Work tracking\n\nuse `decompose`, not capture per child\n",
+        )
+        .unwrap();
+
+        let (report, _) = refresh_run(&store, &project, &boxhome, &[]);
+
+        assert!(
+            report.contains("skill\tstale"),
+            "the skill skein installed, now superseded, must be offered: {report}"
+        );
+        assert!(
+            report.contains("memory\tyours"),
+            "a memory the box rewrote must be recognised as the box's: {report}"
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("skills/work-tracking/SKILL.md")).unwrap(),
+            "NEW SKILL\n",
+            "the correction was not delivered"
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("memory/work-tracking.md")).unwrap(),
+            "the box's own words\n",
+            "skein overwrote an edit it could see — the one thing a refresh must never do"
+        );
+        let claude = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
+        assert!(
+            claude.contains("use `decompose`, not capture per child"),
+            "the block was not corrected: {claude}"
+        );
+        assert!(
+            claude.contains("# proj")
+                && claude.contains("## Later section")
+                && claude.contains("kept"),
+            "rewriting the section ate the rest of the file: {claude}"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// A box wired up before the manifest existed. Neither state is knowable, so the refusal has to
+    /// be explicit rather than silently sorted into "stale" (overwrites edits) or "yours" (delivers
+    /// nothing, forever).
+    #[test]
+    fn without_a_record_of_what_was_installed_a_refresh_asks_rather_than_guesses() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let boxhome = home.join("boxhome");
+        let state = boxhome.join(".local/state/skein");
+        fs::create_dir_all(&state).unwrap();
+        let slug = project.display().to_string().replace('/', "-");
+        fs::write(state.join(format!("sync-{slug}.done")), "").unwrap();
+        fs::create_dir_all(store.join("skills/work-tracking")).unwrap();
+        fs::write(
+            store.join("skills/work-tracking/SKILL.md"),
+            "PRE-MANIFEST\n",
+        )
+        .unwrap();
+
+        let (report, _) = refresh_run(&store, &project, &boxhome, &[]);
+        assert!(report.contains("skill\tunknown"), "{report}");
+        assert_eq!(
+            fs::read_to_string(store.join("skills/work-tracking/SKILL.md")).unwrap(),
+            "PRE-MANIFEST\n",
+            "an unknown document was rewritten without being asked"
+        );
+        let said = describe_refresh(&report, false);
+        assert!(
+            said.contains("Replace"),
+            "the report has to name the way out, or an unknown document is a dead end: {said}"
+        );
+
+        // The human pressing Replace is the evidence that was missing.
+        let (forced, _) = refresh_run(&store, &project, &boxhome, &["--force"]);
+        assert!(forced.contains("skill\tunknown"), "{forced}");
+        assert_eq!(
+            fs::read_to_string(store.join("skills/work-tracking/SKILL.md")).unwrap(),
+            fs::read_to_string(store.join("skein/sync/work-tracking.skill.md")).unwrap(),
+            "Replace did not take it"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// The signal is computed in Rust and read in the page by name, and nothing else connects them:
+    /// rename one side and the button silently never appears, which looks exactly like "nothing to
+    /// update" — the failure this whole feature exists to end. The browser smoke test cannot reach
+    /// this path (its fixture box belongs to no repo, so the flag is always false), so the join is
+    /// asserted here instead of left to a reader.
+    #[test]
+    fn the_page_reads_the_update_flag_by_the_name_the_fleet_sends() {
+        let view = BoxView {
+            docs_update: true,
+            ..BoxView::default()
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            json.contains("\"docs_update\":true"),
+            "the fleet snapshot stopped carrying the flag: {json}"
+        );
+        assert!(
+            include_str!("web/index.html").contains("b.docs_update"),
+            "the cockpit no longer reads docs_update, so the update button can never appear"
+        );
+    }
+
+    /// The button only appears when there is something to deliver, so the signal behind it has to be
+    /// quiet by default — an indicator that is always lit is one nobody reads.
+    #[test]
+    fn the_cockpit_only_offers_an_update_when_the_store_has_a_newer_one() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        assert!(
+            !sync_docs_available(&store),
+            "nothing installed yet is Track work's job, not an update"
+        );
+        fs::create_dir_all(store.join("skills/work-tracking")).unwrap();
+        fs::copy(
+            store.join("skein/sync/work-tracking.skill.md"),
+            store.join("skills/work-tracking/SKILL.md"),
+        )
+        .unwrap();
+        assert!(
+            !sync_docs_available(&store),
+            "an up-to-date box must stay quiet"
+        );
+        fs::write(store.join("skills/work-tracking/SKILL.md"), "older\n").unwrap();
+        assert!(sync_docs_available(&store));
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]

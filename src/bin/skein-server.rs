@@ -106,6 +106,7 @@ async fn main() {
         .route("/api/settings/plane-token", post(api_set_plane_token))
         .route("/api/sync", get(api_sync_status))
         .route("/api/boxes/:name/sync", post(api_sync_provision))
+        .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
         .route("/api/pick-path", post(api_pick_path))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/session", get(api_session))
@@ -351,6 +352,26 @@ async fn api_sync_provision(Path(name): Path<String>) -> Response {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     match tokio::task::spawn_blocking(move || skein::sync_provision_box(&name)).await {
+        Ok(Ok(note)) => Json(serde_json::json!({ "ok": true, "note": note })).into_response(),
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// Re-apply the work-tracking documents to a box that already has them.
+///
+/// `?replace=1` covers boxes installed before skein recorded what it wrote, where stale and edited
+/// cannot be told apart. Even then it refuses documents it can see were edited, so this is never the
+/// blunt instrument its name suggests.
+async fn api_sync_refresh(
+    Path(name): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let force = q.get("replace").is_some_and(|v| v == "1" || v == "true");
+    match tokio::task::spawn_blocking(move || skein::sync_refresh_box(&name, force)).await {
         Ok(Ok(note)) => Json(serde_json::json!({ "ok": true, "note": note })).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
