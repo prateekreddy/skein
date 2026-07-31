@@ -77,6 +77,11 @@ exit 0
   fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({
     check_command: "echo building the thing; echo 'boom: the wheels came off' >&2; exit 3",
   }));
+  // a registered repo, so the settings pane has a card to open and edit
+  fs.writeFileSync(path.join(root, "home", "repos.json"), JSON.stringify([
+    { id: "smoke", source: "/src/smoke", work: ws, store: path.join(root, "store"), agent: "claude",
+      check: "", plane_project: "", sync_gateway_url: "" },
+  ]));
   return { root, ws, sbx, bin };
 }
 
@@ -142,7 +147,9 @@ page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 // broken, several checks fail at once and the whole run has to stay quick enough to keep running.
 page.setDefaultTimeout(4000);
 const noise = [];
-const EXPECTED_404 = /\/file\?path=outside|\/files\?path=outside/;   // the refusal we assert below
+// Refusals this run provokes ON PURPOSE and asserts elsewhere: the workspace-escape guard, and the
+// repo settings rejecting a gateway that isn't a URL. Everything else counts as noise.
+const EXPECTED_404 = /\/file\?path=outside|\/files\?path=outside|\/api\/repos\/[^/]+\/settings/;
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error" && !EXPECTED_404.test(m.location()?.url || "")) noise.push(`[console] ${m.text()}`); });
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
@@ -266,6 +273,74 @@ await check("nothing offers to spend a token before one is configured", async ()
   await openTab("diff");
   if (await page.$("#dtrack"))
     throw new Error("Track work is offered with no gateway configured — it can only fail");
+});
+
+console.log("\nsettings");
+await check("a repo is a card that says what it's configured to do", async () => {
+  await page.click('header .kbtn[title^="Settings"]');
+  await settle();
+  await mustSee("#settings.open", "the settings dialog");
+  const card = await mustSee('.rcard[data-card="smoke"]', "the repo card");
+  const tags = await card.$$eval(".rtag", els => els.map(e => e.textContent));
+  if (!tags.some(t => /building the thing/.test(t))) throw new Error(`the inherited check should show: ${tags}`);
+  if (await page.$(".rcard.open")) throw new Error("cards should start collapsed");
+});
+await check("opening it shows labelled fields, not bare inputs", async () => {
+  await page.click('.rcard[data-card="smoke"] .rhead');
+  await settle(300);
+  const titles = await page.$$eval('.rcard[data-card="smoke"] .set-title', els => els.map(e => e.textContent.replace("saved","").trim()));
+  for (const want of ["Check command", "Plane project", "Sync gateway"])
+    if (!titles.includes(want)) throw new Error(`missing field "${want}" — got ${titles}`);
+  await mustSee('.rcard[data-card="smoke"] [data-key="sync_gateway_url"]', "the gateway field");
+  // With no shared gateway configured, the field must say that rather than imply an inherited one
+  const desc = await text('.rcard[data-card="smoke"] [data-key="sync_gateway_url"]', );
+  const help = await page.$eval('.rcard[data-card="smoke"] [data-key="sync_gateway_url"]',
+    e => e.closest(".set-field").querySelector(".desc").textContent);
+  if (!/no gateway is configured/.test(help)) throw new Error(`the field should say what blank means, got "${help}"`);
+});
+await check("a per-repo gateway saves, confirms at the field, and shows on the card", async () => {
+  const field = '.rcard[data-card="smoke"] [data-key="sync_gateway_url"]';
+  await page.fill(field, "https://own.example/");
+  await page.press(field, "Tab");
+  await page.waitForFunction(() => [...document.querySelectorAll('.rcard[data-card="smoke"] .rtag')].some(t => /own gateway/.test(t.textContent)), null, { timeout: 5000 });
+  await mustSee('.rcard[data-card="smoke"].open', "the card stays open after saving");
+  const saved = await fetch(`http://127.0.0.1:${port}/api/repos`).then(r => r.json());
+  if (saved.find(r => r.id === "smoke").sync_gateway_url !== "https://own.example")
+    throw new Error("the trailing slash should be trimmed before storing");
+});
+await check("the pane doesn't pretend Save applies to repo cards", async () => {
+  const shown = await page.$$eval("#settings .set-foot .primary", els => els.filter(e => e.offsetParent).length);
+  if (shown) throw new Error("Save is offered on a pane whose fields already saved themselves");
+  if (!/saves as you leave a field/.test(await text("#set-hint"))) throw new Error("nothing says when these save");
+  // and it comes back on a pane that IS a form
+  await page.click('.set-navi[data-pane="workflow"]');
+  await settle(250);
+  await mustSee("#settings .set-foot .primary", "Save on the Workflow pane");
+  await page.click('.set-navi[data-pane="repos"]');
+  await settle(250);
+});
+await check("a gateway that isn't a URL is refused, not stored", async () => {
+  const field = '.rcard[data-card="smoke"] [data-key="sync_gateway_url"]';
+  await page.fill(field, "mcp.example.net");
+  await page.press(field, "Tab");
+  await settle(900);
+  const saved = await fetch(`http://127.0.0.1:${port}/api/repos`).then(r => r.json());
+  if (saved.find(r => r.id === "smoke").sync_gateway_url !== "https://own.example")
+    throw new Error("a rejected value must not overwrite the stored one");
+  await page.keyboard.press("Escape");
+});
+
+await check("settings is usable while a box is open (the docked layout hides nothing of it)", async () => {
+  // `body.docked footer {display:none}` — written for the fleet's key hints — also matched the
+  // settings dialog's own <footer>, so Save and Cancel vanished whenever any box tab was open.
+  await page.click('header .kbtn[title^="Settings"]');   // the previous check closed it
+  await settle();
+  await page.click('.set-navi[data-pane="workflow"]');
+  await settle(250);
+  for (const [sel, what] of [["#settings .set-foot .primary", "Save"], ["#settings .set-navi", "the pane rail"],
+                             ["#settings .set-scroll", "the pane body"], ["#settings .set-x", "the close button"]])
+    await mustSee(sel, what);
+  await page.keyboard.press("Escape");
 });
 
 console.log("\ntranscript");

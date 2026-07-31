@@ -62,7 +62,9 @@
   body.docked header { flex-wrap:wrap; row-gap:8px; margin-bottom:14px; }
   body.docked .right { gap:8px; }
   body.docked .counts { font-size:12px; }
-  body.docked footer { display:none; }
+  /* The fleet's key-hints strip, by its own name — as a bare `footer` this also hid the SETTINGS
+     dialog's footer (its Save and Cancel) whenever a box tab was open, which is nearly always. */
+  body.docked footer.keyhints { display:none; }
   /* compact rows in the rail: drop the path, age and chevron; tighten padding */
   body.docked .row { grid-template-columns:16px 1fr auto; gap:10px; padding:9px 11px; }
   body.docked .row .age, body.docked .row .chev { display:none; }
@@ -536,22 +538,32 @@
   .set-field.narrow input, .set-field.narrow select { max-width:300px; }
   /* repositories: a real list — the id reads as an identifier, the path stays subordinate, and the
      unregister control only appears on the row you are pointing at */
-  .set-repos { display:flex; flex-direction:column; gap:6px; margin:12px 0 14px; }
-  .set-repos .rrow { display:flex; align-items:center; gap:11px; padding:10px 12px; background:var(--card);
-    border:1px solid var(--border); border-radius:10px; transition:border-color var(--dur-fast); }
-  .set-repos .rrow:hover { border-color:var(--border-2); }
-  .set-repos .rrow .rid { flex:none; font-family:var(--mono); font-size:12.5px; color:var(--accent); }
-  .set-repos .rrow .rsrc { flex:1; min-width:0; font-family:var(--mono); font-size:11.5px; color:var(--dim);
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .set-repos .rrow .rcheck { flex:0 1 190px; min-width:0; font-family:var(--mono); font-size:11.5px; padding:3px 7px; }
-  .set-repos .rrow .rproj { flex:0 1 150px; min-width:0; font-family:var(--mono); font-size:11.5px; padding:3px 7px; }
-  .set-note { margin:2px 0 0; font-size:11.5px; line-height:1.5; color:var(--faint); }
-  .set-note.ready { color:var(--done); }
-  .set-note.gap { color:var(--attn); }
-  .set-repos .rrow .rx { flex:none; opacity:0; padding:2px 7px; border-radius:6px; color:var(--dim); cursor:pointer;
-    transition:opacity var(--dur-fast), color var(--dur-fast); }
-  .set-repos .rrow:hover .rx, .set-repos .rrow .rx:focus-visible { opacity:1; }
-  .set-repos .rrow .rx:hover { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  .set-repos { display:flex; flex-direction:column; gap:8px; margin:12px 0 14px; }
+  /* One card per repo: a scannable header (what's configured, at a glance) over labelled fields.
+     Three bare inputs in a row was faster to write and impossible to read — nothing said which was
+     which, and the only way to unregister was a ✕ that appeared on hover next to them. */
+  .rcard { background:var(--card); border:1px solid var(--line); border-radius:9px; }
+  .rcard.open { border-color:var(--border-2); }
+  .rhead { display:flex; align-items:center; gap:10px; width:100%; padding:10px 12px; background:none;
+           border:0; border-radius:9px; cursor:pointer; text-align:left; color:inherit; font:inherit; }
+  .rhead:hover { background:var(--panel); }
+  .rhead:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .rhead .rid { flex:none; font-family:var(--mono); font-size:12.5px; color:var(--accent); }
+  .rhead .rsrc { flex:1; min-width:0; font-family:var(--mono); font-size:11.5px; color:var(--dim);
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rtag { flex:none; font-family:var(--mono); font-size:10.5px; padding:1px 6px; border-radius:4px;
+          border:1px solid var(--line); background:var(--inset); color:var(--faint); max-width:170px;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rtag.own { color:var(--text); border-color:var(--border-2); }   /* set ON this repo, not inherited */
+  .rchev { flex:none; color:var(--faint); font-size:11px; transition:transform .15s ease; }
+  .rcard.open .rchev { transform:rotate(90deg); }
+  .rbody { display:none; padding:2px 14px 14px; }
+  .rcard.open .rbody { display:block; border-top:1px solid var(--line); padding-top:12px; }
+  .rbody .set-field { margin-bottom:13px; }
+  .rbody .set-field input { width:100%; }
+  .rsaved { margin-left:8px; font-size:10.5px; color:var(--done); opacity:0; transition:opacity .2s; }
+  .rsaved.on { opacity:1; }
+  .rfoot { display:flex; justify-content:flex-end; border-top:1px solid var(--line); padding-top:11px; }
   .set-repos .none { padding:22px; text-align:center; font-size:12.5px; color:var(--faint);
     border:1px dashed var(--border-2); border-radius:10px; }
   .set-add { display:inline-flex; align-items:center; gap:7px; align-self:flex-start; font:inherit; font-size:12.5px;
@@ -710,7 +722,7 @@
           </div>
         </header>
         <div id="fleet"></div>
-        <footer><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
+        <footer class="keyhints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
       </div>
     </div>
     <div id="gutter" title="drag to resize"></div>
@@ -843,10 +855,10 @@
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
-            <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. A repo can override this on its own row.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. The default for every repo; each can override it under <b>Repositories</b>.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
           </section>
           <section class="set-pane" data-pane="tracking">
-            <label class="set-field"><span class="set-title">Gateway URL</span><span class="desc">the <code>sync</code> gateway your boxes share a backlog through — Plane behind an atomic claim, so two boxes never take the same item</span><input id="set-syncurl" placeholder="https://plane.example.com" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field"><span class="set-title">Gateway URL</span><span class="desc">the <code>sync</code> gateway your boxes share a backlog through — Plane behind an atomic claim, so two boxes never take the same item. The default for every repo; a repo tracked somewhere else can point at its own under <b>Repositories</b></span><input id="set-syncurl" placeholder="https://plane.example.com" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field"><span class="set-title">Plane personal token</span><span class="desc">used <b>once per box</b>, here on the host, to mint that box its own tracker token — a box never receives this one, because a Plane token can bypass the claim. Plane → avatar → Settings → Personal access tokens.</span><div class="path-row"><input id="set-planetok" type="password" placeholder="plane_api_…" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-planetok-forget" title="Delete the stored token from this host">Forget</button></div></label>
             <p class="set-note" id="set-syncnote"></p>
           </section>
@@ -854,7 +866,7 @@
         </div>
         <footer class="set-foot">
           <span class="set-dirty" id="set-dirty">unsaved changes</span>
-          <span class="hint"><code>$SKEIN_*</code> env vars override these</span>
+          <span class="hint" id="set-hint"><code>$SKEIN_*</code> env vars override these</span>
           <button type="button" class="kbtn" onclick="closeSettings()">Cancel</button>
           <button type="button" class="primary" id="set-go">Save</button>
         </footer>
@@ -2454,9 +2466,13 @@ function setPane(pane) {
   const nav = settingsModal().querySelector(`.set-navi[data-pane="${pane}"]`);
   document.getElementById("set-htitle").textContent = nav ? nav.textContent.replace(/\d+$/, "").trim() : pane;
   document.getElementById("set-hsub").textContent = SET_PANES[pane];
+  const hint = document.getElementById("set-hint");
+  if (hint) hint.innerHTML = pane === "repos"
+    ? "each repo saves as you leave a field — these live in <code>repos.json</code>, not in this form"
+    : "<code>$SKEIN_*</code> env vars override these";
   settingsModal().querySelector(".set-scroll").scrollTop = 0;
   // Shortcuts is a reference, not a form — offering Save/Cancel there is noise.
-  settingsModal().querySelector(".set-foot").classList.toggle("readonly", pane === "keys");
+  settingsModal().querySelector(".set-foot").classList.toggle("readonly", pane === "keys" || pane === "repos");
 }
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
@@ -2529,37 +2545,61 @@ function renderSync() {
       : !settings.sync_gateway_url ? "A token is stored, but no gateway URL — nothing to point a box at yet."
       : "A gateway is set, but no Plane token — the host cannot mint a box its token without one.";
 }
+const openRepos = new Set();   // which cards are expanded (survives the re-render after a save)
+// A repo's own settings live in repos.json, not in the config form — so they save when you leave the
+// field, and the dialog's Cancel has nothing to do with them. Saying so beats a Save button that
+// only covers half of what's on screen.
+function repoField(r, key, title, desc, placeholder) {
+  return `<label class="set-field"><span class="set-title">${esc(title)}<span class="rsaved" data-saved="${esc(r.id)}-${key}">saved</span></span>`
+    + `<span class="desc">${desc}</span>`
+    + `<input data-id="${esc(r.id)}" data-key="${key}" value="${esc(r[key] || "")}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false" /></label>`;
+}
 function renderRepoList() {
   const el = document.getElementById("set-repos");
   const n = document.getElementById("set-repon");
   if (n) n.textContent = repos.length || "";
   if (!repos.length) { el.innerHTML = `<div class="none">No repositories yet — add one below to launch boxes into it.</div>`; return; }
-  el.innerHTML = repos.map(r =>
-    `<div class="rrow"><span class="rid">${esc(r.id)}</span><span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span>`
-    + `<input class="rcheck" data-id="${esc(r.id)}" value="${esc(r.check || "")}" placeholder="check: (default)" title="what Verify runs in this repo's boxes — blank uses the default above" autocomplete="off" spellcheck="false" />`
-    + `<input class="rproj" data-id="${esc(r.id)}" value="${esc(r.plane_project || "")}" placeholder="Plane project" title="paste this repo's Plane project URL (or its uuid) — new boxes get a tracker token bound to it" autocomplete="off" spellcheck="false" />`
-    + `<span class="rx" tabindex="0" data-id="${esc(r.id)}" title="Unregister (files left on disk)">✕</span></div>`
-  ).join("");
-  el.querySelectorAll(".rx").forEach(x => x.addEventListener("click", () => removeRepo(x.dataset.id)));
-  // A repo's check command saves on blur, not on the dialog's Save: repos are their own store
-  // (repos.json), so folding them into the config form would make Cancel a lie about half the pane.
-  el.querySelectorAll(".rcheck").forEach(i => i.addEventListener("change", () => {
-    fetch(`/api/repos/${encodeURIComponent(i.dataset.id)}/check`, {
-      method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ check: i.value.trim() }),
-    })
-      .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
-      .then(rp => { toast(rp.check ? `${rp.id}: checks with "${rp.check}"` : `${rp.id}: uses the default check`); loadRepos(); })
-      .catch(e => toast(`couldn't set check: ${e.message}`));
+  const globalCheck = settings.check_command || "", globalGw = settings.sync_gateway_url || "";
+  el.innerHTML = repos.map(r => {
+    // Tags say what this repo would actually do, and whether that came from the repo or the default.
+    const tags = [
+      [r.check || globalCheck || "no check", !!r.check, r.check ? "this repo's own check command" : globalCheck ? "inherited from Settings → Workflow" : "no check command — Verify has nothing to run"],
+      [r.plane_project ? "Plane" : "", true, "tracked in a Plane project"],
+      [r.sync_gateway_url ? "own gateway" : "", true, r.sync_gateway_url || ""],
+    ].filter(([label]) => label)
+     .map(([label, own, tip]) => `<span class="rtag${own ? " own" : ""}" title="${esc(tip)}">${esc(label)}</span>`).join("");
+    return `<div class="rcard${openRepos.has(r.id) ? " open" : ""}" data-card="${esc(r.id)}">`
+      + `<button type="button" class="rhead" aria-expanded="${openRepos.has(r.id)}"><span class="rid">${esc(r.id)}</span>`
+      + `<span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span>${tags}<span class="rchev">›</span></button>`
+      + `<div class="rbody">`
+      + repoField(r, "check", "Check command", `what <b>Verify</b> runs inside this repo's boxes${globalCheck ? ` — blank uses <code>${esc(globalCheck)}</code>` : " — blank means Verify has nothing to run"}`, globalCheck || "cargo test")
+      + repoField(r, "plane_project", "Plane project", "paste the project URL or its uuid — a box's tracker token binds to it, so its work lands on that board", "https://plane…/projects/<uuid>/issues")
+      + repoField(r, "sync_gateway_url", "Sync gateway", `where this repo's boxes claim work${globalGw ? ` — blank uses the shared <code>${esc(globalGw)}</code>` : " — blank means no gateway is configured at all"}`, globalGw || "https://mcp.example.net")
+      + `<div class="rfoot"><button type="button" class="kbtn ghost danger" data-remove="${esc(r.id)}" title="skein forgets this repo; the clone and store stay on disk">Unregister</button></div>`
+      + `</div></div>`;
+  }).join("");
+  el.querySelectorAll(".rhead").forEach(h => h.addEventListener("click", () => {
+    const id = h.closest("[data-card]").dataset.card;
+    openRepos.has(id) ? openRepos.delete(id) : openRepos.add(id);
+    h.closest(".rcard").classList.toggle("open");
+    h.setAttribute("aria-expanded", openRepos.has(id));
   }));
-  // Same story for the Plane project: repos.json, not the config form.
-  el.querySelectorAll(".rproj").forEach(i => i.addEventListener("change", () => {
-    fetch(`/api/repos/${encodeURIComponent(i.dataset.id)}/plane-project`, {
-      method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ project: i.value.trim() }),
+  el.querySelectorAll("[data-remove]").forEach(b => b.addEventListener("click", () => removeRepo(b.dataset.remove)));
+  el.querySelectorAll(".rbody input").forEach(i => i.addEventListener("change", () => saveRepoField(i)));
+}
+function saveRepoField(input) {
+  const { id, key } = input.dataset;
+  fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: input.value.trim() }),
+  })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(() => {
+      // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
+      const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
+      if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
+      loadRepos().then(renderRepoList);   // tags re-derive; open cards stay open
     })
-      .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
-      .then(rp => { toast(rp.plane_project ? `${rp.id}: tracks in Plane` : `${rp.id}: no Plane project`); loadRepos(); })
-      .catch(e => toast(`couldn't set the project: ${e.message}`));
-  }));
+    .catch(e => { toast(`${id}: ${e.message}`); input.focus(); });
 }
 // Sync a repo's working clone to its remote (git pull --ff-only). `x` is the clicked control; it
 // carries the repo id in data-id and shows a brief busy state. Used by each repo's sidebar header.

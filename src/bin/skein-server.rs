@@ -100,8 +100,7 @@ async fn main() {
         .route("/api/repos", get(api_repos).post(api_add_repo))
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
-        .route("/api/repos/:id/check", post(api_set_repo_check))
-        .route("/api/repos/:id/plane-project", post(api_set_repo_project))
+        .route("/api/repos/:id/settings", post(api_set_repo_settings))
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/settings/plane-token", post(api_set_plane_token))
         .route("/api/sync", get(api_sync_status))
@@ -299,28 +298,27 @@ async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>
     }
 }
 
+/// A repo's own settings. Absent field = leave it alone; empty string = clear it back to the global
+/// default. One request can carry all three, so the settings pane saves a card, not a keystroke.
 #[derive(Deserialize)]
-struct RepoCheckReq {
-    check: String,
+struct RepoSettingsReq {
+    check: Option<String>,
+    /// a Plane project URL or bare uuid — what this repo's tracker tokens bind to
+    plane_project: Option<String>,
+    /// this repo's own `sync` gateway; empty falls back to the shared one in Settings
+    sync_gateway_url: Option<String>,
 }
 
-/// Set a repo's own check command (empty clears it back to the global default).
-async fn api_set_repo_check(Path(id): Path<String>, Json(req): Json<RepoCheckReq>) -> Response {
-    match skein::set_repo_check(&id, &req.check) {
-        Ok(repo) => Json(repo).into_response(),
-        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct RepoProjectReq {
-    project: String,
-}
-
-/// Set a repo's Plane project — the project new boxes' tracker tokens bind to. Accepts the project
-/// URL or the bare uuid; empty clears it.
-async fn api_set_repo_project(Path(id): Path<String>, Json(req): Json<RepoProjectReq>) -> Response {
-    match skein::set_repo_plane_project(&id, &req.project) {
+async fn api_set_repo_settings(
+    Path(id): Path<String>,
+    Json(req): Json<RepoSettingsReq>,
+) -> Response {
+    match skein::set_repo_settings(
+        &id,
+        req.check.as_deref(),
+        req.plane_project.as_deref(),
+        req.sync_gateway_url.as_deref(),
+    ) {
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }

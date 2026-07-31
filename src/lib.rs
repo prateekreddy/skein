@@ -1180,6 +1180,12 @@ pub struct Repo {
     /// must name a project on every call.
     #[serde(default)]
     pub plane_project: String,
+    /// The `sync` gateway this repo's boxes are wired to. Empty ⇒ the shared default in
+    /// [`Config::sync_gateway_url`]. Per-repo because a gateway is a backlog: two products tracked
+    /// in different Plane instances (or a self-hosted one alongside the shared one) cannot share a
+    /// claim namespace, and the token a box carries is minted BY the gateway it will talk to.
+    #[serde(default)]
+    pub sync_gateway_url: String,
 }
 
 fn default_agent() -> String {
@@ -1685,39 +1691,59 @@ pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
     write_atomic(&repos_json(), &home, &bytes)
 }
 
-/// Set (or clear, with an empty string) a repo's own check command — what a **verify** runs in that
-/// repo's boxes. Empty falls back to [`Config::check_command`]; see [`verify_command`].
-pub fn set_repo_check(id: &str, check: &str) -> Result<Repo, String> {
-    let mut repos = load_repos();
-    let repo = repos
-        .iter_mut()
-        .find(|r| r.id == id)
-        .ok_or_else(|| format!("no repo with id {id:?}"))?;
-    repo.check = check.trim().to_string();
-    let updated = repo.clone();
-    save_repos(&repos)?;
-    Ok(updated)
-}
-
-/// Set a repo's Plane project (a project URL or a bare uuid). Refuses anything no uuid can be read
-/// out of, rather than storing a value that would only fail later inside an agent session — a
-/// mistyped project surfaces as a token that authenticates and then 403s on the first write.
-pub fn set_repo_plane_project(id: &str, project: &str) -> Result<Repo, String> {
-    let project = project.trim();
-    if !project.is_empty() && plane_project_id(project).is_none() {
-        return Err(
-            "that isn't a Plane project — paste the project URL, or the uuid from it".to_string(),
-        );
+/// Update a repo's own settings. Every field is optional: `None` leaves it alone, `Some("")` clears
+/// it back to the global default. One function — and one route — rather than one per field, because
+/// there are three of these now and a fourth would have been a fourth copy of the same lookup.
+///
+/// Validation happens before anything is written: a half-applied update across two fields is worse
+/// than a refusal. A mistyped Plane project is refused rather than stored, because it would
+/// otherwise surface as a token that authenticates and then 403s on the agent's first write.
+pub fn set_repo_settings(
+    id: &str,
+    check: Option<&str>,
+    plane_project: Option<&str>,
+    sync_gateway_url: Option<&str>,
+) -> Result<Repo, String> {
+    if let Some(project) = plane_project.map(str::trim) {
+        if !project.is_empty() && plane_project_id(project).is_none() {
+            return Err(
+                "that isn't a Plane project — paste the project URL, or the uuid from it".into(),
+            );
+        }
+    }
+    if let Some(url) = sync_gateway_url.map(str::trim) {
+        if !url.is_empty() && !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err("a gateway URL has to start with http:// or https://".into());
+        }
     }
     let mut repos = load_repos();
     let repo = repos
         .iter_mut()
         .find(|r| r.id == id)
         .ok_or_else(|| format!("no repo with id {id:?}"))?;
-    repo.plane_project = project.to_string();
+    if let Some(v) = check {
+        repo.check = v.trim().to_string();
+    }
+    if let Some(v) = plane_project {
+        repo.plane_project = v.trim().to_string();
+    }
+    if let Some(v) = sync_gateway_url {
+        repo.sync_gateway_url = v.trim().trim_end_matches('/').to_string();
+    }
     let updated = repo.clone();
     save_repos(&repos)?;
     Ok(updated)
+}
+
+/// The `sync` gateway a box talks to: its repo's own, else the shared default. Trimmed of a
+/// trailing slash so `sync_mcp_url` can append `/mcp` without producing `//mcp`.
+pub fn sync_gateway_for_box(name: &str) -> String {
+    repo_for_box(name)
+        .map(|r| r.sync_gateway_url.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| load_config().sync_gateway_url.trim().to_string())
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
@@ -1990,8 +2016,9 @@ pub fn add_repo(
         agent: agent
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),
-        check: String::new(), // set later, per repo, in Settings → Repositories
-        plane_project: String::new(), // set later, per repo, in Settings → Repositories
+        check: String::new(), // all three are set later, per repo, in Settings → Repositories
+        plane_project: String::new(),
+        sync_gateway_url: String::new(),
     };
     let mut repos = load_repos();
     repos.retain(|r| r.id != id); // replace any existing entry with the same id
@@ -3720,15 +3747,17 @@ pub struct MintedToken {
 /// setting is not worth a TLS stack in the dependency tree. The PAT travels in the child's
 /// environment, not its argv — argv is world-readable in `ps`, and this is the one credential whose
 /// leak would let someone bypass every lease in the fleet.
-pub fn sync_mint_token(agent: &str, project_id: Option<&str>) -> Result<MintedToken, String> {
-    let cfg = load_config();
-    let base = cfg
-        .sync_gateway_url
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
+pub fn sync_mint_token(
+    agent: &str,
+    project_id: Option<&str>,
+    gateway: &str,
+) -> Result<MintedToken, String> {
+    // The gateway is passed in, not read from config: a repo can point at its own, and a token is
+    // only valid at the gateway that minted it — reading the global default here would hand a box
+    // a credential for a backlog it is not talking to.
+    let base = gateway.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
-        return Err("no sync gateway configured — set it in Settings".into());
+        return Err("no sync gateway configured — set one in Settings, or on this repo".into());
     }
     let token = plane_token().ok_or("no Plane token stored — add it in Settings")?;
     let body = match project_id {
@@ -3811,13 +3840,14 @@ fn json_str(s: &str) -> String {
 /// the box. Inside the box it lands in the box-private `~/.config/sync/env` at 0600, deliberately
 /// not in the shared `.claude` store, which is mounted live into every other box for the repo.
 pub fn sync_provision_box(name: &str) -> Result<String, String> {
-    let status = sync_status();
-    if !status.ready {
-        return Err(if status.gateway_url.is_empty() {
-            "no sync gateway configured — set it in Settings".into()
-        } else {
-            "no Plane token stored — add it in Settings".into()
-        });
+    // Readiness is per BOX, not global: a repo with its own gateway is ready even when no shared
+    // default is set, which is exactly the "this product tracks somewhere else" case.
+    let gateway = sync_gateway_for_box(name);
+    if gateway.is_empty() {
+        return Err("no sync gateway — set a shared one in Settings, or one on this repo".into());
+    }
+    if !plane_token_is_set() {
+        return Err("no Plane token stored — add it in Settings".into());
     }
     if box_liveness(name) != Some(Liveness::Running) {
         return Err(format!("{name} is not running"));
@@ -3825,13 +3855,13 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     let project = repo_for_box(name)
         .map(|r| r.plane_project)
         .and_then(|p| plane_project_id(&p));
-    let minted = sync_mint_token(name, project.as_deref())?;
+    let minted = sync_mint_token(name, project.as_deref(), &gateway)?;
 
     // One heredoc-free write: the shell reads the file body from its own stdin, so nothing about
     // the token appears in any argument list on either side of the boundary.
     let env_file = format!(
         "# written by skein — box-private, never the shared store\nexport SYNC_GATEWAY_URL={}\nexport SYNC_AGENT_TOKEN={}\n",
-        sh_quote(&status.gateway_url),
+        sh_quote(&gateway),
         sh_quote(&minted.token)
     );
     let script = "umask 077; mkdir -p \"$HOME/.config/sync\"; cat > \"$HOME/.config/sync/env\"; \
@@ -3868,7 +3898,7 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
             } else {
                 format!(": {last}")
             },
-            sync_mcp_url(&status.gateway_url)
+            sync_mcp_url(&gateway)
         ))
     }
 }
@@ -6698,6 +6728,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_gateway_url: String::new(),
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
         write_launch_spec_for_agent("demo-task", "feat/started", &repo, "claude").unwrap();
@@ -6905,6 +6936,7 @@ mod tests {
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_gateway_url: String::new(),
             },
             Repo {
                 id: "web-api".into(),
@@ -6914,6 +6946,7 @@ mod tests {
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_gateway_url: String::new(),
             },
         ];
         save_repos(&repos).unwrap();
@@ -6943,6 +6976,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_gateway_url: String::new(),
         }];
         save_repos(&repos).unwrap();
         // box created on the wrong branch (its creation branch)…
@@ -6978,6 +7012,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_gateway_url: String::new(),
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
         let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None);
@@ -7012,6 +7047,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_gateway_url: String::new(),
         };
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
         assert!(cmd.contains("'codex'"));
@@ -7480,6 +7516,7 @@ mod tests {
             agent: "codex".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_gateway_url: String::new(),
         }])
         .unwrap();
 
@@ -8085,6 +8122,59 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     }
 
     #[test]
+    fn a_repo_can_claim_work_through_its_own_gateway() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
+        save_config(&Config {
+            sync_gateway_url: "https://shared.example".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "/src/web".into(),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+        assert_eq!(sync_gateway_for_box("web-main"), "https://shared.example");
+        // Two products tracked in different Plane instances can't share a claim namespace, and the
+        // token a box carries is only valid at the gateway that minted it.
+        set_repo_settings("web", None, None, Some("https://own.example/")).unwrap();
+        assert_eq!(
+            sync_gateway_for_box("web-main"),
+            "https://own.example",
+            "the repo's own gateway wins, trailing slash trimmed so /mcp doesn't double up"
+        );
+        assert_eq!(
+            sync_mcp_url(&sync_gateway_for_box("web-main")),
+            "https://own.example/mcp"
+        );
+        // A box of an unregistered repo still gets the shared one.
+        assert_eq!(sync_gateway_for_box("other-main"), "https://shared.example");
+        // Clearing falls back; nonsense is refused rather than stored to fail inside a box later.
+        set_repo_settings("web", None, None, Some("")).unwrap();
+        assert_eq!(sync_gateway_for_box("web-main"), "https://shared.example");
+        assert!(set_repo_settings("web", None, None, Some("mcp.example.net")).is_err());
+        // One call can carry every field, and the fields don't disturb each other.
+        set_repo_settings("web", Some("cargo test"), None, Some("https://own.example")).unwrap();
+        let saved = load_repos().into_iter().find(|r| r.id == "web").unwrap();
+        assert_eq!(
+            (saved.check.as_str(), saved.sync_gateway_url.as_str()),
+            ("cargo test", "https://own.example")
+        );
+        assert_eq!(saved.plane_project, "", "a field left None is left alone");
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    #[test]
     fn a_repos_own_check_command_beats_the_global_default() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempdir();
@@ -8103,14 +8193,15 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_gateway_url: String::new(),
         }])
         .unwrap();
         assert_eq!(verify_command("web-main").as_deref(), Some("make test"));
-        set_repo_check("web", "npm test").unwrap();
+        set_repo_settings("web", Some("npm test"), None, None).unwrap();
         assert_eq!(verify_command("web-main").as_deref(), Some("npm test"));
         // clearing it falls back, and clearing BOTH means verification is simply unavailable —
         // which the UI must show as "unconfigured", never as a failure.
-        set_repo_check("web", "").unwrap();
+        set_repo_settings("web", Some(""), None, None).unwrap();
         assert_eq!(verify_command("web-main").as_deref(), Some("make test"));
         save_config(&Config::default()).unwrap();
         assert_eq!(verify_command("web-main"), None);
@@ -8154,9 +8245,10 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_gateway_url: String::new(),
         }])
         .unwrap();
-        assert!(set_repo_plane_project("web", "the backlog one").is_err());
+        assert!(set_repo_settings("web", None, Some("the backlog one"), None).is_err());
         assert_eq!(
             load_repos()[0].plane_project,
             "",
@@ -8165,9 +8257,9 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // The URL is kept verbatim — the uuid is derived, so a board link stays possible.
         let url =
             "https://plane.example.net/acme/projects/1e2a3b4c-5d6e-4f70-8912-abcdefabcdef/issues";
-        set_repo_plane_project("web", url).unwrap();
+        set_repo_settings("web", None, Some(url), None).unwrap();
         assert_eq!(load_repos()[0].plane_project, url);
-        set_repo_plane_project("web", "").unwrap();
+        set_repo_settings("web", None, Some(""), None).unwrap();
         assert_eq!(load_repos()[0].plane_project, "", "empty clears it");
         env::remove_var("SKEIN_HOME");
     }
@@ -8518,7 +8610,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let e = sync_provision_box("web-main").unwrap_err();
         assert!(e.contains("not running"), "{e}");
         assert!(
-            sync_mint_token("web-main", None).is_err(),
+            sync_mint_token("web-main", None, "http://127.0.0.1:9").is_err(),
             "minting must not be attempted against an unreachable gateway in a test"
         );
         env::remove_var("SKEIN_HOME");
@@ -10046,6 +10138,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_gateway_url: String::new(),
             },
             Repo {
                 id: "b".into(),
@@ -10055,6 +10148,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_gateway_url: String::new(),
             },
         ])
         .unwrap();

@@ -225,6 +225,16 @@ tool results and thinking are left out, because the point is the conversation.
 Claude only for now. Codex's rollout files have a different shape, and skein captures a runtime's
 format from a real box before claiming to read it — the tab says so rather than guessing.
 
+## Per-repo settings
+
+Settings → Repositories is one card per repo: open it and every per-repo setting is there with a
+label — the **check command** Verify runs, the **Plane project** its boxes' tracker tokens bind to,
+and its **sync gateway**. Each falls back to the global default when blank, and the card's tags say
+at a glance which are the repo's own. A per-repo gateway matters when two products are tracked in
+different Plane instances: a claim namespace can't be shared, and the token a box carries is only
+valid at the gateway that minted it. These save as you leave a field — they live in `repos.json`,
+not in the settings form, so that pane has no Save button to mislead you.
+
 ## Verify — does the work actually stand up?
 
 The board tells you who needs you. **Verify** tells you whose work compiles. Set a check command in
