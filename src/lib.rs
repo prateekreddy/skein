@@ -8161,6 +8161,59 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
     }
 
+    // The block is derived by hand, not copied, so the verbatim check above cannot speak for it —
+    // and it is the file that went stale first: upstream moved decomposition from `capture` per
+    // child to `decompose`, and every box carried the superseded rule until someone read the diff.
+    //
+    // A rule naming a tool the block never mentions is the shape of that failure, so that is what is
+    // asserted. The tool list comes from upstream's own toolspec rather than a copy here, which is
+    // what keeps this from becoming another thing to remember to update.
+    #[test]
+    fn the_always_on_block_names_every_tool_upstreams_own_rules_do() {
+        let up = Path::new(env!("CARGO_MANIFEST_DIR")).join("upstream/sync");
+        let (Ok(agents), Ok(spec)) = (
+            fs::read_to_string(up.join("AGENTS.md")),
+            fs::read_to_string(up.join("server/src/toolspec.ts")),
+        ) else {
+            eprintln!(
+                "skipping block check: upstream/sync absent — run `git submodule update --init`"
+            );
+            return;
+        };
+
+        let tools: Vec<&str> = spec
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("name: '")?.split('\'').next())
+            .collect();
+        assert!(
+            tools.len() > 8,
+            "read {} tool names from upstream's toolspec — the parse broke, and a guard that finds \
+             no tools cannot fail",
+            tools.len()
+        );
+
+        // Upstream's own always-on channel: the § Work tracking section of the file its agents read
+        // on every request. The sections after it are about building sync itself and are not rules
+        // any box of ours has to follow.
+        let rules: String = agents
+            .split("\n## ")
+            .find(|s| s.starts_with("Work tracking"))
+            .expect("upstream AGENTS.md has no § Work tracking")
+            .to_string();
+
+        for tool in tools {
+            let named = |s: &str| s.contains(&format!("`{tool}`"));
+            if named(&rules) && !named(SYNC_BLOCK_MD) {
+                panic!(
+                    "upstream's always-on rules name `{tool}` and src/store/sync/work-tracking.block.md \
+                     does not. Every box gets the block, so a rule missing from it is a rule the fleet \
+                     never follows — reconcile it against upstream/sync/AGENTS.md § Work tracking and \
+                     server/src/mcphttp.ts INSTRUCTIONS."
+                );
+            }
+        }
+    }
+
     // The wiring, not the helper: a correct `sync_revoke_token` that teardown never calls leaves
     // exactly the live credential this exists to retire. Proven against a real socket, so the whole
     // path — destroy → curl → method, URL and bearer — is what is asserted.
