@@ -569,6 +569,25 @@
   .rfoot { display:flex; justify-content:flex-end; border-top:1px solid var(--line); padding-top:11px; }
   .set-repos .none { padding:22px; text-align:center; font-size:12.5px; color:var(--faint);
     border:1px dashed var(--border-2); border-radius:10px; }
+  /* work tracking: one card per connection — a gateway and the token that mints at it are one
+     thing, so they are one card, and a repo picks a card rather than restating half of it */
+  .set-conns { display:flex; flex-direction:column; gap:8px; margin:4px 0 14px; }
+  .ccard { background:var(--card); border:1px solid var(--line); border-radius:9px; padding:12px 14px 13px; }
+  .chead { display:flex; align-items:center; gap:9px; margin-bottom:2px; }
+  .chead .clabel { flex:1; min-width:0; font-size:12.5px; font-weight:600; background:none; border:0;
+                   color:var(--text); font-family:inherit; padding:2px 0; }
+  .chead .clabel:focus-visible { outline:none; box-shadow:0 -1px 0 0 var(--accent) inset; }
+  .cstate { flex:none; font-family:var(--mono); font-size:10.5px; padding:1px 6px; border-radius:4px;
+            border:1px solid var(--line); background:var(--inset); color:var(--faint); }
+  .cstate.ready { color:var(--done); border-color:color-mix(in srgb,var(--done) 45%,transparent); }
+  .ccard .set-field { padding:11px 0; }
+  .ccard .set-field:last-of-type { border-bottom:0; }
+  .cuse { display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-top:1px solid var(--line);
+          padding-top:10px; margin-top:2px; font-size:11.5px; color:var(--faint); }
+  .cuse .spacer { flex:1; }
+  .cuse .rtag { max-width:none; }
+  .set-conns .none { padding:22px; text-align:center; font-size:12.5px; color:var(--faint);
+    border:1px dashed var(--border-2); border-radius:10px; }
   .set-add { display:inline-flex; align-items:center; gap:7px; align-self:flex-start; font:inherit; font-size:12.5px;
     color:var(--accent); background:var(--accent-bg); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
     border-radius:9px; padding:8px 13px; cursor:pointer; transition:background var(--dur-fast), border-color var(--dur-fast); }
@@ -861,9 +880,9 @@
             <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. The default for every repo; each can override it under <b>Repositories</b>.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
           </section>
           <section class="set-pane" data-pane="tracking">
-            <label class="set-field"><span class="set-title">Gateway URL</span><span class="desc">the <code>sync</code> gateway your boxes share a backlog through — Plane behind an atomic claim, so two boxes never take the same item. The default for every repo; a repo tracked somewhere else can point at its own under <b>Repositories</b></span><input id="set-syncurl" placeholder="https://plane.example.com" autocomplete="off" spellcheck="false" /></label>
-            <label class="set-field"><span class="set-title">Plane personal token</span><span class="desc">used <b>once per box</b>, here on the host, to mint that box its own tracker token — a box never receives this one, because a Plane token can bypass the claim. Plane → avatar → Settings → Personal access tokens.</span><div class="path-row"><input id="set-planetok" type="password" placeholder="plane_api_…" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-planetok-forget" title="Delete the stored token from this host">Forget</button></div></label>
             <p class="set-note" id="set-syncnote"></p>
+            <div id="set-conns" class="set-conns"></div>
+            <button type="button" class="kbtn" id="set-conn-add"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add a connection</button>
           </section>
           <section class="set-pane" data-pane="keys"><div id="set-keys" class="set-keys"></div></section>
         </div>
@@ -1522,7 +1541,7 @@ function renderDockbar() {
     // Verify lives beside Diff: the two halves of "should I trust this work" — what changed, and
     // whether it still passes. Disabled while a check is running anywhere (one at a time, by design).
     + `<button class="kbtn ghost" id="dverify"${verifying.has(view.box) ? " disabled" : ""} title="run this repo's check command inside the box (nothing runs it for you)">${verifying.has(view.box) ? "checking…" : "✓ Verify"}</button>`
-    + (syncStatus.ready ? `<button class="kbtn ghost" id="dtrack"${tracking.has(view.box) ? " disabled" : ""} title="mint this box its own tracker token and register the sync server inside it">${tracking.has(view.box) ? "wiring…" : "◇ Track work"}</button>` : "")
+    + (trackableConnection(b) ? `<button class="kbtn ghost" id="dtrack"${tracking.has(view.box) ? " disabled" : ""} title="mint this box its own tracker token at ${esc(trackableConnection(b).label)} and register the sync server inside it">${tracking.has(view.box) ? "wiring…" : "◇ Track work"}</button>` : "")
     // Only when the store actually holds something newer. A button that is always there teaches you
     // to ignore it, and this one has nothing to say on most days.
     + (b.docs_update ? `<button class="kbtn ghost" id="drefreshdocs"${refreshingDocs.has(view.box) ? " disabled" : ""} title="the work-tracking rules in the store are newer than the ones this box installed — re-apply them. Only documents the box has not edited are rewritten; shift-click to also take ones installed before skein recorded what it wrote">${refreshingDocs.has(view.box) ? "applying…" : "⟳ Update rules"}</button>` : "")
@@ -2477,10 +2496,13 @@ function setPane(pane) {
   const hint = document.getElementById("set-hint");
   if (hint) hint.innerHTML = pane === "repos"
     ? "each repo saves as you leave a field — these live in <code>repos.json</code>, not in this form"
-    : "<code>$SKEIN_*</code> env vars override these";
+    : pane === "tracking"
+      ? "each connection saves as you leave a field — a credential never rides along with the config form"
+      : "<code>$SKEIN_*</code> env vars override these";
   settingsModal().querySelector(".set-scroll").scrollTop = 0;
-  // Shortcuts is a reference, not a form — offering Save/Cancel there is noise.
-  settingsModal().querySelector(".set-foot").classList.toggle("readonly", pane === "keys" || pane === "repos");
+  // Shortcuts is a reference, not a form; repos and connections save themselves. A Save button that
+  // covers none of what's on screen is worse than no Save button.
+  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking"].includes(pane));
 }
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
@@ -2500,12 +2522,20 @@ function openSettings(pane = "repos") {
     settingsModal().querySelector(".set-shell")?.focus();
   });
 }
-// Work tracking. `syncStatus` is host state (is a gateway + token configured?), never the token
-// itself — there is no route that reads that back, by design.
-let syncStatus = { gateway_url: "", token_set: false, ready: false };
+// Work tracking. `syncStatus` is host state (which connections exist, and is each one usable?),
+// never a token itself — there is no route that reads one back, by design.
+let syncStatus = { connections: [], ready: false };
 const tracking = new Set();
 function loadSync() {
   return fetch("/api/sync").then(r => r.json()).then(s => { if (s) syncStatus = s; }).catch(() => {});
+}
+// The connection a box could actually be wired to, or null. Per box, not per host: with more than
+// one backlog, "some connection somewhere is ready" says nothing about *this* box, and offering a
+// button that can only fail is worse than not offering it. `repo` is what the row already carries.
+function trackableConnection(b) {
+  const repo = repos.find(r => r.id === (b || {}).repo);
+  if (!repo) return null;
+  return (syncStatus.connections || []).find(c => c.id === repo.sync_connection && c.ready) || null;
 }
 // Wire one box up: the host mints it its own gateway token and registers the MCP server inside it.
 // A click, never a tick — it spends a network round trip and creates a real credential.
@@ -2532,26 +2562,106 @@ function refreshDocs(name, replace) {
     .catch(e => toast(`couldn't update ${name}: ${e.message}`))
     .finally(() => { refreshingDocs.delete(name); renderDockbar(); });
 }
+// One card per connection. A gateway URL and the token that mints at it are one thing — a token is
+// only valid at the gateway that issued it — so they live together, and a repo picks a connection
+// rather than restating half of one. Cards save on change, like repo cards: the dialog's Save
+// covers the config object, and a credential is not part of that object.
 function renderSync() {
-  const url = document.getElementById("set-syncurl");
-  const tok = document.getElementById("set-planetok");
+  const el = document.getElementById("set-conns");
   const note = document.getElementById("set-syncnote");
   const pill = document.getElementById("set-syncn");
-  const forget = document.getElementById("set-planetok-forget");
-  url.value = settings.sync_gateway_url || "";
-  // The field is always blank: a stored token is never sent to a browser, so there is nothing to
-  // put in it. Leaving it blank on save means "unchanged", which is why Forget is a separate act.
-  tok.value = "";
-  tok.placeholder = syncStatus.token_set ? "•••••••••• stored on this host" : "plane_api_…";
-  forget.style.display = syncStatus.token_set ? "" : "none";
+  const conns = syncStatus.connections || [];
   if (pill) pill.textContent = syncStatus.ready ? "on" : "";
-  note.className = "set-note" + (syncStatus.ready ? " ready" : (settings.sync_gateway_url || syncStatus.token_set) ? " gap" : "");
-  note.textContent = syncStatus.ready
-    ? "Ready. Each box is wired up on its own — open one and press Track work. It gets its own token, which is what lets two boxes hold different items; Plane's activity log still shows your name, because the gateway writes as whoever's token minted it. Destroying a box revokes its token."
-    : !settings.sync_gateway_url && !syncStatus.token_set
-      ? "Not configured. Boxes keep their to-do lists in their own heads until both fields are set."
-      : !settings.sync_gateway_url ? "A token is stored, but no gateway URL — nothing to point a box at yet."
-      : "A gateway is set, but no Plane token — the host cannot mint a box its token without one.";
+  const half = conns.filter(c => !c.ready);
+  note.className = "set-note" + (syncStatus.ready && !half.length ? " ready" : conns.length ? " gap" : "");
+  note.textContent = !conns.length
+    ? "No connections yet. A connection is one backlog — the sync gateway your boxes claim work through (Plane behind an atomic claim, so two boxes never take the same item) plus the Plane token that mints each box its own. Add one, then pick it per repo under Repositories."
+    : syncStatus.ready && !half.length
+      ? "Ready. Each box is wired up on its own — open one and press Track work. It gets its own token, which is what lets two boxes hold different items; Plane's activity log still shows your name, because the gateway writes as whoever's token minted it. Destroying a box revokes its token."
+      : `${half.map(c => c.label).join(", ")} ${half.length === 1 ? "is" : "are"} half-configured — a connection needs both a gateway URL and a token before it can mint a box anything.`;
+  if (!conns.length) { el.innerHTML = `<div class="none">No work-tracking connections yet.</div>`; return; }
+  el.innerHTML = conns.map(c => {
+    const used = c.repos.length
+      ? c.repos.map(r => `<span class="rtag own">${esc(r)}</span>`).join("")
+      : `<span>no repos use it yet</span>`;
+    return `<div class="ccard" data-conn="${esc(c.id)}">`
+      + `<div class="chead"><input class="clabel" data-field="label" value="${esc(c.label)}" placeholder="name this backlog" autocomplete="off" spellcheck="false" />`
+      + `<span class="rsaved" data-saved="conn-${esc(c.id)}">saved</span>`
+      + `<span class="cstate${c.ready ? " ready" : ""}">${c.ready ? "ready" : c.token_set ? "no gateway" : "no token"}</span></div>`
+      + `<label class="set-field"><span class="set-title">Gateway URL</span>`
+      + `<span class="desc">the <code>sync</code> gateway boxes on this connection claim work through</span>`
+      + `<input data-field="gateway_url" value="${esc(c.gateway_url)}" placeholder="https://plane.example.com" autocomplete="off" spellcheck="false" /></label>`
+      + `<label class="set-field"><span class="set-title">Plane personal token</span>`
+      + `<span class="desc">used <b>once per box</b>, here on the host, to mint that box its own tracker token — a box never receives this one, because a Plane token can bypass the claim. Plane → avatar → Settings → Personal access tokens.</span>`
+      + `<div class="path-row"><input data-field="token" type="password" placeholder="${c.token_set ? "•••••••••• stored on this host" : "plane_api_…"}" autocomplete="off" spellcheck="false" />`
+      + (c.token_set ? `<button type="button" class="kbtn" data-forget="${esc(c.id)}" title="Delete the stored token from this host">Forget</button>` : "")
+      + `</div></label>`
+      + `<div class="cuse">${used}<span class="spacer"></span>`
+      + `<button type="button" class="kbtn ghost danger" data-dropconn="${esc(c.id)}" title="Forget this connection and its token">Remove</button></div>`
+      + `</div>`;
+  }).join("");
+  el.querySelectorAll(".ccard input").forEach(i => i.addEventListener("change", () => saveConnection(i.closest("[data-conn]"))));
+  el.querySelectorAll("[data-forget]").forEach(b => b.addEventListener("click", () => forgetConnectionToken(b.dataset.forget)));
+  el.querySelectorAll("[data-dropconn]").forEach(b => b.addEventListener("click", () => removeConnection(b.dataset.dropconn)));
+}
+// The whole card in one request, so a URL and its token can never be half-saved against each other.
+// A blank token field means "unchanged" — Forget is the deliberate act, and it is a separate one.
+function saveConnection(card) {
+  const id = card.dataset.conn || null;
+  const val = f => card.querySelector(`[data-field="${f}"]`).value.trim();
+  const body = { id, label: val("label"), gateway_url: val("gateway_url") };
+  const token = val("token");
+  if (token) body.token = token;
+  return fetch("/api/sync/connections", {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body),
+  })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(s => {
+      syncStatus = s;
+      // Confirm at the card, not only in a toast: the toast is gone before you've read the next
+      // label. Re-render after, so the flag survives the repaint.
+      renderSync(); renderRepoList();
+      const flag = document.querySelector(`[data-saved="${CSS.escape("conn-" + (id || (s.connections.at(-1) || {}).id || ""))}"]`);
+      if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
+    })
+    .catch(e => toast(e.message));
+}
+function forgetConnectionToken(id) {
+  fetch(`/api/sync/connections/${encodeURIComponent(id)}/token`, { method:"DELETE" })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(s => { syncStatus = s; renderSync(); toast(`forgot the token for ${id}`); })
+    .catch(e => toast(e.message));
+}
+function removeConnection(id) {
+  const c = (syncStatus.connections || []).find(c => c.id === id);
+  if (c && c.repos.length && !confirm(`${id} is used by ${c.repos.join(", ")}. Remove it anyway?`)) return;
+  fetch(`/api/sync/connections/${encodeURIComponent(id)}`, { method:"DELETE" })
+    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
+    .then(s => { syncStatus = s; renderSync(); renderRepoList(); })
+    .catch(e => toast(e.message));
+}
+// A new card is a card, not a prompt() — it starts blank in the list and saves like any other once
+// it has a URL, so adding one and editing one are the same two fields in the same place.
+function addConnection() {
+  const el = document.getElementById("set-conns");
+  if (el.querySelector('[data-conn=""]')) { el.querySelector('[data-conn=""] [data-field="gateway_url"]').focus(); return; }
+  if (!(syncStatus.connections || []).length) el.innerHTML = "";
+  el.insertAdjacentHTML("beforeend",
+    `<div class="ccard" data-conn="">`
+    + `<div class="chead"><input class="clabel" data-field="label" placeholder="name this backlog" autocomplete="off" spellcheck="false" />`
+    + `<span class="cstate">new</span></div>`
+    + `<label class="set-field"><span class="set-title">Gateway URL</span>`
+    + `<span class="desc">the <code>sync</code> gateway boxes on this connection claim work through</span>`
+    + `<input data-field="gateway_url" placeholder="https://plane.example.com" autocomplete="off" spellcheck="false" /></label>`
+    + `<label class="set-field"><span class="set-title">Plane personal token</span>`
+    + `<span class="desc">minted per box on the host — a box never receives this one</span>`
+    + `<div class="path-row"><input data-field="token" type="password" placeholder="plane_api_…" autocomplete="off" spellcheck="false" /></div></label>`
+    + `<div class="cuse"><span class="spacer"></span><button type="button" class="kbtn ghost" data-cancelconn>Cancel</button>`
+    + `<button type="button" class="primary" data-saveconn>Add</button></div></div>`);
+  const card = el.querySelector('[data-conn=""]');
+  card.querySelector("[data-cancelconn]").addEventListener("click", () => renderSync());
+  card.querySelector("[data-saveconn]").addEventListener("click", () => saveConnection(card));
+  card.querySelector('[data-field="gateway_url"]').focus();
 }
 const openRepos = new Set();   // which cards are expanded (survives the re-render after a save)
 // A repo's own settings live in repos.json, not in the config form — so they save when you leave the
@@ -2562,18 +2672,29 @@ function repoField(r, key, title, desc, placeholder) {
     + `<span class="desc">${desc}</span>`
     + `<input data-id="${esc(r.id)}" data-key="${key}" value="${esc(r[key] || "")}" placeholder="${esc(placeholder)}" autocomplete="off" spellcheck="false" /></label>`;
 }
+// A picker, not a text field: the thing a repo needs is a whole connection — a gateway *and* the
+// token that mints at it — and only Work tracking knows which pairs exist. Typing a URL here could
+// only ever name half of one.
+function repoSelect(r, key, title, desc, options) {
+  return `<label class="set-field"><span class="set-title">${esc(title)}<span class="rsaved" data-saved="${esc(r.id)}-${key}">saved</span></span>`
+    + `<span class="desc">${desc}</span>`
+    + `<select data-id="${esc(r.id)}" data-key="${key}">`
+    + options.map(([value, label]) => `<option value="${esc(value)}"${(r[key] || "") === value ? " selected" : ""}>${esc(label)}</option>`).join("")
+    + `</select></label>`;
+}
 function renderRepoList() {
   const el = document.getElementById("set-repos");
   const n = document.getElementById("set-repon");
   if (n) n.textContent = repos.length || "";
   if (!repos.length) { el.innerHTML = `<div class="none">No repositories yet — add one below to launch boxes into it.</div>`; return; }
-  const globalCheck = settings.check_command || "", globalGw = settings.sync_gateway_url || "";
+  const globalCheck = settings.check_command || "", conns = syncStatus.connections || [];
   el.innerHTML = repos.map(r => {
+    const conn = conns.find(c => c.id === r.sync_connection);
     // Tags say what this repo would actually do, and whether that came from the repo or the default.
     const tags = [
       [r.check || globalCheck || "no check", !!r.check, r.check ? "this repo's own check command" : globalCheck ? "inherited from Settings → Workflow" : "no check command — Verify has nothing to run"],
       [r.plane_project ? "Plane" : "", true, "tracked in a Plane project"],
-      [r.sync_gateway_url ? "own gateway" : "", true, r.sync_gateway_url || ""],
+      [conn ? conn.label : "", true, conn ? (conn.ready ? conn.gateway_url : `${conn.gateway_url || "no gateway"} — not usable yet`) : ""],
     ].filter(([label]) => label)
      .map(([label, own, tip]) => `<span class="rtag${own ? " own" : ""}" title="${esc(tip)}">${esc(label)}</span>`).join("");
     return `<div class="rcard${openRepos.has(r.id) ? " open" : ""}" data-card="${esc(r.id)}">`
@@ -2582,7 +2703,11 @@ function renderRepoList() {
       + `<div class="rbody">`
       + repoField(r, "check", "Check command", `what <b>Verify</b> runs inside this repo's boxes${globalCheck ? ` — blank uses <code>${esc(globalCheck)}</code>` : " — blank means Verify has nothing to run"}`, globalCheck || "cargo test")
       + repoField(r, "plane_project", "Plane project", "paste the project URL or its uuid — a box's tracker token binds to it, so its work lands on that board", "https://plane…/projects/<uuid>/issues")
-      + repoField(r, "sync_gateway_url", "Sync gateway", `where this repo's boxes claim work${globalGw ? ` — blank uses the shared <code>${esc(globalGw)}</code>` : " — blank means no gateway is configured at all"}`, globalGw || "https://mcp.example.net")
+      + repoSelect(r, "sync_connection", "Work tracking",
+          conns.length
+            ? `which backlog this repo's boxes claim work from — set up under <b>Work tracking</b>${conn && !conn.ready ? `. <b>${esc(conn.label)}</b> isn't usable yet: it needs both a gateway URL and a token` : ""}`
+            : "no connections configured yet — add one under <b>Work tracking</b> and it'll appear here",
+          [["", "Not tracked"], ...conns.map(c => [c.id, c.ready ? c.label : `${c.label} (not usable yet)`])])
       + `<div class="rfoot"><button type="button" class="kbtn ghost danger" data-remove="${esc(r.id)}" title="skein forgets this repo; the clone and store stay on disk">Unregister</button></div>`
       + `</div></div>`;
   }).join("");
@@ -2593,7 +2718,7 @@ function renderRepoList() {
     h.setAttribute("aria-expanded", openRepos.has(id));
   }));
   el.querySelectorAll("[data-remove]").forEach(b => b.addEventListener("click", () => removeRepo(b.dataset.remove)));
-  el.querySelectorAll(".rbody input").forEach(i => i.addEventListener("change", () => saveRepoField(i)));
+  el.querySelectorAll(".rbody input, .rbody select").forEach(i => i.addEventListener("change", () => saveRepoField(i)));
 }
 function saveRepoField(input) {
   const { id, key } = input.dataset;
@@ -2605,7 +2730,9 @@ function saveRepoField(input) {
       // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
       const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
       if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-      loadRepos().then(renderRepoList);   // tags re-derive; open cards stay open
+      // Both, not just repos: a connection card lists the repos that depend on it, so picking one
+      // here changes what the other pane is entitled to say about a Remove.
+      Promise.all([loadRepos(), loadSync()]).then(() => { renderRepoList(); renderSync(); });
     })
     .catch(e => { toast(`${id}: ${e.message}`); input.focus(); });
 }
@@ -2638,18 +2765,10 @@ function saveSettings() {
     base_branch: document.getElementById("set-base").value.trim(),
     ssh_key: document.getElementById("set-sshkey").value.trim(),
     check_command: document.getElementById("set-check").value.trim(),
-    sync_gateway_url: document.getElementById("set-syncurl").value.trim(),
   };
-  // The Plane token is not part of the config object and never round-trips, so it is saved on its
-  // own route — and only when one was actually typed. A blank field means "leave it alone", which
-  // is what you want when you opened Settings to change something else entirely.
-  const typed = document.getElementById("set-planetok").value.trim();
-  const token = typed ? fetch("/api/settings/plane-token", {
-    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ token: typed }),
-  }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
-    .then(s => { syncStatus = s; }) : Promise.resolve();
-  token
-    .then(() => fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(next) }))
+  // Work-tracking connections are deliberately NOT in here: they carry a credential, and this
+  // object round-trips through the browser on every save. Their cards save themselves.
+  fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(next) })
     .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
     .then(s => { settings = s; return loadSync(); })
     .then(() => { renderDockbar(); closeSettings(); toast("settings saved"); })
@@ -2794,17 +2913,7 @@ document.getElementById("ar-store-browse").addEventListener("click",
   () => pickPath("folder", document.getElementById("ar-store")));
 document.getElementById("set-sshkey-browse").addEventListener("click",
   () => pickPath("file", document.getElementById("set-sshkey")));
-// Forgetting the Plane token is its own act, not an empty field on Save — a blank field has to
-// mean "unchanged", or opening Settings to fix a typo elsewhere would silently delete it.
-document.getElementById("set-planetok-forget").addEventListener("click", () => {
-  if (!confirm("Delete the stored Plane token from this host?\n\nBoxes already wired up keep working — their own tokens are unaffected. You just can't mint any more until you paste it again.")) return;
-  fetch("/api/settings/plane-token", {
-    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ token: "" }),
-  })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
-    .then(s => { syncStatus = s; renderSync(); renderDockbar(); toast("Plane token forgotten"); })
-    .catch(e => toast(`couldn't forget it: ${e.message}`));
-});
+document.getElementById("set-conn-add").addEventListener("click", addConnection);
 arModal().addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }
   else if (e.key === "Escape") { e.preventDefault(); closeAddRepo(); }
@@ -3246,6 +3355,9 @@ if (DEMO) {
   loadCollisions();
   loadSettings();
   loadRepos();
+  // At boot, not only when Settings opens: ◇ Track work is decided per box from its repo's
+  // connection, and a dockbar that waits for a dialog nobody opened would never offer it.
+  loadSync().then(renderDockbar);
   loadHealth();
   setInterval(loadHealth, 15000);
 }

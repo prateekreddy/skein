@@ -86,7 +86,7 @@ exit 0
   // a registered repo, so the settings pane has a card to open and edit
   fs.writeFileSync(path.join(root, "home", "repos.json"), JSON.stringify([
     { id: "smoke", source: "/src/smoke", work: ws, store: path.join(root, "store"), agent: "claude",
-      check: "", plane_project: "", sync_gateway_url: "" },
+      check: "", plane_project: "", sync_connection: "" },
   ]));
   return { root, ws, sbx, bin };
 }
@@ -153,9 +153,9 @@ page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 // broken, several checks fail at once and the whole run has to stay quick enough to keep running.
 page.setDefaultTimeout(4000);
 const noise = [];
-// Refusals this run provokes ON PURPOSE and asserts elsewhere: the workspace-escape guard, and the
-// repo settings rejecting a gateway that isn't a URL. Everything else counts as noise.
-const EXPECTED_404 = /\/file\?path=outside|\/files\?path=outside|\/api\/repos\/[^/]+\/settings/;
+// Refusals this run provokes ON PURPOSE and asserts elsewhere: the workspace-escape guard, and
+// removing a connection a repo still uses. Everything else counts as noise.
+const EXPECTED_404 = /\/file\?path=outside|\/files\?path=outside|\/api\/repos\/[^/]+\/settings|\/api\/sync\/connections/;
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error" && !EXPECTED_404.test(m.location()?.url || "")) noise.push(`[console] ${m.text()}`); });
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
@@ -267,34 +267,56 @@ await check("settings opens, and its panes switch to fields you can see", async 
 });
 
 console.log("\nwork tracking");
-await check("work tracking is configurable, and says which half is missing", async () => {
+await check("nothing offers to spend a token before one is configured", async () => {
+  await openTab("diff");
+  if (await page.$("#dtrack"))
+    throw new Error("Track work is offered with no connection configured — it can only fail");
+});
+await check("an unconfigured host says what a connection is, not just that it's missing", async () => {
   await page.click('header .kbtn[title^="Settings"]');
   await settle();
   await page.click('.set-navi[data-pane="tracking"]');
   await settle(300);
-  await mustSee("#set-syncurl", "the gateway URL field");
-  await mustSee("#set-planetok", "the Plane token field");
+  await mustSee("#set-conn-add", "the add-a-connection button");
   const note = await text("#set-syncnote");
-  if (!/not configured/i.test(note)) throw new Error(`unconfigured should say so plainly, got "${note}"`);
+  if (!/no connections yet/i.test(note)) throw new Error(`unconfigured should say so plainly, got "${note}"`);
 });
-await check("the stored Plane token is never handed to the browser", async () => {
+await check("a connection is a gateway and its token in one card", async () => {
+  await page.click("#set-conn-add");
+  await settle(300);
+  const card = await mustSee('.ccard[data-conn=""]', "the new connection card");
+  await page.fill('.ccard[data-conn=""] [data-field="label"]', "smoke tracker");
+  await page.fill('.ccard[data-conn=""] [data-field="gateway_url"]', "https://mcp.smoke.example/");
+  await page.fill('.ccard[data-conn=""] [data-field="token"]', "plane_api_smoke_secret");
+  await page.click('.ccard[data-conn=""] [data-saveconn]');
+  await page.waitForSelector('.ccard[data-conn="smoke-example"] .cstate.ready', { timeout: 5000 });
+  const label = await page.$eval('.ccard[data-conn="smoke-example"] [data-field="label"]', e => e.value);
+  if (label !== "smoke tracker") throw new Error(`the label should survive the save, got "${label}"`);
+});
+await check("the stored token is never handed back to the browser", async () => {
   // The one credential whose leak bypasses every lease in the fleet. It must not arrive here at
   // all — not in the field, not in the status, not anywhere in the settings response.
-  const field = await page.$eval("#set-planetok", el => el.value);
+  const sel = '.ccard[data-conn="smoke-example"] [data-field="token"]';
+  const field = await page.$eval(sel, el => el.value);
   if (field) throw new Error(`the token field was pre-filled with "${field}" — it must never round-trip`);
-  const type = await page.$eval("#set-planetok", el => el.type);
+  const type = await page.$eval(sel, el => el.type);
   if (type !== "password") throw new Error(`the token field is type="${type}", so it is shoulder-readable`);
   const [sync, settings] = await page.evaluate(async () =>
     Promise.all([fetch("/api/sync").then(r => r.text()), fetch("/api/settings").then(r => r.text())]));
   if (/plane_api_/.test(sync + settings))
     throw new Error("a Plane token reached the browser through /api/sync or /api/settings");
-  if (!/"token_set"/.test(sync)) throw new Error(`/api/sync must report whether one is stored: ${sync}`);
-  await page.keyboard.press("Escape");
+  if (!/"token_set":true/.test(sync)) throw new Error(`/api/sync must report whether one is stored: ${sync}`);
+  await mustSee('.ccard[data-conn="smoke-example"] [data-forget]', "the Forget button, once one is stored");
 });
-await check("nothing offers to spend a token before one is configured", async () => {
-  await openTab("diff");
-  if (await page.$("#dtrack"))
-    throw new Error("Track work is offered with no gateway configured — it can only fail");
+await check("editing the URL doesn't quietly forget the token", async () => {
+  // A blank token field means "I came here to change the URL". Reading it as "delete my
+  // credential" would break every box on the connection for a one-character edit.
+  const url = '.ccard[data-conn="smoke-example"] [data-field="gateway_url"]';
+  await page.fill(url, "https://mcp.smoke.example/mcp");
+  await page.press(url, "Tab");
+  await settle(400);
+  await mustSee('.ccard[data-conn="smoke-example"] .cstate.ready', "still ready after a URL-only edit");
+  await page.keyboard.press("Escape");
 });
 
 console.log("\nsettings");
@@ -311,24 +333,39 @@ await check("opening it shows labelled fields, not bare inputs", async () => {
   await page.click('.rcard[data-card="smoke"] .rhead');
   await settle(300);
   const titles = await page.$$eval('.rcard[data-card="smoke"] .set-title', els => els.map(e => e.textContent.replace("saved","").trim()));
-  for (const want of ["Check command", "Plane project", "Sync gateway"])
+  for (const want of ["Check command", "Plane project", "Work tracking"])
     if (!titles.includes(want)) throw new Error(`missing field "${want}" — got ${titles}`);
-  await mustSee('.rcard[data-card="smoke"] [data-key="sync_gateway_url"]', "the gateway field");
-  // With no shared gateway configured, the field must say that rather than imply an inherited one
-  const desc = await text('.rcard[data-card="smoke"] [data-key="sync_gateway_url"]', );
-  const help = await page.$eval('.rcard[data-card="smoke"] [data-key="sync_gateway_url"]',
-    e => e.closest(".set-field").querySelector(".desc").textContent);
-  if (!/no gateway is configured/.test(help)) throw new Error(`the field should say what blank means, got "${help}"`);
 });
-await check("a per-repo gateway saves, confirms at the field, and shows on the card", async () => {
-  const field = '.rcard[data-card="smoke"] [data-key="sync_gateway_url"]';
-  await page.fill(field, "https://own.example/");
-  await page.press(field, "Tab");
-  await page.waitForFunction(() => [...document.querySelectorAll('.rcard[data-card="smoke"] .rtag')].some(t => /own gateway/.test(t.textContent)), null, { timeout: 5000 });
+await check("a repo picks a connection instead of restating half of one", async () => {
+  // Typing a gateway URL here could only ever name half a connection: the token that mints at it
+  // lives with the gateway, so the repo has to select the pair.
+  const sel = '.rcard[data-card="smoke"] select[data-key="sync_connection"]';
+  const picker = await mustSee(sel, "the connection picker");
+  const options = await picker.$$eval("option", els => els.map(e => [e.value, e.textContent]));
+  if (options[0][0] !== "" || !/not tracked/i.test(options[0][1]))
+    throw new Error(`"not tracked" has to be sayable, got ${JSON.stringify(options)}`);
+  if (!options.some(([v]) => v === "smoke-example"))
+    throw new Error(`the configured connection should be offered, got ${JSON.stringify(options)}`);
+  await page.selectOption(sel, "smoke-example");
+  await page.waitForFunction(() => [...document.querySelectorAll('.rcard[data-card="smoke"] .rtag')].some(t => /smoke tracker/.test(t.textContent)), null, { timeout: 5000 });
   await mustSee('.rcard[data-card="smoke"].open', "the card stays open after saving");
   const saved = await fetch(`http://127.0.0.1:${port}/api/repos`).then(r => r.json());
-  if (saved.find(r => r.id === "smoke").sync_gateway_url !== "https://own.example")
-    throw new Error("the trailing slash should be trimmed before storing");
+  if (saved.find(r => r.id === "smoke").sync_connection !== "smoke-example")
+    throw new Error("the picked connection should be what's stored");
+});
+await check("a connection in use is not removed out from under its repos", async () => {
+  await page.click('.set-navi[data-pane="tracking"]');
+  await settle(300);
+  const used = await page.$eval('.ccard[data-conn="smoke-example"] .cuse', e => e.textContent);
+  if (!/smoke/.test(used)) throw new Error(`the card should name who depends on it, got "${used}"`);
+  page.once("dialog", d => d.accept());   // the "remove it anyway?" confirm
+  await page.click('.ccard[data-conn="smoke-example"] [data-dropconn]');
+  await settle(500);
+  await mustSee('.ccard[data-conn="smoke-example"]', "the connection survives a refused removal");
+  const toasted = await text("#toast");
+  if (!/smoke/.test(toasted)) throw new Error(`the refusal should name the repo, got "${toasted}"`);
+  await page.click('.set-navi[data-pane="repos"]');
+  await settle(300);
 });
 await check("the pane doesn't pretend Save applies to repo cards", async () => {
   const shown = await page.$$eval("#settings .set-foot .primary", els => els.filter(e => e.offsetParent).length);
@@ -342,14 +379,24 @@ await check("the pane doesn't pretend Save applies to repo cards", async () => {
   await settle(250);
 });
 await check("a gateway that isn't a URL is refused, not stored", async () => {
-  const field = '.rcard[data-card="smoke"] [data-key="sync_gateway_url"]';
+  await page.click('.set-navi[data-pane="tracking"]');
+  await settle(300);
+  const field = '.ccard[data-conn="smoke-example"] [data-field="gateway_url"]';
   await page.fill(field, "mcp.example.net");
   await page.press(field, "Tab");
   await settle(900);
-  const saved = await fetch(`http://127.0.0.1:${port}/api/repos`).then(r => r.json());
-  if (saved.find(r => r.id === "smoke").sync_gateway_url !== "https://own.example")
-    throw new Error("a rejected value must not overwrite the stored one");
+  const sync = await fetch(`http://127.0.0.1:${port}/api/sync`).then(r => r.json());
+  if (sync.connections[0].gateway_url !== "https://mcp.smoke.example/mcp")
+    throw new Error(`a rejected value must not overwrite the stored one, got ${sync.connections[0].gateway_url}`);
   await page.keyboard.press("Escape");
+});
+await check("Track work appears once THIS box's repo has a usable connection", async () => {
+  // The payoff, and the reason readiness is per box: "some connection somewhere is ready" says
+  // nothing about this one.
+  await openTab("diff");
+  const btn = await mustSee("#dtrack", "Track work, now that the repo picks a ready connection");
+  const title = await btn.getAttribute("title");
+  if (!/smoke tracker/.test(title)) throw new Error(`it should name the backlog it would mint at, got "${title}"`);
 });
 
 await check("settings is usable while a box is open (the docked layout hides nothing of it)", async () => {

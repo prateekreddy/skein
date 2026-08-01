@@ -1180,11 +1180,16 @@ pub struct Repo {
     /// must name a project on every call.
     #[serde(default)]
     pub plane_project: String,
-    /// The `sync` gateway this repo's boxes are wired to. Empty ⇒ the shared default in
-    /// [`Config::sync_gateway_url`]. Per-repo because a gateway is a backlog: two products tracked
-    /// in different Plane instances (or a self-hosted one alongside the shared one) cannot share a
-    /// claim namespace, and the token a box carries is minted BY the gateway it will talk to.
+    /// Which [`SyncConnection`] this repo's boxes claim work through, by id. Empty ⇒ not tracked.
+    /// A *selection*, not a URL: a gateway and the personal token that mints tokens at it are one
+    /// thing, and a repo pointed at gateway B while the host holds only gateway A's token is a
+    /// setting that can only be right by accident. Per-repo because a gateway is a backlog — two
+    /// products in different Plane instances cannot share a claim namespace.
     #[serde(default)]
+    pub sync_connection: String,
+    /// Superseded by [`Repo::sync_connection`]; read once by the migration, then cleared. Kept so
+    /// a `repos.json` written before connections existed still parses.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
 }
 
@@ -1562,11 +1567,11 @@ pub struct Config {
     /// Empty ⇒ verification is simply unavailable, which is the honest state until someone sets it.
     #[serde(default)]
     pub check_command: String,
-    /// Base URL of the `sync` work-tracking gateway (e.g. `https://plane.example.com`).
-    /// Empty ⇒ boxes get no tracker, which is the honest default. The matching Plane personal
-    /// token is deliberately NOT here: it is a credential, and this file is written 0644 and
-    /// round-trips through the browser on every settings save. See [`plane_token`].
-    #[serde(default)]
+    /// Superseded by named [`SyncConnection`]s, which pair a gateway with the token that mints at
+    /// it. Read once by the migration and then cleared; kept so a pre-connections `config.json`
+    /// still parses. A credential was never here and never will be — this file is written 0644 and
+    /// round-trips through the browser on every settings save.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
 }
 
@@ -1702,7 +1707,7 @@ pub fn set_repo_settings(
     id: &str,
     check: Option<&str>,
     plane_project: Option<&str>,
-    sync_gateway_url: Option<&str>,
+    sync_connection: Option<&str>,
 ) -> Result<Repo, String> {
     if let Some(project) = plane_project.map(str::trim) {
         if !project.is_empty() && plane_project_id(project).is_none() {
@@ -1711,9 +1716,11 @@ pub fn set_repo_settings(
             );
         }
     }
-    if let Some(url) = sync_gateway_url.map(str::trim) {
-        if !url.is_empty() && !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err("a gateway URL has to start with http:// or https://".into());
+    // A selection that names nothing would read on screen as "tracked" and behave as "not tracked",
+    // which is the silent-wrong-result this whole surface exists to avoid.
+    if let Some(conn) = sync_connection.map(str::trim) {
+        if !conn.is_empty() && !load_connections().iter().any(|c| c.id == conn) {
+            return Err(format!("no work-tracking connection called {conn:?}"));
         }
     }
     let mut repos = load_repos();
@@ -1727,23 +1734,21 @@ pub fn set_repo_settings(
     if let Some(v) = plane_project {
         repo.plane_project = v.trim().to_string();
     }
-    if let Some(v) = sync_gateway_url {
-        repo.sync_gateway_url = v.trim().trim_end_matches('/').to_string();
+    if let Some(v) = sync_connection {
+        repo.sync_connection = v.trim().to_string();
+        repo.sync_gateway_url.clear(); // the selection is now the whole answer
     }
     let updated = repo.clone();
     save_repos(&repos)?;
     Ok(updated)
 }
 
-/// The `sync` gateway a box talks to: its repo's own, else the shared default. Trimmed of a
-/// trailing slash so `sync_mcp_url` can append `/mcp` without producing `//mcp`.
+/// The `sync` gateway a box talks to — its connection's, or empty when it isn't tracked. Trimmed of
+/// a trailing slash so `sync_mcp_url` can append `/mcp` without producing `//mcp`.
 pub fn sync_gateway_for_box(name: &str) -> String {
-    repo_for_box(name)
-        .map(|r| r.sync_gateway_url.trim().to_string())
-        .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| load_config().sync_gateway_url.trim().to_string())
-        .trim_end_matches('/')
-        .to_string()
+    connection_for_box(name)
+        .map(|c| c.gateway_url)
+        .unwrap_or_default()
 }
 
 /// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
@@ -2016,8 +2021,15 @@ pub fn add_repo(
         agent: agent
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),
-        check: String::new(), // all three are set later, per repo, in Settings → Repositories
+        check: String::new(), // set later, per repo, in Settings → Repositories
         plane_project: String::new(),
+        // One connection ⇒ adopt it, so a single-tracker fleet needs no ceremony per repo. Two or
+        // more ⇒ leave it unset: which backlog this repo belongs to is not skein's guess to make,
+        // and a wrong one mints a real credential against the wrong Plane.
+        sync_connection: match load_connections().as_slice() {
+            [only] => only.id.clone(),
+            _ => String::new(),
+        },
         sync_gateway_url: String::new(),
     };
     let mut repos = load_repos();
@@ -3793,57 +3805,378 @@ fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String
 // Nothing here runs on a tick. Provisioning is an explicit act (`sync_provision_box`), for the same
 // reason verification is: it spends a network round trip and mints a real credential.
 
-/// The Plane personal token, in its own 0600 file rather than `config.json`.
+/// One work-tracking connection: a backlog, and the personal token that mints per-box agent tokens
+/// at it.
 ///
-/// `config.json` is written 0644 and — more to the point — is the exact object the settings screen
-/// GETs and POSTs, so a field there would be handed to every browser tab that opens Settings. A
-/// credential should never make that trip; the cockpit only ever learns whether one is set.
-fn plane_token_path() -> PathBuf {
+/// The pair is the primitive. A token minted with PAT `A` is only valid at the gateway `A`
+/// authenticates to, so a per-repo gateway URL paired with one host-wide PAT — which is what this
+/// replaced — is a setting that can only be right when every repo happens to share one Plane. A
+/// repo now *selects* a connection instead of describing half of one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncConnection {
+    /// The stable key repos reference. Never renamed once repos point at it — that would untrack
+    /// them silently — which is exactly why there is a separate, freely editable `label`.
+    pub id: String,
+    pub label: String,
+    /// Base URL, no trailing slash. May be empty only for a connection migrated from a host that
+    /// had stored a token but never a URL; the cockpit shows that as the gap it is.
+    pub gateway_url: String,
+}
+
+fn connections_json() -> PathBuf {
+    skein_home().join("connections.json")
+}
+
+/// A connection's personal token, in its own 0600 file rather than `connections.json`.
+///
+/// That file is written 0644 and is the exact object the settings screen GETs, so a field there
+/// would be handed to every browser tab that opens Settings. The cockpit only ever learns whether
+/// a token is set.
+fn connection_token_path(id: &str) -> PathBuf {
+    skein_home().join("tokens").join(id)
+}
+
+/// Where the single host-wide PAT lived before connections existed.
+fn legacy_token_path() -> PathBuf {
     skein_home().join("plane-token")
 }
 
-/// The operator's Plane personal token, or `None` when unset.
-pub fn plane_token() -> Option<String> {
-    fs::read_to_string(plane_token_path())
+/// An id is a filename under `tokens/`, so it is checked like one — no separators, no dots, no
+/// leading dash. A token written to a path a caller chose is a path traversal wearing a config
+/// field's clothes.
+fn valid_connection_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A connection's personal token, or `None` when unset.
+pub fn connection_token(id: &str) -> Option<String> {
+    if !valid_connection_id(id) {
+        return None;
+    }
+    fs::read_to_string(connection_token_path(id))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-/// Whether a Plane token is stored — the only thing about it the cockpit is told.
-pub fn plane_token_is_set() -> bool {
-    plane_token().is_some()
-}
-
-/// Store (or, with an empty value, clear) the Plane personal token.
+/// Store (or, with an empty value, forget) a connection's personal token.
 ///
 /// The mode is set on the temp file *before* the rename, not after: chmod-after-rename leaves a
 /// window in which the real path is world-readable, and the whole point of this function is that
 /// the window does not exist.
-pub fn set_plane_token(token: &str) -> Result<(), String> {
-    let path = plane_token_path();
+pub fn set_connection_token(id: &str, token: &str) -> Result<(), String> {
+    if !valid_connection_id(id) {
+        return Err(format!("not a connection id: {id:?}"));
+    }
+    let path = connection_token_path(id);
     let token = token.trim();
     if token.is_empty() {
         return match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("clearing the Plane token: {e}")),
+            Err(e) => Err(format!("clearing the token: {e}")),
         };
     }
-    let home = skein_home();
-    fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
-    let tmp = home.join(format!(".plane-token.tmp.{}", std::process::id()));
-    fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing the Plane token: {e}"))?;
+    let dir = skein_home().join("tokens");
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
+    let tmp = dir.join(format!(".{id}.tmp.{}", std::process::id()));
+    fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing the token: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("securing the Plane token: {e}"))?;
+            .map_err(|e| format!("securing the token: {e}"))?;
     }
     fs::rename(&tmp, &path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("storing the Plane token: {e}")
+        format!("storing the token: {e}")
     })
+}
+
+/// Every configured connection, in the order they were added.
+pub fn load_connections() -> Vec<SyncConnection> {
+    if let Ok(text) = fs::read_to_string(connections_json()) {
+        if let Ok(list) = serde_json::from_str::<Vec<SyncConnection>>(&text) {
+            return list;
+        }
+    }
+    migrate_legacy_sync_config()
+}
+
+/// Persist the connection list (pretty, atomic).
+pub fn save_connections(list: &[SyncConnection]) -> Result<(), String> {
+    let home = skein_home();
+    fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
+    let bytes = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
+    write_atomic(&connections_json(), &home, &bytes)
+}
+
+/// A connection id from a gateway URL: its host, minus the `mcp.`/`api.` everyone's is called.
+fn connection_slug(url: &str) -> String {
+    let host = url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    let host = host
+        .strip_prefix("mcp.")
+        .or_else(|| host.strip_prefix("api."))
+        .unwrap_or(host);
+    let mapped: String = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug: String = mapped.trim_matches('-').chars().take(64).collect();
+    if slug.is_empty() {
+        "tracker".into()
+    } else {
+        slug
+    }
+}
+
+/// `base`, or `base-2`, `base-3`… — whichever is free.
+fn unique_connection_id(base: &str, taken: &[SyncConnection]) -> String {
+    let free = |id: &str| !taken.iter().any(|c| c.id == id);
+    if free(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| free(id))
+        .unwrap_or_else(|| base.to_string())
+}
+
+/// One-time promotion of the old single-gateway/single-PAT layout to named connections.
+///
+/// Deliberately behaviour-preserving, *including the part that was wrong*: a repo pointed at its own
+/// gateway was until now wired up with the host-wide PAT, so its migrated connection starts with a
+/// copy of that same token. Starting it empty would be the more principled thing and would break a
+/// fleet that works today; the cockpit flags every connection so a wrong one is one field away.
+///
+/// Ordering is the crash-safety story. Tokens, then `connections.json`, then `repos.json`, and only
+/// then the legacy state — so an interrupted run leaves the old layout intact and simply migrates
+/// again next time.
+fn migrate_legacy_sync_config() -> Vec<SyncConnection> {
+    let mut cfg = load_config();
+    let legacy_url = cfg
+        .sync_gateway_url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let legacy_token = fs::read_to_string(legacy_token_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let mut repos = load_repos();
+    let repo_urls: Vec<String> = repos
+        .iter()
+        .map(|r| r.sync_gateway_url.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .collect();
+    // A fresh install has nothing to migrate, and writing it a file it never asked for would be the
+    // migration inventing state rather than moving it.
+    if legacy_url.is_empty() && legacy_token.is_none() && repo_urls.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<SyncConnection> = Vec::new();
+    let adopt = |out: &mut Vec<SyncConnection>, url: &str| -> String {
+        if let Some(existing) = out.iter().find(|c| c.gateway_url == url) {
+            return existing.id.clone();
+        }
+        let id = unique_connection_id(&connection_slug(url), out);
+        out.push(SyncConnection {
+            id: id.clone(),
+            label: connection_slug(url),
+            gateway_url: url.to_string(),
+        });
+        id
+    };
+    let default_id = if legacy_url.is_empty() {
+        // A stored token with no URL anywhere: keep the half that exists rather than dropping it,
+        // so the screen still says "a token is stored, it has nowhere to point".
+        legacy_token.is_some().then(|| {
+            out.push(SyncConnection {
+                id: "default".into(),
+                label: "default".into(),
+                gateway_url: String::new(),
+            });
+            "default".to_string()
+        })
+    } else {
+        Some(adopt(&mut out, &legacy_url))
+    };
+    for repo in repos.iter_mut() {
+        let own = repo
+            .sync_gateway_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        repo.sync_connection = if own.is_empty() {
+            default_id.clone().unwrap_or_default()
+        } else {
+            adopt(&mut out, &own)
+        };
+        repo.sync_gateway_url.clear();
+    }
+
+    if let Some(token) = &legacy_token {
+        for c in &out {
+            if let Err(e) = set_connection_token(&c.id, token) {
+                eprintln!("skein: migrating the Plane token to {}: {e}", c.id);
+                return Vec::new(); // leave the old layout alone; try again next call
+            }
+        }
+    }
+    if let Err(e) = save_connections(&out) {
+        eprintln!("skein: writing connections.json: {e}");
+        return Vec::new();
+    }
+    if let Err(e) = save_repos(&repos) {
+        eprintln!("skein: recording which connection each repo uses: {e}");
+    }
+    cfg.sync_gateway_url.clear();
+    if let Err(e) = save_config(&cfg) {
+        eprintln!("skein: clearing the superseded gateway setting: {e}");
+    }
+    let _ = fs::remove_file(legacy_token_path());
+    out
+}
+
+/// Create or update a connection. `id: None` mints one from the URL's host.
+///
+/// `token: None` leaves whatever is stored alone — a blank field on a settings screen means "I came
+/// here to change something else", never "forget my credential". Forgetting is its own act.
+pub fn upsert_connection(
+    id: Option<&str>,
+    label: &str,
+    gateway_url: &str,
+    token: Option<&str>,
+) -> Result<SyncConnection, String> {
+    let url = gateway_url.trim().trim_end_matches('/').to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("a gateway URL has to start with http:// or https://".into());
+    }
+    let mut list = load_connections();
+    let id = match id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => {
+            if !valid_connection_id(id) {
+                return Err("a connection id is lowercase letters, digits and dashes".into());
+            }
+            id.to_string()
+        }
+        None => unique_connection_id(&connection_slug(&url), &list),
+    };
+    let label = {
+        let l = label.trim();
+        if l.is_empty() {
+            connection_slug(&url)
+        } else {
+            l.chars().take(80).collect()
+        }
+    };
+    let conn = SyncConnection {
+        id: id.clone(),
+        label,
+        gateway_url: url,
+    };
+    match list.iter_mut().find(|c| c.id == id) {
+        Some(existing) => *existing = conn.clone(),
+        None => list.push(conn.clone()),
+    }
+    // The token first: a connection listed as ready before its credential landed would send someone
+    // to press Track work against a gateway that will refuse them.
+    if let Some(t) = token {
+        set_connection_token(&id, t)?;
+    }
+    save_connections(&list)?;
+    Ok(conn)
+}
+
+/// Forget a connection and its token.
+///
+/// Refused while any repo still selects it, naming them: silently untracking three repos to honour
+/// one click is a bigger edit than the click asked for.
+pub fn remove_connection(id: &str) -> Result<(), String> {
+    let users: Vec<String> = load_repos()
+        .into_iter()
+        .filter(|r| r.sync_connection == id)
+        .map(|r| r.id)
+        .collect();
+    if !users.is_empty() {
+        return Err(format!(
+            "{} still {} it — point {} at another connection first",
+            users.join(", "),
+            if users.len() == 1 { "uses" } else { "use" },
+            if users.len() == 1 {
+                "that repo"
+            } else {
+                "those repos"
+            },
+        ));
+    }
+    let mut list = load_connections();
+    let before = list.len();
+    list.retain(|c| c.id != id);
+    if list.len() == before {
+        return Err(format!("no work-tracking connection called {id:?}"));
+    }
+    save_connections(&list)?;
+    let _ = set_connection_token(id, "");
+    Ok(())
+}
+
+/// The connection a repo claims work through, if it has one.
+pub fn connection_for_repo(repo: &Repo) -> Option<SyncConnection> {
+    let list = load_connections();
+    let chosen = repo.sync_connection.trim();
+    if !chosen.is_empty() {
+        return list.into_iter().find(|c| c.id == chosen);
+    }
+    // Belt for a migration interrupted between `connections.json` and `repos.json`: the repo still
+    // carries the URL it used to, and that URL is now a connection.
+    let legacy = repo.sync_gateway_url.trim().trim_end_matches('/');
+    (!legacy.is_empty())
+        .then(|| list.into_iter().find(|c| c.gateway_url == legacy))
+        .flatten()
+}
+
+/// The connection a box claims work through.
+///
+/// A box whose repo is registered gets that repo's answer, and "none selected" means not tracked —
+/// an explicit setting, not a gap to fill in. A box belonging to *no* registered repo (skein's old
+/// single-repo layout) falls back to the sole connection when there is exactly one, because then
+/// there is nothing to guess. With two, guessing is how a token gets minted against the wrong
+/// backlog.
+pub fn connection_for_box(name: &str) -> Option<SyncConnection> {
+    match repo_for_box(name) {
+        Some(repo) => connection_for_repo(&repo),
+        None => {
+            let mut list = load_connections();
+            (list.len() == 1).then(|| list.remove(0))
+        }
+    }
 }
 
 /// The gateway's MCP endpoint for a configured base URL. Accepts either spelling, so a pasted
@@ -3895,23 +4228,52 @@ pub fn plane_project_id(raw: &str) -> Option<String> {
     None
 }
 
-/// What the cockpit is told about work tracking. No secret crosses this line — only whether one is
+/// One connection as the cockpit sees it. No secret crosses this line — only whether one is
 /// present, because "is it configured?" is the whole question a settings screen has to answer.
 #[derive(Debug, Clone, Serialize)]
-pub struct SyncStatus {
+pub struct SyncConnectionView {
+    pub id: String,
+    pub label: String,
     pub gateway_url: String,
     pub token_set: bool,
-    /// Both halves present, so a box can actually be wired up.
+    /// Both halves present, so a box on this connection can actually be wired up.
+    pub ready: bool,
+    /// The repos that select it — what a delete would untrack, said before the click rather than
+    /// after.
+    pub repos: Vec<String>,
+}
+
+/// What the cockpit is told about work tracking.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncStatus {
+    pub connections: Vec<SyncConnectionView>,
+    /// At least one connection can mint — "is work tracking usable at all", for the nav pill.
     pub ready: bool,
 }
 
 pub fn sync_status() -> SyncStatus {
-    let gateway_url = load_config().sync_gateway_url.trim().to_string();
-    let token_set = plane_token_is_set();
+    let repos = load_repos();
+    let connections: Vec<SyncConnectionView> = load_connections()
+        .into_iter()
+        .map(|c| {
+            let token_set = connection_token(&c.id).is_some();
+            SyncConnectionView {
+                ready: token_set && !c.gateway_url.is_empty(),
+                token_set,
+                repos: repos
+                    .iter()
+                    .filter(|r| r.sync_connection == c.id)
+                    .map(|r| r.id.clone())
+                    .collect(),
+                id: c.id,
+                label: c.label,
+                gateway_url: c.gateway_url,
+            }
+        })
+        .collect();
     SyncStatus {
-        ready: token_set && !gateway_url.is_empty(),
-        gateway_url,
-        token_set,
+        ready: connections.iter().any(|c| c.ready),
+        connections,
     }
 }
 
@@ -3933,16 +4295,20 @@ pub struct MintedToken {
 pub fn sync_mint_token(
     agent: &str,
     project_id: Option<&str>,
-    gateway: &str,
+    conn: &SyncConnection,
 ) -> Result<MintedToken, String> {
-    // The gateway is passed in, not read from config: a repo can point at its own, and a token is
-    // only valid at the gateway that minted it — reading the global default here would hand a box
-    // a credential for a backlog it is not talking to.
-    let base = gateway.trim().trim_end_matches('/').to_string();
+    // The whole connection, not a URL: the PAT that authorises the mint and the gateway that
+    // performs it are one credential in two halves, and pairing half of one with half of another is
+    // how a box ends up holding a token for a backlog it is not talking to.
+    let base = conn.gateway_url.trim().trim_end_matches('/').to_string();
     if base.is_empty() {
-        return Err("no sync gateway configured — set one in Settings, or on this repo".into());
+        return Err(format!(
+            "the {} connection has no gateway URL yet",
+            conn.label
+        ));
     }
-    let token = plane_token().ok_or("no Plane token stored — add it in Settings")?;
+    let token = connection_token(&conn.id)
+        .ok_or_else(|| format!("no Plane token stored for {}", conn.label))?;
     let body = match project_id {
         Some(p) => format!(
             r#"{{"agent":{},"projectId":{}}}"#,
@@ -4023,14 +4389,23 @@ fn json_str(s: &str) -> String {
 /// the box. Inside the box it lands in the box-private `~/.config/sync/env` at 0600, deliberately
 /// not in the shared `.claude` store, which is mounted live into every other box for the repo.
 pub fn sync_provision_box(name: &str) -> Result<String, String> {
-    // Readiness is per BOX, not global: a repo with its own gateway is ready even when no shared
-    // default is set, which is exactly the "this product tracks somewhere else" case.
-    let gateway = sync_gateway_for_box(name);
+    // Readiness is per BOX, not global: a repo on its own connection is ready even when the one
+    // every other repo uses is not, which is exactly the "this product tracks somewhere else" case.
+    let conn = connection_for_box(name).ok_or(
+        "this repo isn't wired to a work tracker — pick a connection for it in Settings → Repositories",
+    )?;
+    let gateway = conn.gateway_url.clone();
     if gateway.is_empty() {
-        return Err("no sync gateway — set a shared one in Settings, or one on this repo".into());
+        return Err(format!(
+            "the {} connection has no gateway URL yet",
+            conn.label
+        ));
     }
-    if !plane_token_is_set() {
-        return Err("no Plane token stored — add it in Settings".into());
+    if connection_token(&conn.id).is_none() {
+        return Err(format!(
+            "no Plane token stored for {} — add it in Settings → Work tracking",
+            conn.label
+        ));
     }
     if box_liveness(name) != Some(Liveness::Running) {
         return Err(format!("{name} is not running"));
@@ -4038,7 +4413,7 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     let project = repo_for_box(name)
         .map(|r| r.plane_project)
         .and_then(|p| plane_project_id(&p));
-    let minted = sync_mint_token(name, project.as_deref(), &gateway)?;
+    let minted = sync_mint_token(name, project.as_deref(), &conn)?;
 
     // One heredoc-free write: the shell reads the file body from its own stdin, so nothing about
     // the token appears in any argument list on either side of the boundary.
@@ -4194,13 +4569,14 @@ fn describe_refresh(report: &str, force: bool) -> String {
 /// Never fatal: `sbx rm` has already succeeded by the time this runs, and refusing to finish a
 /// teardown over a failed revocation would leave a box on the board that no longer exists.
 pub fn sync_revoke_token(agent: &str) -> Result<(), String> {
-    let cfg = load_config();
-    let base = cfg
-        .sync_gateway_url
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-    let Some(token) = plane_token() else {
+    // The box's own connection: a token is only revocable at the gateway that minted it, and the
+    // PAT that can revoke it is that connection's. Reading a host-wide default here would send the
+    // DELETE to a gateway that never issued the token, and report success for a live credential.
+    let Some(conn) = connection_for_box(agent) else {
+        return Ok(());
+    };
+    let base = conn.gateway_url.trim().trim_end_matches('/').to_string();
+    let Some(token) = connection_token(&conn.id) else {
         return Ok(());
     };
     if base.is_empty() {
@@ -6911,6 +7287,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: String::new(),
             sync_gateway_url: String::new(),
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
@@ -7119,6 +7496,7 @@ mod tests {
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_connection: String::new(),
                 sync_gateway_url: String::new(),
             },
             Repo {
@@ -7129,6 +7507,7 @@ mod tests {
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_connection: String::new(),
                 sync_gateway_url: String::new(),
             },
         ];
@@ -7159,6 +7538,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: String::new(),
             sync_gateway_url: String::new(),
         }];
         save_repos(&repos).unwrap();
@@ -7195,6 +7575,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: String::new(),
             sync_gateway_url: String::new(),
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
@@ -7230,6 +7611,7 @@ mod tests {
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: String::new(),
             sync_gateway_url: String::new(),
         };
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
@@ -7699,6 +8081,7 @@ mod tests {
             agent: "codex".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: String::new(),
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -8305,15 +8688,17 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     }
 
     #[test]
-    fn a_repo_can_claim_work_through_its_own_gateway() {
+    fn a_repo_claims_work_through_the_connection_it_picks() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
-        save_config(&Config {
-            sync_gateway_url: "https://shared.example".into(),
-            ..Default::default()
-        })
+        upsert_connection(
+            Some("shared"),
+            "shared",
+            "https://shared.example",
+            Some("pat_shared"),
+        )
         .unwrap();
         save_repos(&[Repo {
             id: "web".into(),
@@ -8323,38 +8708,247 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: "shared".into(),
             sync_gateway_url: String::new(),
         }])
         .unwrap();
         assert_eq!(sync_gateway_for_box("web-main"), "https://shared.example");
         // Two products tracked in different Plane instances can't share a claim namespace, and the
-        // token a box carries is only valid at the gateway that minted it.
-        set_repo_settings("web", None, None, Some("https://own.example/")).unwrap();
+        // token a box carries is only valid at the gateway that minted it — so switching backlogs
+        // switches the credential too, which is exactly what picking a whole connection buys.
+        upsert_connection(Some("own"), "own", "https://own.example/", Some("pat_own")).unwrap();
+        set_repo_settings("web", None, None, Some("own")).unwrap();
         assert_eq!(
             sync_gateway_for_box("web-main"),
             "https://own.example",
-            "the repo's own gateway wins, trailing slash trimmed so /mcp doesn't double up"
+            "trailing slash trimmed so /mcp doesn't double up"
+        );
+        assert_eq!(
+            connection_for_box("web-main").map(|c| connection_token(&c.id).unwrap()),
+            Some("pat_own".to_string()),
+            "the PAT that mints has to be the one that authenticates AT that gateway"
         );
         assert_eq!(
             sync_mcp_url(&sync_gateway_for_box("web-main")),
             "https://own.example/mcp"
         );
-        // A box of an unregistered repo still gets the shared one.
-        assert_eq!(sync_gateway_for_box("other-main"), "https://shared.example");
-        // Clearing falls back; nonsense is refused rather than stored to fail inside a box later.
+        // Clearing means not tracked — an explicit setting, not a gap to be filled by a default.
         set_repo_settings("web", None, None, Some("")).unwrap();
-        assert_eq!(sync_gateway_for_box("web-main"), "https://shared.example");
-        assert!(set_repo_settings("web", None, None, Some("mcp.example.net")).is_err());
+        assert!(connection_for_box("web-main").is_none());
+        assert_eq!(sync_gateway_for_box("web-main"), "");
+        // A selection naming nothing would read as "tracked" and behave as "not tracked".
+        assert!(set_repo_settings("web", None, None, Some("nope")).is_err());
         // One call can carry every field, and the fields don't disturb each other.
-        set_repo_settings("web", Some("cargo test"), None, Some("https://own.example")).unwrap();
+        set_repo_settings("web", Some("cargo test"), None, Some("own")).unwrap();
         let saved = load_repos().into_iter().find(|r| r.id == "web").unwrap();
         assert_eq!(
-            (saved.check.as_str(), saved.sync_gateway_url.as_str()),
-            ("cargo test", "https://own.example")
+            (saved.check.as_str(), saved.sync_connection.as_str()),
+            ("cargo test", "own")
         );
         assert_eq!(saved.plane_project, "", "a field left None is left alone");
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_LS_CMD");
+    }
+
+    // A box that belongs to no registered repo is skein's old single-repo layout. One connection is
+    // unambiguous; two is a guess, and the wrong guess mints a real credential against the wrong
+    // backlog — so it declines rather than picking.
+    #[test]
+    fn an_unregistered_box_only_inherits_a_connection_when_there_is_no_choice() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
+        assert!(
+            connection_for_box("stray-main").is_none(),
+            "none configured"
+        );
+        upsert_connection(Some("one"), "one", "https://one.example", None).unwrap();
+        assert_eq!(
+            connection_for_box("stray-main").map(|c| c.id),
+            Some("one".into())
+        );
+        upsert_connection(Some("two"), "two", "https://two.example", None).unwrap();
+        assert!(
+            connection_for_box("stray-main").is_none(),
+            "two backlogs and no repo to say which — refuse rather than guess"
+        );
+        // A *registered* repo with nothing picked is not a gap: it is "not tracked", and no number
+        // of connections may override that.
+        save_repos(&[Repo {
+            id: "stray".into(),
+            source: "/s".into(),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+        remove_connection("two").unwrap();
+        assert!(
+            connection_for_box("stray-main").is_none(),
+            "an explicit 'not tracked' outranks a sole connection"
+        );
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    // The upgrade path off the old layout, where the gateway was per-repo and the PAT was one file
+    // for the whole host. Silently dropping either half would leave a fleet that tracked work
+    // yesterday and quietly stopped today.
+    #[test]
+    fn the_old_single_token_layout_becomes_named_connections() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
+        fs::create_dir_all(&*dir).unwrap();
+        save_config(&Config {
+            sync_gateway_url: "https://mcp.shared.example".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        fs::write(dir.join("plane-token"), "plane_api_secret\n").unwrap();
+        let repo = |id: &str, gw: &str| Repo {
+            id: id.into(),
+            source: format!("/src/{id}"),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: gw.into(),
+        };
+        save_repos(&[
+            repo("web", ""),
+            repo("bridge", "https://mcp.other.example/"),
+            repo("also", "https://mcp.other.example"),
+        ])
+        .unwrap();
+
+        let conns = load_connections();
+        assert_eq!(
+            conns.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["shared-example", "other-example"],
+            "one connection per distinct gateway, named after its host"
+        );
+        let by_repo = |id: &str| {
+            load_repos()
+                .into_iter()
+                .find(|r| r.id == id)
+                .unwrap()
+                .sync_connection
+        };
+        assert_eq!(by_repo("web"), "shared-example", "inherited the default");
+        assert_eq!(by_repo("bridge"), "other-example");
+        assert_eq!(
+            by_repo("also"),
+            "other-example",
+            "the same URL twice is one connection, not two"
+        );
+        // Behaviour-preserving, including the part that was wrong: a repo on its own gateway was
+        // being wired up with the host-wide PAT, so its connection starts with that same token.
+        for c in &conns {
+            assert_eq!(connection_token(&c.id).as_deref(), Some("plane_api_secret"));
+        }
+        // The legacy state is gone, so this runs exactly once.
+        assert!(!dir.join("plane-token").exists());
+        assert_eq!(load_config().sync_gateway_url, "");
+        assert_eq!(load_repos()[0].sync_gateway_url, "");
+        let again = load_connections();
+        assert_eq!(
+            again.len(),
+            2,
+            "second call reads the file, migrates nothing"
+        );
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    #[test]
+    fn a_fresh_host_is_left_alone_by_the_migration() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        assert!(load_connections().is_empty());
+        assert!(
+            !dir.join("connections.json").exists(),
+            "nothing to migrate ⇒ no file invented"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // Removing a connection is a bigger edit than it looks: every repo pointing at it silently
+    // stops tracking work. So it is refused, by name, rather than performed.
+    #[test]
+    fn a_connection_in_use_is_not_removed_out_from_under_its_repos() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
+        upsert_connection(
+            Some("shared"),
+            "shared",
+            "https://shared.example",
+            Some("pat"),
+        )
+        .unwrap();
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "/src/web".into(),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: "shared".into(),
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+        let e = remove_connection("shared").unwrap_err();
+        assert!(e.contains("web"), "say which repo would lose tracking: {e}");
+        assert!(remove_connection("ghost").is_err());
+        set_repo_settings("web", None, None, Some("")).unwrap();
+        remove_connection("shared").unwrap();
+        assert!(load_connections().is_empty());
+        assert!(
+            connection_token("shared").is_none(),
+            "the credential goes with the connection — a token nothing points at is one nobody rotates"
+        );
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    // An id becomes a filename under `tokens/`, so it is checked like one.
+    #[test]
+    fn a_connection_id_can_never_be_a_path() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        for bad in ["../evil", "a/b", ".ssh", "-lead", "UPPER"] {
+            assert!(
+                upsert_connection(Some(bad), "x", "https://x.example", Some("pat")).is_err(),
+                "accepted {bad:?}"
+            );
+            assert!(set_connection_token(bad, "pat").is_err(), "wrote {bad:?}");
+        }
+        assert!(set_connection_token("", "pat").is_err());
+        assert!(upsert_connection(None, "x", "not-a-url", None).is_err());
+        // A derived id is always safe, however hostile the URL.
+        let c = upsert_connection(None, "", "https://plane.example.com/mcp/", None).unwrap();
+        assert_eq!(c.id, "plane-example-com", "mcp. stripped, dots to dashes");
+        assert_eq!(c.label, "plane-example-com", "blank label ⇒ the host");
+        assert_eq!(c.gateway_url, "https://plane.example.com/mcp");
+        let d = upsert_connection(None, "", "https://plane.example.com", None).unwrap();
+        assert_eq!(
+            d.id, "plane-example-com-2",
+            "a taken id is suffixed, never reused"
+        );
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -8376,6 +8970,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: String::new(),
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -8428,6 +9023,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             check: String::new(),
             plane_project: String::new(),
+            sync_connection: String::new(),
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -8450,35 +9046,37 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // The Plane token is the one credential whose leak would let someone bypass every lease in the
     // fleet, so where it lives and who can read it is a claim worth a test rather than a comment.
     #[test]
-    fn the_plane_token_is_private_to_this_host_and_never_in_the_config() {
+    fn a_connections_token_is_private_to_this_host_and_never_in_a_config_file() {
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
-        assert!(!plane_token_is_set());
-        assert!(!sync_status().ready, "no token, no gateway ⇒ not ready");
+        env::set_var("SKEIN_LS_CMD", "false");
+        assert!(!sync_status().ready, "nothing configured ⇒ not ready");
 
-        set_plane_token("  plane_api_secret  ").unwrap();
+        upsert_connection(
+            Some("shared"),
+            "shared",
+            "https://plane.example.com",
+            None,
+        )
+        .unwrap();
+        assert!(!sync_status().ready, "a gateway alone cannot mint anything");
+        set_connection_token("shared", "  plane_api_secret  ").unwrap();
         assert_eq!(
-            plane_token().as_deref(),
+            connection_token("shared").as_deref(),
             Some("plane_api_secret"),
             "trimmed"
         );
-        assert!(plane_token_is_set());
 
-        // Not in config.json — the object the settings screen GETs and POSTs.
-        save_config(&Config {
-            sync_gateway_url: "https://plane.example.com".into(),
-            ..Default::default()
-        })
-        .unwrap();
-        let config = fs::read_to_string(dir.join("config.json")).unwrap();
+        // Not in connections.json — the object the settings screen GETs.
+        let listed = fs::read_to_string(dir.join("connections.json")).unwrap();
         assert!(
-            !config.contains("plane_api_secret"),
-            "the token must never be written where the settings form can read it: {config}"
+            !listed.contains("plane_api_secret"),
+            "the token must never be written where the settings form can read it: {listed}"
         );
         // ...and not in what the cockpit is told either.
         let status = sync_status();
-        assert!(status.ready && status.token_set);
+        assert!(status.ready && status.connections[0].token_set);
         let json = serde_json::to_string(&status).unwrap();
         assert!(
             !json.contains("plane_api_secret"),
@@ -8488,21 +9086,37 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(dir.join("plane-token"))
+            let mode = fs::metadata(dir.join("tokens").join("shared"))
                 .unwrap()
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "the token file must be owner-only");
         }
 
-        set_plane_token("").unwrap();
-        assert!(!plane_token_is_set(), "empty forgets it");
+        // A blank token on a save means "unchanged" — opening Settings to fix a URL must not
+        // silently delete the credential that makes the connection work.
+        upsert_connection(
+            Some("shared"),
+            "renamed",
+            "https://plane.example.com",
+            None,
+        )
+        .unwrap();
         assert!(
-            set_plane_token("").is_ok(),
+            connection_token("shared").is_some(),
+            "a save is not a forget"
+        );
+        assert_eq!(sync_status().connections[0].label, "renamed");
+
+        set_connection_token("shared", "").unwrap();
+        assert!(connection_token("shared").is_none(), "empty forgets it");
+        assert!(
+            set_connection_token("shared", "").is_ok(),
             "forgetting twice is not an error"
         );
-        assert!(!sync_status().ready, "a gateway alone cannot mint anything");
+        assert!(!sync_status().ready);
         env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
     }
 
     #[test]
@@ -8779,21 +9393,32 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // Nothing configured: the error has to name which half is missing, because "not configured"
         // sends someone to re-check the field they already filled in.
         let e = sync_provision_box("web-main").unwrap_err();
-        assert!(e.contains("gateway"), "{e}");
-        save_config(&Config {
-            sync_gateway_url: "https://plane.example.com".into(),
-            ..Default::default()
-        })
+        assert!(e.contains("connection"), "{e}");
+        upsert_connection(
+            Some("shared"),
+            "shared",
+            "https://plane.example.com",
+            None,
+        )
         .unwrap();
         let e = sync_provision_box("web-main").unwrap_err();
         assert!(e.contains("Plane token"), "{e}");
         // Configured, but the box is not running — refuse before minting a credential for a box
         // that cannot receive it.
-        set_plane_token("plane_api_x").unwrap();
+        set_connection_token("shared", "plane_api_x").unwrap();
         let e = sync_provision_box("web-main").unwrap_err();
         assert!(e.contains("not running"), "{e}");
         assert!(
-            sync_mint_token("web-main", None, "http://127.0.0.1:9").is_err(),
+            sync_mint_token(
+                "web-main",
+                None,
+                &SyncConnection {
+                    id: "shared".into(),
+                    label: "shared".into(),
+                    gateway_url: "http://127.0.0.1:9".into(),
+                }
+            )
+            .is_err(),
             "minting must not be attempted against an unreachable gateway in a test"
         );
         env::remove_var("SKEIN_HOME");
@@ -8808,12 +9433,15 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let _g = ENV_LOCK.lock().unwrap();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
         // Not configured at all ⇒ a silent no-op, so a destroy stays quiet for anyone not tracking.
         assert!(sync_revoke_token("web-main").is_ok(), "nothing to revoke");
-        save_config(&Config {
-            sync_gateway_url: "https://plane.example.com".into(),
-            ..Default::default()
-        })
+        upsert_connection(
+            Some("shared"),
+            "shared",
+            "https://plane.example.com",
+            None,
+        )
         .unwrap();
         assert!(
             sync_revoke_token("web-main").is_ok(),
@@ -8821,17 +9449,19 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
         // Configured, but pointed at nothing that answers: an error the caller LOGS rather than
         // one that aborts the teardown. The distinction is the whole point of the test.
-        set_plane_token("plane_api_x").unwrap();
-        save_config(&Config {
-            sync_gateway_url: "http://127.0.0.1:9".into(),
-            ..Default::default()
-        })
+        upsert_connection(
+            Some("shared"),
+            "shared",
+            "http://127.0.0.1:9",
+            Some("plane_api_x"),
+        )
         .unwrap();
         assert!(
             sync_revoke_token("web-main").is_err(),
             "an unreachable gateway must be reported, not silently treated as revoked"
         );
         env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
     }
 
     // The installer is shell that runs inside a box, so reading it proves nothing. Run it against a
@@ -9172,12 +9802,13 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             }
         });
 
-        save_config(&Config {
-            sync_gateway_url: format!("http://127.0.0.1:{port}"),
-            ..Default::default()
-        })
+        upsert_connection(
+            Some("shared"),
+            "shared",
+            &format!("http://127.0.0.1:{port}"),
+            Some("plane_api_secret"),
+        )
         .unwrap();
-        set_plane_token("plane_api_secret").unwrap();
         env::set_var("SKEIN_DESTROY_CMD", "true"); // stand in for `sbx rm`
         env::set_var("SKEIN_REGISTRY", dir.join("sandboxes.json"));
         fs::write(dir.join("sandboxes.json"), "{}").unwrap();
@@ -10398,6 +11029,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_connection: String::new(),
                 sync_gateway_url: String::new(),
             },
             Repo {
@@ -10408,6 +11040,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 agent: "claude".into(),
                 check: String::new(),
                 plane_project: String::new(),
+                sync_connection: String::new(),
                 sync_gateway_url: String::new(),
             },
         ])

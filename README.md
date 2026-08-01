@@ -234,11 +234,12 @@ format from a real box before claiming to read it — the tab says so rather tha
 
 Settings → Repositories is one card per repo: open it and every per-repo setting is there with a
 label — the **check command** Verify runs, the **Plane project** its boxes' tracker tokens bind to,
-and its **sync gateway**. Each falls back to the global default when blank, and the card's tags say
-at a glance which are the repo's own. A per-repo gateway matters when two products are tracked in
-different Plane instances: a claim namespace can't be shared, and the token a box carries is only
-valid at the gateway that minted it. These save as you leave a field — they live in `repos.json`,
-not in the settings form, so that pane has no Save button to mislead you.
+and which **work-tracking connection** its boxes claim from, picked from the connections you set up
+under Work tracking. The check command falls back to the global default when blank; the connection
+is a picker, not a URL, because a gateway and the token that mints at it are one thing (see below).
+The card's tags say at a glance what each repo is actually configured to do. These save as you leave
+a field — they live in `repos.json`, not in the settings form, so that pane has no Save button to
+mislead you.
 
 ## Verify — does the work actually stand up?
 
@@ -255,22 +256,36 @@ outlive its code — once the box ends another turn, the chip is struck through,
 describes work that has moved on. One check runs at a time fleet-wide, and a box that is mid-turn
 refuses (the check and the agent would be writing the same files).
 
-## Work tracking — one backlog the whole fleet claims from
+## Work tracking — a backlog the fleet claims from
 
 Boxes each keep their intentions in their own context, which is exactly where an intention goes to
-die. **Settings → Work tracking** points the fleet at a [`sync`](https://github.com/prateekreddy/sync)
+die. **Settings → Work tracking** points repos at a [`sync`](https://github.com/prateekreddy/sync)
 gateway: Plane as the system of record, behind a gateway that adds the one thing Plane cannot do —
 an *atomic claim*, so two boxes never work the same item. Assigning yourself in Plane reserves
 nothing; both boxes read back their own name and both proceed.
 
-Two fields, and they do different jobs:
+The unit is a **connection**, and it is one card holding both halves:
 
 - **Gateway URL** — `https://plane.example.com`. This is what a box talks to.
 - **Plane personal token** — used **only here, on the host**, to mint each box its own tracker
   token. A box never receives this one, deliberately: a Plane token can set `assignees` directly,
-  which walks straight around the claim. It is stored in `~/.skein/plane-token` at mode 0600, never
-  in `config.json`, and there is no route that reads it back — the cockpit is only ever told
+  which walks straight around the claim. It is stored in `~/.skein/tokens/<id>` at mode 0600, never
+  in `connections.json`, and there is no route that reads it back — the cockpit is only ever told
   *whether* one is set.
+
+The two halves are one thing because a token minted with PAT *A* is only valid at the gateway *A*
+authenticates to. So a repo **picks a whole connection** rather than naming a URL: add as many as
+you have backlogs (a self-hosted Plane alongside the shared one, a second product in its own
+instance), then choose one per repo. **Not tracked** is a first-class choice, not a blank field, and
+◇ Track work only appears on a box whose own repo has a usable connection — a button that can only
+fail is worse than no button. Removing a connection is refused while a repo still selects it, by
+name, because silently untracking three repos is a bigger edit than the click asked for.
+
+A host set up before connections existed is migrated on first read: the old `~/.skein/plane-token`
+and gateway setting become a connection, each repo that had its own gateway URL becomes another, and
+every repo keeps pointing at the one it was already using. That includes copying the single PAT to
+each of them — which is exactly what skein was doing before, right or wrong — so a fleet that tracked
+work yesterday still does today. If one of those is a different Plane, its token is one field away.
 
 Give a repo its Plane project on its row in Settings → Repositories (paste the project URL; skein
 reads the uuid out of it), then open a box and press **◇ Track work**. The host mints that box its

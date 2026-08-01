@@ -102,8 +102,16 @@ async fn main() {
         .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
         .route("/api/settings", get(api_settings).post(api_set_settings))
-        .route("/api/settings/plane-token", post(api_set_plane_token))
         .route("/api/sync", get(api_sync_status))
+        .route("/api/sync/connections", post(api_save_connection))
+        .route(
+            "/api/sync/connections/:id",
+            axum::routing::delete(api_remove_connection),
+        )
+        .route(
+            "/api/sync/connections/:id/token",
+            axum::routing::delete(api_forget_connection_token),
+        )
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
         .route("/api/pick-path", post(api_pick_path))
@@ -298,15 +306,15 @@ async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>
     }
 }
 
-/// A repo's own settings. Absent field = leave it alone; empty string = clear it back to the global
-/// default. One request can carry all three, so the settings pane saves a card, not a keystroke.
+/// A repo's own settings. Absent field = leave it alone; empty string = clear it. One request can
+/// carry all three, so the settings pane saves a card, not a keystroke.
 #[derive(Deserialize)]
 struct RepoSettingsReq {
     check: Option<String>,
     /// a Plane project URL or bare uuid — what this repo's tracker tokens bind to
     plane_project: Option<String>,
-    /// this repo's own `sync` gateway; empty falls back to the shared one in Settings
-    sync_gateway_url: Option<String>,
+    /// which work-tracking connection this repo claims through, by id; empty = not tracked
+    sync_connection: Option<String>,
 }
 
 async fn api_set_repo_settings(
@@ -317,28 +325,57 @@ async fn api_set_repo_settings(
         &id,
         req.check.as_deref(),
         req.plane_project.as_deref(),
-        req.sync_gateway_url.as_deref(),
+        req.sync_connection.as_deref(),
     ) {
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }
 
-/// Whether work tracking is configured. Never carries the Plane token — only whether one is stored,
-/// which is the whole question the settings screen needs answered.
+/// The configured work-tracking connections. Never carries a Plane token — only whether one is
+/// stored, which is the whole question the settings screen needs answered.
 async fn api_sync_status() -> Json<skein::SyncStatus> {
     Json(skein::sync_status())
 }
 
 #[derive(Deserialize)]
-struct PlaneTokenReq {
-    token: String,
+struct ConnectionReq {
+    /// absent ⇒ create one, with an id derived from the gateway host
+    id: Option<String>,
+    #[serde(default)]
+    label: String,
+    gateway_url: String,
+    /// absent ⇒ leave whatever is stored alone. A blank token field means "I came here to change
+    /// the URL", never "forget my credential" — forgetting has its own route.
+    token: Option<String>,
 }
 
-/// Store (or, with an empty value, clear) the Plane personal token. Write-only by design: there is
-/// no route that reads it back, so a token that reaches the host cannot leave it again.
-async fn api_set_plane_token(Json(req): Json<PlaneTokenReq>) -> Response {
-    match skein::set_plane_token(&req.token) {
+/// Create or update a connection, optionally storing its token in the same act. The token is
+/// write-only by design: no route reads one back, so a credential that reaches the host cannot
+/// leave it again.
+async fn api_save_connection(Json(req): Json<ConnectionReq>) -> Response {
+    match skein::upsert_connection(
+        req.id.as_deref(),
+        &req.label,
+        &req.gateway_url,
+        req.token.as_deref().filter(|t| !t.trim().is_empty()),
+    ) {
+        Ok(_) => Json(skein::sync_status()).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+/// Forget a connection entirely. Refused while a repo still selects it — see `remove_connection`.
+async fn api_remove_connection(Path(id): Path<String>) -> Response {
+    match skein::remove_connection(&id) {
+        Ok(()) => Json(skein::sync_status()).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+/// Forget one connection's stored token, keeping the connection itself.
+async fn api_forget_connection_token(Path(id): Path<String>) -> Response {
+    match skein::set_connection_token(&id, "") {
         Ok(()) => Json(skein::sync_status()).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
