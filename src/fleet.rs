@@ -389,15 +389,24 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
 /// continuing would give every box the sandbox's own `/tmp` and `$HOME` — the exact collision this
 /// design exists to prevent.
 pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
-    let script = "need=''; \
-         command -v tmux >/dev/null 2>&1 || need=\"$need tmux\"; \
-         command -v jq   >/dev/null 2>&1 || need=\"$need jq\"; \
-         command -v bwrap >/dev/null 2>&1 || { echo 'skein: this sandbox image has no bwrap; boxes cannot be isolated in it' >&2; exit 1; }; \
-         [ -n \"$need\" ] || exit 0; \
-         timeout 180 sudo apt-get install -y -qq $need >/dev/null 2>&1 \
-           || { timeout 120 sudo apt-get update -qq >/dev/null 2>&1 && timeout 180 sudo apt-get install -y -qq $need >/dev/null 2>&1; }; \
-         missing=''; for t in $need; do command -v \"$t\" >/dev/null 2>&1 || missing=\"$missing $t\"; done; \
-         [ -z \"$missing\" ] || { echo \"skein: the fleet sandbox is missing required tools:$missing\" >&2; exit 1; }";
+    // apt's output is kept, not discarded: when this step fails it is the only thing that says
+    // whether the mirror was unreachable, sudo refused, or the package simply isn't there — and
+    // "missing required tools: tmux" with the reason thrown away is a dead end.
+    let script = r#"need='';
+         command -v tmux >/dev/null 2>&1 || need="$need tmux";
+         command -v jq   >/dev/null 2>&1 || need="$need jq";
+         command -v bwrap >/dev/null 2>&1 || { echo 'skein: this sandbox image has no bwrap; boxes cannot be isolated in it' >&2; exit 1; };
+         [ -n "$need" ] || exit 0;
+         log=/tmp/skein-substrate.log;
+         { timeout 180 sudo apt-get install -y -qq $need \
+             || { timeout 120 sudo apt-get update -qq && timeout 180 sudo apt-get install -y -qq $need; }; } >"$log" 2>&1;
+         missing=''; for t in $need; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done;
+         [ -z "$missing" ] || {
+             echo "skein: the fleet sandbox is missing required tools:$missing";
+             echo "skein: apt said (tail of $log inside the sandbox):";
+             tail -n 25 "$log" | sed 's/^/  | /';
+             exit 1;
+         } >&2"#;
     own_sandbox(sandbox)
         .exec(script, Duration::from_secs(400))
         .map(|_| ())
