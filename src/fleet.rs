@@ -378,6 +378,7 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     // After the substrate (which may have just installed the runtimes) and before any box starts,
     // so a rebuilt sandbox has its login back before the first box seeds from it.
     sync_fleet_login(sandbox);
+    ensure_known_hosts(sandbox);
     install_launcher(sandbox)
 }
 
@@ -455,6 +456,53 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
     own_sandbox(sandbox)
         .exec(&script, Duration::from_secs(900))
         .map(|_| ())
+}
+
+/// Trust the SSH hosts a box will clone from, once per sandbox.
+///
+/// A fleet box clones from the remote itself, and an SSH remote needs the host's key in
+/// `known_hosts` first. A legacy box got that from its kit; the fleet sandbox never had it, so the
+/// first migration of an SSH-remote repo failed with the least helpful pair of errors git produces:
+///
+///   ssh_askpass: exec(/usr/bin/ssh-askpass): No such file or directory
+///   Host key verification failed.
+///
+/// which reads as a credentials problem and is a host-trust one — with no known host and no
+/// terminal, SSH fell back to asking a human who was not there.
+///
+/// A real connection with `accept-new`, not `ssh-keyscan`: keyscan is answered with "Connection
+/// closed by remote host" here while an ordinary `ssh -T` succeeds and records the key itself.
+/// (I read that one keyscan failure as "port 22 is closed" and was wrong — the transport is fine.)
+/// `accept-new` trusts an unknown host once and still refuses a CHANGED key, which is the property
+/// worth keeping. Hosts come from the registered repos, so a self-hosted forge needs no naming here.
+/// Best-effort: an HTTPS repo needs none of this, and refusing to launch over it would be absurd.
+pub fn ensure_known_hosts(sandbox: &str) {
+    let mut hosts: Vec<String> = load_repos()
+        .iter()
+        .filter(|repo| repo.source.starts_with("git@") || repo.source.starts_with("ssh://"))
+        .filter_map(|repo| host_of(&repo.source).map(str::to_string))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    if hosts.is_empty() {
+        return;
+    }
+    let script = format!(
+        "mkdir -p \"$HOME/.ssh\" && chmod 700 \"$HOME/.ssh\"; \
+         for h in {hosts}; do \
+           ssh-keygen -F \"$h\" >/dev/null 2>&1 && continue; \
+           timeout 25 ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T \"git@$h\" \
+             >/dev/null 2>&1; \
+         done; exit 0",
+        hosts = hosts
+            .iter()
+            .map(|h| sh_quote(h))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    if let Err(e) = own_sandbox(sandbox).exec(&script, Duration::from_secs(120)) {
+        eprintln!("skein: could not pin SSH host keys in {sandbox} ({e}); a box cloning over SSH will fail host key verification");
+    }
 }
 
 /// Create the fleet root and hand it to the sandbox user.
