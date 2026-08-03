@@ -24,7 +24,7 @@ use crate::util::*;
 use crate::{skein_home, valid_name};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -370,11 +370,22 @@ impl Place {
         let argv = self.write_argv(script);
         let mut child = Command::new(&argv[0])
             .args(&argv[1..])
+            // Nothing reads stdout here, and an unread pipe blocks the child once its buffer fills
+            // (~64KB) — a chatty command would look like a hang until the deadline killed it.
+            .stdout(Stdio::null())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("sbx exec: {e}"))?;
+        // Drained on a thread for the same reason, and kept: this used to pipe stderr and never read
+        // it, so every failure here reported a bare `sbx exec exited 1` with the cause discarded.
+        let errors = child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                let _ = pipe.read_to_string(&mut buf);
+                buf
+            })
+        });
         child
             .stdin
             .take()
@@ -387,7 +398,18 @@ impl Place {
         loop {
             match child.try_wait().map_err(|e| e.to_string())? {
                 Some(status) if status.success() => return Ok(()),
-                Some(status) => return Err(format!("sbx exec exited {status}")),
+                Some(status) => {
+                    let detail = errors
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    return Err(if detail.is_empty() {
+                        format!("sbx exec exited {status}")
+                    } else {
+                        detail
+                    });
+                }
                 None if std::time::Instant::now() >= deadline => {
                     let _ = child.kill();
                     return Err("sbx exec timed out".into());
@@ -402,6 +424,38 @@ impl Place {
 mod tests {
     use super::*;
     use crate::testutil::*;
+
+    // A write that fails used to report `sbx exec exited 1` and drop the reason on the floor, which
+    // is how "mkdir: cannot create directory '/boxes': Permission denied" reached nobody.
+    #[test]
+    fn a_failed_write_reports_what_the_sandbox_said() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sbx");
+        fs::write(
+            &fake,
+            "#!/bin/sh\ncat >/dev/null\necho \"mkdir: cannot create directory\" >&2\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let place = Place {
+            name: "b".into(),
+            sandbox: "fleet".into(),
+            at: Where::OwnSandbox,
+        };
+        let err = place
+            .write("cat > /boxes/x", b"body", Duration::from_secs(10))
+            .unwrap_err();
+        assert!(err.contains("cannot create directory"), "{err}");
+
+        std::env::set_var("PATH", path);
+    }
 
     // The argv IS the contract. Every feature that touches a box produces this shape, so pinning
     // both spellings here is what makes the shared-sandbox switch reviewable in one place rather

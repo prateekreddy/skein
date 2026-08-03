@@ -372,6 +372,7 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
         }
     }
     ensure_substrate(sandbox)?;
+    ensure_fleet_root(sandbox)?;
     install_launcher(sandbox)
 }
 
@@ -410,6 +411,25 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
     own_sandbox(sandbox)
         .exec(script, Duration::from_secs(400))
         .map(|_| ())
+}
+
+/// Create the fleet root and hand it to the sandbox user.
+///
+/// [`fleet_root`] defaults to `/boxes` — at the filesystem root, where a non-root user cannot mkdir.
+/// Everything after this point (the launcher, every box root, every tmux socket) is created with a
+/// plain `mkdir -p` by the sandbox user, so all of it fails until this runs once. The integration
+/// test never caught it precisely because `$SKEIN_FLEET_ROOT` points it at a writable temp dir —
+/// the seam that makes the launch path testable is also the seam that hid its first real step.
+pub fn ensure_fleet_root(sandbox: &str) -> Result<(), String> {
+    let root = sh_quote(&fleet_root());
+    let script = format!(
+        "[ -w {root} ] && exit 0; \
+         sudo mkdir -p {root} && sudo chown \"$(id -u):$(id -g)\" {root} && chmod 755 {root}"
+    );
+    own_sandbox(sandbox)
+        .exec(&script, Duration::from_secs(60))
+        .map(|_| ())
+        .map_err(|e| format!("preparing the fleet root {root}: {e}"))
 }
 
 /// Write `box-session.sh` and the provisioning script into the sandbox, over stdin rather than as
