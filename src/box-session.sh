@@ -20,7 +20,7 @@
 # Each private path is seeded from the sandbox's copy on first start, which is how a box inherits a
 # working, logged-in agent and then diverges from it.
 #
-# usage: box-session.sh <box> <root> <pidfile> <session> <cmd…>
+# usage: box-session.sh <box> <root> <pidfile> <session> <state> <cmd…>
 #
 # Starts the box and RETURNS; the box keeps running. <cmd…> becomes the agent inside tmux session
 # <session>, and that tmux server is what holds the namespace open (see "the anchor" below).
@@ -41,18 +41,22 @@
 # rather than a missing flag, which is why it is written down here and asserted in place.rs.
 set -uo pipefail
 
-box="${1:?usage: box-session.sh <box> <root> <pidfile> <session> <cmd…>}"
+box="${1:?usage: box-session.sh <box> <root> <pidfile> <session> <state> <cmd…>}"
 root="${2:?missing box root}"
 pidfile="${3:?missing pidfile}"
 session="${4:?missing session name}"
-shift 4
+# The box's durable state on the HOST (a mounted path). Required rather than optional: if skein
+# forgot to pass it the box would still start, and the only symptom would be a conversation that
+# vanishes the next time the sandbox dies — the silent-degradation shape this file exists to avoid.
+state="${5:?missing host state dir}"
+shift 5
 [ "$#" -gt 0 ] || { echo "skein: no command to run" >&2; exit 2; }
 
 case "$box" in
   */*|*..*|"") echo "skein: refusing box name: $box" >&2; exit 2 ;;
 esac
 
-for p in "$root" "$pidfile"; do
+for p in "$root" "$pidfile" "$state"; do
   case "$p" in
     /tmp/*|"$HOME"/*)
       echo "skein: $p is under a path this box binds over; it would be unreadable from outside" >&2
@@ -124,6 +128,30 @@ binds=(--bind "$home" "$HOME")
 for rel in "${share_paths[@]}"; do
   [ -e "$HOME/$rel" ] && binds+=(--bind "$HOME/$rel" "$HOME/$rel")
 done
+# The conversation lives on the HOST, not in this VM.
+#
+# Everything else here is about isolating boxes from each other; this is about surviving the sandbox
+# itself. A transcript under the box's private HOME is VM-local, so it dies whenever the sandbox
+# does — and a snapshot only rescues it on a *planned* resize. An OOM, a crash, or an `sbx rm` by
+# hand never runs one, and the conversation is simply gone. Bound from a mounted host path it
+# survives all of those, and the cockpit can read it directly instead of shelling into the box —
+# which also means a STOPPED box still has a readable conversation.
+#
+# Only the record, never the credentials: `.credentials.json` and the rest of ~/.claude stay in the
+# box's private HOME, seeded from the sandbox. Naming the two record directories rather than
+# host-mounting ~/.claude wholesale is the same allowlist rule applied to durability instead of
+# privacy — anything unanticipated stays VM-local rather than landing on the host by default.
+#
+# The cost is honest: these paths are virtiofs (~5× slower to write, ~14× to read than VM-local), and
+# a resume reads the whole file. Appends per turn are small; a slower resume is worth a conversation
+# that cannot be lost.
+for pair in ".claude/projects:claude-projects" ".codex/sessions:codex-sessions"; do
+  rel="${pair%%:*}"; host="$state/${pair##*:}"
+  mkdir -p "$host" || exit 1
+  chmod 700 "$host" 2>/dev/null || true
+  binds+=(--bind "$host" "$HOME/$rel")
+done
+
 # /var/tmp is world-writable and a plausible scratch path, so it is private too — but only when the
 # box root is not itself under it, or this would hide the box's own tree and socket from inside.
 # (Caught exactly that while testing from /var/tmp; the real layout is /boxes.)

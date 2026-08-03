@@ -79,6 +79,23 @@ pub fn box_pidfile(name: &str) -> String {
     format!("{}/anchor.pid", box_root(name))
 }
 
+/// Where boxes keep the state that must outlive the sandbox, on the **host**.
+///
+/// A host path, mounted into the sandbox at that same absolute path — so this one string addresses
+/// it from both sides, exactly as a repo store does. The *parent* is mounted, so a box added later
+/// needs no recreate.
+///
+/// Distinct from a repo's store on purpose: this is per-box and skein-owned, not project-scoped
+/// shared data, so nothing here crosses between boxes and it is not somewhere the user puts files.
+pub fn box_state_root() -> String {
+    skein_home().join("boxes").to_string_lossy().into_owned()
+}
+
+/// One box's durable host-side state directory.
+pub fn box_state(name: &str) -> String {
+    format!("{}/{name}", box_state_root())
+}
+
 /// The `sbx create` argv for the fleet sandbox.
 ///
 /// `shell` rather than an agent: nothing runs in the sandbox itself — every agent runs inside a box's
@@ -126,7 +143,9 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
 /// harmless, and mounting a *parent* of it is what keeps a later repo from needing a recreate.
 pub fn fleet_mounts() -> Vec<String> {
     let workspace = fleet_workspace();
-    let mut mounts = vec![workspace.clone()];
+    // The box-state parent too: boxes keep their conversation there, on the host, so it survives the
+    // sandbox rather than only surviving a planned resize.
+    let mut mounts = vec![workspace.clone(), box_state_root()];
     for repo in load_repos() {
         for path in [repo.store.clone(), repo.work.clone()] {
             let path = path.trim().to_string();
@@ -283,12 +302,13 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
 /// The shell that starts a box: its namespace, its tmux server, and the agent inside it.
 pub fn session_script(name: &str, session: &str, agent_command: &str) -> String {
     format!(
-        "{launcher} {name_q} {root_q} {pid_q} {session_q} bash -lc {cmd_q}",
+        "{launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         name_q = sh_quote(name),
         root_q = sh_quote(&box_root(name)),
         pid_q = sh_quote(&box_pidfile(name)),
         session_q = sh_quote(session),
+        state_q = sh_quote(&box_state(name)),
         cmd_q = sh_quote(agent_command),
     )
 }
@@ -430,28 +450,31 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
     Ok(relative)
 }
 
-/// The parts of a box's private `$HOME` that carry the *conversation* — so a rebuilt box can resume
-/// the session rather than start a new one against a familiar tree.
+/// The parts of a box's private `$HOME` that a rebuilt box needs and cannot get any other way.
+///
+/// Deliberately **not** the transcript. `box-session.sh` binds `~/.claude/projects` and
+/// `~/.codex/sessions` in from the host, so the conversation is already durable and is already
+/// exactly where the rebuilt box will look for it — tarring it in here would copy a virtiofs
+/// directory out to the store and straight back, twice over the slow path, to end up with the file
+/// that never left. Host-binding also covers what a snapshot cannot: an OOM or a hand-run `sbx rm`
+/// runs no snapshot at all.
+///
+/// What is left is small and genuinely VM-local: the prompt history, the in-flight todo list, and
+/// the per-box MCP registration.
 ///
 /// An **allowlist**, and that is the whole design. The same argument that made `box-session.sh`
 /// private-by-default applies in reverse here: an agent harness keeps state wherever it likes, and
 /// with an exclude list anything unanticipated — a new token cache, a new auth file — would be
 /// copied into the repo's store, which is host-side shared data. Named paths mean a harness change
-/// costs a lost transcript, never a leaked credential.
+/// costs a lost todo list, never a leaked credential.
 ///
 /// `.credentials.json` is therefore not here, and does not need to be: `box-session.sh` seeds the
 /// box's `~/.claude` from the sandbox's on first start, so the rebuilt box is already logged in.
-///
-/// The transcript is addressed by the *cwd slug* Claude derives (`-boxes-<name>-tree`), which is why
-/// this works at all for a resize: the box comes back at the same path, so the restored transcript is
-/// the one `--continue` looks for. A migration that moved the tree would need the slug rewritten.
 fn agent_state_tar(snapshot: &str) -> String {
     const CARRIED: &[&str] = &[
-        ".claude/projects",      // the transcripts --continue/--resume read
         ".claude/history.jsonl", // the prompt history
         ".claude/todos",         // in-flight task list
         ".claude.json",          // per-box MCP registration + project state
-        ".codex/sessions",       // codex's equivalent
         ".codex/history.jsonl",
     ];
     let list = CARRIED
@@ -778,6 +801,16 @@ mod tests {
             "{script}"
         );
         assert!(script.contains("'/boxes/web-main' '/boxes/web-main/anchor.pid' 'skein-agent'"));
+        // The host-side state dir the box binds its conversation from — a HOST path, not a /boxes
+        // one, because the point of it is to outlive the sandbox that /boxes lives in.
+        assert!(
+            script.contains(&format!("'{}'", box_state("web-main"))),
+            "the box must be told where its durable state lives: {script}"
+        );
+        assert!(
+            !box_state("web-main").starts_with("/boxes"),
+            "box state on VM-local disk would defeat the entire point"
+        );
         assert!(
             script.ends_with("bash -lc 'claude --continue'"),
             "the agent command stays one argument: {script}"

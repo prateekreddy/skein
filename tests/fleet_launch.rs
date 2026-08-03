@@ -398,22 +398,41 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // same path. The credential must NOT travel: the store is host-side shared data, and the box is
     // re-seeded with auth from the sandbox anyway. An allowlist is what makes the second half hold
     // for files that do not exist yet.
+    // The transcript is not merely snapshot-able, it is already on the HOST — bound in from
+    // box_state, so it survives the sandbox dying rather than only surviving a planned resize. An
+    // OOM or a hand-run `sbx rm` never runs a snapshot; this is what covers those.
+    let host_transcript =
+        PathBuf::from(box_state(BOX)).join("claude-projects/-boxes-web-main-tree/sess.jsonl");
+    assert_eq!(
+        fs::read_to_string(&host_transcript)
+            .expect("the conversation must be readable from the host")
+            .trim(),
+        "{\"type\":\"user\"}",
+        "the box wrote its transcript into VM-local disk, where a crash would take it"
+    );
+    // And the credential did NOT follow it out: only the record directories are host-bound.
+    assert!(
+        !PathBuf::from(box_state(BOX))
+            .join("claude-projects/.credentials.json")
+            .exists()
+            && !fs::read_dir(box_state(BOX))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy().contains("credential")),
+        "host-binding the record must not drag the credentials out with it"
+    );
+
+    // The snapshot carries only what is genuinely VM-local. The transcript is host-bound already,
+    // so copying it out to the store and straight back would traverse virtiofs twice to arrive at
+    // the file that never moved.
     let members = sh(&format!("tar -tzf {}/agent-state.tgz", snap.display()));
     assert!(
-        members.contains(".claude/projects/-boxes-web-main-tree/sess.jsonl"),
-        "the transcript did not travel, so the box would resume nothing: {members}"
+        !members.contains(".claude/projects"),
+        "the host-bound transcript was copied redundantly through the store: {members}"
     );
     assert!(
         !members.contains("credentials"),
         "a credential reached the shared store: {members}"
-    );
-    assert_eq!(
-        sh(&format!(
-            "tar -xzOf {}/agent-state.tgz .claude/projects/-boxes-web-main-tree/sess.jsonl",
-            snap.display()
-        )),
-        "{\"type\":\"user\"}",
-        "the transcript arrived truncated or empty"
     );
 
     // ---- a resize that cannot save a box must not destroy the sandbox ----
