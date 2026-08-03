@@ -204,6 +204,76 @@ pub fn box_limits() -> String {
     parts.join(",")
 }
 
+/// Why a box has no memory ceiling, or `None` when it has one.
+///
+/// Read from the file `box-session.sh` leaves behind rather than from its stderr: skein keeps a
+/// command's stdout and discards stderr on success, so a warning about a box that started *fine*
+/// would be dropped exactly when nothing looked wrong. The fact outlives the launch that produced
+/// it, which is what lets anything later — a doctor check, a row on the board — still ask.
+pub fn uncapped_reason(name: &str) -> Option<String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return None;
+    }
+    let path = format!("{}/limits.state", box_root(name));
+    let state = own_sandbox(&sandbox)
+        .exec(&format!("cat {}", sh_quote(&path)), Duration::from_secs(15))
+        .ok()?;
+    let mut parts = state.split_whitespace();
+    match parts.next()? {
+        "uncapped" => Some(parts.next().unwrap_or("reason not recorded").to_string()),
+        _ => None,
+    }
+}
+
+/// Apply the current per-box ceilings to every box that is already running.
+///
+/// Unlike the fleet's own memory, a cgroup limit is **live**: writing `memory.max` changes the cap
+/// on a running box immediately, with no restart and nothing to save or restore. So a tighter or
+/// looser per-box ceiling is a setting you can simply change, and it would be wrong to make the user
+/// rebuild the fleet for it — that is the expensive path, and this is not.
+///
+/// Returns the boxes whose limits could not be written. Best-effort per box on purpose: one box
+/// missing its cgroup (started before delegation existed, say) must not stop the others being
+/// corrected.
+pub fn apply_box_limits() -> Result<Vec<String>, String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured".into());
+    }
+    let limits = box_limits();
+    let fleet = own_sandbox(&sandbox);
+    let mut failed = Vec::new();
+    for (name, _) in placed_boxes(&sandbox) {
+        let mut writes = Vec::new();
+        for kv in limits.split(',') {
+            let Some((key, value)) = kv.split_once('=') else {
+                continue;
+            };
+            let file = match key {
+                "max" => "memory.max",
+                "high" => "memory.high",
+                "pids" => "pids.max",
+                _ => continue,
+            };
+            writes.push(format!(
+                "printf '%s\\n' {} | sudo tee /sys/fs/cgroup/skein/{}/{file} >/dev/null",
+                sh_quote(value),
+                name
+            ));
+        }
+        // `test -d` first, so a box with no cgroup is reported rather than counted as adjusted.
+        let script = format!(
+            "test -d /sys/fs/cgroup/skein/{name} || exit 1; {}",
+            writes.join(" && ")
+        );
+        if fleet.exec(&script, Duration::from_secs(30)).is_err() {
+            failed.push(name);
+        }
+    }
+    Ok(failed)
+}
+
 /// A memory size as MiB. Accepts what sbx accepts (`26g`, `512M`, a bare byte count).
 ///
 /// `None` rather than a guess when it cannot be read: a mis-parsed ceiling is worse than no ceiling,
@@ -472,6 +542,15 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
         &provision_script(name, &repo.store),
         Duration::from_secs(300),
     )?;
+
+    // A box that started without a ceiling started *successfully*, so nothing else would ever say
+    // so — and it is the one condition under which one box's runaway build can kill the others.
+    if let Some(why) = uncapped_reason(name) {
+        eprintln!(
+            "skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can \
+             take down every other box in the fleet"
+        );
+    }
     Ok(())
 }
 

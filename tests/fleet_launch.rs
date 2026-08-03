@@ -194,6 +194,15 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             limit.parse::<u64>().map(|b| b > 0).unwrap_or(false),
             "the cgroup exists but holds no memory ceiling: {limit:?}"
         );
+        // Recorded, not merely logged: skein keeps a command's stdout and drops its stderr on
+        // success, so "this box has no ceiling" would vanish precisely when the box started fine.
+        // The file is how anything later can still ask.
+        let state =
+            fs::read_to_string(format!("{}/limits.state", box_root(BOX))).unwrap_or_default();
+        assert!(
+            state.starts_with("capped "),
+            "a capped box must say so where it can still be read: {state:?}"
+        );
     } else {
         eprintln!("skipping the cgroup assertions: no delegation on this machine");
     }

@@ -885,6 +885,9 @@
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
             <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Per-box hard cap</span><span class="desc">the most memory <b>one</b> box may use (cgroup <code>memory.max</code>). This is what stops a runaway build taking the fleet down with it: without a cap the kernel kills whichever process it likes, which is another box's agent as readily as the guilty one. Blank ⇒ 70% of fleet memory — high enough for a big build, low enough that two boxes can't exhaust the VM.</span><input id="set-boxmax" placeholder="(70% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
+            <div class="set-field"><span class="set-title">Apply ceilings to running boxes</span><span class="desc">Unlike fleet memory, a per-box ceiling is <b>live</b> — it changes on a running box straight away, with nothing to save or restart. Use this after editing the two fields above; no rebuild, no interruption to any box mid-turn.</span><button id="set-applylimits" class="btn" type="button">Apply to running boxes</button></div>
             <div class="set-field"><span class="set-title">Apply to the running fleet</span><span class="desc">Saving these numbers only changes what the <b>next</b> sandbox is created with — sbx fixes memory and CPUs at creation. Applying them now rebuilds the fleet sandbox: every box's unpushed work and conversation is saved to the host first, and nothing is destroyed unless all of it saved. Boxes come back on their own branches; any that don't can be retried individually.</span><button id="set-resize" class="btn" type="button">Rebuild the fleet at these limits</button></div>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
@@ -2530,6 +2533,8 @@ function openSettings(pane = "repos") {
     document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
+    document.getElementById("set-boxmax").value = settings.box_memory_max || "";
+    document.getElementById("set-boxhigh").value = settings.box_memory_high || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
     document.getElementById("set-check").value = settings.check_command || "";
     document.getElementById("set-ai").checked = !!settings.ai_enrichment;
@@ -2782,8 +2787,11 @@ function removeRepo(id) {
     .catch(e => toast(`remove failed: ${e.message}`));
 }
 function closeSettings() { settingsModal().classList.remove("open"); }
-function saveSettings() {
-  const next = {
+// The settings payload, built in one place so an action that must save first (applyBoxLimits) can
+// never drift from what Save itself sends — a half-saved settings object is the kind of bug that
+// only shows up as a setting that mysteriously does not stick.
+function settingsPayload() {
+  return {
     seed_gh_secret: document.getElementById("set-seedgh").checked,
     force_gh_secret: document.getElementById("set-forcegh").checked,
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,
@@ -2791,18 +2799,45 @@ function saveSettings() {
     base_branch: document.getElementById("set-base").value.trim(),
     fleet_memory: document.getElementById("set-fleetmem").value.trim(),
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
+    box_memory_max: document.getElementById("set-boxmax").value.trim(),
+    box_memory_high: document.getElementById("set-boxhigh").value.trim(),
     ssh_key: document.getElementById("set-sshkey").value.trim(),
     check_command: document.getElementById("set-check").value.trim(),
     ai_enrichment: document.getElementById("set-ai").checked,
   };
-  // Work-tracking connections are deliberately NOT in here: they carry a credential, and this
-  // object round-trips through the browser on every save. Their cards save themselves.
-  fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(next) })
+}
+// Work-tracking connections are deliberately NOT in the payload: they carry a credential, and it
+// round-trips through the browser on every save. Their cards save themselves.
+function saveSettingsQuiet() {
+  return fetch("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"},
+                                  body: JSON.stringify(settingsPayload()) })
     .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
-    .then(s => { settings = s; return loadSync(); })
+    .then(s => { settings = s; return s; });
+}
+function saveSettings() {
+  saveSettingsQuiet()
+    .then(() => loadSync())
     .then(() => { renderDockbar(); closeSettings(); toast("settings saved"); })
     .catch(e => toast(`couldn't save: ${e.message}`));
 }
+// A cgroup limit is live, so this is the cheap sibling of resizeFleet: no snapshot, no restart, no
+// box interrupted mid-turn. Save first — the server applies what is stored, not what is typed.
+function applyBoxLimits() {
+  const btn = document.getElementById("set-applylimits");
+  btn.disabled = true; btn.textContent = "applying…";
+  saveSettingsQuiet()
+    .then(() => fetch("/api/fleet/limits", { method:"POST" }))
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
+    .then(res => {
+      const failed = res.failed || [];
+      toast(failed.length
+        ? `ceilings applied; ${failed.join(", ")} has no cgroup and was left as it is`
+        : "ceilings applied to every running box");
+    })
+    .catch(e => toast(`couldn't apply: ${e.message}`))
+    .finally(() => { btn.disabled = false; btn.textContent = "Apply to running boxes"; });
+}
+
 // Memory and CPUs are fixed when sbx creates a sandbox, so applying new ones means rebuilding it.
 // Deliberately a separate, confirmed action rather than part of Save: a save that silently rebuilt
 // every box would be a surprise, and a save that silently did nothing would be worse.
@@ -2930,6 +2965,7 @@ function launchBox(branch) {
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
 document.getElementById("set-resize").addEventListener("click", resizeFleet);
+document.getElementById("set-applylimits").addEventListener("click", applyBoxLimits);
 settingsModal().addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.target.closest(".set-navi")) { e.preventDefault(); saveSettings(); }
   else if (e.key === "Escape") { e.preventDefault(); closeSettings(); }

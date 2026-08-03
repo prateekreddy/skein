@@ -103,6 +103,7 @@ async fn main() {
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/fleet/resize", post(api_fleet_resize))
+        .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
         .route(
@@ -690,6 +691,18 @@ async fn api_set_settings(Json(c): Json<skein::Config>) -> Response {
             }
             Json(c).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Push the current per-box ceilings onto every running box.
+///
+/// Separate from resize, and cheap where that is expensive: a cgroup limit is live, so this changes
+/// the cap on a running box with no restart, no snapshot and nothing to restore. 200 with the boxes
+/// that could not be adjusted — one box missing its cgroup must not stop the rest being corrected.
+async fn api_fleet_limits() -> Response {
+    match skein::apply_box_limits() {
+        Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }

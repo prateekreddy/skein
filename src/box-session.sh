@@ -210,15 +210,24 @@ if [ -n "$limits" ]; then
         *) echo "skein: ignoring unknown limit $kv for $box" >&2 ;;
       esac
     done
-    sudo sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null \
-      || echo "skein: $box could not join its cgroup; it runs without a memory ceiling" >&2
+    if sudo sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null; then
+      # Recorded, not just logged. skein reads a command's stdout and drops its stderr on success,
+      # so a warning here would vanish exactly when nothing looked wrong — and "this box has no
+      # ceiling" is a fact worth still being true tomorrow, not a line in one launch's output.
+      printf 'capped %s\n' "$limits" > "$root/limits.state"
+    else
+      printf 'uncapped could-not-join-cgroup\n' > "$root/limits.state"
+      echo "skein: $box could not join its cgroup; it runs without a memory ceiling" >&2
+    fi
   else
+    printf 'uncapped no-cgroup-delegation\n' > "$root/limits.state"
     # Not fatal: an uncapped box still works, and refusing to start one because the image lacks
     # cgroup delegation would be a worse trade. Loud, though — this is the guard that keeps one
     # box's runaway build from killing every other box in the sandbox.
     echo "skein: no cgroup delegation in this sandbox; $box runs WITHOUT a memory ceiling, so a runaway build in it can take the whole fleet down" >&2
   fi
 else
+  printf 'uncapped no-limit-computed\n' > "$root/limits.state"
   echo "skein: no memory ceiling computed for $box; it runs uncapped" >&2
 fi
 

@@ -410,6 +410,28 @@ await check("a connection in use is not removed out from under its repos", async
   await page.click('.set-navi[data-pane="repos"]');
   await settle(300);
 });
+await check("a per-box ceiling is settable, and says what happens without one", async () => {
+  // The fleet fields configure a POOL; these two configure what one box may take out of it. Without
+  // the second pair there is no ceiling at all, and a runaway build kills other boxes' agents — so
+  // the pane has to make the per-box cap findable and say what it is protecting against.
+  await page.click('.set-navi[data-pane="workflow"]');
+  await settle(300);
+  await mustSee("#set-boxmax", "the per-box hard cap");
+  await mustSee("#set-boxhigh", "the per-box throttle");
+  const why = await page.$eval("#set-boxmax", e => e.closest(".set-field").querySelector(".desc").textContent);
+  for (const claim of ["runaway", "another box"])
+    if (!why.includes(claim)) throw new Error(`the cap should explain "${claim}": ${why}`);
+  // Blank must read as "derived", never as "unlimited" — the difference is a fleet that survives a
+  // bad build and one that doesn't.
+  const hint = await page.$eval("#set-boxmax", e => e.placeholder);
+  if (!/%/.test(hint)) throw new Error(`blank should show what it derives to, got "${hint}"`);
+  // Applying these is live; applying fleet memory is a rebuild. Both are offered, and they must not
+  // look like the same button.
+  const cheap = await page.$eval("#set-applylimits", e => e.closest(".set-field").querySelector(".desc").textContent);
+  if (!/live/.test(cheap)) throw new Error(`the live path should say so: ${cheap}`);
+  const dear = await page.$eval("#set-resize", e => e.closest(".set-field").querySelector(".desc").textContent);
+  if (!/rebuild/i.test(dear)) throw new Error(`the destructive path should say so: ${dear}`);
+});
 await check("AI enrichment is a visible setting, not folklore in an env var", async () => {
   // It existed for months as $SKEIN_AI only, so nobody knew it was there. The toggle has to be
   // findable, and it has to say what would actually happen — "on" with no `claude` on PATH is a
