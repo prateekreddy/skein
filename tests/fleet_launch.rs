@@ -649,6 +649,35 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "the box's .claude must resolve into the store, got {claude:?}"
     );
 
+    // ---- the sandbox cycles: the tree survives, the session does not ----
+    // Measured against a real sandbox, not imagined: after sbx restarted skein-fleet, the box's
+    // checkout, private HOME and cgroup ceiling were all intact and its tmux server was gone. Every
+    // such box was then unreachable, and what a user saw first was an nsenter error about a pid.
+    let before = shared_record(name).unwrap().ns_pid;
+    let place = own_sandbox(FLEET);
+    place
+        .exec(
+            &format!("tmux -S {} kill-server", box_sock(name)),
+            Duration::from_secs(30),
+        )
+        .ok();
+    assert_eq!(
+        fleet_liveness().get(name).copied(),
+        Some(false),
+        "a killed server is a stopped box, and the sweep must see it"
+    );
+    ensure_box_session(name).expect("restart the session from the tree");
+    assert_eq!(
+        fleet_liveness().get(name).copied(),
+        Some(true),
+        "the box is reachable again without a re-clone"
+    );
+    let after = shared_record(name).unwrap().ns_pid;
+    assert_ne!(
+        before, after,
+        "the anchor is a new process, so the placement must name it — a stale pid addresses nothing"
+    );
+
     let _ = stop_box(name);
     forget_place(name);
     let _ = Command::new("sudo")

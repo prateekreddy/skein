@@ -955,6 +955,57 @@ pub fn base_branch(repo: &Repo) -> String {
 ///
 /// The pid is knowable only inside the sandbox, and only after the session starts — which is why
 /// placement is recorded after launch rather than predicted before it.
+/// Make sure a placed box has a live session, restarting it from its own tree if not.
+///
+/// The box is its **tree**; the session is disposable. A fleet box's tmux server does not survive
+/// the sandbox stopping — measured: `skein start` brought a box up at 14:12 with a live server, and
+/// after the sandbox cycled the checkout, the private HOME and the cgroup ceiling were all intact
+/// while the server was gone. Without this, every such box is unreachable until someone re-runs
+/// `skein start`, and what they see first is `nsenter: cannot open /proc/<pid>/ns/user` — an error
+/// about a namespace, for a box that simply needs starting again.
+///
+/// A no-op for a box with a live session, and for a box that isn't placed (its sandbox is its box,
+/// and sbx starts that itself). Never clones: a missing tree is a different problem and saying so is
+/// more useful than silently rebuilding one.
+pub fn ensure_box_session(name: &str) -> Result<(), String> {
+    let Some(record) = shared_record(name) else {
+        return Ok(()); // legacy box — sbx owns its lifecycle
+    };
+    if fleet_liveness().get(name).copied().unwrap_or(false) {
+        return Ok(());
+    }
+    let fleet = own_sandbox(&record.sandbox);
+    let (has_tree, has_session) = box_progress(&fleet, name, "skein-shell")?;
+    if has_session {
+        return Ok(()); // raced with someone else's restart, or the sweep was stale
+    }
+    if !has_tree {
+        return Err(format!(
+            "box {name} has no checkout in {} — `skein start {name}` to build one",
+            record.sandbox
+        ));
+    }
+    fleet.exec(
+        &session_script(name, "skein-shell", "exec bash -l"),
+        Duration::from_secs(120),
+    )?;
+    // The anchor is a new process, so the old record addresses nothing. Re-record before anyone
+    // tries to enter the namespace — that is the whole point of doing this here.
+    let ns_pid = read_anchor(&record.sandbox, name)?;
+    record_place(
+        name,
+        &PlaceRecord {
+            ns_pid,
+            ..record.clone()
+        },
+    )?;
+    // The sweep just became wrong in the other direction; a stale "dead" answer would send the very
+    // next caller through this again.
+    *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    eprintln!("skein: restarted {name}'s session (its sandbox had cycled)");
+    Ok(())
+}
+
 /// 1.5s micro-cache over the fleet's liveness sweep, for the same reason [`crate::fleet_boxes`] has
 /// one: the board asks per box, and a refresh must not become one `sbx exec` per box per tick.
 static LIVENESS_CACHE: std::sync::Mutex<

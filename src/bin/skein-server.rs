@@ -1213,6 +1213,18 @@ async fn terminal_session(
     // $SKEIN_ATTACH_CMD fully overrides it (run via `sh -c`) — `{name}` and `{dir}` in the
     // value are substituted first, so you can tune the exact sbx invocation per box without
     // recompiling, e.g. SKEIN_ATTACH_CMD='sbx exec -it {name} tmux attach -t skein-agent'
+    // A fleet box's tmux server does not survive its sandbox cycling, while its tree, private HOME
+    // and cgroup do. Restart the session before we address its namespace, or the terminal opens on
+    // `nsenter: cannot open /proc/<pid>/ns/user` — a namespace error for a box that just needs
+    // starting again. A no-op for a live box and for one that owns its sandbox.
+    if launch.is_none() {
+        let boxed = name.clone();
+        if let Ok(Err(e)) =
+            tokio::task::spawn_blocking(move || skein::ensure_box_session(&boxed)).await
+        {
+            let _ = socket.send(Message::Text(format!("skein: {e}\r\n"))).await;
+        }
+    }
     let dir = skein::lookup_dir(&name).unwrap_or_default();
     // $SKEIN_SHELL_CMD overrides the shell command, $SKEIN_ATTACH_CMD the agent attach (both run via
     // `sh -c`, `{name}`/`{dir}` substituted). Default agent: reconnect to the box's tmux+`claude

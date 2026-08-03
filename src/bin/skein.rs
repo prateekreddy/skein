@@ -568,6 +568,10 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
         }
         name.to_string()
     };
+    // A fleet box loses its tmux server whenever its sandbox cycles; the tree, the private HOME and
+    // the cgroup survive. Restart the session before addressing its namespace, or the first thing
+    // the user sees is `nsenter: cannot open /proc/<pid>/ns/user`.
+    skein::ensure_box_session(&attach_name)?;
     let dir = skein::lookup_dir(&attach_name).unwrap_or_default();
     let argv = skein::attach_argv_as(&attach_name, &dir, &agent);
     match Command::new("sbx").args(&argv).status() {
