@@ -458,6 +458,68 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// Claude's transcript directory for a working directory: every `/` and `.` becomes `-`.
+///
+/// Not a guess — read off a real box: `/Users/you/.skein/repos/sync/work` is stored as
+/// `-Users-you--skein-repos-sync-work` (the `/.` giving the doubled dash).
+pub fn transcript_slug(dir: &str) -> String {
+    dir.chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
+/// Point a migrated box's conversation at the directory it now works in.
+///
+/// The runtimes key a transcript by the cwd it was had in, and migrating a box MOVES that cwd: from
+/// the old sandbox's checkout to `/boxes/<name>/tree`. So the conversation travels in the snapshot,
+/// lands intact — and the agent looks under a slug for its new path, finds nothing, and starts over.
+/// Measured on the first real migration: 25MB of transcript under
+/// `-Users-you--skein-repos-sync-work`, and an empty `-boxes-example-box-9-tree` beside it.
+///
+/// Copy rather than move, and only into an empty destination: the old directory is the record of
+/// where that conversation actually happened, and a box that already has a conversation of its own
+/// must never have someone else's merged into it.
+pub fn realign_transcript(name: &str) -> Result<usize, String> {
+    let root = std::path::PathBuf::from(box_state(name)).join("claude-projects");
+    let target = root.join(transcript_slug(&format!("{}/tree", box_root(name))));
+    let jsonl_count = |dir: &std::path::Path| -> usize {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+            .count()
+    };
+    if target.is_dir() && jsonl_count(&target) > 0 {
+        return Ok(0); // it has its own conversation; leave it alone
+    }
+    // The richest sibling is the one worth carrying: a box can accumulate empty slugs from probes
+    // and one-off commands run elsewhere.
+    let Some(source) = std::fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && *p != target)
+        .max_by_key(|p| jsonl_count(p))
+        .filter(|p| jsonl_count(p) > 0)
+    else {
+        return Ok(0);
+    };
+    std::fs::create_dir_all(&target).map_err(|e| format!("mkdir {}: {e}", target.display()))?;
+    let mut moved = 0;
+    for entry in std::fs::read_dir(&source).into_iter().flatten().flatten() {
+        let from = entry.path();
+        if from.extension().is_some_and(|x| x == "jsonl") {
+            let to = target.join(entry.file_name());
+            if std::fs::copy(&from, &to).is_ok() {
+                moved += 1;
+            }
+        }
+    }
+    Ok(moved)
+}
+
 /// Trust the SSH hosts a box will clone from, once per sandbox.
 ///
 /// A fleet box clones from the remote itself, and an SSH remote needs the host's key in
@@ -902,6 +964,19 @@ pub fn migrate_box(name: &str) -> Result<String, String> {
              and the snapshot remains at {dir} in the repo store."
         )
     })?;
+    // The checkout moved, so the conversation has to be told where it lives now — otherwise the box
+    // starts up with a transcript on disk that its agent will never look at.
+    match realign_transcript(name) {
+        Ok(0) => {}
+        Ok(n) => {
+            eprintln!("skein: carried {n} transcript file(s) onto {name}'s new working directory")
+        }
+        Err(e) => eprintln!(
+            "skein: {name} migrated, but its conversation could not be pointed at the new checkout \
+             ({e}); the files are in {}/claude-projects and `claude --continue` will start fresh",
+            box_state(name)
+        ),
+    }
     Ok(dir)
 }
 
@@ -1564,6 +1639,47 @@ mod tests {
             assert!(spec.contains(".claude.json"), "{spec}");
             assert!(spec.contains(".claude/todos"), "{spec}");
         }
+    }
+
+    // A migrated box works in a new directory, and the runtimes key a transcript by that directory.
+    // Without this the conversation arrives intact and invisible.
+    #[test]
+    fn a_migrated_boxs_conversation_follows_it_to_the_new_checkout() {
+        use std::{env, fs};
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_FLEET_ROOT", "/boxes");
+        assert_eq!(
+            transcript_slug("/Users/you/.skein/repos/sync/work"),
+            "-Users-you--skein-repos-sync-work",
+            "the slug rule is read off a real box, not invented"
+        );
+
+        let projects = std::path::PathBuf::from(box_state("example-box-9")).join("claude-projects");
+        let old = projects.join("-Users-you--skein-repos-sync-work");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("a.jsonl"), "{}").unwrap();
+        fs::write(old.join("b.jsonl"), "{}").unwrap();
+        // an empty slug from a one-off command elsewhere must not win
+        fs::create_dir_all(projects.join("-tmp")).unwrap();
+
+        assert_eq!(realign_transcript("example-box-9").unwrap(), 2);
+        let now = projects.join("-boxes-example-box-9-tree");
+        assert!(now.join("a.jsonl").exists() && now.join("b.jsonl").exists());
+        assert!(
+            old.join("a.jsonl").exists(),
+            "copied, not moved — the old directory is the record of where it happened"
+        );
+
+        // A box with its own conversation must never have another merged into it.
+        fs::write(now.join("own.jsonl"), "{}").unwrap();
+        fs::write(old.join("c.jsonl"), "{}").unwrap();
+        assert_eq!(realign_transcript("example-box-9").unwrap(), 0);
+        assert!(!now.join("c.jsonl").exists());
+
+        env::remove_var("SKEIN_FLEET_ROOT");
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]
