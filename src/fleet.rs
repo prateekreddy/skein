@@ -401,8 +401,21 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
          command -v bwrap >/dev/null 2>&1 || { echo 'skein: this sandbox image has no bwrap; boxes cannot be isolated in it' >&2; exit 1; };
          [ -n "$need" ] || exit 0;
          log=/tmp/skein-substrate.log;
-         { timeout 180 sudo apt-get install -y -qq $need \
-             || { timeout 120 sudo apt-get update -qq && timeout 180 sudo apt-get install -y -qq $need; }; } >"$log" 2>&1;
+         # A freshly created sandbox is still running its own first-boot apt, and apt refuses to run
+         # twice. Outlast it rather than failing the launch on a race: measured on a real rebuild,
+         # where the retry landed on "Could not get lock ... held by process 281 (apt-get)".
+         waited=0;
+         while [ "$waited" -lt 120 ]; do
+           if sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1; then
+             sleep 3; waited=$((waited + 3));
+           else break; fi;
+         done;
+         # update FIRST. A fresh image ships an empty index, where install reports "Package 'tmux'
+         # has no installation candidate" — which reads as a missing package and is a missing index.
+         { timeout 180 sudo apt-get update -qq; \
+           timeout 240 sudo apt-get install -y -qq $need \
+             || { sleep 5; timeout 180 sudo apt-get update -qq; \
+                  timeout 240 sudo apt-get install -y -qq $need; }; } >"$log" 2>&1;
          missing=''; for t in $need; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done;
          [ -z "$missing" ] || {
              echo "skein: the fleet sandbox is missing required tools:$missing";
@@ -411,7 +424,7 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
              exit 1;
          } >&2"#;
     own_sandbox(sandbox)
-        .exec(script, Duration::from_secs(400))
+        .exec(script, Duration::from_secs(900))
         .map(|_| ())
 }
 
@@ -912,13 +925,20 @@ pub fn resize_fleet(memory: &str, cpus: &str) -> Result<Vec<String>, String> {
     // The one moment when there is no sandbox at all. If the rebuild fails here — most likely a
     // confirmation `sbx create` asked for and nobody could answer — say where the work is, because
     // the boxes are gone and their checkouts went with the VM.
-    let (mem, cpu) = (memory.trim(), cpus.trim());
+    let again = format!(
+        "skein resize {}{}",
+        memory.trim(),
+        match cpus.trim() {
+            "" => String::new(),
+            cpus => format!(" {cpus}"),
+        }
+    );
     ensure_fleet(&sandbox, &fleet_mounts()).map_err(|e| {
         format!(
-            "{sandbox} was destroyed and could not be rebuilt: {e}\n\
-             every box's work is saved in its repo store under {run}; rebuild from a terminal with \
-             `skein resize {mem} {cpu}` (which can answer sbx's prompts) and each box restores \
-             on its next `skein start`"
+            "{sandbox} is not usable yet: {e}\n\
+             every box's work is saved in its repo store under {run}, and nothing is lost. \
+             `{again}` is safe to re-run — creating the sandbox is idempotent, so it retries only \
+             the step that failed, and each box restores on its next `skein start`"
         )
     })?;
 
