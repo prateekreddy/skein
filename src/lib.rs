@@ -219,6 +219,22 @@ pub fn locate_registry() -> Result<PathBuf, String> {
     Err("can't locate sandboxes.json — set $SKEIN_REGISTRY or $SKEIN_SHARED".into())
 }
 
+/// Where `locate_registry` got its answer. Worth saying out loud when the lookup fails: with neither
+/// variable set the path is derived from the *current checkout*, so running from a second clone
+/// silently looks for a store beside that clone and reports a missing registry — which reads as
+/// "your registry is broken" when it means "you are standing somewhere else".
+pub fn registry_origin() -> &'static str {
+    let set = |k: &str| env::var(k).map(|v| !v.is_empty()).unwrap_or(false);
+    if set("SKEIN_REGISTRY") {
+        "$SKEIN_REGISTRY"
+    } else if set("SKEIN_SHARED") {
+        "$SKEIN_SHARED"
+    } else {
+        "derived from this checkout (no $SKEIN_REGISTRY/$SKEIN_SHARED) — it follows your cwd, \
+         so a second clone looks for a store beside itself"
+    }
+}
+
 pub fn load_registry() -> Result<(BTreeMap<String, Sandbox>, PathBuf), String> {
     let path = locate_registry()?;
     let data = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
@@ -2385,6 +2401,26 @@ mod tests {
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_REGISTRY");
         *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    // A missing registry is reported the same way whether it was configured or guessed, and the two
+    // want opposite responses: fix the path, or go stand in the right checkout.
+    #[test]
+    fn a_registry_says_whether_it_was_configured_or_guessed_from_the_cwd() {
+        let _g = env_lock();
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_SHARED");
+        assert!(registry_origin().contains("follows your cwd"));
+        env::set_var("SKEIN_SHARED", "/somewhere");
+        assert_eq!(registry_origin(), "$SKEIN_SHARED");
+        // an explicitly set registry wins, and is named as the thing to change
+        env::set_var("SKEIN_REGISTRY", "/somewhere/sandboxes.json");
+        assert_eq!(registry_origin(), "$SKEIN_REGISTRY");
+        // set-but-empty is not set — same rule locate_registry follows
+        env::set_var("SKEIN_REGISTRY", "");
+        assert_eq!(registry_origin(), "$SKEIN_SHARED");
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_SHARED");
     }
 
     // The takeover path reaches into the source box for its branch and HEAD, and until now nothing

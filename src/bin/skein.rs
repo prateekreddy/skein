@@ -323,7 +323,13 @@ fn cmd_doctor() -> Result<(), String> {
             p.display(),
             b.len()
         ),
-        Err(e) => println!("{BAD} registry      {e}"),
+        Err(e) => {
+            println!("{BAD} registry      {e}");
+            println!(
+                "{DIM}              from {}{RESET}",
+                skein::registry_origin()
+            );
+        }
     }
     let addr = env::var("SKEIN_ADDR")
         .ok()
