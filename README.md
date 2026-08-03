@@ -84,10 +84,15 @@ More attention helpers, all free unless noted:
   the box was actually working on.
 - **Away digest** — step away and come back and skein shows "while you were away": who now needs you, who
   finished, who made progress.
-- **AI enrichment (opt-in, `SKEIN_AI=on`)** — skein runs inside an `sbx run` box where `claude` is logged in,
-  so it can spend *rationed* Haiku calls on the subscription: a one-line digest for boxes with no journal,
-  and a conservative safety gate on **Continue N** (a box is held back unless the model says it's routine).
-  Off by default because it shares the fleet's rate-limit window; lazy and cached when on.
+- **AI enrichment (opt-in — Settings → Workflow)** — skein runs inside an `sbx run` box where `claude`
+  is logged in, so it can spend *rationed* Haiku calls on the subscription with no API key: a one-line
+  summary for a box with no journal (marked ✨ and labelled as model-written, never mixed in with what
+  the box actually said), and a conservative safety gate on **Continue N** — a box the heuristic reads as
+  a routine "shall I proceed?" is held back if the model reads it as a real decision. The gate can only
+  ever *add* a hold, never grant a continue, so a flaky or absent answer errs toward asking you. Off by
+  default because these calls share the fleet's rate-limit window; lazy, on demand and cached per
+  turn-end when on — never a per-tick sweep. `$SKEIN_AI=on|off` overrides the setting, and `skein doctor`
+  reports what would actually happen (including "on, but `claude` is not on PATH").
 
 The **diff** is computed **inside the box**, against the remote base branch — `origin/<your base
 branch>`, then `origin/main`/`origin/master` — from the merge-base to the working tree, so it shows

@@ -574,6 +574,8 @@
   .dbase { position:sticky; top:0; z-index:1; padding:6px 12px; font-size:11.5px; color:var(--faint);
            background:var(--panel); border-bottom:1px solid var(--line); }
   .dbase code { font-family:var(--mono); color:var(--dim); }
+  /* provenance: any value skein did not get straight from the box says where it DID come from */
+  .prov { margin-left:8px; font-weight:400; font-size:10.5px; color:var(--faint); }
   .dbase.stale { color:var(--waiting); }   /* same yellow the fleet uses for "not current" */
   /* work tracking: one card per connection — a gateway and the token that mints at it are one
      thing, so they are one card, and a repo picks a card rather than restating half of it */
@@ -884,6 +886,8 @@
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
             <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. The default for every repo; each can override it under <b>Repositories</b>.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill">✨</span></span><span class="desc">spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked ✨ in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</span></span><input type="checkbox" id="set-ai" class="switch"></label>
+            <p class="set-note" id="set-ainote"></p>
           </section>
           <section class="set-pane" data-pane="tracking">
             <p class="set-note" id="set-syncnote"></p>
@@ -1814,7 +1818,8 @@ function loadNarration(name) {
     const sess = sesspane.querySelector(".sess"); if (!sess) return;
     sess.querySelector("#ai-sum")?.remove();   // rapid tab toggling can land two responses — keep one
     const blk = document.createElement("div"); blk.className = "blk"; blk.id = "ai-sum";
-    blk.innerHTML = `<h4>✨ summary</h4><div class="msg ai">${esc(d.summary)}</div>`;
+    blk.innerHTML = `<h4>✨ summary <span class="prov">written by Haiku from the box's last message, not by the box</span></h4>`
+      + `<div class="msg ai">${esc(d.summary)}</div>`;
     sess.prepend(blk);
   }).catch(() => {});
 }
@@ -2505,6 +2510,15 @@ function openSettings(pane = "repos") {
     document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
     document.getElementById("set-check").value = settings.check_command || "";
+    document.getElementById("set-ai").checked = !!settings.ai_enrichment;
+    // The toggle says what you asked for; this says what would actually happen. "on, but `claude`
+    // is not on PATH" is the state a checkbox alone can never show.
+    fetch("/api/health").then(r => r.json()).then(h => {
+      const note = document.getElementById("set-ainote");
+      if (!note || !h.ai) return;
+      note.textContent = h.ai.detail;
+      note.className = "set-note" + (/^on —/.test(h.ai.detail) ? " ready" : /^on,/.test(h.ai.detail) ? " gap" : "");
+    }).catch(() => {});
     renderSync(); renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
     settingsModal().classList.add("open");
     // Focus the dialog itself so esc/⏎ reach its handler; focusing the nav button instead would
@@ -2755,6 +2769,7 @@ function saveSettings() {
     base_branch: document.getElementById("set-base").value.trim(),
     ssh_key: document.getElementById("set-sshkey").value.trim(),
     check_command: document.getElementById("set-check").value.trim(),
+    ai_enrichment: document.getElementById("set-ai").checked,
   };
   // Work-tracking connections are deliberately NOT in here: they carry a credential, and this
   // object round-trips through the browser on every save. Their cards save themselves.

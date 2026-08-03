@@ -24,6 +24,9 @@ pub struct HealthReport {
     pub gh: HealthCheck,
     pub probes: HealthCheck,
     pub mailbox: HealthCheck,
+    /// Whether AI enrichment is on and can actually run. Never `ok: false` — it is opt-in, so
+    /// "off" is a correct state, not a fault; the detail says what turning it on would buy.
+    pub ai: HealthCheck,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
@@ -32,6 +35,17 @@ pub struct HealthReport {
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
 pub fn health_report() -> HealthReport {
+    let ai = HealthCheck {
+        ok: true,
+        detail: if !crate::ai_enabled() {
+            "off — Settings → Workflow turns it on: a one-line summary for boxes with no journal,              and a second opinion before Continue N resumes anything"
+                .into()
+        } else if !program_on_path("claude") {
+            "on, but `claude` is not on PATH — every call falls back to the free signals".into()
+        } else {
+            "on — rationed Haiku over your subscription, on demand and cached per turn-end".into()
+        },
+    };
     let registry = match load_registry() {
         Ok((boxes, path)) => HealthCheck {
             ok: true,
@@ -183,6 +197,7 @@ pub fn health_report() -> HealthReport {
         gh,
         probes,
         mailbox,
+        ai,
         dark_boxes,
         stale_boxes,
         runtimes: supported_runtimes(),

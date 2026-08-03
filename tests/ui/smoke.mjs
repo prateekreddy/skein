@@ -402,6 +402,33 @@ await check("a connection in use is not removed out from under its repos", async
   await page.click('.set-navi[data-pane="repos"]');
   await settle(300);
 });
+await check("AI enrichment is a visible setting, not folklore in an env var", async () => {
+  // It existed for months as $SKEIN_AI only, so nobody knew it was there. The toggle has to be
+  // findable, and it has to say what would actually happen — "on" with no `claude` on PATH is a
+  // state a checkbox alone can never show.
+  await page.click('.set-navi[data-pane="workflow"]');
+  await settle(300);
+  const box = await mustSee("#set-ai", "the AI enrichment toggle");
+  if (await box.isChecked()) throw new Error("it must default to off — the calls share the fleet's rate limit");
+  const why = await page.$eval("#set-ai", e => e.closest(".set-row").querySelector(".desc").textContent);
+  for (const claim of ["rate-limit", "Continue N", "subscription"])
+    if (!why.includes(claim)) throw new Error(`the description should explain "${claim}": ${why}`);
+  const note = await text("#set-ainote");
+  if (!/^off —/.test(note)) throw new Error(`it should report its real state, got "${note}"`);
+  await page.click("#set-ai");
+  await page.click("#set-go");
+  await settle(600);
+  const cfg = await page.evaluate(() => fetch("/api/settings").then(r => r.json()));
+  if (cfg.ai_enrichment !== true) throw new Error("the toggle didn't persist");
+  const h = await page.evaluate(() => fetch("/api/health").then(r => r.json()));
+  if (!/^on/.test(h.ai.detail)) throw new Error(`doctor should now say it's on, got "${h.ai.detail}"`);
+  if (h.ai.ok !== true) throw new Error("opt-in-and-off is not a fault, so this must never report unhealthy");
+  // Save closed the dialog — put the pane back where the following checks expect it.
+  await page.click('header .kbtn[title^="Settings"]');
+  await settle();
+  await page.click('.set-navi[data-pane="repos"]');
+  await settle(300);
+});
 await check("the pane doesn't pretend Save applies to repo cards", async () => {
   const shown = await page.$$eval("#settings .set-foot .primary", els => els.filter(e => e.offsetParent).length);
   if (shown) throw new Error("Save is offered on a pane whose fields already saved themselves");

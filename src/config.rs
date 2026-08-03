@@ -65,6 +65,14 @@ pub struct Config {
     /// it. Read once by the migration and then cleared; kept so a pre-connections `config.json`
     /// still parses. A credential was never here and never will be — this file is written 0644 and
     /// round-trips through the browser on every settings save.
+    /// Spend *rationed* Haiku calls on the Claude subscription to enrich the board: a one-line
+    /// summary for a box with no journal, and a conservative safety gate on **Continue N**.
+    ///
+    /// Off by default because skein runs inside a box where `claude` is logged in, so these calls
+    /// share the fleet's rate-limit window. `$SKEIN_AI=on|off` overrides. Lazy and cached per
+    /// turn-end when on — never a per-tick sweep. See [`crate::ai`].
+    #[serde(default)]
+    pub ai_enrichment: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
 }
@@ -125,4 +133,20 @@ pub fn save_config(c: &Config) -> Result<(), String> {
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?;
     write_atomic(&config_json(), &home, &bytes)
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            seed_gh_secret: true,
+            force_gh_secret: false,
+            default_agent: default_agent(),
+            base_branch: String::new(),
+            confirm_destroy: true,
+            ssh_key: String::new(),
+            check_command: String::new(),
+            ai_enrichment: false,
+            sync_gateway_url: String::new(),
+        }
+    }
 }

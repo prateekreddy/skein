@@ -595,6 +595,10 @@ async fn api_health() -> Json<skein::HealthReport> {
                     ok: false,
                     detail: "health task failed".into(),
                 },
+                ai: skein::HealthCheck {
+                    ok: true,
+                    detail: "health task failed".into(),
+                },
                 probes: skein::HealthCheck {
                     ok: false,
                     detail: "health task failed".into(),
