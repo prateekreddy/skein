@@ -211,7 +211,10 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     // ...while the state that must differ per box really does. Two boxes sharing this file claim
     // work as the SAME agent, which silently defeats the atomic claim the tracker exists for.
     boxed
-        .exec("echo mine > ~/.config/sync/env", Duration::from_secs(30))
+        .exec(
+            "mkdir -p ~/.config/sync && echo mine > ~/.config/sync/env",
+            Duration::from_secs(30),
+        )
         .unwrap();
     assert_eq!(
         fs::read_to_string(format!("{}/home/.config/sync/env", box_root(BOX)))

@@ -78,28 +78,50 @@ mkdir -p "$home" "$tmp" "$tree" "$(dirname "$pidfile")" || exit 1
 # security boundary, but they are not entitled to read them by accident either.
 chmod 700 "$home" "$tmp" 2>/dev/null || true
 
-# The agent state that must differ per box. Everything else in $HOME stays shared on purpose.
-#   .claude.json    — MCP registration, so each box gets its repo's own work-tracking gateway
-#   .claude/        — credentials, settings and this box's conversation history
-#   .codex/         — the same, for the other runtime
-#   .config/sync/   — the tracker identity; sharing it makes two boxes claim work as ONE agent
-private_paths=(".claude.json" ".claude" ".codex" ".config/sync")
+# Private by DEFAULT, with a short list of deliberate escapes.
+#
+# The earlier shape was the other way round — share $HOME, bind over the paths known to matter — and
+# that is unsafe for a reason no list can fix: an agent harness keeps state wherever it likes, and
+# anything unanticipated was silently SHARED, so two boxes corrupt each other quietly. This way
+# round, something unanticipated is merely private: it costs a re-download, not an identity two
+# boxes both claim work under.
+#
+# (A copy-on-write overlay would be the honest version of this, and it is unavailable here: the
+# sandbox root is ITSELF overlayfs, and overlayfs refuses an overlayfs upperdir. Measured, not
+# assumed — bwrap 0.11.1 and this kernel both support it fine.)
+#
+# Seeded into the box on first start and diverging from there: credentials, per-box conversation
+# history, and the MCP registration that points each box at its own repo's work-tracking gateway.
+seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
+# Bound back through, genuinely shared. ~/.local carries the agent CLIs themselves — software, not
+# state, and 547M of it, so copying it per box would cost gigabytes to isolate binaries every box
+# wants identical. Conversation state lives in ~/.claude, which IS seeded. The rest are package
+# caches no box needs its own copy of, plus the project-scoped directory that exists to cross boxes.
+share_paths=(".local" ".cargo" ".rustup" ".npm" "shared")
 
-binds=()
-for rel in "${private_paths[@]}"; do
+for rel in "${seed_paths[@]}"; do
   mine="$home/$rel"
-  if [ ! -e "$mine" ]; then
-    mkdir -p "$(dirname "$mine")" || exit 1
-    # Seed from the sandbox's own copy so the box starts with a logged-in agent; an absent source
-    # (a tracker identity skein has not provisioned yet) simply starts empty.
-    if [ -e "$HOME/$rel" ]; then
-      cp -a "$HOME/$rel" "$mine" 2>/dev/null || { echo "skein: could not seed $rel for $box" >&2; exit 1; }
-    else
-      mkdir -p "$mine" || exit 1
-    fi
-  fi
-  binds+=(--bind "$mine" "$HOME/$rel")
+  [ -e "$mine" ] && continue
+  [ -e "$HOME/$rel" ] || continue
+  mkdir -p "$(dirname "$mine")" || exit 1
+  cp -a "$HOME/$rel" "$mine" 2>/dev/null || { echo "skein: could not seed $rel for $box" >&2; exit 1; }
 done
+
+# $HOME first, then the shared escapes ON TOP of it. bwrap resolves every source against the
+# ORIGINAL filesystem, so these still name the sandbox's real directories even though each
+# destination now sits inside the box's private HOME — a symlink could not do this, because the
+# path it would point at is the one being shadowed.
+binds=(--bind "$home" "$HOME")
+for rel in "${share_paths[@]}"; do
+  [ -e "$HOME/$rel" ] && binds+=(--bind "$HOME/$rel" "$HOME/$rel")
+done
+# /var/tmp is world-writable and a plausible scratch path, so it is private too — but only when the
+# box root is not itself under it, or this would hide the box's own tree and socket from inside.
+# (Caught exactly that while testing from /var/tmp; the real layout is /boxes.)
+case "$root" in
+  /var/tmp/*) ;;
+  *) mkdir -p "$root/vartmp" || exit 1; binds+=(--bind "$root/vartmp" /var/tmp) ;;
+esac
 
 # Starting a box is not the same as adding a session to one. This creates the namespace, so running
 # it twice would build a SECOND namespace and server for the same box: the new server takes over the
