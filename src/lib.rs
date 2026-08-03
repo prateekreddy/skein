@@ -3752,6 +3752,62 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::remove_var("SKEIN_HOME");
     }
 
+    // A box rebuilt from a snapshot is new to sbx but not new to its user. The resize restores the
+    // previous conversation into the fresh checkout — and starting the runtime clean would leave
+    // that transcript on disk unread, with the agent opening an empty session against a tree full of
+    // context it appears not to remember. The launch spec's handoff dir is the signal.
+    #[test]
+    fn a_box_rebuilt_from_a_snapshot_resumes_instead_of_starting_over() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::remove_var("SKEIN_LAUNCH_CMD");
+        let repo = Repo {
+            id: "web".into(),
+            source: "git@github.com:o/web.git".into(),
+            work: home.join("repos/web/work").to_string_lossy().into(),
+            store: home
+                .join("repos/web/store/.claude")
+                .to_string_lossy()
+                .into(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        };
+        save_repos(std::slice::from_ref(&repo)).unwrap();
+
+        // A box with no snapshot behind it starts fresh, as it always has.
+        write_launch_spec_for_agent("web-feat-x", "feat/x", &repo, "claude").unwrap();
+        let fresh = initial_attach_argv_as("web-feat-x", "claude").join(" ");
+        assert!(
+            !fresh.contains("--continue"),
+            "an ordinary new box has nothing to continue: {fresh}"
+        );
+
+        // The same box, rebuilt: the spec now carries the snapshot it was restored from.
+        let dir = Path::new(&repo.store).join("skein/launch");
+        fs::write(
+            dir.join("web-feat-x.json"),
+            r#"{"branch":"feat/x","agent":"claude",
+                "handoff":{"source":"web-feat-x","dir":"skein/handoff-snapshots/web-feat-x/r1"}}"#,
+        )
+        .unwrap();
+        let restored = initial_attach_argv_as("web-feat-x", "claude").join(" ");
+        assert!(
+            restored.contains("claude --continue"),
+            "the restored conversation would have gone unread: {restored}"
+        );
+        // The fallback is what makes this safe for a cross-runtime takeover, whose target has no
+        // native transcript of its own and must not be left with a failed command.
+        assert!(
+            restored.contains("|| claude"),
+            "a box with nothing to continue must still start: {restored}"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn age_buckets() {
         assert!(sb("", &secs_ago(5)).age().ends_with("s ago"));

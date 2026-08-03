@@ -12,8 +12,8 @@ use crate::runtime::*;
 use crate::util::*;
 use crate::{
     agent_for_box, ai_says_hold, box_liveness, branch_from_box, ensure_kit, ensure_store,
-    fleet_boxes, locate_registry, parse_registry, repo_for_box, store_dir, store_for_box,
-    sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness, Repo,
+    fleet_boxes, launch_spec, locate_registry, parse_registry, repo_for_box, store_dir,
+    store_for_box, sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness, Repo,
 };
 use chrono::Utc;
 use std::env;
@@ -630,13 +630,36 @@ pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
 /// provider to resume some unrelated prior transcript.
 pub(crate) fn initial_attach_argv_as(name: &str, agent: &str) -> Vec<String> {
     let runtime = resolve_runtime(agent);
-    agent_attach_argv(
-        name,
-        runtime,
-        "skein-agent",
-        runtime.interactive_start,
-        true,
-    )
+    // A box that was rebuilt from a snapshot is new to sbx but not new to its user: a fleet resize
+    // restores the previous conversation into the fresh checkout, and starting the runtime clean
+    // here would leave that transcript sitting on disk, unread, while the agent opened an empty
+    // session against a tree full of context it appears not to remember.
+    //
+    // Safe for the cross-runtime takeover path, which also carries a handoff dir: `interactive_resume`
+    // is `<cli> --continue || <cli>`, so a target runtime with no native transcript of its own falls
+    // back to a fresh start on its own — the takeover brief is what carries context there.
+    let command = if restored_from_snapshot(name) {
+        runtime.interactive_resume
+    } else {
+        runtime.interactive_start
+    };
+    agent_attach_argv(name, runtime, "skein-agent", command, true)
+}
+
+/// Was this box's checkout rebuilt from a snapshot rather than started empty?
+///
+/// Read from the launch spec — the same record the provisioning script restores from — so the host
+/// and the box agree on it without a round-trip into a box that may not be up yet.
+fn restored_from_snapshot(name: &str) -> bool {
+    repo_for_box(name)
+        .and_then(|repo| launch_spec(&repo, name))
+        .and_then(|spec| {
+            spec.get("handoff")?
+                .get("dir")?
+                .as_str()
+                .map(|d| !d.trim().is_empty())
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn agent_attach_argv(
