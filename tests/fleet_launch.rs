@@ -577,6 +577,19 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     );
     std::env::set_var("SKEIN_HOME", root.join("skein"));
     std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    // Stand in for the SANDBOX's home. Without this the fake `sbx` reports this machine's real
+    // $HOME, and the launcher would seed a box from — and reconcile credentials back into — the
+    // developer's own ~/.claude. A test must not be able to touch that; the first run of this test
+    // read a real credential file, which is exactly how it was caught.
+    let sandbox_home = root.join("sandbox-home");
+    fs::create_dir_all(sandbox_home.join(".claude")).unwrap();
+    fs::write(
+        sandbox_home.join(".claude/.credentials.json"),
+        br#"{"tok":"SEEDED"}"#,
+    )
+    .unwrap();
+    let real_home = std::env::var("HOME").unwrap_or_default();
+    std::env::set_var("HOME", &sandbox_home);
     // The fleet sandbox already exists, so `ensure_fleet` goes straight to substrate + launcher.
     std::env::set_var("SKEIN_LS_CMD", format!("echo '[{{\"name\":\"{FLEET}\"}}]'"));
 
@@ -655,6 +668,16 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // such box was then unreachable, and what a user saw first was an nsenter error about a pid.
     let before = shared_record(name).unwrap().ns_pid;
     let place = own_sandbox(FLEET);
+    // A re-login inside the box, made just before the session dies: it is newer than the sandbox's
+    // copy, so the restart must carry it back — otherwise a rotated token means one login per box.
+    let box_cred = PathBuf::from(format!("{}/home/.claude/.credentials.json", box_root(name)));
+    assert_eq!(
+        fs::read_to_string(&box_cred).unwrap_or_default(),
+        r#"{"tok":"SEEDED"}"#,
+        "a new box inherits the sandbox's login rather than asking for its own"
+    );
+    std::thread::sleep(Duration::from_millis(1100)); // mtime granularity, not a race
+    fs::write(&box_cred, br#"{"tok":"RELOGIN"}"#).unwrap();
     place
         .exec(
             &format!("tmux -S {} kill-server", box_sock(name)),
@@ -678,11 +701,21 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "the anchor is a new process, so the placement must name it — a stale pid addresses nothing"
     );
 
+    // ---- one login, reused by every box, in whichever direction it was made ----
+    // Seeding alone answers "log in once" only for a box that has never run. A re-login inside a
+    // box must reach the next box too, or a rotated token quietly means one login per box.
+    assert_eq!(
+        fs::read_to_string(sandbox_home.join(".claude/.credentials.json")).unwrap_or_default(),
+        r#"{"tok":"RELOGIN"}"#,
+        "a login made inside a box must become the seed for the next one"
+    );
+
     let _ = stop_box(name);
     forget_place(name);
     let _ = Command::new("sudo")
         .args(["rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
         .status();
+    std::env::set_var("HOME", real_home);
     std::env::remove_var("SKEIN_LS_CMD");
     let _ = fs::remove_dir_all(&root);
 }

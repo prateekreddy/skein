@@ -124,6 +124,26 @@ for rel in "${seed_paths[@]}"; do
   cp -a "$HOME/$rel" "$mine" 2>/dev/null || { echo "skein: could not seed $rel for $box" >&2; exit 1; }
 done
 
+# Credentials seed downward like everything else, but they also flow BACK — the only state here that
+# does. Seeding alone is a one-way copy on first start, which answers "log in once" for a box that
+# has never run and for nothing else: a login done inside one box would stay there, and a refresh
+# that rotates the token would leave the sandbox's copy dead, so every box created afterwards would
+# start logged out and need its own login. That is the opposite of once.
+#
+# Newest wins, in whichever direction. A login anywhere becomes the seed for every box started after
+# it. Safe because every box here is the same person — boxes are isolated from each other's *state*,
+# not from each other's identity — and the file is written whole, so there is no half-copied token.
+for rel in ".claude/.credentials.json" ".codex/auth.json"; do
+  mine="$home/$rel"; canon="$HOME/$rel"
+  if [ -e "$mine" ] && { [ ! -e "$canon" ] || [ "$mine" -nt "$canon" ]; }; then
+    mkdir -p "$(dirname "$canon")" 2>/dev/null \
+      && cp -p "$mine" "$canon" 2>/dev/null && chmod 600 "$canon" 2>/dev/null
+  elif [ -e "$canon" ] && { [ ! -e "$mine" ] || [ "$canon" -nt "$mine" ]; }; then
+    mkdir -p "$(dirname "$mine")" 2>/dev/null \
+      && cp -p "$canon" "$mine" 2>/dev/null && chmod 600 "$mine" 2>/dev/null
+  fi
+done
+
 # $HOME first, then the shared escapes ON TOP of it. bwrap resolves every source against the
 # ORIGINAL filesystem, so these still name the sandbox's real directories even though each
 # destination now sits inside the box's private HOME — a symlink could not do this, because the
