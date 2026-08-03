@@ -638,11 +638,33 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
 pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String> {
     let relative = format!("skein/handoff-snapshots/{name}/{run}");
     let snapshot = format!("{store}/{relative}");
-    let boxed = place_of(name).ok_or_else(|| format!("box {name} is not placed"))?;
+    // Addressed from the SANDBOX, not through the box's namespace.
+    //
+    // A snapshot exists to rescue work, so requiring the box's *session* to be alive to take one is
+    // backwards — and it fails exactly when it is needed most: a fleet box loses its tmux server
+    // whenever the sandbox cycles, and the first thing resize did was refuse with `nsenter: cannot
+    // open /proc/<pid>/ns/user`, leaving the work it was trying to save unreachable.
+    //
+    // Nothing here needs the namespace anyway. A box's tree and its private HOME are ordinary
+    // directories in the sandbox (`/boxes/<name>/{tree,home}`), so naming them directly reads the
+    // same bytes without entering anything. A legacy box keeps the old path: its sandbox IS the box.
+    let placed = shared_record(name);
+    let (boxed, enter, home) = match &placed {
+        Some(record) => (
+            own_sandbox(&record.sandbox),
+            format!("cd {}; ", sh_quote(&format!("{}/tree", box_root(name)))),
+            format!("{}/home", box_root(name)),
+        ),
+        None => (
+            place_of(name).ok_or_else(|| format!("box {name} is not placed"))?,
+            String::new(),
+            "$HOME".to_string(),
+        ),
+    };
     // Written straight into the store, which is host-mounted and readable from both sides — rather
     // than built in the box's private /tmp and copied out a file at a time.
     let build = format!(
-        "set -e; mkdir -p {s}; \
+        "set -e; {enter}mkdir -p {s}; \
          git bundle create {s}/repo.bundle --all; \
          git diff --cached --binary HEAD > {s}/index.patch; \
          git diff --binary > {s}/worktree.patch; \
@@ -656,7 +678,7 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
         s = sh_quote(&snapshot),
         n = sh_quote(name),
         // A box already in the fleet host-binds its transcript; one being migrated in does not.
-        agent_state = agent_state_tar(&snapshot, shared_record(name).is_none()),
+        agent_state = agent_state_tar(&snapshot, placed.is_none(), &home),
     );
     boxed.exec(&build, Duration::from_secs(600))?;
     Ok(relative)
@@ -683,7 +705,7 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
 /// * A **box being migrated in** from its own sandbox has it on VM-local disk, and the VM is about
 ///   to stop. Leaving it out there is not an optimisation, it is losing the conversation; this is
 ///   precisely the case where the box has years of context and no host copy of any of it.
-fn agent_state_tar(snapshot: &str, transcript_is_vm_local: bool) -> String {
+fn agent_state_tar(snapshot: &str, transcript_is_vm_local: bool, home: &str) -> String {
     let mut carried: Vec<&str> = vec![
         ".claude/history.jsonl", // the prompt history
         ".claude/todos",         // in-flight task list
@@ -701,10 +723,13 @@ fn agent_state_tar(snapshot: &str, transcript_is_vm_local: bool) -> String {
         .join(" ");
     // Only the paths that exist: tar fails the whole archive on a missing member, and which of these
     // a box has depends on which runtime it ran.
+    // `home` is the box's private HOME as seen from wherever this runs: an absolute path in the
+    // sandbox for a fleet box, and literally `$HOME` for a legacy one entered through its own place.
     format!(
-        "have=''; for p in {list}; do [ -e \"$HOME/$p\" ] && have=\"$have $p\"; done; \
-         if [ -n \"$have\" ]; then tar -C \"$HOME\" -czf {s}/agent-state.tgz $have; \
+        "have=''; for p in {list}; do [ -e \"{h}/$p\" ] && have=\"$have $p\"; done; \
+         if [ -n \"$have\" ]; then tar -C \"{h}\" -czf {s}/agent-state.tgz $have; \
          else tar -czf {s}/agent-state.tgz --files-from /dev/null; fi",
+        h = home,
         s = sh_quote(snapshot),
     )
 }
@@ -1347,16 +1372,23 @@ mod tests {
     // that and tarred up real transcripts — the harness cannot fake a VM it has to enter.
     #[test]
     fn a_migrating_box_carries_its_conversation_and_a_fleet_box_does_not() {
-        let migrating = agent_state_tar("/snap", true);
+        let migrating = agent_state_tar("/snap", true, "$HOME");
         assert!(
             migrating.contains(".claude/projects") && migrating.contains(".codex/sessions"),
             "a box moving in from its own sandbox would lose its whole conversation: {migrating}"
         );
 
-        let already_in = agent_state_tar("/snap", false);
+        let already_in = agent_state_tar("/snap", false, "/boxes/web-main/home");
         assert!(
             !already_in.contains(".claude/projects"),
             "the transcript is host-bound already; copying it is pure virtiofs waste: {already_in}"
+        );
+
+        // A fleet box's HOME is named absolutely, because the tar runs in the SANDBOX rather than
+        // inside the box — that is what lets a box whose session has died still have its work saved.
+        assert!(
+            already_in.contains("/boxes/web-main/home") && !already_in.contains("$HOME"),
+            "a dead box's private HOME must still be addressable: {already_in}"
         );
 
         // The allowlist rule holds on both paths — this is host-side shared data.
