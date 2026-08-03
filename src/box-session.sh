@@ -2,13 +2,23 @@
 # skein box-session.sh — start one box inside a shared sandbox.
 #
 # Several boxes live in one sbx sandbox so that memory is a pool they share rather than N
-# reservations that sum. A shared VM does not hand out /tmp and $HOME per box, so this makes them
-# private deliberately: a bwrap mount namespace with the box's own directories bound over both.
+# reservations that sum. A shared VM does not hand out /tmp and the agent's own state per box, so
+# this makes them private deliberately, in a bwrap mount namespace.
 #
 # Without it, two boxes running a suite that writes /tmp/fixture stomp each other — and far worse,
 # they share ~/.claude.json (so every box gets the same MCP servers, defeating per-repo work-tracking
 # gateways) and ~/.config/sync/env (so two boxes claim work as the SAME agent, silently defeating the
 # atomic claim the tracker exists for).
+#
+# It binds those PATHS rather than the whole of $HOME, and the difference is not a refinement — it is
+# the difference between a box that works and one that cannot start. `claude` itself lives at
+# ~/.local/bin/claude and its credentials at ~/.claude/, so a box handed an empty private $HOME has
+# no agent and no way to authenticate one. Binding only what must differ also leaves ~/.cargo,
+# ~/.rustup and ~/.npm SHARED, so boxes reuse one toolchain and one build cache instead of each
+# paying for its own.
+#
+# Each private path is seeded from the sandbox's copy on first start, which is how a box inherits a
+# working, logged-in agent and then diverges from it.
 #
 # usage: box-session.sh <box> <root> <pidfile> <session> <cmd…>
 #
@@ -64,9 +74,32 @@ tree="$root/tree"
 sock="$root/session.sock"
 
 mkdir -p "$home" "$tmp" "$tree" "$(dirname "$pidfile")" || exit 1
-# 0700: the box's HOME holds its tracker token and its MCP registration. Other boxes here are not a
-# security boundary, but they are not entitled to read it by accident either.
+# 0700: this holds the box's tracker token and its agent credentials. Other boxes here are not a
+# security boundary, but they are not entitled to read them by accident either.
 chmod 700 "$home" "$tmp" 2>/dev/null || true
+
+# The agent state that must differ per box. Everything else in $HOME stays shared on purpose.
+#   .claude.json    — MCP registration, so each box gets its repo's own work-tracking gateway
+#   .claude/        — credentials, settings and this box's conversation history
+#   .codex/         — the same, for the other runtime
+#   .config/sync/   — the tracker identity; sharing it makes two boxes claim work as ONE agent
+private_paths=(".claude.json" ".claude" ".codex" ".config/sync")
+
+binds=()
+for rel in "${private_paths[@]}"; do
+  mine="$home/$rel"
+  if [ ! -e "$mine" ]; then
+    mkdir -p "$(dirname "$mine")" || exit 1
+    # Seed from the sandbox's own copy so the box starts with a logged-in agent; an absent source
+    # (a tracker identity skein has not provisioned yet) simply starts empty.
+    if [ -e "$HOME/$rel" ]; then
+      cp -a "$HOME/$rel" "$mine" 2>/dev/null || { echo "skein: could not seed $rel for $box" >&2; exit 1; }
+    else
+      mkdir -p "$mine" || exit 1
+    fi
+  fi
+  binds+=(--bind "$mine" "$HOME/$rel")
+done
 
 # Starting a box is not the same as adding a session to one. This creates the namespace, so running
 # it twice would build a SECOND namespace and server for the same box: the new server takes over the
@@ -88,7 +121,7 @@ rm -f "$sock"
 exec bwrap \
   --dev-bind / / \
   --bind "$tmp" /tmp \
-  --bind "$home" "$HOME" \
+  "${binds[@]}" \
   -- \
   bash -lc '
     session="$1"; sock="$2"; pidfile="$3"; tree="$4"; shift 4

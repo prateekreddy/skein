@@ -48,9 +48,14 @@ pub enum Where {
     /// getting either detail wrong looks like a permissions bug rather than a missing flag.
     Shared {
         ns_pid: u32,
-        /// The box's private HOME. Explicit rather than inherited: `nsenter` carries the caller's
-        /// environment in, so without this a box would read skein's `$HOME`, not its own — and
-        /// `~/.claude.json` and `~/.config/sync/env` are exactly the files that must not be shared.
+        /// The HOME a script runs with — the sandbox's own path, not a private directory.
+        ///
+        /// Explicit rather than inherited, because `nsenter` carries the caller's environment in and
+        /// a script that reads `~` must read the box's view of it. The privacy is in the *mounts*:
+        /// `box-session.sh` binds the few paths that must differ per box (`~/.claude.json`,
+        /// `~/.claude`, `~/.codex`, `~/.config/sync`) and leaves the rest shared. Replacing HOME
+        /// outright was the earlier design and it could not work — `claude` lives under `~/.local/bin`
+        /// and its credentials under `~/.claude`, so the box had no agent to start.
         home: String,
         /// The box's checkout. Every script skein sends assumes it starts at the repo root.
         tree: String,

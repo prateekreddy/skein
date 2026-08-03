@@ -175,7 +175,10 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         &PlaceRecord {
             sandbox: FLEET.into(),
             ns_pid: anchor,
-            home: format!("{}/home", box_root(BOX)),
+            // The sandbox's own HOME: a box no longer gets an empty private one. `claude` lives at
+            // ~/.local/bin and its credentials at ~/.claude, so replacing HOME wholesale left a box
+            // with no agent to run. Privacy comes from binding the few paths that must differ.
+            home: std::env::var("HOME").unwrap_or_default(),
             tree: tree.clone(),
             sock: box_sock(BOX),
         },
@@ -193,13 +196,29 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         tree,
         "scripts start at the repo root, which nsenter does not inherit"
     );
-    assert_eq!(
+    // The agent and its credentials survive, because HOME is not replaced any more...
+    assert!(
         boxed
-            .exec("echo $HOME", Duration::from_secs(30))
+            .exec(
+                "command -v claude >/dev/null && echo yes",
+                Duration::from_secs(30)
+            )
+            .unwrap()
+            .trim()
+            == "yes",
+        "a box with no agent CLI cannot start one — this is what binding all of HOME broke"
+    );
+    // ...while the state that must differ per box really does. Two boxes sharing this file claim
+    // work as the SAME agent, which silently defeats the atomic claim the tracker exists for.
+    boxed
+        .exec("echo mine > ~/.config/sync/env", Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(format!("{}/home/.config/sync/env", box_root(BOX)))
             .unwrap()
             .trim(),
-        format!("{}/home", box_root(BOX)),
-        "and read the box's own HOME — ~/.claude.json must never be the shared one"
+        "mine",
+        "the box's tracker identity landed in its own copy"
     );
     assert_eq!(
         boxed
