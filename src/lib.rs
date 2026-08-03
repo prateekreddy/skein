@@ -11,6 +11,7 @@ mod diff;
 mod files;
 mod health;
 mod mailbox;
+mod place;
 mod repos;
 mod runtime;
 mod sandbox;
@@ -28,6 +29,7 @@ pub use diff::*;
 pub use files::*;
 pub use health::*;
 pub use mailbox::*;
+pub use place::*;
 pub use repos::*;
 pub use runtime::*;
 pub use sandbox::*;
@@ -1214,8 +1216,11 @@ fn copy_guest_file(name: &str, guest: &str, host: &Path) -> Result<(), String> {
     ));
     let stdout = fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
     let stderr = fs::File::create(&err).map_err(|e| format!("create {}: {e}", err.display()))?;
-    let mut child = Command::new("sbx")
-        .args(["exec", name, "cat", guest])
+    let argv = place_of(name)
+        .ok_or("invalid box name")?
+        .raw_argv(&["cat", guest]);
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .stdout(stdout)
         .stderr(stderr)

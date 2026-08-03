@@ -6,6 +6,7 @@
 //! this module rather than to every feature that touches one.
 
 use crate::config::*;
+use crate::place::place_of;
 use crate::runtime::*;
 use crate::util::*;
 use crate::{
@@ -504,18 +505,9 @@ pub(crate) fn sbx_guest_output(
     shell: &str,
     timeout: Duration,
 ) -> Result<String, String> {
-    let mut command = Command::new("sbx");
-    command.args(["exec", name, "bash", "-lc", shell]);
-    let out = bounded_output(&mut command, "sbx exec", timeout)?;
-    if !out.status.success() {
-        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!("sbx exec exited {}", out.status)
-        } else {
-            detail
-        });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    place_of(name)
+        .ok_or("invalid box name")?
+        .exec(shell, timeout)
 }
 
 // ---------- work tracking: wiring a box to the sync gateway ----------
@@ -544,32 +536,9 @@ pub(crate) fn guest_write(
     stdin: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    use std::io::Write;
-    let mut child = Command::new("sbx")
-        .args(["exec", "-i", name, "bash", "-lc", shell])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("sbx exec: {e}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or("sbx exec: no stdin")?
-        .write_all(stdin.as_bytes())
-        .map_err(|e| format!("sbx exec: writing stdin: {e}"))?;
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) if status.success() => return Ok(()),
-            Some(status) => return Err(format!("sbx exec exited {status}")),
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                return Err("sbx exec timed out".into());
-            }
-            None => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
+    place_of(name)
+        .ok_or("invalid box name")?
+        .write(shell, stdin.as_bytes(), timeout)
 }
 
 // ---------- transcript: the conversation as the RECORD has it, not as the screen had it ----------

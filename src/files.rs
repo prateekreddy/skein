@@ -6,12 +6,12 @@
 //! for a clone-mode box the two are different checkouts on different branches.
 
 use crate::answer::Answer;
+use crate::place::place_of;
 use crate::util::*;
 use crate::{box_liveness, lookup_dir, sbx_guest_output, valid_name, Liveness};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 /// One entry in a workspace directory listing.
@@ -145,18 +145,9 @@ pub(crate) fn sbx_guest_bytes(
     shell: &str,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new("sbx");
-    command.args(["exec", name, "bash", "-lc", shell]);
-    let out = bounded_output(&mut command, "sbx exec", timeout)?;
-    if !out.status.success() {
-        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!("sbx exec exited {}", out.status)
-        } else {
-            detail
-        });
-    }
-    Ok(out.stdout)
+    place_of(name)
+        .ok_or("invalid box name")?
+        .bytes(shell, timeout)
 }
 
 /// Read a file inside the box. The status line comes first as text, the file's raw bytes after it.
