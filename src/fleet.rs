@@ -391,6 +391,40 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
     Ok(())
 }
 
+/// Everything in a box that is not already on a remote, written into the repo's host-mounted store.
+///
+/// The fleet sandbox's memory and CPUs are fixed when it is created, so changing them means
+/// destroying it — and every box's checkout is VM-local, which is exactly what makes builds fast and
+/// makes this necessary. Committed-but-unpushed work, staged changes, unstaged changes and untracked
+/// files each need their own artifact: a bundle preserves history a patch cannot, and `git diff`
+/// covers neither untracked files nor the index/worktree distinction.
+///
+/// Returns the path *relative to the store*, which is the form the launch spec carries and the
+/// provisioning script validates — it refuses anything not under `skein/handoff-snapshots/`.
+pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String> {
+    let relative = format!("skein/handoff-snapshots/{name}/{run}");
+    let snapshot = format!("{store}/{relative}");
+    let boxed = place_of(name).ok_or_else(|| format!("box {name} is not placed"))?;
+    // Written straight into the store, which is host-mounted and readable from both sides — rather
+    // than built in the box's private /tmp and copied out a file at a time.
+    let build = format!(
+        "set -e; mkdir -p {s}; \
+         git bundle create {s}/repo.bundle --all; \
+         git diff --cached --binary HEAD > {s}/index.patch; \
+         git diff --binary > {s}/worktree.patch; \
+         git ls-files --others --exclude-standard -z -- . ':(exclude).claude' ':(exclude).claude/**' > {s}/untracked.list; \
+         if [ -s {s}/untracked.list ]; then tar --null -T {s}/untracked.list -czf {s}/untracked.tgz; \
+         else tar -czf {s}/untracked.tgz --files-from /dev/null; fi; \
+         rm -f {s}/untracked.list; \
+         printf '{{\"box\":\"%s\",\"branch\":\"%s\",\"head\":\"%s\"}}\\n' {n} \
+           \"$(git rev-parse --abbrev-ref HEAD)\" \"$(git rev-parse HEAD)\" > {s}/manifest.json",
+        s = sh_quote(&snapshot),
+        n = sh_quote(name),
+    );
+    boxed.exec(&build, Duration::from_secs(600))?;
+    Ok(relative)
+}
+
 /// What a box clones from. The registered source when it is a URL — a box should start from the
 /// same base the diff is taken against, not from whatever is stale or half-committed in the host's
 /// clone. For a repo adopted in place there is no URL, so the host clone is it; that is mounted

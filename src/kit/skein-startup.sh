@@ -176,9 +176,23 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
     *) echo "[skein-kit] refusing unsafe handoff path: $handoff_dir" >&2; exit 1 ;;
   esac
   [ -s "$snapshot/repo.bundle" ] || { echo "[skein-kit] handoff bundle missing" >&2; exit 1; }
-  git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD \
-    && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD \
-    || { echo "[skein-kit] could not restore handoff commit" >&2; exit 1; }
+  # Two bundle shapes reach here. A cross-runtime takeover bundles HEAD alone, because it is moving
+  # one branch to a new box. A fleet resize bundles --all, because it is reconstructing a box that
+  # may have been carrying several local branches — and restoring only HEAD there would silently
+  # drop the rest, which looks like a clean box rather than like lost work. So prefer every branch
+  # and fall back, rather than assuming either shape.
+  restored=""
+  if git -C "$clone_root" fetch "$snapshot/repo.bundle" \
+       'refs/heads/*:refs/remotes/snapshot/*' >/dev/null 2>&1 \
+     && git -C "$clone_root" rev-parse --verify -q "refs/remotes/snapshot/$branch" >/dev/null; then
+    git -C "$clone_root" checkout -B "$branch" "refs/remotes/snapshot/$branch" 2>/dev/null \
+      && restored="all-branches"
+  fi
+  if [ -z "$restored" ]; then
+    git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD \
+      && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD \
+      || { echo "[skein-kit] could not restore handoff commit" >&2; exit 1; }
+  fi
   if [ -s "$snapshot/index.patch" ]; then
     git -C "$clone_root" apply --binary --index "$snapshot/index.patch" \
       || { echo "[skein-kit] could not restore staged changes" >&2; exit 1; }

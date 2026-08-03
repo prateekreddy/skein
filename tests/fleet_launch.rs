@@ -306,6 +306,78 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         "a lossy UTF-8 hop here corrupts every binary the box serves"
     );
 
+    // ---- the snapshot that has to survive a resize ----
+    // Changing the fleet's memory or CPUs means destroying the sandbox, and every box's checkout is
+    // VM-local — that is what makes builds fast and what makes this the one path where a bug costs
+    // real work. So each kind of not-yet-pushed state is made distinct here and checked separately:
+    // a commit that is on no remote, a staged change, an unstaged change, and an untracked file.
+    boxed
+        .exec(
+            "git -c user.email=t@e.com -c user.name=t commit -qm local --allow-empty \
+             && echo staged > s.txt && git add s.txt \
+             && echo hello-unstaged >> README.md \
+             && echo loose > u.txt",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    let head = boxed
+        .exec("git rev-parse HEAD", Duration::from_secs(30))
+        .unwrap()
+        .trim()
+        .to_string();
+    let relative = snapshot_box(BOX, &store.to_string_lossy(), "resize-run").expect("snapshot");
+    assert!(
+        relative.starts_with("skein/handoff-snapshots/"),
+        "the provisioning script refuses any path outside that prefix: {relative}"
+    );
+    let snap = store.join(&relative);
+    for artifact in [
+        "repo.bundle",
+        "index.patch",
+        "worktree.patch",
+        "untracked.tgz",
+    ] {
+        assert!(
+            snap.join(artifact).metadata().map(|m| m.len()).unwrap_or(0) > 0,
+            "{artifact} is empty — one whole class of unpushed work would be lost"
+        );
+    }
+    // Restore into a fresh clone, which is exactly what a resized box comes up as. `--all` rather
+    // than `HEAD`: a bundle of HEAD alone drops every other local branch the box was carrying.
+    let restored = root.join("restored");
+    sh(&format!(
+        "set -e; git clone -q --branch main {remote} {r}; cd {r}; \
+         git fetch -q {s}/repo.bundle 'refs/heads/*:refs/remotes/snap/*'; \
+         git checkout -q -B feat/auth snap/feat/auth; \
+         git apply --binary --index {s}/index.patch; \
+         git apply --binary {s}/worktree.patch; \
+         tar -xzf {s}/untracked.tgz",
+        r = restored.display(),
+        s = snap.display()
+    ));
+    assert_eq!(
+        sh(&format!("git -C {} rev-parse HEAD", restored.display())),
+        head,
+        "the unpushed commit did not survive the bundle"
+    );
+    assert_eq!(
+        sh(&format!(
+            "git -C {} diff --cached --name-only",
+            restored.display()
+        )),
+        "s.txt",
+        "the staged change came back unstaged, which loses the index"
+    );
+    assert!(
+        sh(&format!("cat {}/README.md", restored.display())).contains("hello-unstaged"),
+        "the unstaged change was lost"
+    );
+    assert_eq!(
+        sh(&format!("cat {}/u.txt", restored.display())),
+        "loose",
+        "the untracked file was lost — no patch covers these"
+    );
+
     // ---- liveness, without entering anything ----
     let sock = box_sock(BOX);
     assert!(
