@@ -170,6 +170,19 @@ pub(crate) fn host_of(url: &str) -> Option<&str> {
 
 /// Run a program in the repo dir ($SKEIN_REPO, else cwd); returns (stdout, stderr, exit-code).
 pub(crate) fn run_capture(prog: &str, args: &[&str]) -> Result<(String, String, i32), String> {
+    let timeout = env::var("SKEIN_ACTION_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30));
+    run_capture_for(prog, args, timeout)
+}
+
+/// Run a program with the terminal attached: the child owns stdin/stdout/stderr, and there is no
+/// timeout. For steps that are interactive *and* slow — `sbx create` asks for confirmation and then
+/// boots a microVM. Capturing its output closes stdin, so the prompt reads EOF and sbx aborts with
+/// "user cancelled operation": a question nobody was shown, reported as a refusal.
+pub(crate) fn run_attached(prog: &str, args: &[&str]) -> Result<i32, String> {
     let mut c = Command::new(prog);
     c.args(args);
     if let Ok(repo) = env::var("SKEIN_REPO") {
@@ -177,11 +190,25 @@ pub(crate) fn run_capture(prog: &str, args: &[&str]) -> Result<(String, String, 
             c.current_dir(repo);
         }
     }
-    let timeout = env::var("SKEIN_ACTION_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(30));
+    let status = c
+        .status()
+        .map_err(|e| format!("{prog} failed to start: {e}"))?;
+    Ok(status.code().unwrap_or(-1))
+}
+
+/// [`run_capture`] with the timeout named at the call site, for work the 30s action budget doesn't fit.
+pub(crate) fn run_capture_for(
+    prog: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(String, String, i32), String> {
+    let mut c = Command::new(prog);
+    c.args(args);
+    if let Ok(repo) = env::var("SKEIN_REPO") {
+        if !repo.is_empty() {
+            c.current_dir(repo);
+        }
+    }
     let out = output_with_timeout(&mut c, timeout).ok_or_else(|| {
         format!(
             "{prog} failed to start or exceeded the {}s action timeout",

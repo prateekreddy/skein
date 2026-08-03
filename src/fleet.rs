@@ -24,6 +24,7 @@ use crate::repos::{branch_of, is_git_url, load_repos, repo_for_box, Repo};
 use crate::util::*;
 use crate::{agent_for_box, fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
 use chrono::Utc;
+use std::io::IsTerminal;
 use std::time::Duration;
 
 /// The launcher, embedded so it can be installed into a sandbox that has never seen this repo.
@@ -339,12 +340,30 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
         Some(false) => {
             let argv = create_argv(sandbox, mounts);
             let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-            let (out, err, code) = run_capture("sbx", &args)?;
-            if code != 0 {
-                let detail = if err.trim().is_empty() { out } else { err };
+            // `sbx create` confirms before it mounts host directories, and creating the fleet
+            // sandbox mounts several. When a terminal is there, hand it over — the question is for
+            // the person running the command. When there isn't (the server), capture it, but on a
+            // budget that fits booting a microVM rather than the 30s action timeout.
+            let failure = if std::io::stdin().is_terminal() {
+                match run_attached("sbx", &args)? {
+                    0 => None,
+                    code => Some(format!("sbx exited {code}")),
+                }
+            } else {
+                let (out, err, code) = run_capture_for("sbx", &args, Duration::from_secs(900))?;
+                match code {
+                    0 => None,
+                    _ => Some({
+                        let detail = if err.trim().is_empty() { out } else { err };
+                        detail.trim().to_string()
+                    }),
+                }
+            };
+            if let Some(detail) = failure {
                 return Err(format!(
-                    "creating fleet sandbox {sandbox}: {}",
-                    detail.trim()
+                    "creating fleet sandbox {sandbox}: {detail}\n\
+                     if that was a confirmation you never saw, create it once by hand:\n  sbx {}",
+                    args.join(" ")
                 ));
             }
         }
