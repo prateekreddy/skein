@@ -34,8 +34,13 @@ use std::time::Duration;
 pub enum Where {
     /// The sandbox is this box's alone. Nothing to enter; the sandbox IS the box.
     OwnSandbox,
-    /// The sandbox hosts several boxes. This one lives in a bwrap namespace whose init process is
-    /// `ns_pid`, with its own `/tmp` and `$HOME` bound in there.
+    /// The sandbox hosts several boxes. This one lives in a bwrap namespace anchored by `ns_pid`,
+    /// with its own `/tmp` and `$HOME` bound in there.
+    ///
+    /// `ns_pid` is the box's **tmux server**, not the process that launched it. The launcher starts
+    /// the session and exits — tmux double-forks away from it — so its pid names a corpse while the
+    /// box runs happily. The server is the honest anchor: it is in the namespace, and it lives
+    /// exactly as long as the box. Box alive ⇔ server alive ⇔ namespace joinable.
     ///
     /// Reaching in means joining that namespace. Both the user and mount namespaces have to be
     /// joined together — joining the mount namespace alone is refused — and credentials must be
@@ -49,6 +54,10 @@ pub enum Where {
         home: String,
         /// The box's checkout. Every script skein sends assumes it starts at the repo root.
         tree: String,
+        /// The box's tmux socket, deliberately *outside* the private mounts so it is the same path
+        /// inside and out. That is what lets skein list, attach to and kill a box's session from
+        /// the sandbox without entering its namespace first — and `ns_pid` is that very server.
+        sock: String,
     },
 }
 
@@ -65,14 +74,18 @@ pub struct Place {
 
 /// What skein records about a box living in a shared sandbox, written when its session starts.
 ///
-/// A file rather than a lookup, because the namespace's init pid is knowable only to whoever
+/// A file rather than a lookup, because the namespace's anchor pid is knowable only to whoever
 /// launched it, and skein must be able to reach a box after a restart of its own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceRecord {
     pub sandbox: String,
+    /// The box's tmux server — see [`Where::Shared::ns_pid`] for why it is that process and not
+    /// the one that launched it.
     pub ns_pid: u32,
     pub home: String,
     pub tree: String,
+    #[serde(default)]
+    pub sock: String,
 }
 
 fn place_record_path(name: &str) -> PathBuf {
@@ -125,6 +138,7 @@ pub fn place_of(name: &str) -> Option<Place> {
                     ns_pid: rec.ns_pid,
                     home: rec.home,
                     tree: rec.tree,
+                    sock: rec.sock,
                 },
             });
         }
@@ -154,6 +168,24 @@ impl Place {
         argv.push("-lc".into());
         argv.push(self.wrap(script));
         argv
+    }
+
+    /// How to spell `tmux` for this box: bare when the sandbox is the box, socket-qualified when it
+    /// is shared. A shell fragment, because every tmux call skein makes is already part of one.
+    ///
+    /// Session *names* stay the same in both shapes (`skein-agent`, `skein-agent-<runtime>`) — under
+    /// the shared model the socket is what separates one box's sessions from another's. Two boxes
+    /// with a `skein-agent` session are then unambiguous, where sharing a server would collide on
+    /// the first name and silently attach a box to its neighbour's agent.
+    ///
+    /// Note there is no `nsenter` here: the socket lives outside the box's private mounts, so the
+    /// server answers from the sandbox directly. Commands the *session* runs are inside the
+    /// namespace regardless, because the server itself is.
+    pub fn tmux(&self) -> String {
+        match &self.at {
+            Where::OwnSandbox => "tmux".into(),
+            Where::Shared { sock, .. } => format!("tmux -S {}", sh_quote(sock)),
+        }
     }
 
     /// The `nsenter` hop that puts a command inside this box's namespace — empty when the sandbox
@@ -328,6 +360,7 @@ mod tests {
                 ns_pid: 4242,
                 home: "/boxes/web-main/home".into(),
                 tree: "/boxes/web-main/tree".into(),
+                sock: "/boxes/web-main/session.sock".into(),
             },
         };
         assert_eq!(
@@ -365,6 +398,36 @@ mod tests {
                 "cat",
                 "/tmp/artifact",
             ]
+        );
+    }
+
+    // A box's tmux server is addressed by socket, never by nsenter — the socket sits outside the
+    // private mounts precisely so liveness and attach work from the sandbox. Under the original
+    // model the spelling stays bare `tmux`, so nothing about today's boxes changes.
+    #[test]
+    fn a_shared_box_tmux_server_is_addressed_by_its_own_socket() {
+        let own = Place {
+            name: "web-main".into(),
+            sandbox: "web-main".into(),
+            at: Where::OwnSandbox,
+        };
+        assert_eq!(own.tmux(), "tmux");
+
+        let shared = Place {
+            name: "web-main".into(),
+            sandbox: "skein-fleet".into(),
+            at: Where::Shared {
+                ns_pid: 4242,
+                home: "/boxes/web-main/home".into(),
+                tree: "/boxes/web-main/tree".into(),
+                sock: "/boxes/web-main/session.sock".into(),
+            },
+        };
+        assert_eq!(shared.tmux(), "tmux -S '/boxes/web-main/session.sock'");
+        assert!(
+            !shared.tmux().contains("nsenter"),
+            "the server answers from the sandbox; entering its namespace to talk to it would be \
+             both unnecessary and wrong — the socket does not exist inside the private /tmp"
         );
     }
 
@@ -407,6 +470,7 @@ mod tests {
                 ns_pid: std::process::id(),
                 home: "/boxes/web-main/home".into(),
                 tree: "/boxes/web-main/tree".into(),
+                sock: "/boxes/web-main/session.sock".into(),
             },
         )
         .unwrap();
@@ -422,6 +486,7 @@ mod tests {
                 ns_pid: 0,
                 home: "/h".into(),
                 tree: "/t".into(),
+                sock: "/s".into(),
             },
         )
         .unwrap();
