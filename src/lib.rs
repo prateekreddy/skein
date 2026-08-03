@@ -801,13 +801,54 @@ fn registry_entry_for_box(name: &str) -> Option<Sandbox> {
 
 const KIT_SPEC_YAML: &str = include_str!("kit/spec.yaml");
 
+/// The provisioning script, kept as a real file rather than inline in the kit spec.
+///
+/// It has two callers that must not drift: sbx runs it as this kit's startup hook in a `--clone`
+/// sandbox, and [`crate::fleet::provision_script`] runs the same bytes inside a box's namespace in
+/// the shared sandbox. Provisioning is a dozen steps — the store link, the settings merge, the
+/// branch checkout, the handoff restore, shared-home, the agent guide, the Codex hooks, the skills,
+/// the boot report, the sync install — and a second implementation of them for the fleet path would
+/// be a second set of ways for a box to come up looking healthy with no hooks wired.
+pub(crate) const KIT_STARTUP_SH: &str = include_str!("kit/skein-startup.sh");
+
+/// The marker line in the spec that [`kit_spec`] replaces with the script body.
+const KIT_STARTUP_MARKER: &str = "        # @SKEIN_STARTUP_SCRIPT@";
+
+/// The kit spec with the startup script spliced back into its `content:` block.
+///
+/// A YAML block scalar carries its indentation, so the script is re-indented to the eight spaces the
+/// `content: |` level expects — and blank lines stay genuinely blank, because trailing whitespace on
+/// an otherwise empty line would change the block's detected indentation.
+fn kit_spec() -> String {
+    let body: String = KIT_STARTUP_SH
+        .lines()
+        .map(|l| {
+            if l.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("        {l}\n")
+            }
+        })
+        .collect();
+    KIT_SPEC_YAML
+        .lines()
+        .map(|l| {
+            if l.starts_with(KIT_STARTUP_MARKER) {
+                body.clone()
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect::<String>()
+}
+
 /// Install skein's own sbx kit into `~/.skein/kit/spec.yaml` so native launch can `--kit` it without
 /// the repo shipping a kit. Embedded via `include_str!`; rewritten each call (idempotent).
 pub fn ensure_kit() -> Result<PathBuf, String> {
     let kit = skein_home().join("kit");
     fs::create_dir_all(&kit).map_err(|e| format!("mkdir {}: {e}", kit.display()))?;
     let spec = kit.join("spec.yaml");
-    fs::write(&spec, KIT_SPEC_YAML).map_err(|e| format!("write {}: {e}", spec.display()))?;
+    fs::write(&spec, kit_spec()).map_err(|e| format!("write {}: {e}", spec.display()))?;
     Ok(kit)
 }
 
@@ -2257,6 +2298,37 @@ mod tests {
     use super::*;
     use crate::testutil::*;
     use std::process::Stdio;
+
+    // The provisioning script is one file with two callers — the kit hook and the fleet path — and
+    // the kit's copy is spliced into a YAML block scalar, where indentation IS the syntax. A line
+    // that lands at the wrong depth ends the block early, and the failure is not a parse error: sbx
+    // writes a truncated script, the box comes up with no hooks, and it looks perfectly healthy.
+    #[test]
+    fn the_kit_carries_the_same_provisioning_script_the_fleet_runs() {
+        let spec = kit_spec();
+        assert!(
+            !spec.contains("@SKEIN_STARTUP_SCRIPT@"),
+            "the marker survived, so the kit would install a script that is only a comment"
+        );
+        // Every line of the script, at the block's indentation — including the ones the shell needs
+        // at column 0 and the ones already indented inside it.
+        for line in KIT_STARTUP_SH.lines().filter(|l| !l.is_empty()) {
+            assert!(
+                spec.contains(&format!("\n        {line}\n")),
+                "not spliced at the block's depth: {line:?}"
+            );
+        }
+        // A blank line carrying eight spaces would deepen the block's detected indentation and take
+        // the rest of the script with it.
+        assert!(
+            !spec.contains("\n        \n"),
+            "a blank line was padded, which re-indents everything after it"
+        );
+        assert!(
+            spec.contains("\n  startup:\n"),
+            "the splice must not disturb what follows the block"
+        );
+    }
 
     #[test]
     fn valid_name_guards_paths() {

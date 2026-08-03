@@ -231,6 +231,66 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         "agent-started",
         "the agent really ran inside the namespace"
     );
+
+    // ---- provisioning: the same script the kit runs, inside the box ----
+    // A box that never got this comes up looking entirely healthy and simply never reports — no
+    // hooks, no probe, no tracker. It is the one gap that cannot be seen from the outside, so it is
+    // asserted from the inside, on the artefacts the script actually leaves.
+    let store = root.join("skein/repos/web/store/.claude");
+    ensure_store(&store).expect("a store to provision against");
+    // Written by the ordinary launch path (`write_launch_spec_for_agent`), which the fleet shares —
+    // keyed on the box name, which is exactly the identity `SKEIN_BOX` supplies inside the box.
+    fs::write(
+        store.join(format!("skein/launch/{BOX}.json")),
+        r#"{"branch":"feat/auth","agent":"claude"}"#,
+    )
+    .unwrap();
+    boxed
+        .exec(
+            &provision_script(BOX, &store.to_string_lossy()),
+            Duration::from_secs(120),
+        )
+        .expect("provision the box");
+    assert_eq!(
+        boxed
+            .exec("readlink .claude", Duration::from_secs(30))
+            .unwrap()
+            .trim(),
+        store.to_string_lossy(),
+        "the store link is what makes hooks, skills and the probe resolve at all"
+    );
+    // `shared` is scoped to a REPO, not to a sandbox — the two were one object when a box WAS a
+    // sandbox. So it must be this box's own symlink into its own repo's store, not the fleet
+    // sandbox's directory bound through to every box regardless of which repo they are checkouts of.
+    // Binding it also failed closed: shared-home.sh refuses to replace a real path, and it gates
+    // startup, so every box in the fleet would have failed to provision.
+    assert_eq!(
+        boxed
+            .exec("readlink ~/shared", Duration::from_secs(30))
+            .unwrap()
+            .trim(),
+        store.join("shared-home").to_string_lossy(),
+        "a box's shared workspace must resolve to its own repo's store"
+    );
+    // The boot report is per BOX, not per sandbox. Every box here reports the same SANDBOX_VM_ID,
+    // so without an explicit identity they would overwrite each other — one box's diagnosis
+    // standing in for all of them, which is worse than none.
+    let boot = store.join(format!("skein/boot/{BOX}.json"));
+    let report = fs::read_to_string(&boot).expect("boot report at the box's own name");
+    assert!(
+        report.contains("\"claude_link\":\"linked\"")
+            && report.contains("\"shared_home\":\"linked\""),
+        "the report is how a dark box is diagnosed without entering it: {report}"
+    );
+    // The store is infrastructure that must never show up as a worktree change.
+    assert_eq!(
+        boxed
+            .exec("git status --porcelain", Duration::from_secs(30))
+            .unwrap()
+            .trim(),
+        "",
+        "the linked store leaked into the box's diff"
+    );
     // The isolation, from the other side: the box's /tmp is invisible to everyone else.
     assert!(
         !Path::new("/tmp/agent.log").exists(),

@@ -96,8 +96,17 @@ seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
 # Bound back through, genuinely shared. ~/.local carries the agent CLIs themselves — software, not
 # state, and 547M of it, so copying it per box would cost gigabytes to isolate binaries every box
 # wants identical. Conversation state lives in ~/.claude, which IS seeded. The rest are package
-# caches no box needs its own copy of, plus the project-scoped directory that exists to cross boxes.
-share_paths=(".local" ".cargo" ".rustup" ".npm" "shared")
+# caches no box needs its own copy of.
+#
+# NOT ~/shared, though it is the most obviously shared thing here. It is scoped to a REPO, not to a
+# sandbox — the two were the same object when a box was a sandbox, and this is where they come apart:
+# one fleet sandbox hosts boxes from many repos, so binding its copy through would hand all of them
+# one `shared` and quietly cross project boundaries. Each box gets its own instead, created during
+# provisioning by shared-home.sh as a symlink into that box's repo store — which is host-mounted, so
+# it stays live across boxes of the SAME repo, which is what `shared` has always meant. Binding it
+# also broke provisioning outright: shared-home.sh refuses to replace a real path, and it gates
+# startup, so every fleet box would have failed to come up.
+share_paths=(".local" ".cargo" ".rustup" ".npm")
 
 for rel in "${seed_paths[@]}"; do
   mine="$home/$rel"

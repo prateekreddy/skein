@@ -18,7 +18,7 @@
 use crate::config::*;
 use crate::place::own_sandbox;
 use crate::util::*;
-use crate::{fleet_boxes, skein_home, valid_name};
+use crate::{fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
 use std::time::Duration;
 
 /// The launcher, embedded so it can be installed into a sandbox that has never seen this repo.
@@ -45,6 +45,16 @@ pub fn fleet_root() -> String {
 /// Where the launcher is installed inside the fleet sandbox.
 pub fn box_session_path() -> String {
     format!("{}/.skein/box-session.sh", fleet_root())
+}
+
+/// Where the provisioning script is installed inside the fleet sandbox.
+///
+/// Beside the launcher rather than in `~/.local/bin` (where the kit puts it) for two reasons: a box
+/// binds its own `$HOME` over the sandbox's, and the fleet sandbox is created without a kit at all,
+/// so nothing would have put it there. Under `--dev-bind / /` this path reads the same from inside
+/// every box as it does from the sandbox.
+pub fn box_provision_path() -> String {
+    format!("{}/.skein/skein-startup.sh", fleet_root())
 }
 
 /// One box's root inside the fleet sandbox. Callers must have validated `name`; every path skein
@@ -184,19 +194,24 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
-/// Write `box-session.sh` into the sandbox, over stdin rather than as an argument — the script is
-/// large and `sbx exec`'s argv is visible in every process listing on the host.
+/// Write `box-session.sh` and the provisioning script into the sandbox, over stdin rather than as
+/// arguments — both are large and `sbx exec`'s argv is visible in every process listing on the host.
 pub fn install_launcher(sandbox: &str) -> Result<(), String> {
-    let path = box_session_path();
-    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
-    let script = format!(
-        "mkdir -p {} && cat > {} && chmod 755 {}",
-        sh_quote(dir),
-        sh_quote(&path),
-        sh_quote(&path)
-    );
-    // The fleet sandbox itself, not a box inside it — no namespace to enter.
-    own_sandbox(sandbox).write(&script, BOX_SESSION_SH.as_bytes(), Duration::from_secs(30))
+    for (path, body) in [
+        (box_session_path(), BOX_SESSION_SH),
+        (box_provision_path(), KIT_STARTUP_SH),
+    ] {
+        let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
+        let script = format!(
+            "mkdir -p {} && cat > {} && chmod 755 {}",
+            sh_quote(dir),
+            sh_quote(&path),
+            sh_quote(&path)
+        );
+        // The fleet sandbox itself, not a box inside it — no namespace to enter.
+        own_sandbox(sandbox).write(&script, body.as_bytes(), Duration::from_secs(30))?;
+    }
+    Ok(())
 }
 
 /// The shell that prepares a box's checkout inside the fleet sandbox.
@@ -235,6 +250,34 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         pid_q = sh_quote(&box_pidfile(name)),
         session_q = sh_quote(session),
         cmd_q = sh_quote(agent_command),
+    )
+}
+
+/// The shell that provisions a box: the store link, the branch, the hooks, the guide, the tracker.
+///
+/// This runs the kit's own startup script — the same bytes sbx runs at startup in a `--clone`
+/// sandbox — rather than a fleet-shaped reimplementation of it. Provisioning is a dozen steps and
+/// most of them fail *quietly*: a box whose store never got linked looks perfectly healthy and
+/// simply never reports. Two implementations of that would be two sets of ways to be silently dark.
+///
+/// Four env vars carry what the script cannot work out for itself in a shared sandbox, because
+/// every signal it normally reads there belongs to the sandbox rather than to the box:
+///   * `SKEIN_PROVISION` — say so explicitly, since `/run/sandbox/source` does not exist here;
+///   * `SKEIN_BOX`       — the identity, or every box reads one launch spec and one boot report;
+///   * `SKEIN_STORE`     — the repo's store, a directory inside the mounted workspace rather than
+///     a mount of its own, so the script's scan would find nothing;
+///   * `WORKSPACE_DIR`   — the box's checkout, which is not this process's cwd.
+///
+/// **Must run inside the box's namespace**, not the sandbox: it writes `~/.codex`, `~/.claude` and
+/// `~/shared`, and outside the namespace those are the sandbox's, shared by every box.
+pub fn provision_script(name: &str, store: &str) -> String {
+    format!(
+        "SKEIN_PROVISION=1 SKEIN_BOX={name_q} SKEIN_STORE={store_q} WORKSPACE_DIR={tree_q} \
+         bash {script_q}",
+        name_q = sh_quote(name),
+        store_q = sh_quote(store),
+        tree_q = sh_quote(&format!("{}/tree", box_root(name))),
+        script_q = sh_quote(&box_provision_path()),
     )
 }
 
