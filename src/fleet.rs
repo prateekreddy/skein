@@ -893,6 +893,11 @@ pub fn resize_fleet(memory: &str, cpus: &str) -> Result<Vec<String>, String> {
     let boxes = placed_boxes(&sandbox);
 
     // ---- phase 1: get everything out, or change nothing ----
+    // The login first, because it lives in the sandbox's HOME and the rebuild destroys it.
+    // `ensure_fleet` restores it afterwards — but only if something captured it BEFORE the destroy,
+    // and its own call runs after `sbx create`, when the sandbox is empty and there is nothing left
+    // to save. Measured the hard way: a login made between two resizes was gone after the second.
+    sync_fleet_login(&sandbox);
     let mut snapshots: Vec<BoxSnapshot> = Vec::new();
     let run = format!("resize-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
     for (name, _) in &boxes {
