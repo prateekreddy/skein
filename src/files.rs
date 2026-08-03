@@ -5,6 +5,7 @@
 //! The host clone is a labelled fallback for a box that cannot be asked, never a silent substitute:
 //! for a clone-mode box the two are different checkouts on different branches.
 
+use crate::answer::Answer;
 use crate::util::*;
 use crate::{box_liveness, lookup_dir, sbx_guest_output, valid_name, Liveness};
 use serde::Serialize;
@@ -26,14 +27,6 @@ pub struct FileEntry {
 pub struct FileListing {
     pub path: String,
     pub entries: Vec<FileEntry>,
-    /// "box" when this came from inside the sandbox, "host" when it came from the host-side clone.
-    /// The two are DIFFERENT TREES for a clone-mode box — different branch, sometimes no working
-    /// tree at all — so a reader that doesn't say which it read is quietly showing the wrong files.
-    #[serde(default)]
-    pub source: String,
-    /// why a listing is empty or came from the host instead of the box
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub note: String,
 }
 
 /// Cap on file bytes served to the cockpit — larger than any doc/source file a human reads,
@@ -142,8 +135,6 @@ pub(crate) fn list_files_in_box(name: &str, rel: &str) -> Result<FileListing, St
     Ok(FileListing {
         path: rel.trim_matches('/').to_string(),
         entries,
-        source: "box".into(),
-        note: String::new(),
     })
 }
 
@@ -220,12 +211,7 @@ pub(crate) fn list_host_files(name: &str, rel: &str) -> Result<FileListing, Stri
         .unwrap_or(Path::new(""))
         .to_string_lossy()
         .into_owned();
-    Ok(FileListing {
-        path,
-        entries,
-        source: "host".into(),
-        note: String::new(),
-    })
+    Ok(FileListing { path, entries })
 }
 
 /// Read a file from the box's HOST-side clone, capped at FILE_READ_CAP. Returns (bytes, truncated).
@@ -249,38 +235,41 @@ pub(crate) fn read_host_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), S
 /// List a directory for the cockpit: the box's own tree when the box is up, the host clone when it
 /// isn't. Falling back is not a silent substitution — the listing says which tree answered, because
 /// for a clone-mode box those are different branches and one of them may have no working tree at all.
-pub fn list_box_files(name: &str, rel: &str) -> Result<FileListing, String> {
+pub fn list_box_files(name: &str, rel: &str) -> Result<Answer<FileListing>, String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
     if box_liveness(name) == Some(Liveness::Running) {
         match list_files_in_box(name, rel) {
-            Ok(listing) => return Ok(annotate_listing(listing)),
+            Ok(listing) => return Ok(annotate(Answer::from_box(listing))),
             // A refusal by the box (escape, not-a-directory) is an answer; only an inability to ask
             // it falls through to the host clone.
             Err(e) if e.contains("escapes") || e.contains("not a directory") => return Err(e),
             Err(_) => {}
         }
     }
-    let mut listing = list_host_files(name, rel)?;
-    listing.note = if box_liveness(name) == Some(Liveness::Running) {
-        "read from the host clone — the box could not be asked".into()
+    let listing = list_host_files(name, rel)?;
+    let why = if box_liveness(name) == Some(Liveness::Running) {
+        "read from the host clone — the box could not be asked"
     } else {
-        "read from the host clone — this box isn't running".into()
+        "read from the host clone — this box isn't running"
     };
-    Ok(annotate_listing(listing))
+    Ok(annotate(Answer::from_host(listing, why)))
 }
 
 /// An empty directory and a checkout that was never populated look identical, and the second is the
 /// one that makes a dev say "files don't work". Only the root can tell them apart: a repo root with
 /// nothing but `.git` is a clone with no working tree.
-pub(crate) fn annotate_listing(mut listing: FileListing) -> FileListing {
-    if listing.entries.is_empty() && listing.path.is_empty() && listing.note.is_empty() {
-        listing.note = "this workspace has no files in it".into();
-    } else if listing.entries.is_empty() && listing.path.is_empty() {
-        listing.note = format!("{} — and it has no files in it", listing.note);
+pub(crate) fn annotate(mut answer: Answer<FileListing>) -> Answer<FileListing> {
+    if !answer.value.entries.is_empty() || !answer.value.path.is_empty() {
+        return answer;
     }
-    listing
+    answer.note = if answer.note.is_empty() {
+        "this workspace has no files in it".into()
+    } else {
+        format!("{} — and it has no files in it", answer.note)
+    };
+    answer
 }
 
 /// Read a file for the cockpit, from the box when it's up and the host clone when it isn't.

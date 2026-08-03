@@ -5,6 +5,7 @@
 //! `sandboxes.json` and derives status. See ARCHITECTURE.md.
 
 mod ai;
+mod answer;
 mod config;
 mod diff;
 mod files;
@@ -21,6 +22,7 @@ mod util;
 mod verify;
 
 pub use ai::*;
+pub use answer::*;
 pub use config::*;
 pub use diff::*;
 pub use files::*;
@@ -4989,28 +4991,21 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     fn an_empty_root_says_whether_the_checkout_is_the_problem() {
         // The bug this whole path exists for: a host clone holding nothing but `.git` listed as
         // "empty", so the Files tab looked broken while the box had a full tree.
-        let bare = annotate_listing(FileListing {
-            path: String::new(),
+        let empty = |path: &str| FileListing {
+            path: path.into(),
             entries: vec![],
-            source: "host".into(),
-            note: String::new(),
-        });
+        };
+        let bare = annotate(Answer::from_host(empty(""), ""));
         assert_eq!(bare.note, "this workspace has no files in it");
+        assert_eq!(bare.source, Source::Host, "the fallback still says so");
         // an empty SUBdirectory is just an empty directory — no alarming note
-        let sub = annotate_listing(FileListing {
-            path: "docs".into(),
-            entries: vec![],
-            source: "box".into(),
-            note: String::new(),
-        });
+        let sub = annotate(Answer::from_box(empty("docs")));
         assert!(sub.note.is_empty());
         // and a fallback keeps its own explanation, with the emptiness appended
-        let fell_back = annotate_listing(FileListing {
-            path: String::new(),
-            entries: vec![],
-            source: "host".into(),
-            note: "read from the host clone — this box isn't running".into(),
-        });
+        let fell_back = annotate(Answer::from_host(
+            empty(""),
+            "read from the host clone — this box isn't running",
+        ));
         assert!(fell_back.note.contains("isn't running") && fell_back.note.contains("no files"));
     }
 
@@ -5039,17 +5034,25 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::set_var("SKEIN_LS_CMD", "false"); // no sbx here — registry is the lookup path
 
         let l = list_box_files("bx", "").unwrap();
-        let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            l.source,
+            Source::Host,
+            "no sbx here, so this is the host clone and has to say so"
+        );
+        let names: Vec<&str> = l.value.entries.iter().map(|e| e.name.as_str()).collect();
         assert!(!names.contains(&".git"), ".git must be omitted");
         assert_eq!(names[0], "docs", "dirs sort first");
         assert!(names.contains(&"README.md"));
         let (bytes, truncated) = read_box_file("bx", "README.md").unwrap();
         assert!(!truncated);
         assert_eq!(bytes, b"# hi");
-        assert_eq!(list_box_files("bx", "docs").unwrap().entries.len(), 1);
+        assert_eq!(list_box_files("bx", "docs").unwrap().value.entries.len(), 1);
         // a symlinked directory reads as a directory (type follows the link), and opens
-        assert!(l.entries.iter().any(|e| e.name == "linked" && e.dir));
-        assert_eq!(list_box_files("bx", "linked").unwrap().entries.len(), 1);
+        assert!(l.value.entries.iter().any(|e| e.name == "linked" && e.dir));
+        assert_eq!(
+            list_box_files("bx", "linked").unwrap().value.entries.len(),
+            1
+        );
         // traversal / absolute / symlink-escape / bad-name are all rejected
         assert!(read_box_file("bx", "../sandboxes.json").is_err());
         assert!(read_box_file("bx", "/etc/passwd").is_err());

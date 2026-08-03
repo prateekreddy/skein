@@ -4,6 +4,7 @@
 //! from `~/.skein/repos/<id>/work`, which for a clone-mode box is a different checkout on a
 //! different branch — a confidently wrong answer that looked exactly like a right one.
 
+use crate::answer::Answer;
 use crate::config::*;
 use crate::util::*;
 use crate::{
@@ -29,22 +30,18 @@ pub struct DiffStat {
 
 /// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
 /// (Boxes report their own diff because `sbx run` can't exec an arbitrary command in them.)
-/// A branch-vs-base patch, and what it was actually measured against.
+/// A branch-vs-base patch and the ref it was measured from. Wrapped in an [`Answer`] by
+/// [`box_diff`], which is where "which tree is this?" gets answered.
 #[derive(Debug, Clone, Serialize)]
-pub struct DiffView {
+pub struct Diff {
     pub patch: String,
     /// The ref the diff starts from — `origin/main`, or `HEAD` when no base ref resolves (in
-    /// which case the patch is uncommitted work only). Shown, because a diff whose base you can't
-    /// see is a number you can't act on.
+    /// which case the patch is uncommitted work only). Shown, because a diff whose base you
+    /// can't see is a number you can't act on.
     pub base: String,
-    /// `box` (computed just now, inside the box) or `stored` (the patch box-diff.sh wrote at the
-    /// last turn end).
-    pub source: String,
-    /// Why the answer isn't fresh, when it isn't.
-    pub note: String,
 }
 
-pub(crate) const DIFF_BASE_MARK: &str = "SKEIN_DIFF_BASE ";
+const DIFF_BASE_MARK: &str = "SKEIN_DIFF_BASE ";
 
 pub(crate) const DIFF_CAP: usize = 2_000_000;
 
@@ -106,7 +103,7 @@ pub(crate) fn split_diff(raw: &str) -> (String, String) {
 /// answering from `~/.skein/repos/<id>/work` — a different clone on a different branch — which is
 /// silently wrong for every clone-mode box and empty for one whose host clone has no working tree.
 /// On demand only, never per tick: it forks a git inside a sandbox.
-pub fn box_diff(name: &str) -> Option<DiffView> {
+pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
     if !valid_name(name) {
         return None;
     }
@@ -117,12 +114,7 @@ pub fn box_diff(name: &str) -> Option<DiffView> {
                 patch.truncate(DIFF_CAP);
                 patch.push_str("\n\n# … diff truncated by skein (too large to render) …\n");
             }
-            return Some(DiffView {
-                patch,
-                base,
-                source: "box".into(),
-                note: String::new(),
-            });
+            return Some(Answer::from_box(Diff { patch, base }));
         }
     }
     // The box can't be asked — fall back to what it wrote at its last turn end, and say so, so a
@@ -131,15 +123,18 @@ pub fn box_diff(name: &str) -> Option<DiffView> {
         .join("diffs")
         .join(format!("{name}.patch"));
     let patch = fs::read_to_string(path).ok()?;
-    (!patch.trim().is_empty()).then(|| DiffView {
-        patch,
-        base: String::new(),
-        source: "stored".into(),
-        note: "the box isn't running — this is the patch it wrote at its last turn end".into(),
+    (!patch.trim().is_empty()).then(|| {
+        Answer::from_store(
+            Diff {
+                patch,
+                base: String::new(),
+            },
+            "the box isn't running — this is the patch it wrote at its last turn end",
+        )
     })
 }
 
-pub(crate) const DIFF_TIMEOUT: Duration = Duration::from_secs(30);
+const DIFF_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn git_ok(dir: &str, args: &[&str]) -> bool {
     let mut a = vec!["-C", dir];

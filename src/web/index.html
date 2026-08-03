@@ -1983,8 +1983,10 @@ function renderFiles(name, d, st) {
   const src = d.source === "host"
     ? `<span class="fsrc host" title="${esc(d.note || "the box could not be asked")}">host clone</span>` : "";
   const empty = d.note && !d.entries.length ? `<div class="fnote">${esc(d.note)}</div>` : `<div class="fent">empty</div>`;
+  // The badge sits in the breadcrumb where your eye already is; the banner carries the REASON, and
+  // shows even when the fallback tree does have files — a silent one is how this shipped broken.
   filespane.innerHTML =
-    `<div class="flist"><div class="fcrumb">${crumbs.join(" / ")}${src}</div>${rows || empty}</div>`
+    `<div class="flist">${provenance(d)}<div class="fcrumb">${crumbs.join(" / ")}${src}</div>${rows || empty}</div>`
     + `<div class="fview" id="fview">${st.file ? `<div class="note">loading…</div>` : `<div class="note">select a file</div>`}</div>`;
   filespane.querySelector(".flist").addEventListener("click", e => {
     const c = e.target.closest("[data-p]"); if (c) { e.preventDefault(); loadFiles(name, c.dataset.p, null); return; }
@@ -2052,15 +2054,26 @@ function loadDiff(name) {
     renderComments(name);
   }).catch(() => { diffpane.innerHTML = `<div class="diff"><div class="note">could not load diff</div></div>`; });
 }
-// What the patch is measured against, and whether it's current. A diff whose base you can't see is
-// a number you can't act on — and a patch from the last turn end must never read as the live tree.
+// One renderer for provenance, used by every pane that shows a value skein read from somewhere.
+// The server sends `source` ("box" | "store" | "host") beside the value; "box" is the only one that
+// describes the box as it is right now, so the other two always say so. Four panes used to each
+// spell this out their own way, and the two that forgot shipped as bugs.
+const SOURCE_LABEL = { store: "last turn end", host: "host clone" };
+function provenance(a, extra) {
+  const bits = (extra || []).slice();
+  if (a && a.source && a.source !== "box")
+    bits.push(esc(a.note || SOURCE_LABEL[a.source] || a.source));
+  if (!bits.length) return "";
+  const stale = a && a.source && a.source !== "box";
+  return `<div class="dbase${stale ? " stale" : ""}">${bits.join(" · ")}</div>`;
+}
+// A diff whose base you can't see is a number you can't act on, so the base rides along with it.
 function diffBanner(d) {
   if (!d || !d.patch || !d.patch.trim()) return "";
-  const bits = [];
-  if (d.base && d.base !== "HEAD") bits.push(`vs <code>${esc(d.base)}</code>`);
-  else if (d.base === "HEAD") bits.push("uncommitted changes only — no remote base branch resolved");
-  if (d.source === "stored") bits.push(esc(d.note || "written at the last turn end"));
-  return bits.length ? `<div class="dbase${d.source === "stored" ? " stale" : ""}">${bits.join(" · ")}</div>` : "";
+  const base = d.base && d.base !== "HEAD"
+    ? [`vs <code>${esc(d.base)}</code>`]
+    : d.base === "HEAD" ? ["uncommitted changes only — no remote base branch resolved"] : [];
+  return provenance(d, base);
 }
 function renderDiff(txt) {
   if (!txt || !txt.trim() || txt.startsWith("# no diff"))

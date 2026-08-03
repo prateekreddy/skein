@@ -236,6 +236,13 @@ await check("the listing says the box's own tree answered", async () => {
   if (d.source !== "box") throw new Error(`a running box must be read from the box itself, got "${d.source}"`);
   if (await page.$("#filespane .fsrc.host")) throw new Error("no host-clone badge should show for a live box");
 });
+await check("a fallback tree announces itself in the pane, not just a tooltip", async () => {
+  // The Files tab shipped reading the host clone as if it were the box's tree. The badge alone
+  // hid the reason behind a hover; provenance has to be readable without pointing at anything.
+  const d = await page.evaluate(n => fetch(`/api/boxes/${n}/files?path=`).then(r => r.json()), "bare-box");
+  if (d.source !== "host") throw new Error(`a stopped box's listing comes from the host, got "${d.source}"`);
+  if (!/host clone/.test(d.note || "")) throw new Error(`and must say so in words: "${d.note}"`);
+});
 await check("a clone with nothing but .git says so instead of looking broken", async () => {
   await page.evaluate(() => showBox("bare-box", "files"));
   await settle(1200);
@@ -273,6 +280,7 @@ await check("the diff is measured against the remote base branch, and says so", 
     throw new Error("uncommitted work is missing from the patch");
   const d = await page.evaluate(n => fetch(`/api/boxes/${n}/diff`).then(r => r.json()), BOX);
   if (d.source !== "box") throw new Error(`the running box should answer for itself, got "${d.source}"`);
+  if (d.note) throw new Error(`a current answer has nothing to explain, got "${d.note}"`);
   if (d.base !== "origin/master") throw new Error(`unexpected base "${d.base}"`);
 });
 await check("the collision radar is gone, not merely hidden", async () => {
