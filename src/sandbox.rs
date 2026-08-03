@@ -6,7 +6,8 @@
 //! this module rather than to every feature that touches one.
 
 use crate::config::*;
-use crate::place::{own_sandbox, place_of};
+use crate::fleet::box_root;
+use crate::place::{forget_place, own_sandbox, place_of, shared_record};
 use crate::runtime::*;
 use crate::util::*;
 use crate::{
@@ -380,6 +381,16 @@ pub fn stop_box(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
+    // A shared box has no sandbox of its own to stop. `sbx stop <box>` would either fail or — worse
+    // — stop an unrelated sandbox that happens to carry the same name. Killing its tmux server ends
+    // every process in the box, which frees the namespace, and leaves the tree for a later restart.
+    if let Some(rec) = shared_record(name) {
+        let sock = sh_quote(&rec.sock);
+        let script = format!("tmux -S {sock} kill-server 2>/dev/null; rm -f {sock}; exit 0");
+        return own_sandbox(&rec.sandbox)
+            .exec(&script, Duration::from_secs(30))
+            .map(|_| ());
+    }
     let (_out, err, code) = run_shell(&stop_command(name))?;
     if code != 0 {
         return Err(format!("stop failed (exit {code}): {}", err.trim()));
@@ -485,6 +496,21 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
     // design — an unreachable gateway must not strand a box on the board.
     if let Err(e) = sync_revoke_token(name) {
         eprintln!("skein: destroying {name}, but revoking its tracker token failed — revoke it by hand at the gateway: {e}");
+    }
+    if let Some(rec) = shared_record(name) {
+        // Same reasoning as stop_box, and this one REMOVES — `sbx rm -f <box>` aimed at a sandbox
+        // that shares the box's name would destroy someone else's work. Kill the server, then the
+        // tree: the checkout is VM-local, so this is the destructive step `destroy_command`
+        // documents, just aimed at the right thing.
+        let sock = sh_quote(&rec.sock);
+        let root = sh_quote(&box_root(name));
+        let script = format!("tmux -S {sock} kill-server 2>/dev/null; rm -rf {root}; exit 0");
+        own_sandbox(&rec.sandbox).exec(&script, Duration::from_secs(120))?;
+        forget_place(name);
+        if let Err(e) = delist_box(name) {
+            eprintln!("skein: destroyed {name}, but delisting it failed (harmless): {e}");
+        }
+        return Ok(());
     }
     let (_out, err, code) = run_shell(&destroy_command(name))?;
     if code != 0 {

@@ -115,6 +115,19 @@ pub fn forget_place(name: &str) {
     }
 }
 
+/// The placement skein recorded for a box, alive or not.
+///
+/// [`place_of`] deliberately falls back to the original model when the anchor is dead, because a
+/// dead namespace must never be entered. The lifecycle needs the opposite view: a box with a record
+/// is a *shared* box whether or not it is currently running, and asking sbx about a sandbox named
+/// after it would report on something that was never there.
+pub fn shared_record(name: &str) -> Option<PlaceRecord> {
+    if !valid_name(name) {
+        return None;
+    }
+    read_place_record(name)
+}
+
 fn read_place_record(name: &str) -> Option<PlaceRecord> {
     serde_json::from_str(&fs::read_to_string(place_record_path(name)).ok()?).ok()
 }

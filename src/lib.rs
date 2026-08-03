@@ -556,6 +556,18 @@ fn resolve_fleet(
 
 /// One box's run-state from sbx — a single-box view of [`fleet_boxes`].
 fn box_liveness(name: &str) -> Option<Liveness> {
+    // A shared box is not in `sbx ls` — no sandbox carries its name — so asking there reports every
+    // one of them as gone. Its anchor IS its liveness: the tmux server lives exactly as long as the
+    // box, so a live pid is a running box and a dead one is a stopped box with its tree intact.
+    if let Some(rec) = shared_record(name) {
+        return Some(
+            if std::path::Path::new(&format!("/proc/{}", rec.ns_pid)).exists() {
+                Liveness::Running
+            } else {
+                Liveness::Stopped
+            },
+        );
+    }
     fleet_boxes()?
         .into_iter()
         .find(|b| b.name == name)
@@ -5038,6 +5050,51 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // own server. Both matter for the same reason: session names are identical across boxes, so a
     // bare `tmux has-session -t skein-agent` on the sandbox's default socket would find a NEIGHBOUR's
     // agent and attach the user straight into someone else's turn.
+    // The three lifecycle calls that used to name a SANDBOX after the box. For a shared box no such
+    // sandbox exists, so `sbx ls` reported it dead, `sbx stop` missed, and `sbx rm -f` would have
+    // aimed a destructive command at whatever sandbox happened to share the name.
+    #[test]
+    fn a_shared_boxs_lifecycle_never_names_a_sandbox_after_the_box() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+
+        // Alive: this very process stands in for the box's tmux server.
+        record_place(
+            "thing-x",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: std::process::id(),
+                home: "/home/agent".into(),
+                tree: "/boxes/thing-x/tree".into(),
+                sock: "/boxes/thing-x/session.sock".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            box_liveness("thing-x"),
+            Some(Liveness::Running),
+            "the anchor IS the liveness — sbx ls knows nothing about a shared box"
+        );
+
+        // Dead anchor: stopped, not missing. The tree is still there to restart from.
+        record_place(
+            "thing-x",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 0,
+                home: "/home/agent".into(),
+                tree: "/boxes/thing-x/tree".into(),
+                sock: "/boxes/thing-x/session.sock".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(box_liveness("thing-x"), Some(Liveness::Stopped));
+
+        forget_place("thing-x");
+        env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn a_shared_box_is_attached_through_its_namespace_and_its_own_tmux_server() {
         let _g = env_lock();

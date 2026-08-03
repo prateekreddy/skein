@@ -255,8 +255,10 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         "the socket sits outside the private mounts so the fleet can be listed from outside"
     );
 
-    // ---- teardown drops the last process in the namespace, which frees it ----
-    sh(&format!("tmux -S {sock} kill-server"));
+    // ---- teardown through skein's own lifecycle, not a hand-rolled kill ----
+    // stop_box used to run `sbx stop <box>`, which for a shared box either misses or stops an
+    // unrelated sandbox carrying the same name. It must reach this box's server instead.
+    stop_box(BOX).expect("stop the box");
     for _ in 0..40 {
         if !Path::new(&format!("/proc/{anchor}")).exists() {
             break;
