@@ -584,14 +584,17 @@ fn box_liveness(name: &str) -> Option<Liveness> {
     // A shared box is not in `sbx ls` — no sandbox carries its name — so asking there reports every
     // one of them as gone. Its anchor IS its liveness: the tmux server lives exactly as long as the
     // box, so a live pid is a running box and a dead one is a stopped box with its tree intact.
-    if let Some(rec) = shared_record(name) {
-        return Some(
-            if std::path::Path::new(&format!("/proc/{}", rec.ns_pid)).exists() {
+    if shared_record(name).is_some() {
+        // Asked of the sandbox, not of the host's /proc — see `fleet_liveness`. A box missing from
+        // the sweep is one the sandbox could not answer for (it is stopped, or sbx did not reply),
+        // and "cannot tell" is `None`, not "stopped".
+        return fleet_liveness().get(name).map(|live| {
+            if *live {
                 Liveness::Running
             } else {
                 Liveness::Stopped
-            },
-        );
+            }
+        });
     }
     fleet_boxes()?
         .into_iter()
@@ -5332,38 +5335,52 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
 
-        // Alive: this very process stands in for the box's tmux server.
         record_place(
             "thing-x",
             &PlaceRecord {
                 sandbox: "skein-fleet".into(),
-                ns_pid: std::process::id(),
+                ns_pid: 4242,
                 home: "/home/agent".into(),
                 tree: "/boxes/thing-x/tree".into(),
                 sock: "/boxes/thing-x/session.sock".into(),
             },
         )
         .unwrap();
+        let mut config = load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        save_config(&config).unwrap();
+
+        // Liveness comes from the SANDBOX, which is the only place the box's tmux server exists.
+        // The pid in the record is deliberately not consulted: it belongs to the sandbox's pid
+        // namespace, so checking it against the host's /proc asks about an unrelated process — and
+        // on macOS, where there is no /proc, reported every running box as stopped.
+        let fake = dir.join("bin");
+        fs::create_dir_all(&fake).unwrap();
+        let path = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", format!("{}:{path}", fake.display()));
+        let sweep = |answer: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            let p = fake.join("sbx");
+            fs::write(&p, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+
+        sweep("thing-x 1");
         assert_eq!(
             box_liveness("thing-x"),
             Some(Liveness::Running),
-            "the anchor IS the liveness — sbx ls knows nothing about a shared box"
+            "the box's own tmux server IS its liveness — sbx ls knows nothing about a shared box"
         );
 
-        // Dead anchor: stopped, not missing. The tree is still there to restart from.
-        record_place(
-            "thing-x",
-            &PlaceRecord {
-                sandbox: "skein-fleet".into(),
-                ns_pid: 0,
-                home: "/home/agent".into(),
-                tree: "/boxes/thing-x/tree".into(),
-                sock: "/boxes/thing-x/session.sock".into(),
-            },
-        )
-        .unwrap();
+        // Dead session: stopped, not missing. The tree is still there to restart from.
+        sweep("thing-x 0");
         assert_eq!(box_liveness("thing-x"), Some(Liveness::Stopped));
 
+        // Sandbox stopped, or sbx silent: unknown, which must not be reported as stopped.
+        sweep("");
+        assert_eq!(box_liveness("thing-x"), None);
+
+        env::set_var("PATH", path);
         forget_place("thing-x");
         env::remove_var("SKEIN_HOME");
     }

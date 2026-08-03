@@ -955,6 +955,56 @@ pub fn base_branch(repo: &Repo) -> String {
 ///
 /// The pid is knowable only inside the sandbox, and only after the session starts — which is why
 /// placement is recorded after launch rather than predicted before it.
+/// 1.5s micro-cache over the fleet's liveness sweep, for the same reason [`crate::fleet_boxes`] has
+/// one: the board asks per box, and a refresh must not become one `sbx exec` per box per tick.
+static LIVENESS_CACHE: std::sync::Mutex<
+    Option<(std::time::Instant, std::collections::HashMap<String, bool>)>,
+> = std::sync::Mutex::new(None);
+
+/// Which boxes in the fleet sandbox have a live session — asked of the sandbox, in one round-trip.
+///
+/// A shared box's liveness *is* its tmux server: box alive ⇔ server alive ⇔ namespace joinable. That
+/// question cannot be answered from the host. The anchor pid belongs to the sandbox's pid namespace,
+/// so `/proc/<pid>` on the host asks about an unrelated process — and on macOS there is no `/proc`
+/// at all, which reported every running box as stopped.
+///
+/// Every box at once because the board refreshes all of them, and a stopped sandbox answers for none
+/// of them: an empty map means "cannot tell", which the caller reports rather than inventing.
+pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Default::default();
+    }
+    if !cfg!(test) {
+        let cache = LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, map)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_millis(1500) {
+                return map.clone();
+            }
+        }
+    }
+    let script = format!(
+        "for d in {root}/*/; do n=${{d%/}}; n=${{n##*/}}; s=\"$d/session.sock\"; \
+         if [ -S \"$s\" ] && tmux -S \"$s\" has-session 2>/dev/null; then echo \"$n 1\"; \
+         else echo \"$n 0\"; fi; done",
+        root = fleet_root()
+    );
+    let map: std::collections::HashMap<String, bool> = own_sandbox(&sandbox)
+        .exec(&script, Duration::from_secs(15))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (name, live) = line.trim().split_once(' ')?;
+            Some((name.to_string(), live == "1"))
+        })
+        .collect();
+    if !cfg!(test) {
+        *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((std::time::Instant::now(), map.clone()));
+    }
+    map
+}
+
 /// The sandbox user's `$HOME`, which is the HOME every command in a box must run with.
 ///
 /// Not a private directory and not empty: `box-session.sh` binds the box's own `home` *over* this
