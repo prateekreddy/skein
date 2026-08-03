@@ -759,7 +759,13 @@ fn write_restore_launch_spec(snap: &BoxSnapshot) -> Result<(), String> {
 /// same base the diff is taken against, not from whatever is stale or half-committed in the host's
 /// clone. For a repo adopted in place there is no URL, so the host clone is it; that is mounted
 /// (see [`fleet_mounts`]) at the same path, and git is content to clone a local directory.
-fn clone_source(repo: &Repo) -> String {
+///
+/// That fallback carries a real consequence, stated here because nothing else would say it: for an
+/// adopted repo the host clone's freshness *is* what every new box starts from. Nobody pulling it
+/// means every new box quietly starts behind, with a green checkout and no signal at all. That is
+/// what [`crate::repos::pull_repo`] is for, and why it did not become redundant when boxes started
+/// cloning from remotes.
+pub(crate) fn clone_source(repo: &Repo) -> String {
     if is_git_url(&repo.source) {
         repo.source.clone()
     } else {

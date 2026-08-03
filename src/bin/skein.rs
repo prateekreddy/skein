@@ -72,7 +72,7 @@ skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbo
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
-skein doctor          check registry + required tools (sbx/git/gh)\n  \
+skein doctor          check registry, tools, and the shared sandbox if one is on\n  \
 skein version\n  \
 skein help\n\n\
 the web cockpit lives in `skein-server` (run it, open http://127.0.0.1:7878).\n\n\
@@ -381,6 +381,74 @@ fn cmd_doctor() -> Result<(), String> {
             );
         } else {
             println!("{WARN} ssh agent     no keys loaded {DIM}(SSH git push from boxes will fail — set an ssh key in settings){RESET}");
+        }
+    }
+
+    // The shared sandbox, checked against the sandbox itself rather than against config.
+    //
+    // Every one of these fails *quietly* if it is wrong: a box with no bwrap silently shares another
+    // box's /tmp and $HOME, a box with no cgroup delegation runs with no ceiling, and a repo the
+    // sandbox cannot see produces a box with no store, no hooks and no probe — all of which look
+    // like a healthy box that simply never reports. So they are asked, not assumed.
+    let fleet = cfg.fleet_sandbox.trim().to_string();
+    if fleet.is_empty() {
+        println!(
+            "\n{DIM}·{RESET} fleet         {DIM}off — every box gets its own sandbox (skein's original model){RESET}"
+        );
+    } else {
+        println!("\n{BOLD}fleet{RESET} {DIM}({fleet}){RESET}");
+        match skein::fleet_exists(&fleet) {
+            Some(true) => println!("{OK} sandbox       up"),
+            Some(false) => println!(
+                "{WARN} sandbox       not created yet {DIM}(the next launch creates it){RESET}"
+            ),
+            None => println!("{BAD} sandbox       sbx did not answer — cannot tell if it exists"),
+        }
+        let place = skein::own_sandbox(&fleet);
+        let probe = |script: &str| {
+            place
+                .exec(script, std::time::Duration::from_secs(20))
+                .map(|o| o.trim().to_string())
+                .unwrap_or_default()
+        };
+        for (tool, why) in [
+            (
+                "bwrap",
+                "without it a box shares another box's /tmp and $HOME",
+            ),
+            (
+                "tmux",
+                "the session IS the box; it cannot start without one",
+            ),
+            ("git", "boxes clone their own checkout"),
+        ] {
+            if probe(&format!("command -v {tool} >/dev/null && echo yes")) == "yes" {
+                println!("{OK} {tool:<13} in the sandbox");
+            } else {
+                println!("{BAD} {tool:<13} missing in the sandbox — {why}");
+            }
+        }
+        // The ceiling is the whole reason one runaway box does not take the others down.
+        if probe("sudo mkdir -p /sys/fs/cgroup/skein 2>/dev/null && echo yes") == "yes" {
+            println!(
+                "{OK} ceilings      cgroup delegation works {DIM}({}){RESET}",
+                skein::box_limits()
+            );
+        } else {
+            println!("{BAD} ceilings      no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box");
+        }
+        // A mount that is missing produces a box with no store, which looks entirely healthy.
+        for path in skein::fleet_mounts() {
+            let seen = probe(&format!("test -d '{path}' && echo yes")) == "yes";
+            println!(
+                "{} mount         {DIM}{path}{RESET}{}",
+                if seen { OK } else { BAD },
+                if seen {
+                    String::new()
+                } else {
+                    " — not visible in the sandbox; boxes for it would come up with no store".into()
+                }
+            );
         }
     }
 

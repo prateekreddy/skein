@@ -400,6 +400,17 @@ pub fn add_repo(
 /// next box branches from current upstream. Fast-forward-only on purpose: skein never merges or
 /// rebases on the user's behalf, so a diverged or dirty clone fails loudly rather than silently
 /// rewriting their tree. Returns git's own summary on success. `None` repo id ⇒ error.
+///
+/// How much this matters depends on how the repo was registered, and the difference is worth knowing:
+///
+/// * **Registered from a URL** — boxes clone from the remote, so this only keeps the host clone's
+///   `origin/HEAD` current, which is where [`crate::fleet::base_branch`] reads the base from.
+/// * **Adopted in place** (a path, no URL) — there is no remote for a box to clone from, so
+///   `fleet::clone_source` hands boxes the host clone itself. Its freshness *is* what a new
+///   box starts from, and a stale clone means every new box starts stale with nothing to say so.
+///
+/// Which is why this did not go away when boxes stopped cloning from the host: for adopted repos it
+/// became more load-bearing, not less.
 pub fn pull_repo(id: &str) -> Result<String, String> {
     let repo = load_repos()
         .into_iter()
