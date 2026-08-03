@@ -44,7 +44,10 @@ pub(crate) fn write_atomic(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), 
 /// failure. Pipes are drained on their own threads so a chatty child can't fill the pipe buffer
 /// and deadlock against the polling loop. Dependency-free; callers are all off the async runtime
 /// (blocking pool / CLI).
-pub(crate) fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::Output> {
+pub(crate) fn output_with_timeout(
+    cmd: &mut Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     use std::io::Read as _;
     use std::process::Stdio;
     let mut child = cmd

@@ -1,0 +1,246 @@
+//! What a box changed on its branch, measured against the **remote** base.
+//!
+//! Computed inside the box, because that is where the box's checkout is: host-side git answered
+//! from `~/.skein/repos/<id>/work`, which for a clone-mode box is a different checkout on a
+//! different branch — a confidently wrong answer that looked exactly like a right one.
+
+use crate::config::*;
+use crate::util::*;
+use crate::{
+    box_liveness, locate_registry, lookup_dir, sbx_guest_output, store_for_box, valid_name,
+    Liveness,
+};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+/// Diff summary a box reports for its branch-vs-base work (written by box-diff.sh).
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct DiffStat {
+    #[serde(default)]
+    pub files: u32,
+    #[serde(default)]
+    pub ins: u32,
+    #[serde(default)]
+    pub del: u32,
+}
+
+/// Read the full branch-vs-base patch a box wrote to `<store>/diffs/<name>.patch`.
+/// (Boxes report their own diff because `sbx run` can't exec an arbitrary command in them.)
+/// A branch-vs-base patch, and what it was actually measured against.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffView {
+    pub patch: String,
+    /// The ref the diff starts from — `origin/main`, or `HEAD` when no base ref resolves (in
+    /// which case the patch is uncommitted work only). Shown, because a diff whose base you can't
+    /// see is a number you can't act on.
+    pub base: String,
+    /// `box` (computed just now, inside the box) or `stored` (the patch box-diff.sh wrote at the
+    /// last turn end).
+    pub source: String,
+    /// Why the answer isn't fresh, when it isn't.
+    pub note: String,
+}
+
+pub(crate) const DIFF_BASE_MARK: &str = "SKEIN_DIFF_BASE ";
+
+pub(crate) const DIFF_CAP: usize = 2_000_000;
+
+/// The base-ref ladder, most specific first: the configured base branch on the remote, then the
+/// usual remote defaults, then their local counterparts as a last resort for a repo with no remote.
+///
+/// Remote-first is the point. The old host-side path measured against whatever the *host clone*
+/// had checked out, which for a clone-mode box is a different branch of a different checkout —
+/// a wrong answer that looked exactly like a right one.
+pub(crate) fn diff_base_refs() -> Vec<String> {
+    let mut refs = Vec::new();
+    let configured = load_config().base_branch.trim().to_string();
+    if !configured.is_empty() {
+        refs.push(format!("origin/{configured}"));
+    }
+    for r in ["origin/main", "origin/master", "main", "master"] {
+        if !refs.iter().any(|x| x == r) {
+            refs.push(r.to_string());
+        }
+    }
+    refs
+}
+
+/// Shell that resolves the base inside the box and emits the patch, base first.
+pub(crate) fn diff_script(refs: &[String]) -> String {
+    let list = refs
+        .iter()
+        .map(|r| sh_quote(r))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; cd \"$root\" || exit 1; \
+         base=''; for ref in {list}; do \
+           if git rev-parse --verify -q \"$ref\" >/dev/null 2>&1; then base=\"$ref\"; break; fi; \
+         done; \
+         range=HEAD; \
+         if [ -n \"$base\" ]; then mb=\"$(git merge-base HEAD \"$base\" 2>/dev/null || true)\"; \
+           [ -n \"$mb\" ] && range=\"$mb\"; fi; \
+         printf '{DIFF_BASE_MARK}%s\\n' \"${{base:-HEAD}}\"; \
+         git diff \"$range\" 2>/dev/null | head -c {DIFF_CAP}"
+    )
+}
+
+/// Split the box's answer into (base, patch). A patch line can say anything, so only the *first*
+/// line is ever read as the marker.
+pub(crate) fn split_diff(raw: &str) -> (String, String) {
+    match raw.split_once('\n') {
+        Some((first, rest)) if first.starts_with(DIFF_BASE_MARK) => (
+            first[DIFF_BASE_MARK.len()..].trim().to_string(),
+            rest.to_string(),
+        ),
+        _ => ("HEAD".into(), raw.to_string()),
+    }
+}
+
+/// The branch-vs-base patch for a box.
+///
+/// Computed **inside the box**, because that is where the box's checkout is. Host-side git was
+/// answering from `~/.skein/repos/<id>/work` — a different clone on a different branch — which is
+/// silently wrong for every clone-mode box and empty for one whose host clone has no working tree.
+/// On demand only, never per tick: it forks a git inside a sandbox.
+pub fn box_diff(name: &str) -> Option<DiffView> {
+    if !valid_name(name) {
+        return None;
+    }
+    if box_liveness(name) == Some(Liveness::Running) {
+        if let Ok(raw) = sbx_guest_output(name, &diff_script(&diff_base_refs()), DIFF_TIMEOUT) {
+            let (base, mut patch) = split_diff(&raw);
+            if patch.len() > DIFF_CAP {
+                patch.truncate(DIFF_CAP);
+                patch.push_str("\n\n# … diff truncated by skein (too large to render) …\n");
+            }
+            return Some(DiffView {
+                patch,
+                base,
+                source: "box".into(),
+                note: String::new(),
+            });
+        }
+    }
+    // The box can't be asked — fall back to what it wrote at its last turn end, and say so, so a
+    // stale patch is never mistaken for the current tree.
+    let path = store_for_box(name)?
+        .join("diffs")
+        .join(format!("{name}.patch"));
+    let patch = fs::read_to_string(path).ok()?;
+    (!patch.trim().is_empty()).then(|| DiffView {
+        patch,
+        base: String::new(),
+        source: "stored".into(),
+        note: "the box isn't running — this is the patch it wrote at its last turn end".into(),
+    })
+}
+
+pub(crate) const DIFF_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn git_ok(dir: &str, args: &[&str]) -> bool {
+    let mut a = vec!["-C", dir];
+    a.extend_from_slice(args);
+    let mut command = Command::new("git");
+    command.args(&a);
+    bounded_output(&mut command, "git", Duration::from_secs(10))
+        .is_ok_and(|output| output.status.success())
+}
+
+/// The git ref a host-side branch-vs-base range starts at, or None if `dir` isn't a git repo here.
+/// Same ladder as the in-box diff, so the takeover brief's file list and the diff pane agree about
+/// what "the branch" means. With no common ancestor it falls back to `HEAD` (uncommitted only)
+/// rather than exploding into an unrelated-history diff.
+pub(crate) fn git_range(dir: &str) -> Option<String> {
+    if !Path::new(dir).join(".git").exists() {
+        return None;
+    }
+    let refs = diff_base_refs();
+    let base = refs
+        .iter()
+        .find(|b| git_ok(dir, &["rev-parse", "--verify", "-q", b]));
+    let merge_base = base.and_then(|b| {
+        let mut command = Command::new("git");
+        command.args(["-C", dir, "merge-base", "HEAD", b]);
+        let o = bounded_output(&mut command, "git merge-base", Duration::from_secs(10)).ok()?;
+        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        (o.status.success() && !s.is_empty()).then_some(s)
+    });
+    Some(merge_base.unwrap_or_else(|| "HEAD".into()))
+}
+
+/// The diff± badge for a fleet row: the shortstat the box itself wrote at its last turn end.
+///
+/// The box's own number, never the host's. Host-side git ran against whatever `dir` resolved to
+/// here — for a clone-mode box that's a different checkout on a different branch — so it produced
+/// a plausible wrong number for exactly the boxes the badge matters most for. Free, because the
+/// box already wrote it to `<store>/diffs/<name>.json`; this runs on every fleet tick and must
+/// never fork anything.
+pub(crate) fn read_diffstat_file(name: &str) -> Option<DiffStat> {
+    let path = store_for_box(name)?
+        .join("diffs")
+        .join(format!("{name}.json"));
+    let s = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    let get = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let stat = DiffStat {
+        files: get("files"),
+        ins: get("ins"),
+        del: get("del"),
+    };
+    (stat.files != 0 || stat.ins != 0 || stat.del != 0).then_some(stat)
+}
+
+/// The files a box changed on its branch (host-side `git diff --name-only`, or parsed from the
+/// box-reported patch in clone mode where this host can't see the box's `.git`). Feeds the
+/// takeover brief, which is the only thing that still needs a file list.
+pub fn changed_files(name: &str) -> Vec<String> {
+    if !valid_name(name) {
+        return vec![];
+    }
+    if let Some(dir) = lookup_dir(name) {
+        if let Some(range) = git_range(&dir) {
+            let mut command = Command::new("git");
+            command.args(["-C", &dir, "diff", "--name-only", &range]);
+            if let Ok(out) = bounded_output(
+                &mut command,
+                "git diff --name-only",
+                Duration::from_secs(15),
+            ) {
+                if out.status.success() {
+                    let v: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !v.is_empty() {
+                        return v;
+                    }
+                }
+            }
+        }
+    }
+    // clone-mode fallback: pull the file list out of the patch the box reported.
+    let mut files = Vec::new();
+    if let Some(reg) = locate_registry()
+        .ok()
+        .and_then(|r| r.parent().map(|p| p.to_path_buf()))
+    {
+        if let Ok(patch) = fs::read_to_string(reg.join("diffs").join(format!("{name}.patch"))) {
+            for line in patch.lines() {
+                if let Some(rest) = line.strip_prefix("+++ b/") {
+                    let f = rest.trim();
+                    if !f.is_empty() && f != "/dev/null" {
+                        files.push(f.to_string());
+                    }
+                }
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
