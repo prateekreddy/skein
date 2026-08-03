@@ -577,6 +577,9 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     );
     std::env::set_var("SKEIN_HOME", root.join("skein"));
     std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    // No runtime installs: this harness's `sbx exec` runs on THIS machine, so the substrate step
+    // would npm-install an agent runtime onto the developer's box. It did exactly that once.
+    std::env::set_var("SKEIN_RUNTIME_PACKAGES", "");
     // Stand in for the SANDBOX's home. Without this the fake `sbx` reports this machine's real
     // $HOME, and the launcher would seed a box from — and reconcile credentials back into — the
     // developer's own ~/.claude. A test must not be able to touch that; the first run of this test

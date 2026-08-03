@@ -375,6 +375,9 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     }
     ensure_substrate(sandbox)?;
     ensure_fleet_root(sandbox)?;
+    // After the substrate (which may have just installed the runtimes) and before any box starts,
+    // so a rebuilt sandbox has its login back before the first box seeds from it.
+    sync_fleet_login(sandbox);
     install_launcher(sandbox)
 }
 
@@ -398,9 +401,22 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
     let script = r#"need='';
          command -v tmux >/dev/null 2>&1 || need="$need tmux";
          command -v jq   >/dev/null 2>&1 || need="$need jq";
+         # The agent runtimes are substrate too. The `shell` image has neither, and an agent image
+         # would only ever carry one of them — so they are installed once, into the sandbox, and
+         # every box in it shares them. Measured on a real sandbox: 6s and 3s. What stays per box is
+         # the state, which box-session.sh keeps private; only the binaries are shared.
+         npm="$SKEIN_RUNTIME_PACKAGES";
          command -v bwrap >/dev/null 2>&1 || { echo 'skein: this sandbox image has no bwrap; boxes cannot be isolated in it' >&2; exit 1; };
-         [ -n "$need" ] || exit 0;
          log=/tmp/skein-substrate.log;
+         want=""; for p in $npm; do
+           case "$p" in
+             *claude-code) command -v claude >/dev/null 2>&1 || want="$want $p" ;;
+             *codex)       command -v codex  >/dev/null 2>&1 || want="$want $p" ;;
+             *)            want="$want $p" ;;
+           esac;
+         done; npm="$want";
+         [ -n "$need" ] || [ -n "$npm" ] || exit 0;
+         [ -n "$need" ] || { timeout 300 sudo npm install -g $npm >>"$log" 2>&1 || true; exit 0; };
          # A freshly created sandbox is still running its own first-boot apt, and apt refuses to run
          # twice. Outlast it rather than failing the launch on a race: measured on a real rebuild,
          # where the retry landed on "Could not get lock ... held by process 281 (apt-get)".
@@ -416,6 +432,9 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
            timeout 240 sudo apt-get install -y -qq $need \
              || { sleep 5; timeout 180 sudo apt-get update -qq; \
                   timeout 240 sudo apt-get install -y -qq $need; }; } >"$log" 2>&1;
+         if [ -n "$npm" ] && command -v npm >/dev/null 2>&1; then
+           timeout 300 sudo npm install -g $npm >>"$log" 2>&1 || true;
+         fi;
          missing=''; for t in $need; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done;
          [ -z "$missing" ] || {
              echo "skein: the fleet sandbox is missing required tools:$missing";
@@ -423,8 +442,18 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
              tail -n 25 "$log" | sed 's/^/  | /';
              exit 1;
          } >&2"#;
+    // The packages are named by the caller, not by the script, so a harness can ask for none.
+    // Without that seam the integration test — whose `sbx exec` runs on the developer's own machine
+    // — npm-installs an agent runtime onto it, which is both a 50s test and software nobody asked
+    // for. $SKEIN_RUNTIME_PACKAGES set to empty means "install no runtimes".
+    let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
+        .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
+    let script = format!(
+        "SKEIN_RUNTIME_PACKAGES={}; {script}",
+        sh_quote(packages.trim())
+    );
     own_sandbox(sandbox)
-        .exec(script, Duration::from_secs(900))
+        .exec(&script, Duration::from_secs(900))
         .map(|_| ())
 }
 
@@ -1014,6 +1043,63 @@ pub fn base_branch(repo: &Repo) -> String {
 ///
 /// The pid is knowable only inside the sandbox, and only after the session starts — which is why
 /// placement is recorded after launch rather than predicted before it.
+/// Where the fleet's logins are kept on the HOST, so they outlive the sandbox.
+///
+/// Not the shared project store — that is data the boxes read, and a credential has no business in
+/// it. This is skein's own directory, beside the box state it already keeps there.
+fn fleet_home_dir() -> std::path::PathBuf {
+    skein_home().join("fleet-home")
+}
+
+/// The files that make a login a login, relative to a HOME.
+const LOGIN_FILES: [&str; 2] = [".claude/.credentials.json", ".codex/auth.json"];
+
+/// Keep the fleet's login on the host, and put it back into a sandbox that has none.
+///
+/// `skein login` writes into the sandbox's own HOME, which is VM-local — so a resize destroyed it
+/// along with everything else, and "log in once" quietly became "log in after every resize".
+/// Measured: after a rebuild the sandbox came back with `cred=GONE`.
+///
+/// Newest wins, in one direction at a time: a sandbox that has the credential is the live copy and
+/// refreshes the host's; a sandbox without one is freshly built and gets the host's back. Boxes
+/// already reconcile into the sandbox at session start, so a re-login anywhere reaches here too.
+///
+/// Best-effort by design: a fleet running on API keys has no login to carry, and failing a launch
+/// over that would be absurd.
+pub fn sync_fleet_login(sandbox: &str) {
+    let fleet = own_sandbox(sandbox);
+    let dir = fleet_home_dir();
+    for rel in LOGIN_FILES {
+        let host = dir.join(rel);
+        let in_sandbox = fleet
+            .bytes(
+                &format!("cat \"$HOME\"/{} 2>/dev/null || true", sh_quote(rel)),
+                Duration::from_secs(20),
+            )
+            .unwrap_or_default();
+        if !in_sandbox.is_empty() {
+            if let Some(parent) = host.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::write(&host, &in_sandbox).is_ok() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o600));
+            }
+            continue;
+        }
+        let Ok(saved) = std::fs::read(&host) else {
+            continue;
+        };
+        let restore = format!(
+            "mkdir -p \"$(dirname \"$HOME\"/{r})\" && cat > \"$HOME\"/{r} && chmod 600 \"$HOME\"/{r}",
+            r = sh_quote(rel)
+        );
+        if let Err(e) = fleet.write(&restore, &saved, Duration::from_secs(30)) {
+            eprintln!("skein: could not restore the {rel} login into {sandbox}: {e}");
+        }
+    }
+}
+
 /// Make sure a placed box has a live session, restarting it from its own tree if not.
 ///
 /// The box is its **tree**; the session is disposable. A fleet box's tmux server does not survive
