@@ -5032,6 +5032,64 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::remove_var("SKEIN_REGISTRY");
     }
 
+    // A box in a shared sandbox is attached to through its namespace, and every tmux call names its
+    // own server. Both matter for the same reason: session names are identical across boxes, so a
+    // bare `tmux has-session -t skein-agent` on the sandbox's default socket would find a NEIGHBOUR's
+    // agent and attach the user straight into someone else's turn.
+    #[test]
+    fn a_shared_box_is_attached_through_its_namespace_and_its_own_tmux_server() {
+        let _g = ENV_LOCK.lock().unwrap();
+        env::set_var("SKEIN_HOME", tempdir());
+        record_place(
+            "thing-x",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: std::process::id(), // alive, so the record is followed
+                home: "/boxes/thing-x/home".into(),
+                tree: "/boxes/thing-x/tree".into(),
+                sock: "/boxes/thing-x/session.sock".into(),
+            },
+        )
+        .unwrap();
+
+        for argv in [attach_argv("thing-x", "/d"), shell_argv("thing-x")] {
+            assert_eq!(
+                &argv[..3],
+                ["exec", "-it", "skein-fleet"],
+                "the sandbox is the fleet's, not the box's"
+            );
+            assert!(
+                argv.contains(&"--preserve-credentials".to_string()),
+                "the attach itself runs in the namespace — its setup writes the box's HOME and tree"
+            );
+            let shell = argv.last().unwrap();
+            assert!(
+                shell.contains("export HOME='/boxes/thing-x/home'"),
+                "nsenter carries the CALLER's environment in, so HOME must be set explicitly"
+            );
+            // Every tmux call, not just the attach: has-session, new-session, set-option and the
+            // server-global configuration all have to land on this box's server.
+            for call in shell.match_indices("tmux ").map(|(i, _)| &shell[i..]) {
+                assert!(
+                    call.starts_with("tmux -S '/boxes/thing-x/session.sock'")
+                        || call.starts_with("tmux is required")
+                        || call.starts_with("tmux >/dev/null"),
+                    "a tmux call went to the default socket: {call:.60}"
+                );
+            }
+        }
+
+        // The observer runs its own tmux commands in a detached process, so it needs the socket too
+        // — otherwise turn state for this box would be read off a neighbour's pane.
+        assert!(attach_argv("thing-x", "/d")
+            .last()
+            .unwrap()
+            .contains("SKEIN_TMUX_SOCK='/boxes/thing-x/session.sock'"));
+
+        forget_place("thing-x");
+        env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn shell_and_attach_argv_differ() {
         let _g = ENV_LOCK.lock().unwrap();

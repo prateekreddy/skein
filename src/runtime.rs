@@ -153,11 +153,20 @@ pub(crate) fn resolve_runtime(id: &str) -> &'static RuntimeAdapter {
 /// human's editor for CPU. Idempotent: the script takes a box-local lock and a second copy exits
 /// immediately, so every reconnect can run this blindly. Fail-soft throughout: a box whose store
 /// predates the script simply has no observer, and turn-state falls back to hook edges alone.
-pub(crate) fn pane_observer_start(tmux_name: &str) -> String {
+/// `sock` is the box's tmux socket under the shared model, empty when the sandbox is the box. It is
+/// exported rather than passed as an argument so that a store whose `box-pane.sh` predates this
+/// still starts and simply ignores it — the observer is fail-soft by design, and a box that loses
+/// its observer loses turn-state detail, not its session.
+pub(crate) fn pane_observer_start(tmux_name: &str, sock: &str) -> String {
+    let socket_env = if sock.is_empty() {
+        String::new()
+    } else {
+        format!("SKEIN_TMUX_SOCK={} ", sh_quote(sock))
+    };
     format!(
         "obs=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/skein/bin/box-pane.sh\"; \
          if [ -r \"$obs\" ]; then command -v setsid >/dev/null 2>&1 || setsid() {{ \"$@\"; }}; \
-         ( setsid nice -n 19 bash \"$obs\" {tmux_name} >/dev/null 2>&1 & ) ; fi;"
+         ( {socket_env}setsid nice -n 19 bash \"$obs\" {tmux_name} >/dev/null 2>&1 & ) ; fi;"
     )
 }
 

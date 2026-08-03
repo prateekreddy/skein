@@ -6,7 +6,7 @@
 //! this module rather than to every feature that touches one.
 
 use crate::config::*;
-use crate::place::place_of;
+use crate::place::{own_sandbox, place_of};
 use crate::runtime::*;
 use crate::util::*;
 use crate::{
@@ -610,26 +610,25 @@ pub(crate) fn agent_attach_argv(
     };
     let instruction = agent_instruction_setup(runtime);
     let command = guarded_agent_command(agent, command);
-    let observer = pane_observer_start(tmux_name);
+    let place = place_of(name).unwrap_or_else(|| own_sandbox(name));
+    // Every `tmux` below is this box's server: bare under the original model, socket-qualified when
+    // the sandbox is shared. Session names are identical either way, so without the socket two boxes
+    // would both find a live `skein-agent` on the sandbox's one server and attach to each other's.
+    let tmux = place.tmux();
+    let observer = pane_observer_start(tmux_name, place.tmux_sock());
+    let configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} "));
     let shell = format!(
         "{setup_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not installed in this sandbox image; create a {agent} box or install/authenticate the CLI here to take over'; exec bash -li; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
          {setup}; \
-         created=0; if ! tmux has-session -t {tmux_name} 2>/dev/null; then {instruction}; {update}; tmux new-session -d -s {tmux_name} {command:?}; created=1; fi; \
-         if [ \"$created\" = 1 ]; then tmux set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
+         created=0; if ! {tmux} has-session -t {tmux_name} 2>/dev/null; then {instruction}; {update}; {tmux} new-session -d -s {tmux_name} {command:?}; created=1; fi; \
+         if [ \"$created\" = 1 ]; then {tmux} set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
          {observer} \
-         {TMUX_CONFIGURE}exec tmux -u attach-session -t {tmux_name}",
+         {configure}exec {tmux} -u attach-session -t {tmux_name}",
         setup = runtime.interactive_setup,
         update = runtime.update_before_start,
     );
-    vec![
-        "exec".into(),
-        "-it".into(),
-        name.into(),
-        "bash".into(),
-        "-lc".into(),
-        shell,
-    ]
+    place.interactive_argv(&shell)
 }
 
 /// Stop one runtime's persistent tmux process without touching the sandbox or another provider's
@@ -649,10 +648,13 @@ pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), St
         return Err(format!("box {name:?} is not running"));
     }
     let session = agent_session_name(name, runtime);
-    let (out, err, code) = run_capture(
-        "sbx",
-        &["exec", name, "tmux", "kill-session", "-t", &session],
-    )?;
+    let place = place_of(name).ok_or("invalid box name")?;
+    // `session` is built from a validated box name and a validated runtime, so it is safe to spell
+    // into a shell string here — and going through the place is what aims kill-session at this
+    // box's own server rather than whichever one answers on the sandbox's default socket.
+    let argv = place.exec_argv(&format!("{} kill-session -t {session}", place.tmux()));
+    let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+    let (out, err, code) = run_capture(&argv[0], &args)?;
     if code == 0 {
         Ok(())
     } else {
@@ -681,12 +683,10 @@ pub(crate) fn agent_resume_cmd(agent: &str) -> String {
 /// direct shell avoids presenting a terminal whose process dies on reload. Override the whole
 /// command with $SKEIN_SHELL_CMD (`sh -c`).
 pub fn shell_argv(name: &str) -> Vec<String> {
-    vec![
-        "exec".into(),
-        "-it".into(),
-        name.into(),
-        "bash".into(),
-        "-lc".into(),
-        format!("if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; if ! tmux has-session -t skein-shell 2>/dev/null; then tmux new-session -d -s skein-shell; fi; {TMUX_CONFIGURE}exec tmux -u attach-session -t skein-shell"),
-    ]
+    let place = place_of(name).unwrap_or_else(|| own_sandbox(name));
+    let tmux = place.tmux();
+    let configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} "));
+    place.interactive_argv(&format!(
+        "if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; if ! {tmux} has-session -t skein-shell 2>/dev/null; then {tmux} new-session -d -s skein-shell; fi; {configure}exec {tmux} -u attach-session -t skein-shell"
+    ))
 }

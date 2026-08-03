@@ -150,6 +150,19 @@ pub fn place_of(name: &str) -> Option<Place> {
     })
 }
 
+/// A box that is its own sandbox — skein's original model.
+///
+/// For the argv builders that must produce *something* for a name `place_of` rejects: they used to
+/// interpolate the name directly and had no failure path, so refusing here would turn a bad name
+/// from a command that fails in the box into a panic in the server.
+pub fn own_sandbox(name: &str) -> Place {
+    Place {
+        name: name.to_string(),
+        sandbox: name.to_string(),
+        at: Where::OwnSandbox,
+    }
+}
+
 /// The name of the one sandbox that hosts every box, when the shared model is on. Empty ⇒ each box
 /// gets its own sandbox, which is skein's original behaviour and stays the default.
 pub fn fleet_sandbox() -> String {
@@ -188,6 +201,15 @@ impl Place {
         }
     }
 
+    /// This box's tmux socket, empty when the sandbox is the box. For the few callers that need the
+    /// bare path rather than the `tmux` spelling — the pane observer runs its own tmux commands.
+    pub fn tmux_sock(&self) -> &str {
+        match &self.at {
+            Where::OwnSandbox => "",
+            Where::Shared { sock, .. } => sock,
+        }
+    }
+
     /// The `nsenter` hop that puts a command inside this box's namespace — empty when the sandbox
     /// is the box, which is what keeps the original model byte-for-byte unchanged.
     fn enter(&self) -> Vec<String> {
@@ -217,6 +239,26 @@ impl Place {
                 sh_quote(tree)
             ),
         }
+    }
+
+    /// The `sbx` arguments for an **interactive** attach — a terminal, not a captured command.
+    ///
+    /// Returns everything *after* the program name, unlike the other builders here, because both
+    /// callers hand `sbx` to a PTY spawner (`CommandBuilder::new("sbx")`) rather than running an
+    /// argv[0]. Kept as-is rather than "fixed" for symmetry: changing it would mean touching the
+    /// terminal plumbing on both ends for no behavioural gain.
+    ///
+    /// The whole attach runs inside the namespace, not just the tmux call. The shell it carries
+    /// refreshes the runtime's instruction file, runs the runtime's setup and starts the pane
+    /// observer — all of which read and write the box's own HOME and tree. Outside the hop they
+    /// would quietly operate on skein's.
+    pub fn interactive_argv(&self, script: &str) -> Vec<String> {
+        let mut argv = vec!["exec".to_string(), "-it".into(), self.sandbox.clone()];
+        argv.extend(self.enter());
+        argv.push("bash".into());
+        argv.push("-lc".into());
+        argv.push(self.wrap(script));
+        argv
     }
 
     /// The argv for running a command here *without* a shell — `["cat", path]` and friends.
