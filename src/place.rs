@@ -128,6 +128,29 @@ pub fn shared_record(name: &str) -> Option<PlaceRecord> {
     read_place_record(name)
 }
 
+/// Every box skein has placed in `sandbox`, running or not.
+///
+/// Read off the placement records rather than by asking the sandbox what is inside it: a resize has
+/// to account for boxes that are *stopped* too — their checkouts are still VM-local and still hold
+/// unpushed work, and a sandbox that is about to be destroyed cannot be asked about them.
+/// Sorted, so a resize processes them in the same order every time and its log can be followed.
+pub fn placed_boxes(sandbox: &str) -> Vec<(String, PlaceRecord)> {
+    let dir = skein_home().join("places");
+    let mut found: Vec<(String, PlaceRecord)> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = name.strip_suffix(".json")?.to_string();
+            let record = read_place_record(&name)?;
+            (record.sandbox == sandbox).then_some((name, record))
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
 fn read_place_record(name: &str) -> Option<PlaceRecord> {
     serde_json::from_str(&fs::read_to_string(place_record_path(name)).ok()?).ok()
 }

@@ -205,6 +205,15 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
     tar -C "$clone_root" -xzf "$snapshot/untracked.tgz" \
       || { echo "[skein-kit] could not restore untracked files" >&2; exit 1; }
   fi
+  # The conversation, where the snapshot carried one. A fleet resize rebuilds a box at the same path
+  # it had before, so the transcript's cwd slug still addresses it and the runtime's own --continue
+  # finds the session rather than opening a new one against a familiar-looking tree. Extracted OVER
+  # the seeded HOME, so the credentials seeded from the sandbox stay as they are — the snapshot
+  # deliberately carries no auth of its own (see fleet::agent_state_tar).
+  if [ -s "$snapshot/agent-state.tgz" ]; then
+    tar -C "$HOME" -xzf "$snapshot/agent-state.tgz" \
+      || echo "[skein-kit] could not restore the previous conversation; the tree is intact" >&2
+  fi
   cp "$snapshot/manifest.json" "$handoff_marker" 2>/dev/null \
     || printf '%s\n' "$handoff_dir" > "$handoff_marker"
   echo "[skein-kit] restored replacement snapshot from $handoff_dir"

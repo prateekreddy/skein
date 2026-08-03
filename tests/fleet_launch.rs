@@ -54,6 +54,9 @@ fn write_fake_sbx(dir: &Path) {
 verb="$1"; shift
 case "$verb" in
   create) exit 0 ;;
+  # Destroying the sandbox is the one irreversible step, so the harness records that it happened
+  # rather than trusting resize's own report of whether it got that far.
+  rm) : > "$SBX_RM_MARKER"; exit 0 ;;
   exec)
     while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done
     shift          # the sandbox name
@@ -325,6 +328,17 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         .unwrap()
         .trim()
         .to_string();
+    // A transcript and a credential, side by side in the box's private HOME exactly as the real
+    // agent leaves them — so the snapshot has to distinguish them rather than take the directory.
+    boxed
+        .exec(
+            "mkdir -p ~/.claude/projects/-boxes-web-main-tree \
+             && echo '{\"type\":\"user\"}' > ~/.claude/projects/-boxes-web-main-tree/sess.jsonl \
+             && echo 'SECRET-TOKEN' > ~/.claude/.credentials.json",
+            Duration::from_secs(30),
+        )
+        .unwrap();
+
     let relative = snapshot_box(BOX, &store.to_string_lossy(), "resize-run").expect("snapshot");
     assert!(
         relative.starts_with("skein/handoff-snapshots/"),
@@ -377,6 +391,59 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         "loose",
         "the untracked file was lost — no patch covers these"
     );
+
+    // ---- the conversation travels; the credential does not ----
+    // A rebuilt box must resume the session rather than open a new one against a familiar tree, and
+    // the transcript is addressed by the cwd slug, which survives because the box comes back at the
+    // same path. The credential must NOT travel: the store is host-side shared data, and the box is
+    // re-seeded with auth from the sandbox anyway. An allowlist is what makes the second half hold
+    // for files that do not exist yet.
+    let members = sh(&format!("tar -tzf {}/agent-state.tgz", snap.display()));
+    assert!(
+        members.contains(".claude/projects/-boxes-web-main-tree/sess.jsonl"),
+        "the transcript did not travel, so the box would resume nothing: {members}"
+    );
+    assert!(
+        !members.contains("credentials"),
+        "a credential reached the shared store: {members}"
+    );
+    assert_eq!(
+        sh(&format!(
+            "tar -xzOf {}/agent-state.tgz .claude/projects/-boxes-web-main-tree/sess.jsonl",
+            snap.display()
+        )),
+        "{\"type\":\"user\"}",
+        "the transcript arrived truncated or empty"
+    );
+
+    // ---- a resize that cannot save a box must not destroy the sandbox ----
+    // The entire safety property of resize_fleet is its ordering: everything comes out first, and a
+    // single failure leaves the sandbox standing with every box still in it. A partial snapshot is
+    // not a partial resize, it is lost work — and the box that loses it is precisely the one whose
+    // state could not be read. Asserted against the marker the fake sbx writes, not against the
+    // error message, because the failure being guarded is "it destroyed things anyway".
+    let rm_marker = root.join("sbx-rm-happened");
+    std::env::set_var("SBX_RM_MARKER", &rm_marker);
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        ..load_config()
+    })
+    .unwrap();
+    // This box belongs to no registered repo, so its work has nowhere to be saved.
+    let err = resize_fleet("8g", "4").expect_err("resize must refuse");
+    assert!(
+        err.contains("no registered repo") && err.contains("untouched"),
+        "the refusal must say the sandbox was left alone: {err}"
+    );
+    assert!(
+        !rm_marker.exists(),
+        "the sandbox was destroyed despite a box whose work could not be saved"
+    );
+    save_config(&Config {
+        fleet_sandbox: String::new(),
+        ..load_config()
+    })
+    .unwrap();
 
     // ---- liveness, without entering anything ----
     let sock = box_sock(BOX);

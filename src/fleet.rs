@@ -16,10 +16,13 @@
 //! record, so turning this on never retroactively reinterprets one.
 
 use crate::config::*;
-use crate::place::{fleet_sandbox, own_sandbox, place_of, record_place, PlaceRecord};
-use crate::repos::{is_git_url, load_repos, Repo};
+use crate::place::{
+    fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, PlaceRecord,
+};
+use crate::repos::{branch_of, is_git_url, load_repos, repo_for_box, Repo};
 use crate::util::*;
-use crate::{fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
+use crate::{agent_for_box, fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
+use chrono::Utc;
 use std::time::Duration;
 
 /// The launcher, embedded so it can be installed into a sandbox that has never seen this repo.
@@ -417,12 +420,176 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
          else tar -czf {s}/untracked.tgz --files-from /dev/null; fi; \
          rm -f {s}/untracked.list; \
          printf '{{\"box\":\"%s\",\"branch\":\"%s\",\"head\":\"%s\"}}\\n' {n} \
-           \"$(git rev-parse --abbrev-ref HEAD)\" \"$(git rev-parse HEAD)\" > {s}/manifest.json",
+           \"$(git rev-parse --abbrev-ref HEAD)\" \"$(git rev-parse HEAD)\" > {s}/manifest.json; \
+         {agent_state}",
         s = sh_quote(&snapshot),
         n = sh_quote(name),
+        agent_state = agent_state_tar(&snapshot),
     );
     boxed.exec(&build, Duration::from_secs(600))?;
     Ok(relative)
+}
+
+/// The parts of a box's private `$HOME` that carry the *conversation* — so a rebuilt box can resume
+/// the session rather than start a new one against a familiar tree.
+///
+/// An **allowlist**, and that is the whole design. The same argument that made `box-session.sh`
+/// private-by-default applies in reverse here: an agent harness keeps state wherever it likes, and
+/// with an exclude list anything unanticipated — a new token cache, a new auth file — would be
+/// copied into the repo's store, which is host-side shared data. Named paths mean a harness change
+/// costs a lost transcript, never a leaked credential.
+///
+/// `.credentials.json` is therefore not here, and does not need to be: `box-session.sh` seeds the
+/// box's `~/.claude` from the sandbox's on first start, so the rebuilt box is already logged in.
+///
+/// The transcript is addressed by the *cwd slug* Claude derives (`-boxes-<name>-tree`), which is why
+/// this works at all for a resize: the box comes back at the same path, so the restored transcript is
+/// the one `--continue` looks for. A migration that moved the tree would need the slug rewritten.
+fn agent_state_tar(snapshot: &str) -> String {
+    const CARRIED: &[&str] = &[
+        ".claude/projects",      // the transcripts --continue/--resume read
+        ".claude/history.jsonl", // the prompt history
+        ".claude/todos",         // in-flight task list
+        ".claude.json",          // per-box MCP registration + project state
+        ".codex/sessions",       // codex's equivalent
+        ".codex/history.jsonl",
+    ];
+    let list = CARRIED
+        .iter()
+        .map(|p| sh_quote(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Only the paths that exist: tar fails the whole archive on a missing member, and which of these
+    // a box has depends on which runtime it ran.
+    format!(
+        "have=''; for p in {list}; do [ -e \"$HOME/$p\" ] && have=\"$have $p\"; done; \
+         if [ -n \"$have\" ]; then tar -C \"$HOME\" -czf {s}/agent-state.tgz $have; \
+         else tar -czf {s}/agent-state.tgz --files-from /dev/null; fi",
+        s = sh_quote(snapshot),
+    )
+}
+
+/// What one box needs in order to be rebuilt after the sandbox is destroyed.
+#[derive(Debug, Clone)]
+pub struct BoxSnapshot {
+    pub name: String,
+    pub repo: Repo,
+    pub branch: String,
+    pub agent: String,
+    /// The snapshot path *relative to the repo store* — the form the launch spec carries.
+    pub dir: String,
+}
+
+/// Change the fleet sandbox's memory or CPUs, carrying every box's work across.
+///
+/// sbx fixes both at creation, so this destroys the sandbox and rebuilds it. Every box's checkout is
+/// VM-local — the thing that makes builds fast — so all of it has to come out first and go back
+/// after. The sequence is:
+///
+///   snapshot every box → record each snapshot in its launch spec → destroy → recreate → restart
+///
+/// **Nothing is destroyed until every box has been snapshotted.** A partial snapshot is not a
+/// partial resize, it is lost work, and the boxes that would lose it are exactly the ones whose
+/// state could not be read — so a single failure aborts with the sandbox still standing and every
+/// box still in it. That ordering is the entire safety property of this function.
+///
+/// Restarting is best-effort *by design*: once the snapshots are written they are durable, on the
+/// host, in each repo's store. A box that fails to come back can be retried with `skein start`, and
+/// the provisioning script restores it from the launch spec it already carries. Failing the whole
+/// resize because the fourth box's clone timed out would help nobody.
+pub fn resize_fleet(memory: &str, cpus: &str) -> Result<Vec<String>, String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured; nothing to resize".into());
+    }
+    let boxes = placed_boxes(&sandbox);
+
+    // ---- phase 1: get everything out, or change nothing ----
+    let mut snapshots: Vec<BoxSnapshot> = Vec::new();
+    let run = format!("resize-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    for (name, _) in &boxes {
+        let repo = repo_for_box(name).ok_or_else(|| {
+            format!(
+                "box {name} belongs to no registered repo, so its work has nowhere to be saved — \
+                 resize aborted with the sandbox untouched"
+            )
+        })?;
+        let branch = branch_of(name).unwrap_or_default();
+        if branch.trim().is_empty() {
+            return Err(format!(
+                "box {name} has no recorded branch to restore onto — resize aborted with the \
+                 sandbox untouched"
+            ));
+        }
+        let dir = snapshot_box(name, &repo.store, &run).map_err(|e| {
+            format!(
+                "could not save {name}'s work ({e}) — resize aborted with the sandbox untouched"
+            )
+        })?;
+        snapshots.push(BoxSnapshot {
+            name: name.clone(),
+            agent: agent_for_box(name),
+            repo: repo.clone(),
+            branch,
+            dir,
+        });
+    }
+    // Only now, with every box's work on the host, is the launch spec rewritten to restore from it.
+    for snap in &snapshots {
+        write_restore_launch_spec(snap)?;
+    }
+
+    // ---- phase 2: the destructive part ----
+    let config = load_config();
+    save_config(&Config {
+        fleet_memory: memory.trim().to_string(),
+        fleet_cpus: cpus.trim().to_string(),
+        ..config
+    })?;
+    let (out, err, code) = run_capture("sbx", &["rm", "-f", &sandbox])?;
+    if code != 0 {
+        let detail = if err.trim().is_empty() { out } else { err };
+        return Err(format!(
+            "could not destroy {sandbox}: {} — every box's work is saved in its repo store under \
+             {run}, and `skein start <box>` restores it once the sandbox is rebuilt",
+            detail.trim()
+        ));
+    }
+    // The namespaces died with the sandbox. Forget them before rebuilding, or `place_of` would hand
+    // out pids into a VM that no longer exists.
+    for (name, _) in &boxes {
+        forget_place(name);
+    }
+    ensure_fleet(&sandbox, &fleet_mounts())?;
+
+    // ---- phase 3: bring them back ----
+    let mut failed = Vec::new();
+    for snap in &snapshots {
+        if let Err(e) = start_box(&snap.name, &snap.repo, &snap.branch, "exec bash -l") {
+            eprintln!("skein: {} did not come back: {e}", snap.name);
+            failed.push(snap.name.clone());
+        }
+    }
+    Ok(failed)
+}
+
+/// Point a box's launch spec at the snapshot it must restore from on its next start.
+///
+/// The same `handoff.dir` channel a cross-runtime takeover uses, because it is the same problem:
+/// a new checkout that has to become an old box. The provisioning script validates the path against
+/// the `skein/handoff-snapshots/` prefix and restores once, guarded by a marker in `.git`.
+fn write_restore_launch_spec(snap: &BoxSnapshot) -> Result<(), String> {
+    let dir = std::path::Path::new(&snap.repo.store)
+        .join("skein")
+        .join("launch");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let body = serde_json::json!({
+        "branch": snap.branch,
+        "agent": snap.agent,
+        "handoff": { "source": snap.name, "dir": snap.dir },
+    });
+    let bytes = serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join(format!("{}.json", snap.name)), &dir, &bytes)
 }
 
 /// What a box clones from. The registered source when it is a URL — a box should start from the
