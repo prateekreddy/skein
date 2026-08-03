@@ -89,10 +89,21 @@ fn write_remote(root: &Path) -> String {
 /// box root beneath either is unreadable from outside — and `box-session.sh` refuses it outright.
 /// The first run of this test put the scratch in `/tmp` and was correctly turned away.
 fn scratch() -> PathBuf {
-    let d = PathBuf::from("/var/tmp").join(format!("skein-fleet-it-{}", std::process::id()));
+    scratch_named("box")
+}
+
+fn scratch_named(what: &str) -> PathBuf {
+    let d = PathBuf::from("/var/tmp").join(format!("skein-fleet-it-{what}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// Both tests in this file drive skein through process-wide environment ($PATH, $SKEIN_HOME,
+/// $SKEIN_FLEET_ROOT), so they cannot run at the same time in the same process.
+fn serialize() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// One box, from nothing to running to gone.
@@ -103,6 +114,7 @@ fn scratch() -> PathBuf {
 /// mutable state between tests through the environment — which is exactly what makes suites flaky.
 #[test]
 fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
+    let _guard = serialize();
     if !have("bwrap") || !have("tmux") || !have("git") {
         eprintln!("skipping: this machine lacks bwrap/tmux/git, so it cannot host a box");
         return;
@@ -533,5 +545,115 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let _ = Command::new("sudo")
         .args(["rmdir", &format!("/sys/fs/cgroup/skein/{BOX}")])
         .status();
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The whole of `start_box`, rather than its pieces called in the right order by hand.
+///
+/// The test above assembles the launch itself — install, clone, session — and that is precisely why
+/// it kept passing while every real launch failed. Each bug lived in the *seams*: the placement
+/// recorded an empty HOME, so provisioning resolved `$HOME/shared` to `/shared`; no launch spec was
+/// written, so the box stayed on the clone's default branch; the fleet root was never created. None
+/// of it is visible unless the entry point itself is the thing under test.
+#[test]
+fn start_box_leaves_a_box_that_is_actually_usable() {
+    if !have("bwrap") || !have("tmux") || !have("git") {
+        eprintln!("skipping: this machine lacks bwrap/tmux/git, so it cannot host a box");
+        return;
+    }
+    let _guard = serialize();
+    let root = scratch_named("start");
+    write_fake_sbx(&root.join("bin"));
+    let remote = write_remote(&root);
+    let name = "demo-smoke";
+
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            root.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    std::env::set_var("SKEIN_HOME", root.join("skein"));
+    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    // The fleet sandbox already exists, so `ensure_fleet` goes straight to substrate + launcher.
+    std::env::set_var("SKEIN_LS_CMD", format!("echo '[{{\"name\":\"{FLEET}\"}}]'"));
+
+    let store = root.join("store");
+    fs::create_dir_all(&store).unwrap();
+    ensure_store(&store).expect("seed the store");
+    ensure_probe_in(&store).expect("seed the store's scripts");
+    let repo = Repo {
+        id: "demo".into(),
+        source: remote.clone(),
+        work: root.join("work").to_string_lossy().into_owned(),
+        store: store.to_string_lossy().into_owned(),
+        agent: "claude".into(),
+        check: String::new(),
+        plane_project: String::new(),
+        sync_connection: String::new(),
+        sync_gateway_url: String::new(),
+    };
+    save_repos(std::slice::from_ref(&repo)).expect("register the repo");
+    let mut config = load_config();
+    config.fleet_sandbox = FLEET.into();
+    save_config(&config).expect("turn the fleet on");
+
+    start_box(name, &repo, "feat/smoke", "exec sleep 300").expect("start the box");
+
+    // The placement must carry a real HOME: `Place::wrap` exports it, and an empty one sends every
+    // `$HOME/…` path in provisioning to the filesystem root.
+    let placed = shared_record(name).expect("the box is placed");
+    assert!(
+        placed.home.starts_with('/') && placed.home.len() > 1,
+        "a placement with no HOME makes every box command write to /: {:?}",
+        placed.home
+    );
+
+    // The launch spec is how the box, and skein, learn which branch this box is for. Asserting on
+    // the checkout alone proves nothing: `clone_script` checks the branch out itself, so that stays
+    // green with no spec at all — while the box's own restart falls back to the clone's default and
+    // the board reports the wrong branch.
+    let tree = format!("{}/tree", box_root(name));
+    assert_eq!(
+        sh(&format!("git -C {tree} rev-parse --abbrev-ref HEAD")),
+        "feat/smoke",
+        "the box is on its own branch, not the clone's default"
+    );
+    assert_eq!(
+        branch_of(name).as_deref(),
+        Some("feat/smoke"),
+        "skein must be able to read the box's branch back from its launch spec"
+    );
+
+    // Provisioning ran *inside* the box: its shared home resolves under the store, not under /.
+    let boxed = place_of(name).expect("placed");
+    let link = boxed
+        .exec("readlink \"$HOME/shared\" || true", Duration::from_secs(30))
+        .expect("read the shared-home link");
+    assert!(
+        link.trim().starts_with(store.to_str().unwrap()),
+        "shared home must point into the mounted store, got {link:?}"
+    );
+
+    // And the store is reachable from the checkout, which is what makes hooks and the probe work.
+    let claude = boxed
+        .exec(
+            &format!("readlink -f {tree}/.claude || true"),
+            Duration::from_secs(30),
+        )
+        .expect("resolve .claude");
+    assert!(
+        claude.trim().starts_with(store.to_str().unwrap()),
+        "the box's .claude must resolve into the store, got {claude:?}"
+    );
+
+    let _ = stop_box(name);
+    forget_place(name);
+    let _ = Command::new("sudo")
+        .args(["rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
+        .status();
+    std::env::remove_var("SKEIN_LS_CMD");
     let _ = fs::remove_dir_all(&root);
 }

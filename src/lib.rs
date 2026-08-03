@@ -296,6 +296,15 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         }
         None => names.extend(reg.keys().cloned()),
     }
+    // Boxes in the shared sandbox are not sandboxes, so `sbx ls` has never heard of them — without
+    // this the entire fleet is invisible on the board while running perfectly. Their placement
+    // records are the register. The sandbox itself is *not* a box: it would otherwise appear as one,
+    // permanently stale, with no repo and no branch.
+    let fleet = fleet_sandbox();
+    if !fleet.is_empty() {
+        names.remove(&fleet);
+        names.extend(placed_boxes(&fleet).into_iter().map(|(name, _)| name));
+    }
 
     let mut views: Vec<BoxView> = names
         .into_iter()
@@ -5026,6 +5035,48 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // The shape that would slip through a bare "is it JSON?" check.
         assert!(revocation_outcome(r#"{"ok":true}"#).is_err());
         assert!(revocation_outcome("").is_err());
+    }
+
+    // A fleet box is not a sandbox, so `sbx ls` never mentions it. Until the placement records were
+    // consulted here, a perfectly healthy fleet was simply absent from the board — and the sandbox
+    // hosting it sat there instead, looking like a stale box nobody could attach to.
+    #[test]
+    fn the_board_shows_boxes_in_the_shared_sandbox_and_not_the_sandbox_itself() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
+        fs::write(home.join("sandboxes.json"), "{}").unwrap();
+        env::set_var("SKEIN_LS_CMD", "echo '[{\"name\":\"skein-fleet\"}]'");
+        let mut config = load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        save_config(&config).unwrap();
+        record_place(
+            "demo-task",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 1,
+                home: "/home/agent".into(),
+                tree: "/boxes/demo-task/tree".into(),
+                sock: "/boxes/demo-task/session.sock".into(),
+            },
+        )
+        .unwrap();
+
+        let names: Vec<String> = load_views().unwrap().into_iter().map(|v| v.name).collect();
+        assert!(
+            names.iter().any(|n| n == "demo-task"),
+            "a placed box must appear even though sbx has never heard of it: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "skein-fleet"),
+            "the sandbox that hosts the boxes is not itself a box: {names:?}"
+        );
+
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     #[test]

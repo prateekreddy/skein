@@ -20,7 +20,9 @@ use crate::place::{
     fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
     Place, PlaceRecord,
 };
-use crate::repos::{branch_of, is_git_url, load_repos, repo_for_box, Repo};
+use crate::repos::{
+    branch_of, is_git_url, launch_spec, load_repos, repo_for_box, write_launch_spec_for_agent, Repo,
+};
 use crate::util::*;
 use crate::{agent_for_box, fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
 use chrono::Utc;
@@ -591,11 +593,19 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
         &PlaceRecord {
             sandbox: sandbox.clone(),
             ns_pid,
-            home: String::new(),
+            home: sandbox_home(&fleet)?,
             tree: format!("{}/tree", box_root(name)),
             sock: box_sock(name),
         },
     )?;
+
+    // The launch spec is how the provisioning script learns the box's branch and runtime — without
+    // it the box stays on the clone's default branch, which is a silently wrong box rather than a
+    // failed one. The legacy path writes it while building the `sbx create` line; this path had no
+    // equivalent. Never overwrite a restore's spec: that one also carries the handoff snapshot.
+    if launch_spec(repo, name).is_none() {
+        write_launch_spec_for_agent(name, branch, repo, &agent_for_box(name))?;
+    }
 
     // Through the placement, so it lands in the box's private HOME rather than the sandbox's.
     let boxed = place_of(name).ok_or_else(|| format!("box {name} was not placed"))?;
@@ -945,6 +955,29 @@ pub fn base_branch(repo: &Repo) -> String {
 ///
 /// The pid is knowable only inside the sandbox, and only after the session starts — which is why
 /// placement is recorded after launch rather than predicted before it.
+/// The sandbox user's `$HOME`, which is the HOME every command in a box must run with.
+///
+/// Not a private directory and not empty: `box-session.sh` binds the box's own `home` *over* this
+/// path, so entering the namespace with it is what gives the box its private view. Recording an
+/// empty string here instead made `Place::wrap` export `HOME=`, and every provisioning step then
+/// resolved `$HOME/x` to `/x` — which is how a box tried to symlink `/shared` at the filesystem root
+/// and reported "shared home unavailable" and a bare "mkdir: Permission denied".
+///
+/// Asked of the sandbox rather than assumed to be `/home/agent`: the image chooses the user.
+fn sandbox_home(fleet: &Place) -> Result<String, String> {
+    let home = fleet
+        .exec("printf %s \"$HOME\"", Duration::from_secs(20))?
+        .trim()
+        .to_string();
+    if home.is_empty() || !home.starts_with('/') {
+        return Err(format!(
+            "the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \
+             HOME unset and write to the filesystem root"
+        ));
+    }
+    Ok(home)
+}
+
 /// How far a previous launch of this box got: does it have a checkout, and is its session alive?
 ///
 /// One round-trip rather than two, and asked of the sandbox rather than inferred from a placement
