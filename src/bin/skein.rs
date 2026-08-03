@@ -39,6 +39,7 @@ fn main() {
             Some(name) => cmd_start(name, &rest[1..]),
             None => Err("usage: skein start <box> [--branch <branch>] [--agent <runtime>]".into()),
         },
+        "login" => cmd_login(rest.first().map(String::as_str)),
         "migrate" => match rest.first() {
             Some(name) => cmd_migrate(name),
             None => Err("usage: skein migrate <box>   (moves it into the shared sandbox)".into()),
@@ -73,6 +74,7 @@ skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
 skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbox)\n  \
+skein login <runtime> authenticate once in the shared sandbox; every box inherits it\n  \
 skein migrate <box>   move an existing box into the shared sandbox (old one is stopped, not removed)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
@@ -515,6 +517,26 @@ fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
     // its own second way of launching an agent to keep in step with the first.
     skein::start_box(name, &repo, &branch, "exec bash -l")?;
     eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
+    Ok(())
+}
+
+/// `skein login <runtime>` — authenticate once, in the sandbox HOME every box seeds from.
+///
+/// The credential then flows to every box: new ones seed from it at first start, and running ones
+/// reconcile by recency at their next session start. The sandbox is not on the board (it is not a
+/// box), so without this there is no way to reach the HOME that seeds all the others.
+fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
+    let runtime = runtime.unwrap_or("claude");
+    if !skein::valid_runtime(runtime) {
+        return Err(format!("unsupported runtime {runtime:?}"));
+    }
+    if runtime == "claude" {
+        eprintln!("{DIM}skein:{RESET} claude has no `login` subcommand — type {CYAN}/login{RESET} once it starts, then {CYAN}/exit{RESET}");
+    }
+    skein::fleet_login(runtime)?;
+    eprintln!(
+        "{DIM}skein:{RESET} every new box now inherits this login; running boxes pick it up when their session next starts"
+    );
     Ok(())
 }
 

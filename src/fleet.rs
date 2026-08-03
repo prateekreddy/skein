@@ -1056,6 +1056,44 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
     map
 }
 
+/// The command that authenticates `runtime` inside the fleet sandbox, and why it differs per runtime.
+///
+/// There is no uniform spelling to guess at: `codex login` exists, `claude login` does not — Claude
+/// authenticates from inside its own TUI (`/login`) or with `claude setup-token`. An unknown runtime
+/// gets a plain shell rather than a command that will fail in an unhelpful way.
+pub fn fleet_login_command(runtime: &str) -> String {
+    match runtime {
+        "codex" => "codex login".into(),
+        "claude" => "claude".into(), // then /login inside it
+        _ => "exec bash -l".into(),
+    }
+}
+
+/// Log in to a runtime once, in the sandbox's own HOME, so every box inherits it.
+///
+/// The sandbox is deliberately not on the board — it is not a box — so there is otherwise no way to
+/// reach the one HOME that seeds all the others. Interactive by construction: every one of these
+/// flows prints a URL and waits, so the terminal has to be the user's.
+pub fn fleet_login(runtime: &str) -> Result<(), String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured".into());
+    }
+    let argv = [
+        "exec".to_string(),
+        "-it".into(),
+        sandbox.clone(),
+        "bash".into(),
+        "-lc".into(),
+        fleet_login_command(runtime),
+    ];
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match run_attached("sbx", &args)? {
+        0 => Ok(()),
+        code => Err(format!("login in {sandbox} exited {code}")),
+    }
+}
+
 /// The sandbox user's `$HOME`, which is the HOME every command in a box must run with.
 ///
 /// Not a private directory and not empty: `box-session.sh` binds the box's own `home` *over* this
