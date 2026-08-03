@@ -17,7 +17,8 @@
 
 use crate::config::*;
 use crate::place::{
-    fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, PlaceRecord,
+    fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
+    PlaceRecord,
 };
 use crate::repos::{branch_of, is_git_url, load_repos, repo_for_box, Repo};
 use crate::util::*;
@@ -584,23 +585,14 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
          {agent_state}",
         s = sh_quote(&snapshot),
         n = sh_quote(name),
-        agent_state = agent_state_tar(&snapshot),
+        // A box already in the fleet host-binds its transcript; one being migrated in does not.
+        agent_state = agent_state_tar(&snapshot, shared_record(name).is_none()),
     );
     boxed.exec(&build, Duration::from_secs(600))?;
     Ok(relative)
 }
 
 /// The parts of a box's private `$HOME` that a rebuilt box needs and cannot get any other way.
-///
-/// Deliberately **not** the transcript. `box-session.sh` binds `~/.claude/projects` and
-/// `~/.codex/sessions` in from the host, so the conversation is already durable and is already
-/// exactly where the rebuilt box will look for it — tarring it in here would copy a virtiofs
-/// directory out to the store and straight back, twice over the slow path, to end up with the file
-/// that never left. Host-binding also covers what a snapshot cannot: an OOM or a hand-run `sbx rm`
-/// runs no snapshot at all.
-///
-/// What is left is small and genuinely VM-local: the prompt history, the in-flight todo list, and
-/// the per-box MCP registration.
 ///
 /// An **allowlist**, and that is the whole design. The same argument that made `box-session.sh`
 /// private-by-default applies in reverse here: an agent harness keeps state wherever it likes, and
@@ -610,14 +602,29 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
 ///
 /// `.credentials.json` is therefore not here, and does not need to be: `box-session.sh` seeds the
 /// box's `~/.claude` from the sandbox's on first start, so the rebuilt box is already logged in.
-fn agent_state_tar(snapshot: &str) -> String {
-    const CARRIED: &[&str] = &[
+///
+/// Whether the **transcript** is carried depends on where the box keeps it, which is the one thing
+/// that differs between the two callers:
+///
+/// * A **fleet box** host-binds `~/.claude/projects`, so the conversation is already durable and
+///   already exactly where the rebuilt box will look. Tarring it would copy a virtiofs directory out
+///   to the store and straight back — twice over the slow path — to arrive at the file that never
+///   left.
+/// * A **box being migrated in** from its own sandbox has it on VM-local disk, and the VM is about
+///   to stop. Leaving it out there is not an optimisation, it is losing the conversation; this is
+///   precisely the case where the box has years of context and no host copy of any of it.
+fn agent_state_tar(snapshot: &str, transcript_is_vm_local: bool) -> String {
+    let mut carried: Vec<&str> = vec![
         ".claude/history.jsonl", // the prompt history
         ".claude/todos",         // in-flight task list
         ".claude.json",          // per-box MCP registration + project state
         ".codex/history.jsonl",
     ];
-    let list = CARRIED
+    if transcript_is_vm_local {
+        carried.push(".claude/projects"); // the record --continue reads
+        carried.push(".codex/sessions");
+    }
+    let list = carried
         .iter()
         .map(|p| sh_quote(p))
         .collect::<Vec<_>>()
@@ -630,6 +637,87 @@ fn agent_state_tar(snapshot: &str) -> String {
          else tar -czf {s}/agent-state.tgz --files-from /dev/null; fi",
         s = sh_quote(snapshot),
     )
+}
+
+/// Move a box that has its own sandbox into the shared one, keeping its work and its conversation.
+///
+/// The reason to want this is the reason the fleet exists: every per-VM box holds a memory
+/// *reservation* whether or not it is doing anything, and those are what the shared sandbox stops
+/// summing. A fleet nobody can move their existing boxes into only helps the boxes they have not
+/// created yet.
+///
+/// The old sandbox is **stopped, never destroyed**. Its checkout, its history and its snapshot all
+/// still exist, so a migration that goes wrong costs a `sbx start` rather than a day's work — the
+/// same rule the cross-runtime takeover follows, and worth more here because this path cannot be
+/// rehearsed against a fake. Removing it is left to the user, once they are satisfied.
+///
+/// One asymmetry with a resize, and it is the whole reason this is a separate function: a per-VM box
+/// keeps its transcript on VM-local disk, so the snapshot has to carry it (see [`agent_state_tar`]).
+/// For a box already in the fleet that would be redundant; for this one, skipping it loses the
+/// conversation — which for a long-lived box is most of its value.
+pub fn migrate_box(name: &str) -> Result<String, String> {
+    if !valid_name(name) {
+        return Err(format!("invalid box name {name:?}"));
+    }
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured; set one before migrating into it".into());
+    }
+    if shared_record(name).is_some() {
+        return Err(format!("{name} is already in the fleet"));
+    }
+    let repo = repo_for_box(name).ok_or_else(|| {
+        format!("box {name} belongs to no registered repo, so it cannot be moved")
+    })?;
+
+    // Its own branch, asked of the box itself rather than of the registry: it may have moved (a
+    // branch-per-slice box does), and restoring it onto the branch skein last recorded would quietly
+    // put the agent's work somewhere it does not expect to find it.
+    let branch = place_of(name)
+        .ok_or_else(|| format!("box {name} is not reachable"))?
+        .exec("git rev-parse --abbrev-ref HEAD", Duration::from_secs(30))?
+        .trim()
+        .to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err(format!(
+            "{name} has no attached branch to restore onto — check it out in the box first"
+        ));
+    }
+
+    ensure_fleet(&sandbox, &fleet_mounts())?;
+    let run = format!("migrate-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let dir = snapshot_box(name, &repo.store, &run).map_err(|e| {
+        format!("could not save {name}'s work ({e}) — nothing was changed, the box is untouched")
+    })?;
+    write_restore_launch_spec(&BoxSnapshot {
+        name: name.to_string(),
+        repo: repo.clone(),
+        branch: branch.clone(),
+        agent: agent_for_box(name),
+        dir: dir.clone(),
+    })?;
+
+    // Stop the old sandbox before starting the new box, not after: the reservation is the entire
+    // point, and for a moment otherwise the fleet box and the VM it replaces would both hold one.
+    // `sbx stop` rather than `rm` — see above.
+    let (out, err, code) = run_capture("sbx", &["stop", name])?;
+    if code != 0 {
+        let detail = if err.trim().is_empty() { out } else { err };
+        return Err(format!(
+            "could not stop the old sandbox for {name}: {} — its work is saved under {dir} in the \
+             repo store, so nothing is lost; resolve this and retry",
+            detail.trim()
+        ));
+    }
+
+    start_box(name, &repo, &branch, "exec bash -l").map_err(|e| {
+        format!(
+            "{name} was snapshotted and its old sandbox stopped, but the fleet box did not start \
+             ({e}). Nothing is lost: `sbx start {name}` brings the original back exactly as it was, \
+             and the snapshot remains at {dir} in the repo store."
+        )
+    })?;
+    Ok(dir)
 }
 
 /// What one box needs in order to be rebuilt after the sandbox is destroyed.
@@ -978,6 +1066,43 @@ mod tests {
         .unwrap();
         assert!(box_limits().contains("max=4g"), "{}", box_limits());
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    // The one thing that differs between a resize and a migration, and it decides whether a
+    // long-lived box keeps its conversation.
+    //
+    // A box already in the fleet host-binds ~/.claude/projects, so tarring it copies a virtiofs
+    // directory out to the store and straight back to arrive at the file that never left. A box
+    // being MIGRATED in has it on VM-local disk, and that VM is about to stop — leaving it out is
+    // not an optimisation, it is losing the conversation, which for an old box is most of its value.
+    //
+    // Tested here rather than in the launch harness on purpose: there, `sbx exec` runs locally, so a
+    // "legacy box" would read the developer's own $HOME. The first version of this test did exactly
+    // that and tarred up real transcripts — the harness cannot fake a VM it has to enter.
+    #[test]
+    fn a_migrating_box_carries_its_conversation_and_a_fleet_box_does_not() {
+        let migrating = agent_state_tar("/snap", true);
+        assert!(
+            migrating.contains(".claude/projects") && migrating.contains(".codex/sessions"),
+            "a box moving in from its own sandbox would lose its whole conversation: {migrating}"
+        );
+
+        let already_in = agent_state_tar("/snap", false);
+        assert!(
+            !already_in.contains(".claude/projects"),
+            "the transcript is host-bound already; copying it is pure virtiofs waste: {already_in}"
+        );
+
+        // The allowlist rule holds on both paths — this is host-side shared data.
+        for spec in [&migrating, &already_in] {
+            assert!(
+                !spec.contains("credentials"),
+                "a credential would be copied into the repo store: {spec}"
+            );
+            // Everything genuinely VM-local travels either way.
+            assert!(spec.contains(".claude.json"), "{spec}");
+            assert!(spec.contains(".claude/todos"), "{spec}");
+        }
     }
 
     #[test]
