@@ -81,6 +81,13 @@ pub struct Config {
     /// namespace one. Worth it when N reservations no longer fit; not worth it before.
     #[serde(default)]
     pub fleet_sandbox: String,
+    /// Memory for the fleet sandbox (`sbx -m`), e.g. "24g". Empty ⇒ sbx's own default, which is
+    /// already the win: one reservation shared by every box instead of one reservation each.
+    #[serde(default)]
+    pub fleet_memory: String,
+    /// CPUs for the fleet sandbox (`sbx --cpus`). Empty ⇒ sbx's own default.
+    #[serde(default)]
+    pub fleet_cpus: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
 }
@@ -155,6 +162,8 @@ impl Default for Config {
             check_command: String::new(),
             ai_enrichment: false,
             fleet_sandbox: String::new(),
+            fleet_memory: String::new(),
+            fleet_cpus: String::new(),
             sync_gateway_url: String::new(),
         }
     }
