@@ -149,7 +149,7 @@ mod tests {
         if Command::new("sh").arg("-c").arg("true").output().is_err() {
             return;
         }
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(

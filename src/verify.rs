@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn a_pass_goes_stale_the_moment_the_box_works_again() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(

@@ -2258,7 +2258,7 @@ mod tests {
 
     #[test]
     fn managed_registry_current_branch_beats_launch_branch() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let root = tempdir();
         let home = root.join("home");
         let work = root.join("work");
@@ -2309,7 +2309,7 @@ mod tests {
     #[test]
     fn preparing_a_takeover_asks_the_source_box_itself() {
         use std::os::unix::fs::PermissionsExt;
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -2550,7 +2550,7 @@ mod tests {
 
     #[test]
     fn repo_for_box_matches_longest_id_prefix() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let repos = vec![
@@ -2591,7 +2591,7 @@ mod tests {
 
     #[test]
     fn repin_branch_rewrites_launch_spec_without_relaunch() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("st").join(".claude");
@@ -2628,7 +2628,7 @@ mod tests {
 
     #[test]
     fn repo_launch_command_uses_skein_kit_and_persistent_session() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         env::remove_var("SKEIN_AGENT");
@@ -2666,7 +2666,7 @@ mod tests {
 
     #[test]
     fn codex_launch_records_runtime_and_bypasses_generated_hook_review() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let repo = Repo {
@@ -2882,7 +2882,7 @@ mod tests {
 
     #[test]
     fn ensure_store_and_kit_provision_layout() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("repos").join("x").join("store").join(".claude");
@@ -3107,7 +3107,7 @@ mod tests {
     fn shared_home_import_is_dry_run_first_explicit_and_filtered() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let skein_home = tempdir();
         let work = tempdir().join("work");
         let store = tempdir().join("store/.claude");
@@ -3214,7 +3214,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn ensure_store_scaffolds_without_clobbering_user_data() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("shared").join(".claude");
@@ -3583,7 +3583,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn native_launch_command_builds_create_then_persistent_attach() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         env::remove_var("SKEIN_LAUNCH_CMD");
         env::set_var("SKEIN_KIT", "/abs/kit");
         env::set_var("SKEIN_AGENT", "claude");
@@ -3626,7 +3626,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn shorten_replaces_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         env::set_var("HOME", "/home/me");
         assert_eq!(shorten("/home/me/work/x"), "~/work/x");
         assert_eq!(shorten("/other/x"), "/other/x");
@@ -3634,7 +3634,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn a_repo_claims_work_through_the_connection_it_picks() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -3700,7 +3700,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // backlog — so it declines rather than picking.
     #[test]
     fn an_unregistered_box_only_inherits_a_connection_when_there_is_no_choice() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -3746,7 +3746,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // yesterday and quietly stopped today.
     #[test]
     fn the_old_single_token_layout_becomes_named_connections() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -3816,7 +3816,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn a_fresh_host_is_left_alone_by_the_migration() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         assert!(load_connections().is_empty());
@@ -3831,7 +3831,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // stops tracking work. So it is refused, by name, rather than performed.
     #[test]
     fn a_connection_in_use_is_not_removed_out_from_under_its_repos() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -3871,7 +3871,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // An id becomes a filename under `tokens/`, so it is checked like one.
     #[test]
     fn a_connection_id_can_never_be_a_path() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         for bad in ["../evil", "a/b", ".ssh", "-lead", "UPPER"] {
@@ -3898,7 +3898,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn a_repos_own_check_command_beats_the_global_default() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -3957,7 +3957,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn a_repo_refuses_a_project_no_uuid_can_be_read_from() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         save_repos(&[Repo {
@@ -3992,7 +3992,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // fleet, so where it lives and who can read it is a claim worth a test rather than a comment.
     #[test]
     fn a_connections_token_is_private_to_this_host_and_never_in_a_config_file() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -4143,7 +4143,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     /// comparison. A box that finds its edits reverted has no reason to trust anything else here.
     #[test]
     fn a_refresh_replaces_what_skein_installed_and_keeps_what_the_box_wrote() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
@@ -4236,7 +4236,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     /// nothing, forever).
     #[test]
     fn without_a_record_of_what_was_installed_a_refresh_asks_rather_than_guesses() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
@@ -4305,7 +4305,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     /// quiet by default — an indicator that is always lit is one nobody reads.
     #[test]
     fn the_cockpit_only_offers_an_update_when_the_store_has_a_newer_one() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
@@ -4331,7 +4331,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn wiring_a_box_up_refuses_before_it_spends_anything() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -4375,7 +4375,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // that succeeding: `sbx rm` has already run by then.
     #[test]
     fn retiring_a_box_retires_its_token_but_never_blocks_on_it() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         env::set_var("SKEIN_LS_CMD", "false");
@@ -4414,7 +4414,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     #[test]
     fn the_store_installer_registers_the_box_then_writes_the_rules() {
         use std::os::unix::fs::PermissionsExt;
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
@@ -4542,7 +4542,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     #[test]
     fn a_failed_registration_installs_no_rules_for_tools_that_are_not_there() {
         use std::os::unix::fs::PermissionsExt;
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
@@ -4592,7 +4592,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // be silent and change nothing until there is something to register.
     #[test]
     fn the_store_installer_does_nothing_at_all_without_credentials() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         let store = home.join("store").join(".claude");
@@ -4713,7 +4713,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     #[test]
     fn destroying_a_box_actually_sends_the_revocation() {
         use std::io::{Read, Write};
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
 
@@ -4796,7 +4796,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn load_views_promotes_only_the_self_box_when_quiet() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(
@@ -4829,7 +4829,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn load_views_drops_registry_only_boxes_when_sbx_is_authoritative() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         // Registry remembers two boxes, but sbx only lists one — the other was destroyed and its
@@ -4866,7 +4866,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn load_views_treats_successful_empty_sbx_fleet_as_authoritative() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(
@@ -4896,7 +4896,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn delist_box_removes_records_and_guards() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(
@@ -4932,7 +4932,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn stop_box_runs_command_without_delisting() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         let marker = dir.join("stopped");
@@ -4967,7 +4967,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn destroy_box_runs_teardown_then_delists() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         let marker = dir.join("torn-down");
@@ -5020,7 +5020,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn destroy_succeeds_even_when_registry_is_unparseable() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         // a registry too broken to even self-heal: delist will fail, but the sandbox is already gone.
@@ -5040,7 +5040,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // agent and attach the user straight into someone else's turn.
     #[test]
     fn a_shared_box_is_attached_through_its_namespace_and_its_own_tmux_server() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         env::set_var("SKEIN_HOME", tempdir());
         record_place(
             "thing-x",
@@ -5094,7 +5094,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn shell_and_attach_argv_differ() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // empty home ⇒ repo_for_box finds nothing ⇒ the default agent (claude) → `--continue`.
         env::set_var("SKEIN_HOME", tempdir());
         // attach opens the agent inside a persistent `skein-agent` tmux session so the live process
@@ -5261,7 +5261,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // Simulates the clone-mode bug directly: `dir` (the registered box dir) is the HOST's
         // shared working clone, which never has the box's own `.skein/journal.md` — only
         // box-journal.sh's copy in the store does. read_journal must find it there.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let work = dir.join("work");
         fs::create_dir_all(&work).unwrap(); // no .skein/journal.md here — the clone-mode case
@@ -5310,7 +5310,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     fn box_token_usage_sums_new_assistant_entries_and_is_idempotent() {
         // Shells out to the installed script directly (like the mailbox round-trip test) so this
         // proves the real jq pipeline, not just a Rust-side assumption about its behavior.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
@@ -5414,7 +5414,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn resume_box_guards_name_and_launches() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         assert!(resume_box("../escape", "go").is_err()); // name guard
         let dir = tempdir();
         let registry = dir.join("sandboxes.json");
@@ -5449,7 +5449,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         if Command::new("sh").arg("-c").arg("true").output().is_err() {
             return;
         }
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(

@@ -257,7 +257,7 @@ mod tests {
     // wrong answer for every clone-mode box.
     #[test]
     fn the_diff_base_ladder_prefers_the_configured_remote_branch() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         save_config(&Config::default()).unwrap();
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn a_boxs_changed_files_are_read_from_the_patch_it_reported() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         // dirs aren't git repos here → changed_files falls back to parsing the reported patches

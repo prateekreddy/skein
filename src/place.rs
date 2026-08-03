@@ -494,7 +494,7 @@ mod tests {
     // recycled pid would send a box's commands into whatever process now holds that number.
     #[test]
     fn a_placement_outlives_nothing_and_a_dead_namespace_is_not_followed() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         std::env::set_var("SKEIN_HOME", &dir);
 

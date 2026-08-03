@@ -81,11 +81,17 @@ pub struct Config {
     /// namespace one. Worth it when N reservations no longer fit; not worth it before.
     #[serde(default)]
     pub fleet_sandbox: String,
-    /// Memory for the fleet sandbox (`sbx -m`), e.g. "24g". Empty ⇒ sbx's own default, which is
-    /// already the win: one reservation shared by every box instead of one reservation each.
-    #[serde(default)]
+    /// Memory for the fleet sandbox (`sbx -m`), e.g. "16g".
+    ///
+    /// This is a ceiling shared by every box, not one reservation each — which is the whole point.
+    /// sbx's own default is half the host, and the fleet wants a deliberate number instead: too low
+    /// and a single `cargo build` takes the fleet down with it.
+    #[serde(default = "default_fleet_memory")]
     pub fleet_memory: String,
-    /// CPUs for the fleet sandbox (`sbx --cpus`). Empty ⇒ sbx's own default.
+    /// CPUs for the fleet sandbox (`sbx --cpus`). Empty ⇒ every host CPU but one.
+    ///
+    /// Leaving one back is what keeps the machine answering while the fleet is busy: `--cpus 0`
+    /// means *all* of them, and a fleet compiling on every core makes the host's own UI stutter.
     #[serde(default)]
     pub fleet_cpus: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -150,6 +156,10 @@ pub fn save_config(c: &Config) -> Result<(), String> {
     write_atomic(&config_json(), &home, &bytes)
 }
 
+fn default_fleet_memory() -> String {
+    "16g".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -162,7 +172,7 @@ impl Default for Config {
             check_command: String::new(),
             ai_enrichment: false,
             fleet_sandbox: String::new(),
-            fleet_memory: String::new(),
+            fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
             sync_gateway_url: String::new(),
         }

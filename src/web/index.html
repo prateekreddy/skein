@@ -883,6 +883,8 @@
           </section>
           <section class="set-pane" data-pane="workflow">
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
+            <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="16g" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
             <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. The default for every repo; each can override it under <b>Repositories</b>.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
@@ -2525,6 +2527,8 @@ function openSettings(pane = "repos") {
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
     document.getElementById("set-agent").value = settings.default_agent || "";
     document.getElementById("set-base").value = settings.base_branch || "";
+    document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
+    document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
     document.getElementById("set-check").value = settings.check_command || "";
     document.getElementById("set-ai").checked = !!settings.ai_enrichment;
@@ -2784,6 +2788,8 @@ function saveSettings() {
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,
     default_agent: document.getElementById("set-agent").value,
     base_branch: document.getElementById("set-base").value.trim(),
+    fleet_memory: document.getElementById("set-fleetmem").value.trim(),
+    fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
     ssh_key: document.getElementById("set-sshkey").value.trim(),
     check_command: document.getElementById("set-check").value.trim(),
     ai_enrichment: document.getElementById("set-ai").checked,

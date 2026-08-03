@@ -306,7 +306,7 @@ mod tests {
         // Proves the P0 fix at the shell level: mail delivered at UserPromptSubmit (inbox) and
         // blocked-and-surfaced at Stop (stop-check), not just once at SessionStart. Two vmids
         // sharing one temp store stand in for two boxes sharing one shared mount.
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         let store = home.join("store").join(".claude");
         ensure_store(&store).unwrap();
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn relay_cross_project_mail_delivers_across_stores() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         // Keep store_dir()'s legacy git-toplevel fallback from picking up this checkout's own

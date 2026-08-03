@@ -73,9 +73,9 @@ pub fn box_pidfile(name: &str) -> String {
 /// because boxes clone from the remote onto VM-local disk (measured ~5× faster to write and ~14×
 /// faster to read than a virtiofs mount, which matters for a build).
 ///
-/// Memory and CPU are left to sbx's own defaults unless configured. Passing nothing is already the
-/// win — one reservation shared by every box instead of one each — and picking a number here would
-/// be guessing at a machine skein cannot see.
+/// Memory and CPUs come from [`Config`], and both are ceilings the boxes share rather than one
+/// reservation each — which is what makes them safe to set generously. CPUs default to every host
+/// core but one, so the machine keeps answering while the fleet compiles.
 pub fn create_argv(sandbox: &str, workspace: &str) -> Vec<String> {
     let config = load_config();
     let mut argv = vec!["create".to_string(), "--name".into(), sandbox.to_string()];
@@ -84,14 +84,27 @@ pub fn create_argv(sandbox: &str, workspace: &str) -> Vec<String> {
         argv.push("-m".into());
         argv.push(memory.to_string());
     }
-    let cpus = config.fleet_cpus.trim();
+    let cpus = config.fleet_cpus.trim().to_string();
+    let cpus = if cpus.is_empty() {
+        host_cpus_less_one()
+    } else {
+        cpus
+    };
     if !cpus.is_empty() {
         argv.push("--cpus".into());
-        argv.push(cpus.to_string());
+        argv.push(cpus);
     }
     argv.push("shell".into());
     argv.push(workspace.to_string());
     argv
+}
+
+/// Every host CPU but one, so the host stays responsive while the fleet is busy. Empty when the
+/// count cannot be read, which leaves the flag off and sbx's own default in charge.
+fn host_cpus_less_one() -> String {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1).to_string())
+        .unwrap_or_default()
 }
 
 /// The host directory the fleet sandbox mounts: the parent of every repo's store.
@@ -269,7 +282,7 @@ mod tests {
     // skein translates paths across that boundary, and this is why it never has to.
     #[test]
     fn a_repos_store_is_reachable_at_the_same_path_inside_the_fleet_sandbox() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         let workspace = fleet_workspace();
@@ -286,20 +299,22 @@ mod tests {
     // that let it host boxes from every repo without being recreated when one is added.
     #[test]
     fn the_fleet_sandbox_is_agentless_and_mounts_the_store_parent() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("SKEIN_HOME", tempdir());
         let argv = create_argv("skein-fleet", "/h/.skein/repos");
+        assert_eq!(&argv[..3], ["create", "--name", "skein-fleet"]);
         assert_eq!(
-            argv,
-            [
-                "create",
-                "--name",
-                "skein-fleet",
-                "shell",
-                "/h/.skein/repos"
-            ],
-            "no -m/--cpus unless configured: one shared reservation is already the win, and a \
-             number picked here would be guessing at a machine skein cannot see"
+            &argv[argv.len() - 2..],
+            ["shell", "/h/.skein/repos"],
+            "agentless, and the workspace is the store parent"
+        );
+        // Both are ceilings the boxes SHARE rather than one reservation each, which is what makes
+        // them safe to set generously — and why a default is better here than deferring to sbx's.
+        let flags = argv.join(" ");
+        assert!(flags.contains("-m 16g"), "{flags}");
+        assert!(
+            flags.contains("--cpus "),
+            "CPUs default to every host core but one, so the host keeps answering: {flags}"
         );
         assert!(
             !argv.contains(&"--clone".to_string()),

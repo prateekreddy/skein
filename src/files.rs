@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn file_api_lists_reads_and_guards_the_workspace() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir().join("ws");
         fs::create_dir_all(dir.join("docs")).unwrap();
         fs::create_dir_all(dir.join(".git")).unwrap(); // must be hidden from listings

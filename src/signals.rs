@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn session_signal_reads_store_file() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn current_task_prefers_live_then_journal() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let dir = tempdir();
         let work = dir.join("work");
         fs::create_dir_all(work.join(".skein")).unwrap();
@@ -1390,7 +1390,7 @@ mod tests {
 
     #[test]
     fn read_pane_ignores_an_observation_that_has_gone_stale() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let store = tempdir().join(".claude");
         fs::create_dir_all(store.join("status")).unwrap();
         let reg = store.join("sandboxes.json");

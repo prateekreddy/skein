@@ -20,6 +20,16 @@ use std::sync::Mutex;
 /// nothing else, which is the failure mode that looks like a flaky test.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Take the env lock, ignoring poisoning.
+///
+/// A plain `.lock().unwrap()` turns *one* failing test into a cascade: the panic poisons the mutex,
+/// every other test then panics taking it, and the real failure is buried in fifty identical ones.
+/// Observed exactly that — one stale assertion here read as fifty broken tests. The data this
+/// guards is `()`; there is no invariant for a panic to have corrupted.
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A fresh temp directory, unique per process and per call.
