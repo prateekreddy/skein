@@ -18,7 +18,7 @@
 use crate::config::*;
 use crate::place::{
     fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
-    PlaceRecord,
+    Place, PlaceRecord,
 };
 use crate::repos::{branch_of, is_git_url, load_repos, repo_for_box, Repo};
 use crate::util::*;
@@ -563,15 +563,27 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
         ));
     }
 
-    let source = clone_source(repo);
-    fleet.exec(
-        &clone_script(name, &source, &base_branch(repo), branch),
-        Duration::from_secs(600),
-    )?;
-    fleet.exec(
-        &session_script(name, "skein-shell", agent_command),
-        Duration::from_secs(120),
-    )?;
+    // A launch that dies partway leaves a checkout, and sometimes a live session, behind. Carry on
+    // from there rather than demand the box be destroyed: cloning is the only step here that is not
+    // idempotent, and it is also the only one whose work a repeat would throw away.
+    let (has_tree, has_session) = box_progress(&fleet, name, "skein-shell")?;
+    if has_tree {
+        eprintln!("skein: {name} already has a checkout; keeping it");
+    } else {
+        let source = clone_source(repo);
+        fleet.exec(
+            &clone_script(name, &source, &base_branch(repo), branch),
+            Duration::from_secs(600),
+        )?;
+    }
+    if has_session {
+        eprintln!("skein: {name} already has a live session; keeping it");
+    } else {
+        fleet.exec(
+            &session_script(name, "skein-shell", agent_command),
+            Duration::from_secs(120),
+        )?;
+    }
 
     let ns_pid = read_anchor(&sandbox, name)?;
     record_place(
@@ -933,6 +945,25 @@ pub fn base_branch(repo: &Repo) -> String {
 ///
 /// The pid is knowable only inside the sandbox, and only after the session starts — which is why
 /// placement is recorded after launch rather than predicted before it.
+/// How far a previous launch of this box got: does it have a checkout, and is its session alive?
+///
+/// One round-trip rather than two, and asked of the sandbox rather than inferred from a placement
+/// record — after a failed launch the record is exactly what may be missing.
+fn box_progress(fleet: &Place, name: &str, session: &str) -> Result<(bool, bool), String> {
+    let script = format!(
+        "tree=0; sess=0; \
+         [ -e {tree_q}/.git ] && tree=1; \
+         tmux -S {sock_q} has-session -t {session_q} 2>/dev/null && sess=1; \
+         echo \"$tree$sess\"",
+        tree_q = sh_quote(&format!("{}/tree", box_root(name))),
+        sock_q = sh_quote(&box_sock(name)),
+        session_q = sh_quote(session),
+    );
+    let out = fleet.exec(&script, Duration::from_secs(30))?;
+    let out = out.trim();
+    Ok((out.starts_with('1'), out.ends_with('1')))
+}
+
 pub fn read_anchor(sandbox: &str, name: &str) -> Result<u32, String> {
     let script = format!("cat {}", sh_quote(&box_pidfile(name)));
     let out = own_sandbox(sandbox).exec(&script, Duration::from_secs(10))?;

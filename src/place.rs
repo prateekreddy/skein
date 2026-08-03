@@ -117,10 +117,9 @@ pub fn forget_place(name: &str) {
 
 /// The placement skein recorded for a box, alive or not.
 ///
-/// [`place_of`] deliberately falls back to the original model when the anchor is dead, because a
-/// dead namespace must never be entered. The lifecycle needs the opposite view: a box with a record
-/// is a *shared* box whether or not it is currently running, and asking sbx about a sandbox named
-/// after it would report on something that was never there.
+/// The same source [`place_of`] uses, exposed for the callers that need the *record* rather than an
+/// address: a box with a record is a shared box whether or not it is currently running, and asking
+/// sbx about a sandbox named after it would report on something that was never there.
 pub fn shared_record(name: &str) -> Option<PlaceRecord> {
     if !valid_name(name) {
         return None;
@@ -169,20 +168,27 @@ pub fn place_of(name: &str) -> Option<Place> {
         return None;
     }
     if let Some(rec) = read_place_record(name) {
-        // The pid is only meaningful while that process lives; a dead namespace means the box is
-        // gone, not that it should be reached some other way.
-        if PathBuf::from(format!("/proc/{}", rec.ns_pid)).exists() {
-            return Some(Place {
-                name: name.to_string(),
-                sandbox: rec.sandbox,
-                at: Where::Shared {
-                    ns_pid: rec.ns_pid,
-                    home: rec.home,
-                    tree: rec.tree,
-                    sock: rec.sock,
-                },
-            });
-        }
+        // The record is authoritative, and deliberately not gated on the anchor being alive.
+        //
+        // This used to check `/proc/<ns_pid>` — on the HOST, where that pid means nothing: the
+        // anchor lives inside the fleet sandbox's own pid namespace, and on macOS there is no
+        // `/proc` at all. So the check failed for every box, always, and the fallback below then
+        // addressed a fleet box as a sandbox named after itself — `sbx exec skein-fleetsmoke` for a
+        // sandbox that does not exist and never will.
+        //
+        // A dead anchor is a real condition, but it is liveness, not address: `box_liveness` asks
+        // the box's tmux socket, and an exec against a dead namespace fails loudly on its own. What
+        // must never happen is a *placed* box being reached as though it were unplaced.
+        return Some(Place {
+            name: name.to_string(),
+            sandbox: rec.sandbox,
+            at: Where::Shared {
+                ns_pid: rec.ns_pid,
+                home: rec.home,
+                tree: rec.tree,
+                sock: rec.sock,
+            },
+        });
     }
     Some(Place {
         name: name.to_string(),
@@ -588,7 +594,7 @@ mod tests {
     // A recorded placement is only good while its namespace is alive. A stale record pointing at a
     // recycled pid would send a box's commands into whatever process now holds that number.
     #[test]
-    fn a_placement_outlives_nothing_and_a_dead_namespace_is_not_followed() {
+    fn a_placed_box_is_addressed_by_its_record_never_by_its_own_name() {
         let _g = env_lock();
         let dir = tempdir();
         std::env::set_var("SKEIN_HOME", &dir);
@@ -615,7 +621,12 @@ mod tests {
         assert_eq!(p.sandbox, "skein-fleet");
         assert!(matches!(p.at, Where::Shared { .. }));
 
-        // A pid that cannot be running: pid 0 is never a process.
+        // A pid that cannot be running: pid 0 is never a process. It must STILL resolve to the
+        // fleet. This assertion used to be the opposite, and that was the bug: the pid names a
+        // process in the sandbox's namespace, so checking it against the host's `/proc` asks the
+        // wrong kernel — and on macOS asks nothing at all, since there is no `/proc`. Every fleet
+        // box therefore fell through to `OwnSandbox` and was addressed as a sandbox named after
+        // itself, which is both wrong and, if a same-named sandbox exists, dangerous.
         record_place(
             "web-main",
             &PlaceRecord {
@@ -627,10 +638,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            place_of("web-main").map(|p| p.at),
-            Some(Where::OwnSandbox),
-            "a dead namespace must not be entered — fall back rather than exec into a stranger"
+        let p = place_of("web-main").unwrap();
+        assert_eq!(p.sandbox, "skein-fleet", "a placed box stays placed");
+        assert!(
+            matches!(p.at, Where::Shared { ns_pid: 0, .. }),
+            "liveness is the tmux socket's answer, not a pid lookup in the wrong namespace"
         );
 
         forget_place("web-main");
