@@ -81,7 +81,7 @@ pub struct Config {
     /// namespace one. Worth it when N reservations no longer fit; not worth it before.
     #[serde(default)]
     pub fleet_sandbox: String,
-    /// Memory for the fleet sandbox (`sbx -m`), e.g. "16g".
+    /// Memory for the fleet sandbox (`sbx -m`), e.g. "26g".
     ///
     /// This is a ceiling shared by every box, not one reservation each — which is the whole point.
     /// sbx's own default is half the host, and the fleet wants a deliberate number instead: too low
@@ -157,7 +157,7 @@ pub fn save_config(c: &Config) -> Result<(), String> {
 }
 
 fn default_fleet_memory() -> String {
-    "16g".to_string()
+    "26g".to_string()
 }
 
 impl Default for Config {

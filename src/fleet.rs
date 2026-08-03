@@ -311,7 +311,7 @@ mod tests {
         // Both are ceilings the boxes SHARE rather than one reservation each, which is what makes
         // them safe to set generously — and why a default is better here than deferring to sbx's.
         let flags = argv.join(" ");
-        assert!(flags.contains("-m 16g"), "{flags}");
+        assert!(flags.contains("-m 26g"), "{flags}");
         assert!(
             flags.contains("--cpus "),
             "CPUs default to every host core but one, so the host keeps answering: {flags}"
