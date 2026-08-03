@@ -18,7 +18,7 @@
 use crate::config::*;
 use crate::place::own_sandbox;
 use crate::util::*;
-use crate::{fleet_boxes, valid_name};
+use crate::{fleet_boxes, skein_home, valid_name};
 use std::time::Duration;
 
 /// The launcher, embedded so it can be installed into a sandbox that has never seen this repo.
@@ -81,6 +81,17 @@ pub fn create_argv(sandbox: &str, workspace: &str) -> Vec<String> {
     argv.push("shell".into());
     argv.push(workspace.to_string());
     argv
+}
+
+/// The host directory the fleet sandbox mounts: the parent of every repo's store.
+///
+/// sbx mounts a workspace at its **host absolute path** (verified in a real sandbox — the host's
+/// `/Users/…/.skein/repos` is that same path inside the guest). That is worth more than it looks:
+/// `repo.store` is a host path, and it resolves unchanged inside the fleet sandbox, so nothing in
+/// skein has to translate one. Mounting the parent rather than each store is what lets a repo be
+/// added later without recreating the sandbox.
+pub fn fleet_workspace() -> String {
+    skein_home().join("repos").to_string_lossy().into_owned()
 }
 
 /// Is the fleet sandbox already there?
@@ -242,6 +253,24 @@ mod tests {
         }
         assert_eq!(box_sock("web-main"), "/boxes/web-main/session.sock");
         assert_eq!(box_pidfile("web-main"), "/boxes/web-main/anchor.pid");
+    }
+
+    // A repo's store is a HOST path, and sbx mounts a workspace at its host absolute path — so the
+    // very same string addresses the store on the host and inside the fleet sandbox. Nothing in
+    // skein translates paths across that boundary, and this is why it never has to.
+    #[test]
+    fn a_repos_store_is_reachable_at_the_same_path_inside_the_fleet_sandbox() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let workspace = fleet_workspace();
+        let store = home.join("repos/web/store/.claude");
+        assert!(
+            store.starts_with(&workspace),
+            "{} must sit under the mounted workspace {workspace}",
+            store.display()
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // The sandbox is agentless and mounts the store parent, not any one repo — the two properties
