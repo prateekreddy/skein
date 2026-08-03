@@ -39,8 +39,41 @@ const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 /// descriptors on the host. Each live terminal holds one permit for its whole session.
 static PTY_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(24);
 
+/// The server takes no subcommands — it is configured entirely by environment ($SKEIN_ADDR et al).
+/// It used to ignore argv outright, so `skein-server doctor` booted the cockpit and swallowed the
+/// word "doctor": you get a running server and no hint that your command went nowhere. Refuse
+/// instead, and say where the subcommand actually lives.
+fn refuse_unknown_args(args: &[String]) -> Option<String> {
+    match args.first().map(String::as_str) {
+        None => None,
+        Some("--help" | "-h") => Some(format!(
+            "skein-server {} — the web cockpit; no subcommands.\n\
+             configure with the environment: $SKEIN_ADDR (default {DEFAULT_ADDR}), $SKEIN_REGISTRY.\n\
+             fleet commands live on the other binary: `skein ls`, `skein doctor`, `skein attach <box>`.",
+            env!("CARGO_PKG_VERSION")
+        )),
+        Some("--version" | "-v") => Some(format!("skein-server {}", env!("CARGO_PKG_VERSION"))),
+        Some(other) => Some(format!(
+            "skein-server takes no arguments (got {other:?}) — it is the web cockpit, not the CLI.\n\
+             did you mean `skein {other}`?   (build both: cargo build --release)"
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    // Argv check first: before the port bind, and before ensure_probe_all/ensure_kit write anything.
+    // A mistyped invocation should change nothing on disk.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(msg) = refuse_unknown_args(&args) {
+        let help = matches!(args[0].as_str(), "--help" | "-h" | "--version" | "-v");
+        if help {
+            println!("{msg}");
+        } else {
+            eprintln!("skein-server: {msg}");
+        }
+        std::process::exit(if help { 0 } else { 2 });
+    }
     // Pick up a local .env so the registry/repo paths needn't be typed each run (real env vars
     // still win; a malformed file is reported, not silently half-applied). See skein::load_dotenv.
     skein::load_dotenv();
@@ -1341,8 +1374,24 @@ async fn terminal_session(
 
 #[cfg(test)]
 mod tests {
-    use super::origin_ok;
+    use super::{origin_ok, refuse_unknown_args};
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
+
+    #[test]
+    fn a_cli_subcommand_typed_at_the_server_is_refused_not_swallowed() {
+        let arg = |s: &str| vec![s.to_string()];
+        // No args is the real invocation: boot the cockpit.
+        assert_eq!(refuse_unknown_args(&[]), None);
+        // A CLI subcommand must not silently start a server; it must name the binary that has it.
+        let msg = refuse_unknown_args(&arg("doctor")).expect("must refuse");
+        assert!(msg.contains("skein doctor"), "{msg}");
+        assert!(refuse_unknown_args(&arg("attach"))
+            .expect("must refuse")
+            .contains("skein attach"));
+        assert!(refuse_unknown_args(&arg("--help"))
+            .expect("help")
+            .contains("no subcommands"));
+    }
 
     fn with_origin(o: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();

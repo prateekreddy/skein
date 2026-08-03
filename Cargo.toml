@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "See and steer your fleet of agent sandboxes"
 license = "MIT OR Apache-2.0"
+# Two binaries, so a bare `cargo run -- doctor` would otherwise refuse to pick one. The CLI is the
+# one you type at; the server you start deliberately with `--bin skein-server`.
+default-run = "skein"
 
 # Principle: compose, don't reinvent. Standard wheels only — serde/chrono for the core,
 # axum/tokio for the server. The rich frontend (Svelte) is added when we need the diff
