@@ -84,11 +84,18 @@ More attention helpers, all free unless noted:
   the box was actually working on.
 - **Away digest** — step away and come back and skein shows "while you were away": who now needs you, who
   finished, who made progress.
-- **Collision radar** — ⚠ flags files that two or more boxes have both changed, to reconcile before merge.
 - **AI enrichment (opt-in, `SKEIN_AI=on`)** — skein runs inside an `sbx run` box where `claude` is logged in,
   so it can spend *rationed* Haiku calls on the subscription: a one-line digest for boxes with no journal,
   and a conservative safety gate on **Continue N** (a box is held back unless the model says it's routine).
   Off by default because it shares the fleet's rate-limit window; lazy and cached when on.
+
+The **diff** is computed **inside the box**, against the remote base branch — `origin/<your base
+branch>`, then `origin/main`/`origin/master` — from the merge-base to the working tree, so it shows
+committed branch work and uncommitted edits together. The pane names the base it used. It has to run
+in the box for the same reason Files does: host-side git answered from `~/.skein/repos/<id>/work`,
+which for a clone-mode box is a different checkout on a different branch, and empty for a repo whose
+host clone never got a working tree. When the box is down, the patch it wrote at its last turn end is
+shown and labelled as such, so a stale diff never reads as the live tree.
 
 Each box also gets a **Files** tab — browse its workspace and read files without leaving skein:
 markdown renders (README auto-opens at the root, relative links navigate), images display inline,
@@ -101,7 +108,7 @@ substituting one tree for the other silently.
 
 API: `GET /api/{boxes,health,runtimes}`, `GET /api/events` (SSE), `GET /api/boxes/:name/{diff,session,narrate,ship}`,
 `GET /api/boxes/:name/files?path=` + `GET /api/boxes/:name/file?path=` (the Files tab),
-`GET /api/{collisions,repos,settings,mailbox}`, `POST /api/boxes/:name/{resume,stop,destroy,pr,merge,repin,upload}`,
+`GET /api/{repos,settings,mailbox}`, `POST /api/boxes/:name/{resume,stop,destroy,pr,merge,repin,upload}`,
 `POST /api/{resume-batch,repos,settings,mailbox,pick-path}`, `GET /api/boxes/:name/terminal` (WebSocket).
 xterm.js and marked.js are vendored into the binary (served from `/vendor/`), so everything works
 with no CDN — important in the firewalled sbx network.

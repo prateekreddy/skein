@@ -133,7 +133,6 @@ async fn main() {
         .route("/api/boxes/:name/takeover", post(api_takeover))
         .route("/api/boxes/:name/narrate", get(api_narrate))
         .route("/api/resume-batch", post(api_resume_batch))
-        .route("/api/collisions", get(api_collisions))
         .route("/api/boxes/:name/stop", post(api_stop))
         .route("/api/boxes/:name/destroy", post(api_destroy))
         .route(
@@ -465,19 +464,22 @@ async fn api_diff(Path(name): Path<String>) -> Response {
     if !skein::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
-    let body = skein::read_diff(&name)
-        .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| {
-            "# no diff reported yet — the box writes one when its agent pauses (Stop hook)\n".into()
-        });
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        body,
-    )
-        .into_response()
+    // Computed inside the box, so it forks a git in a sandbox — off the async runtime, like every
+    // other blocking box call.
+    let view = tokio::task::spawn_blocking(move || skein::box_diff(&name))
+        .await
+        .ok()
+        .flatten();
+    match view {
+        Some(view) => Json(view).into_response(),
+        None => Json(serde_json::json!({
+            "patch": "",
+            "base": "",
+            "source": "none",
+            "note": "no diff yet — start the box, or wait for it to finish a turn",
+        }))
+        .into_response(),
+    }
 }
 
 /// List a directory in a box's host-side workspace (`?path=rel/dir`, default root). Traversal,
@@ -860,15 +862,6 @@ async fn api_resume_batch(Json(r): Json<BatchReq>) -> Json<serde_json::Value> {
         .await
         .unwrap_or_default();
     Json(serde_json::json!({ "ok": true, "resumed": resumed, "held": held }))
-}
-
-/// Files two or more boxes have both changed — the collision radar (step 9). Cached host-side.
-async fn api_collisions() -> Json<Vec<skein::Collision>> {
-    Json(
-        tokio::task::spawn_blocking(skein::collisions)
-            .await
-            .unwrap_or_default(),
-    )
 }
 
 /// Stop a box: halt the sandbox (frees compute; resume later via attach). Non-destructive — the box

@@ -569,6 +569,12 @@
   .rfoot { display:flex; justify-content:flex-end; border-top:1px solid var(--line); padding-top:11px; }
   .set-repos .none { padding:22px; text-align:center; font-size:12.5px; color:var(--faint);
     border:1px dashed var(--border-2); border-radius:10px; }
+  /* what the diff is measured against — the base ref, and whether the patch is live or the one
+     the box wrote at its last turn end */
+  .dbase { position:sticky; top:0; z-index:1; padding:6px 12px; font-size:11.5px; color:var(--faint);
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  .dbase code { font-family:var(--mono); color:var(--dim); }
+  .dbase.stale { color:var(--waiting); }   /* same yellow the fleet uses for "not current" */
   /* work tracking: one card per connection — a gateway and the token that mints at it are one
      thing, so they are one card, and a repo picks a card rather than restating half of it */
   .set-conns { display:flex; flex-direction:column; gap:8px; margin:4px 0 14px; }
@@ -2027,13 +2033,29 @@ function loadFileContent(name, path) {
     .catch(e => { fv.innerHTML = `<div class="note">could not read ${esc(path)} — ${esc(reason(e))}</div>`; });
 }
 
+// The diff is computed inside the box now, against the remote base branch. It takes a moment
+// (a git fork in a sandbox), which is why this says "asking the box" rather than "loading".
 function loadDiff(name) {
-  diffpane.innerHTML = `<div class="diff"><div class="note">loading…</div></div>`;
-  fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(r => r.text()).then(txt => {
+  diffpane.innerHTML = `<div class="diff"><div class="note">asking the box…</div></div>`;
+  fetch(`/api/boxes/${encodeURIComponent(name)}/diff`).then(r => r.json()).then(d => {
     if (view.box !== name || view.mode !== "diff") return;
-    diffpane.innerHTML = renderDiff(txt);
+    // An empty patch is an answer, and the server's note says which one — "nothing changed" and
+    // "the box isn't running" look identical otherwise.
+    diffpane.innerHTML = (d.patch || "").trim()
+      ? diffBanner(d) + renderDiff(d.patch)
+      : `<div class="diff"><div class="note">${esc(d.note || "no changes on this branch yet")}</div></div>`;
     renderComments(name);
   }).catch(() => { diffpane.innerHTML = `<div class="diff"><div class="note">could not load diff</div></div>`; });
+}
+// What the patch is measured against, and whether it's current. A diff whose base you can't see is
+// a number you can't act on — and a patch from the last turn end must never read as the live tree.
+function diffBanner(d) {
+  if (!d || !d.patch || !d.patch.trim()) return "";
+  const bits = [];
+  if (d.base && d.base !== "HEAD") bits.push(`vs <code>${esc(d.base)}</code>`);
+  else if (d.base === "HEAD") bits.push("uncommitted changes only — no remote base branch resolved");
+  if (d.source === "stored") bits.push(esc(d.note || "written at the last turn end"));
+  return bits.length ? `<div class="dbase${d.source === "stored" ? " stale" : ""}">${bits.join(" · ")}</div>` : "";
 }
 function renderDiff(txt) {
   if (!txt || !txt.trim() || txt.startsWith("# no diff"))
@@ -2274,37 +2296,6 @@ function renderAwayOverlay(items, sinceT) {
   ov.classList.add("open");
 }
 
-// ---------- collision radar: files two+ boxes have both changed (free — host-side git) ----------
-let collisions = [];
-function loadCollisions() {
-  // No header chrome: collisions are a low-stakes heads-up (worst case is a merge conflict), so
-  // they live in the ⌘K palette ("View collisions", shown only when there are any) rather than a
-  // permanent header badge. We just keep the list fresh for the palette + the popover.
-  fetch("/api/collisions").then(r => r.json()).then(c => {
-    collisions = Array.isArray(c) ? c : [];
-  }).catch(() => {});
-}
-function showCollisions() {
-  if (!collisions.length) return;
-  let ov = document.getElementById("away");
-  if (!ov) { ov = document.createElement("div"); ov.id = "away"; document.body.append(ov);
-    ov.addEventListener("click", e => { if (e.target === ov) ov.classList.remove("open"); }); }
-  ov.innerHTML = `<div class="away-card"><div class="away-head"><b>Collision radar</b>`
-    + `<span class="sub">${collisions.length} file${collisions.length>1?"s":""} changed by 2+ boxes</span><span class="x">✕</span></div>`
-    + `<div class="away-list"></div></div>`;
-  const list = ov.querySelector(".away-list");
-  for (const c of collisions) {
-    const row = document.createElement("div"); row.className = "away-row k-attn";
-    row.innerHTML = `<span class="ad"></span><span class="nm">${esc(c.file)}</span><span class="tx">${esc((c.boxes||[]).join(", "))}</span>`;
-    row.addEventListener("click", () => { ov.classList.remove("open"); if (c.boxes?.[0]) openDiff(c.boxes[0]); });
-    list.append(row);
-  }
-  ov.querySelector(".x").addEventListener("click", () => ov.classList.remove("open"));
-  ov.classList.add("open");
-}
-setInterval(loadCollisions, 8000);
-
-
 // ---------- command palette ----------
 const pal = document.getElementById("pal"), palInput = document.getElementById("pal-input"), palList = document.getElementById("pal-list");
 let palItems = [], palSel = 0;
@@ -2321,7 +2312,6 @@ function commands() {
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
-  if (collisions.length) acts.push({ sec:"Actions", label:`View collisions (${collisions.length})`, run:showCollisions });
   const bx = [];
   for (const b of boxes) {
     bx.push({ sec:"Boxes", label:b.name, meta:labelOf(b.state), state:b.state, run:()=>openTerminal(b.name) });
@@ -3352,7 +3342,6 @@ if (DEMO) {
   loadRuntimes();
   fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
   connect();
-  loadCollisions();
   loadSettings();
   loadRepos();
   // At boot, not only when Settings opens: ◇ Track work is decided per box from its repo's

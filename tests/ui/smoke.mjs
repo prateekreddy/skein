@@ -43,9 +43,22 @@ function makeFixture() {
   }));
   // a real git repo, so a verify can fingerprint what it checked the way it would in a box
   const git = (...a) => spawnSync("git", ["-C", ws, ...a], { stdio: "ignore" });
+  const commit = (m) => git("-c", "user.email=smoke@test", "-c", "user.name=smoke", "commit", "-qm", m);
   git("init", "-q");
-  git("-c", "user.email=smoke@test", "-c", "user.name=smoke", "add", "-A");
-  git("-c", "user.email=smoke@test", "-c", "user.name=smoke", "commit", "-qm", "fixture");
+  git("add", "-A");
+  commit("fixture");
+  // A real `origin` with a real base branch, because the diff is measured against the REMOTE base
+  // now — a fixture with only local refs would pass while the thing under test never ran.
+  const remote = path.join(root, "remote.git");
+  spawnSync("git", ["init", "-q", "--bare", "-b", "master", remote], { stdio: "ignore" });
+  git("remote", "add", "origin", remote);
+  git("push", "-q", "origin", "HEAD:master");
+  git("fetch", "-q", "origin");
+  // …then move the branch ahead of it, so the patch has to come from the merge-base and not HEAD.
+  fs.writeFileSync(path.join(ws, "docs", "guide.md"), "# Guide\n\nBack to [the readme](../README.md).\n\nA committed change, ahead of origin/master.\n");
+  git("add", "-A");
+  commit("work on the branch");
+  fs.writeFileSync(path.join(ws, "notes.txt"), "plain text\nand an uncommitted edit\n");
   // Stand-in for sbx: the cockpit asks it for the fleet, and must never reach the real one. It
   // serves `exec` too, running the command in the fixture workspace the way a box would — so the
   // verify path (wrapper script, exit-code marker, stored record) runs for real, without a sandbox.
@@ -153,9 +166,10 @@ page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 // broken, several checks fail at once and the whole run has to stay quick enough to keep running.
 page.setDefaultTimeout(4000);
 const noise = [];
-// Refusals this run provokes ON PURPOSE and asserts elsewhere: the workspace-escape guard, and
-// removing a connection a repo still uses. Everything else counts as noise.
-const EXPECTED_404 = /\/file\?path=outside|\/files\?path=outside|\/api\/repos\/[^/]+\/settings|\/api\/sync\/connections/;
+// Refusals this run provokes ON PURPOSE and asserts elsewhere: the workspace-escape guard,
+// removing a connection a repo still uses, and probing that the retired collision route is gone.
+// Everything else counts as noise.
+const EXPECTED_404 = /\/file\?path=outside|\/files\?path=outside|\/api\/repos\/[^/]+\/settings|\/api\/sync\/connections|\/api\/collisions/;
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error" && !EXPECTED_404.test(m.location()?.url || "")) noise.push(`[console] ${m.text()}`); });
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
@@ -245,6 +259,27 @@ await check("diff renders something rather than an empty pane", async () => {
   await openTab("diff");
   await mustSee("#diffpane .diff", "the diff pane");
   if (!(await text("#diffpane"))) throw new Error("the diff pane is blank");
+});
+await check("the diff is measured against the remote base branch, and says so", async () => {
+  // The old path ran `git -C <host clone>`, which for a clone-mode box is a different checkout on
+  // a different branch — a confidently wrong answer. This asserts the box computed it.
+  const banner = await mustSee("#diffpane .dbase", "the base banner");
+  const said = (await banner.textContent()).trim();
+  if (!/origin\/master/.test(said)) throw new Error(`should name the remote base it used, got "${said}"`);
+  const body = await text("#diffpane");
+  if (!/ahead of origin\/master/.test(body))
+    throw new Error("a committed change on the branch is missing — the range started at HEAD, not the merge-base");
+  if (!/an uncommitted edit/.test(body))
+    throw new Error("uncommitted work is missing from the patch");
+  const d = await page.evaluate(n => fetch(`/api/boxes/${n}/diff`).then(r => r.json()), BOX);
+  if (d.source !== "box") throw new Error(`the running box should answer for itself, got "${d.source}"`);
+  if (d.base !== "origin/master") throw new Error(`unexpected base "${d.base}"`);
+});
+await check("the collision radar is gone, not merely hidden", async () => {
+  const r = await page.evaluate(() => fetch("/api/collisions").then(r => r.status));
+  if (r !== 404) throw new Error(`/api/collisions still answers ${r}`);
+  const leftovers = await page.evaluate(() => typeof loadCollisions);
+  if (leftovers !== "undefined") throw new Error("the radar's client code is still loaded");
 });
 await check("session renders something rather than an empty pane", async () => {
   await openTab("session");
