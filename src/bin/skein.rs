@@ -530,9 +530,6 @@ fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
     if !skein::valid_runtime(runtime) {
         return Err(format!("unsupported runtime {runtime:?}"));
     }
-    if runtime == "claude" {
-        eprintln!("{DIM}skein:{RESET} claude has no `login` subcommand — type {CYAN}/login{RESET} once it starts, then {CYAN}/exit{RESET}");
-    }
     skein::fleet_login(runtime)?;
     eprintln!(
         "{DIM}skein:{RESET} every new box now inherits this login; running boxes pick it up when their session next starts"

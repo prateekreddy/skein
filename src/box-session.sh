@@ -251,6 +251,20 @@ else
   echo "skein: no memory ceiling computed for $box; it runs uncapped" >&2
 fi
 
+# A login the user made must beat the placeholder key the sandbox ships with.
+#
+# sbx puts `ANTHROPIC_API_KEY=proxy-managed` (and the OpenAI equivalent) in the environment of every
+# non-agent image, for the proxy to substitute a real key into. With no such secret configured the
+# placeholder is simply an invalid key — and the runtimes prefer an API key over a stored login, so
+# an agent in a box failed with "Invalid API key" while a perfectly good credential sat unused
+# beside it. Measured both ways in a real box: with the variable set, `claude -p` fails; with it
+# unset, the same box answers.
+#
+# Conditional on the credential existing, so a fleet that genuinely runs on API keys is untouched:
+# no login, no unset, and the proxy path works exactly as before.
+[ -s "$home/.claude/.credentials.json" ] && unset ANTHROPIC_API_KEY
+[ -s "$home/.codex/auth.json" ] && unset OPENAI_API_KEY
+
 # --dev-bind / / keeps the sandbox's own filesystem visible (the repo, the toolchains, the store
 # mount) and then binds the box's private directories over the two paths that must not be shared.
 # No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has

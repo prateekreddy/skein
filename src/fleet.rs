@@ -1058,13 +1058,14 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
 
 /// The command that authenticates `runtime` inside the fleet sandbox, and why it differs per runtime.
 ///
-/// There is no uniform spelling to guess at: `codex login` exists, `claude login` does not — Claude
-/// authenticates from inside its own TUI (`/login`) or with `claude setup-token`. An unknown runtime
-/// gets a plain shell rather than a command that will fail in an unhelpful way.
+/// There is no uniform spelling to guess at: `codex login` exists, `claude login` does not. Claude's
+/// headless flow is `setup-token` — a long-lived token obtained without a TUI, which is the right
+/// shape here because this login is a setup step for a sandbox, not a session someone is sitting in.
+/// An unknown runtime gets a plain shell rather than a command that will fail in an unhelpful way.
 pub fn fleet_login_command(runtime: &str) -> String {
     match runtime {
         "codex" => "codex login".into(),
-        "claude" => "claude".into(), // then /login inside it
+        "claude" => "claude setup-token".into(),
         _ => "exec bash -l".into(),
     }
 }
