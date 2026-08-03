@@ -31,15 +31,26 @@ const BOX_SESSION_SH: &str = include_str!("box-session.sh");
 /// Deliberately not under `$HOME` or `/tmp`: `box-session.sh` binds the box's own directories over
 /// both, so a root beneath either would be visible only from inside the box that owns it — and the
 /// tmux socket and anchor pidfile that skein reads from outside live in this root.
-pub const FLEET_ROOT: &str = "/boxes";
+///
+/// `$SKEIN_FLEET_ROOT` overrides it, in the same spirit as `$SKEIN_LS_CMD` and `$SKEIN_LAUNCH_CMD`:
+/// `/boxes` needs root to create, so without this seam the launch path could only ever be exercised
+/// against a real sandbox — which is precisely the part that kept going untested.
+pub fn fleet_root() -> String {
+    std::env::var("SKEIN_FLEET_ROOT")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/boxes".to_string())
+}
 
 /// Where the launcher is installed inside the fleet sandbox.
-pub const BOX_SESSION_PATH: &str = "/boxes/.skein/box-session.sh";
+pub fn box_session_path() -> String {
+    format!("{}/.skein/box-session.sh", fleet_root())
+}
 
 /// One box's root inside the fleet sandbox. Callers must have validated `name`; every path skein
 /// derives for a box hangs off this, so a name containing `..` would escape the layout entirely.
 pub fn box_root(name: &str) -> String {
-    format!("{FLEET_ROOT}/{name}")
+    format!("{}/{name}", fleet_root())
 }
 
 /// The box's tmux socket — the same path inside the namespace and out, which is what lets skein
@@ -163,15 +174,13 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
 /// Write `box-session.sh` into the sandbox, over stdin rather than as an argument — the script is
 /// large and `sbx exec`'s argv is visible in every process listing on the host.
 pub fn install_launcher(sandbox: &str) -> Result<(), String> {
-    let dir = BOX_SESSION_PATH
-        .rsplit_once('/')
-        .map(|(d, _)| d)
-        .unwrap_or(FLEET_ROOT);
+    let path = box_session_path();
+    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
     let script = format!(
         "mkdir -p {} && cat > {} && chmod 755 {}",
         sh_quote(dir),
-        sh_quote(BOX_SESSION_PATH),
-        sh_quote(BOX_SESSION_PATH)
+        sh_quote(&path),
+        sh_quote(&path)
     );
     // The fleet sandbox itself, not a box inside it — no namespace to enter.
     own_sandbox(sandbox).write(&script, BOX_SESSION_SH.as_bytes(), Duration::from_secs(30))
@@ -207,7 +216,7 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
 pub fn session_script(name: &str, session: &str, agent_command: &str) -> String {
     format!(
         "{launcher} {name_q} {root_q} {pid_q} {session_q} bash -lc {cmd_q}",
-        launcher = sh_quote(BOX_SESSION_PATH),
+        launcher = sh_quote(&box_session_path()),
         name_q = sh_quote(name),
         root_q = sh_quote(&box_root(name)),
         pid_q = sh_quote(&box_pidfile(name)),
@@ -242,7 +251,7 @@ mod tests {
             box_root("web-main"),
             box_sock("web-main"),
             box_pidfile("web-main"),
-            BOX_SESSION_PATH.to_string(),
+            box_session_path(),
         ] {
             assert!(path.starts_with("/boxes/"), "{path} escaped the layout");
             assert!(
@@ -322,7 +331,10 @@ mod tests {
     #[test]
     fn starting_a_box_hands_the_launcher_quoted_arguments() {
         let script = session_script("web-main", "skein-agent", "claude --continue");
-        assert!(script.starts_with("'/boxes/.skein/box-session.sh' 'web-main'"));
+        assert!(
+            script.starts_with("'/boxes/.skein/box-session.sh' 'web-main'"),
+            "{script}"
+        );
         assert!(script.contains("'/boxes/web-main' '/boxes/web-main/anchor.pid' 'skein-agent'"));
         assert!(
             script.ends_with("bash -lc 'claude --continue'"),
