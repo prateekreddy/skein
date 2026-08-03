@@ -885,6 +885,7 @@
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
             <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
+            <div class="set-field"><span class="set-title">Apply to the running fleet</span><span class="desc">Saving these numbers only changes what the <b>next</b> sandbox is created with — sbx fixes memory and CPUs at creation. Applying them now rebuilds the fleet sandbox: every box's unpushed work and conversation is saved to the host first, and nothing is destroyed unless all of it saved. Boxes come back on their own branches; any that don't can be retried individually.</span><button id="set-resize" class="btn" type="button">Rebuild the fleet at these limits</button></div>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
             <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. The default for every repo; each can override it under <b>Repositories</b>.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
@@ -2802,6 +2803,30 @@ function saveSettings() {
     .then(() => { renderDockbar(); closeSettings(); toast("settings saved"); })
     .catch(e => toast(`couldn't save: ${e.message}`));
 }
+// Memory and CPUs are fixed when sbx creates a sandbox, so applying new ones means rebuilding it.
+// Deliberately a separate, confirmed action rather than part of Save: a save that silently rebuilt
+// every box would be a surprise, and a save that silently did nothing would be worse.
+function resizeFleet() {
+  const memory = document.getElementById("set-fleetmem").value.trim();
+  const cpus = document.getElementById("set-fleetcpus").value.trim();
+  if (!confirm(`Rebuild the fleet sandbox at ${memory || "the default"} memory?\n\n` +
+               `Every box's unpushed work and conversation is saved to the host first, and the ` +
+               `sandbox is left alone unless all of it saved. Boxes then restart on their branches.`)) return;
+  const btn = document.getElementById("set-resize");
+  btn.disabled = true; btn.textContent = "rebuilding…";
+  fetch("/api/fleet/resize", { method:"POST", headers:{"Content-Type":"application/json"},
+                               body: JSON.stringify({ memory, cpus }) })
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
+    .then(res => {
+      const failed = res.failed || [];
+      toast(failed.length
+        ? `fleet rebuilt; ${failed.join(", ")} did not restart — their work is saved, retry from the board`
+        : "fleet rebuilt; every box is back");
+      refresh();
+    })
+    .catch(e => toast(`resize failed: ${e.message}`))
+    .finally(() => { btn.disabled = false; btn.textContent = "Rebuild the fleet at these limits"; });
+}
 // Load the repos skein manages so the new-box dialog can prefix `<repo>-<branch>` and the palette
 // can offer "Add a repo". Refreshed when the dialog/palette opens.
 function loadRepos() {
@@ -2904,6 +2929,7 @@ function launchBox(branch) {
   applyView();
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
+document.getElementById("set-resize").addEventListener("click", resizeFleet);
 settingsModal().addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.target.closest(".set-navi")) { e.preventDefault(); saveSettings(); }
   else if (e.key === "Escape") { e.preventDefault(); closeSettings(); }

@@ -102,6 +102,7 @@ async fn main() {
         .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
         .route("/api/settings", get(api_settings).post(api_set_settings))
+        .route("/api/fleet/resize", post(api_fleet_resize))
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
         .route(
@@ -691,6 +692,30 @@ async fn api_set_settings(Json(c): Json<skein::Config>) -> Response {
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+/// Change the fleet sandbox's memory/CPUs, carrying every box across.
+///
+/// Its own endpoint rather than a side effect of saving settings, because it is destructive and
+/// slow: sbx fixes both at creation, so this rebuilds the sandbox and every box in it. Saving the
+/// numbers alone only changes what the NEXT create uses — which is why the settings pane offers this
+/// separately rather than appearing to apply them and quietly doing nothing.
+///
+/// 200 with the boxes that failed to come back: their work is already snapshotted on the host, so a
+/// partial return is a retry (`skein start <box>`), not a failure of the resize.
+async fn api_fleet_resize(Json(r): Json<ResizeReq>) -> Response {
+    match skein::resize_fleet(&r.memory, &r.cpus) {
+        Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ResizeReq {
+    #[serde(default)]
+    memory: String,
+    #[serde(default)]
+    cpus: String,
 }
 
 /// Post a message into the shared mailbox (from skein). `to` is a vmid or "broadcast".
