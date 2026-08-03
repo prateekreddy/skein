@@ -93,12 +93,7 @@ pub(crate) fn verify_summary(name: &str) -> Option<VerifySummary> {
     Some(VerifySummary {
         ok: rec.ok,
         stale: moved > at,
-        age: match secs {
-            s if s < 60 => format!("{s}s ago"),
-            s if s < 3600 => format!("{}m ago", s / 60),
-            s if s < 86400 => format!("{}h ago", s / 3600),
-            s => format!("{}d ago", s / 86400),
-        },
+        age: ago(secs),
         cmd: rec.cmd,
     })
 }

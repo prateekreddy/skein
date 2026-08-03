@@ -122,7 +122,10 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
     let path = store_for_box(name)?
         .join("diffs")
         .join(format!("{name}.patch"));
-    let patch = fs::read_to_string(path).ok()?;
+    let patch = fs::read_to_string(&path).ok()?;
+    // *When* it was written is the whole question for a stored answer: "at its last turn end" is
+    // reassuring if that was a minute ago and misleading if it was yesterday.
+    let written = file_ago(&path).unwrap_or_default();
     (!patch.trim().is_empty()).then(|| {
         Answer::from_store(
             Diff {
@@ -131,6 +134,7 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
             },
             "the box isn't running — this is the patch it wrote at its last turn end",
         )
+        .at(written)
     })
 }
 

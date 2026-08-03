@@ -153,13 +153,7 @@ impl Sandbox {
     }
 
     pub fn age(&self) -> String {
-        match self.age_secs() {
-            None => "?".into(),
-            Some(s) if s < 60 => format!("{s}s ago"),
-            Some(s) if s < 3600 => format!("{}m ago", s / 60),
-            Some(s) if s < 86400 => format!("{}h ago", s / 3600),
-            Some(s) => format!("{}d ago", s / 86400),
-        }
+        self.age_secs().map(ago).unwrap_or_else(|| "?".into())
     }
 
     /// State, refined by what sbx itself reports about the box's run state (`fleet_boxes`).
@@ -2324,6 +2318,75 @@ mod tests {
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_REGISTRY");
         *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    // The takeover path reaches into the source box for its branch and HEAD, and until now nothing
+    // exercised that. The guard is deliberately the *argv*: `Place` is about to change how skein
+    // addresses a box, and this is the contract it must not silently alter.
+    #[test]
+    fn preparing_a_takeover_asks_the_source_box_itself() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_LS_CMD", "false");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let sbx = bin.join("sbx");
+        fs::write(
+            &sbx,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n\
+                 case \"$*\" in\n\
+                   *abbrev-ref*) echo feat/auth ;;\n\
+                   *rev-parse\\ HEAD*) echo 0123456789abcdef ;;\n\
+                 esac\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&sbx, fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", format!("{}:{old_path}", bin.display()));
+
+        // Refusals come before anything is spent, and each names what is actually wrong.
+        let e = prepare_replacement("web-main", "claude").unwrap_err();
+        assert!(e.contains("already uses"), "{e}");
+        let e = prepare_replacement("web-main", "codex").unwrap_err();
+        assert!(e.contains("managed repo"), "unregistered box: {e}");
+        assert!(!log.exists(), "a refusal must not have touched the box");
+
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "/src/web".into(),
+            work: home.join("work").to_string_lossy().into_owned(),
+            store: home.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+        fs::create_dir_all(home.join("work")).unwrap();
+        let _ = prepare_replacement("web-main", "codex");
+
+        let asked = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            asked.contains("exec web-main bash -lc git rev-parse --abbrev-ref HEAD"),
+            "the branch must come from the BOX, not the host clone — it is a different checkout: {asked}"
+        );
+        assert!(
+            asked.contains("exec web-main bash -lc git rev-parse HEAD"),
+            "and so must the commit it snapshots: {asked}"
+        );
+
+        env::set_var("PATH", old_path);
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_LS_CMD");
     }
 
     #[test]

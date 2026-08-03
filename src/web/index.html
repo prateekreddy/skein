@@ -2061,8 +2061,12 @@ function loadDiff(name) {
 const SOURCE_LABEL = { store: "last turn end", host: "host clone" };
 function provenance(a, extra) {
   const bits = (extra || []).slice();
-  if (a && a.source && a.source !== "box")
-    bits.push(esc(a.note || SOURCE_LABEL[a.source] || a.source));
+  if (a && a.source && a.source !== "box") {
+    // "written at the last turn end" reassures if that was a minute ago and misleads if it was
+    // yesterday, so the age goes in the same breath as the claim.
+    const when = a.as_of ? ` (${esc(a.as_of)})` : "";
+    bits.push(esc(a.note || SOURCE_LABEL[a.source] || a.source) + when);
+  }
   if (!bits.length) return "";
   const stale = a && a.source && a.source !== "box";
   return `<div class="dbase${stale ? " stale" : ""}">${bits.join(" · ")}</div>`;

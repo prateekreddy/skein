@@ -316,3 +316,57 @@ pub fn shorten(p: &str) -> String {
     }
     p.to_string()
 }
+
+/// A duration in seconds as the fleet says it: `12s ago`, `4m ago`, `3h ago`, `2d ago`.
+///
+/// One copy, because three had grown — the fleet row, the verify chip and now provenance — and
+/// three spellings of "how old is this" is how two of them end up disagreeing about the same
+/// moment. Negative input (a clock that moved) clamps to zero rather than rendering nonsense.
+pub fn ago(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 60 => format!("{s}s ago"),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86400),
+    }
+}
+
+/// How long ago a file was last written, formatted by [`ago`]. `None` when the path is unreadable
+/// or the filesystem's timestamp is in the future by more than rounding.
+pub fn file_ago(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(modified)
+        .ok()?
+        .as_secs();
+    Some(ago(secs as i64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ages_read_the_way_the_fleet_says_them() {
+        assert_eq!(ago(0), "0s ago");
+        assert_eq!(ago(59), "59s ago");
+        assert_eq!(ago(60), "1m ago");
+        assert_eq!(ago(3599), "59m ago");
+        assert_eq!(ago(3600), "1h ago");
+        assert_eq!(ago(86_399), "23h ago");
+        assert_eq!(ago(86_400), "1d ago");
+        // A clock that moved backwards must not render "-3s ago" on the board.
+        assert_eq!(ago(-5), "0s ago");
+    }
+
+    #[test]
+    fn a_files_age_comes_from_the_file_and_is_absent_when_it_cannot() {
+        let dir = std::env::temp_dir().join(format!("skein-ago-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("x");
+        fs::write(&f, "hi").unwrap();
+        assert_eq!(file_ago(&f).as_deref(), Some("0s ago"));
+        assert!(file_ago(&dir.join("nope")).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
