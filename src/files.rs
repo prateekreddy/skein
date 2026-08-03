@@ -277,3 +277,137 @@ pub fn read_box_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
     }
     read_host_file(name, rel)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::answer::Source;
+    #[allow(unused_imports)]
+    use crate::testutil::*;
+    #[allow(unused_imports)]
+    use std::{env, fs};
+
+    #[test]
+    fn a_listing_from_the_box_reads_types_the_way_the_box_sees_them() {
+        // `find -printf '%y\t%Y\t%s\t%f\n'`: %y is the entry's own type, %Y the type after following
+        // a symlink. A linked directory must read as a directory; a link pointing nowhere (%Y = N)
+        // must still appear, because a file you can see is debuggable and one that vanished is not.
+        let body = "d\td\t4096\tdocs\nf\tf\t120\tREADME.md\nl\td\t12\tlinked\nl\tN\t9\tbroken\nd\td\t4096\t.git\n";
+        let mut entries = parse_guest_listing(body);
+        sort_entries(&mut entries);
+        let seen: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("docs", true),
+                ("linked", true),
+                ("broken", false),
+                ("README.md", false)
+            ],
+            "dirs first (a symlinked dir among them), then files; .git omitted"
+        );
+        assert_eq!(entries[3].size, 120);
+        // a line the box couldn't format is skipped rather than becoming a nameless row
+        assert!(parse_guest_listing("garbage\n\n").is_empty());
+    }
+
+    #[test]
+    fn the_box_answering_no_is_different_from_the_box_not_answering() {
+        // OK carries its detail; a refusal is an ANSWER and must not fall through to the host clone
+        // (that is how you end up reading a different branch's files and never being told).
+        assert_eq!(
+            split_guest_fs("SKEIN_FS OK 42\nbody").unwrap(),
+            ("42".into(), "body".into())
+        );
+        assert_eq!(
+            split_guest_fs("SKEIN_FS OK\nrows").unwrap(),
+            ("".into(), "rows".into())
+        );
+        assert!(split_guest_fs("SKEIN_FS ESCAPE\n")
+            .unwrap_err()
+            .contains("escapes"));
+        assert!(split_guest_fs("SKEIN_FS NOTDIR\n")
+            .unwrap_err()
+            .contains("not a directory"));
+        assert!(split_guest_fs("bash: sbx: command not found").is_err());
+        // the preamble refuses traversal before it resolves anything
+        let pre = guest_fs_preamble("../../etc");
+        assert!(pre.contains("realpath -m") && pre.contains("SKEIN_FS ESCAPE"));
+    }
+
+    #[test]
+    fn an_empty_root_says_whether_the_checkout_is_the_problem() {
+        // The bug this whole path exists for: a host clone holding nothing but `.git` listed as
+        // "empty", so the Files tab looked broken while the box had a full tree.
+        let empty = |path: &str| FileListing {
+            path: path.into(),
+            entries: vec![],
+        };
+        let bare = annotate(Answer::from_host(empty(""), ""));
+        assert_eq!(bare.note, "this workspace has no files in it");
+        assert_eq!(bare.source, Source::Host, "the fallback still says so");
+        // an empty SUBdirectory is just an empty directory — no alarming note
+        let sub = annotate(Answer::from_box(empty("docs")));
+        assert!(sub.note.is_empty());
+        // and a fallback keeps its own explanation, with the emptiness appended
+        let fell_back = annotate(Answer::from_host(
+            empty(""),
+            "read from the host clone — this box isn't running",
+        ));
+        assert!(fell_back.note.contains("isn't running") && fell_back.note.contains("no files"));
+    }
+
+    #[test]
+    fn file_api_lists_reads_and_guards_the_workspace() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().join("ws");
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        fs::create_dir_all(dir.join(".git")).unwrap(); // must be hidden from listings
+        fs::write(dir.join("README.md"), "# hi").unwrap();
+        fs::write(dir.join("docs").join("a.txt"), "aaa").unwrap();
+        // a symlink pointing OUTSIDE the workspace must not be traversable
+        let _ = std::os::unix::fs::symlink("/etc", dir.join("esc"));
+        // one pointing INSIDE it is an ordinary directory, and must list as one
+        let _ = std::os::unix::fs::symlink(dir.join("docs"), dir.join("linked"));
+        let reg = dir.parent().unwrap().join("sandboxes.json");
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"bx":{{"branch":"b","dir":"{}","lastSeen":"2026-01-01T00:00:00Z","status":""}}}}"#,
+                dir.display()
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::set_var("SKEIN_LS_CMD", "false"); // no sbx here — registry is the lookup path
+
+        let l = list_box_files("bx", "").unwrap();
+        assert_eq!(
+            l.source,
+            Source::Host,
+            "no sbx here, so this is the host clone and has to say so"
+        );
+        let names: Vec<&str> = l.value.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&".git"), ".git must be omitted");
+        assert_eq!(names[0], "docs", "dirs sort first");
+        assert!(names.contains(&"README.md"));
+        let (bytes, truncated) = read_box_file("bx", "README.md").unwrap();
+        assert!(!truncated);
+        assert_eq!(bytes, b"# hi");
+        assert_eq!(list_box_files("bx", "docs").unwrap().value.entries.len(), 1);
+        // a symlinked directory reads as a directory (type follows the link), and opens
+        assert!(l.value.entries.iter().any(|e| e.name == "linked" && e.dir));
+        assert_eq!(
+            list_box_files("bx", "linked").unwrap().value.entries.len(),
+            1
+        );
+        // traversal / absolute / symlink-escape / bad-name are all rejected
+        assert!(read_box_file("bx", "../sandboxes.json").is_err());
+        assert!(read_box_file("bx", "/etc/passwd").is_err());
+        assert!(list_box_files("bx", "esc").is_err());
+        assert!(read_box_file("../bx", "README.md").is_err());
+
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+}

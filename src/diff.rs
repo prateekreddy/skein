@@ -243,3 +243,146 @@ pub fn changed_files(name: &str) -> Vec<String> {
     files.dedup();
     files
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::testutil::*;
+    #[allow(unused_imports)]
+    use std::{env, fs};
+
+    // A diff is only meaningful against a base you can name, and the base has to be the REMOTE
+    // branch — measuring against a local ref is how the old host-side path produced a confident
+    // wrong answer for every clone-mode box.
+    #[test]
+    fn the_diff_base_ladder_prefers_the_configured_remote_branch() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        save_config(&Config::default()).unwrap();
+        assert_eq!(
+            diff_base_refs(),
+            ["origin/main", "origin/master", "main", "master"],
+            "remote refs first; the local ones are a last resort for a repo with no remote"
+        );
+        save_config(&Config {
+            base_branch: "develop".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            diff_base_refs().first().map(String::as_str),
+            Some("origin/develop"),
+            "a repo whose base branch is `develop` must not be diffed against main"
+        );
+        save_config(&Config {
+            base_branch: "main".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            diff_base_refs(),
+            ["origin/main", "origin/master", "main", "master"],
+            "configuring the default must not duplicate it in the ladder"
+        );
+        // The script names every ref it will try, so a base that never resolves is visible in the
+        // command rather than being silently swallowed into `HEAD`.
+        let script = diff_script(&diff_base_refs());
+        assert!(script.contains("origin/main"), "{script}");
+        assert!(script.contains("merge-base"), "{script}");
+        assert!(
+            script.contains("show-toplevel"),
+            "the diff runs at the box's repo root, not wherever the shell landed: {script}"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
+
+    // The box answers with the base on the first line and the patch after it. A patch can contain
+    // anything — including that marker — so only the first line may ever be read as one.
+    #[test]
+    fn the_base_is_read_from_the_first_line_and_only_the_first_line() {
+        let (base, patch) = split_diff("SKEIN_DIFF_BASE origin/main\ndiff --git a/x b/x\n+ok\n");
+        assert_eq!(base, "origin/main");
+        assert_eq!(patch, "diff --git a/x b/x\n+ok\n");
+        // A patch that quotes the marker must not move the base.
+        let (base, patch) = split_diff("SKEIN_DIFF_BASE HEAD\n+SKEIN_DIFF_BASE origin/evil\n");
+        assert_eq!(base, "HEAD");
+        assert!(patch.contains("origin/evil"), "kept in the patch, not read");
+        // No marker at all (an old box, or a shell that died early) is a patch with an unknown
+        // base — reported as HEAD rather than guessed at.
+        let (base, patch) = split_diff("diff --git a/x b/x\n");
+        assert_eq!(base, "HEAD");
+        assert_eq!(patch, "diff --git a/x b/x\n");
+        assert_eq!(split_diff("").0, "HEAD");
+    }
+
+    #[test]
+    fn git_range_handles_repo_and_nonrepo() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return; // git not available in this environment
+        }
+        let dir = tempdir();
+        let d = dir.to_str().unwrap();
+        let git = |args: &[&str]| {
+            let mut a = vec!["-C", d];
+            a.extend_from_slice(args);
+            assert!(Command::new("git")
+                .args(&a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        fs::write(dir.join("a.txt"), "hello\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        fs::write(dir.join("a.txt"), "hello world\n").unwrap();
+        // A repo with no remote still yields a usable range — the local branch tail of the ladder.
+        let range = git_range(d).expect("a git repo yields a range");
+        assert!(!range.is_empty());
+
+        let empty = tempdir(); // not a git repo → None, never explodes
+        assert!(git_range(empty.to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_boxs_changed_files_are_read_from_the_patch_it_reported() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        // dirs aren't git repos here → changed_files falls back to parsing the reported patches
+        fs::write(
+            &reg,
+            r#"{"box-a":{"branch":"a","dir":"/nope-a","lastSeen":"","status":""},
+               "box-b":{"branch":"b","dir":"/nope-b","lastSeen":"","status":""}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("diffs")).unwrap();
+        fs::write(
+            dir.join("diffs").join("box-a.patch"),
+            "+++ b/src/shared.rs\n+++ b/src/only_a.rs\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("diffs").join("box-b.patch"),
+            "+++ b/src/shared.rs\n+++ b/src/only_b.rs\n",
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+
+        assert_eq!(
+            changed_files("box-a"),
+            vec!["src/only_a.rs", "src/shared.rs"]
+        );
+        assert_eq!(
+            changed_files("box-b"),
+            vec!["src/only_b.rs", "src/shared.rs"]
+        );
+        env::remove_var("SKEIN_REGISTRY");
+    }
+}

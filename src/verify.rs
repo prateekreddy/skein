@@ -220,3 +220,114 @@ pub fn run_verify(name: &str) -> Result<VerifyRecord, String> {
     .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(record)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::testutil::*;
+    #[allow(unused_imports)]
+    use std::{env, fs};
+
+    #[test]
+    fn a_checks_exit_code_comes_from_the_marker_not_the_shell() {
+        // `sbx exec` reports the wrapper shell's status, so the check's own code rides a marker line.
+        let raw = format!(
+            "{VERIFY_FP}abc1234+992 1\nrunning 3 tests\ntest result: FAILED\n{VERIFY_EXIT}101\n"
+        );
+        let (fp, exit, body) = parse_verify_output(&raw);
+        assert_eq!(fp, "abc1234+992 1");
+        assert_eq!(exit, Some(101));
+        assert!(body.contains("test result: FAILED"));
+        assert!(
+            !body.contains("SKEIN_VERIFY"),
+            "markers are protocol, not output"
+        );
+        // A run that never reached the marker was killed or timed out — that is NOT a failing test,
+        // and run_verify refuses to record it as one.
+        let (_, none, _) = parse_verify_output("running 3 tests\n");
+        assert_eq!(none, None);
+    }
+
+    #[test]
+    fn the_stored_output_keeps_the_end_where_the_failure_is() {
+        assert_eq!(tail_of("short", 100), "short");
+        let long = format!("{}\nFAILED: the last line\n", "noise\n".repeat(4000));
+        let cut = tail_of(&long, 200);
+        assert!(cut.contains("FAILED: the last line"));
+        assert!(cut.starts_with("… earlier output trimmed …"));
+        assert!(cut.len() < 400);
+        // never splits a line in half — the first kept line is a whole one
+        assert!(cut.lines().nth(1).is_some_and(|l| l == "noise"));
+    }
+
+    #[test]
+    fn a_pass_goes_stale_the_moment_the_box_works_again() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            r#"{"bx":{"branch":"b","dir":"/d","lastSeen":"2026-01-01T00:00:00Z","status":""}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::set_var("SKEIN_LS_CMD", "false");
+        fs::create_dir_all(dir.join("verify")).unwrap();
+        fs::create_dir_all(dir.join("status")).unwrap();
+        let checked_at = Utc::now() - chrono::Duration::seconds(300);
+        fs::write(
+            dir.join("verify/bx.json"),
+            serde_json::to_string(&VerifyRecord {
+                cmd: "cargo test".into(),
+                exit: 0,
+                ok: true,
+                ts: checked_at.to_rfc3339(),
+                secs: 42,
+                fingerprint: "abc1234+0".into(),
+                tail: "test result: ok".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        // nothing has happened in the box since: the pass stands
+        let fresh = verify_summary("bx").expect("a record was written");
+        assert!(fresh.ok && !fresh.stale);
+        assert_eq!(fresh.age, "5m ago");
+        assert_eq!(
+            fresh.cmd, "cargo test",
+            "a tick is meaningless without the command"
+        );
+        // the agent ended another turn after the check — the result now describes older code
+        fs::write(
+            dir.join("status/bx.json"),
+            format!(
+                r#"{{"status":"waiting","ts":"{}"}}"#,
+                Utc::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+        assert!(verify_summary("bx").unwrap().stale);
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_LS_CMD");
+    }
+
+    #[test]
+    fn only_one_check_runs_at_a_time_across_the_whole_fleet() {
+        // The guard that keeps a "verify" from ever becoming N test suites fighting the dev's own
+        // machine for cores. Held by an RAII flight, so a panicking run can't wedge the slot.
+        let first = VerifyFlight::take("bx-one").unwrap();
+        let same = VerifyFlight::take("bx-one").unwrap_err();
+        assert!(same.contains("already being verified"));
+        let other = VerifyFlight::take("bx-two").unwrap_err();
+        assert!(
+            other.contains("bx-one"),
+            "say which box holds the slot: {other}"
+        );
+        drop(first);
+        assert!(
+            VerifyFlight::take("bx-two").is_ok(),
+            "the slot frees on drop"
+        );
+    }
+}

@@ -134,3 +134,45 @@ pub(crate) fn ai_says_hold(name: &str) -> Option<bool> {
     // err toward HOLD: only an explicit ROUTINE clears a box for auto-continue
     Some(!ans.to_uppercase().contains("ROUTINE"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::testutil::*;
+    #[allow(unused_imports)]
+    use std::{env, fs};
+
+    #[test]
+    #[cfg(unix)]
+    fn narrate_uses_stubbed_claude_and_respects_kill_switch() {
+        if Command::new("sh").arg("-c").arg("true").output().is_err() {
+            return;
+        }
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            r#"{"thing-n":{"branch":"x","dir":"/d","lastSeen":"","status":"waiting"}}"#,
+        )
+        .unwrap();
+        write_session(&dir, "thing-n", "Refactored the parser module today.");
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+        env::set_var("SKEIN_CLAUDE_BIN", write_claude_stub(&dir));
+
+        env::remove_var("SKEIN_AI"); // kill switch: off → no spend, None
+        assert_eq!(narrate("thing-n"), None);
+
+        env::set_var("SKEIN_AI", "on");
+        assert_eq!(
+            narrate("thing-n").as_deref(),
+            Some("It wired up the parser.")
+        );
+
+        env::remove_var("SKEIN_AI");
+        env::remove_var("SKEIN_CLAUDE_BIN");
+        env::remove_var("SKEIN_REGISTRY");
+    }
+}

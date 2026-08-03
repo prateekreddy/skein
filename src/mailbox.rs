@@ -288,3 +288,234 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
         Err(errs.join("; "))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::testutil::*;
+    #[allow(unused_imports)]
+    use crate::{ensure_store, save_repos, Repo};
+    #[allow(unused_imports)]
+    use std::process::Command;
+    #[allow(unused_imports)]
+    use std::{env, fs};
+
+    #[test]
+    fn mailbox_turn_boundary_delivery_round_trip() {
+        // Proves the P0 fix at the shell level: mail delivered at UserPromptSubmit (inbox) and
+        // blocked-and-surfaced at Stop (stop-check), not just once at SessionStart. Two vmids
+        // sharing one temp store stand in for two boxes sharing one shared mount.
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            Command::new("bash")
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SANDBOX_VM_ID", vmid)
+                .output()
+                .expect("run mailbox.sh")
+        };
+
+        let sent = run(
+            "boxA",
+            &[
+                "send",
+                "--to",
+                "broadcast",
+                "--kind",
+                "note",
+                "--body",
+                "hello from A",
+            ],
+        );
+        assert!(
+            sent.status.success(),
+            "send failed: {}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+
+        // Box B's UserPromptSubmit-equivalent surfaces it once …
+        let inbox1 = run("boxB", &["inbox"]);
+        assert!(inbox1.status.success());
+        let out1 = String::from_utf8_lossy(&inbox1.stdout);
+        assert!(
+            out1.contains("hello from A"),
+            "expected message in inbox, got: {out1}"
+        );
+        // … and never again (seenBy dedup).
+        let inbox2 = run("boxB", &["inbox"]);
+        assert!(inbox2.status.success());
+        assert!(String::from_utf8_lossy(&inbox2.stdout).trim().is_empty());
+        // The sender never sees its own broadcast.
+        let inbox_a = run("boxA", &["inbox"]);
+        assert!(String::from_utf8_lossy(&inbox_a.stdout).trim().is_empty());
+
+        // A fresh message + the Stop-boundary check: blocks (exit 2), body on stderr.
+        let sent2 = run(
+            "boxA",
+            &[
+                "send",
+                "--to",
+                "broadcast",
+                "--kind",
+                "note",
+                "--body",
+                "stop-check test",
+            ],
+        );
+        assert!(sent2.status.success());
+        let stop1 = run("boxC", &["stop-check"]);
+        assert_eq!(
+            stop1.status.code(),
+            Some(2),
+            "stop-check must block on unread mail"
+        );
+        assert!(String::from_utf8_lossy(&stop1.stderr).contains("stop-check test"));
+        // Repeat: already seen, silent success — the same message can't block twice.
+        let stop2 = run("boxC", &["stop-check"]);
+        assert_eq!(stop2.status.code(), Some(0));
+        assert!(stop2.stderr.is_empty());
+    }
+
+    #[test]
+    fn relay_cross_project_mail_delivers_across_stores() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        // Keep store_dir()'s legacy git-toplevel fallback from picking up this checkout's own
+        // store and adding a spurious third store to the sweep.
+        env::set_var(
+            "SKEIN_REGISTRY",
+            home.join("no-such-dir").join("sandboxes.json"),
+        );
+
+        let store_a = home.join("repos").join("a").join("store").join(".claude");
+        let store_b = home.join("repos").join("b").join("store").join(".claude");
+        fs::create_dir_all(store_a.join("mailbox")).unwrap();
+        fs::create_dir_all(store_b.join("mailbox")).unwrap();
+        save_repos(&[
+            Repo {
+                id: "a".into(),
+                source: "a".into(),
+                work: "a".into(),
+                store: store_a.to_string_lossy().into_owned(),
+                agent: "claude".into(),
+                check: String::new(),
+                plane_project: String::new(),
+                sync_connection: String::new(),
+                sync_gateway_url: String::new(),
+            },
+            Repo {
+                id: "b".into(),
+                source: "b".into(),
+                work: "b".into(),
+                store: store_b.to_string_lossy().into_owned(),
+                agent: "claude".into(),
+                check: String::new(),
+                plane_project: String::new(),
+                sync_connection: String::new(),
+                sync_gateway_url: String::new(),
+            },
+        ])
+        .unwrap();
+
+        // A box in project A writes an "all-projects" broadcast (as mailbox.sh would, once a
+        // box uses that keyword).
+        let msg = Message {
+            from: "boxA".into(),
+            to: "all-projects".into(),
+            kind: "note".into(),
+            branch: "master".into(),
+            body: "cross-project hello".into(),
+            ts: "2026-01-01T00:00:00Z".into(),
+            seen_by: vec![],
+            relayed_to: vec![],
+            origin_project: String::new(),
+        };
+        fs::write(
+            store_a.join("mailbox").join("1.json"),
+            serde_json::to_string(&msg).unwrap(),
+        )
+        .unwrap();
+
+        relay_cross_project_mail().unwrap();
+
+        // A copy landed in B's mailbox, rewritten to broadcast (B's own local match), tagged with
+        // provenance, and with a fresh (unrelayed) seenBy so B's boxes still see it as unread.
+        let b_files: Vec<_> = fs::read_dir(store_b.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(b_files.len(), 1, "expected exactly one relayed copy in B");
+        let copy: Message =
+            serde_json::from_str(&fs::read_to_string(b_files[0].path()).unwrap()).unwrap();
+        assert_eq!(copy.to, "broadcast");
+        assert_eq!(copy.body, "cross-project hello");
+        assert_eq!(copy.origin_project, "a");
+        assert!(copy.seen_by.is_empty());
+
+        // Idempotent: a second sweep doesn't duplicate the delivery.
+        relay_cross_project_mail().unwrap();
+        let b_files2: Vec<_> = fs::read_dir(store_b.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(
+            b_files2.len(),
+            1,
+            "relay must not duplicate on a repeat sweep"
+        );
+
+        // The origin message is marked relayedTo, which is what makes the sweep idempotent.
+        let origin: Message = serde_json::from_str(
+            &fs::read_to_string(store_a.join("mailbox").join("1.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(!origin.relayed_to.is_empty());
+
+        // project:<id> direct addressing: only the named project gets a copy, also rewritten to
+        // that project's own broadcast (never delivered as a literal "project:b" no box matches).
+        let msg2 = Message {
+            from: "boxA".into(),
+            to: "project:b".into(),
+            kind: "note".into(),
+            branch: "master".into(),
+            body: "hi just b".into(),
+            ts: "2026-01-01T00:01:00Z".into(),
+            seen_by: vec![],
+            relayed_to: vec![],
+            origin_project: String::new(),
+        };
+        fs::write(
+            store_a.join("mailbox").join("2.json"),
+            serde_json::to_string(&msg2).unwrap(),
+        )
+        .unwrap();
+        relay_cross_project_mail().unwrap();
+        let b_files3: Vec<_> = fs::read_dir(store_b.join("mailbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(
+            b_files3.len(),
+            2,
+            "the project:b message should also land in B"
+        );
+        let copy2 = b_files3
+            .iter()
+            .map(|e| {
+                serde_json::from_str::<Message>(&fs::read_to_string(e.path()).unwrap()).unwrap()
+            })
+            .find(|m| m.body == "hi just b")
+            .expect("project:b copy present");
+        assert_eq!(copy2.to, "broadcast");
+
+        env::remove_var("SKEIN_HOME");
+        env::remove_var("SKEIN_REGISTRY");
+    }
+}

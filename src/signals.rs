@@ -683,3 +683,771 @@ pub fn classify_message(msg: &str, blocked: bool) -> Pause {
     }
     Pause::Statement
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::testutil::*;
+    #[allow(unused_imports)]
+    use std::{env, fs};
+
+    #[test]
+    fn classify_message_routes_pauses() {
+        // a permission prompt dominates regardless of text
+        assert_eq!(classify_message("anything", true), Pause::NeedsInput);
+        // trivial "may I continue" endings → batch-resolvable
+        assert_eq!(
+            classify_message("Done with step 1.\nShall I proceed to step 2?", false),
+            Pause::Proceed
+        );
+        assert_eq!(
+            classify_message("Want me to continue?", false),
+            Pause::Proceed
+        );
+        assert_eq!(
+            classify_message("Tests pass. Should I go ahead and merge?", false),
+            Pause::Proceed
+        );
+        // a real question that isn't a rote proceed → a genuine fork
+        assert_eq!(
+            classify_message("Two schemas are possible. Which one do you want?", false),
+            Pause::Fork
+        );
+        // a report with a '?' earlier but a statement ending → not asking
+        assert_eq!(
+            classify_message("Is the cache stale? I checked and refreshed it.", false),
+            Pause::Statement
+        );
+        // plain sign-off
+        assert_eq!(
+            classify_message("All done; pushed the branch.", false),
+            Pause::Statement
+        );
+        assert_eq!(classify_message("   ", false), Pause::None);
+    }
+
+    #[test]
+    fn session_signal_reads_store_file() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            r#"{"thing-x":{"branch":"x","dir":"/d","lastSeen":"","status":""}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("sessions")).unwrap();
+        fs::write(
+            dir.join("sessions").join("thing-x.json"),
+            r#"{"ts":"2026-06-28T00:00:00Z","kind":"stop","lastMessage":"hi"}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+
+        let s = session_signal("thing-x").expect("signal present");
+        assert_eq!(s.kind, "stop");
+        assert_eq!(s.last_message, "hi");
+        assert!(session_signal("thing-missing").is_none());
+        assert!(session_signal("../escape").is_none());
+
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn current_task_prefers_live_then_journal() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempdir();
+        let work = dir.join("work");
+        fs::create_dir_all(work.join(".skein")).unwrap();
+        let reg = dir.join("sandboxes.json");
+        fs::write(
+            &reg,
+            format!(
+                r#"{{"thing-x":{{"branch":"x","dir":"{}","lastSeen":"","status":""}}}}"#,
+                work.display()
+            ),
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        env::remove_var("SKEIN_SHARED");
+
+        // journal-only fallback: the `next …` clause of the last line, stopping at the blocked-on part.
+        fs::write(
+            work.join(".skein").join("journal.md"),
+            "did: scaffolded api / next: wire the reducer / blocked-on: nothing\n",
+        )
+        .unwrap();
+        assert_eq!(
+            current_task("thing-x").as_deref(),
+            Some("wire the reducer")
+        );
+
+        // the live task signal wins over the journal.
+        fs::create_dir_all(dir.join("tasks")).unwrap();
+        fs::write(
+            dir.join("tasks").join("thing-x.json"),
+            r#"{"ts":"2026-06-29T00:00:00Z","task":"Running the tests"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            current_task("thing-x").as_deref(),
+            Some("Running the tests")
+        );
+
+        // an empty live task falls back to the journal again.
+        fs::write(
+            dir.join("tasks").join("thing-x.json"),
+            r#"{"ts":"2026-06-29T00:00:00Z","task":""}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            current_task("thing-x").as_deref(),
+            Some("wire the reducer")
+        );
+
+        assert!(current_task("../escape").is_none()); // name guard
+
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    #[test]
+    fn classify_pane_reads_a_real_permission_prompt() {
+        assert_eq!(
+            classify_pane("claude", &obs(PERMISSION_TAIL)),
+            Screen::Blocked(Blocked::Permission)
+        );
+        // …and the moment it is answered the same predicate says "not blocked" — the whole point of
+        // a level signal: nothing has to fire an event for the chip to clear.
+        assert_eq!(
+            classify_pane("claude", &obs(ANSWERED_TAIL)),
+            Screen::Waiting
+        );
+    }
+
+    #[test]
+    fn classify_pane_separates_the_four_blocking_kinds() {
+        let question = &[
+            " Would you like to proceed with this plan?",
+            " ❯ 1. Yes, and auto-accept edits",
+            "   2. No, keep planning",
+        ];
+        assert_eq!(
+            classify_pane("claude", &obs(question)),
+            Screen::Blocked(Blocked::Question)
+        );
+        let trust = &[
+            " Do you trust the files in this folder?",
+            " ❯ 1. Yes, proceed",
+            "   2. No, exit",
+        ];
+        assert_eq!(
+            classify_pane("claude", &obs(trust)),
+            Screen::Blocked(Blocked::Trust)
+        );
+        // Quota reads like an error but the move is yours, so it ranks as "needs you", not "error".
+        let quota = &[
+            "✗ Claude usage limit reached · resets at 3pm",
+            "❯ ",
+            "  ? for shortcuts",
+        ];
+        assert_eq!(
+            classify_pane("claude", &obs(quota)),
+            Screen::Blocked(Blocked::Auth)
+        );
+        let api = &[
+            "  ⎿  API Error: 500 Internal Server Error",
+            "❯ ",
+            "  ? for shortcuts",
+        ];
+        assert!(matches!(
+            classify_pane("claude", &obs(api)),
+            Screen::Error(_)
+        ));
+    }
+
+    #[test]
+    fn classify_pane_busy_survives_the_composer_being_visible() {
+        // A real working pane: the spinner line carries the token counter, and the hint line is
+        // still on screen — so "composer present" must not be read as "idle".
+        let busy = &[
+            "  Searched for 6 patterns, read 2 files",
+            "✢ Whirlpooling… (5m 13s · ↓ 16.1k tokens)",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ];
+        assert_eq!(classify_pane("claude", &obs(busy)), Screen::Busy);
+        // The other half of the same claim, from the title: braille spins, ✳ does not.
+        let mut spinning = obs(&["  ⏸ manual mode on · ? for shortcuts"]);
+        spinning.title = "⠂ Claude Code".into();
+        assert_eq!(classify_pane("claude", &spinning), Screen::Busy);
+        let mut idle = obs(&["  ⏸ manual mode on · ? for shortcuts"]);
+        idle.title = "✳ Claude Code".into();
+        assert_eq!(classify_pane("claude", &idle), Screen::Waiting);
+    }
+
+    #[test]
+    fn classify_pane_will_not_be_fooled_by_the_agent_talking_about_dialogs() {
+        // This very repo's docs contain the sentence below. Prose is not a dialog: without an option
+        // list, and with the composer on screen, it is just a box that is waiting for you.
+        let prose = &[
+            "● I asked: \"Do you want to allow Claude to fetch this content?\" and it said yes.",
+            "✻ Baked for 12s",
+            "❯ ",
+            "  ⏸ manual mode on · ? for shortcuts",
+        ];
+        assert_eq!(classify_pane("claude", &obs(prose)), Screen::Waiting);
+    }
+
+    #[test]
+    fn classify_pane_sees_a_dead_agent_and_defers_on_other_runtimes() {
+        let mut dead = obs(&[]);
+        dead.dead = 1;
+        assert_eq!(classify_pane("claude", &dead), Screen::Dead);
+        // The launch guard dropped to a shell: the TUI is gone, so the box is not "working".
+        let shell = &[
+            "skein: claude could not start — see the error above; keeping this session as a shell",
+            "agent@skein-box:~/work/skein$",
+        ];
+        assert_eq!(classify_pane("claude", &obs(shell)), Screen::Dead);
+        // A runtime nobody has read the screen of must defer to the hook edges rather than guess.
+        assert_eq!(
+            classify_pane("gemini", &obs(PERMISSION_TAIL)),
+            Screen::Unknown
+        );
+        // …but a dead window needs no grammar, so that still reports across runtimes.
+        assert_eq!(classify_pane("gemini", &dead), Screen::Dead);
+        assert_eq!(classify_pane("codex", &dead), Screen::Dead);
+    }
+
+    #[test]
+    fn screen_health_says_which_half_of_turn_state_is_actually_running() {
+        let fresh = || PaneObs {
+            ts: Utc::now().timestamp(),
+            tail: ANSWERED_TAIL.iter().map(|l| l.to_string()).collect(),
+            ..Default::default()
+        };
+        // Reading the screen: no caveat to show.
+        assert_eq!(screen_health("claude", Some(&fresh()), true), "");
+        // No observer has ever written: the common case until a box is reattached.
+        assert_eq!(screen_health("claude", None, true), "none");
+        // An observer that stopped — the agent session went away, or it was killed.
+        let stopped = PaneObs {
+            ts: Utc::now().timestamp() - (PANE_FRESH_SECS + 5),
+            ..fresh()
+        };
+        assert_eq!(screen_health("claude", Some(&stopped), true), "stale");
+        // A screen the grammar does not recognise. Distinct from "stale" because the fix is
+        // different: this one is a skein bug to report, not a box to reattach.
+        let unreadable = PaneObs {
+            tail: vec!["something no grammar has ever seen".into()],
+            ..fresh()
+        };
+        assert_eq!(
+            screen_health("claude", Some(&unreadable), true),
+            "unreadable"
+        );
+        // A runtime with no grammar at all is hooks-only by design, not by fault.
+        assert_eq!(screen_health("gemini", None, true), "unsupported");
+        assert!(has_screen_grammar("claude") && has_screen_grammar("codex"));
+        assert!(!has_screen_grammar("gemini"));
+        // A box that isn't running has no screen to read, so there is nothing to caveat.
+        for h in [None, Some(&fresh()), Some(&stopped)] {
+            assert_eq!(screen_health("claude", h, false), "");
+        }
+        // A crashed agent is a real reading, not a failure to read one.
+        let dead = PaneObs { dead: 1, ..fresh() };
+        assert_eq!(screen_health("claude", Some(&dead), true), "");
+    }
+
+    #[test]
+    fn each_runtimes_grammar_owns_its_glyphs_because_skein_knows_the_runtime() {
+        // The runtime is never inferred from the screen — `load_views` resolves it from sbx metadata,
+        // the box's launch spec, or the repo default, and hands it to `classify_pane`. So each table
+        // reads only its own selection glyph, and one agent showing the *other's* dialog — pasted into
+        // a message, or quoted in a doc, both routine in this repo — is not a live dialog.
+        let codex_dialog = &[
+            "  Would you like to run the following command?",
+            "› 1. Yes, proceed (y)",
+            "  2. No, and tell Codex what to do differently (esc)",
+            "  Press enter to confirm or esc to cancel",
+        ];
+        assert_eq!(
+            classify_pane("codex", &obs(codex_dialog)),
+            Screen::Blocked(Blocked::Permission)
+        );
+        assert_eq!(classify_pane("claude", &obs(codex_dialog)), Screen::Unknown);
+        assert!(is_option_line("› 1. Yes, proceed (y)", &['›', '>']));
+        assert!(!is_option_line("› 1. Yes, proceed (y)", &['❯', '>']));
+        // And the marker itself is required: an unmarked numbered row is just a numbered list, which
+        // agents write all the time — including in the message this test was written from.
+        assert!(!is_option_line("  2. No, keep planning", &['❯', '>']));
+        assert!(!is_option_line(
+            "  2. The observer was capturing scrollback, so a status line stayed current.",
+            &['❯', '>']
+        ));
+    }
+
+    #[test]
+    fn claude_busy_holds_still_across_the_status_lines_shifting_tail() {
+        // Sampled from a real skein box every 2s through four minutes of continuous work. The old
+        // predicate matched the *end* of this line (`tokens)`), so consecutive samples classified
+        // Busy / Waiting / Waiting / Busy — the board flapping the user reported. All four are the
+        // same state and must classify identically.
+        for line in [
+            "✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)",
+            "✽ Beboppin'… (3m 43s · ↓ 12.9k tokens · thinking)",
+            "✻ Beboppin'… (4m 6s · ↓ 13.7k tokens · thought for 10s)",
+            "· Beboppin'… (1m 16s · ↓ 500 tokens · thought for 70s)",
+            "✢ Whirlpooling… (5m 13s · ↓ 16.1k tokens)",
+            "✻ Thinking… (2s)",
+            // The animation's whole observed frame set — `· ✢ * ✶ ✻ ✽`, including the plain ASCII
+            // `*`, which an earlier draft of this predicate threw out as "markdown, not a spinner".
+            "* Beboppin'… (13m 7s · ↓ 40.4k tokens)",
+            "✶ Beboppin'… (13m 19s · ↓ 40.6k tokens)",
+        ] {
+            assert!(
+                is_working_status_line(line),
+                "should read as working: {line}"
+            );
+        }
+        // …and the whole pane, as the observer really recorded it mid-turn: a configured statusline,
+        // no `esc to interrupt` anywhere on screen, and a title whose glyph is `_`, not braille. Every
+        // other busy signal is absent, so the status line has to carry this alone.
+        let mut real = obs(&[
+            "✻ Sautéed for 24m 3s",
+            "● Running 4 shell commands…",
+            "  ⎿  $ python3 -c \"import json\"",
+            "✽ Beboppin'… (3m 43s · ↓ 12.9k tokens · thinking)",
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  CTX █░░░░ 16% 163.4k/1.0M │ 5H ░░░░ 0%→0% 4h50m left │ $8.80 │ Opus 5",
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]);
+        real.title = "_ Claude Code".into();
+        real.title_age = 2000;
+        assert_eq!(classify_pane("claude", &real), Screen::Busy);
+    }
+
+    #[test]
+    fn claude_is_waiting_once_the_status_line_becomes_a_completion_marker() {
+        // The same pane after the turn ends: the status line is replaced in place by `… for <time>`,
+        // which must NOT read as working — it stays on screen for the whole of the next turn.
+        let mut idle = obs(&[
+            "● Right. First, evidence from a real skein box — my own.",
+            "✻ Sautéed for 24m 3s",
+            "● Running 4 shell commands…",
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  CTX █░░░░ 16% 163.4k/1.0M │ $8.80 │ Opus 5",
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]);
+        idle.title = "_ Claude Code".into();
+        assert_eq!(classify_pane("claude", &idle), Screen::Waiting);
+        // A tool announcement carries the ellipsis but no elapsed time, so it is not the status line.
+        assert!(!is_working_status_line("● Running 4 shell commands…"));
+        assert!(!is_working_status_line(
+            "● Searching for 2 patterns, running 5 shell commands…"
+        ));
+        assert!(!is_working_status_line("✻ Sautéed for 24m 3s"));
+        // The agent's own prose about elapsed times is not a status line either.
+        assert!(!is_working_status_line(
+            "  and the sampler ran… (30s of wall clock) before I stopped it"
+        ));
+        // Nor is a captured status line the agent is *displaying* — a quoted fixture, or a diff line
+        // (both were on this box's screen while this very test was being written).
+        assert!(!is_working_status_line(
+            "            \"✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)\","
+        ));
+        assert!(!is_working_status_line(
+            "      8171 +            \"✽ Beboppin'… (3m 39s)\""
+        ));
+    }
+
+    #[test]
+    fn a_status_line_scrolled_up_the_screen_is_not_the_current_one() {
+        // Same line, two positions. Directly above the composer it is the pane's own status line;
+        // twelve lines up it is the agent showing one — a log, a capture, an earlier turn left on a
+        // screen that has since gone quiet.
+        let composer = [
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ];
+        let mut live: Vec<&str> =
+            vec!["● reading a file", "✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)"];
+        live.extend(composer);
+        assert_eq!(classify_pane("claude", &obs(&live)), Screen::Busy);
+        let mut displayed: Vec<&str> = vec!["✽ Beboppin'… (3m 39s · ↓ 12.5k tokens)"];
+        displayed.extend([
+            "● one", "  two", "  three", "  four", "  five", "  six", "  seven",
+        ]);
+        displayed.extend(composer);
+        assert_eq!(classify_pane("claude", &obs(&displayed)), Screen::Waiting);
+    }
+
+    #[test]
+    fn claude_composer_survives_a_configured_statusline() {
+        // A box whose statusline replaces the hint line, and whose mode footer is off screen: the
+        // bare prompt row between the rules is still proof the TUI is alive and taking input, so the
+        // box reads `waiting` instead of falling back to a stale edge that says `working`.
+        let bare = &[
+            "✻ Sautéed for 14m 21s",
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  CTX █░░░ 0% 0/1.0M │ 5H ███ 53%→54% 4m left │ 7D ███ 28%→31%",
+        ];
+        assert_eq!(classify_pane("claude", &obs(bare)), Screen::Waiting);
+    }
+
+    #[test]
+    fn claude_busy_outranks_an_error_line_left_over_in_the_tail() {
+        // An "API Error" from the previous turn is still in the visible tail while the next turn is
+        // running. The turn is demonstrably live, so there is nothing for a human to do — reading
+        // history as current state is the same fault as latching an edge.
+        let retrying = &[
+            "  ⎿  API Error: 500 Internal Server Error",
+            "✻ Whirlpooling… (12s · ↓ 1.2k tokens)",
+            "  ⏸ manual mode on · ? for shortcuts",
+        ];
+        assert_eq!(classify_pane("claude", &obs(retrying)), Screen::Busy);
+    }
+
+    // ---------- Codex 0.145.0, captured live from a box (docs/turn-state.md §6b) ----------
+
+    /// A shell-command approval, exactly as Codex draws it. Note there is no composer footer: a
+    /// dialog *replaces* it.
+    const CODEX_APPROVAL: &[&str] = &[
+        "› run the shell command: date",
+        "• I’ll run date and report its output.",
+        "• Running date",
+        "  Would you like to run the following command?",
+        "  Environment: local",
+        "  $ date",
+        "› 1. Yes, proceed (y)",
+        "  2. Yes, and don't ask again for commands that start with `date` (p)",
+        "  3. No, and tell Codex what to do differently (esc)",
+        "  Press enter to confirm or esc to cancel",
+    ];
+
+    /// The same pane after pressing esc — and a minefield: a `■ ` notice line, a monthly-limit
+    /// warning, and the user's own prompt echoed with the same `› ` glyph the options use.
+    const CODEX_ANSWERED: &[&str] = &[
+        "› run the shell command: date",
+        "• I’ll run date and report its output.",
+        "✗ You canceled the request to run date",
+        "• Ran date",
+        "  └ (no output)",
+        "⚠ Heads up, you have less than 25% of your monthly limit left. Run /status for a breakdown.",
+        "■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the",
+        "issue.",
+        "› Improve documentation in @filename",
+        "  ? for shortcuts                                          100% context left",
+    ];
+
+    #[test]
+    fn classify_pane_reads_codexs_approval_and_watches_it_clear() {
+        let mut dialog = obs(CODEX_APPROVAL);
+        dialog.title = "[ ! ] Action Required | skein".into();
+        assert_eq!(
+            classify_pane("codex", &dialog),
+            Screen::Blocked(Blocked::Permission)
+        );
+        // One keystroke later: no confirm footer, composer back, title back to the plain directory.
+        let mut answered = obs(CODEX_ANSWERED);
+        answered.title = "skein".into();
+        assert_eq!(classify_pane("codex", &answered), Screen::Waiting);
+    }
+
+    #[test]
+    fn classify_pane_reads_codexs_edit_approval_too() {
+        // A different body under the same footer — which is why the footer, not the wording of any
+        // one dialog, is the predicate.
+        let mut edits = obs(&[
+            "• Added scratch-hello.txt (+1 -0)",
+            "    1 +hello",
+            "  Would you like to make the following edits?",
+            "› 1. Yes, proceed (y)",
+            "  2. Yes, and don't ask again for these files (a)",
+            "  3. No, and tell Codex what to do differently (esc)",
+            "  Press enter to confirm or esc to cancel",
+        ]);
+        edits.title = "[ . ] Action Required | skein".into();
+        assert_eq!(
+            classify_pane("codex", &edits),
+            Screen::Blocked(Blocked::Permission)
+        );
+    }
+
+    #[test]
+    fn classify_pane_names_the_wall_codex_puts_in_front_of_skeins_own_hooks() {
+        // skein installs its probes into every store, so "N hooks are new or changed" is the trust
+        // gate a skein box really hits — and it blocks *before* any hook could fire to report it.
+        let trust = &[
+            "  Hooks need review",
+            "  19 hooks are new or changed.",
+            "  Hooks can run outside the sandbox after you trust them.",
+            "› 1. Review hooks",
+            "  2. Trust all and continue",
+            "  3. Continue without trusting (hooks won't run)",
+            "  Press enter to confirm or esc to go back",
+        ];
+        assert_eq!(
+            classify_pane("codex", &obs(trust)),
+            Screen::Blocked(Blocked::Trust)
+        );
+        // Onboarding with no credentials: the options switch to a plain `> 1.` and the footer to
+        // "continue", and nothing will ever run until a human signs in.
+        let signin = &[
+            "  Welcome to Codex, OpenAI's command-line coding agent",
+            "  Sign in with ChatGPT to use Codex as part of your paid plan",
+            "  or connect an API key for usage-based billing",
+            "> 1. Sign in with ChatGPT",
+            "     Usage included with Plus, Pro, Business, and Enterprise plans",
+            "  2. Sign in with Device Code",
+            "  3. Provide your own API key",
+            "  Press enter to continue",
+        ];
+        assert_eq!(
+            classify_pane("codex", &obs(signin)),
+            Screen::Blocked(Blocked::Auth)
+        );
+        // A picker is a question, not a permission: nothing is waiting on a yes.
+        let picker = &[
+            "  Select a model",
+            "› 1. gpt-5.6-sol (current)",
+            "  2. gpt-5.6-terra",
+            "  Press enter to confirm or esc to go back",
+        ];
+        assert_eq!(
+            classify_pane("codex", &obs(picker)),
+            Screen::Blocked(Blocked::Question)
+        );
+    }
+
+    #[test]
+    fn codexs_action_required_title_covers_a_dialog_we_have_no_wording_for() {
+        // The next Codex release can reword any dialog body; the title marker is the backstop, and it
+        // is honest about not knowing which kind. Verified to appear only while a decision is
+        // pending — it clears on approve *and* on esc, and stays clear through a finished turn.
+        let mut unknown_dialog = obs(&["  Some future prompt nobody has captured", "  ▸ pick one"]);
+        unknown_dialog.title = "[ ! ] Action Required | skein".into();
+        assert_eq!(
+            classify_pane("codex", &unknown_dialog),
+            Screen::Blocked(Blocked::Question)
+        );
+        // The bracket animates, so only the words can be matched.
+        assert!(title_has_attention("[ ! ] Action Required | skein"));
+        assert!(title_has_attention("[ . ] Action Required | skein"));
+        assert!(!title_has_attention("⠧ skein"));
+    }
+
+    #[test]
+    fn classify_pane_reads_codexs_working_line_and_its_notices() {
+        // Codex keeps the composer on screen while it works, so "composer present" cannot mean idle.
+        let mut busy = obs(&[
+            "› run the shell command: date",
+            "• Working (1s • esc to interrupt)",
+            "› Improve documentation in @filename",
+            "  ? for shortcuts                                          100% context left",
+        ]);
+        busy.title = "⠴ skein".into();
+        assert_eq!(classify_pane("codex", &busy), Screen::Busy);
+        // A failure is a `■ ` line carrying a JSON payload…
+        let failed = &[
+            "› run the shell command: date",
+            "■ {\"detail\":\"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.\"}",
+            "  ? for shortcuts                                          100% context left",
+        ];
+        assert!(matches!(
+            classify_pane("codex", &obs(failed)),
+            Screen::Error(_)
+        ));
+        // …while the prose `■ ` notice and the monthly-limit warning in CODEX_ANSWERED are neither an
+        // error nor an auth block. That pane is simply waiting for you.
+        assert_eq!(
+            classify_pane("codex", &obs(CODEX_ANSWERED)),
+            Screen::Waiting
+        );
+    }
+
+    #[test]
+    fn fuse_status_clears_an_edge_that_nothing_ever_cleared() {
+        // The bug, as recorded in this box's own hook-log: `blocked` written at 13:27, nothing until
+        // Stop at 13:47. A screen observation taken at 13:30 showing a composer ends it.
+        let edge = Some(("blocked".to_string(), 1000));
+        let level = Some((Screen::Waiting, 1180));
+        assert_eq!(fuse_status(edge, level), (Some("waiting".into()), ""));
+    }
+
+    #[test]
+    fn fuse_status_lets_a_newer_edge_lead_then_the_next_sample_confirms() {
+        // A Notification fires 5s after the last sample: show it at once (latency), don't wait.
+        let edge = Some(("blocked".to_string(), 1205));
+        let level = Some((Screen::Waiting, 1200));
+        assert_eq!(
+            fuse_status(edge.clone(), level),
+            (Some("blocked".into()), "")
+        );
+        // The next sample sees the dialog and names which kind it is.
+        assert_eq!(
+            fuse_status(edge, Some((Screen::Blocked(Blocked::Permission), 1210))),
+            (Some("blocked".into()), "permission")
+        );
+    }
+
+    #[test]
+    fn fuse_status_without_an_observation_is_exactly_todays_behaviour() {
+        for status in ["blocked", "working", "waiting", "error", "ended"] {
+            assert_eq!(
+                fuse_status(Some((status.to_string(), 10)), None),
+                (Some(status.to_string()), "")
+            );
+        }
+        // An unreadable screen defers too, rather than inventing a state.
+        assert_eq!(
+            fuse_status(Some(("blocked".into(), 10)), Some((Screen::Unknown, 99))),
+            (Some("blocked".into()), "")
+        );
+        // No edge and no observation: nothing claimed, so liveness decides downstream.
+        assert_eq!(fuse_status(None, None), (None, ""));
+    }
+
+    #[test]
+    fn fuse_status_reports_a_crashed_agent_but_keeps_a_human_set_outcome() {
+        assert_eq!(
+            fuse_status(Some(("working".into(), 10)), Some((Screen::Dead, 20))),
+            (Some("ended".into()), "")
+        );
+        // `done` is a human's verdict on the work, not a claim about the process.
+        assert_eq!(
+            fuse_status(Some(("done".into(), 10)), Some((Screen::Dead, 20))),
+            (Some("done".into()), "")
+        );
+    }
+
+    #[test]
+    fn title_activity_names_the_tool_but_not_the_idle_title() {
+        assert_eq!(
+            title_activity("✳ Run bash command true").as_deref(),
+            Some("Run bash command true")
+        );
+        assert_eq!(title_activity("⠂ Claude Code"), None);
+        assert_eq!(title_activity("✳ Claude Code"), None);
+        assert_eq!(title_activity(""), None);
+    }
+
+    #[test]
+    fn title_text_is_only_a_task_while_it_is_demonstrably_fresh() {
+        // Observed live: Claude Code kept a finished tool's description in the title through a later,
+        // unrelated turn. So "busy" alone is not enough to believe the title's text — the observer
+        // must have watched it change, and recently.
+        let stale = PaneObs {
+            ts: 1,
+            title: "⠂ Fetch and quote robots.txt file".into(),
+            title_age: 600,
+            ..Default::default()
+        };
+        let fresh = PaneObs {
+            title_age: 3,
+            ..stale.clone()
+        };
+        let unwitnessed = PaneObs {
+            title_age: -1,
+            ..stale.clone()
+        };
+        let task_from_title = |runtime: &str, o: &PaneObs| {
+            runtime == "claude"
+                && (0..=TITLE_FRESH_SECS).contains(&o.title_age)
+                && title_activity(&o.title).is_some()
+        };
+        let usable = |o: &PaneObs| task_from_title("claude", o);
+        assert!(
+            usable(&fresh),
+            "a title seen changing 3s ago names current work"
+        );
+        assert!(
+            !usable(&stale),
+            "ten minutes old is the residue of an earlier tool call"
+        );
+        assert!(
+            !usable(&unwitnessed),
+            "never seen changing ⇒ no claim at all"
+        );
+        // Codex's title is the working directory, not the running tool, so it names no task however
+        // fresh it is — otherwise the task column would just repeat the box's folder name.
+        let codex = PaneObs {
+            title: "⠧ skein".into(),
+            title_age: 2,
+            ..stale.clone()
+        };
+        assert!(!task_from_title("codex", &codex));
+    }
+
+    #[test]
+    fn read_pane_ignores_an_observation_that_has_gone_stale() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let store = tempdir().join(".claude");
+        fs::create_dir_all(store.join("status")).unwrap();
+        let reg = store.join("sandboxes.json");
+        fs::write(
+            &reg,
+            r#"{"thing-x":{"branch":"x","dir":"/d","lastSeen":"","status":""}}"#,
+        )
+        .unwrap();
+        env::set_var("SKEIN_REGISTRY", &reg);
+        let now = Utc::now().timestamp();
+        let write = |ts: i64| {
+            fs::write(
+                store.join("status/thing-x.pane.json"),
+                format!(r#"{{"contract":1,"ts":{ts},"age":0,"moving":1,"dead":0,"title":"⠂ Claude Code","cmd":"bash","tail":["❯ ","  ? for shortcuts"]}}"#),
+            )
+            .unwrap();
+        };
+        write(now);
+        assert!(read_pane("thing-x").is_some(), "a fresh sample counts");
+        write(now - (PANE_FRESH_SECS + 5));
+        assert!(
+            read_pane("thing-x").is_none(),
+            "a sample older than three heartbeats must stop counting, so a dead observer degrades \
+             to hook-only turn-state instead of freezing the board"
+        );
+        env::remove_var("SKEIN_REGISTRY");
+    }
+
+    fn obs(tail: &[&str]) -> PaneObs {
+        PaneObs {
+            ts: 1,
+            tail: tail.iter().map(|l| l.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The exact bottom-of-pane of a Claude permission prompt (a WebFetch approval).
+    const PERMISSION_TAIL: &[&str] = &[
+        "● Fetch(https://example.com/robots.txt)",
+        "────────────────────────────────────────────────────────────",
+        " Fetch",
+        "   url: \"https://example.com/robots.txt\", prompt: \"Return the raw content\"",
+        "   Claude wants to fetch content from example.com",
+        " Do you want to allow Claude to fetch this content?",
+        " ❯ 1. Yes",
+        "   2. Yes, and don't ask again for example.com",
+        "   3. No, and tell Claude what to do differently (esc)",
+    ];
+
+    /// The same pane one keystroke later: dialog gone, composer and hint line back.
+    const ANSWERED_TAIL: &[&str] = &[
+        "  ⎿  Interrupted · What should Claude do instead?",
+        "✻ Baked for 1m 26s",
+        "                                              ● high · /effort",
+        "────────────────────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  ⏸ manual mode on · ? for shortcuts · ← for agents",
+    ];
+}

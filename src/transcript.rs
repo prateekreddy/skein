@@ -217,3 +217,101 @@ pub fn read_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String>
 // mid-turn) are exactly what an automatic trigger would have to satisfy, so turning one on later is
 // a call site, not a redesign. The one place it would go: the transition into `waiting` in
 // `load_views`, gated on a setting that does not exist yet.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use crate::testutil::*;
+    #[allow(unused_imports)]
+    use std::{env, fs};
+
+    #[test]
+    fn the_transcript_reader_keeps_the_conversation_and_drops_the_bookkeeping() {
+        // Line shapes taken from a real 14MB Claude Code record, whose 3800 lines are: user,
+        // assistant, system, mode, permission-mode, last-prompt, file-history-snapshot,
+        // file-history-delta, attachment, queue-operation, bridge-session. Only two are the
+        // conversation; 913 of the "user" lines are tool_result payloads that would drown it.
+        let body = concat!(
+            r#"{"type":"mode","mode":"default"}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-07-31T08:10:00Z","message":{"role":"user","content":"restart the server"}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-07-31T08:10:05Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"long private reasoning"},{"type":"text","text":"On it."},{"type":"tool_use","name":"Bash","input":{"command":"cargo build --bins","description":"build"}}]}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-07-31T08:10:09Z","message":{"role":"user","content":[{"type":"tool_result","content":"<12MB of build output>"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-07-31T08:11:00Z","message":{"role":"assistant","content":[{"type":"text","text":"subagent says hi"}]}}"#,
+            "\n",
+            r#"{"type":"file-history-snapshot","messageId":"x"}"#,
+            "\n",
+        );
+        let msgs = parse_transcript_jsonl(body);
+        assert_eq!(
+            msgs.len(),
+            3,
+            "two conversation turns + one subagent line: {msgs:#?}"
+        );
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(
+            msgs[0].text, "restart the server",
+            "a string content body is the human's message"
+        );
+        assert_eq!(
+            msgs[1].text, "On it.",
+            "thinking is not the conversation and is dropped"
+        );
+        assert_eq!(
+            msgs[1].tools,
+            vec!["Bash(cargo build --bins)"],
+            "tool calls are summarised, not inlined"
+        );
+        assert!(
+            msgs[2].sidechain,
+            "subagent chatter is marked so the UI can dim it"
+        );
+        // a tool_result-only turn carries no human-readable content and must not become a message
+        assert!(
+            !msgs.iter().any(|m| m.text.contains("12MB")),
+            "tool results stay out of the view"
+        );
+    }
+
+    #[test]
+    fn a_half_line_from_the_tail_is_never_parsed_as_a_message() {
+        // Reading the last N bytes of a JSONL file almost always lands mid-line. That fragment is
+        // not a record; parsing it would render a message with no role and half a sentence.
+        let fragment =
+            r#"pe":"assistant","message":{"content":[{"type":"text","text":"...half a line"}]}}"#;
+        assert!(parse_transcript_jsonl(fragment).is_empty());
+        let after = format!(
+            "{fragment}\n{}",
+            r#"{"type":"user","message":{"content":"whole line"}}"#
+        );
+        // the reader drops everything up to the first newline when it tailed; the parser also
+        // refuses the fragment on its own, so both halves of the defence hold
+        assert_eq!(parse_transcript_jsonl(&after).len(), 1);
+    }
+
+    #[test]
+    fn long_messages_and_tool_details_are_clipped_not_dumped() {
+        assert_eq!(clip("short", 10), "short");
+        assert_eq!(clip("abcdefghij", 4), "abcd…");
+        let huge = "x".repeat(TRANSCRIPT_MAX_TEXT + 500);
+        let line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{huge}"}}]}}}}"#
+        );
+        let msgs = parse_transcript_jsonl(&line);
+        assert_eq!(
+            msgs[0].text.chars().count(),
+            TRANSCRIPT_MAX_TEXT + 1,
+            "clipped, with the ellipsis"
+        );
+        // a write tool's input is the whole file — the summary must take the path, not the content
+        let write = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"/src/lib.rs","content":"...entire file..."}}]}}"#;
+        assert_eq!(
+            parse_transcript_jsonl(write)[0].tools,
+            vec!["Write(/src/lib.rs)"]
+        );
+    }
+}
