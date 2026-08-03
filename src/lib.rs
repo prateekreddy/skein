@@ -4,6 +4,14 @@
 //! (`skein-server`). It owns no state the sandboxes don't already write; it only reads
 //! `sandboxes.json` and derives status. See ARCHITECTURE.md.
 
+mod config;
+mod runtime;
+mod util;
+
+pub use config::*;
+pub use runtime::*;
+pub use util::*;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,19 +21,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// Load a local `.env` (searched from the cwd upward) so the registry/repo paths and `*_CMD`
-/// templates needn't be passed on every invocation. Variables already set in the real
-/// environment win — dotenv never overrides — so a command-line `VAR=… skein …` still takes
-/// precedence. A missing file is fine and silent; a *malformed* file is reported on stderr
-/// rather than silently dropping every line after the bad one (which once made a quoting slip
-/// look like a "command not found"). The binaries call this once at startup.
-pub fn load_dotenv() {
-    match dotenvy::dotenv() {
-        Ok(_) => {}
-        Err(e) if e.not_found() => {}
-        Err(e) => eprintln!("skein: ignoring malformed .env — {e}"),
-    }
-}
 
 /// Diff summary a box reports for its branch-vs-base work (written by box-diff.sh).
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -211,21 +206,6 @@ pub fn valid_name(name: &str) -> bool {
         && !name.contains(['/', '\\', '\0'])
 }
 
-/// Write `bytes` to `path` atomically: a temp file in the same dir, then rename (POSIX-atomic),
-/// so a concurrent reader sees either the old or the new whole file, never a truncated one.
-/// `dir` must be `path`'s parent (same filesystem) for the rename to be atomic.
-fn write_atomic(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), String> {
-    // pid + per-call counter: a pid-only temp name let two threads of the same process writing
-    // into the same dir clobber each other's temp mid-write and rename the wrong bytes into place.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(".skein.tmp.{}.{n}", std::process::id()));
-    fs::write(&tmp, bytes).map_err(|e| format!("writing temp: {e}"))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("renaming into place: {e}")
-    })
-}
 
 pub fn locate_registry() -> Result<PathBuf, String> {
     if let Ok(p) = env::var("SKEIN_REGISTRY") {
@@ -602,67 +582,7 @@ fn resolve_fleet(
     }
 }
 
-/// Run a command with a hard wall-clock bound: kill + reap on expiry, `None` on timeout/spawn
-/// failure. Pipes are drained on their own threads so a chatty child can't fill the pipe buffer
-/// and deadlock against the polling loop. Dependency-free; callers are all off the async runtime
-/// (blocking pool / CLI).
-fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::Output> {
-    use std::io::Read as _;
-    use std::process::Stdio;
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut out_pipe = child.stdout.take()?;
-    let mut err_pipe = child.stderr.take()?;
-    let out_h = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = out_pipe.read_to_end(&mut v);
-        v
-    });
-    let err_h = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = err_pipe.read_to_end(&mut v);
-        v
-    });
-    let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) if start.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    Some(std::process::Output {
-        status,
-        stdout: out_h.join().unwrap_or_default(),
-        stderr: err_h.join().unwrap_or_default(),
-    })
-}
 
-fn bounded_output(
-    cmd: &mut Command,
-    label: &str,
-    timeout: Duration,
-) -> Result<std::process::Output, String> {
-    output_with_timeout(cmd, timeout).ok_or_else(|| {
-        format!(
-            "{label} failed to start or exceeded the {}s timeout",
-            timeout.as_secs()
-        )
-    })
-}
 
 /// One box's run-state from sbx — a single-box view of [`fleet_boxes`].
 fn box_liveness(name: &str) -> Option<Liveness> {
@@ -1146,18 +1066,6 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
     }
 }
 
-/// Wrap a string for safe single-quoting in a POSIX shell. Used to quote every value substituted
-/// into a `*_CMD` template before it reaches `sh -c`, so a branch/box name can't inject commands.
-pub fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-// ───────────────────────────── skein-owned repo registry ─────────────────────────────
-//
-// skein is no longer single-repo. `~/.skein/repos.json` lists every repo skein manages; each box
-// is `<repo-id>-<branch>` and maps back to its repo by id-prefix. This is skein's OWN config —
-// distinct from the per-box `sandboxes.json` we dropped — and it's what makes "add a repo URL and
-// go" work without the repo shipping anything for skein.
 
 /// One managed repo. `work` is the host clone (for host-side git/diff + as the `sbx run` workspace);
 /// `store` is the host `.claude` skein provisions and mounts into every box for that repo.
@@ -1193,22 +1101,7 @@ pub struct Repo {
     pub sync_gateway_url: String,
 }
 
-fn default_agent() -> String {
-    "claude".into()
-}
 
-/// Public runtime metadata consumed by the CLI and cockpit. Runtime choices are deliberately
-/// discovered from the core instead of duplicated in every client; adding another adapter therefore
-/// makes it appear everywhere without another round of provider-specific UI conditionals.
-#[derive(Debug, Clone, Serialize)]
-pub struct RuntimeInfo {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub executable: &'static str,
-    pub supports_resume: bool,
-    pub supports_handoff: bool,
-    pub adapted_statusline: bool,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthCheck {
@@ -1230,129 +1123,13 @@ pub struct HealthReport {
     pub runtimes: Vec<RuntimeInfo>,
 }
 
-/// Everything Skein needs to start or resume a native agent process. Lifecycle hook translation is
-/// kept beside this registry below, while launch, attach, takeover, validation, health, and UI all
-/// consume these definitions. Provider quirks belong here, not at their call sites.
-struct RuntimeAdapter {
-    info: RuntimeInfo,
-    /// Idempotent provider setup run on attach and before first launch. It may provide defaults but
-    /// must preserve explicit user configuration. Provider quirks remain centralized here.
-    interactive_setup: &'static str,
-    /// Best-effort, bounded native updater run immediately before creating a new agent process.
-    /// Reattaching to a live tmux session skips it so an in-progress agent is never replaced.
-    update_before_start: &'static str,
-    /// Emits the Claude-compatible status-line JSON model on stdout. `None` means the provider
-    /// supplies its own command-driven status line and needs no browser footer adapter.
-    statusline_input: Option<&'static str>,
-    /// Runtime-native durable instruction file, relative to HOME. Skein adds one managed block.
-    instruction_file: &'static str,
-    /// Optional higher-precedence instruction file used only when the user already created it.
-    instruction_override: &'static str,
-    /// Shell command used to create this runtime's first persistent tmux process.
-    interactive_start: &'static str,
-    /// Shell command used when creating a provider-specific persistent tmux session.
-    interactive_resume: &'static str,
-    /// Headless command run inside an existing box; `{prompt}` is replaced with a shell-quoted value.
-    headless_resume: &'static str,
-    /// Best-effort, bounded provider-native transcript export. It emits Markdown to stdout and is
-    /// used only for cross-runtime replacement; native transcript files never leave the source box.
-    context_export: &'static str,
-}
 
-static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
-    RuntimeAdapter {
-        info: RuntimeInfo {
-            id: "claude",
-            label: "Claude",
-            executable: "claude",
-            supports_resume: true,
-            supports_handoff: true,
-            adapted_statusline: false,
-        },
-        interactive_setup: ":",
-        update_before_start: "timeout 120 claude update </dev/null || echo 'skein: Claude update failed; starting installed version' >&2",
-        statusline_input: None,
-        instruction_file: ".claude/CLAUDE.md",
-        instruction_override: "",
-        interactive_start: "claude",
-        // `|| claude` is not belt-and-braces: a box can legitimately have nothing to continue — a
-        // cross-runtime replacement box whose new agent was never spoken to, a box whose transcript
-        // was cleared, a session killed before its first turn. There `claude --continue` exits with
-        // "No conversation found", the tmux session dies with it, and every reconnect replayed that
-        // same failure. Fall back to a fresh conversation (the takeover brief is on disk, so the new
-        // agent still picks up the context). Mirrors Codex's `resume --last || codex` below.
-        interactive_resume: "claude --continue || claude",
-        headless_resume: "claude --continue --print {prompt} || claude --print {prompt}",
-        context_export: r####"project="$HOME/.claude/projects/$(printf '%s' "$root" | sed 's#/#-#g')"; latest="$(find "$project" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'def text: if type == "string" then . elif type == "array" then map(if type == "string" then . elif .type == "text" then (.text // empty) else empty end) | join("\n") else "" end; select(.type == "user" or .type == "assistant") | (.message.role // .type) as $role | ((.message.content // empty) | text) as $body | select($body != "") | "### \($role)\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
-    },
-    RuntimeAdapter {
-        info: RuntimeInfo {
-            id: "codex",
-            label: "Codex",
-            executable: "codex",
-            supports_resume: true,
-            supports_handoff: true,
-            adapted_statusline: true,
-        },
-        // Skein's exact footer needs bars and projections that Codex's native item list cannot
-        // express. Disable only the default Skein previously seeded; an explicit `/statusline`
-        // choice remains authoritative and suppresses the adapted footer below.
-        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; broken='status_line = null # skein custom statusline'; marker='status_line = [] # skein custom statusline'; if grep -Fqx "$broken" "$cfg"; then sed -i 's/^status_line = null # skein custom statusline$/status_line = [] # skein custom statusline/' "$cfg"; elif grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = [] # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi; root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi; installer="$store/skein/bin/install-codex-hooks.sh"; [ ! -r "$installer" ] || bash "$installer" "$store""#,
-        update_before_start: "timeout 120 codex update </dev/null || echo 'skein: Codex update failed; starting installed version' >&2",
-        // Codex records the same live data used by `/status` in token_count events. Select limits
-        // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
-        // both providers share the renderer below. The marker makes `/statusline` an opt-out.
-        statusline_input: Some(r####"grep -Fq 'status_line = [] # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload]) as $tokens | ($tokens | last) as $t | (([$tokens[] | select((.rate_limits.limit_name // "") == "")] | last) // $t) as $quota | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$quota.rate_limits.primary, $quota.rate_limits.secondary, $quota.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
-        instruction_file: ".codex/AGENTS.md",
-        instruction_override: ".codex/AGENTS.override.md",
-        // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
-        // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
-        // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
-        // tmux + xterm.js, alternate-screen wheel events otherwise become Up/Down and cycle prompt
-        // history instead of scrolling the conversation.
-        interactive_start: "codex --no-alt-screen --dangerously-bypass-hook-trust",
-        interactive_resume: "codex --no-alt-screen --dangerously-bypass-hook-trust resume --last || codex --no-alt-screen --dangerously-bypass-hook-trust",
-        headless_resume: "codex exec resume --last --dangerously-bypass-hook-trust {prompt} || codex exec --dangerously-bypass-hook-trust {prompt}",
-        context_export: r####"latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'select(.type == "response_item" and .payload.type == "message") | .payload as $m | (($m.content // []) | map(.text // .input_text // .output_text // empty) | join("\n")) as $body | select($body != "") | "### \($m.role // "agent")\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
-    },
-];
 
-/// `sbx create` returns before its durable startup hooks finish. The first `sbx exec` keeps the box
-/// alive and waits for the kit's provider-neutral handshake; later attaches skip this entirely and
-/// go straight to tmux. A bounded wait makes a broken kit visible instead of hanging the terminal.
-const INITIAL_SETUP_WAIT: &str = "echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt 600 ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ";
 
-/// Make tmux a persistence layer rather than visible UI. These are server-global because the box has
-/// one Skein-owned tmux server; applying after detached session creation works on both first launch
-/// and reconnect, and remains compatible with older boxes whose server already exists.
-const TMUX_CONFIGURE: &str = "tmux set-option -g status off; tmux set-option -g mouse on; tmux set-option -g history-limit 100000; tmux set-option -g focus-events on; tmux set-option -g set-clipboard on; ";
-const TMUX_AGENT_CONTRACT: &str = "inline-scrollback-v1";
 
-fn runtime_adapter(id: &str) -> Option<&'static RuntimeAdapter> {
-    RUNTIME_ADAPTERS
-        .iter()
-        .find(|runtime| runtime.info.id == id)
-}
 
-pub fn supported_runtimes() -> Vec<RuntimeInfo> {
-    RUNTIME_ADAPTERS
-        .iter()
-        .map(|runtime| runtime.info.clone())
-        .collect()
-}
 
-pub fn valid_runtime(id: &str) -> bool {
-    runtime_adapter(id).is_some()
-}
 
-fn program_on_path(name: &str) -> bool {
-    env::var_os("PATH").is_some_and(|path| {
-        env::split_paths(&path).any(|dir| {
-            let candidate = dir.join(name);
-            candidate.is_file()
-        })
-    })
-}
 
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
@@ -1514,70 +1291,10 @@ pub fn health_report() -> HealthReport {
     }
 }
 
-fn resolve_runtime(id: &str) -> &'static RuntimeAdapter {
-    runtime_adapter(id).unwrap_or(&RUNTIME_ADAPTERS[0])
-}
 
-/// skein's home dir (`$SKEIN_HOME`, else `~/.skein`): holds `repos.json`, the embedded `kit/`, and
-/// (for URL-added repos) `repos/<id>/{work,store}`.
-pub fn skein_home() -> PathBuf {
-    if let Some(h) = env::var_os("SKEIN_HOME").filter(|s| !s.is_empty()) {
-        return PathBuf::from(h);
-    }
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".skein")
-}
 
-fn repos_json() -> PathBuf {
-    skein_home().join("repos.json")
-}
 
-/// skein's app settings (`~/.skein/config.json`) — the toggles the cockpit exposes. Every field has a
-/// serde default so old/partial files keep working as new settings are added. Matching `$SKEIN_*` env
-/// vars still override these at runtime (env wins) for headless/CI use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Config {
-    /// Seed the host `gh` token into sbx (global) at startup so boxes can fetch/push/open PRs.
-    /// Off is the UI equivalent of `$SKEIN_NO_GH_SECRET`.
-    #[serde(default = "default_true")]
-    pub seed_gh_secret: bool,
-    /// Overwrite an already-set sbx `github` secret with the current token (refresh on rotation).
-    /// On is the UI equivalent of `$SKEIN_FORCE_GH_SECRET`.
-    #[serde(default)]
-    pub force_gh_secret: bool,
-    /// Default agent for newly-added repos / boxes (the per-runtime seam). `claude` for now.
-    #[serde(default = "default_agent")]
-    pub default_agent: String,
-    /// Base branch for `gh pr create` / merge when a repo doesn't specify one. Empty ⇒ repo default.
-    /// UI equivalent of `$SKEIN_BASE`.
-    #[serde(default)]
-    pub base_branch: String,
-    /// Confirm before a destructive **Destroy** (clone-mode boxes lose unpushed commits). The cockpit
-    /// reads this to decide whether to prompt.
-    #[serde(default = "default_true")]
-    pub confirm_destroy: bool,
-    /// Path to a private SSH key (host) to load into the host ssh-agent so sbx forwards it into boxes
-    /// for SSH git push (`git@…`/`ssh://` remotes). Empty ⇒ rely on whatever's already in the agent.
-    /// `$SKEIN_SSH_KEY` overrides. The key never enters a box — only the agent socket is forwarded.
-    #[serde(default)]
-    pub ssh_key: String,
-    /// Default command a **verify** runs inside a box (`cargo test`). A repo's own `check` wins.
-    /// Empty ⇒ verification is simply unavailable, which is the honest state until someone sets it.
-    #[serde(default)]
-    pub check_command: String,
-    /// Superseded by named [`SyncConnection`]s, which pair a gateway with the token that mints at
-    /// it. Read once by the migration and then cleared; kept so a pre-connections `config.json`
-    /// still parses. A credential was never here and never will be — this file is written 0644 and
-    /// round-trips through the browser on every settings save.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub sync_gateway_url: String,
-}
 
-fn default_true() -> bool {
-    true
-}
 
 impl Default for Config {
     fn default() -> Self {
@@ -1594,69 +1311,10 @@ impl Default for Config {
     }
 }
 
-/// Ensure the configured SSH key is loaded in the host ssh-agent, so sbx forwards it into boxes for
-/// SSH git push. `$SKEIN_SSH_KEY` overrides the config. No key configured ⇒ no-op (the agent's
-/// existing keys, if any, are forwarded as-is). The key itself never enters a box — only the agent
-/// socket is forwarded (docs.docker.com/ai/sandboxes/security/credentials). Best-effort: returns Err
-/// (logged by callers) but never panics. Idempotent — `ssh-add` of an already-loaded key is a no-op.
-pub fn ensure_ssh_key() -> Result<(), String> {
-    let key = env::var("SKEIN_SSH_KEY")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| load_config().ssh_key);
-    let key = key.trim();
-    if key.is_empty() {
-        return Ok(());
-    }
-    let expanded = expand_tilde(key);
-    if !Path::new(&expanded).exists() {
-        return Err(format!("ssh key not found: {expanded}"));
-    }
-    let mut command = Command::new("ssh-add");
-    command.arg(&expanded);
-    let out = bounded_output(&mut command, "ssh-add", Duration::from_secs(15))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "ssh-add failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
-}
 
-/// Expand a leading `~/` to `$HOME` (ssh-add doesn't do shell tilde expansion when called directly).
-fn expand_tilde(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = env::var_os("HOME") {
-            return Path::new(&home).join(rest).to_string_lossy().into_owned();
-        }
-    }
-    p.to_string()
-}
 
-fn config_json() -> PathBuf {
-    skein_home().join("config.json")
-}
 
-/// Load skein's app settings (defaults if the file is absent/malformed).
-pub fn load_config() -> Config {
-    fs::read_to_string(config_json())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
 
-/// Persist skein's app settings to `~/.skein/config.json`.
-pub fn save_config(c: &Config) -> Result<(), String> {
-    if !valid_runtime(&c.default_agent) {
-        return Err(format!("unsupported default runtime {:?}", c.default_agent));
-    }
-    let home = skein_home();
-    fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
-    let bytes = serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?;
-    write_atomic(&config_json(), &home, &bytes)
-}
 
 /// 1s micro-cache over `repos.json`: a single `load_views` pass consults the repo list dozens of
 /// times per box (store_for_box, current_status, current_task, …) and each SSE tick repeats that
@@ -1811,24 +1469,6 @@ pub fn branch_from_box(name: &str, repo: &Repo) -> String {
         .to_string()
 }
 
-/// Sbx sandbox names can't carry every branch character (notably `/`), so the box name is a *slug* of
-/// the branch: anything outside `[A-Za-z0-9._-]` becomes `-`, runs collapse, ends trimmed. The real
-/// branch (`feat/auth`) is preserved separately (launch spec → `git checkout`); only the *name* is
-/// slugged (`<repo>-feat-auth`). Same branch ⇒ same name (stable), so reconnect/lookup are consistent.
-pub fn slug(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_dash = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-            out.push(c);
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
 
 /// The sbx box name for a repo + branch: `<repo-id>-<branch-slug>`.
 pub fn box_name(repo_id: &str, branch: &str) -> String {
@@ -1903,17 +1543,6 @@ pub fn remote_warning(work: &str) -> Option<String> {
     Some(msg)
 }
 
-/// Host component of an SSH git URL (for the network-policy hint). `None` if unparseable.
-fn host_of(url: &str) -> Option<&str> {
-    if let Some(rest) = url.strip_prefix("git@") {
-        return rest.split(':').next();
-    }
-    if let Some(rest) = url.strip_prefix("ssh://") {
-        let rest = rest.split_once('@').map(|(_, h)| h).unwrap_or(rest);
-        return rest.split(['/', ':']).next();
-    }
-    None
-}
 
 /// Best-effort `git@github.com:org/repo.git` / `ssh://git@host/org/repo.git` → `https://host/org/repo.git`.
 /// Returns `None` for shapes we don't recognise (caller just omits the suggestion).
@@ -2413,79 +2042,8 @@ pub fn agent_for_box(name: &str) -> String {
     default_agent()
 }
 
-/// Run a program in the repo dir ($SKEIN_REPO, else cwd); returns (stdout, stderr, exit-code).
-fn run_capture(prog: &str, args: &[&str]) -> Result<(String, String, i32), String> {
-    let mut c = Command::new(prog);
-    c.args(args);
-    if let Ok(repo) = env::var("SKEIN_REPO") {
-        if !repo.is_empty() {
-            c.current_dir(repo);
-        }
-    }
-    let timeout = env::var("SKEIN_ACTION_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(30));
-    let out = output_with_timeout(&mut c, timeout).ok_or_else(|| {
-        format!(
-            "{prog} failed to start or exceeded the {}s action timeout",
-            timeout.as_secs()
-        )
-    })?;
-    Ok((
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-        out.status.code().unwrap_or(-1),
-    ))
-}
 
-fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
-    run_capture("sh", &["-c", cmd])
-}
 
-// ───────────────────────────── attachments: paste / drop into a box ─────────────────────────────
-//
-// The agent runs *inside* the sandbox: it can't see the user's clipboard, their Downloads folder, or
-// anything else on the host. Anything the user wants to hand it — a screenshot, a PDF, a video, a
-// whole folder of samples — has to be copied into the box first, then referenced by its in-box path.
-// One drop (paste, drag-and-drop, file picker) becomes one `/tmp/skein-drop-<batch>/` directory:
-// per-batch so a folder keeps its structure and the agent can be handed the directory itself, and so
-// same-named files from different drops never clobber each other.
-
-/// Sanitise one browser-supplied path component into a plain, single-segment filename. Letters and
-/// digits of any script are kept — `née deed.pdf` and CJK names stay readable rather than turning into
-/// hyphen soup — and everything else collapses to `-`: no separator, quote, glob, space, or control
-/// character survives, so the name is safe both as a path and as a bare token pasted into a prompt.
-/// Leading dots are stripped (kills `..` and dotfiles that would hide the drop) and the name is capped
-/// at 80 chars **keeping its extension**, since the suffix is what tells the agent it got an `.mp4`.
-fn safe_component(s: &str) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    while out.starts_with('.') {
-        out.remove(0);
-    }
-    if out.chars().count() > 80 {
-        let ext = out
-            .rsplit_once('.')
-            .map(|(_, e)| e)
-            .filter(|e| !e.is_empty() && e.chars().count() <= 8)
-            .map(|e| format!(".{e}"))
-            .unwrap_or_default();
-        // char-wise, not `truncate`: a multibyte name would panic on a byte boundary.
-        let stem: String = out.chars().take(80 - ext.chars().count()).collect();
-        out = stem + &ext;
-    }
-    out
-}
 
 /// A fresh drop-batch id: millis-since-epoch + a process-local counter (no collisions within a run).
 fn next_drop_id() -> String {
@@ -2558,27 +2116,6 @@ pub fn box_write_argv(name: &str, dir: &str, path: &str) -> Result<Vec<String>, 
     ])
 }
 
-/// Percent-decode a header value. Filenames are arbitrary UTF-8 (`née.pdf`, CJK, emoji) but HTTP
-/// headers are ASCII, so the UI sends `encodeURIComponent(name)` and this reverses it. Invalid
-/// escapes are left verbatim rather than erroring — `safe_component` sanitises whatever comes out.
-pub fn pct_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
-            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
 
 /// Merge-readiness for a box: does a PR exist, its state, and CI checks. All host-side via `gh`.
 #[derive(Debug, Default, Serialize)]
@@ -4345,10 +3882,6 @@ fn gateway_said(body: &str) -> String {
     }
 }
 
-/// JSON-quote a string without building a Value for it.
-fn json_str(s: &str) -> String {
-    serde_json::Value::String(s.to_string()).to_string()
-}
 
 /// Wire one box to the work tracker: mint its token, write it into the box, and register the MCP
 /// server there.
@@ -4665,14 +4198,6 @@ pub const TRANSCRIPT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const TRANSCRIPT_HEADER: &str = "SKEIN_TX ";
 const TRANSCRIPT_NONE: &str = "SKEIN_TX_NONE";
 
-/// Cut a string to `max` chars on a char boundary, marking that it was cut.
-fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let kept: String = text.chars().take(max).collect();
-    format!("{kept}…")
-}
 
 /// Summarise a tool call as `name(detail)` — the detail being whichever well-known input field says
 /// what it acted on. Never the whole input: a file write's input is the entire file.
@@ -4942,19 +4467,6 @@ fn parse_verify_output(raw: &str) -> (String, Option<i32>, String) {
     (fingerprint, exit, body)
 }
 
-/// Keep the END of the output — a test suite says what failed at the bottom.
-fn tail_of(text: &str, bytes: usize) -> String {
-    if text.len() <= bytes {
-        return text.to_string();
-    }
-    let mut cut = text.len() - bytes;
-    while cut < text.len() && !text.is_char_boundary(cut) {
-        cut += 1;
-    }
-    let rest = &text[cut..];
-    let from_line = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or(rest);
-    format!("… earlier output trimmed …\n{from_line}")
-}
 
 /// Why a verify must not start right now, if it must not. A check while the agent is mid-turn would
 /// have the two of them writing the same tree — and a red result would be the collision, not the code.
@@ -5646,50 +5158,9 @@ fn agent_attach_argv(
     ]
 }
 
-/// Shell that starts the level observer (box-pane.sh) beside the agent's tmux session.
-///
-/// Detached with `setsid` so it outlives this attach — a browser tab closing must not stop the box
-/// reporting what its screen says — and `nice -n 19` so it can never compete with the agent or the
-/// human's editor for CPU. Idempotent: the script takes a box-local lock and a second copy exits
-/// immediately, so every reconnect can run this blindly. Fail-soft throughout: a box whose store
-/// predates the script simply has no observer, and turn-state falls back to hook edges alone.
-fn pane_observer_start(tmux_name: &str) -> String {
-    format!(
-        "obs=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/skein/bin/box-pane.sh\"; \
-         if [ -r \"$obs\" ]; then command -v setsid >/dev/null 2>&1 || setsid() {{ \"$@\"; }}; \
-         ( setsid nice -n 19 bash \"$obs\" {tmux_name} >/dev/null 2>&1 & ) ; fi;"
-    )
-}
 
-/// Wrap the command that becomes a tmux session's agent process so a *failure to start* leaves the
-/// window alive as a shell with the provider's error still on screen. Without it the window exits
-/// instantly and the attach right behind it dies on tmux's own "can't find session", the real cause
-/// already scrolled away — the shape the cross-runtime replacement path kept hitting.
-/// Contains no `$`: this string is embedded double-quoted in the outer shell, which would expand a
-/// variable itself instead of leaving it for tmux's shell.
-fn guarded_agent_command(agent: &str, command: &str) -> String {
-    format!(
-        "{command} || {{ echo; echo 'skein: {agent} could not start — see the error above; keeping this session as a shell'; exec bash -li; }}"
-    )
-}
 
-/// Refresh the concise Skein-managed block in a runtime's native durable instruction file before
-/// creating its agent process. Reattaching to a live tmux session skips this entire branch.
-fn agent_instruction_setup(runtime: &RuntimeAdapter) -> String {
-    let instruction = sh_quote(runtime.instruction_file);
-    let override_ = sh_quote(runtime.instruction_override);
-    format!(
-        r#"root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi; helper="$store/skein/bin/agent-guide.sh"; if [ -r "$helper" ]; then bash "$helper" "$store" {instruction} {override_} || echo 'skein: durable agent guidance could not be refreshed' >&2; else echo 'skein: agent guide helper is unavailable; restart the host server to refresh this store' >&2; fi"#
-    )
-}
 
-fn agent_session_name(name: &str, runtime: &str) -> String {
-    if runtime == agent_for_box(name) {
-        "skein-agent".to_string()
-    } else {
-        format!("skein-agent-{runtime}")
-    }
-}
 
 /// Stop one runtime's persistent tmux process without touching the sandbox or another provider's
 /// native session. Reattaching recreates it through that adapter's native resume command.
@@ -7014,21 +6485,6 @@ impl Pause {
     }
 }
 
-/// First non-empty line of `s`, whitespace-collapsed and capped — the inbox headline. None when
-/// `s` is blank.
-fn first_line(s: &str) -> Option<String> {
-    let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    const CAP: usize = 120;
-    let out = if collapsed.chars().count() > CAP {
-        let mut t: String = collapsed.chars().take(CAP).collect();
-        t.push('…');
-        t
-    } else {
-        collapsed
-    };
-    Some(out).filter(|s| !s.is_empty())
-}
 
 /// Classify the last assistant message. `blocked` is true when the box's status is the
 /// permission-prompt signal (Notification), which dominates regardless of the text.
@@ -7177,14 +6633,6 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
     })
 }
 
-pub fn shorten(p: &str) -> String {
-    if let Ok(home) = env::var("HOME") {
-        if !home.is_empty() && p.starts_with(&home) {
-            return format!("~{}", &p[home.len()..]);
-        }
-    }
-    p.to_string()
-}
 
 #[cfg(test)]
 mod tests {
