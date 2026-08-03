@@ -73,6 +73,14 @@ pub struct Config {
     /// turn-end when on — never a per-tick sweep. See [`crate::ai`].
     #[serde(default)]
     pub ai_enrichment: bool,
+    /// The one sbx sandbox that hosts every box, when several boxes share one.
+    ///
+    /// Empty ⇒ skein's original model: one sandbox per box, each its own microVM. That is the
+    /// default and stays it, because switching is not free — a shared sandbox trades per-box
+    /// memory *reservations* for a shared pool, and trades a VM boundary between boxes for a
+    /// namespace one. Worth it when N reservations no longer fit; not worth it before.
+    #[serde(default)]
+    pub fleet_sandbox: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
 }
@@ -146,6 +154,7 @@ impl Default for Config {
             ssh_key: String::new(),
             check_command: String::new(),
             ai_enrichment: false,
+            fleet_sandbox: String::new(),
             sync_gateway_url: String::new(),
         }
     }
