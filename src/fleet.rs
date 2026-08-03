@@ -117,7 +117,36 @@ pub fn ensure_fleet(sandbox: &str, workspace: &str) -> Result<(), String> {
             return Err("sbx did not answer; cannot tell whether the fleet sandbox exists".into())
         }
     }
+    ensure_substrate(sandbox)?;
     install_launcher(sandbox)
+}
+
+/// Install the tools a box needs in order to exist at all.
+///
+/// Measured in a real sandbox: the `shell` image ships `bwrap` and `git` but **not `tmux`**, and a
+/// box without tmux cannot start — `box-session.sh` refuses, because the session *is* the box.
+///
+/// skein's kit installs jq and tmux for ordinary boxes, but it cannot serve this one: its startup
+/// hook returns early in non-clone mode ("already has an in-repo .claude"), and a fleet sandbox is
+/// neither a clone nor a mounted repo. So it provisions its own substrate rather than bending a hook
+/// written for a different shape. jq comes along because the store probes that run inside boxes need it.
+///
+/// bwrap is checked but never installed: without it there is no isolation to be had, and quietly
+/// continuing would give every box the sandbox's own `/tmp` and `$HOME` — the exact collision this
+/// design exists to prevent.
+pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
+    let script = "need=''; \
+         command -v tmux >/dev/null 2>&1 || need=\"$need tmux\"; \
+         command -v jq   >/dev/null 2>&1 || need=\"$need jq\"; \
+         command -v bwrap >/dev/null 2>&1 || { echo 'skein: this sandbox image has no bwrap; boxes cannot be isolated in it' >&2; exit 1; }; \
+         [ -n \"$need\" ] || exit 0; \
+         timeout 180 sudo apt-get install -y -qq $need >/dev/null 2>&1 \
+           || { timeout 120 sudo apt-get update -qq >/dev/null 2>&1 && timeout 180 sudo apt-get install -y -qq $need >/dev/null 2>&1; }; \
+         missing=''; for t in $need; do command -v \"$t\" >/dev/null 2>&1 || missing=\"$missing $t\"; done; \
+         [ -z \"$missing\" ] || { echo \"skein: the fleet sandbox is missing required tools:$missing\" >&2; exit 1; }";
+    own_sandbox(sandbox)
+        .exec(script, Duration::from_secs(400))
+        .map(|_| ())
 }
 
 /// Write `box-session.sh` into the sandbox, over stdin rather than as an argument — the script is
