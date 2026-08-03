@@ -7,7 +7,7 @@
 
 use crate::config::*;
 use crate::fleet::box_root;
-use crate::place::{forget_place, own_sandbox, place_of, shared_record};
+use crate::place::{fleet_sandbox, forget_place, own_sandbox, place_of, shared_record};
 use crate::runtime::*;
 use crate::util::*;
 use crate::{
@@ -119,6 +119,25 @@ pub(crate) fn repo_launch_command_as(
         .unwrap_or_else(|| "claude".into());
     if let Err(e) = write_launch_spec_for_agent(name, &branch, repo, &agent) {
         eprintln!("skein: write_launch_spec: {e}");
+    }
+    // The fleet: one sandbox hosting many boxes, so there is no `sbx create` for this box at all.
+    // Bringing it up is a sequence of round-trips into that sandbox, each consuming the last one's
+    // side effects (see `fleet::start_box`), which is not something a single shell line can express
+    // and not something worth open-coding into one. The launcher runs `skein start`, and the second
+    // half stays exactly as it is — `skein attach` still does the full agent setup, in the same tmux
+    // server the box is anchored to, so nothing downstream of here learns a new shape.
+    if !fleet_sandbox().is_empty() {
+        return format!(
+            "skein start {} --branch {} --agent {} && sbx {}",
+            sh_quote(name),
+            sh_quote(&branch),
+            sh_quote(&agent),
+            initial_attach_argv_as(name, &agent)
+                .into_iter()
+                .map(|a| sh_quote(&a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
     let parts = vec![
         "sbx".to_string(),

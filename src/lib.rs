@@ -3694,6 +3694,64 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         }
     }
 
+    // The switch. One config value decides whether a NEW box gets its own microVM or a namespace in
+    // the shared sandbox — and it must decide only that: the attach half is identical either way, so
+    // that everything downstream of launch (the tmux session, the runtime setup, the reconnect) has
+    // exactly one shape to know about. Boxes already running keep their own model regardless; this
+    // is the creation path, not a reinterpretation of an existing box.
+    #[test]
+    fn the_fleet_flag_changes_how_a_box_is_created_and_nothing_else() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::remove_var("SKEIN_LAUNCH_CMD");
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "git@github.com:o/web.git".into(),
+            work: home.join("repos/web/work").to_string_lossy().into(),
+            store: home
+                .join("repos/web/store/.claude")
+                .to_string_lossy()
+                .into(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+
+        let own = launch_command("web-feat-x", "feat/x");
+        assert!(
+            own.starts_with("sbx create --clone --kit "),
+            "the default is still a sandbox per box: {own}"
+        );
+
+        save_config(&Config {
+            fleet_sandbox: "skein-fleet".into(),
+            ..load_config()
+        })
+        .unwrap();
+        let fleet = launch_command("web-feat-x", "feat/x");
+        assert!(
+            fleet.starts_with("skein start 'web-feat-x' --branch 'feat/x' --agent 'claude'"),
+            "a box in the fleet is brought up by skein, not by `sbx create`: {fleet}"
+        );
+        assert!(
+            !fleet.contains("sbx create"),
+            "there is no sandbox to create for this box: {fleet}"
+        );
+        // The half that must NOT change: the same attach, into the same named session.
+        let attach_of = |cmd: &str| cmd.split_once("&& ").map(|(_, a)| a.to_string()).unwrap();
+        assert_eq!(
+            attach_of(&fleet),
+            attach_of(&own),
+            "the fleet must not grow a second way to start an agent"
+        );
+
+        env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn age_buckets() {
         assert!(sb("", &secs_ago(5)).age().ends_with("s ago"));

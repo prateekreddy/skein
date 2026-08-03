@@ -35,6 +35,10 @@ fn main() {
         },
         "doctor" => cmd_doctor(),
         "shared" => cmd_shared(rest),
+        "start" => match rest.first() {
+            Some(name) => cmd_start(name, &rest[1..]),
+            None => Err("usage: skein start <box> [--branch <branch>] [--agent <runtime>]".into()),
+        },
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
@@ -64,6 +68,7 @@ skein [ls]            show the fleet (default)\n  \
 skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  \
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
+skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbox)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
@@ -405,6 +410,33 @@ fn have(prog: &str) -> bool {
         Command::new(prog).arg("--version").output(),
         Err(e) if e.kind() == ErrorKind::NotFound
     )
+}
+
+/// Bring a box up inside the shared sandbox — the fleet's stand-in for `sbx create`.
+///
+/// A subcommand rather than a shell line in the launch command because starting a box is a sequence
+/// of round-trips into the sandbox, each consuming the previous one's side effects: the anchor pid
+/// does not exist until the session runs, and provisioning has to go through the placement that pid
+/// produces. `skein attach` then behaves exactly as it always has.
+fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
+    let repo = skein::repo_for_box(name)
+        .ok_or_else(|| format!("no registered repo for box {name} — `skein repos` to check"))?;
+    let branch =
+        flag(opts, "--branch").unwrap_or_else(|| skein::branch_of(name).unwrap_or_default());
+    if branch.trim().is_empty() {
+        return Err(format!("no branch for box {name}; pass --branch <branch>"));
+    }
+    let agent = flag(opts, "--agent").unwrap_or_else(|| skein::agent_for_box(name));
+    if !skein::valid_runtime(&agent) {
+        return Err(format!("unsupported runtime {agent:?}"));
+    }
+    eprintln!("{DIM}skein:{RESET} starting {name} in the shared sandbox…");
+    // The box's own persistent shell, not its agent. `skein attach` starts the runtime — with the
+    // full setup it does for every box — into this same tmux server, so the fleet path does not get
+    // its own second way of launching an agent to keep in step with the first.
+    skein::start_box(name, &repo, &branch, "exec bash -l")?;
+    eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
+    Ok(())
 }
 
 fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {

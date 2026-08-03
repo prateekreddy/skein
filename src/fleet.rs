@@ -16,7 +16,8 @@
 //! record, so turning this on never retroactively reinterprets one.
 
 use crate::config::*;
-use crate::place::own_sandbox;
+use crate::place::{fleet_sandbox, own_sandbox, place_of, record_place, PlaceRecord};
+use crate::repos::{is_git_url, load_repos, Repo};
 use crate::util::*;
 use crate::{fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
 use std::time::Duration;
@@ -78,15 +79,16 @@ pub fn box_pidfile(name: &str) -> String {
 /// The `sbx create` argv for the fleet sandbox.
 ///
 /// `shell` rather than an agent: nothing runs in the sandbox itself — every agent runs inside a box's
-/// namespace, started by `box-session.sh`. The workspace is `~/.skein/repos`, the *parent* of every
-/// repo's store, so adding a repo later needs no recreate; a box's checkout is not mounted at all,
-/// because boxes clone from the remote onto VM-local disk (measured ~5× faster to write and ~14×
-/// faster to read than a virtiofs mount, which matters for a build).
+/// namespace, started by `box-session.sh`. The mounts are [`fleet_mounts`]: `~/.skein/repos`, the
+/// *parent* of every managed repo's store, so adding one later needs no recreate — plus any adopted
+/// repo that lives outside it. A box's checkout is not mounted at all, because boxes clone from the
+/// remote onto VM-local disk (measured ~5× faster to write and ~14× faster to read than a virtiofs
+/// mount, which matters for a build).
 ///
 /// Memory and CPUs come from [`Config`], and both are ceilings the boxes share rather than one
 /// reservation each — which is what makes them safe to set generously. CPUs default to every host
 /// core but one, so the machine keeps answering while the fleet compiles.
-pub fn create_argv(sandbox: &str, workspace: &str) -> Vec<String> {
+pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
     let config = load_config();
     let mut argv = vec!["create".to_string(), "--name".into(), sandbox.to_string()];
     let memory = config.fleet_memory.trim();
@@ -105,8 +107,43 @@ pub fn create_argv(sandbox: &str, workspace: &str) -> Vec<String> {
         argv.push(cpus);
     }
     argv.push("shell".into());
-    argv.push(workspace.to_string());
+    argv.extend(mounts.iter().cloned());
     argv
+}
+
+/// Every host directory the fleet sandbox must be able to see.
+///
+/// [`fleet_workspace`] covers repos skein manages, whose work clone and store both live under it.
+/// It does **not** cover a repo adopted in place, or one pointed at a store the user already had —
+/// `skein add <path> --store …`, which is how this very project is registered. Those sit anywhere on
+/// the host, so they are mounted explicitly or the box cannot read its own store, and provisioning
+/// fails for a reason that reads as a skein bug rather than a missing mount.
+///
+/// Deduped against the workspace, and against each other: mounting a path twice is not obviously
+/// harmless, and mounting a *parent* of it is what keeps a later repo from needing a recreate.
+pub fn fleet_mounts() -> Vec<String> {
+    let workspace = fleet_workspace();
+    let mut mounts = vec![workspace.clone()];
+    for repo in load_repos() {
+        for path in [repo.store.clone(), repo.work.clone()] {
+            let path = path.trim().to_string();
+            if path.is_empty() {
+                continue;
+            }
+            if mounts.iter().any(|m| under(&path, m)) {
+                continue;
+            }
+            mounts.push(path);
+        }
+    }
+    mounts
+}
+
+/// Is `path` inside `dir` (or `dir` itself)? Textual, because both are host absolute paths skein
+/// wrote or normalised, and the answer is needed before any sandbox exists to ask.
+fn under(path: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches('/');
+    path == dir || path.starts_with(&format!("{dir}/"))
 }
 
 /// Every host CPU but one, so the host stays responsive while the fleet is busy. Empty when the
@@ -140,14 +177,14 @@ pub fn fleet_exists(sandbox: &str) -> Option<bool> {
 ///
 /// Idempotent: safe to call before every launch, which is how a sandbox the user removed by hand
 /// comes back rather than leaving every box unstartable.
-pub fn ensure_fleet(sandbox: &str, workspace: &str) -> Result<(), String> {
+pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     if !valid_name(sandbox) {
         return Err("invalid fleet sandbox name".into());
     }
     match fleet_exists(sandbox) {
         Some(true) => {}
         Some(false) => {
-            let argv = create_argv(sandbox, workspace);
+            let argv = create_argv(sandbox, mounts);
             let args: Vec<&str> = argv.iter().map(String::as_str).collect();
             let (out, err, code) = run_capture("sbx", &args)?;
             if code != 0 {
@@ -281,6 +318,111 @@ pub fn provision_script(name: &str, store: &str) -> String {
     )
 }
 
+/// Bring one box up inside the fleet sandbox, from nothing to a running, provisioned agent.
+///
+/// The ordering is forced by what each step produces rather than chosen: the anchor pid does not
+/// exist until the session runs, the placement is meaningless without the anchor, and provisioning
+/// must go *through* the placement or it writes the sandbox's `~/.claude` instead of the box's.
+///
+///   ensure the sandbox → clone the tree → start the session → read the anchor → record the
+///   placement → provision inside it
+///
+/// Idempotent at the sandbox level and deliberately **not** at the box level: `clone_script` refuses
+/// a tree that already exists and `box-session.sh` refuses a second server, because both are how a
+/// re-run would otherwise hand a box someone else's uncommitted work or strand its namespace.
+pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err(format!("invalid box name {name:?}"));
+    }
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured".into());
+    }
+    ensure_fleet(&sandbox, &fleet_mounts())?;
+
+    // The store is a HOST path used verbatim inside the sandbox, so this is the one precondition
+    // worth paying a round-trip for: unreachable, every later step still "succeeds" and the box
+    // comes up with no hooks and no probe — the failure this whole path is least able to see.
+    let fleet = own_sandbox(&sandbox);
+    let probe = format!("test -d {} && echo ok", sh_quote(&repo.store));
+    if fleet
+        .exec(&probe, Duration::from_secs(20))
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        != Some("ok")
+    {
+        return Err(format!(
+            "the fleet sandbox cannot see {}, so box {name} would come up with no store. \
+             It is mounted at sandbox creation, so a repo added since then needs \
+             `sbx rm {sandbox}` and a relaunch to pick it up.",
+            repo.store
+        ));
+    }
+
+    let source = clone_source(repo);
+    fleet.exec(
+        &clone_script(name, &source, &base_branch(repo), branch),
+        Duration::from_secs(600),
+    )?;
+    fleet.exec(
+        &session_script(name, "skein-shell", agent_command),
+        Duration::from_secs(120),
+    )?;
+
+    let ns_pid = read_anchor(&sandbox, name)?;
+    record_place(
+        name,
+        &PlaceRecord {
+            sandbox: sandbox.clone(),
+            ns_pid,
+            home: String::new(),
+            tree: format!("{}/tree", box_root(name)),
+            sock: box_sock(name),
+        },
+    )?;
+
+    // Through the placement, so it lands in the box's private HOME rather than the sandbox's.
+    let boxed = place_of(name).ok_or_else(|| format!("box {name} was not placed"))?;
+    boxed.exec(
+        &provision_script(name, &repo.store),
+        Duration::from_secs(300),
+    )?;
+    Ok(())
+}
+
+/// What a box clones from. The registered source when it is a URL — a box should start from the
+/// same base the diff is taken against, not from whatever is stale or half-committed in the host's
+/// clone. For a repo adopted in place there is no URL, so the host clone is it; that is mounted
+/// (see [`fleet_mounts`]) at the same path, and git is content to clone a local directory.
+fn clone_source(repo: &Repo) -> String {
+    if is_git_url(&repo.source) {
+        repo.source.clone()
+    } else {
+        repo.work.clone()
+    }
+}
+
+/// The branch a box's own branch is cut from.
+///
+/// Asked of the host clone rather than assumed to be `main`: skein already manages that clone, and a
+/// repo whose default is `master` or `develop` would otherwise fail to clone at all. `origin/HEAD`
+/// first because that is the remote's own answer; the clone's current branch next, for a repo with
+/// no remote; `main` only when there is nothing to ask.
+pub fn base_branch(repo: &Repo) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        let mut argv = vec!["-C", repo.work.as_str()];
+        argv.extend_from_slice(args);
+        let (out, _, code) = run_capture("git", &argv).ok()?;
+        let out = out.trim().to_string();
+        (code == 0 && !out.is_empty()).then_some(out)
+    };
+    git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .and_then(|r| r.rsplit_once('/').map(|(_, b)| b.to_string()))
+        .or_else(|| git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD"))
+        .unwrap_or_else(|| "main".to_string())
+}
+
 /// Read back the anchor pid `box-session.sh` recorded, so the host can write the box's placement.
 ///
 /// The pid is knowable only inside the sandbox, and only after the session starts — which is why
@@ -344,7 +486,7 @@ mod tests {
     fn the_fleet_sandbox_is_agentless_and_mounts_the_store_parent() {
         let _g = env_lock();
         std::env::set_var("SKEIN_HOME", tempdir());
-        let argv = create_argv("skein-fleet", "/h/.skein/repos");
+        let argv = create_argv("skein-fleet", &["/h/.skein/repos".to_string()]);
         assert_eq!(&argv[..3], ["create", "--name", "skein-fleet"]);
         assert_eq!(
             &argv[argv.len() - 2..],
@@ -364,6 +506,47 @@ mod tests {
             "the sandbox is not a checkout; boxes clone from the remote onto VM-local disk"
         );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    // A repo skein manages keeps its work clone and its store under the one mounted workspace, and
+    // that is the case the design was built around. A repo ADOPTED in place — or pointed at a store
+    // the user already had, which is how this very project is registered — sits anywhere on the host.
+    // Missing that mount does not fail loudly: the clone succeeds, the session starts, and the box
+    // comes up with no store to link, no hooks, and no probe, looking entirely healthy.
+    #[test]
+    fn a_repo_that_lives_outside_the_workspace_is_still_mounted() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let managed = home.join("repos/web");
+        let mounts = {
+            let workspace = fleet_workspace();
+            // Managed: both paths are already covered by the workspace, so neither is mounted twice.
+            assert!(under(
+                &managed.join("store/.claude").to_string_lossy(),
+                &workspace
+            ));
+            assert!(under(&managed.join("work").to_string_lossy(), &workspace));
+            // Adopted: outside it, so it must be named explicitly.
+            assert!(!under("/Users/y/dev/skein-shared/.claude", &workspace));
+            vec![workspace]
+        };
+        assert_eq!(mounts.len(), 1, "the workspace is always mounted first");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn one_mount_covers_everything_beneath_it() {
+        assert!(under("/a/b", "/a"), "a child is covered");
+        assert!(under("/a", "/a"), "the directory itself is covered");
+        assert!(
+            under("/a/b", "/a/"),
+            "a trailing slash is not a different path"
+        );
+        assert!(
+            !under("/ab", "/a"),
+            "a prefix is not a parent — /ab would go unmounted while looking covered"
+        );
     }
 
     // A box that already has a checkout is refused, not reused. Silently adopting the tree left by a
