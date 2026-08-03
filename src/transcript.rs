@@ -4,9 +4,11 @@
 //! scrollback — while the runtime's JSONL record on the box's disk survives all three. This reads
 //! that, tail-first, so a huge session opens instantly and pages backwards on demand.
 
+use crate::place::shared_record;
 use crate::util::*;
 use crate::{agent_for_box, sbx_guest_output, valid_name};
 use serde::Serialize;
+use std::fs;
 use std::time::Duration;
 
 /// One message as the transcript recorded it — human-readable parts only. Tool payloads are
@@ -143,6 +145,83 @@ pub(crate) fn parse_transcript_jsonl(body: &str) -> Vec<TranscriptMsg> {
     out
 }
 
+/// Read a fleet box's conversation straight off the host.
+///
+/// The box binds `~/.claude/projects` in from `box_state`, so the newest record under it is the same
+/// file the agent is writing — live, with no `sbx exec` in the way, and readable whether the box is
+/// running, stopped, or its whole sandbox is gone.
+///
+/// Seeks to the tail rather than reading the file: these transcripts reach tens of megabytes, and
+/// the cockpit only ever wants the end of one.
+fn read_host_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let empty = |note: &str| TranscriptView {
+        path: String::new(),
+        size: 0,
+        scanned: 0,
+        complete: true,
+        messages: vec![],
+        note: note.to_string(),
+    };
+    let root = std::path::PathBuf::from(crate::fleet::box_state(name)).join("claude-projects");
+    // Newest by mtime, across every project slug: a box has one tree, but a rebuilt box can carry an
+    // older slug beside the current one, and "most recently written" is what the agent is using.
+    let newest = walk_jsonl(&root)
+        .into_iter()
+        .max_by_key(|(_, mtime)| *mtime)
+        .map(|(path, _)| path);
+    let Some(path) = newest else {
+        return Ok(empty(
+            "no conversation record found for this box yet — the agent writes one as it runs",
+        ));
+    };
+    let mut file = fs::File::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let from = size.saturating_sub(bytes);
+    file.seek(SeekFrom::Start(from))
+        .map_err(|e| format!("seek {}: {e}", path.display()))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let body = String::from_utf8_lossy(&buf).into_owned();
+    let complete = from == 0;
+    // A tail almost always starts mid-line; that fragment is not a record and must not be parsed as
+    // one (it would render as a half message with no role).
+    let body = if complete {
+        body.as_str()
+    } else {
+        body.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+    };
+    Ok(TranscriptView {
+        path: path.to_string_lossy().into_owned(),
+        size,
+        scanned: (buf.len() as u64).min(size),
+        complete,
+        messages: parse_transcript_jsonl(body),
+        note: String::new(),
+    })
+}
+
+/// Every `*.jsonl` under `root`, with its mtime. Shallow recursion by hand rather than a crate:
+/// the layout is `<slug>/<session>.jsonl`, two levels, and skein has no walkdir dependency.
+fn walk_jsonl(root: &std::path::Path) -> Vec<(std::path::PathBuf, std::time::SystemTime)> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(walk_jsonl(&path));
+        } else if path.extension().is_some_and(|e| e == "jsonl") {
+            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+                found.push((path, mtime));
+            }
+        }
+    }
+    found
+}
+
 /// Read the tail of a box's conversation record. `bytes` is how much of the end to read — the
 /// cockpit doubles it to page backwards, so a 14MB transcript never crosses the wire whole.
 pub fn read_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String> {
@@ -166,6 +245,13 @@ pub fn read_transcript(name: &str, bytes: u64) -> Result<TranscriptView, String>
         return Ok(empty(&format!(
             "the transcript reader is wired for Claude only — {runtime}'s record has a different shape and hasn't been captured yet"
         )));
+    }
+    // A fleet box keeps its record on the HOST (box-session.sh binds it in), so read it from there.
+    // Not an optimisation — a correctness fix: this path used to shell into the box, so a STOPPED
+    // box reported "no conversation record" when it had one all along, and the cockpit could not
+    // show you what a box had been doing right when you most wanted to know.
+    if shared_record(name).is_some() {
+        return read_host_transcript(name, bytes);
     }
     let script = format!(
         "p=\"$(find \"$HOME/.claude/projects\" -type f -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2-)\"; \
@@ -225,6 +311,55 @@ mod tests {
     use crate::testutil::*;
     #[allow(unused_imports)]
     use std::{env, fs};
+
+    // The record used to be read by shelling into the box, so a box that was stopped — or whose
+    // sandbox was gone entirely — reported "no conversation record" when it had one all along.
+    // That is precisely when you most want to see what it had been doing. A fleet box binds its
+    // record in from the host, so it is readable with nothing running at all.
+    #[test]
+    fn a_stopped_boxs_conversation_is_still_readable() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        // A placement whose anchor pid is long dead: the box is stopped, and place_of would refuse
+        // to enter it. shared_record still identifies it as a fleet box, which is the distinction.
+        crate::place::record_place(
+            "web-main",
+            &crate::place::PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 0,
+                home: String::new(),
+                tree: "/boxes/web-main/tree".into(),
+                sock: "/boxes/web-main/session.sock".into(),
+            },
+        )
+        .unwrap();
+        let slug = std::path::PathBuf::from(crate::fleet::box_state("web-main"))
+            .join("claude-projects/-boxes-web-main-tree");
+        fs::create_dir_all(&slug).unwrap();
+        fs::write(
+            slug.join("s.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"content\":\"ship it\"}}\n\
+             {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n",
+        )
+        .unwrap();
+
+        let view = read_transcript("web-main", TRANSCRIPT_MIN_BYTES).expect("read");
+        assert_eq!(
+            view.messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            ["ship it", "done"],
+            "a stopped box's conversation must still render: {}",
+            view.note
+        );
+        assert!(
+            view.complete,
+            "a short record was reported as a partial tail, so the cockpit would page for more"
+        );
+        env::remove_var("SKEIN_HOME");
+    }
 
     #[test]
     fn the_transcript_reader_keeps_the_conversation_and_drops_the_bookkeeping() {
