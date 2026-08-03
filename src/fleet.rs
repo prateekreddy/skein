@@ -867,7 +867,10 @@ pub fn resize_fleet(memory: &str, cpus: &str) -> Result<Vec<String>, String> {
         fleet_cpus: cpus.trim().to_string(),
         ..config
     })?;
-    let (out, err, code) = run_capture("sbx", &["rm", "-f", &sandbox])?;
+    // Not the 30s action budget: tearing a microVM down is slower than a status query, and a
+    // timeout here is reported as a failed destroy while the destroy carries on regardless.
+    let (out, err, code) =
+        run_capture_for("sbx", &["rm", "-f", &sandbox], Duration::from_secs(300))?;
     if code != 0 {
         let detail = if err.trim().is_empty() { out } else { err };
         return Err(format!(
@@ -881,7 +884,18 @@ pub fn resize_fleet(memory: &str, cpus: &str) -> Result<Vec<String>, String> {
     for (name, _) in &boxes {
         forget_place(name);
     }
-    ensure_fleet(&sandbox, &fleet_mounts())?;
+    // The one moment when there is no sandbox at all. If the rebuild fails here — most likely a
+    // confirmation `sbx create` asked for and nobody could answer — say where the work is, because
+    // the boxes are gone and their checkouts went with the VM.
+    let (mem, cpu) = (memory.trim(), cpus.trim());
+    ensure_fleet(&sandbox, &fleet_mounts()).map_err(|e| {
+        format!(
+            "{sandbox} was destroyed and could not be rebuilt: {e}\n\
+             every box's work is saved in its repo store under {run}; rebuild from a terminal with \
+             `skein resize {mem} {cpu}` (which can answer sbx's prompts) and each box restores \
+             on its next `skein start`"
+        )
+    })?;
 
     // ---- phase 3: bring them back ----
     let mut failed = Vec::new();

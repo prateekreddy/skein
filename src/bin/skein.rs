@@ -40,6 +40,10 @@ fn main() {
             None => Err("usage: skein start <box> [--branch <branch>] [--agent <runtime>]".into()),
         },
         "login" => cmd_login(rest.first().map(String::as_str)),
+        "resize" => match rest.first() {
+            Some(memory) => cmd_resize(memory, rest.get(1).map(String::as_str).unwrap_or("")),
+            None => Err("usage: skein resize <memory> [cpus]   e.g. skein resize 26g".into()),
+        },
         "migrate" => match rest.first() {
             Some(name) => cmd_migrate(name),
             None => Err("usage: skein migrate <box>   (moves it into the shared sandbox)".into()),
@@ -75,6 +79,7 @@ skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
 skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbox)\n  \
 skein login <runtime> authenticate once in the shared sandbox; every box inherits it\n  \
+skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
 skein migrate <box>   move an existing box into the shared sandbox (old one is stopped, not removed)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
@@ -517,6 +522,28 @@ fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
     // its own second way of launching an agent to keep in step with the first.
     skein::start_box(name, &repo, &branch, "exec bash -l")?;
     eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
+    Ok(())
+}
+
+/// `skein resize <memory> [cpus]` — rebuild the shared sandbox at a new size.
+///
+/// A CLI command and not only a cockpit button because this is the one operation that destroys the
+/// sandbox: `sbx create` may ask for confirmation, and a server has no terminal to answer with — so
+/// the riskiest path needs to be runnable somewhere a person is sitting.
+fn cmd_resize(memory: &str, cpus: &str) -> Result<(), String> {
+    eprintln!(
+        "{DIM}skein:{RESET} saving every box's work, then rebuilding the sandbox at {memory}…"
+    );
+    let failed = skein::resize_fleet(memory, cpus)?;
+    if failed.is_empty() {
+        eprintln!("{DIM}skein:{RESET} resized; every box came back");
+    } else {
+        eprintln!(
+            "{DIM}skein:{RESET} resized, but these did not come back: {}\n  their work is in the \
+             repo store; `skein start <box>` restores it",
+            failed.join(", ")
+        );
+    }
     Ok(())
 }
 
