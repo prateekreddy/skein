@@ -168,6 +168,66 @@ fn under(path: &str, dir: &str) -> bool {
     path == dir || path.starts_with(&format!("{dir}/"))
 }
 
+/// The per-box cgroup limits, as the `key=value,…` spec `box-session.sh` applies.
+///
+/// Memory only. **CPU is deliberately not capped**: `cpu.weight` is already equal for every box, so
+/// they fair-share under contention and a lone box still gets every core — and capping it would
+/// leave cores idle while a box waits, which is the exact waste the shared sandbox exists to end.
+/// Memory is different because it is not reclaimable on demand: two boxes wanting 20 GB do not each
+/// get 13 slowly, they hit the wall and the kernel starts killing things.
+///
+/// `max` is what stops one box taking the fleet down with it. `high` sits below it so the kernel
+/// throttles and reclaims first — a box that briefly overshoots gets slower rather than losing its
+/// turn. Defaults derive from the fleet total: 70% and 55%, so one box can still run a big build
+/// while two of them cannot exhaust the VM between them.
+///
+/// `pids.max` is the fork-bomb guard; a runaway spawn loop in one box would otherwise exhaust the
+/// VM's pid space and no box could start a process.
+pub fn box_limits() -> String {
+    let config = load_config();
+    let fleet_mib = parse_mib(&config.fleet_memory);
+    let pick = |explicit: &str, fraction: u64| -> Option<String> {
+        let explicit = explicit.trim();
+        if !explicit.is_empty() {
+            return Some(explicit.to_string());
+        }
+        fleet_mib.map(|total| format!("{}M", (total * fraction / 100).max(512)))
+    };
+    let mut parts = Vec::new();
+    if let Some(max) = pick(&config.box_memory_max, 70) {
+        parts.push(format!("max={max}"));
+    }
+    if let Some(high) = pick(&config.box_memory_high, 55) {
+        parts.push(format!("high={high}"));
+    }
+    parts.push("pids=8192".to_string());
+    parts.join(",")
+}
+
+/// A memory size as MiB. Accepts what sbx accepts (`26g`, `512M`, a bare byte count).
+///
+/// `None` rather than a guess when it cannot be read: a mis-parsed ceiling is worse than no ceiling,
+/// because it would silently cap every box at some number nobody chose.
+fn parse_mib(value: &str) -> Option<u64> {
+    let value = value.trim().to_lowercase();
+    // `26gi` and `26g` are the same size, so drop the `i` before looking at the unit — reading it as
+    // the unit is exactly the mis-parse this function exists to avoid.
+    let value = value.strip_suffix('i').unwrap_or(&value);
+    let unit = value.chars().last()?;
+    if unit.is_ascii_digit() {
+        // A bare number: sbx reads it as bytes.
+        return value.parse::<u64>().ok().map(|b| b / (1024 * 1024));
+    }
+    let digits = value[..value.len() - unit.len_utf8()].trim();
+    let n = digits.parse::<u64>().ok()?;
+    match unit {
+        'g' => Some(n * 1024),
+        'm' => Some(n),
+        'k' => Some(n / 1024),
+        _ => None,
+    }
+}
+
 /// Every host CPU but one, so the host stays responsive while the fleet is busy. Empty when the
 /// count cannot be read, which leaves the flag off and sbx's own default in charge.
 fn host_cpus_less_one() -> String {
@@ -302,13 +362,14 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
 /// The shell that starts a box: its namespace, its tmux server, and the agent inside it.
 pub fn session_script(name: &str, session: &str, agent_command: &str) -> String {
     format!(
-        "{launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} bash -lc {cmd_q}",
+        "{launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         name_q = sh_quote(name),
         root_q = sh_quote(&box_root(name)),
         pid_q = sh_quote(&box_pidfile(name)),
         session_q = sh_quote(session),
         state_q = sh_quote(&box_state(name)),
+        limits_q = sh_quote(&box_limits()),
         cmd_q = sh_quote(agent_command),
     )
 }
@@ -756,6 +817,81 @@ mod tests {
             vec![workspace]
         };
         assert_eq!(mounts.len(), 1, "the workspace is always mounted first");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    // A mis-parsed ceiling is worse than no ceiling: it would silently cap every box at a number
+    // nobody chose, and the symptom is builds dying with no explanation. So an unreadable size
+    // yields None and the box runs uncapped-but-loud, rather than capped-and-wrong.
+    #[test]
+    fn a_memory_size_is_read_or_refused_never_guessed() {
+        assert_eq!(parse_mib("26g"), Some(26624));
+        assert_eq!(parse_mib(" 26G "), Some(26624));
+        assert_eq!(
+            parse_mib("26gi"),
+            Some(26624),
+            "the i suffix is the same size"
+        );
+        assert_eq!(parse_mib("512m"), Some(512));
+        assert_eq!(
+            parse_mib("2097152"),
+            Some(2),
+            "a bare number is bytes, as sbx reads it"
+        );
+        for bad in ["", "lots", "26 gigs", "g", "-4g"] {
+            assert_eq!(parse_mib(bad), None, "{bad:?} must not parse to a number");
+        }
+    }
+
+    // The ceiling exists so ONE runaway box cannot take the fleet down with it. That means max sits
+    // below the fleet total (or it protects nothing) and high sits below max (or the kernel kills
+    // the box instead of throttling it, turning a slow build into a lost turn).
+    #[test]
+    fn a_boxs_ceiling_protects_the_fleet_and_throttles_before_it_kills() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        let spec = box_limits();
+        let get = |k: &str| -> u64 {
+            let raw = spec
+                .split(',')
+                .find_map(|p| p.strip_prefix(&format!("{k}=")))
+                .unwrap_or_else(|| panic!("{k} missing from {spec}"));
+            parse_mib(raw).unwrap()
+        };
+        let (max, high) = (get("max"), get("high"));
+        assert!(
+            max < 26624,
+            "a cap at or above the fleet total protects nothing: {spec}"
+        );
+        assert!(high < max, "high must throttle before max kills: {spec}");
+        assert!(
+            max > 26624 / 2,
+            "a cap this tight makes a normal build fail; the point is one box CAN be big: {spec}"
+        );
+        assert!(
+            spec.contains("pids="),
+            "a fork bomb in one box starves every other: {spec}"
+        );
+        // CPU is deliberately absent — see box_limits.
+        assert!(
+            !spec.contains("cpu"),
+            "capping CPU idles cores while a box waits, which is the waste this design ends: {spec}"
+        );
+
+        // An explicit value always wins over the derivation.
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            box_memory_max: "4g".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        assert!(box_limits().contains("max=4g"), "{}", box_limits());
         std::env::remove_var("SKEIN_HOME");
     }
 

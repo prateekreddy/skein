@@ -173,6 +173,31 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         "the launcher has exited by now; the anchor must be the tmux server, which has not"
     );
 
+    // ---- the ceiling that keeps one box from taking the fleet down ----
+    // The limit is applied to the LAUNCHER before it execs bwrap, so the tmux server and everything
+    // the agent forks inherit it. Moving the anchor pid afterwards would move one process and leave
+    // its children outside — a limit that looks applied and holds nothing. Checked on the anchor
+    // precisely because it is a process the launcher spawned, not the launcher itself.
+    //
+    // Skipped where the substrate can't do it: box-session.sh warns and runs the box uncapped rather
+    // than refusing to start it, so the absence of cgroup delegation is not a test failure.
+    let cgroup_of_anchor = sh(&format!("cat /proc/{anchor}/cgroup 2>/dev/null"));
+    if sh("sudo mkdir -p /sys/fs/cgroup/skein 2>/dev/null && echo yes") == "yes" {
+        assert!(
+            cgroup_of_anchor.contains(&format!("/skein/{BOX}")),
+            "the box's processes are outside its cgroup, so nothing caps them: {cgroup_of_anchor}"
+        );
+        let limit = sh(&format!(
+            "cat /sys/fs/cgroup/skein/{BOX}/memory.max 2>/dev/null"
+        ));
+        assert!(
+            limit.parse::<u64>().map(|b| b > 0).unwrap_or(false),
+            "the cgroup exists but holds no memory ceiling: {limit:?}"
+        );
+    } else {
+        eprintln!("skipping the cgroup assertions: no delegation on this machine");
+    }
+
     record_place(
         BOX,
         &PlaceRecord {
@@ -493,5 +518,11 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         "a forgotten box falls back to the original model rather than a dead namespace"
     );
 
+    // The cgroup outlives the box's filesystem — rmdir only succeeds once the server is gone, which
+    // the wait above has already established. destroy_box does this for a real box; stop_box (used
+    // here) deliberately does not, because a stopped box is meant to be startable again.
+    let _ = Command::new("sudo")
+        .args(["rmdir", &format!("/sys/fs/cgroup/skein/{BOX}")])
+        .status();
     let _ = fs::remove_dir_all(&root);
 }

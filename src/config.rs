@@ -94,6 +94,22 @@ pub struct Config {
     /// means *all* of them, and a fleet compiling on every core makes the host's own UI stutter.
     #[serde(default)]
     pub fleet_cpus: String,
+    /// The hard memory cap for ONE box (cgroup `memory.max`). Empty ⇒ derived from
+    /// [`Config::fleet_memory`].
+    ///
+    /// This is the protection the shared model needs, and the only one that is not optional: without
+    /// it a single runaway box exhausts the VM and the kernel starts killing whichever process it
+    /// likes — which is every *other* box's agent as readily as the guilty one. Capped below the
+    /// fleet total, a runaway box can only kill itself.
+    #[serde(default)]
+    pub box_memory_max: String,
+    /// The soft memory limit for one box (cgroup `memory.high`). Empty ⇒ derived.
+    ///
+    /// Deliberately below `memory.max`: past this the kernel throttles the box and reclaims rather
+    /// than killing it, so a build that briefly wants more gets slower instead of dying. The gap
+    /// between the two is the difference between a slow box and a lost turn.
+    #[serde(default)]
+    pub box_memory_high: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
 }
@@ -174,6 +190,8 @@ impl Default for Config {
             fleet_sandbox: String::new(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
+            box_memory_max: String::new(),
+            box_memory_high: String::new(),
             sync_gateway_url: String::new(),
         }
     }

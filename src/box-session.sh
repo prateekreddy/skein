@@ -49,7 +49,11 @@ session="${4:?missing session name}"
 # forgot to pass it the box would still start, and the only symptom would be a conversation that
 # vanishes the next time the sandbox dies — the silent-degradation shape this file exists to avoid.
 state="${5:?missing host state dir}"
-shift 5
+# cgroup limits as key=value pairs, e.g. "max=18G,high=14G,pids=8192". Present but may be empty —
+# skein always passes it, and empty means it could not work out a ceiling rather than that it wants
+# none, which is why the warning below fires either way.
+limits="${6-}"
+shift 6
 [ "$#" -gt 0 ] || { echo "skein: no command to run" >&2; exit 2; }
 
 case "$box" in
@@ -172,6 +176,51 @@ fi
 # Only now is unlinking safe: kill-server leaves the socket behind, so a socket nothing answers on is
 # a dead box's litter. Unlinking one that IS answering is what strands a namespace.
 rm -f "$sock"
+
+# The box's ceiling, applied HERE — before exec'ing bwrap — for two reasons that both matter.
+#
+# Privilege: this is still the sandbox, where sudo works. Inside bwrap the box is in an unprivileged
+# user namespace and a setuid sudo has nothing to escalate to, so a cgroup written from in there is
+# not an option at all.
+#
+# Inheritance: a process's children start in its cgroup, so putting THIS shell in it means the tmux
+# server, the agent, and every compiler it forks are all inside the same ceiling. Moving the anchor
+# pid afterwards would move one process and leave its existing children outside — a limit that looks
+# applied and holds nothing.
+#
+# Memory only, and on purpose. CPU stays uncapped: cpu.weight is already equal per box, so they
+# fair-share under contention while a lone box still gets every core — and a cap would idle cores
+# while a box waits, which is the waste this design exists to end. Memory cannot be shared that way:
+# two boxes wanting 20G do not each get 13 slowly, they hit the wall and the kernel starts killing
+# processes — as readily another box's agent as the guilty one.
+if [ -n "$limits" ]; then
+  cgroup_root="/sys/fs/cgroup/skein"
+  cg="$cgroup_root/$box"
+  # A controller is only available in a child if the PARENT delegates it, so the order is: make the
+  # parent, delegate, then make the leaf. Processes live only in the leaf — cgroup v2 forbids a
+  # cgroup having both children and processes.
+  if sudo mkdir -p "$cgroup_root" 2>/dev/null \
+    && sudo sh -c 'echo "+memory +pids" > '"$cgroup_root"'/cgroup.subtree_control' 2>/dev/null \
+    && sudo mkdir -p "$cg" 2>/dev/null; then
+    for kv in $(printf '%s' "$limits" | tr ',' ' '); do
+      case "$kv" in
+        max=*)  sudo sh -c 'echo "$1" > "$2"' _ "${kv#max=}"  "$cg/memory.max"  2>/dev/null || true ;;
+        high=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#high=}" "$cg/memory.high" 2>/dev/null || true ;;
+        pids=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#pids=}" "$cg/pids.max"    2>/dev/null || true ;;
+        *) echo "skein: ignoring unknown limit $kv for $box" >&2 ;;
+      esac
+    done
+    sudo sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null \
+      || echo "skein: $box could not join its cgroup; it runs without a memory ceiling" >&2
+  else
+    # Not fatal: an uncapped box still works, and refusing to start one because the image lacks
+    # cgroup delegation would be a worse trade. Loud, though — this is the guard that keeps one
+    # box's runaway build from killing every other box in the sandbox.
+    echo "skein: no cgroup delegation in this sandbox; $box runs WITHOUT a memory ceiling, so a runaway build in it can take the whole fleet down" >&2
+  fi
+else
+  echo "skein: no memory ceiling computed for $box; it runs uncapped" >&2
+fi
 
 # --dev-bind / / keeps the sandbox's own filesystem visible (the repo, the toolchains, the store
 # mount) and then binds the box's private directories over the two paths that must not be shared.

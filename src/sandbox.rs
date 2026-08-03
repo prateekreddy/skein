@@ -523,7 +523,15 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
         // documents, just aimed at the right thing.
         let sock = sh_quote(&rec.sock);
         let root = sh_quote(&box_root(name));
-        let script = format!("tmux -S {sock} kill-server 2>/dev/null; rm -rf {root}; exit 0");
+        // The cgroup too, after the server is gone — rmdir refuses one that still holds processes,
+        // which is the right order anyway. Left behind, every destroyed box would accumulate an
+        // empty cgroup, and a box later given the same name would inherit the old one's limits
+        // rather than the current settings.
+        let cgroup = sh_quote(&format!("/sys/fs/cgroup/skein/{name}"));
+        let script = format!(
+            "tmux -S {sock} kill-server 2>/dev/null; rm -rf {root}; \
+             sudo rmdir {cgroup} 2>/dev/null; exit 0"
+        );
         own_sandbox(&rec.sandbox).exec(&script, Duration::from_secs(120))?;
         forget_place(name);
         if let Err(e) = delist_box(name) {
