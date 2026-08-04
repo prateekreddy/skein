@@ -4095,12 +4095,22 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             !fleet.contains("sbx create"),
             "there is no sandbox to create for this box: {fleet}"
         );
-        // The half that must NOT change: the same attach, into the same named session.
-        let attach_of = |cmd: &str| cmd.split_once("&& ").map(|(_, a)| a.to_string()).unwrap();
-        assert_eq!(
-            attach_of(&fleet),
-            attach_of(&own),
-            "the fleet must not grow a second way to start an agent"
+        // The attach is DEFERRED, not precomputed. It names the box's placement, and this string is
+        // built before `skein start` has made one — baked in, it addressed a sandbox named after the
+        // box and the create terminal died on `no sandbox named …` the instant the box came up fine.
+        assert!(
+            fleet.trim_end().ends_with("--attach"),
+            "the fleet attach must resolve after the box exists: {fleet}"
+        );
+        assert!(
+            !fleet.contains("&& sbx"),
+            "nothing about the box can be addressed before it is placed: {fleet}"
+        );
+        // And it is still the SAME attach: `--attach` runs `initial_attach_argv_as`, the one the
+        // non-fleet path bakes in here, so there is no second way to start an agent.
+        assert!(
+            own.contains("&& sbx "),
+            "unchanged for a box of its own: {own}"
         );
 
         env::remove_var("SKEIN_HOME");

@@ -37,7 +37,10 @@ fn main() {
         "shared" => cmd_shared(rest),
         "start" => match rest.first() {
             Some(name) => cmd_start(name, &rest[1..]),
-            None => Err("usage: skein start <box> [--branch <branch>] [--agent <runtime>]".into()),
+            None => Err(
+                "usage: skein start <box> [--branch <branch>] [--agent <runtime>] [--attach]"
+                    .into(),
+            ),
         },
         "login" => cmd_login(rest.first().map(String::as_str)),
         "resize" => match rest.first() {
@@ -530,7 +533,25 @@ fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
     // its own second way of launching an agent to keep in step with the first.
     skein::start_box(name, &repo, &branch, "exec bash -l")?;
     eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
+    // `--attach` exists so the cockpit's create-a-box terminal can hand off into the agent without
+    // the caller having to name the box's placement — which does not exist until the line above has
+    // run. Resolved here, after the box is real.
+    if opts.iter().any(|o| o == "--attach") {
+        return run_sbx(&skein::initial_attach_argv_as(name, &agent));
+    }
     Ok(())
+}
+
+/// Run `sbx` with an already-built argv, reporting the one failure worth naming.
+fn run_sbx(argv: &[String]) -> Result<(), String> {
+    match Command::new("sbx").args(argv).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("sbx exited non-zero".into()),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            Err("sbx not found on PATH — attach needs the sbx CLI (host only)".into())
+        }
+        Err(e) => Err(format!("running sbx: {e}")),
+    }
 }
 
 /// `skein resize <memory> [cpus]` — rebuild the shared sandbox at a new size.
@@ -648,13 +669,5 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // the user sees is `nsenter: cannot open /proc/<pid>/ns/user`.
     skein::ensure_box_session(&attach_name)?;
     let dir = skein::lookup_dir(&attach_name).unwrap_or_default();
-    let argv = skein::attach_argv_as(&attach_name, &dir, &agent);
-    match Command::new("sbx").args(&argv).status() {
-        Ok(s) if s.success() => Ok(()),
-        Ok(_) => Err("sbx exited non-zero".into()),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            Err("sbx not found on PATH — attach needs the sbx CLI (host only)".into())
-        }
-        Err(e) => Err(format!("running sbx: {e}")),
-    }
+    run_sbx(&skein::attach_argv_as(&attach_name, &dir, &agent))
 }

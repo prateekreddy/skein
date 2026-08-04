@@ -128,17 +128,17 @@ pub(crate) fn repo_launch_command_as(
     // half stays exactly as it is — `skein attach` still does the full agent setup, in the same tmux
     // server the box is anchored to, so nothing downstream of here learns a new shape.
     if !fleet_sandbox().is_empty() {
+        // `--attach` rather than `&& sbx <argv>`: the attach argv names the box's PLACEMENT, and
+        // this string is built before `skein start` has created one. Precomputed, it fell back to
+        // addressing a sandbox named after the box — `ERROR: no sandbox named …` the moment the box
+        // came up perfectly. `skein start --attach` resolves it after the box exists, through the
+        // same `initial_attach_argv_as` the non-fleet path uses.
         return format!(
-            "{} start {} --branch {} --agent {} && sbx {}",
+            "{} start {} --branch {} --agent {} --attach",
             skein_exe(),
             sh_quote(name),
             sh_quote(&branch),
             sh_quote(&agent),
-            initial_attach_argv_as(name, &agent)
-                .into_iter()
-                .map(|a| sh_quote(&a))
-                .collect::<Vec<_>>()
-                .join(" ")
         );
     }
     let parts = vec![
@@ -671,7 +671,7 @@ pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
 /// The first agent attach after `sbx create`. It deliberately uses the same primary tmux session
 /// name as all future reconnects, but starts a new native conversation instead of asking the
 /// provider to resume some unrelated prior transcript.
-pub(crate) fn initial_attach_argv_as(name: &str, agent: &str) -> Vec<String> {
+pub fn initial_attach_argv_as(name: &str, agent: &str) -> Vec<String> {
     let runtime = resolve_runtime(agent);
     // A box that was rebuilt from a snapshot is new to sbx but not new to its user: a fleet resize
     // restores the previous conversation into the fresh checkout, and starting the runtime clean
