@@ -6155,6 +6155,41 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::remove_var("SKEIN_HOME");
     }
 
+    /// The launcher exports `SKEIN_TMUX_SOCK`; the observer has to read it.
+    ///
+    /// It did not, and nothing said so: `pane_observer_start` set the variable, `box-pane.sh` used
+    /// bare `tmux`, and in a fleet box that reaches the sandbox's default socket — which does not
+    /// exist. The first tick got `error connecting to /tmp/tmux-1000/default`, read the empty answer
+    /// as "the agent's window is gone", wrote one dead observation and exited. Every fleet box then
+    /// had a stale sample and the board said "screen lost" for all of them, permanently.
+    ///
+    /// A contract between a shell string and a shell script has no compiler behind it, so this is
+    /// the only thing that can hold the two halves together.
+    #[test]
+    fn the_screen_observer_reads_the_socket_its_launcher_exports() {
+        let launcher =
+            crate::runtime::pane_observer_start("skein-agent", "/boxes/web-main/session.sock");
+        assert!(
+            launcher.contains("SKEIN_TMUX_SOCK='/boxes/web-main/session.sock'"),
+            "the launcher must name the box's own tmux server: {launcher}"
+        );
+        assert!(
+            PROBE_PANE_SH.contains("SKEIN_TMUX_SOCK"),
+            "box-pane.sh must READ what the launcher exports, or it talks to the wrong tmux server \
+             and reports every box's agent as gone"
+        );
+        assert!(
+            PROBE_PANE_SH.contains("tmux -S \"$SKEIN_TMUX_SOCK\""),
+            "and it must use it as tmux's socket, not merely mention it"
+        );
+        // A box that IS its own sandbox has no socket, and must keep the bare call.
+        let alone = crate::runtime::pane_observer_start("skein-agent", "");
+        assert!(
+            !alone.contains("SKEIN_TMUX_SOCK"),
+            "a legacy box's tmux is the only one there: {alone}"
+        );
+    }
+
     #[test]
     fn pct_decode_recovers_unicode_filenames() {
         assert_eq!(pct_decode("n%C3%A9e%20deed.pdf"), "née deed.pdf");

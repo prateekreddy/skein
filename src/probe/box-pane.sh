@@ -45,6 +45,21 @@ QUIET_LONG=300
 
 command -v tmux >/dev/null 2>&1 || exit 0
 
+# Which tmux server to ask. A box in the shared sandbox has its own, on its own socket — bare `tmux`
+# would reach the sandbox's default socket, find no `skein-agent` there, read that as "the agent's
+# window is gone" and exit on the first tick. Every fleet box therefore had an observer that died
+# immediately and a board that said "screen lost" for all of them, permanently.
+#
+# The attach has exported SKEIN_TMUX_SOCK since the shared model existed; this is the half that was
+# missing. Empty (a box that is its own sandbox) keeps the bare call, so nothing changes there.
+tm() {
+  if [ -n "${SKEIN_TMUX_SOCK:-}" ]; then
+    tmux -S "$SKEIN_TMUX_SOCK" "$@"
+  else
+    tmux "$@"
+  fi
+}
+
 # Store resolution matches the other probes: the repo root's .claude, hopping the kit's symlink when
 # the repo ships its own .claude (the shared store is the link target's parent, not the repo dir).
 cwd="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -124,7 +139,7 @@ while :; do
   # redraw — that IS the "working" signal), whether the pane is dead, and the title, which carries a
   # spinner glyph in both runtimes, the running tool in Claude Code, and `[ ! ] Action Required` in
   # Codex — the only place either provider says outright that a human has to act.
-  if ! meta="$(tmux display-message -p -t "$sess" '#{window_activity}|#{pane_dead}|#{pane_current_command}|#{pane_height}|#{pane_title}' 2>/dev/null)"; then
+  if ! meta="$(tm display-message -p -t "$sess" '#{window_activity}|#{pane_dead}|#{pane_current_command}|#{pane_height}|#{pane_title}' 2>/dev/null)"; then
     meta=""
   fi
   if [ -z "$meta" ]; then
@@ -179,7 +194,7 @@ while :; do
   [ "$title_text" != "$prev_text_w" ] && due=1
   [ $((EPOCHSECONDS - last_write)) -ge "$HEARTBEAT" ] && due=1
   if [ "$due" = 1 ]; then
-    tail_text="$(tmux capture-pane -p -t "$sess" -S "$start" 2>/dev/null | tr '\t' ' ')"
+    tail_text="$(tm capture-pane -p -t "$sess" -S "$start" 2>/dev/null | tr '\t' ' ')"
     shape "$tail_text"; sig=$SIG
     since=$((EPOCHSECONDS - last_write))
     # The raw title still goes into the file — the animated glyph IS the host's spinner evidence —
