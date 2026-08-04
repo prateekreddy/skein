@@ -626,7 +626,7 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
     // that the remote does not have has always been possible — a configured base a given repo does
     // not use, a cached `origin/HEAD` gone stale after a rename — and the cost was severe out of all
     // proportion: a migration that stops the old sandbox, then cannot start the new box, leaves the
-    // box in neither place until someone runs `sbx start` by hand. A tree cloned from the wrong base
+    // box in neither place until someone woke the old sandbox by hand. A tree cloned from the wrong base
     // is a non-event by comparison, since the branch is checked out over it immediately.
     let clone = if base.is_empty() {
         format!("git clone {url_q} {tree_q}")
@@ -905,16 +905,11 @@ pub fn recover_ignored(name: &str) -> Result<String, String> {
 
     // The old sandbox, addressed as a sandbox — `place_of` would hand back the box's fleet placement,
     // which is exactly the copy that is missing the files.
+    //
+    // No explicit start, because sbx has no such verb: `stop` halts a sandbox and exec'ing into one
+    // wakes it again. Asking for `sbx start` failed with `unknown command: "start"` — advice skein
+    // had also been printing after every migration, in a message about how to undo one.
     let old = own_sandbox(name);
-    let (out, err, code) = run_capture_for("sbx", &["start", name], Duration::from_secs(300))?;
-    if code != 0 {
-        let detail = if err.trim().is_empty() { out } else { err };
-        return Err(format!(
-            "could not start the old sandbox for {name}: {} — it may already have been removed, \
-             in which case its ignored files are gone and there is nothing to recover",
-            detail.trim()
-        ));
-    }
 
     let carried = (|| -> Result<String, String> {
         let staging = format!("{}/skein/handoff-snapshots/{name}", repo.store);
@@ -931,7 +926,13 @@ pub fn recover_ignored(name: &str) -> Result<String, String> {
             sweep = ignored_sweep(&staging, "list", "/dev/null"),
         );
         let count = old
-            .exec(&script, Duration::from_secs(600))?
+            .exec(&script, Duration::from_secs(600))
+            .map_err(|e| {
+                format!(
+                    "could not read {name}'s old sandbox ({e}) — if it has already been removed, \
+                     its ignored files are gone and there is nothing left to recover"
+                )
+            })?
             .trim()
             .to_string();
         // `-k` is the whole safety property: extract only what is not already there.
@@ -1090,7 +1091,7 @@ fn agent_state_tar(snapshot: &str, transcript_is_vm_local: bool, home: &str) -> 
 /// created yet.
 ///
 /// The old sandbox is **stopped, never destroyed**. Its checkout, its history and its snapshot all
-/// still exist, so a migration that goes wrong costs a `sbx start` rather than a day's work — the
+/// still exist, so a migration that goes wrong costs one `sbx exec` to wake rather than a day's work — the
 /// same rule the cross-runtime takeover follows, and worth more here because this path cannot be
 /// rehearsed against a fake. Removing it is left to the user, once they are satisfied.
 ///
@@ -1136,7 +1137,7 @@ pub fn migrate_box(name: &str) -> Result<String, String> {
     // reads it to restore this snapshot. That is right for the fleet box being built and wrong for
     // the box the snapshot came from, whose tree already holds every byte of it. It matters on the
     // failure path, which is the only path that starts the old box again: a migration that stopped
-    // the sandbox and then could not clone left `sbx start` as the way back, and the restore would
+    // the sandbox and then could not clone left waking the old sandbox as the way back, and the restore would
     // have met patches already applied and failed the box's startup outright.
     //
     // So the source is marked as already-restored before it is stopped, in the file the kit checks.
@@ -1175,7 +1176,7 @@ pub fn migrate_box(name: &str) -> Result<String, String> {
     start_box(name, &repo, &branch, "exec bash -l").map_err(|e| {
         format!(
             "{name} was snapshotted and its old sandbox stopped, but the fleet box did not start \
-             ({e}). Nothing is lost: `sbx start {name}` brings the original back exactly as it was, \
+             ({e}). Nothing is lost: `sbx exec -it {name} bash -l` wakes the original exactly as it was, \
              and the snapshot remains at {dir} in the repo store."
         )
     })?;
@@ -2115,7 +2116,7 @@ mod tests {
         );
         // A base the remote does not have must not be fatal. It cost a real migration: the old
         // sandbox was already stopped, the clone refused `--branch main` on a repo whose default is
-        // `master`, and the box existed in neither place until someone ran `sbx start` by hand.
+        // `master`, and the box existed in neither place until someone woke the old sandbox by hand.
         assert!(
             script.contains("|| {") && script.matches("git clone").count() == 2,
             "a wrong base must fall back to the remote's default, not strand the box: {script}"
@@ -2225,7 +2226,7 @@ mod tests {
             e.contains("not in the fleet"),
             "a box that still owns its sandbox has nothing to fetch: {e}"
         );
-        // Reached without spending anything: no `sbx start` can have run, since a box with no
+        // Reached without spending anything: the old sandbox is never woken, since a box with no
         // placement record never gets that far.
         assert!(recover_ignored("../escape")
             .unwrap_err()

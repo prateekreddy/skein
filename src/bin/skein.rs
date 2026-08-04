@@ -587,7 +587,7 @@ fn cmd_migrate(name: &str) -> Result<(), String> {
     println!("  {DIM}snapshot{RESET}  {dir} {DIM}(in the repo store){RESET}");
     println!(
         "\n{DIM}the original sandbox is STOPPED, not removed — check the box, then:{RESET}\n  \
-         sbx start {name}   {DIM}to go back{RESET}\n  \
+         sbx exec -it {name} bash -l   {DIM}wakes it, to go back{RESET}\n  \
          sbx rm {name}      {DIM}once you are satisfied (this frees its memory reservation for good){RESET}"
     );
     Ok(())
