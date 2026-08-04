@@ -330,20 +330,6 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
     format!("{kept}…")
 }
 
-/// Keep the END of the output — a test suite says what failed at the bottom.
-pub(crate) fn tail_of(text: &str, bytes: usize) -> String {
-    if text.len() <= bytes {
-        return text.to_string();
-    }
-    let mut cut = text.len() - bytes;
-    while cut < text.len() && !text.is_char_boundary(cut) {
-        cut += 1;
-    }
-    let rest = &text[cut..];
-    let from_line = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or(rest);
-    format!("… earlier output trimmed …\n{from_line}")
-}
-
 /// First non-empty line of `s`, whitespace-collapsed and capped — the inbox headline. None when
 /// `s` is blank.
 pub(crate) fn first_line(s: &str) -> Option<String> {

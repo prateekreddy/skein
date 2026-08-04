@@ -743,6 +743,88 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
     )
 }
 
+/// Who a box commits as: its own choice, else the configured default, else the host clone's.
+///
+/// Three sources because each answers a different question. A box set at creation is working on
+/// someone else's behalf — a shared machine, a different identity per client. The setting is the
+/// answer for everything else. And falling back to the host clone means an untouched skein commits
+/// as you without anyone configuring anything, because `git -C <work> config user.name` resolves
+/// through the host's global gitconfig.
+pub fn box_identity(name: &str, repo: &Repo) -> (String, String) {
+    let config = load_config();
+    let from_host = |key: &str| -> String {
+        std::process::Command::new("git")
+            .args(["-C", &repo.work, "config", "--get", key])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let pick = |own: Option<String>, configured: &str, key: &str| -> String {
+        own.filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| match configured.trim() {
+                "" => from_host(key),
+                v => v.to_string(),
+            })
+    };
+    let own = box_identity_override(name);
+    (
+        pick(own.clone().map(|(n, _)| n), &config.git_name, "user.name"),
+        pick(own.map(|(_, e)| e), &config.git_email, "user.email"),
+    )
+}
+
+/// A box's own committer, recorded at creation. `name\nemail`, beside its other durable state.
+pub fn box_identity_override(name: &str) -> Option<(String, String)> {
+    let raw =
+        std::fs::read_to_string(std::path::Path::new(&box_state(name)).join("identity")).ok()?;
+    let mut lines = raw.lines();
+    Some((
+        lines.next().unwrap_or_default().trim().to_string(),
+        lines.next().unwrap_or_default().trim().to_string(),
+    ))
+}
+
+/// Record (or clear) that committer. `None` returns the box to the configured default.
+pub fn set_box_identity(name: &str, who: Option<(&str, &str)>) -> Result<(), String> {
+    let dir = std::path::PathBuf::from(box_state(name));
+    let path = dir.join("identity");
+    let Some((who_name, email)) = who else {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("clearing {}: {e}", path.display()))
+            }
+            _ => Ok(()),
+        };
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let body = format!("{}\n{}\n", who_name.trim(), email.trim());
+    write_atomic(&path, &dir, body.as_bytes())
+}
+
+/// Set that identity inside the box, so its first commit is not `Author identity unknown`.
+///
+/// `--global` (the box's own HOME), not the repo: the checkout is re-cloned by a rebuild, a resize
+/// or a migration, and a repo-local setting goes with it every time. Only what is missing is
+/// written, so an identity someone set in the box by hand is never overwritten.
+fn identity_script(name: &str, email: &str) -> String {
+    let mut steps = Vec::new();
+    if !name.trim().is_empty() {
+        steps.push(format!(
+            "git config --global --get user.name >/dev/null 2>&1 || git config --global user.name {}",
+            sh_quote(name.trim())
+        ));
+    }
+    if !email.trim().is_empty() {
+        steps.push(format!(
+            "git config --global --get user.email >/dev/null 2>&1 || git config --global user.email {}",
+            sh_quote(email.trim())
+        ));
+    }
+    steps.join("; ")
+}
+
 /// Point an existing box's `origin` at the repo's remote, if it is still the host clone.
 ///
 /// The clone-time version of this ([`clone_script`]) only helps boxes cloned after it landed. This
@@ -949,6 +1031,16 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
     // After provisioning, because it writes into the box's private HOME, and on every start because
     // a repo registered since the box was built adds a host it has never trusted.
     ensure_box_known_hosts(name);
+
+    // Same reasoning, same moment: a private HOME starts with no committer, and the box finds out
+    // when it tries to commit rather than when it was built.
+    let (who, email) = box_identity(name, repo);
+    let script = identity_script(&who, &email);
+    if !script.is_empty() {
+        if let Err(e) = boxed.exec(&script, Duration::from_secs(30)) {
+            eprintln!("skein: could not set {name}'s git identity ({e}); its first commit will ask who you are");
+        }
+    }
 
     match realign_transcript(name) {
         Ok(0) => {}
@@ -2440,7 +2532,6 @@ mod tests {
             work: work.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -2456,6 +2547,88 @@ mod tests {
             known_hosts_script(&ssh_hosts()).contains("StrictHostKeyChecking=accept-new"),
             "trust an unknown host once; still refuse a CHANGED one"
         );
+    }
+
+    /// A box has a private HOME and a freshly cloned tree, so it starts with no committer at all —
+    /// and finds out at `git commit`, which is after the work, not before it.
+    #[test]
+    fn a_box_is_told_who_it_commits_as_before_it_needs_to_know() {
+        let _g = env_lock();
+        let home = tempdir();
+        // Deliberately NOT setting SKEIN_FLEET_ROOT: nothing here reads it, and a test that sets a
+        // global other tests read is a test that breaks them from another thread.
+        std::env::set_var("SKEIN_HOME", &home);
+        let work = home.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Host Default"]);
+        git(&["config", "user.email", "host@example.com"]);
+        let repo = Repo {
+            id: "web".into(),
+            source: work.to_string_lossy().into_owned(),
+            work: work.to_string_lossy().into_owned(),
+            store: home.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        };
+
+        save_config(&Config::default()).unwrap();
+        assert_eq!(
+            box_identity("web-main", &repo),
+            ("Host Default".into(), "host@example.com".into()),
+            "with nothing configured, the host clone already knows — asking the user would be a \
+             question skein can answer itself"
+        );
+
+        save_config(&Config {
+            git_name: "Fleet".into(),
+            git_email: "fleet@example.com".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        assert_eq!(
+            box_identity("web-main", &repo).0,
+            "Fleet",
+            "the setting is the answer for every box that did not choose one"
+        );
+
+        set_box_identity("web-main", Some(("Client A", "a@client.example"))).unwrap();
+        assert_eq!(
+            box_identity("web-main", &repo),
+            ("Client A".into(), "a@client.example".into()),
+            "a box created on someone else's behalf commits as them"
+        );
+        assert_eq!(
+            box_identity("web-other", &repo).0,
+            "Fleet",
+            "and only that box — its siblings keep the default"
+        );
+
+        set_box_identity("web-main", None).unwrap();
+        assert_eq!(box_identity("web-main", &repo).0, "Fleet");
+
+        // --global, because the checkout is re-cloned by every rebuild, resize and migration; and
+        // never over an identity already set inside the box.
+        let script = identity_script("Fleet", "fleet@example.com");
+        assert!(script.contains("git config --global user.name 'Fleet'"));
+        assert!(
+            script.contains("--get user.name >/dev/null 2>&1 ||"),
+            "only what is missing: an identity set in the box by hand is someone's choice: {script}"
+        );
+        assert!(
+            identity_script("", "").is_empty(),
+            "nothing configured and nothing on the host ⇒ nothing to run"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -2849,7 +3022,6 @@ mod tests {
             work: String::new(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -2928,7 +3100,6 @@ mod tests {
             work: origin.to_string_lossy().into_owned(),
             store: String::new(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),

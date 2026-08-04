@@ -245,28 +245,13 @@ format from a real box before claiming to read it — the tab says so rather tha
 ## Per-repo settings
 
 Settings → Repositories is one card per repo: open it and every per-repo setting is there with a
-label — the **check command** Verify runs, the **Plane project** its boxes' tracker tokens bind to,
-and which **work-tracking connection** its boxes claim from, picked from the connections you set up
-under Work tracking. The check command falls back to the global default when blank; the connection
-is a picker, not a URL, because a gateway and the token that mints at it are one thing (see below).
+label — the **Plane project** its boxes' tracker tokens bind to, and which **work-tracking
+connection** its boxes claim from, picked from the connections you set up under Work tracking. The
+connection is a picker, not a URL, because a gateway and the token that mints at it are one thing
+(see below).
 The card's tags say at a glance what each repo is actually configured to do. These save as you leave
 a field — they live in `repos.json`, not in the settings form, so that pane has no Save button to
 mislead you.
-
-## Verify — does the work actually stand up?
-
-The board tells you who needs you. **Verify** tells you whose work compiles. Set a check command in
-Settings → Workflow (`cargo test`), or override it per repo on that repo's row, and the ✓ Verify
-button in a box's toolbar runs it **inside the box** (`sbx exec`, no model tokens) and keeps the
-result: a green or red chip on the fleet row, the command it ran in the tooltip, and the output —
-stdout and stderr together, which is where a failing suite says the useful part — one click away.
-
-Two things it deliberately does *not* do. It never runs itself: no schedule, no turn-end trigger, no
-"auto-verify" setting, because a check is a real test suite burning cores on your machine and six
-boxes doing it at once is six test suites competing with your own work. And it never lets a pass
-outlive its code — once the box ends another turn, the chip is struck through, because the result now
-describes work that has moved on. One check runs at a time fleet-wide, and a box that is mid-turn
-refuses (the check and the agent would be writing the same files).
 
 ## Work tracking — a backlog the fleet claims from
 
@@ -302,8 +287,8 @@ work yesterday still does today. If one of those is a different Plane, its token
 Give a repo its Plane project on its row in Settings → Repositories (paste the project URL; skein
 reads the uuid out of it), then open a box and press **◇ Track work**. The host mints that box its
 own token, writes it into the box over stdin at `~/.config/sync/env`, and registers the `sync` MCP
-server there for whichever runtime the box runs. Like Verify, nothing triggers it: it spends a
-network round trip and creates a real credential, so it is always your click.
+server there for whichever runtime the box runs. Nothing triggers it: it spends a network round
+trip and creates a real credential, so it is always your click.
 
 **Existing boxes work too, and nothing of theirs is overwritten.** The installer rides the *store* —
 mounted live into every box for the repo — rather than the kit, because a kit only reaches boxes

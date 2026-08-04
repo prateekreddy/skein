@@ -57,10 +57,6 @@ pub struct Config {
     /// `$SKEIN_SSH_KEY` overrides. The key never enters a box — only the agent socket is forwarded.
     #[serde(default)]
     pub ssh_key: String,
-    /// Default command a **verify** runs inside a box (`cargo test`). A repo's own `check` wins.
-    /// Empty ⇒ verification is simply unavailable, which is the honest state until someone sets it.
-    #[serde(default)]
-    pub check_command: String,
     /// Superseded by named [`SyncConnection`]s, which pair a gateway with the token that mints at
     /// it. Read once by the migration and then cleared; kept so a pre-connections `config.json`
     /// still parses. A credential was never here and never will be — this file is written 0644 and
@@ -106,6 +102,16 @@ pub struct Config {
     /// never had to share.
     #[serde(default)]
     pub fleet_disk: String,
+    /// The `user.name` every box commits as. Empty ⇒ read from the repo's host clone at start.
+    ///
+    /// A box's checkout is a fresh clone into a private HOME, so it inherits neither the host's
+    /// global gitconfig nor anything a previous box set — and the first commit fails with `Author
+    /// identity unknown`, at the moment the work is finished rather than when the box was built.
+    #[serde(default)]
+    pub git_name: String,
+    /// The `user.email` every box commits as. Empty ⇒ read from the repo's host clone at start.
+    #[serde(default)]
+    pub git_email: String,
     /// The hard memory cap for ONE box (cgroup `memory.max`). Empty ⇒ derived from
     /// [`Config::fleet_memory`].
     ///
@@ -197,12 +203,13 @@ impl Default for Config {
             base_branch: String::new(),
             confirm_destroy: true,
             ssh_key: String::new(),
-            check_command: String::new(),
             ai_enrichment: false,
             fleet_sandbox: String::new(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
             fleet_disk: String::new(),
+            git_name: String::new(),
+            git_email: String::new(),
             box_memory_max: String::new(),
             box_memory_high: String::new(),
             sync_gateway_url: String::new(),

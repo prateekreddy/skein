@@ -29,11 +29,6 @@ pub struct Repo {
     pub store: String,  // host shared `.claude` store
     #[serde(default = "default_agent")]
     pub agent: String, // runtime adapter id (see `supported_runtimes`)
-    /// Command a **verify** runs inside a box of this repo (`cargo test`, `npm test`, a script).
-    /// Empty ⇒ fall back to the global default in [`Config::check_command`]. Per-repo because a
-    /// fleet spanning a Rust service and a web app has no single right answer.
-    #[serde(default)]
-    pub check: String,
     /// The Plane project this repo's work is tracked in — a project URL or a bare uuid, kept
     /// verbatim so the cockpit can link to the board. Per-repo because a project is what an agent
     /// token binds to; empty ⇒ this repo's boxes get a tracker token with no default project, and
@@ -100,7 +95,6 @@ pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
 /// otherwise surface as a token that authenticates and then 403s on the agent's first write.
 pub fn set_repo_settings(
     id: &str,
-    check: Option<&str>,
     plane_project: Option<&str>,
     sync_connection: Option<&str>,
 ) -> Result<Repo, String> {
@@ -123,9 +117,6 @@ pub fn set_repo_settings(
         .iter_mut()
         .find(|r| r.id == id)
         .ok_or_else(|| format!("no repo with id {id:?}"))?;
-    if let Some(v) = check {
-        repo.check = v.trim().to_string();
-    }
     if let Some(v) = plane_project {
         repo.plane_project = v.trim().to_string();
     }
@@ -377,7 +368,6 @@ pub fn add_repo(
         agent: agent
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),
-        check: String::new(), // set later, per repo, in Settings → Repositories
         plane_project: String::new(),
         // One connection ⇒ adopt it, so a single-tracker fleet needs no ceremony per repo. Two or
         // more ⇒ leave it unset: which backlog this repo belongs to is not skein's guess to make,

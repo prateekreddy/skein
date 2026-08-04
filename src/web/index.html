@@ -179,14 +179,6 @@
             overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
   .dstat { flex:none; white-space:nowrap; }
   .hookwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
-  /* verify chip: the last check that ran IN the box. Green/red is the outcome; struck-through and
-     dimmed means the box has worked since, so the result describes older code — never a fresh pass. */
-  .vchip { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10.5px; font-weight:600;
-           padding:0 5px; border-radius:4px; border:1px solid transparent; cursor:pointer; }
-  .vchip.pass { color:var(--done); background:color-mix(in srgb,var(--done) 12%,transparent); }
-  .vchip.fail { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
-  .vchip.stale { opacity:.5; text-decoration:line-through; }
-  .vchip.busy { color:var(--dim); background:var(--panel); }
   /* repo tag: a quiet badge naming the box's repo, shown only when >1 repo is managed */
   .repotag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--faint);
              background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:0 4px; opacity:.85; }
@@ -472,22 +464,8 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #vout { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #vout.open { display:flex; justify-content:center; align-items:flex-start; }
-  /* check output: monospace, scrollable, sized to read a test failure without leaving the cockpit */
-  .vout-shell { display:flex; flex-direction:column; width:min(900px,92vw); max-height:74vh; background:var(--card);
-                border:1px solid var(--border-2); border-radius:12px; overflow:hidden; outline:none; }
-  .vout-head { display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid var(--line); }
-  .vout-head b { font-family:var(--mono); font-size:12.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .vout-head #vout-meta { flex:1; font-size:11.5px; color:var(--dim); white-space:nowrap; }
-  /* the verdict carries the colour — a failure must read as one at a glance (.pos/.neg are
-     scoped to .dstat, so the diff badge's colours don't reach in here) */
-  .vout-head #vout-meta .pos { color:var(--done); font-weight:600; }
-  .vout-head #vout-meta .neg { color:var(--attn); font-weight:600; }
-  .vout-head .x { cursor:pointer; color:var(--dim); padding:0 4px; }
-  .vout-head .x:hover { color:var(--text); }
-  #vout-body { margin:0; padding:12px 14px; overflow:auto; font:12px/1.5 var(--mono); color:var(--text);
-               white-space:pre-wrap; word-break:break-word; }
+  #mbx, #newbox, #settings, #addrepo { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open { display:flex; justify-content:center; align-items:flex-start; }
   /* add-repo modal: derived-id preview + inline result/warning (replaces the native prompt/alert) */
   .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
   .ar-derived b { color:var(--accent); font-weight:600; }
@@ -826,15 +804,12 @@
       <select id="nb-agent"></select>
       <label class="nb-lbl">work tracking</label>
       <select id="nb-sync"></select>
+      <label class="nb-lbl">commit as <span style="opacity:.6">(optional — blank uses the default)</span></label>
+      <div class="path-row">
+        <input id="nb-gitname" placeholder="name" autocomplete="off" spellcheck="false" />
+        <input id="nb-gitemail" placeholder="email" autocomplete="off" spellcheck="false" />
+      </div>
       <div class="nb-foot"><span class="hint">creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
-    </div>
-  </div>
-
-  <!-- The output of the last check that ran in a box: what actually failed, not just that it did. -->
-  <div id="vout" aria-hidden="true">
-    <div class="vout-shell" tabindex="-1" role="dialog" aria-modal="true" aria-label="Check output">
-      <div class="vout-head"><b id="vout-title"></b><span id="vout-meta"></span><span class="x" onclick="closeVerify()">✕</span></div>
-      <pre id="vout-body"></pre>
     </div>
   </div>
 
@@ -891,6 +866,8 @@
           </section>
           <section class="set-pane" data-pane="workflow">
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
+            <label class="set-field narrow"><span class="set-title">Git name</span><span class="desc">who boxes commit as. Blank reads it from the repo's host clone, which is usually already right — a box has a private HOME, so it inherits no gitconfig of its own.</span><input id="set-gitname" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits</span><input id="set-gitemail" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet disk</span><span class="desc">one filesystem shared by every box, <b>20G</b> by default. Memory stopped summing when boxes started sharing a sandbox; disk did not. Fixed when the sandbox is created, so changing it rebuilds.</span><input id="set-fleetdisk" placeholder="20g" autocomplete="off" spellcheck="false" /></label>
@@ -900,7 +877,6 @@
             <div class="set-field"><span class="set-title">Apply to the running fleet</span><span class="desc">Saving these numbers only changes what the <b>next</b> sandbox is created with — sbx fixes memory and CPUs at creation. Applying them now rebuilds the fleet sandbox: every box's unpushed work and conversation is saved to the host first, and nothing is destroyed unless all of it saved. Boxes come back on their own branches; any that don't can be retried individually.</span><button id="set-resize" class="btn" type="button">Rebuild the fleet at these limits</button></div>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
-            <label class="set-field"><span class="set-title">Check command</span><span class="desc">what <b>Verify</b> runs inside a box — nothing runs it for you, it's always your click. The default for every repo; each can override it under <b>Repositories</b>.</span><input id="set-check" placeholder="cargo test" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill">✨</span></span><span class="desc">spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked ✨ in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</span></span><input type="checkbox" id="set-ai" class="switch"></label>
             <p class="set-note" id="set-ainote"></p>
           </section>
@@ -1004,7 +980,7 @@ function ensureSection(id, repoId) {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="branch"></span><span class="dstat"></span><span class="vchip"></span><span class="dir"></span><span class="hookwarn"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -1013,7 +989,6 @@ function makeRow(name) {
     if (e.target.classList.contains("pchip") && e.target.classList.contains("proceed")) { resumeBox(name); return; }
     if (e.target.classList.contains("hookwarn") && e.target.dataset.restart === "1") { restartAgent(name); return; }
     // the check chip is a link to what the check actually said — a red tick you can't read is noise
-    if (e.target.classList.contains("vchip")) { if (!verifying.has(name)) openVerifyOutput(name); return; }
     openTerminal(name);
   });
   // mousemove, not mouseenter: rows shift under a stationary cursor every tick, and mouseenter on
@@ -1076,7 +1051,6 @@ function updateRow(el, b, showRepo) {
   el.querySelector(".age").textContent = b.age;
   el.querySelector(".chev").textContent = wired ? "▣" : "›";
   el.querySelector(".dstat").innerHTML = diffBadge(b.diff);
-  verifyChip(el.querySelector(".vchip"), b);
   // hook-health: a Running box whose probes have NEVER reported has dark hooks — every other
   // signal on this row is a lie of omission, so say so instead of impersonating a quiet box.
   const hw = el.querySelector(".hookwarn");
@@ -1571,9 +1545,6 @@ function renderDockbar() {
     + (m==='term' ? `<button class="kbtn ghost" id="dattach" title="attach files or a folder for the agent to read (or just paste / drag them onto the terminal)"><svg class="ic" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>` : "")
     + (otherRuntime ? `<button class="kbtn ghost" id="dtake" title="create a lightweight ${esc(otherLabel)} replacement; preserve this source as rollback">↔ ${esc(otherLabel)}</button>` : "")
     + (m==='diff' ? `<button class="kbtn ghost" id="dref" title="refresh diff"><svg class="ic" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>` : "")
-    // Verify lives beside Diff: the two halves of "should I trust this work" — what changed, and
-    // whether it still passes. Disabled while a check is running anywhere (one at a time, by design).
-    + `<button class="kbtn ghost" id="dverify"${verifying.has(view.box) ? " disabled" : ""} title="run this repo's check command inside the box (nothing runs it for you)">${verifying.has(view.box) ? "checking…" : "✓ Verify"}</button>`
     + (trackableConnection(b) ? `<button class="kbtn ghost" id="dtrack"${tracking.has(view.box) ? " disabled" : ""} title="mint this box its own tracker token at ${esc(trackableConnection(b).label)} and register the sync server inside it">${tracking.has(view.box) ? "wiring…" : "◇ Track work"}</button>` : "")
     // Only when the store actually holds something newer. A button that is always there teaches you
     // to ignore it, and this one has nothing to say on most days.
@@ -1592,7 +1563,6 @@ function renderDockbar() {
   dockbar.querySelector('[data-m=files]').onclick = () => openFiles(view.box);
   dockbar.querySelector('[data-m=tx]').onclick = () => openTranscript(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
-  const vf = dockbar.querySelector("#dverify"); if (vf) vf.onclick = () => runVerify(view.box);
   const tk = dockbar.querySelector("#dtrack"); if (tk) tk.onclick = () => trackWork(view.box);
   const rd = dockbar.querySelector("#drefreshdocs"); if (rd) rd.onclick = e => refreshDocs(view.box, e.shiftKey);
   // plain click = files, shift-click = a whole folder (the picker can only do one or the other).
@@ -1901,51 +1871,6 @@ function renderTranscript(name, d) {
   txpane.querySelector(".txmore")?.addEventListener("click", () => loadTranscript(name, Math.min(d.scanned * 4, TX_CAP)));
   txpane.querySelector(".txref")?.addEventListener("click", () => loadTranscript(name));
 }
-
-// ---------- verify: run the repo's own check INSIDE a box, and report what it said ----------
-// Always a click, never a schedule: a check is a real test suite burning cores on this machine, so
-// skein asks for it rather than deciding for you. The chip is only as good as the command behind
-// it, so the tooltip always names that command — and once the box has worked again, the chip is
-// struck through instead of continuing to claim a pass for code that has moved on.
-const verifying = new Set();   // boxes with a check in flight (the server refuses a second anyway)
-function verifyChip(el, b) {
-  const busy = verifying.has(b.name), v = b.verify;
-  if (!busy && !v) { el.style.display = "none"; el.textContent = ""; el.className = "vchip"; return; }
-  el.style.display = "";
-  if (busy) { el.className = "vchip busy"; el.textContent = "checking…"; el.title = "a check is running in this box"; return; }
-  el.className = `vchip ${v.ok ? "pass" : "fail"}${v.stale ? " stale" : ""}`;
-  el.textContent = v.ok ? "✓ checked" : "✗ failed";
-  el.title = `${v.cmd}\n${v.ok ? "passed" : "FAILED"} · ${v.age}`
-    + (v.stale ? "\n\nthe box has worked since — this describes older code, not what's there now" : "")
-    + "\n\nclick to read the output";
-}
-function runVerify(name) {
-  if (verifying.has(name)) return;
-  verifying.add(name); render(boxes); if (view.box) renderDockbar();
-  toast(`checking ${name}…`);
-  fetch(`/api/boxes/${encodeURIComponent(name)}/verify`, { method:"POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
-    .then(rec => { toast(`${name}: ${rec.ok ? "passed" : `failed (exit ${rec.exit})`} in ${rec.secs}s`); showVerify(name, rec); })
-    .catch(e => toast(`verify: ${e.message}`))
-    .finally(() => { verifying.delete(name); render(boxes); if (view.box) renderDockbar(); });
-}
-function openVerifyOutput(name) {
-  fetch(`/api/boxes/${encodeURIComponent(name)}/verify`)
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
-    .then(rec => showVerify(name, rec))
-    .catch(e => toast(`no output: ${e.message}`));
-}
-function showVerify(name, rec) {
-  const box = document.getElementById("vout");
-  document.getElementById("vout-title").textContent = `${name} · ${rec.cmd}`;
-  document.getElementById("vout-meta").innerHTML =
-    `<span class="${rec.ok ? "pos" : "neg"}">${rec.ok ? "passed" : `failed · exit ${rec.exit|0}`}</span>`
-    + ` · ${rec.secs|0}s` + (rec.fingerprint ? ` · <code>${esc(rec.fingerprint)}</code>` : "");
-  document.getElementById("vout-body").textContent = rec.tail || "(no output)";
-  box.classList.add("open");
-  box.querySelector(".vout-shell").focus();
-}
-function closeVerify() { document.getElementById("vout").classList.remove("open"); }
 
 // ---------- files: browse + read the box's workspace without leaving skein ----------
 // Two panes: directory list left, content right. Markdown renders via vendored marked (raw HTML
@@ -2551,10 +2476,11 @@ function openSettings(pane = "repos") {
     document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
     document.getElementById("set-fleetdisk").value = settings.fleet_disk || "";
+    document.getElementById("set-gitname").value = settings.git_name || "";
+    document.getElementById("set-gitemail").value = settings.git_email || "";
     document.getElementById("set-boxmax").value = settings.box_memory_max || "";
     document.getElementById("set-boxhigh").value = settings.box_memory_high || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
-    document.getElementById("set-check").value = settings.check_command || "";
     document.getElementById("set-ai").checked = !!settings.ai_enrichment;
     // The toggle says what you asked for; this says what would actually happen. "on, but `claude`
     // is not on PATH" is the state a checkbox alone can never show.
@@ -2736,12 +2662,11 @@ function renderRepoList() {
   const n = document.getElementById("set-repon");
   if (n) n.textContent = repos.length || "";
   if (!repos.length) { el.innerHTML = `<div class="none">No repositories yet — add one below to launch boxes into it.</div>`; return; }
-  const globalCheck = settings.check_command || "", conns = syncStatus.connections || [];
+  const conns = syncStatus.connections || [];
   el.innerHTML = repos.map(r => {
     const conn = conns.find(c => c.id === r.sync_connection);
     // Tags say what this repo would actually do, and whether that came from the repo or the default.
     const tags = [
-      [r.check || globalCheck || "no check", !!r.check, r.check ? "this repo's own check command" : globalCheck ? "inherited from Settings → Workflow" : "no check command — Verify has nothing to run"],
       [r.plane_project ? "Plane" : "", true, "tracked in a Plane project"],
       [conn ? conn.label : "", true, conn ? (conn.ready ? conn.gateway_url : `${conn.gateway_url || "no gateway"} — not usable yet`) : ""],
     ].filter(([label]) => label)
@@ -2750,7 +2675,6 @@ function renderRepoList() {
       + `<button type="button" class="rhead" aria-expanded="${openRepos.has(r.id)}"><span class="rid">${esc(r.id)}</span>`
       + `<span class="rsrc" title="${esc(r.source)}">${esc(r.source)}</span>${tags}<span class="rchev">›</span></button>`
       + `<div class="rbody">`
-      + repoField(r, "check", "Check command", `what <b>Verify</b> runs inside this repo's boxes${globalCheck ? ` — blank uses <code>${esc(globalCheck)}</code>` : " — blank means Verify has nothing to run"}`, globalCheck || "cargo test")
       + repoField(r, "plane_project", "Plane project", "paste the project URL or its uuid — a box's tracker token binds to it, so its work lands on that board", "https://plane…/projects/<uuid>/issues")
       + repoSelect(r, "sync_connection", "Work tracking",
           conns.length
@@ -2818,10 +2742,11 @@ function settingsPayload() {
     fleet_memory: document.getElementById("set-fleetmem").value.trim(),
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
     fleet_disk: document.getElementById("set-fleetdisk").value.trim(),
+    git_name: document.getElementById("set-gitname").value.trim(),
+    git_email: document.getElementById("set-gitemail").value.trim(),
     box_memory_max: document.getElementById("set-boxmax").value.trim(),
     box_memory_high: document.getElementById("set-boxhigh").value.trim(),
     ssh_key: document.getElementById("set-sshkey").value.trim(),
-    check_command: document.getElementById("set-check").value.trim(),
     ai_enrichment: document.getElementById("set-ai").checked,
   };
 }
@@ -2909,8 +2834,14 @@ function currentRepoId() {
   if (repos.length) return repos[0].id;
   return "box";
 }
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync()]).then(() => { fillRepoSelect(); fillSyncSelect(); }); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync()]).then(() => { fillRepoSelect(); fillSyncSelect(); }); nbBranch.focus(); }
 
+// Blank on every open, because these are a per-box exception: carrying the last box's identity
+// forward is how the wrong name ends up on a commit nobody checked.
+function clearIdentityFields() {
+  document.getElementById("nb-gitname").value = "";
+  document.getElementById("nb-gitemail").value = "";
+}
 // The tracking choice belongs to the box, not only to its repo: two boxes on the same repo can be
 // one claiming from the backlog and one doing something nobody filed. "Repo default" stays the
 // first option so the common case is still one keystroke.
@@ -2928,7 +2859,7 @@ function fillSyncSelect() {
 }
 // Open the new-box dialog with a specific repo preselected (the per-repo ＋ in the sidebar).
 function openNewBoxFor(repoId) {
-  newbox.classList.add("open"); nbBranch.value = "";
+  newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields();
   Promise.all([loadRepos(), loadSync()]).then(() => {
     if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId;
     fillSyncSelect(); nbBranch.focus();
@@ -2997,16 +2928,21 @@ function launchBox(branch) {
   const agent = nbAgent.value || settings.default_agent || runtimes[0]?.id;
   const name = `${id}-${slug(branch)}`;                 // e.g. thing-feat-auth
   const sync = document.getElementById("nb-sync").value;
+  const gitName = document.getElementById("nb-gitname").value.trim();
+  const gitEmail = document.getElementById("nb-gitemail").value.trim();
   closeNewBox();
   select(name);
   view = { box: name, mode: "term", kind: "agent" };
   // Before the launch, not after: provisioning reads the choice, so a token minted against the
   // repo's default and corrected afterwards would already be the wrong one.
-  const chosen = sync === "" ? Promise.resolve()
-    : fetch(`/api/boxes/${encodeURIComponent(name)}/tracking`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connection: sync === "none" ? "" : sync }),
-      }).catch(e => toast(`could not set work tracking: ${e.message}`));
+  const post = (path, body, what) =>
+    fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }).catch(e => toast(`could not set ${what}: ${e.message}`));
+  const chosen = Promise.all([
+    sync === "" ? null : post("tracking", { connection: sync === "none" ? "" : sync }, "work tracking"),
+    (gitName || gitEmail) ? post("identity", { name: gitName, email: gitEmail }, "the committer") : null,
+  ].filter(Boolean));
   chosen.then(() => { if (!sessions.has(name)) createSession(name, "agent", branch, agent); });
   applyView();
 }
@@ -3113,7 +3049,6 @@ document.addEventListener("keydown", e => {
   const away = document.getElementById("away");
   if (away?.classList.contains("open")) { if (e.key === "Escape") away.classList.remove("open"); return; }
   if (mbx.classList.contains("open")) { if (e.key === "Escape") closeMailbox(); return; }
-  if (document.getElementById("vout").classList.contains("open")) { if (e.key === "Escape") closeVerify(); return; }
   if (newbox.classList.contains("open")) return;
   if (pal.classList.contains("open")) return;
   // Settings owns its own keys (esc closes, ⏎ saves, arrows walk the section rail); a key that leaks

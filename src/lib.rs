@@ -23,7 +23,6 @@ mod testutil;
 mod tracking;
 mod transcript;
 mod util;
-mod verify;
 
 pub use ai::*;
 pub use answer::*;
@@ -42,7 +41,6 @@ pub use signals::*;
 pub use tracking::*;
 pub use transcript::*;
 pub use util::*;
-pub use verify::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -111,11 +109,6 @@ pub struct BoxView {
     /// falling back to hook-only turn state looks exactly like everything working.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub screen_health: String,
-    /// the last check that ran in this box, and whether the box has worked since — "who needs me"
-    /// is only half of triage; "whose work stands up" is the other half. Absent when no check has
-    /// ever run here (which is not a failure, and must not read as one).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verify: Option<VerifySummary>,
     /// this repo's store holds work-tracking documents newer than the ones installed from it, so a
     /// re-apply has something to deliver. Repo-scoped and host-side, because that half of the answer
     /// is free; whether *this box's* CLAUDE.md is stale can only be read inside the box, and is not
@@ -492,7 +485,6 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 task,
                 pause,
                 blocked_kind: blocked_kind.to_string(),
-                verify: verify_summary(&name),
                 hook_health,
                 screen_health: screen.to_string(),
                 // Two file reads against the repo's store — no box is woken to answer this, which is
@@ -2497,7 +2489,6 @@ mod tests {
             work: work.display().to_string(),
             store: store.display().to_string(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -2583,7 +2574,6 @@ mod tests {
             work: home.join("work").to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -2795,7 +2785,6 @@ mod tests {
                 work: "/w".into(),
                 store: "/s".into(),
                 agent: "claude".into(),
-                check: String::new(),
                 plane_project: String::new(),
                 sync_connection: String::new(),
                 sync_gateway_url: String::new(),
@@ -2806,7 +2795,6 @@ mod tests {
                 work: "/w".into(),
                 store: "/s".into(),
                 agent: "claude".into(),
-                check: String::new(),
                 plane_project: String::new(),
                 sync_connection: String::new(),
                 sync_gateway_url: String::new(),
@@ -2837,7 +2825,6 @@ mod tests {
             work: "/w".into(),
             store: store.to_string_lossy().to_string(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -2874,7 +2861,6 @@ mod tests {
             work: "/work/thing".into(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -2910,7 +2896,6 @@ mod tests {
             work: "/work/skein".into(),
             store: home.join("store/.claude").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -3380,7 +3365,6 @@ mod tests {
             work: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),
             agent: "codex".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -3865,7 +3849,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             work: String::new(),
             store: String::new(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -4054,7 +4037,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 .to_string_lossy()
                 .into(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -4135,7 +4117,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 .to_string_lossy()
                 .into(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -4225,7 +4206,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             work: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: "team".into(),
             sync_gateway_url: String::new(),
@@ -4284,7 +4264,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             work: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: "shared".into(),
             sync_gateway_url: String::new(),
@@ -4295,7 +4274,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // token a box carries is only valid at the gateway that minted it — so switching backlogs
         // switches the credential too, which is exactly what picking a whole connection buys.
         upsert_connection(Some("own"), "own", "https://own.example/", Some("pat_own")).unwrap();
-        set_repo_settings("web", None, None, Some("own")).unwrap();
+        set_repo_settings("web", None, Some("own")).unwrap();
         assert_eq!(
             sync_gateway_for_box("web-main"),
             "https://own.example",
@@ -4311,18 +4290,15 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             "https://own.example/mcp"
         );
         // Clearing means not tracked — an explicit setting, not a gap to be filled by a default.
-        set_repo_settings("web", None, None, Some("")).unwrap();
+        set_repo_settings("web", None, Some("")).unwrap();
         assert!(connection_for_box("web-main").is_none());
         assert_eq!(sync_gateway_for_box("web-main"), "");
         // A selection naming nothing would read as "tracked" and behave as "not tracked".
-        assert!(set_repo_settings("web", None, None, Some("nope")).is_err());
+        assert!(set_repo_settings("web", None, Some("nope")).is_err());
         // One call can carry every field, and the fields don't disturb each other.
-        set_repo_settings("web", Some("cargo test"), None, Some("own")).unwrap();
+        set_repo_settings("web", None, Some("own")).unwrap();
         let saved = load_repos().into_iter().find(|r| r.id == "web").unwrap();
-        assert_eq!(
-            (saved.check.as_str(), saved.sync_connection.as_str()),
-            ("cargo test", "own")
-        );
+        assert_eq!(saved.sync_connection, "own");
         assert_eq!(saved.plane_project, "", "a field left None is left alone");
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_LS_CMD");
@@ -4359,7 +4335,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             work: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
@@ -4396,7 +4371,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             work: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: gw.into(),
@@ -4481,7 +4455,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             work: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: "shared".into(),
             sync_gateway_url: String::new(),
@@ -4490,7 +4463,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let e = remove_connection("shared").unwrap_err();
         assert!(e.contains("web"), "say which repo would lose tracking: {e}");
         assert!(remove_connection("ghost").is_err());
-        set_repo_settings("web", None, None, Some("")).unwrap();
+        set_repo_settings("web", None, Some("")).unwrap();
         remove_connection("shared").unwrap();
         assert!(load_connections().is_empty());
         assert!(
@@ -4529,43 +4502,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::remove_var("SKEIN_HOME");
     }
 
-    #[test]
-    fn a_repos_own_check_command_beats_the_global_default() {
-        let _g = env_lock();
-        let dir = tempdir();
-        env::set_var("SKEIN_HOME", &dir);
-        env::set_var("SKEIN_LS_CMD", "false");
-        save_config(&Config {
-            check_command: "make test".into(),
-            ..Default::default()
-        })
-        .unwrap();
-        save_repos(&[Repo {
-            id: "web".into(),
-            source: "/src/web".into(),
-            work: "/w".into(),
-            store: dir.join("store").to_string_lossy().into_owned(),
-            agent: "claude".into(),
-            check: String::new(),
-            plane_project: String::new(),
-            sync_connection: String::new(),
-            sync_gateway_url: String::new(),
-        }])
-        .unwrap();
-        assert_eq!(verify_command("web-main").as_deref(), Some("make test"));
-        set_repo_settings("web", Some("npm test"), None, None).unwrap();
-        assert_eq!(verify_command("web-main").as_deref(), Some("npm test"));
-        // clearing it falls back, and clearing BOTH means verification is simply unavailable —
-        // which the UI must show as "unconfigured", never as a failure.
-        set_repo_settings("web", Some(""), None, None).unwrap();
-        assert_eq!(verify_command("web-main").as_deref(), Some("make test"));
-        save_config(&Config::default()).unwrap();
-        assert_eq!(verify_command("web-main"), None);
-        assert!(run_verify("web-main").is_err(), "no command ⇒ no run");
-        env::remove_var("SKEIN_HOME");
-        env::remove_var("SKEIN_LS_CMD");
-    }
-
     // A project id is what an agent token binds to, and the only place a human ever sees one is
     // the Plane URL they are already looking at — so pasting that URL has to work.
     #[test]
@@ -4599,13 +4535,12 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             work: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
-            check: String::new(),
             plane_project: String::new(),
             sync_connection: String::new(),
             sync_gateway_url: String::new(),
         }])
         .unwrap();
-        assert!(set_repo_settings("web", None, Some("the backlog one"), None).is_err());
+        assert!(set_repo_settings("web", Some("the backlog one"), None).is_err());
         assert_eq!(
             load_repos()[0].plane_project,
             "",
@@ -4614,9 +4549,9 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // The URL is kept verbatim — the uuid is derived, so a board link stays possible.
         let url =
             "https://plane.example.net/acme/projects/1e2a3b4c-5d6e-4f70-8912-abcdefabcdef/issues";
-        set_repo_settings("web", None, Some(url), None).unwrap();
+        set_repo_settings("web", Some(url), None).unwrap();
         assert_eq!(load_repos()[0].plane_project, url);
-        set_repo_settings("web", None, Some(""), None).unwrap();
+        set_repo_settings("web", Some(""), None).unwrap();
         assert_eq!(load_repos()[0].plane_project, "", "empty clears it");
         env::remove_var("SKEIN_HOME");
     }

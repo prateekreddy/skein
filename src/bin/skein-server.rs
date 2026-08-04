@@ -148,6 +148,7 @@ async fn main() {
             axum::routing::delete(api_forget_connection_token),
         )
         .route("/api/boxes/:name/tracking", post(api_set_box_tracking))
+        .route("/api/boxes/:name/identity", post(api_set_box_identity))
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
         .route("/api/pick-path", post(api_pick_path))
@@ -158,10 +159,6 @@ async fn main() {
         .route("/api/boxes/:name/ship", get(api_ship))
         .route("/api/boxes/:name/pr", post(api_pr))
         .route("/api/boxes/:name/merge", post(api_merge))
-        .route(
-            "/api/boxes/:name/verify",
-            get(api_verify_last).post(api_verify_run),
-        )
         .route("/api/boxes/:name/transcript", get(api_transcript))
         .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
@@ -345,7 +342,6 @@ async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>
 /// carry all three, so the settings pane saves a card, not a keystroke.
 #[derive(Deserialize)]
 struct RepoSettingsReq {
-    check: Option<String>,
     /// a Plane project URL or bare uuid — what this repo's tracker tokens bind to
     plane_project: Option<String>,
     /// which work-tracking connection this repo claims through, by id; empty = not tracked
@@ -358,7 +354,6 @@ async fn api_set_repo_settings(
 ) -> Response {
     match skein::set_repo_settings(
         &id,
-        req.check.as_deref(),
         req.plane_project.as_deref(),
         req.sync_connection.as_deref(),
     ) {
@@ -383,6 +378,29 @@ async fn api_set_box_tracking(Path(name): Path<String>, Json(r): Json<TrackingRe
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+/// Who a box commits as, when it should not be the configured default.
+///
+/// Recorded before the box starts, like its tracking choice: the identity is written into the box's
+/// HOME during provisioning, and a correction afterwards would arrive after the first commit.
+async fn api_set_box_identity(Path(name): Path<String>, Json(r): Json<IdentityReq>) -> Response {
+    let who = match (r.name.as_deref(), r.email.as_deref()) {
+        (None, None) => None,
+        (n, e) => Some((n.unwrap_or_default(), e.unwrap_or_default())),
+    };
+    match skein::set_box_identity(&name, who) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct IdentityReq {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -486,31 +504,6 @@ async fn api_transcript(
         Ok(Ok(view)) => Json(view).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
-    }
-}
-
-/// Run the box's check command inside it and report the outcome. Slow by nature (it's a test
-/// suite), single-flight fleet-wide, and refused while the agent is mid-turn — see
-/// [`skein::run_verify`]. Only ever reached by a click: nothing schedules this.
-async fn api_verify_run(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
-        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
-    }
-    match tokio::task::spawn_blocking(move || skein::run_verify(&name)).await {
-        Ok(Ok(record)) => Json(record).into_response(),
-        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
-    }
-}
-
-/// The last check recorded for a box, output and all. 404 when none has ever run.
-async fn api_verify_last(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
-        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
-    }
-    match skein::read_verify(&name) {
-        Some(record) => Json(record).into_response(),
-        None => (StatusCode::NOT_FOUND, "no check has run in this box yet").into_response(),
     }
 }
 
