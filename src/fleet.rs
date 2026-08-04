@@ -977,7 +977,52 @@ pub fn migrate_box(name: &str) -> Result<String, String> {
             box_state(name)
         ),
     }
+    remint_tracker_token(name);
     Ok(dir)
+}
+
+/// Re-issue a migrated box's work-tracker credential, if it had one.
+///
+/// The snapshot carries `~/.config/sync/env` across with the rest of the box's home, and a bearer
+/// token is the one thing here that a faithful copy does not preserve: it is bound to a box's
+/// lifetime at the gateway, not to the bytes on disk. Destroying a box revokes it (`destroy_box`),
+/// so a box that is destroyed and migrated again — the ordinary way to retry a migration — comes
+/// back holding a token the gateway has already retired.
+///
+/// It fails in the worst available shape. The MCP server registers fine, the agent is *told* by its
+/// own CLAUDE.md to claim work before starting, and the 401 arrives mid-turn on the first `capture`
+/// — while `sync-install.sh`'s once-per-box stamp guarantees no restart will ever re-register it.
+/// Measured on the first migrated box, which sat with a dead `sync` server through three `/mcp`
+/// attempts before anyone worked out why.
+///
+/// Minting unconditionally rather than probing first: a fresh mint of the same agent name keeps the
+/// project binding and invalidates only its own predecessor, which belonged to this same box. One
+/// round trip, and no "is it still good?" answer to get wrong.
+///
+/// **Only for a box that already had one.** This never wires up a box the user never wired up — a
+/// migration is not consent to mint a credential, and provisioning stays an explicit act everywhere
+/// else (see the note above `guest_write`). And it is fail-soft: the migration itself has already
+/// succeeded by the time this runs, and a tracker that cannot be reached must not turn a moved box
+/// into a failed one.
+fn remint_tracker_token(name: &str) {
+    let carried = place_of(name).and_then(|p| {
+        p.exec(
+            "[ -s \"$HOME/.config/sync/env\" ] && echo yes",
+            Duration::from_secs(30),
+        )
+        .ok()
+    });
+    if !carried.unwrap_or_default().contains("yes") {
+        return;
+    }
+    match crate::sync_provision_box(name) {
+        Ok(note) => eprintln!("skein: re-issued {name}'s tracker token — {note}"),
+        Err(e) => eprintln!(
+            "skein: {name} moved, but its work-tracker token could not be re-issued ({e}). The one \
+             it carried over was revoked when its old box went, so `sync` will fail to connect \
+             until you provision it again from the cockpit."
+        ),
+    }
 }
 
 /// What one box needs in order to be rebuilt after the sandbox is destroyed.
@@ -1447,6 +1492,86 @@ mod tests {
         }
         assert_eq!(box_sock("web-main"), "/boxes/web-main/session.sock");
         assert_eq!(box_pidfile("web-main"), "/boxes/web-main/anchor.pid");
+    }
+
+    // Migration copies a box's home faithfully, and the tracker token is the one thing a faithful
+    // copy does not preserve — the gateway binds it to a box's lifetime, not to the bytes. So a
+    // migrated box that HAD one has to be re-issued one, and a box that never had one must be left
+    // exactly as it is: moving a box is not consent to mint it a credential.
+    #[test]
+    fn a_migrated_box_reissues_only_a_tracker_token_it_actually_carried() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let dir = tempdir();
+        std::env::set_var("SKEIN_HOME", &dir);
+        *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        record_place(
+            "web-main",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 4242,
+                home: "/boxes/web-main/home".into(),
+                tree: "/boxes/web-main/tree".into(),
+                sock: "/boxes/web-main/session.sock".into(),
+            },
+        )
+        .unwrap();
+        let mut config = load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        save_config(&config).unwrap();
+        // Configured far enough that a mint would be ATTEMPTED — otherwise both cases would refuse
+        // for the same unrelated reason and the test would prove nothing about the gate.
+        crate::upsert_connection(Some("shared"), "shared", "http://127.0.0.1:9", None).unwrap();
+        crate::set_connection_token("shared", "plane_api_x").unwrap();
+
+        let log = dir.join("sbx.log");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let sbx = bin.join("sbx");
+        // Answers the credential probe, and nothing else: silence from the liveness sweep reads as
+        // "cannot tell", which stops `sync_provision_box` before it reaches the network.
+        fs::write(
+            &sbx,
+            "#!/bin/sh\necho \"$@\" >> \"$FAKE_SBX_LOG\"\n\
+             case \"$*\" in *.config/sync/env*) [ -n \"$FAKE_BOX_HAS_CRED\" ] && echo yes ;; esac\n\
+             exit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&sbx, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        std::env::set_var("FAKE_SBX_LOG", &log);
+
+        let calls = || fs::read_to_string(&log).unwrap_or_default().lines().count();
+
+        // No credential: the probe runs, finds nothing, and that is the end of it.
+        std::env::remove_var("FAKE_BOX_HAS_CRED");
+        fs::write(&log, "").unwrap();
+        remint_tracker_token("web-main");
+        assert_eq!(
+            calls(),
+            1,
+            "a box that never had a tracker token must cost one probe and no mint"
+        );
+
+        // Carried one: it goes on to re-issue. It gets no further than the liveness check here, and
+        // that is the point — the assertion is that it TRIED, without a live gateway to try against.
+        std::env::set_var("FAKE_BOX_HAS_CRED", "1");
+        *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        fs::write(&log, "").unwrap();
+        remint_tracker_token("web-main");
+        assert!(
+            calls() > 1,
+            "a box carrying a tracker credential must be re-issued one, not left holding a dead token"
+        );
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("FAKE_SBX_LOG");
+        std::env::remove_var("FAKE_BOX_HAS_CRED");
+        forget_place("web-main");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // A repo's store is a HOST path, and sbx mounts a workspace at its host absolute path — so the
