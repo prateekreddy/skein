@@ -5654,6 +5654,79 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     }
 
     #[test]
+    fn boxes_sharing_one_sandbox_each_report_under_their_own_name() {
+        // The regression that made the fleet's first migrated box show `stale` on the board while
+        // it was visibly working: every probe keyed its signals on SANDBOX_VM_ID, which names the
+        // VM. One box per VM made that an identity by accident; several boxes in one sandbox all
+        // answer with the SAME string, so they overwrite one another's status and the board — which
+        // looks up each box by name — finds nothing for any of them.
+        //
+        // Runs the installed script, not a Rust-side model of it, because the bug was in the shell.
+        let _g = env_lock();
+        let store = tempdir().join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let script = store.join("skein").join("bin").join("box-status.sh");
+        let project_dir = store.parent().unwrap().to_path_buf();
+
+        let report = |box_name: &str, mode: &str| {
+            let out = Command::new("bash")
+                .arg(&script)
+                .arg(mode)
+                .env("CLAUDE_PROJECT_DIR", &project_dir)
+                // What both boxes agree on: they are in one sandbox, so this is the same for each.
+                .env("SANDBOX_VM_ID", "skein-fleet")
+                .env("SKEIN_BOX", box_name)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("run box-status.sh");
+            assert!(out.status.success(), "{box_name} {mode}");
+            // A UserPromptSubmit hook's stdout is injected into the prompt, so it must stay empty.
+            assert!(out.stdout.is_empty(), "{box_name} {mode} wrote to stdout");
+        };
+        report("alpha", "working");
+        report("beta", "waiting");
+
+        let status = |name: &str| -> serde_json::Value {
+            let p = store.join("status").join(format!("{name}.json"));
+            serde_json::from_str(
+                &fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())),
+            )
+            .unwrap()
+        };
+        assert_eq!(status("alpha")["status"], "working");
+        assert_eq!(status("beta")["status"], "waiting");
+        assert!(
+            !store.join("status").join("skein-fleet.json").exists(),
+            "a box must never report under the name of the sandbox holding it"
+        );
+        // The heartbeat is per box too: hook health that pools every box into one log cannot say
+        // WHICH box's probes have gone quiet, which is the only question it is asked.
+        for name in ["alpha", "beta"] {
+            assert!(
+                store
+                    .join("hook-log")
+                    .join(format!("{name}.jsonl"))
+                    .exists(),
+                "{name} left no heartbeat"
+            );
+        }
+
+        // A legacy box sets no SKEIN_BOX and is alone in its VM: there the VM name IS the box name,
+        // and it has to keep working exactly as before.
+        let out = Command::new("bash")
+            .arg(&script)
+            .arg("waiting")
+            .env("CLAUDE_PROJECT_DIR", &project_dir)
+            .env("SANDBOX_VM_ID", "old-style-box")
+            .env_remove("SKEIN_BOX")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run box-status.sh");
+        assert!(out.status.success());
+        assert_eq!(status("old-style-box")["status"], "waiting");
+    }
+
+    #[test]
     fn box_token_usage_sums_new_assistant_entries_and_is_idempotent() {
         // Shells out to the installed script directly (like the mailbox round-trip test) so this
         // proves the real jq pipeline, not just a Rust-side assumption about its behavior.

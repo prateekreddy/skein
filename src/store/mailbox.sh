@@ -37,7 +37,11 @@ command -v jq >/dev/null 2>&1 || {
 }
 box="$here/mailbox"
 mkdir -p "$box"
-vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
+# The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
+# signal on it makes every box write one file and the board see none of them report.
+# SKEIN_BOX is exported by box-session.sh, the only thing that knows which box a process is
+# in. A legacy box has no SKEIN_BOX and is alone in its VM, where the two are the same name.
+vmid="${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}}"
 vmid="${vmid//\//-}"   # slash-safe identity (matches the registry/journal shard keys)
 cmd="${1:-inbox}"; shift || true
 

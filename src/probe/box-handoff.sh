@@ -15,7 +15,11 @@ store="$root/.claude"
 if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; fi
 [ -d "$store" ] || exit 0
 
-vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
+# The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
+# signal on it makes every box write one file and the board see none of them report.
+# SKEIN_BOX is exported by box-session.sh, the only thing that knows which box a process is
+# in. A legacy box has no SKEIN_BOX and is alone in its VM, where the two are the same name.
+vmid="${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}}"
 vmid="${vmid//\//-}"
 pending="$store/handoffs/$vmid.$target.pending.md"
 

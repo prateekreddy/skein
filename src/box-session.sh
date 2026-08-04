@@ -265,6 +265,21 @@ fi
 [ -s "$home/.claude/.credentials.json" ] && unset ANTHROPIC_API_KEY
 [ -s "$home/.codex/auth.json" ] && unset OPENAI_API_KEY
 
+# Who this box is, for everything that runs inside it.
+#
+# The probes record their signals under an identity, and every one of them used to read
+# `SANDBOX_VM_ID`. That names the VM. It was also the box name for as long as a box WAS a sandbox,
+# and the moment several boxes share one it stops being an identity at all: every box in this
+# sandbox reports the same string, so they all write one another's status file and the board, which
+# looks for each box by name, finds nothing and calls them all stale. Measured on the first migrated
+# box — it showed `stale` on the board while visibly working.
+#
+# Exported here because this script is the only place that knows the answer: the agent, its hooks
+# and every process they fork are all children of the tmux server started below, so one export
+# reaches all of them. The sandbox cannot tell them apart, and a box cannot be asked to work out its
+# own name from a path without guessing at a layout.
+export SKEIN_BOX="$box"
+
 # --dev-bind / / keeps the sandbox's own filesystem visible (the repo, the toolchains, the store
 # mount) and then binds the box's private directories over the two paths that must not be shared.
 # No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has
