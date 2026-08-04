@@ -553,12 +553,17 @@ pub fn branch_of(name: &str) -> Option<String> {
 /// preserves a New-box override), then the repo default. Unknown/legacy boxes remain Claude for
 /// backwards compatibility.
 pub fn agent_for_box(name: &str) -> String {
-    if let Some(agent) = fleet_boxes()
-        .and_then(|boxes| boxes.into_iter().find(|b| b.name == name))
-        .map(|b| b.agent)
-        .filter(|a| valid_runtime(a))
-    {
-        return agent;
+    // Not for a box in the fleet. Migration leaves the old sandbox stopped but still listed under
+    // the box's name, so `sbx ls` answers with a record from before the move — which would outrank
+    // the launch spec a later takeover wrote. A placed box's spec is the live answer.
+    if crate::place::shared_record(name).is_none() {
+        if let Some(agent) = fleet_boxes()
+            .and_then(|boxes| boxes.into_iter().find(|b| b.name == name))
+            .map(|b| b.agent)
+            .filter(|a| valid_runtime(a))
+        {
+            return agent;
+        }
     }
     if let Some(repo) = repo_for_box(name) {
         return launch_spec_agent(&repo, name)
