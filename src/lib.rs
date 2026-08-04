@@ -1001,6 +1001,14 @@ pub fn lookup_dir(name: &str) -> Option<String> {
     {
         return Some(dir);
     }
+    // A box in the fleet is not a sandbox, so `sbx ls` has never heard of it — but its placement
+    // record names its checkout, which is the very thing being asked for.
+    if let Some(tree) = shared_record(name)
+        .map(|r| r.tree)
+        .filter(|t| !t.is_empty())
+    {
+        return Some(tree);
+    }
     fleet_boxes()?
         .into_iter()
         .find(|b| b.name == name)
@@ -1128,10 +1136,9 @@ fn takeover_repo(name: &str) -> Option<Repo> {
     if let Some(repo) = repo_for_box(name) {
         return Some(repo);
     }
-    let dir = fleet_boxes()?
-        .into_iter()
-        .find(|box_| box_.name == name)?
-        .dir;
+    // Through `lookup_dir`, which knows about placed boxes too: asking `sbx ls` alone meant a
+    // takeover of any fleet box whose name does not match `<repo>-<branch>` refused outright.
+    let dir = lookup_dir(name)?;
     let wanted = PathBuf::from(expand_tilde(&dir));
     let wanted = wanted.canonicalize().unwrap_or(wanted);
     load_repos().into_iter().find(|repo| {
@@ -1149,11 +1156,18 @@ fn replacement_name(repo: &Repo, source: &str, branch: &str, target_runtime: &st
         format!("{}-{source}-{target_runtime}", repo.id)
     };
     let base = slug(&base);
-    let existing = fleet_boxes()
+    // Every name already in use, sandboxes AND boxes in the fleet. Counting only sandboxes would
+    // hand the replacement the name of a live fleet box, and `start_box` refuses a tree that
+    // already exists — so the takeover would fail on a collision it had just created for itself.
+    let mut existing = fleet_boxes()
         .unwrap_or_default()
         .into_iter()
         .map(|box_| box_.name)
         .collect::<BTreeSet<_>>();
+    let fleet = fleet_sandbox();
+    if !fleet.is_empty() {
+        existing.extend(placed_boxes(&fleet).into_iter().map(|(name, _)| name));
+    }
     if !existing.contains(&base) {
         return base;
     }
@@ -3810,6 +3824,77 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // In the fleet the mirror is the repo's real work tree, mounted read-write — so every entry
     // takes the `rw` shape there, seeded into the store and linked from there. A box must not be
     // able to edit the host's own checkout, which the read-only bind used to guarantee for free.
+    // Three resolutions that all asked `sbx ls` who a box is. A box in the fleet is not a sandbox
+    // and never appears there, so each one quietly failed for the whole fleet: its workspace was
+    // unknown, a takeover of it refused, and a replacement could be handed the name of a live box.
+    #[test]
+    fn a_box_in_the_fleet_can_still_be_found_by_name() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
+        fs::write(home.join("sandboxes.json"), "{}").unwrap();
+        // `sbx ls` knows nothing — the fleet's normal state.
+        env::set_var("SKEIN_LS_CMD", "echo '[]'");
+        save_config(&Config {
+            fleet_sandbox: "skein-fleet".into(),
+            ..load_config()
+        })
+        .unwrap();
+        record_place(
+            "web-main",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 1,
+                home: "/boxes/web-main/home".into(),
+                tree: "/boxes/web-main/tree".into(),
+                sock: "/boxes/web-main/session.sock".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            lookup_dir("web-main").as_deref(),
+            Some("/boxes/web-main/tree"),
+            "a placed box knows its own checkout even when sbx has never heard of it"
+        );
+        // And a name already taken by a fleet box must not be handed out again.
+        let repo = Repo {
+            id: "web".into(),
+            source: String::new(),
+            work: String::new(),
+            store: String::new(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        };
+        record_place(
+            "web-main-codex",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 2,
+                home: "/boxes/web-main-codex/home".into(),
+                tree: "/boxes/web-main-codex/tree".into(),
+                sock: "/boxes/web-main-codex/session.sock".into(),
+            },
+        )
+        .unwrap();
+        let picked = replacement_name(&repo, "web-main", "main", "codex");
+        assert_ne!(
+            picked, "web-main-codex",
+            "that name is a live box in the fleet; `start_box` would refuse its existing tree"
+        );
+        forget_place("web-main-codex");
+
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+        forget_place("web-main");
+        env::remove_var("SKEIN_HOME");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     #[test]
     fn a_box_with_no_clone_mirror_still_gets_the_repos_shared_paths() {
         use std::os::unix::fs::symlink;
