@@ -272,6 +272,11 @@ pub fn drop_dest(batch: &str, rel: &str) -> Result<(String, String), String> {
 /// Returns the full argv including `sbx`, since where a box lives decides the program as well as its
 /// arguments — a legacy box is still `sbx exec`, a fleet box is `sbx exec … nsenter …`.
 pub fn box_write_argv(name: &str, dir: &str, path: &str) -> Result<Vec<String>, String> {
+    // Validated before the lookup so the refusal says which problem it is: a name that could never
+    // be a box is a caller bug, a valid name with no placement is a box that is not there.
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
     let place = place_of(name).ok_or_else(|| format!("no box named {name}"))?;
     let inner = format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path));
     Ok(place.write_argv(&inner))
