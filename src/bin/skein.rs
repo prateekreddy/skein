@@ -48,6 +48,13 @@ fn main() {
             Some(name) => cmd_migrate(name),
             None => Err("usage: skein migrate <box>   (moves it into the shared sandbox)".into()),
         },
+        "recover" => match rest.first() {
+            Some(name) => cmd_recover(name),
+            None => Err(
+                "usage: skein recover <box>   (fetches ignored files its migration left behind)"
+                    .into(),
+            ),
+        },
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
@@ -81,6 +88,7 @@ skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbo
 skein login <runtime> authenticate once in the shared sandbox; every box inherits it\n  \
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
 skein migrate <box>   move an existing box into the shared sandbox (old one is stopped, not removed)\n  \
+skein recover <box>   fetch ignored files (.env, .skein/) an early migration left behind\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
@@ -582,6 +590,24 @@ fn cmd_migrate(name: &str) -> Result<(), String> {
          sbx start {name}   {DIM}to go back{RESET}\n  \
          sbx rm {name}      {DIM}once you are satisfied (this frees its memory reservation for good){RESET}"
     );
+    Ok(())
+}
+
+/// `skein recover <box>` — fetch the ignored files an early migration left in the old sandbox.
+///
+/// Only useful for a box migrated before snapshots swept ignored files, and harmless to run on one
+/// that was not: it copies nothing it cannot find, and overwrites nothing the box already has.
+fn cmd_recover(name: &str) -> Result<(), String> {
+    eprintln!("{DIM}skein:{RESET} starting {name}'s old sandbox to read what it kept…");
+    let carried = skein::recover_ignored(name)?;
+    let n: usize = carried.trim().parse().unwrap_or(0);
+    if n == 0 {
+        println!("{BOLD}nothing to recover{RESET} for {CYAN}{name}{RESET} — it had no ignored files worth carrying");
+    } else {
+        println!("{BOLD}recovered{RESET} {n} ignored path(s) into {CYAN}{name}{RESET}");
+        println!("  {DIM}files the box already had were left alone — its own copies are the newer ones{RESET}");
+    }
+    println!("\n{DIM}its old sandbox has been stopped again.{RESET}");
     Ok(())
 }
 

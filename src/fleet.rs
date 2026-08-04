@@ -879,6 +879,115 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
 /// Where the snapshot records the ignored paths it decided not to carry.
 const SKIPPED_FILE: &str = "skipped-ignored.txt";
 
+/// Fetch the ignored files a box left behind in the sandbox it was migrated out of.
+///
+/// For boxes migrated before the snapshot swept ignored files at all: `.env`, local dev config and
+/// the box's own `.skein/journal.md` stayed in the old VM, and the box has been running without them
+/// ever since. This exists because the old sandbox is *stopped rather than destroyed* — that
+/// decision was made so a migration could be undone, and it turns out to be what makes this
+/// recoverable too.
+///
+/// Deliberately additive: it refuses to overwrite anything the new box already has. The box has been
+/// working since it moved, and a file it wrote itself is newer and more correct than the copy in the
+/// VM it left. Recovering work must never be a way to lose some.
+///
+/// Leaves the old sandbox stopped again, whatever happens — it holds a full memory reservation while
+/// it runs, which is the thing the migration existed to reclaim.
+pub fn recover_ignored(name: &str) -> Result<String, String> {
+    if !valid_name(name) {
+        return Err(format!("invalid box name {name:?}"));
+    }
+    let record = shared_record(name).ok_or_else(|| {
+        format!("{name} is not in the fleet, so it has no old sandbox to recover from")
+    })?;
+    let repo =
+        repo_for_box(name).ok_or_else(|| format!("box {name} belongs to no registered repo"))?;
+
+    // The old sandbox, addressed as a sandbox — `place_of` would hand back the box's fleet placement,
+    // which is exactly the copy that is missing the files.
+    let old = own_sandbox(name);
+    let (out, err, code) = run_capture_for("sbx", &["start", name], Duration::from_secs(300))?;
+    if code != 0 {
+        let detail = if err.trim().is_empty() { out } else { err };
+        return Err(format!(
+            "could not start the old sandbox for {name}: {} — it may already have been removed, \
+             in which case its ignored files are gone and there is nothing to recover",
+            detail.trim()
+        ));
+    }
+
+    let carried = (|| -> Result<String, String> {
+        let staging = format!("{}/skein/handoff-snapshots/{name}", repo.store);
+        let archive = format!("{staging}/ignored-rescue.tgz");
+        let script = format!(
+            "set -e; cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; mkdir -p {stage}; \
+             {sweep} \
+             if [ -s {stage}/list ]; then tar --null -T {stage}/list -czf {archive}; \
+             else tar -czf {archive} --files-from /dev/null; fi; \
+             rm -f {stage}/list; \
+             tar -tzf {archive} | wc -l",
+            stage = sh_quote(&staging),
+            archive = sh_quote(&archive),
+            sweep = ignored_sweep(&staging, "list", "/dev/null"),
+        );
+        let count = old
+            .exec(&script, Duration::from_secs(600))?
+            .trim()
+            .to_string();
+        // `-k` is the whole safety property: extract only what is not already there.
+        let restore = format!(
+            "cd {tree}; tar -xzkf {archive} 2>/dev/null || true; rm -f {archive}",
+            tree = sh_quote(&format!("{}/tree", box_root(name))),
+            archive = sh_quote(&archive),
+        );
+        own_sandbox(&record.sandbox).exec(&restore, Duration::from_secs(300))?;
+        Ok(count)
+    })();
+
+    // Stopped again either way. A rescue that leaves a second VM running has undone the migration.
+    if let Err(e) = run_capture_for("sbx", &["stop", name], Duration::from_secs(300)) {
+        eprintln!("skein: {name}'s old sandbox could not be stopped again ({e}) — `sbx stop {name}` frees its reservation");
+    }
+    carried
+}
+
+/// List the ignored paths worth carrying, into `<dir>/<list>` — shared by the snapshot and the
+/// rescue so the two can never disagree about what counts as work.
+fn ignored_sweep(dir: &str, list: &str, skipped: &str) -> String {
+    const FILE_KB: u64 = 10 * 1024;
+    const DIR_KB: u64 = 20 * 1024;
+    const DIR_FILES: u64 = 2000;
+    let d = sh_quote(dir);
+    format!(
+        "git ls-files --others --ignored --exclude-standard --directory -z \
+           -- . ':(exclude).claude' ':(exclude).claude/**' > {d}/ignored.list; \
+         : > {skipped_q}; \
+         while IFS= read -r -d '' p; do \
+           case \"$p\" in \
+             */) \
+               n=$(find \"$p\" -type f 2>/dev/null | head -n {over} | wc -l); \
+               if [ \"$n\" -ge {over} ]; then \
+                 printf '%s (over {DIR_FILES} files)\\n' \"$p\" >> {skipped_q}; continue; \
+               fi; \
+               kb=$(du -sk \"$p\" 2>/dev/null | cut -f1); \
+               case \"$kb\" in ''|*[!0-9]*) kb=0 ;; esac; \
+               if [ \"$kb\" -gt {DIR_KB} ]; then \
+                 printf '%s (%s MB)\\n' \"$p\" \"$((kb/1024))\" >> {skipped_q}; continue; \
+               fi ;; \
+             *) \
+               kb=$(( $(wc -c < \"$p\" 2>/dev/null || echo 0) / 1024 )); \
+               if [ \"$kb\" -gt {FILE_KB} ]; then \
+                 printf '%s (%s MB)\\n' \"$p\" \"$((kb/1024))\" >> {skipped_q}; continue; \
+               fi ;; \
+           esac; \
+           printf '%s\\0' \"$p\" >> {d}/{list}; \
+         done < {d}/ignored.list; \
+         rm -f {d}/ignored.list; ",
+        over = DIR_FILES + 1,
+        skipped_q = sh_quote(skipped),
+    )
+}
+
 /// Everything a box's work is, written into the store: its commits, its index, its worktree, the
 /// files git is not tracking, and the agent's own state.
 ///
@@ -899,37 +1008,10 @@ const SKIPPED_FILE: &str = "skipped-ignored.txt";
 /// Whatever is refused is written to [`SKIPPED_FILE`] and reported by the caller.
 fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, home: &str) -> String {
     let s = sh_quote(snapshot);
-    // Deliberately generous: the cost of carrying a few MB too much is disk in the store, and the
-    // cost of carrying too little is a box that cannot run.
-    const FILE_KB: u64 = 10 * 1024;
-    const DIR_KB: u64 = 20 * 1024;
-    const DIR_FILES: u64 = 2000;
-    let sweep_ignored = format!(
-        "git ls-files --others --ignored --exclude-standard --directory -z \
-           -- . ':(exclude).claude' ':(exclude).claude/**' > {s}/ignored.list; \
-         : > {s}/{SKIPPED_FILE}; \
-         while IFS= read -r -d '' p; do \
-           case \"$p\" in \
-             */) \
-               n=$(find \"$p\" -type f 2>/dev/null | head -n {over} | wc -l); \
-               if [ \"$n\" -ge {over} ]; then \
-                 printf '%s (over {DIR_FILES} files)\\n' \"$p\" >> {s}/{SKIPPED_FILE}; continue; \
-               fi; \
-               kb=$(du -sk \"$p\" 2>/dev/null | cut -f1); \
-               case \"$kb\" in ''|*[!0-9]*) kb=0 ;; esac; \
-               if [ \"$kb\" -gt {DIR_KB} ]; then \
-                 printf '%s (%s MB)\\n' \"$p\" \"$((kb/1024))\" >> {s}/{SKIPPED_FILE}; continue; \
-               fi ;; \
-             *) \
-               kb=$(( $(wc -c < \"$p\" 2>/dev/null || echo 0) / 1024 )); \
-               if [ \"$kb\" -gt {FILE_KB} ]; then \
-                 printf '%s (%s MB)\\n' \"$p\" \"$((kb/1024))\" >> {s}/{SKIPPED_FILE}; continue; \
-               fi ;; \
-           esac; \
-           printf '%s\\0' \"$p\" >> {s}/untracked.list; \
-         done < {s}/ignored.list; \
-         rm -f {s}/ignored.list; ",
-        over = DIR_FILES + 1,
+    let sweep_ignored = ignored_sweep(
+        snapshot,
+        "untracked.list",
+        &format!("{snapshot}/{SKIPPED_FILE}"),
     );
     format!(
         "set -e; mkdir -p {s}; \
@@ -2127,6 +2209,45 @@ mod tests {
         let skipped = fs::read_to_string(snapshot.join(SKIPPED_FILE)).unwrap();
         assert!(skipped.contains("node_modules/"), "{skipped}");
         assert!(skipped.contains("big.bin"), "{skipped}");
+    }
+
+    // The rescue reads a stopped VM and writes into a live box, so its guards matter more than its
+    // happy path: it must refuse a box that has no old sandbox rather than start something, and it
+    // must never overwrite a file the box has been maintaining since it moved.
+    #[test]
+    fn recovering_ignored_files_refuses_a_box_with_nothing_to_recover_from() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let e = recover_ignored("never-migrated").unwrap_err();
+        assert!(
+            e.contains("not in the fleet"),
+            "a box that still owns its sandbox has nothing to fetch: {e}"
+        );
+        // Reached without spending anything: no `sbx start` can have run, since a box with no
+        // placement record never gets that far.
+        assert!(recover_ignored("../escape")
+            .unwrap_err()
+            .contains("invalid"));
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    // Both the snapshot and the rescue decide what counts as work worth carrying. They must decide
+    // it the same way — two copies of this rule would drift, and the drift would be silent.
+    #[test]
+    fn the_snapshot_and_the_rescue_agree_on_what_is_worth_carrying() {
+        let sweep = ignored_sweep("/snap", "list", "/snap/skipped");
+        let snapshot = snapshot_script("/snap", "demo-main", true, "/home/agent");
+        assert!(
+            snapshot.contains("--others --ignored --exclude-standard --directory"),
+            "the snapshot must sweep ignored files at all"
+        );
+        for rule in ["over 2000 files", "-gt 20480", "-gt 10240"] {
+            assert!(sweep.contains(rule), "the sweep lost a rule: {rule}");
+            assert!(snapshot.contains(rule), "the snapshot lost a rule: {rule}");
+        }
     }
 
     // A box's turn state describes a SESSION, and the store it is written to outlives the box. So a
