@@ -854,27 +854,100 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
             "$HOME".to_string(),
         ),
     };
-    // Written straight into the store, which is host-mounted and readable from both sides — rather
-    // than built in the box's private /tmp and copied out a file at a time.
     let build = format!(
-        "set -e; {enter}mkdir -p {s}; \
+        "{enter}{}",
+        snapshot_script(&snapshot, name, placed.is_none(), &home)
+    );
+    boxed.exec(&build, Duration::from_secs(600))?;
+
+    // What the sweep refused to carry, said out loud. A snapshot that quietly leaves things behind
+    // is worse than one that carries less: the box comes back looking complete.
+    let skipped = std::fs::read_to_string(format!("{snapshot}/{SKIPPED_FILE}")).unwrap_or_default();
+    let lines: Vec<&str> = skipped.lines().filter(|l| !l.trim().is_empty()).collect();
+    if !lines.is_empty() {
+        eprintln!(
+            "skein: {name}'s snapshot leaves {} ignored path(s) behind — {}{}. \
+             They are build output or dependencies by size; rebuild them in the box.",
+            lines.len(),
+            lines.iter().take(3).copied().collect::<Vec<_>>().join(", "),
+            if lines.len() > 3 { ", …" } else { "" }
+        );
+    }
+    Ok(relative)
+}
+
+/// Where the snapshot records the ignored paths it decided not to carry.
+const SKIPPED_FILE: &str = "skipped-ignored.txt";
+
+/// Everything a box's work is, written into the store: its commits, its index, its worktree, the
+/// files git is not tracking, and the agent's own state.
+///
+/// **Ignored files are work too.** The sweep used to be `--others --exclude-standard`, which lists
+/// untracked files and deliberately omits ignored ones — so `.env`, `.envrc`, local dev config and
+/// the box's own `.skein/journal.md` were silently left behind on every migration and every resize.
+/// The box came back looking complete and failed at runtime, or came back having forgotten what it
+/// had been doing, which is worse than an error because nothing announces it.
+///
+/// The reason it cannot simply carry everything ignored is `node_modules/` and `target/`: this runs
+/// for every box, into a host directory, and a resize does the whole fleet at once. So the rule is
+/// **size, not names** — a hand-written list of build directories is a list that is wrong for the
+/// next language. An ignored *file* is carried unless it is very large; an ignored *directory* is
+/// carried when it is small enough to be config rather than artefacts. `.skein/` and `.env` pass;
+/// a dependency tree does not. The file-count probe short-circuits at its threshold, so a directory
+/// with 200k files costs one bounded `find` rather than a walk of the whole thing.
+///
+/// Whatever is refused is written to [`SKIPPED_FILE`] and reported by the caller.
+fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, home: &str) -> String {
+    let s = sh_quote(snapshot);
+    // Deliberately generous: the cost of carrying a few MB too much is disk in the store, and the
+    // cost of carrying too little is a box that cannot run.
+    const FILE_KB: u64 = 10 * 1024;
+    const DIR_KB: u64 = 20 * 1024;
+    const DIR_FILES: u64 = 2000;
+    let sweep_ignored = format!(
+        "git ls-files --others --ignored --exclude-standard --directory -z \
+           -- . ':(exclude).claude' ':(exclude).claude/**' > {s}/ignored.list; \
+         : > {s}/{SKIPPED_FILE}; \
+         while IFS= read -r -d '' p; do \
+           case \"$p\" in \
+             */) \
+               n=$(find \"$p\" -type f 2>/dev/null | head -n {over} | wc -l); \
+               if [ \"$n\" -ge {over} ]; then \
+                 printf '%s (over {DIR_FILES} files)\\n' \"$p\" >> {s}/{SKIPPED_FILE}; continue; \
+               fi; \
+               kb=$(du -sk \"$p\" 2>/dev/null | cut -f1); \
+               case \"$kb\" in ''|*[!0-9]*) kb=0 ;; esac; \
+               if [ \"$kb\" -gt {DIR_KB} ]; then \
+                 printf '%s (%s MB)\\n' \"$p\" \"$((kb/1024))\" >> {s}/{SKIPPED_FILE}; continue; \
+               fi ;; \
+             *) \
+               kb=$(( $(wc -c < \"$p\" 2>/dev/null || echo 0) / 1024 )); \
+               if [ \"$kb\" -gt {FILE_KB} ]; then \
+                 printf '%s (%s MB)\\n' \"$p\" \"$((kb/1024))\" >> {s}/{SKIPPED_FILE}; continue; \
+               fi ;; \
+           esac; \
+           printf '%s\\0' \"$p\" >> {s}/untracked.list; \
+         done < {s}/ignored.list; \
+         rm -f {s}/ignored.list; ",
+        over = DIR_FILES + 1,
+    );
+    format!(
+        "set -e; mkdir -p {s}; \
          git bundle create {s}/repo.bundle --all; \
          git diff --cached --binary HEAD > {s}/index.patch; \
          git diff --binary > {s}/worktree.patch; \
          git ls-files --others --exclude-standard -z -- . ':(exclude).claude' ':(exclude).claude/**' > {s}/untracked.list; \
+         {sweep_ignored}\
          if [ -s {s}/untracked.list ]; then tar --null -T {s}/untracked.list -czf {s}/untracked.tgz; \
          else tar -czf {s}/untracked.tgz --files-from /dev/null; fi; \
          rm -f {s}/untracked.list; \
          printf '{{\"box\":\"%s\",\"branch\":\"%s\",\"head\":\"%s\"}}\\n' {n} \
            \"$(git rev-parse --abbrev-ref HEAD)\" \"$(git rev-parse HEAD)\" > {s}/manifest.json; \
          {agent_state}",
-        s = sh_quote(&snapshot),
         n = sh_quote(name),
         // A box already in the fleet host-binds its transcript; one being migrated in does not.
-        agent_state = agent_state_tar(&snapshot, placed.is_none(), &home),
-    );
-    boxed.exec(&build, Duration::from_secs(600))?;
-    Ok(relative)
+        agent_state = agent_state_tar(snapshot, transcript_is_vm_local, home),
+    )
 }
 
 /// The parts of a box's private `$HOME` that a rebuilt box needs and cannot get any other way.
@@ -1971,6 +2044,89 @@ mod tests {
             blind.contains("git clone 'git@github.com:o/r.git'") && !blind.contains("--branch"),
             "no base means let git use the remote's default: {blind}"
         );
+    }
+
+    // Ignored files are work too — `.env`, `.envrc`, local dev config, and the box's own
+    // `.skein/journal.md`. The sweep omitted every one of them, so a migrated box came back looking
+    // complete and either failed at runtime or had forgotten what it was doing. What it must still
+    // refuse is `node_modules/` and `target/`, which is why the rule is size rather than a list of
+    // names that would be wrong for the next language.
+    //
+    // Runs the real script against a real repository: it is shell, and shell is where the bug was.
+    #[test]
+    fn a_snapshot_carries_ignored_config_but_not_the_build_output() {
+        use std::fs;
+        let dir = tempdir();
+        let tree = dir.join("tree");
+        let snapshot = dir.join("snap");
+        let home = dir.join("home");
+        fs::create_dir_all(&tree).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let sh = |cwd: &std::path::Path, script: &str| -> std::process::Output {
+            std::process::Command::new("bash")
+                .current_dir(cwd)
+                .arg("-c")
+                .arg(script)
+                .env("HOME", &home)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap()
+        };
+        fs::write(
+            tree.join(".gitignore"),
+            ".env\n.skein/\nnode_modules/\nbig.bin\n",
+        )
+        .unwrap();
+        fs::write(tree.join("src.rs"), "fn main() {}").unwrap();
+        let out = sh(
+            &tree,
+            "git init -q -b main . && git add -A && git commit -qm one",
+        );
+        assert!(out.status.success(), "{out:?}");
+
+        // Ignored, and all of it work: local config and the box's own journal.
+        fs::write(tree.join(".env"), "SECRET=1\n").unwrap();
+        fs::create_dir_all(tree.join(".skein")).unwrap();
+        fs::write(tree.join(".skein/journal.md"), "what I did\n").unwrap();
+        // Ignored, and none of it work: reproducible output, too big to keep copying.
+        fs::create_dir_all(tree.join("node_modules/pkg")).unwrap();
+        for i in 0..2100 {
+            fs::write(tree.join(format!("node_modules/pkg/f{i}")), "x").unwrap();
+        }
+        fs::write(tree.join("big.bin"), vec![0u8; 11 * 1024 * 1024]).unwrap();
+        // Plain untracked files must still be carried, exactly as before.
+        fs::write(tree.join("notes.txt"), "scratch\n").unwrap();
+
+        let script = snapshot_script(
+            &snapshot.to_string_lossy(),
+            "demo-main",
+            true,
+            &home.to_string_lossy(),
+        );
+        let out = sh(&tree, &script);
+        assert!(out.status.success(), "snapshot failed: {out:?}");
+
+        let listing = sh(&snapshot, "tar -tzf untracked.tgz");
+        let carried = String::from_utf8_lossy(&listing.stdout);
+        for want in [".env", ".skein/journal.md", "notes.txt"] {
+            assert!(
+                carried.lines().any(|l| l.trim_end_matches('/') == want),
+                "{want} was left behind: {carried}"
+            );
+        }
+        assert!(
+            !carried.contains("node_modules"),
+            "a dependency tree does not belong in the store: {carried}"
+        );
+        assert!(!carried.contains("big.bin"), "{carried}");
+
+        // And it says so, rather than leaving them behind quietly.
+        let skipped = fs::read_to_string(snapshot.join(SKIPPED_FILE)).unwrap();
+        assert!(skipped.contains("node_modules/"), "{skipped}");
+        assert!(skipped.contains("big.bin"), "{skipped}");
     }
 
     // A box's turn state describes a SESSION, and the store it is written to outlives the box. So a
