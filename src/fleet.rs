@@ -954,6 +954,25 @@ pub fn migrate_box(name: &str) -> Result<String, String> {
     let dir = snapshot_box(name, &repo.store, &run).map_err(|e| {
         format!("could not save {name}'s work ({e}) — nothing was changed, the box is untouched")
     })?;
+    // The spec is written into the repo's store, which the OLD box reads too — and it tells whoever
+    // reads it to restore this snapshot. That is right for the fleet box being built and wrong for
+    // the box the snapshot came from, whose tree already holds every byte of it. It matters on the
+    // failure path, which is the only path that starts the old box again: a migration that stopped
+    // the sandbox and then could not clone left `sbx start` as the way back, and the restore would
+    // have met patches already applied and failed the box's startup outright.
+    //
+    // So the source is marked as already-restored before it is stopped, in the file the kit checks.
+    // Best-effort: the mark prevents a bad recovery, and failing to write it must not fail a
+    // migration that has otherwise succeeded.
+    if let Some(place) = place_of(name) {
+        // Asked of git rather than built from a recorded path, so it lands in the right place for a
+        // box in either shape — every script skein sends already starts at the box's repo root.
+        let _ = place.exec(
+            "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
+             touch \"$root/.git/skein-handoff-restored\" 2>/dev/null || true",
+            Duration::from_secs(30),
+        );
+    }
     write_restore_launch_spec(&BoxSnapshot {
         name: name.to_string(),
         repo: repo.clone(),
