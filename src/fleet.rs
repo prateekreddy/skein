@@ -650,6 +650,28 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
     )
 }
 
+/// Drop what the *previous* session said about this box, as a new one starts.
+///
+/// Turn state is a claim about a session — "working", "waiting", "ended" — and it is written into
+/// the repo's store, which lives on the host and outlives the box entirely. So a migrated box came
+/// up reading `ended`: stopping the old sandbox killed its agent, the SessionEnd hook faithfully
+/// recorded that, and the new box inherited a dead session's last word and looked terminated while
+/// sitting there perfectly alive. The same would greet every box after a resize.
+///
+/// Only the claim about the current turn goes. The narrative signal, the telemetry and the hook log
+/// are history — they describe what happened, not what is happening, and a box that has just moved
+/// is exactly when its history is worth keeping. The in-flight sub-agent counter goes too: it counts
+/// processes that died with the old session, and a stale one would make the first Notification of
+/// the new session read as "still busy" instead of "needs you".
+///
+/// Absent files are the normal case (a box being created for the first time), so this is silent.
+fn forget_turn_state(repo: &Repo, name: &str) {
+    let status = std::path::Path::new(&repo.store).join("status");
+    for file in [format!("{name}.json"), format!("{name}.agents")] {
+        let _ = std::fs::remove_file(status.join(file));
+    }
+}
+
 /// The shell that starts a box: its namespace, its tmux server, and the agent inside it.
 pub fn session_script(name: &str, session: &str, agent_command: &str) -> String {
     format!(
@@ -751,6 +773,7 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
     if has_session {
         eprintln!("skein: {name} already has a live session; keeping it");
     } else {
+        forget_turn_state(repo, name);
         fleet.exec(
             &session_script(name, "skein-shell", agent_command),
             Duration::from_secs(120),
@@ -1948,6 +1971,66 @@ mod tests {
             blind.contains("git clone 'git@github.com:o/r.git'") && !blind.contains("--branch"),
             "no base means let git use the remote's default: {blind}"
         );
+    }
+
+    // A box's turn state describes a SESSION, and the store it is written to outlives the box. So a
+    // migrated box came up reading `ended` — the old sandbox's agent died on the way out, its
+    // SessionEnd hook recorded that faithfully, and the new box inherited it and looked terminated
+    // while sitting there alive. What the box did stays; what it is doing right now does not.
+    #[test]
+    fn a_new_session_does_not_inherit_the_previous_ones_turn_state() {
+        use std::fs;
+        let store = tempdir().join("store").join(".claude");
+        for dir in ["status", "sessions", "hook-log", "telemetry"] {
+            fs::create_dir_all(store.join(dir)).unwrap();
+        }
+        let repo = Repo {
+            id: "bridge".into(),
+            source: String::new(),
+            work: String::new(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        };
+        let write = |rel: &str, body: &str| fs::write(store.join(rel), body).unwrap();
+        write(
+            "status/bridge-main.json",
+            r#"{"status":"ended","detail":"session ended: other"}"#,
+        );
+        write("status/bridge-main.agents", "2");
+        write(
+            "sessions/bridge-main.json",
+            r#"{"lastMessage":"shipped it"}"#,
+        );
+        write("hook-log/bridge-main.jsonl", "{\"event\":\"ended\"}\n");
+        write("telemetry/bridge-main.jsonl", "{\"total\":1}\n");
+        // Another box's state must be untouched: these all live in one shared directory.
+        write("status/other-box.json", r#"{"status":"working"}"#);
+
+        forget_turn_state(&repo, "bridge-main");
+
+        assert!(
+            !store.join("status/bridge-main.json").exists(),
+            "a dead session's last word must not greet the new one"
+        );
+        assert!(
+            !store.join("status/bridge-main.agents").exists(),
+            "the counter counts processes that died with the old session"
+        );
+        for kept in [
+            "sessions/bridge-main.json",
+            "hook-log/bridge-main.jsonl",
+            "telemetry/bridge-main.jsonl",
+            "status/other-box.json",
+        ] {
+            assert!(store.join(kept).exists(), "{kept} is history, not a claim");
+        }
+
+        // A box being created for the first time has none of this, and that is not an error.
+        forget_turn_state(&repo, "brand-new");
     }
 
     // The base is a ladder, not a guess: the branch the user configured, then the local caches of
