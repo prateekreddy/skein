@@ -1022,13 +1022,32 @@ fn ignored_sweep(dir: &str, list: &str, skipped: &str) -> String {
 /// with 200k files costs one bounded `find` rather than a walk of the whole thing.
 ///
 /// Whatever is refused is written to [`SKIPPED_FILE`] and reported by the caller.
+///
+/// **The bundle carries what the remote does not have, not the whole history.** `--all` on its own
+/// wrote every object the repository has ever held into the store, over a virtiofs mount that is
+/// several times slower to write than local disk: one box with a 1.8 GB `.git` took a migration past
+/// its ten-minute budget doing nothing but copying history that already exists on the remote. A
+/// resize does that for every box at once.
+///
+/// `--not --remotes` leaves a bundle of exactly the commits that would otherwise be lost, with the
+/// rest recorded as prerequisites. That is safe *because of how the box is rebuilt*: the replacement
+/// is cloned from the same source this box was, so every prerequisite is already in it before the
+/// bundle is opened. Unpushed local commits are by definition not reachable from a remote ref, so
+/// they are all still in there — which is the entire job.
+///
+/// A repository with nothing unpushed makes an empty bundle, and git refuses to write one, so the
+/// fallback carries the tip commit alone (its parent is the prerequisite) — enough for the restore
+/// to find a HEAD, and still nothing like the full history. `--all` remains the last resort, for a
+/// repository too young to have a parent commit.
 fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, home: &str) -> String {
     let s = sh_quote(snapshot);
     let skipped = format!("{snapshot}/{SKIPPED_FILE}");
     let sweep_ignored = ignored_sweep(snapshot, "untracked.list", &skipped);
     format!(
         "set -e; mkdir -p {s}; \
-         git bundle create {s}/repo.bundle --all; \
+         git bundle create {s}/repo.bundle --all --not --remotes 2>/dev/null \
+           || git bundle create {s}/repo.bundle 'HEAD~1..HEAD' 2>/dev/null \
+           || git bundle create {s}/repo.bundle --all; \
          git diff --cached --binary HEAD > {s}/index.patch; \
          git diff --binary > {s}/worktree.patch; \
          git ls-files --others --exclude-standard -z -- . ':(exclude).claude' ':(exclude).claude/**' > {s}/untracked.list; \
@@ -2183,6 +2202,120 @@ mod tests {
         );
     }
 
+    // The snapshot carries what the remote does not have. `--all` copied every object the repo had
+    // ever held into the store, over a mount several times slower than local disk: a box with a
+    // 1.8 GB .git took a migration past its ten-minute budget copying history the remote already
+    // had, and a resize would do that for every box at once.
+    #[test]
+    fn a_snapshot_bundles_the_unpushed_work_not_the_whole_history() {
+        use std::fs;
+        let dir = tempdir();
+        let origin = dir.join("origin");
+        let tree = dir.join("tree");
+        let home = dir.join("home");
+        fs::create_dir_all(&origin).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let sh = |cwd: &std::path::Path, script: &str| -> std::process::Output {
+            std::process::Command::new("bash")
+                .current_dir(cwd)
+                .arg("-c")
+                .arg(script)
+                .env("HOME", &home)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap()
+        };
+        // History the remote already has: one large blob, the stand-in for a 1.8 GB .git.
+        let out = sh(&origin, "git init -q -b main .");
+        assert!(out.status.success(), "{out:?}");
+        fs::write(origin.join("big.bin"), vec![7u8; 6 * 1024 * 1024]).unwrap();
+        let out = sh(&origin, "git add -A && git commit -qm history");
+        assert!(out.status.success(), "{out:?}");
+
+        let out = sh(
+            &dir,
+            &format!("git clone -q {} {}", origin.display(), tree.display()),
+        );
+        assert!(out.status.success(), "{out:?}");
+        // The only thing that would actually be lost: one small unpushed commit.
+        fs::write(tree.join("work.txt"), "the unpushed work\n").unwrap();
+        let out = sh(&tree, "git add -A && git commit -qm unpushed");
+        assert!(out.status.success(), "{out:?}");
+
+        let snapshot = dir.join("snap");
+        let script = snapshot_script(
+            &snapshot.to_string_lossy(),
+            "demo-main",
+            true,
+            &home.to_string_lossy(),
+        );
+        let out = sh(&tree, &script);
+        assert!(out.status.success(), "snapshot failed: {out:?}");
+
+        let bundle = snapshot.join("repo.bundle");
+        let size = fs::metadata(&bundle).unwrap().len();
+        assert!(
+            size < 1024 * 1024,
+            "the bundle re-copied history the remote already has: {size} bytes"
+        );
+        // Small, and still complete: the unpushed commit is in there, and a fresh clone of the same
+        // origin — which is exactly what the box is rebuilt from — can open it.
+        let restored = dir.join("restored");
+        let out = sh(
+            &dir,
+            &format!("git clone -q {} {}", origin.display(), restored.display()),
+        );
+        assert!(out.status.success(), "{out:?}");
+        let out = sh(
+            &restored,
+            &format!(
+                "git fetch -q {} 'refs/heads/*:refs/remotes/snapshot/*' && \
+                 git checkout -q -B main refs/remotes/snapshot/main && cat work.txt",
+                bundle.display()
+            ),
+        );
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("unpushed work"),
+            "a thin bundle must still restore the work it was taken for: {out:?}"
+        );
+
+        // A box with nothing unpushed asks git for an empty bundle, which git refuses to write. The
+        // fallback carries the tip alone — the restore needs *a* bundle, and the kit treats a
+        // missing one as a failed snapshot.
+        let clean = dir.join("clean");
+        let out = sh(
+            &dir,
+            &format!("git clone -q {} {}", origin.display(), clean.display()),
+        );
+        assert!(out.status.success(), "{out:?}");
+        let snapshot2 = dir.join("snap2");
+        let out = sh(
+            &clean,
+            &snapshot_script(
+                &snapshot2.to_string_lossy(),
+                "demo-main",
+                true,
+                &home.to_string_lossy(),
+            ),
+        );
+        assert!(
+            out.status.success(),
+            "snapshot of a clean box failed: {out:?}"
+        );
+        let size2 = fs::metadata(snapshot2.join("repo.bundle")).unwrap().len();
+        assert!(
+            size2 > 0,
+            "the kit reads a missing bundle as a failed snapshot"
+        );
+        assert!(
+            size2 < 1024 * 1024,
+            "a clean box must not fall back to the whole history: {size2} bytes"
+        );
+    }
+
     // Ignored files are work too — `.env`, `.envrc`, local dev config, and the box's own
     // `.skein/journal.md`. The sweep omitted every one of them, so a migrated box came back looking
     // complete and either failed at runtime or had forgotten what it was doing. What it must still
@@ -2486,6 +2619,12 @@ mod tests {
     // launcher whole, and the launcher does its own refusing from there.
     #[test]
     fn starting_a_box_hands_the_launcher_quoted_arguments() {
+        // Takes the env lock and pins its own SKEIN_HOME: `session_script` reads the box's cgroup
+        // limits out of the config, so without this it can be handed another test's home mid-run
+        // and fail on an assertion about a string it never built. Latent for a long time; it only
+        // started firing once there were more env-setting tests to race with.
+        let _g = env_lock();
+        std::env::set_var("SKEIN_HOME", tempdir());
         let script = session_script("web-main", "skein-agent", "claude --continue");
         assert!(
             script.starts_with("'/boxes/.skein/box-session.sh' 'web-main'"),
@@ -2506,5 +2645,6 @@ mod tests {
             script.ends_with("bash -lc 'claude --continue'"),
             "the agent command stays one argument: {script}"
         );
+        std::env::remove_var("SKEIN_HOME");
     }
 }
