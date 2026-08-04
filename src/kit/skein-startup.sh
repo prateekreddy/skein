@@ -189,9 +189,27 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
       && restored="all-branches"
   fi
   if [ -z "$restored" ]; then
-    git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD \
-      && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD \
-      || { echo "[skein-kit] could not restore handoff commit" >&2; exit 1; }
+    git -C "$clone_root" fetch "$snapshot/repo.bundle" HEAD >/dev/null 2>&1 \
+      && git -C "$clone_root" checkout -B "$branch" FETCH_HEAD 2>/dev/null \
+      && restored="head"
+  fi
+  # A bundle with no ref this clone can use is fatal ONLY if the clone is not already there. The
+  # snapshot records the commit it was taken at, so that is answerable rather than a guess: when the
+  # fresh clone's HEAD is already that commit, the bundle had nothing to add and the patches below
+  # are the whole remaining restore. Skipping the check would risk silently dropping unpushed
+  # commits; without it, a box whose branch was fully pushed could not be restored at all — its
+  # snapshot was complete and its migration failed anyway, with the old sandbox already stopped.
+  if [ -z "$restored" ]; then
+    want="$(sed -n 's/.*"head"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' \
+              "$snapshot/manifest.json" 2>/dev/null)"
+    have="$(git -C "$clone_root" rev-parse HEAD 2>/dev/null)"
+    if [ -n "$want" ] && [ "$want" = "$have" ]; then
+      git -C "$clone_root" checkout -B "$branch" HEAD >/dev/null 2>&1
+      echo "[skein-kit] snapshot commit is already this clone's HEAD; restoring working state only" >&2
+    else
+      echo "[skein-kit] could not restore handoff commit" >&2
+      exit 1
+    fi
   fi
   if [ -s "$snapshot/index.patch" ]; then
     git -C "$clone_root" apply --binary --index "$snapshot/index.patch" \

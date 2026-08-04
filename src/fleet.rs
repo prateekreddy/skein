@@ -1035,9 +1035,16 @@ fn ignored_sweep(dir: &str, list: &str, skipped: &str) -> String {
 /// bundle is opened. Unpushed local commits are by definition not reachable from a remote ref, so
 /// they are all still in there — which is the entire job.
 ///
-/// A repository with nothing unpushed makes an empty bundle, and git refuses to write one, so the
-/// fallback carries the tip commit alone (its parent is the prerequisite) — enough for the restore
-/// to find a HEAD, and still nothing like the full history. `--all` remains the last resort, for a
+/// The trimmed bundle is then **checked for the box's own branch**, and that check is the whole
+/// safety of this. `--not --remotes` drops any ref whose tip the remote already has, so a box whose
+/// checked-out branch is fully pushed gets a bundle without it — and if some *other* local ref is
+/// unpushed the bundle is still non-empty, so it looks perfectly healthy. Measured: a 127 KB bundle
+/// with no `refs/heads/<branch>` and no HEAD, and a restore that died on `couldn't find remote ref
+/// HEAD` after the old sandbox had already been stopped.
+///
+/// When the branch is missing — or the bundle would be empty, which git refuses to write — the
+/// fallback carries the tip commit alone, its parent recorded as a prerequisite. That is a ref the
+/// restore can find, and still nothing like the full history. `--all` remains the last resort, for a
 /// repository too young to have a parent commit.
 fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, home: &str) -> String {
     let s = sh_quote(snapshot);
@@ -1045,9 +1052,13 @@ fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, hom
     let sweep_ignored = ignored_sweep(snapshot, "untracked.list", &skipped);
     format!(
         "set -e; mkdir -p {s}; \
-         git bundle create {s}/repo.bundle --all --not --remotes 2>/dev/null \
-           || git bundle create {s}/repo.bundle 'HEAD~1..HEAD' 2>/dev/null \
-           || git bundle create {s}/repo.bundle --all; \
+         b=\"$(git rev-parse --abbrev-ref HEAD)\"; \
+         if ! {{ git bundle create {s}/repo.bundle --all --not --remotes 2>/dev/null \
+                && git bundle list-heads {s}/repo.bundle 2>/dev/null \
+                   | awk -v r=\"refs/heads/$b\" '$2==r{{f=1}} END{{exit !f}}'; }}; then \
+           git bundle create {s}/repo.bundle 'HEAD~1..HEAD' 2>/dev/null \
+             || git bundle create {s}/repo.bundle --all; \
+         fi; \
          git diff --cached --binary HEAD > {s}/index.patch; \
          git diff --binary > {s}/worktree.patch; \
          git ls-files --others --exclude-standard -z -- . ':(exclude).claude' ':(exclude).claude/**' > {s}/untracked.list; \
@@ -2313,6 +2324,48 @@ mod tests {
         assert!(
             size2 < 1024 * 1024,
             "a clean box must not fall back to the whole history: {size2} bytes"
+        );
+
+        // The shape that actually broke a migration: the checked-out branch is fully pushed, but
+        // ANOTHER local ref is not. `--not --remotes` drops the pushed branch's ref while the other
+        // keeps the bundle non-empty — so it looked healthy and carried nothing the restore could
+        // find, and the box's old sandbox had already been stopped by the time that surfaced.
+        let out = sh(
+            &clean,
+            "git checkout -q -b side && git commit -q --allow-empty -m side && git checkout -q main",
+        );
+        assert!(out.status.success(), "{out:?}");
+        let snapshot3 = dir.join("snap3");
+        let out = sh(
+            &clean,
+            &snapshot_script(
+                &snapshot3.to_string_lossy(),
+                "demo-main",
+                true,
+                &home.to_string_lossy(),
+            ),
+        );
+        assert!(out.status.success(), "{out:?}");
+        let restored2 = dir.join("restored2");
+        let out = sh(
+            &dir,
+            &format!("git clone -q {} {}", origin.display(), restored2.display()),
+        );
+        assert!(out.status.success(), "{out:?}");
+        // The invariant the restore depends on: a ref it can actually check the branch out from.
+        let bundle3 = snapshot3.join("repo.bundle");
+        let out = sh(
+            &restored2,
+            &format!(
+                "git fetch -q {b} 'refs/heads/*:refs/remotes/snapshot/*' 2>/dev/null && \
+                 git rev-parse --verify -q refs/remotes/snapshot/main >/dev/null || \
+                 git fetch -q {b} HEAD",
+                b = bundle3.display()
+            ),
+        );
+        assert!(
+            out.status.success(),
+            "the restore must find a ref for the box's branch: {out:?}"
         );
     }
 
