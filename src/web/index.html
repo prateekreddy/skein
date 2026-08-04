@@ -474,6 +474,7 @@
   #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open { display:flex; justify-content:center; align-items:flex-start; }
   /* add-repo modal: derived-id preview + inline result/warning (replaces the native prompt/alert) */
   .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
+  .bs-actions { display:flex; gap:8px; flex-wrap:wrap; }
   .ar-derived b { color:var(--accent); font-weight:600; }
   .ar-msg { font-size:12px; line-height:1.5; border-radius:8px; padding:9px 11px; border:1px solid var(--line); }
   .ar-msg.err  { color:#ffb4ae; background:color-mix(in srgb,var(--attn) 12%,transparent); border-color:color-mix(in srgb,var(--attn) 35%,transparent); }
@@ -834,7 +835,15 @@
       <label class="nb-lbl">disk allowance</label>
       <input id="bs-disk" autocomplete="off" spellcheck="false" />
       <div class="ar-derived" id="bs-note"></div>
-      <div class="nb-foot"><span class="hint">applies immediately — the box keeps running</span><button class="primary" id="bs-go">Save</button></div>
+      <!-- One-shot actions, not settings: each spends a real round trip, so they are buttons you
+           press rather than fields that save. They live here because the dock had grown a row of
+           them that were mostly irrelevant to the box you were looking at. -->
+      <label class="nb-lbl">actions</label>
+      <div class="bs-actions">
+        <button type="button" class="kbtn ghost" id="bs-wire"></button>
+        <button type="button" class="kbtn ghost" id="bs-take"></button>
+      </div>
+      <div class="nb-foot"><span class="hint">settings apply immediately — the box keeps running</span><button class="primary" id="bs-go">Save</button></div>
     </div>
   </div>
 
@@ -1550,10 +1559,7 @@ function renderDockbar() {
   dockbar.className = "dockbar s-" + g;
   const m = view.mode, isShell = view.kind === "shell";
   const runtime = (!isShell && activeSession()?.runtime) || b.agent || agentOf(view.box);
-  const targetRuntime = nextRuntime(runtime);
-  const otherRuntime = targetRuntime?.id;
   const activeRuntimeLabel = runtimeLabel(runtime);
-  const otherLabel = targetRuntime?.label || "another runtime";
   const hasReview = m === 'diff' && (comments.get(view.box) || []).length;
   dockbar.innerHTML =
       `<button class="kbtn ghost dback" id="dback" title="back to the fleet"><svg class="ic" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></button>`
@@ -1571,10 +1577,8 @@ function renderDockbar() {
        </div>`
     + `<div class="dock-right">`
     + (m==='term' ? `<button class="kbtn ghost" id="dattach" title="attach files or a folder for the agent to read (or just paste / drag them onto the terminal)"><svg class="ic" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>` : "")
-    + (otherRuntime ? `<button class="kbtn ghost" id="dtake" title="create a lightweight ${esc(otherLabel)} replacement; preserve this source as rollback">↔ ${esc(otherLabel)}</button>` : "")
     + (m==='diff' ? `<button class="kbtn ghost" id="dref" title="refresh diff"><svg class="ic" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>` : "")
     + `<button class="kbtn ghost" id="dbset" title="this box's own work tracking, committer and disk allowance">⚙ Box settings</button>`
-    + (trackableConnection(b) ? `<button class="kbtn ghost" id="dtrack"${tracking.has(view.box) ? " disabled" : ""} title="mint this box its own tracker token at ${esc(trackableConnection(b).label)} and register the sync server inside it">${tracking.has(view.box) ? "wiring…" : "◇ Track work"}</button>` : "")
     // Only when the store actually holds something newer. A button that is always there teaches you
     // to ignore it, and this one has nothing to say on most days.
     + (b.docs_update ? `<button class="kbtn ghost" id="drefreshdocs"${refreshingDocs.has(view.box) ? " disabled" : ""} title="the work-tracking rules in the store are newer than the ones this box installed — re-apply them. Only documents the box has not edited are rewritten; shift-click to also take ones installed before skein recorded what it wrote">${refreshingDocs.has(view.box) ? "applying…" : "⟳ Update rules"}</button>` : "")
@@ -1593,11 +1597,9 @@ function renderDockbar() {
   dockbar.querySelector('[data-m=tx]').onclick = () => openTranscript(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
   const bs = dockbar.querySelector("#dbset"); if (bs) bs.onclick = () => openBoxSettings(view.box);
-  const tk = dockbar.querySelector("#dtrack"); if (tk) tk.onclick = () => trackWork(view.box);
   const rd = dockbar.querySelector("#drefreshdocs"); if (rd) rd.onclick = e => refreshDocs(view.box, e.shiftKey);
   // plain click = files, shift-click = a whole folder (the picker can only do one or the other).
   const at = dockbar.querySelector("#dattach"); if (at) at.onclick = e => pickAttachment(e.shiftKey);
-  const takeover = dockbar.querySelector("#dtake"); if (takeover) takeover.onclick = () => takeOver(view.box, otherRuntime);
   const sd = dockbar.querySelector("#dsend"); if (sd) sd.onclick = () => sendReview(view.box);
   const restart = dockbar.querySelector("#drestart"); if (restart) restart.onclick = () => restartAgent(view.box);
   const ar = dockbar.querySelector("#dstop"); if (ar) ar.onclick = () => stopBox(view.box);
@@ -2538,21 +2540,16 @@ function loadSync() {
 // The connection a box could actually be wired to, or null. Per box, not per host: with more than
 // one backlog, "some connection somewhere is ready" says nothing about *this* box, and offering a
 // button that can only fail is worse than not offering it. `repo` is what the row already carries.
-function trackableConnection(b) {
-  const repo = repos.find(r => r.id === (b || {}).repo);
-  if (!repo) return null;
-  return (syncStatus.connections || []).find(c => c.id === repo.sync_connection && c.ready) || null;
-}
 // Wire one box up: the host mints it its own gateway token and registers the MCP server inside it.
 // A click, never a tick — it spends a network round trip and creates a real credential.
 function trackWork(name) {
   if (!name || tracking.has(name)) return;
-  tracking.add(name); renderDockbar();
+  tracking.add(name);
   fetch(`/api/boxes/${encodeURIComponent(name)}/sync`, { method:"POST" })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(d => toast(d.note || `${name} is tracking work`))
     .catch(e => toast(`couldn't wire ${name}: ${e.message}`))
-    .finally(() => { tracking.delete(name); renderDockbar(); });
+    .finally(() => { tracking.delete(name); });
 }
 // Re-apply the work-tracking documents to a box that already has them. `replace` (shift-click) is
 // for boxes wired up before skein recorded what it installed, where stale and box-edited cannot be
@@ -2914,6 +2911,30 @@ function openBoxSettings(name) {
       const d = document.getElementById("bs-disk");
       d.value = cur.own_disk || "";
       d.placeholder = cur.effective_disk_mb ? fmtGb(cur.effective_disk_mb) : "unlimited";
+      // Work tracking: the button says what pressing it would DO, which depends on whether the box
+      // already holds a token. Nothing host-side records that, so the panel asked the box.
+      const wire = document.getElementById("bs-wire");
+      const conn = cur.effective_connection;
+      wire.disabled = !conn || tracking.has(name);
+      wire.textContent = tracking.has(name) ? "wiring…"
+        : !conn ? "◇ Not tracked"
+        : cur.wired ? `◇ Re-mint token at ${conn}` : `◇ Wire up ${conn}`;
+      wire.title = !conn
+        ? "this box claims work from nowhere — pick a connection above first"
+        : cur.wired
+          ? `this box already holds a token for ${conn}; re-minting replaces it (its predecessor was this box's own)`
+          : `mint this box its own token at ${conn} and register the sync server inside it`;
+      wire.onclick = () => { trackWork(name); closeBoxSettings(); };
+
+      // Runtime: the other one, or nothing to offer when there is no other.
+      const take = document.getElementById("bs-take");
+      const other = nextRuntime(cur.agent || agentOf(name));
+      take.style.display = other ? "" : "none";
+      if (other) {
+        take.textContent = `↔ Replace with ${other.label}`;
+        take.title = `snapshot this box and create a ${other.label} replacement; this one stays intact as rollback`;
+        take.onclick = () => { closeBoxSettings(); takeOver(name, other.id); };
+      }
       document.getElementById("bs-note").textContent =
         "Blank inherits the fleet default; `none` means unlimited. Disk is measured, not enforced — one filesystem serves every box.";
       document.getElementById("boxset").classList.add("open");

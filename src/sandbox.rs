@@ -588,11 +588,7 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn sbx_guest_output(
-    name: &str,
-    shell: &str,
-    timeout: Duration,
-) -> Result<String, String> {
+pub fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String, String> {
     place_of(name)
         .ok_or("invalid box name")?
         .exec(shell, timeout)

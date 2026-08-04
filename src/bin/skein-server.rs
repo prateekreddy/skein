@@ -433,6 +433,17 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
         "effective_git_name": git_name,
         "effective_git_email": git_email,
         "effective_disk_mb": skein::box_disk_limit(&name),
+        // Asked of the box, because nothing host-side records it: the token lands in the box's own
+        // `~/.config/sync/env`. One round trip, and only when someone opens this panel — the board
+        // refreshes every 2s and could never pay for this per box.
+        "wired": skein::sbx_guest_output(
+            &name,
+            "test -s \"$HOME/.config/sync/env\" && echo wired",
+            std::time::Duration::from_secs(15),
+        )
+        .unwrap_or_default()
+        .contains("wired"),
+        "agent": skein::agent_for_box(&name),
         "repo_connection": repo
             .and_then(|r| skein::connection_for_repo(&r))
             .map(|c| c.label)
