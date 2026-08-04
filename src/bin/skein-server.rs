@@ -802,8 +802,33 @@ async fn api_settings() -> Json<skein::Config> {
     Json(skein::load_config())
 }
 
-/// Update skein's app settings.
-async fn api_set_settings(Json(c): Json<skein::Config>) -> Response {
+/// Update skein's app settings — MERGED onto what is stored, never replacing it.
+///
+/// Every field of `Config` has a serde default, so deserializing a partial body into one silently
+/// turns each absent field into its default and writes that back. The settings screen sends the
+/// fields it renders, which is not all of them — so saving anything at all cleared `fleet_sandbox`,
+/// and skein forgot the fleet existed: every box read as legacy, the board emptied, and the next
+/// `skein start` would have built a whole microVM for a box that already had a namespace.
+///
+/// Merging at the JSON layer rather than fixing the one client, because the failure is structural: a
+/// body that omits a key means "leave it alone" in every REST API anyone has ever used, and the next
+/// field added to this screen would otherwise reintroduce exactly this bug.
+async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Response {
+    let Some(patch) = patch.as_object() else {
+        return (StatusCode::BAD_REQUEST, "settings must be an object").into_response();
+    };
+    let current = skein::load_config();
+    let mut merged = match serde_json::to_value(&current) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return (StatusCode::INTERNAL_SERVER_ERROR, "unreadable config").into_response(),
+    };
+    for (key, value) in patch {
+        merged.insert(key.clone(), value.clone());
+    }
+    let c: skein::Config = match serde_json::from_value(serde_json::Value::Object(merged)) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
     match skein::save_config(&c) {
         Ok(()) => {
             // Apply a newly-set SSH key immediately (load into the agent) so the user needn't restart.

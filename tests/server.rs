@@ -216,3 +216,63 @@ fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
     );
     let _ = slow.join();
 }
+
+/// Saving settings must never clear a setting the screen does not render.
+///
+/// Every `Config` field has a serde default, so a partial body deserialized straight into one turns
+/// each absent field into its default and writes that back. `fleet_sandbox` is not on the settings
+/// screen — so saving *anything* cleared it, skein forgot the fleet existed, every box read as
+/// legacy and the board emptied. Measured on a live fleet of eight.
+#[test]
+fn saving_settings_leaves_untouched_fields_alone() {
+    let dir = std::env::temp_dir().join(format!("skein-settings-it-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.json"),
+        r#"{"fleet_sandbox":"skein-fleet","fleet_memory":"26g","base_branch":"trunk"}"#,
+    )
+    .unwrap();
+
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &dir)
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Exactly what the settings screen sends: the fields it renders, and no others.
+    let (st, _) = http_post(
+        &addr,
+        "/api/settings",
+        "Content-Type: application/json\r\n",
+        br#"{"fleet_memory":"32g"}"#,
+    );
+    assert_eq!(st, 200);
+
+    let (_, body) = http_get(&addr, "/api/settings");
+    let saved: serde_json::Value =
+        serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap_or("{}"))
+            .expect("settings are JSON");
+    assert_eq!(
+        saved["fleet_memory"], "32g",
+        "the field sent must be applied"
+    );
+    assert_eq!(
+        saved["fleet_sandbox"], "skein-fleet",
+        "a field the screen never renders must survive a save — clearing this one unmakes the fleet"
+    );
+    assert_eq!(saved["base_branch"], "trunk", "and so must every other one");
+    std::fs::remove_dir_all(&dir).ok();
+}

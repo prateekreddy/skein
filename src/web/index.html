@@ -2760,8 +2760,12 @@ function closeSettings() { settingsModal().classList.remove("open"); }
 // The settings payload, built in one place so an action that must save first (applyBoxLimits) can
 // never drift from what Save itself sends — a half-saved settings object is the kind of bug that
 // only shows up as a setting that mysteriously does not stick.
+// Spread the loaded settings first, so a field this screen does not render is sent back unchanged
+// rather than omitted. The server merges too — belt and braces, because the cost of getting this
+// wrong is skein forgetting its fleet sandbox exists.
 function settingsPayload() {
   return {
+    ...settings,
     seed_gh_secret: document.getElementById("set-seedgh").checked,
     force_gh_secret: document.getElementById("set-forcegh").checked,
     confirm_destroy: document.getElementById("set-confirmdestroy").checked,
