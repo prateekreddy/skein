@@ -640,7 +640,21 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
 ///
 /// Refuses rather than reuses when the tree is already populated: a box root left behind by a
 /// previous box of the same name would otherwise silently give the new one someone else's work.
-pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
+///
+/// `upstream` repairs the one case where cloning and pushing want different sources. A repo adopted
+/// in place has no URL, so the clone comes from the host's own checkout ([`clone_source`]) — and
+/// `git clone <path>` sets `origin` to that path, discarding the URL the host clone pushes to. The
+/// box then depends on the host for something it should never need it for: skein *validates* the
+/// host clone's origin ([`crate::remote_warning`] warns when there isn't one, precisely because "a
+/// box can't push or open a PR until one exists") and then provisions a box pointing somewhere else
+/// entirely. Pushing worked anyway until a box shared the host's checked-out branch, at which point
+/// git refused with a message about `receive.denyCurrentBranch` — a remote-side policy error for
+/// what is really a mis-pointed remote.
+///
+/// So: clone locally, which is fast and carries the host's unpushed commits, then point `origin` at
+/// the URL and keep the path as `local`. Nothing is lost and the box pushes where every other box
+/// does. Empty when the source is already a URL, or when the host clone has no origin to inherit.
+pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &str) -> String {
     let root = box_root(name);
     let tree = format!("{root}/tree");
     let tree_q = sh_quote(&tree);
@@ -664,15 +678,50 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
             base_q = sh_quote(base),
         )
     };
+    // Best-effort, and deliberately not under `set -e`: a box whose remote could not be re-pointed
+    // is a box that pushes to the host clone, which is where it would have pushed anyway. Failing
+    // the whole clone over it would turn a working box into no box.
+    let remotes = if upstream.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; git remote add local {url_q} 2>/dev/null || true; \
+             git remote set-url origin {up_q} || \
+             echo 'skein: could not point origin at {upstream}; this box pushes to the host clone' >&2",
+            up_q = sh_quote(upstream),
+        )
+    };
     format!(
         "set -e; \
          if [ -e {tree_q}/.git ]; then echo 'skein: {name} already has a checkout; destroy the box first' >&2; exit 1; fi; \
          mkdir -p {root_q}; \
          {clone}; \
          cd {tree_q}; \
-         git checkout -B {branch_q}",
+         git checkout -B {branch_q}{remotes}",
         root_q = sh_quote(&root),
         branch_q = sh_quote(branch),
+    )
+}
+
+/// Point an existing box's `origin` at the repo's remote, if it is still the host clone.
+///
+/// The clone-time version of this ([`clone_script`]) only helps boxes cloned after it landed. This
+/// is the same repair for the ones already on disk, and it runs on every start because there is no
+/// other moment that would notice.
+///
+/// The equality test is the whole safety argument: it rewrites only the URL skein itself put there.
+/// An origin someone re-pointed by hand — at a fork, at a mirror — is left exactly alone.
+pub fn origin_repair_script(name: &str, source: &str, upstream: &str) -> String {
+    format!(
+        "cd {tree_q} 2>/dev/null || exit 0; \
+         cur=\"$(git remote get-url origin 2>/dev/null || true)\"; \
+         [ \"$cur\" = {src_q} ] || exit 0; \
+         git remote add local {src_q} 2>/dev/null || true; \
+         git remote set-url origin {up_q} && \
+         echo 'skein: {name} pushed at the host clone; origin now points at {upstream}' >&2",
+        tree_q = sh_quote(&format!("{}/tree", box_root(name))),
+        src_q = sh_quote(source),
+        up_q = sh_quote(upstream),
     )
 }
 
@@ -790,12 +839,26 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
     // from there rather than demand the box be destroyed: cloning is the only step here that is not
     // idempotent, and it is also the only one whose work a repeat would throw away.
     let (has_tree, has_session) = box_progress(&fleet, name, "skein-shell")?;
+    let source = clone_source(repo);
+    // Only an adopted repo needs this: a URL source already clones from the place it pushes to.
+    let upstream = match crate::is_git_url(&repo.source) {
+        true => String::new(),
+        false => crate::remote_origin_url(&repo.work).unwrap_or_default(),
+    };
     if has_tree {
         eprintln!("skein: {name} already has a checkout; keeping it");
+        // Every box cloned before origin was re-pointed still pushes at the host, and they are not
+        // going to be re-cloned to fix it. Guarded on origin still *being* the host clone, so a box
+        // whose remote someone set deliberately keeps it.
+        if !upstream.is_empty() {
+            let _ = fleet.exec(
+                &origin_repair_script(name, &source, &upstream),
+                Duration::from_secs(60),
+            );
+        }
     } else {
-        let source = clone_source(repo);
         fleet.exec(
-            &clone_script(name, &source, &base_branch(repo), branch),
+            &clone_script(name, &source, &base_branch(repo), branch, &upstream),
             Duration::from_secs(600),
         )?;
     }
@@ -2249,6 +2312,62 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
+    /// A box pushes to the repo's remote. For a repo adopted in place the clone comes from the
+    /// host's checkout — fast, and it carries commits the host has not pushed — but `git clone
+    /// <path>` names that path `origin`, and a box whose origin is a directory on someone's laptop
+    /// is a box that cannot open a PR. It also fails outright the moment the box works on the branch
+    /// the host has checked out, which is the normal state of affairs for skein's own box.
+    #[test]
+    fn a_box_cloned_from_the_host_still_pushes_to_the_remote() {
+        let script = clone_script(
+            "web-main",
+            "/Users/you/work/web",
+            "main",
+            "feat/auth",
+            "git@github.com:o/r.git",
+        );
+        assert!(
+            script.contains("git clone --branch 'main' '/Users/you/work/web'"),
+            "still cloned locally — the point is the push target, not the fetch: {script}"
+        );
+        assert!(
+            script.contains("git remote set-url origin 'git@github.com:o/r.git'"),
+            "origin must be the remote the repo actually pushes to: {script}"
+        );
+        assert!(
+            script.contains("git remote add local '/Users/you/work/web'"),
+            "the host clone stays reachable by name; re-pointing origin must not lose it: {script}"
+        );
+        let after_checkout = script.split("git checkout -B").nth(1).unwrap_or_default();
+        assert!(
+            after_checkout.contains("set-url"),
+            "re-pointing before the branch exists would leave a box with no checkout: {script}"
+        );
+
+        // A URL source already clones from where it pushes; touching origin there could only break it.
+        let direct = clone_script(
+            "web-main",
+            "git@github.com:o/r.git",
+            "main",
+            "feat/auth",
+            "",
+        );
+        assert!(
+            !direct.contains("remote set-url") && !direct.contains("remote add"),
+            "nothing to repair when the source is the remote: {direct}"
+        );
+
+        // And the same repair for the boxes already on disk, which will never be re-cloned.
+        let repair =
+            origin_repair_script("web-main", "/Users/you/work/web", "git@github.com:o/r.git");
+        assert!(
+            repair.contains("[ \"$cur\" = '/Users/you/work/web' ] || exit 0"),
+            "only the URL skein put there may be rewritten; a hand-set origin is someone's \
+             deliberate choice: {repair}"
+        );
+        assert!(repair.contains("git remote set-url origin 'git@github.com:o/r.git'"));
+    }
+
     #[test]
     fn one_mount_covers_everything_beneath_it() {
         assert!(under("/a/b", "/a"), "a child is covered");
@@ -2267,7 +2386,13 @@ mod tests {
     // previous box of the same name would hand the new one someone else's uncommitted work.
     #[test]
     fn preparing_a_checkout_starts_from_the_remote_base_and_never_reuses_a_tree() {
-        let script = clone_script("web-main", "git@github.com:o/r.git", "main", "feat/auth");
+        let script = clone_script(
+            "web-main",
+            "git@github.com:o/r.git",
+            "main",
+            "feat/auth",
+            "",
+        );
         // The quoting closes before `/.git`, which the shell concatenates back into one word.
         assert!(script.contains("if [ -e '/boxes/web-main/tree'/.git ]"));
         assert!(script.contains("exit 1"));
@@ -2287,7 +2412,7 @@ mod tests {
             "a wrong base must fall back to the remote's default, not strand the box: {script}"
         );
         // And when skein could not learn the base at all, it asks the remote instead of guessing.
-        let blind = clone_script("web-main", "git@github.com:o/r.git", "", "feat/auth");
+        let blind = clone_script("web-main", "git@github.com:o/r.git", "", "feat/auth", "");
         assert!(
             blind.contains("git clone 'git@github.com:o/r.git'") && !blind.contains("--branch"),
             "no base means let git use the remote's default: {blind}"

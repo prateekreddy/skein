@@ -147,7 +147,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     let place = own_sandbox(FLEET);
     place
         .exec(
-            &clone_script(BOX, &remote, "main", "feat/auth"),
+            &clone_script(BOX, &remote, "main", "feat/auth", ""),
             Duration::from_secs(120),
         )
         .expect("clone");
@@ -161,7 +161,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     assert!(
         place
             .exec(
-                &clone_script(BOX, &remote, "main", "feat/auth"),
+                &clone_script(BOX, &remote, "main", "feat/auth", ""),
                 Duration::from_secs(60)
             )
             .is_err(),
