@@ -190,6 +190,12 @@
   /* repo tag: a quiet badge naming the box's repo, shown only when >1 repo is managed */
   .repotag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--faint);
              background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:0 4px; opacity:.85; }
+  /* legacy tag: this box still owns a whole VM, and that reservation is held whether it works or
+     idles. Shown only when a fleet exists to move it into — the shared sandbox is the default, so
+     this marks the exception rather than labelling every row. Amber, not red: nothing is broken. */
+  .vmtag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--waiting);
+           background:color-mix(in srgb,var(--waiting) 12%,transparent); border-radius:4px; padding:0 4px;
+           border:1px solid color-mix(in srgb,var(--waiting) 35%,transparent); }
   .dir { font-family:var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* inbox headline: the gist of what the box last said / is asking — one truncated line */
   .headline { display:none; color:var(--dim); font-size:12px; margin-top:3px; overflow:hidden;
@@ -995,7 +1001,7 @@ function ensureSection(id, repoId) {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="repotag"></span><span class="branch"></span><span class="dstat"></span><span class="vchip"></span><span class="dir"></span><span class="hookwarn"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="branch"></span><span class="dstat"></span><span class="vchip"></span><span class="dir"></span><span class="hookwarn"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -1047,6 +1053,14 @@ function updateRow(el, b, showRepo) {
   const tag = (showRepo && b.repo) ? b.repo : "";
   rt.textContent = tag;
   rt.style.display = tag ? "" : "none";
+  // legacy tag: the box still has a sandbox of its own. The backend only sets this once a fleet
+  // sandbox exists, so an unadopted host stays unlabelled and a migrated box simply loses its tag.
+  const vt = el.querySelector(".vmtag");
+  vt.textContent = b.legacy ? "legacy" : "";
+  vt.style.display = b.legacy ? "" : "none";
+  vt.title = b.legacy
+    ? "this box has a sandbox to itself, which reserves its full memory whether it is working or idle — `skein migrate " + b.name + "` moves it into the shared one"
+    : "";
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
   // The state pill, plus a `◐` when only half the signal produced it (hook edges, no screen). One

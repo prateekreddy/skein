@@ -122,6 +122,18 @@ pub struct BoxView {
     /// worth waking one on every snapshot to find out. See [`sync_docs_available`].
     #[serde(default)]
     pub docs_update: bool,
+    /// this box still has a sandbox of its own, rather than living in the shared one.
+    ///
+    /// It is the memory question made visible: a per-VM box holds a full *reservation* whenever it
+    /// exists, working or idle, and those reservations are what the fleet exists to stop summing.
+    /// Nothing else on the row says so — a legacy box and a fleet box behave identically until the
+    /// host starts refusing work.
+    ///
+    /// False for a box in the fleet, and false for *every* box until a fleet sandbox is configured:
+    /// the shared sandbox is the default now, so this marks the exception. Badging every row on a
+    /// host that has not adopted the fleet would label the normal case as the odd one.
+    #[serde(default)]
+    pub legacy: bool,
 }
 
 impl Sandbox {
@@ -488,6 +500,10 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 docs_update: repo
                     .as_ref()
                     .is_some_and(|rp| sync_docs_available(Path::new(&rp.store))),
+                // Only once there is a fleet to be outside of. The placement record is the whole
+                // test: it is what makes a box a fleet box, and its absence is what leaves one
+                // holding a VM of its own.
+                legacy: !fleet.is_empty() && shared_record(&name).is_none(),
             }
         })
         .collect();
@@ -5088,6 +5104,77 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             "the sandbox that hosts the boxes is not itself a box: {names:?}"
         );
 
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    // The board has to say which boxes still cost a whole VM, because nothing else on the row does:
+    // a legacy box and a fleet box look and behave identically right up until the host runs out of
+    // memory to reserve. It marks the exception, not the norm — the shared sandbox is the default.
+    #[test]
+    fn the_board_marks_a_box_that_still_owns_a_whole_vm() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
+        fs::write(home.join("sandboxes.json"), "{}").unwrap();
+        env::set_var(
+            "SKEIN_LS_CMD",
+            r#"echo '[{"name":"skein-fleet"},{"name":"old-box"}]'"#,
+        );
+        let mut config = load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        save_config(&config).unwrap();
+        record_place(
+            "demo-task",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 1,
+                home: "/boxes/demo-task/home".into(),
+                tree: "/boxes/demo-task/tree".into(),
+                sock: "/boxes/demo-task/session.sock".into(),
+            },
+        )
+        .unwrap();
+
+        let tagged = || -> Vec<(String, bool)> {
+            load_views()
+                .unwrap()
+                .into_iter()
+                .map(|v| (v.name, v.legacy))
+                .collect()
+        };
+        let rows = tagged();
+        assert!(
+            rows.contains(&("old-box".into(), true)),
+            "a box with a sandbox to itself still holds a whole reservation: {rows:?}"
+        );
+        assert!(
+            rows.contains(&("demo-task".into(), false)),
+            "a box in the fleet is the ordinary case and carries no tag: {rows:?}"
+        );
+
+        // No fleet configured: nothing has been migrated because there is nowhere to migrate to, and
+        // tagging every row would label the normal case as the odd one.
+        let mut config = load_config();
+        config.fleet_sandbox = String::new();
+        save_config(&config).unwrap();
+        assert!(
+            tagged().iter().all(|(_, legacy)| !legacy),
+            "without a fleet there is no exception to mark: {:?}",
+            tagged()
+        );
+
+        // The flag is only half the feature: a row that carries it and a cockpit that ignores it
+        // look identical from here, and that is how a tag silently stops appearing.
+        assert!(
+            include_str!("web/index.html").contains("b.legacy"),
+            "the cockpit no longer reads legacy, so the tag can never appear"
+        );
+
+        forget_place("demo-task");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
