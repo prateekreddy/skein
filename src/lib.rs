@@ -1991,6 +1991,24 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         .map(|(ev, cmd, _)| (*ev, cmd.clone()))
         .collect();
     obsolete.push(("Notification", format!("{PROBE_STATUS_CMD} notify")));
+    // The pre-`skein/` store layout: probes lived directly under `<store>/bin/`, so a store
+    // provisioned back then still wires `$CLAUDE_PROJECT_DIR/.claude/bin/…` — a path that stopped
+    // existing when the store grew a `skein/` subdirectory. Additive merging keeps it *beside* the
+    // correct entry, so the box works perfectly and announces a failure at every session start:
+    //   SessionStart:resume hook error … /…/.claude/bin/sandbox-bootstrap.sh: not found
+    // Seen on a box whose store predates the rename. Retire both spellings, since a store old enough
+    // to have the old path may carry either the bare or the bash-wrapped form.
+    for (event, legacy) in entries
+        .iter()
+        .filter_map(|(ev, cmd, _)| {
+            let old = cmd.replace("/.claude/skein/bin/", "/.claude/bin/");
+            (old != *cmd).then_some((*ev, old))
+        })
+        .collect::<Vec<_>>()
+    {
+        obsolete.push((event, wire(&legacy)));
+        obsolete.push((event, legacy));
+    }
 
     let mut out = existing.clone();
     if !out.is_object() {
@@ -3739,6 +3757,46 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
         // 6 skein Stop hooks (all bash-wrapped) + 1 user hook
         assert_eq!(stop_cmds.len(), 7);
+    }
+
+    #[test]
+    fn settings_with_probe_retires_the_pre_skein_store_layout() {
+        // Probes used to live directly under `<store>/bin/`. A store provisioned then still wires
+        // `$CLAUDE_PROJECT_DIR/.claude/bin/…`, which has not existed since the store grew a
+        // `skein/` subdirectory — and because merging is additive it sat *beside* the correct entry,
+        // so the box worked perfectly and announced a hook failure at every session start:
+        //   SessionStart:resume hook error … /…/.claude/bin/sandbox-bootstrap.sh: not found
+        let legacy = BOOTSTRAP_CMD.replace("/.claude/skein/bin/", "/.claude/bin/");
+        assert!(legacy.contains("/.claude/bin/"), "the rename this retires");
+        let existing = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    // bare and bash-wrapped: a store old enough to have this may carry either
+                    { "hooks": [ { "type": "command", "command": legacy } ] },
+                    { "hooks": [ { "type": "command", "command": format!("bash \"{legacy}\"") } ] },
+                    { "hooks": [ { "type": "command", "command": "my-own-start-hook.sh" } ] }
+                ]
+            }
+        });
+        let merged = settings_with_probe(&existing);
+        let cmds: Vec<&str> = merged["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["hooks"][0]["command"].as_str().unwrap_or(""))
+            .collect();
+        assert!(
+            !cmds.iter().any(|c| c.contains("/.claude/bin/")),
+            "a path that no longer exists must not stay wired: {cmds:?}"
+        );
+        assert!(
+            cmds.iter().any(|c| c.contains(BOOTSTRAP_CMD)),
+            "and the current one must be there: {cmds:?}"
+        );
+        assert!(
+            cmds.contains(&"my-own-start-hook.sh"),
+            "a hook skein did not write is not skein's to retire: {cmds:?}"
+        );
     }
 
     #[test]
