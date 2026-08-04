@@ -810,6 +810,19 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
         Duration::from_secs(300),
     )?;
 
+    // Every start, not just a migration's. `migrate_box` used to be the only caller, and its call
+    // sits *after* `start_box` — so a migration that failed here left the conversation under the old
+    // sandbox's slug with nothing that would ever move it, and the retry (`skein start`, because the
+    // placement already exists and `migrate` now refuses the box) started the agent on an empty
+    // transcript. Measured on lattice-feat-design-codex-claude: the work restored, the conversation
+    // did not. It is idempotent — a box that already has a conversation at its own slug keeps it —
+    // so the honest place for it is wherever a box comes up, not on one path through that.
+    match realign_transcript(name) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("skein: pointed {n} transcript file(s) at {name}'s working directory"),
+        Err(e) => eprintln!("skein: {name} came up, but its conversation could not be located ({e})"),
+    }
+
     // A box that started without a ceiling started *successfully*, so nothing else would ever say
     // so — and it is the one condition under which one box's runaway build can kill the others.
     if let Some(why) = uncapped_reason(name) {
@@ -1681,7 +1694,11 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     // The sweep just became wrong in the other direction; a stale "dead" answer would send the very
     // next caller through this again.
     *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    eprintln!("skein: restarted {name}'s session (its sandbox had cycled)");
+    // What was observed is that the tmux server was gone, not *why*. A cycled sandbox is the common
+    // cause and the one this exists for, but it is not the only one — a killed server or an OOM'd
+    // box reach here identically — and asserting it sends anyone debugging to look for a restart
+    // that never happened. The tree, the private HOME and the ceiling are all intact either way.
+    eprintln!("skein: {name} had no live session, so it was restarted (its work is untouched)");
     Ok(())
 }
 
