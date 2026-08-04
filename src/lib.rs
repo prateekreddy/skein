@@ -360,7 +360,19 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                     .filter(|s| !s.is_empty())
                     .unwrap_or_default(),
             };
-            let live = s.and_then(|x| x.live);
+            // Liveness through `box_liveness`, never straight off the `sbx ls` row — for a box in
+            // the fleet the two disagree, and the row wins in the worst possible way.
+            //
+            // A migrated box's old sandbox is STOPPED, not destroyed (that is deliberate: it is the
+            // undo). It keeps the box's name, so `sbx ls` still lists it, `s` is `Some`, and its
+            // `live` is `Stopped` — which `state_with` turns into `stale`, discarding a perfectly
+            // fresh `waiting` the box's own hooks just wrote. Every migrated box read `stale` on the
+            // board while working, and the per-box session view — which already went through
+            // `box_liveness` — disagreed with the board about the same box at the same moment.
+            //
+            // `box_liveness` knows a placed box's liveness is its tmux server in the shared sandbox,
+            // and falls back to exactly this row for a box that is still its own VM.
+            let live = box_liveness(&name);
             let (mut state, mut tier) = sb.state_with(live);
             // Cold-start fallback has no authoritative existence/liveness signal. Old outcome files
             // must not resurrect destroyed boxes in "needs you": once the registry heartbeat is
@@ -5076,6 +5088,86 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             "the sandbox that hosts the boxes is not itself a box: {names:?}"
         );
 
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
+        *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    // Migration STOPS the old sandbox rather than destroying it — that is the undo. So `sbx ls`
+    // goes on listing a stopped sandbox with the box's name long after the box itself moved into
+    // the fleet and is running there. Read liveness off that row and every migrated box shows
+    // `stale` on the board while working, which is exactly what happened: the board and the per-box
+    // session view disagreed about the same box at the same moment, because only one of them asked
+    // `box_liveness`.
+    #[test]
+    fn a_migrated_boxs_stopped_old_sandbox_does_not_make_it_look_dead() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
+        fs::write(
+            home.join("sandboxes.json"),
+            format!(
+                r#"{{"demo-task":{{"branch":"b","dir":"/boxes/demo-task/tree","lastSeen":"{}","status":"waiting"}}}}"#,
+                secs_ago(20)
+            ),
+        )
+        .unwrap();
+        // The husk the migration left behind, still carrying the box's name.
+        env::set_var(
+            "SKEIN_LS_CMD",
+            r#"echo '[{"name":"skein-fleet"},{"name":"demo-task","status":"stopped"}]'"#,
+        );
+        let mut config = load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        save_config(&config).unwrap();
+        record_place(
+            "demo-task",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 1,
+                home: "/boxes/demo-task/home".into(),
+                tree: "/boxes/demo-task/tree".into(),
+                sock: "/boxes/demo-task/session.sock".into(),
+            },
+        )
+        .unwrap();
+
+        // The fleet's own liveness sweep — the only thing that knows whether the box is running.
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let path = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", format!("{}:{path}", bin.display()));
+        let sweep = |answer: &str| {
+            let p = bin.join("sbx");
+            fs::write(&p, format!("#!/bin/sh\necho '{answer}'\n")).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let state_of = || {
+            load_views()
+                .unwrap()
+                .into_iter()
+                .find(|v| v.name == "demo-task")
+                .expect("the migrated box must still be on the board")
+                .state
+        };
+
+        sweep("demo-task 1");
+        assert_eq!(
+            state_of(),
+            "waiting",
+            "the box's own turn state, not the state of the sandbox it moved out of"
+        );
+
+        // And the reverse, so this is a fix rather than a suppression: when the box's session really
+        // is gone, the board still says so.
+        sweep("demo-task 0");
+        assert_eq!(state_of(), "stale");
+
+        env::set_var("PATH", path);
+        forget_place("demo-task");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
