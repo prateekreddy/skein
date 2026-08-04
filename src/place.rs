@@ -280,9 +280,20 @@ impl Place {
     fn wrap(&self, script: &str) -> String {
         match &self.at {
             Where::OwnSandbox => script.to_string(),
+            // SKEIN_BOX as well as HOME, because entering the namespace is not the same as being
+            // launched into it. `box-session.sh` exports the identity for the session it starts, but
+            // a later `nsenter` gets a fresh environment — so anything skein runs through a
+            // placement had only `SANDBOX_VM_ID` to go on, which names the SANDBOX and is the same
+            // string for every box in it.
+            //
+            // Measured: every fleet box's screen observer wrote `skein-fleet.pane.json` into its own
+            // repo's store, so no box had a fresh screen observation and the board said "screen
+            // lost" for all of them — while each box's *hooks*, which inherit from the agent process
+            // that `box-session.sh` did launch, were filing correctly under the box's own name.
             Where::Shared { home, tree, .. } => format!(
-                "export HOME={} && cd {} && {script}",
+                "export HOME={} SKEIN_BOX={} && cd {} && {script}",
                 sh_quote(home),
+                sh_quote(&self.name),
                 sh_quote(tree)
             ),
         }
@@ -492,8 +503,8 @@ mod tests {
 
     // The three details that are easy to get wrong and all look like permissions bugs: the user
     // and mount namespaces must be joined TOGETHER (mount alone is refused), credentials must be
-    // preserved (or setgroups fails unprivileged), and HOME/cwd must be set explicitly because
-    // nsenter carries the caller's, not the box's.
+    // preserved (or setgroups fails unprivileged), and HOME/cwd/SKEIN_BOX must be set explicitly
+    // because nsenter carries the caller's environment, not the box's.
     #[test]
     fn a_shared_sandbox_is_entered_by_namespace_with_the_boxs_own_home() {
         let p = Place {
@@ -519,7 +530,7 @@ mod tests {
                 "--",
                 "bash",
                 "-lc",
-                "export HOME='/boxes/web-main/home' && cd '/boxes/web-main/tree' && git status",
+                "export HOME='/boxes/web-main/home' SKEIN_BOX='web-main' && cd '/boxes/web-main/tree' && git status",
             ]
         );
         // The stdin path keeps `-i` in front of the sandbox and the hop after it.
