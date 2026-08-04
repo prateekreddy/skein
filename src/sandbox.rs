@@ -12,8 +12,9 @@ use crate::runtime::*;
 use crate::util::*;
 use crate::{
     agent_for_box, ai_says_hold, box_liveness, branch_from_box, ensure_kit, ensure_store,
-    fleet_boxes, launch_spec, locate_registry, parse_registry, repo_for_box, store_dir,
-    store_for_box, sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness, Repo,
+    fleet_boxes, launch_spec, locate_registry, parse_registry, record_repo_mirror, repo_for_box,
+    store_dir, store_for_box, sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness,
+    Repo,
 };
 use chrono::Utc;
 use std::env;
@@ -111,6 +112,7 @@ pub(crate) fn repo_launch_command_as(
     if let Err(e) = ensure_store(Path::new(&repo.store)) {
         eprintln!("skein: ensure_store: {e}");
     }
+    record_repo_mirror(repo);
     let kit = skein_home().join("kit");
     let agent = agent_override
         .map(str::to_string)
@@ -128,7 +130,8 @@ pub(crate) fn repo_launch_command_as(
     // server the box is anchored to, so nothing downstream of here learns a new shape.
     if !fleet_sandbox().is_empty() {
         return format!(
-            "skein start {} --branch {} --agent {} && sbx {}",
+            "{} start {} --branch {} --agent {} && sbx {}",
+            skein_exe(),
             sh_quote(name),
             sh_quote(&branch),
             sh_quote(&agent),
@@ -152,6 +155,26 @@ pub(crate) fn repo_launch_command_as(
         sh_quote(&repo.store),
     ];
     persistent_launch_command(parts, name, &agent)
+}
+
+/// How to spell `skein` in a command the server hands to `sh -c`.
+///
+/// Bare `skein` assumes an install on `$PATH`, and the cockpit is normally run straight out of a
+/// build — `cargo run --bin skein-server`, where nothing named `skein` is on `$PATH` at all. So
+/// creating a box in the fleet died on `sh: skein: command not found`, and the terminal then
+/// reconnected onto `sbx exec` for a sandbox that was never made: `no sandbox named …`, forever.
+///
+/// The sibling of the running executable is the right answer and needs no configuration: the two
+/// binaries are built and installed together, so whichever `skein-server` is running, the `skein`
+/// beside it is the matching build. Falls back to the bare name when there is no sibling — an
+/// installed-on-PATH layout, which is exactly when bare works.
+pub(crate) fn skein_exe() -> String {
+    env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("skein")))
+        .filter(|p| p.is_file())
+        .map(|p| sh_quote(&p.to_string_lossy()))
+        .unwrap_or_else(|| "skein".into())
 }
 
 /// Join a completed `sbx create` argv with the first tmux-backed agent attach. Each argument is

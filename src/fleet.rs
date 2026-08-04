@@ -736,6 +736,9 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
         return Err("no fleet sandbox configured".into());
     }
     ensure_fleet(&sandbox, &fleet_mounts())?;
+    // A fleet box has no `/run/sandbox/source`, so this is how it finds the repo's host files to
+    // surface `shared-paths.txt` from — `.env`, and the `CLAUDE.md` some repos keep out of git.
+    crate::record_repo_mirror(repo);
 
     // The store is a HOST path used verbatim inside the sandbox, so this is the one precondition
     // worth paying a round-trip for: unreachable, every later step still "succeeds" and the box

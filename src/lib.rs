@@ -918,6 +918,30 @@ const STORE_README: &str = include_str!("store/README.md");
 /// launch — an empty folder comes up fully working (memory bridge, mailbox, status line), an
 /// already-populated one is left intact (machinery refreshed, settings merged additively). The user
 /// only optionally fills `memory/` and `skills/` with their own content.
+/// Tell this repo's boxes where its host files are, for the ones that have no `/run/sandbox/source`.
+///
+/// `sbx create --clone` is handed the repo's `work` directory and mounts it read-only at
+/// `/run/sandbox/source`; a box surfaces its gitignored shared paths (`shared-paths.txt`) from
+/// there. A fleet box has no such mount — several boxes share one sandbox, and it was created for
+/// no single repo — so that whole mechanism was inert in the fleet: not dangling links, *nothing*,
+/// including the `CLAUDE.md` an `gadget-demo` box gets its project direction from.
+///
+/// The same directory is reachable, though, because [`crate::fleet_mounts`] mounts every repo's
+/// `work` at its own host path. Recording it in the store — repo-scoped data, which is exactly what
+/// this is — lets the box find it without skein having to thread it through a session's environment.
+///
+/// Written on every launch, so a repo whose `work` moves is not stuck with the old answer.
+pub fn record_repo_mirror(repo: &Repo) {
+    let work = repo.work.trim();
+    if work.is_empty() {
+        return;
+    }
+    let dir = Path::new(&repo.store).join("skein");
+    if fs::create_dir_all(&dir).is_ok() {
+        let _ = write_atomic(&dir.join("mirror"), &dir, format!("{work}\n").as_bytes());
+    }
+}
+
 pub fn ensure_store(store: &Path) -> Result<(), String> {
     fs::create_dir_all(store).map_err(|e| format!("mkdir {}: {e}", store.display()))?;
     // skein-owned runtime (skein/, mailbox/, status/, tasks/) + the user-filled content homes
@@ -3759,6 +3783,84 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert_eq!(stop_cmds.len(), 7);
     }
 
+    // `shared-paths.txt` surfaces a repo's gitignored essentials into a box — `.env`, and for some
+    // repos the `CLAUDE.md` the box takes its direction from. It read them from
+    // `/run/sandbox/source`, a mount only `--clone` mode has, so in the fleet the whole mechanism
+    // was inert: not broken links, *nothing*, and nothing said so.
+    //
+    // In the fleet the mirror is the repo's real work tree, mounted read-write — so every entry
+    // takes the `rw` shape there, seeded into the store and linked from there. A box must not be
+    // able to edit the host's own checkout, which the read-only bind used to guarantee for free.
+    #[test]
+    fn a_box_with_no_clone_mirror_still_gets_the_repos_shared_paths() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let dir = tempdir();
+        let store = dir.join("store").join(".claude");
+        let work = dir.join("work"); // the host checkout: what /run/sandbox/source used to be
+        let tree = dir.join("tree"); // the box's own clone
+        ensure_store(&store).unwrap();
+        for d in [&work, &tree] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(work.join(".env"), "SECRET=from-host\n").unwrap();
+        fs::write(work.join("CLAUDE.md"), "# direction\n").unwrap();
+        fs::write(store.join("shared-paths.txt"), ".env\nCLAUDE.md\n").unwrap();
+        fs::write(
+            store.join("skein").join("mirror"),
+            format!("{}\n", work.display()),
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        symlink(&store, tree.join(".claude")).unwrap();
+        // The wreckage an earlier migration left: a link into a mount this box does not have.
+        symlink("/run/sandbox/source/.env", tree.join(".env")).unwrap();
+
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let out = Command::new("bash")
+            .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+            .env("CLAUDE_PROJECT_DIR", &tree)
+            .env("HOME", &home)
+            .env("SKEIN_BOX", "demo-main")
+            // This box may itself be clone-mode, so name the mirror rather than letting the
+            // script find the harness's own /run/sandbox/source.
+            .env("SKEIN_MIRROR", &work)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        for name in [".env", "CLAUDE.md"] {
+            let dst = tree.join(name);
+            let target = fs::read_link(&dst).unwrap_or_else(|e| panic!("{name}: {e}"));
+            // Canonical, because the box reaches its store through a symlink: the same directory
+            // has two spellings and only one of them is the one written here.
+            let target = fs::canonicalize(&target).unwrap();
+            assert!(
+                target.starts_with(fs::canonicalize(store.join("shared-rw")).unwrap()),
+                "{name} must resolve through the store, never straight at the host checkout: {}",
+                target.display()
+            );
+            assert!(
+                fs::read_to_string(&dst).unwrap().contains("from-host") || name == "CLAUDE.md",
+                "{name} must carry the host's content"
+            );
+        }
+        // The point of routing through the store: writing here must not touch the host checkout.
+        fs::write(tree.join(".env"), "SECRET=changed\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(work.join(".env")).unwrap(),
+            "SECRET=from-host\n",
+            "a box must never be able to edit the host's own working copy"
+        );
+    }
+
     #[test]
     fn settings_with_probe_retires_the_pre_skein_store_layout() {
         // Probes used to live directly under `<store>/bin/`. A store provisioned then still wires
@@ -3868,9 +3970,23 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         .unwrap();
         let fleet = launch_command("web-feat-x", "feat/x");
         assert!(
-            fleet.starts_with("skein start 'web-feat-x' --branch 'feat/x' --agent 'claude'"),
+            fleet.contains(" start 'web-feat-x' --branch 'feat/x' --agent 'claude'"),
             "a box in the fleet is brought up by skein, not by `sbx create`: {fleet}"
         );
+        // Runnable, not merely correct. The cockpit is normally run straight out of a build, where
+        // nothing called `skein` is on $PATH — creating a box died on `sh: skein: command not
+        // found` and then reconnected forever onto a sandbox that was never made.
+        let launcher = fleet.split_whitespace().next().unwrap();
+        assert!(
+            launcher.ends_with("skein") || launcher.ends_with("skein'"),
+            "the launcher must name the skein binary: {fleet}"
+        );
+        if launcher != "skein" {
+            assert!(
+                std::path::Path::new(launcher.trim_matches('\'')).is_file(),
+                "an absolute launcher must exist, or `sh -c` cannot run it: {launcher}"
+            );
+        }
         assert!(
             !fleet.contains("sbx create"),
             "there is no sandbox to create for this box: {fleet}"

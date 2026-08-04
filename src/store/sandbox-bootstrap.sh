@@ -52,7 +52,23 @@ fi
 # in. A legacy box has no SKEIN_BOX and is alone in its VM, where the two are the same name.
 vmid="${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}}"
 vmid="${vmid//\//-}"
-mirror="/run/sandbox/source"   # the RO host repo mirror — present only in --clone mode
+# Where this repo's host files are. `--clone` mode bind-mounts them read-only at
+# /run/sandbox/source; a fleet box has no such mount (one sandbox, many repos), so it reads the path
+# skein recorded in the store — the same directory, reachable because the fleet sandbox mounts every
+# repo's work tree at its own host path. Without this the whole surfacing block below was skipped in
+# a fleet box and nothing said so: no .env, and no CLAUDE.md for a repo that keeps one out of git.
+# $SKEIN_MIRROR names it outright (a runtime that is not sbx, and the seam the tests drive); then
+# the clone-mode bind; then the path skein recorded for this repo. Only the bind is read-only.
+mirror="${SKEIN_MIRROR:-}"
+mirror_is_ro=0
+if [ -z "$mirror" ]; then
+  if [ -d /run/sandbox/source ]; then
+    mirror="/run/sandbox/source"
+    mirror_is_ro=1
+  else
+    mirror="$(sed -n '1p' "$store/skein/mirror" 2>/dev/null || true)"
+  fi
+fi
 
 # Echo the exact installed probe contract from SessionStart. The host compares this with the current
 # store revision and can offer a targeted agent-session restart when a long-running process is old.
@@ -106,7 +122,12 @@ if [ -d "$mirror" ] && [ -f "$manifest" ]; then
     flag="$(printf '%s' "$line" | awk '{print $2}')"
     [ -z "$p" ] && continue
     dst="$root/$p"
-    if [ "$flag" = "rw" ]; then
+    # Outside --clone mode the mirror is the repo's real work tree, mounted READ-WRITE. An RO entry
+    # symlinked straight at it would let a box silently edit the host's own checkout, which the
+    # read-only bind used to make impossible for free. So every entry takes the `rw` shape there:
+    # seeded into the store's shared-rw/ and linked from there, so a box can still never reach the
+    # host checkout. RO stops meaning "edits fail" and starts meaning "edits do not reach the host".
+    if [ "$flag" = "rw" ] || [ "$mirror_is_ro" = "0" ]; then
       rwcopy="$rw_root/$p"
       if [ ! -e "$rwcopy" ]; then
         mkdir -p "$(dirname "$rwcopy")" 2>/dev/null || true
