@@ -1943,7 +1943,7 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // the script path bare relies on the exec bit surviving the shared mount into the microVM — if
     // it's squashed, every hook fails "permission denied" on every event, silently. The status line
     // learned this lesson first (STATUSLINE_CMD was already bash-prefixed); now it's uniform.
-    let entries: [(&str, String, Option<&str>); 23] = [
+    let entries: [(&str, String, Option<&str>); 24] = [
         (
             "UserPromptSubmit",
             format!("{PROBE_STATUS_CMD} working"),
@@ -2027,6 +2027,7 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
         ("PostToolUse", PROBE_TASK_CMD.to_string(), Some("TodoWrite")),
         ("SessionStart", BOOTSTRAP_CMD.to_string(), None),
         ("SessionStart", format!("{PROBE_HANDOFF_CMD} claude"), None),
+        ("SessionStart", format!("{PROBE_STATUS_CMD} started"), None),
     ];
     // Entries a *previous* skein version wired that this one has since replaced/renamed. Purely
     // additive merging (below) would otherwise leave these stale forever in an already-provisioned
@@ -2187,6 +2188,14 @@ fn codex_hooks_with_probe() -> serde_json::Value {
         "SessionStart",
         Some("startup|resume|clear|compact"),
         command("SessionStart", "box-handoff.sh", "codex"),
+    );
+    // Same reason as the Claude table: SessionEnd records `ended`, and without this nothing ever
+    // unrecords it — a restarted box reads "ended" while its new session waits at the prompt. The
+    // script itself only clears that one state, so the `compact` source stays truthful.
+    add(
+        "SessionStart",
+        Some("startup|resume|clear|compact"),
+        command("SessionStart", "box-status.sh", "started"),
     );
     add(
         "UserPromptSubmit",
@@ -3537,10 +3546,20 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 "missing {ev}"
             );
         }
+        // bootstrap + handoff context, and the turn-state clear: SessionEnd writes `ended`, and a
+        // session that has just started is not one that ended.
+        let starts = merged["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(
-            merged["hooks"]["SessionStart"].as_array().unwrap().len(),
-            2,
-            "SessionStart needs bootstrap + handoff context"
+            starts.len(),
+            3,
+            "SessionStart needs bootstrap + handoff + started"
+        );
+        assert!(
+            starts.iter().any(|h| h["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("box-status.sh\" started")),
+            "without it a restarted box reads `ended` while waiting at its prompt: {starts:?}"
         );
         // UserPromptSubmit: box-status.sh (turn-state reset) + mailbox.sh inbox (turn-boundary
         // mail delivery — the fix for mail sitting unread past SessionStart).

@@ -223,6 +223,21 @@ case "$mode" in
     refresh_branch
     write_status waiting
     ;;
+  started)
+    # A new session cannot be an ended one. The SessionEnd hook faithfully records `ended` when you
+    # exit the agent, and nothing used to clear it — so a box you restarted sat there reading
+    # "ended" while its new session waited at the prompt.
+    #
+    # Only that transition, because SessionStart fires for several sources: after a compaction the
+    # box is mid-turn and `working` is the truth, and overwriting it with `waiting` would claim the
+    # box wants you when it is busy.
+    cur="$(sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([a-z-]*\)".*/\1/p' "$dir/$vmid.json" 2>/dev/null)"
+    if [ "$cur" = "ended" ] || [ -z "$cur" ]; then
+      adjust reset
+      refresh_branch
+      write_status waiting
+    fi
+    ;;
   *)
     # explicit pass-through (e.g. a caller that hands a literal status)
     write_status "$mode"
