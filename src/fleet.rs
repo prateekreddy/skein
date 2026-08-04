@@ -617,17 +617,35 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
 pub fn clone_script(name: &str, url: &str, base: &str, branch: &str) -> String {
     let root = box_root(name);
     let tree = format!("{root}/tree");
+    let tree_q = sh_quote(&tree);
+    let url_q = sh_quote(url);
+    // An empty base is not a missing value to substitute a guess for — it is skein saying it could
+    // not learn the remote's default, and a plain `git clone` asks the remote for it directly.
+    //
+    // When there IS a base, the clone falls back to the same plain form rather than failing. A base
+    // that the remote does not have has always been possible — a configured base a given repo does
+    // not use, a cached `origin/HEAD` gone stale after a rename — and the cost was severe out of all
+    // proportion: a migration that stops the old sandbox, then cannot start the new box, leaves the
+    // box in neither place until someone runs `sbx start` by hand. A tree cloned from the wrong base
+    // is a non-event by comparison, since the branch is checked out over it immediately.
+    let clone = if base.is_empty() {
+        format!("git clone {url_q} {tree_q}")
+    } else {
+        format!(
+            "git clone --branch {base_q} {url_q} {tree_q} || \
+             {{ echo 'skein: no {base} on the remote; cloning its default branch instead' >&2; \
+                rm -rf {tree_q}; git clone {url_q} {tree_q}; }}",
+            base_q = sh_quote(base),
+        )
+    };
     format!(
         "set -e; \
          if [ -e {tree_q}/.git ]; then echo 'skein: {name} already has a checkout; destroy the box first' >&2; exit 1; fi; \
          mkdir -p {root_q}; \
-         git clone --branch {base_q} {url_q} {tree_q}; \
+         {clone}; \
          cd {tree_q}; \
          git checkout -B {branch_q}",
-        tree_q = sh_quote(&tree),
         root_q = sh_quote(&root),
-        base_q = sh_quote(base),
-        url_q = sh_quote(url),
         branch_q = sh_quote(branch),
     )
 }
@@ -1194,10 +1212,16 @@ pub(crate) fn clone_source(repo: &Repo) -> String {
 
 /// The branch a box's own branch is cut from.
 ///
-/// Asked of the host clone rather than assumed to be `main`: skein already manages that clone, and a
-/// repo whose default is `master` or `develop` would otherwise fail to clone at all. `origin/HEAD`
-/// first because that is the remote's own answer; the clone's current branch next, for a repo with
-/// no remote; `main` only when there is nothing to ask.
+/// Asked of the REMOTE skein is about to clone from, because that is the only copy whose answer is
+/// necessarily true. `refs/remotes/origin/HEAD` looks like the remote's answer and is not: it is a
+/// local cache written when the host clone was made, and it goes stale when the default is renamed
+/// on the far side. A box migration failed on exactly that — the cached ref said `main`, the remote
+/// had only `master`, and `git clone --branch main` refused, leaving the box's old sandbox stopped
+/// with no fleet box to replace it.
+///
+/// So: `ls-remote --symref HEAD` first, one round trip against the same source the clone will use.
+/// The cached ref and the host clone's own branch remain the offline fallbacks, and `main` only when
+/// there is nothing left to ask.
 pub fn base_branch(repo: &Repo) -> String {
     let git = |args: &[&str]| -> Option<String> {
         let mut argv = vec!["-C", repo.work.as_str()];
@@ -1206,10 +1230,65 @@ pub fn base_branch(repo: &Repo) -> String {
         let out = out.trim().to_string();
         (code == 0 && !out.is_empty()).then_some(out)
     };
-    git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .and_then(|r| r.rsplit_once('/').map(|(_, b)| b.to_string()))
-        .or_else(|| git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD"))
-        .unwrap_or_else(|| "main".to_string())
+
+    // What this repo's base might be called, most specific first. The configured one is the user's
+    // own answer and leads; the two local reads are caches of the remote and follow it.
+    let mut wanted: Vec<String> = Vec::new();
+    let configured = load_config().base_branch.trim().to_string();
+    if !configured.is_empty() {
+        wanted.push(configured);
+    }
+    for candidate in [
+        git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+            .and_then(|r| r.rsplit_once('/').map(|(_, b)| b.to_string())),
+        git(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !wanted.contains(&candidate) {
+            wanted.push(candidate);
+        }
+    }
+
+    // One round trip settles all of them: `HEAD` comes back as `ref: refs/heads/<default>` — the
+    // remote's own name for its default, whatever it is — and each candidate comes back only if the
+    // remote really has it. Naming the refs explicitly keeps the reply small on a repo with
+    // thousands of branches. A local-path source answers this too, from its own refs.
+    let source = clone_source(repo);
+    let mut argv: Vec<String> = ["ls-remote", "--symref", &source, "HEAD"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    argv.extend(wanted.iter().map(|b| format!("refs/heads/{b}")));
+    let listing = git(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+
+    if let Some(listing) = listing {
+        // The first candidate the remote actually has wins — that is how a configured base of
+        // `develop` is honoured on the repos that have one without breaking the repos that do not.
+        if let Some(found) = wanted.iter().find(|b| {
+            listing
+                .lines()
+                .any(|line| line.split_whitespace().nth(1) == Some(&format!("refs/heads/{b}")))
+        }) {
+            return found.clone();
+        }
+        // None of them exist there — so take the remote's own default, which always does.
+        if let Some(default) = listing
+            .lines()
+            .find_map(|line| line.strip_prefix("ref:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|r| r.rsplit_once('/').map(|(_, b)| b.to_string()))
+        {
+            return default;
+        }
+    }
+
+    // Offline, or a source that cannot be reached: fall back to the local guesses in the same order
+    // and let the clone's own fallback cover a wrong one. Empty rather than `main` when there is
+    // nothing to go on at all — a guess that names a branch fails the clone outright, while naming
+    // none asks git for the remote's default and cannot be wrong.
+    wanted.into_iter().next().unwrap_or_default()
 }
 
 /// Read back the anchor pid `box-session.sh` recorded, so the host can write the box's placement.
@@ -1837,6 +1916,91 @@ mod tests {
             script.contains("git checkout -B 'feat/auth'"),
             "a branch with a slash is one argument, not a path"
         );
+        // A base the remote does not have must not be fatal. It cost a real migration: the old
+        // sandbox was already stopped, the clone refused `--branch main` on a repo whose default is
+        // `master`, and the box existed in neither place until someone ran `sbx start` by hand.
+        assert!(
+            script.contains("|| {") && script.matches("git clone").count() == 2,
+            "a wrong base must fall back to the remote's default, not strand the box: {script}"
+        );
+        // And when skein could not learn the base at all, it asks the remote instead of guessing.
+        let blind = clone_script("web-main", "git@github.com:o/r.git", "", "feat/auth");
+        assert!(
+            blind.contains("git clone 'git@github.com:o/r.git'") && !blind.contains("--branch"),
+            "no base means let git use the remote's default: {blind}"
+        );
+    }
+
+    // The base is a ladder, not a guess: the branch the user configured, then the local caches of
+    // the remote's default — and every rung is checked against the remote before it is used, so a
+    // configured `develop` is honoured on the repos that have one without breaking those that don't.
+    #[test]
+    fn the_base_branch_is_whatever_the_remote_actually_has() {
+        use std::fs;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        // A real repository whose default branch is `master`, which is the case that failed.
+        let origin = home.join("origin");
+        fs::create_dir_all(&origin).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap();
+            assert!(ok.status.success(), "git {args:?}: {ok:?}");
+        };
+        git(&origin, &["init", "-b", "master"]);
+        fs::write(origin.join("f"), "x").unwrap();
+        git(&origin, &["add", "-A"]);
+        git(&origin, &["commit", "-m", "one"]);
+
+        let repo = Repo {
+            id: "bridge".into(),
+            source: origin.to_string_lossy().into_owned(),
+            work: origin.to_string_lossy().into_owned(),
+            store: String::new(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        };
+
+        let mut config = load_config();
+        config.base_branch = String::new();
+        save_config(&config).unwrap();
+        assert_eq!(
+            base_branch(&repo),
+            "master",
+            "the remote's own default, never an assumed `main`"
+        );
+
+        // A configured base the repo does not have must not be taken at face value: it is one
+        // setting shared by every repo, so trusting it blindly reintroduces the same failure.
+        let mut config = load_config();
+        config.base_branch = "main".into();
+        save_config(&config).unwrap();
+        assert_eq!(
+            base_branch(&repo),
+            "master",
+            "no `main` here — fall through"
+        );
+
+        // A configured base the repo DOES have wins, ahead of the remote's default.
+        git(&origin, &["branch", "develop"]);
+        let mut config = load_config();
+        config.base_branch = "develop".into();
+        save_config(&config).unwrap();
+        assert_eq!(base_branch(&repo), "develop", "the user's own answer leads");
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // Every argument is quoted: a branch like `feat/auth` or a name with a space must reach the
