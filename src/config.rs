@@ -102,6 +102,14 @@ pub struct Config {
     /// never had to share.
     #[serde(default)]
     pub fleet_disk: String,
+    /// The most disk **one** box may use, e.g. "10g". Empty ⇒ unlimited.
+    ///
+    /// The fleet's disk is one filesystem shared by every box, so unlike memory there is no kernel
+    /// ceiling standing between them: a box that fills it fills it for everyone, and the first
+    /// symptom is another box's build failing with ENOSPC. A per-box override lives beside the box's
+    /// other durable state, so raising one box's allowance is not a decision about all of them.
+    #[serde(default = "default_box_disk_max")]
+    pub box_disk_max: String,
     /// The `user.name` every box commits as. Empty ⇒ read from the repo's host clone at start.
     ///
     /// A box's checkout is a fresh clone into a private HOME, so it inherits neither the host's
@@ -130,6 +138,10 @@ pub struct Config {
     pub box_memory_high: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
+}
+
+fn default_box_disk_max() -> String {
+    "10g".to_string()
 }
 
 pub(crate) fn default_true() -> bool {
@@ -208,6 +220,7 @@ impl Default for Config {
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
             fleet_disk: String::new(),
+            box_disk_max: default_box_disk_max(),
             git_name: String::new(),
             git_email: String::new(),
             box_memory_max: String::new(),

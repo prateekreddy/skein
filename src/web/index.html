@@ -179,6 +179,12 @@
             overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
   .dstat { flex:none; white-space:nowrap; }
   .hookwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
+  /* disk chip: only speaks when a box is near or over its share of the fleet's one disk. Silent
+     below the threshold, because a badge that is always there is a badge nobody reads. */
+  .dchip { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10.5px; font-weight:600;
+           padding:0 5px; border-radius:4px; border:1px solid transparent; cursor:pointer; }
+  .dchip.near { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 12%,transparent); }
+  .dchip.over { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
   /* repo tag: a quiet badge naming the box's repo, shown only when >1 repo is managed */
   .repotag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--faint);
              background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:0 4px; opacity:.85; }
@@ -464,8 +470,8 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open { display:flex; justify-content:center; align-items:flex-start; }
   /* add-repo modal: derived-id preview + inline result/warning (replaces the native prompt/alert) */
   .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
   .ar-derived b { color:var(--accent); font-weight:600; }
@@ -813,6 +819,25 @@
     </div>
   </div>
 
+  <!-- One box's own settings. Everything here is an EXCEPTION to a default; each field says what it
+       would be if left blank, so the panel reads as "what does this box do" rather than a form. -->
+  <div id="boxset" aria-hidden="true">
+    <div class="nb-card" style="max-width:560px">
+      <div class="nb-head"><b id="bs-title">Box settings</b><span class="x" onclick="closeBoxSettings()">✕</span></div>
+      <label class="nb-lbl">work tracking</label>
+      <select id="bs-sync"></select>
+      <label class="nb-lbl">commit as</label>
+      <div class="path-row">
+        <input id="bs-gitname" autocomplete="off" spellcheck="false" />
+        <input id="bs-gitemail" autocomplete="off" spellcheck="false" />
+      </div>
+      <label class="nb-lbl">disk allowance</label>
+      <input id="bs-disk" autocomplete="off" spellcheck="false" />
+      <div class="ar-derived" id="bs-note"></div>
+      <div class="nb-foot"><span class="hint">applies immediately — the box keeps running</span><button class="primary" id="bs-go">Save</button></div>
+    </div>
+  </div>
+
   <div id="addrepo" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
       <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
@@ -866,6 +891,7 @@
           </section>
           <section class="set-pane" data-pane="workflow">
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
+            <label class="set-field narrow"><span class="set-title">Per-box disk</span><span class="desc">how much of the fleet's one shared filesystem each box may use. <b>Measured, not enforced</b> — nothing in the kernel stops a box, so this is what tells you who took the space before another box's build dies with no room left. A single box can be given its own allowance from its row.</span><input id="set-boxdisk" placeholder="10g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Git name</span><span class="desc">who boxes commit as. Blank reads it from the repo's host clone, which is usually already right — a box has a private HOME, so it inherits no gitconfig of its own.</span><input id="set-gitname" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits</span><input id="set-gitemail" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
@@ -980,7 +1006,7 @@ function ensureSection(id, repoId) {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -988,6 +1014,7 @@ function makeRow(name) {
     // the "proceed?" chip is the action itself — one click continues the box, no terminal trip
     if (e.target.classList.contains("pchip") && e.target.classList.contains("proceed")) { resumeBox(name); return; }
     if (e.target.classList.contains("hookwarn") && e.target.dataset.restart === "1") { restartAgent(name); return; }
+    if (e.target.classList.contains("dchip")) { askDiskLimit(name); return; }
     // the check chip is a link to what the check actually said — a red tick you can't read is noise
     openTerminal(name);
   });
@@ -1039,6 +1066,7 @@ function updateRow(el, b, showRepo) {
   vt.title = b.legacy
     ? "this box has a sandbox to itself, which reserves its full memory whether it is working or idle — `skein migrate " + b.name + "` moves it into the shared one"
     : "";
+  diskChip(el.querySelector(".dchip"), b);
   el.querySelector(".branch").textContent = b.branch || "—";
   el.querySelector(".dir").textContent = b.dir || "";
   // The state pill, plus a `◐` when only half the signal produced it (hook edges, no screen). One
@@ -1545,6 +1573,7 @@ function renderDockbar() {
     + (m==='term' ? `<button class="kbtn ghost" id="dattach" title="attach files or a folder for the agent to read (or just paste / drag them onto the terminal)"><svg class="ic" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>` : "")
     + (otherRuntime ? `<button class="kbtn ghost" id="dtake" title="create a lightweight ${esc(otherLabel)} replacement; preserve this source as rollback">↔ ${esc(otherLabel)}</button>` : "")
     + (m==='diff' ? `<button class="kbtn ghost" id="dref" title="refresh diff"><svg class="ic" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>` : "")
+    + `<button class="kbtn ghost" id="dbset" title="this box's own work tracking, committer and disk allowance">⚙ Box settings</button>`
     + (trackableConnection(b) ? `<button class="kbtn ghost" id="dtrack"${tracking.has(view.box) ? " disabled" : ""} title="mint this box its own tracker token at ${esc(trackableConnection(b).label)} and register the sync server inside it">${tracking.has(view.box) ? "wiring…" : "◇ Track work"}</button>` : "")
     // Only when the store actually holds something newer. A button that is always there teaches you
     // to ignore it, and this one has nothing to say on most days.
@@ -1563,6 +1592,7 @@ function renderDockbar() {
   dockbar.querySelector('[data-m=files]').onclick = () => openFiles(view.box);
   dockbar.querySelector('[data-m=tx]').onclick = () => openTranscript(view.box);
   const rf = dockbar.querySelector("#dref"); if (rf) rf.onclick = () => loadDiff(view.box);
+  const bs = dockbar.querySelector("#dbset"); if (bs) bs.onclick = () => openBoxSettings(view.box);
   const tk = dockbar.querySelector("#dtrack"); if (tk) tk.onclick = () => trackWork(view.box);
   const rd = dockbar.querySelector("#drefreshdocs"); if (rd) rd.onclick = e => refreshDocs(view.box, e.shiftKey);
   // plain click = files, shift-click = a whole folder (the picker can only do one or the other).
@@ -2476,6 +2506,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
     document.getElementById("set-fleetdisk").value = settings.fleet_disk || "";
+    document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     document.getElementById("set-gitname").value = settings.git_name || "";
     document.getElementById("set-gitemail").value = settings.git_email || "";
     document.getElementById("set-boxmax").value = settings.box_memory_max || "";
@@ -2742,6 +2773,7 @@ function settingsPayload() {
     fleet_memory: document.getElementById("set-fleetmem").value.trim(),
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
     fleet_disk: document.getElementById("set-fleetdisk").value.trim(),
+    box_disk_max: document.getElementById("set-boxdisk").value.trim(),
     git_name: document.getElementById("set-gitname").value.trim(),
     git_email: document.getElementById("set-gitemail").value.trim(),
     box_memory_max: document.getElementById("set-boxmax").value.trim(),
@@ -2845,6 +2877,69 @@ function clearIdentityFields() {
 // The tracking choice belongs to the box, not only to its repo: two boxes on the same repo can be
 // one claiming from the backlog and one doing something nobody filed. "Repo default" stays the
 // first option so the common case is still one keystroke.
+// Usage is measured, not enforced: the fleet's disk is one filesystem shared by every box, so this
+// says who is taking the space rather than stopping them. Click to change just this box's allowance.
+function fmtGb(mb) { return mb >= 1024 ? `${(mb/1024).toFixed(1)}G` : `${mb}M`; }
+function diskChip(el, b) {
+  const used = b.disk_mb, cap = b.disk_limit_mb;
+  if (used == null || !cap || used < cap * 0.8) { el.style.display = "none"; el.textContent = ""; return; }
+  el.style.display = "";
+  el.className = `dchip ${used >= cap ? "over" : "near"}`;
+  el.textContent = `${fmtGb(used)}/${fmtGb(cap)}`;
+  el.title = `${used >= cap ? "over" : "near"} this box's ${fmtGb(cap)} share of the fleet's shared disk`
+    + `\n\nnothing stops it — one filesystem serves every box, so this is a measurement, not a quota`
+    + `\n\nclick to change this box's allowance`;
+}
+// One box's own settings. Every field is blank-means-inherit, and the placeholder is what it would
+// inherit — so leaving the panel untouched is always the same as never opening it.
+let boxSettingsFor = "";
+function openBoxSettings(name) {
+  boxSettingsFor = name;
+  Promise.all([loadSync(), fetch(`/api/boxes/${encodeURIComponent(name)}/settings`).then(r => r.json())])
+    .then(([, cur]) => {
+      document.getElementById("bs-title").textContent = name;
+      const conns = syncStatus.connections || [];
+      document.getElementById("bs-sync").innerHTML = [
+        `<option value="">repo default${cur.repo_connection ? ` — ${esc(cur.repo_connection)}` : " — not tracked"}</option>`,
+        `<option value="none">not tracked</option>`,
+        ...conns.map(c => `<option value="${esc(c.id)}">${esc(c.label)}${c.ready ? "" : " (not ready)"}</option>`),
+      ].join("");
+      // Stored "" means "this box claims nowhere"; *absent* means it inherits. The API can only
+      // send a string, so the panel asks whether an override exists at all.
+      document.getElementById("bs-sync").value =
+        cur.connection ? cur.connection : (cur.has_tracking_override ? "none" : "");
+      const gn = document.getElementById("bs-gitname"), ge = document.getElementById("bs-gitemail");
+      gn.value = cur.own_git_name || ""; gn.placeholder = cur.effective_git_name || "(unset)";
+      ge.value = cur.own_git_email || ""; ge.placeholder = cur.effective_git_email || "(unset)";
+      const d = document.getElementById("bs-disk");
+      d.value = cur.own_disk || "";
+      d.placeholder = cur.effective_disk_mb ? fmtGb(cur.effective_disk_mb) : "unlimited";
+      document.getElementById("bs-note").textContent =
+        "Blank inherits the fleet default; `none` means unlimited. Disk is measured, not enforced — one filesystem serves every box.";
+      document.getElementById("boxset").classList.add("open");
+    })
+    .catch(e => toast(`settings: ${e.message}`));
+}
+function closeBoxSettings() { document.getElementById("boxset").classList.remove("open"); }
+function saveBoxSettings() {
+  const name = boxSettingsFor;
+  const sync = document.getElementById("bs-sync").value;
+  const gitName = document.getElementById("bs-gitname").value.trim();
+  const gitEmail = document.getElementById("bs-gitemail").value.trim();
+  const disk = document.getElementById("bs-disk").value.trim();
+  const post = (path, body) => fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); });
+  // Absent vs empty is the whole grammar here: cleared field ⇒ inherit again, not "set to nothing".
+  Promise.all([
+    post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) }),
+    post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {}),
+    post("disk", { limit: disk || null }),
+  ])
+    .then(() => { toast(`${name}: settings saved`); closeBoxSettings(); refresh(); })
+    .catch(e => toast(`settings: ${e.message}`));
+}
+function askDiskLimit(name) { openBoxSettings(name); }
 function fillSyncSelect() {
   const el = document.getElementById("nb-sync");
   const repo = (repos || []).find(r => r.id === currentRepoId());
@@ -2961,6 +3056,8 @@ settingsModal().addEventListener("change", e => { if (e.target.closest(".set-pan
 // Click the backdrop (not the dialog) to dismiss — expected of a modal, and it was missing.
 settingsModal().addEventListener("mousedown", e => { if (e.target === settingsModal()) closeSettings(); });
 document.getElementById("nb-repo").addEventListener("change", fillSyncSelect);
+document.getElementById("bs-go").addEventListener("click", saveBoxSettings);
+document.getElementById("boxset").addEventListener("mousedown", e => { if (e.target.id === "boxset") closeBoxSettings(); });
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }

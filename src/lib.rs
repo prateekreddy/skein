@@ -127,6 +127,12 @@ pub struct BoxView {
     /// host that has not adopted the fleet would label the normal case as the odd one.
     #[serde(default)]
     pub legacy: bool,
+    /// MiB this box occupies on the fleet's shared disk, and what it is allowed. Absent for a box
+    /// with a sandbox of its own, whose disk is nobody else's problem.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_limit_mb: Option<u64>,
 }
 
 impl Sandbox {
@@ -310,6 +316,10 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         names.remove(&fleet);
         names.extend(placed_boxes(&fleet).into_iter().map(|(name, _)| name));
     }
+
+    // One measurement for the whole board, not one per row: it is a single `du` in the sandbox, and
+    // asking per box would be one round trip each for a number they all read from the same walk.
+    let usage = fleet_disk_usage();
 
     let mut views: Vec<BoxView> = names
         .into_iter()
@@ -496,6 +506,8 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 // test: it is what makes a box a fleet box, and its absence is what leaves one
                 // holding a VM of its own.
                 legacy: !fleet.is_empty() && shared_record(&name).is_none(),
+                disk_mb: usage.get(&name).copied(),
+                disk_limit_mb: usage.get(&name).and(box_disk_limit(&name)),
             }
         })
         .collect();

@@ -149,6 +149,8 @@ async fn main() {
         )
         .route("/api/boxes/:name/tracking", post(api_set_box_tracking))
         .route("/api/boxes/:name/identity", post(api_set_box_identity))
+        .route("/api/boxes/:name/disk", post(api_set_box_disk))
+        .route("/api/boxes/:name/settings", get(api_box_settings))
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
         .route("/api/pick-path", post(api_pick_path))
@@ -393,6 +395,68 @@ async fn api_set_box_identity(Path(name): Path<String>, Json(r): Json<IdentityRe
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+/// Everything settable about ONE box, and what it would be if nothing were set.
+///
+/// Both halves, because a per-box panel that shows only overrides shows mostly blanks: the useful
+/// question is "what does this box do today, and is that its own choice or the default?" — so each
+/// field carries the override (possibly empty) and the value in force.
+async fn api_box_settings(Path(name): Path<String>) -> Response {
+    if !skein::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let config = skein::load_config();
+    let repo = skein::repo_for_box(&name);
+    let (git_name, git_email) = match &repo {
+        Some(repo) => skein::box_identity(&name, repo),
+        None => (config.git_name.clone(), config.git_email.clone()),
+    };
+    let own_identity = skein::box_identity_override(&name);
+    Json(serde_json::json!({
+        "name": name,
+        "repo": repo.as_ref().map(|r| r.id.clone()).unwrap_or_default(),
+        // the box's own choice, empty when it inherits
+        "connection": skein::box_tracking(&name).unwrap_or_default(),
+        // "" is a real answer (claims nowhere); absent is inheritance. A bare string cannot say which.
+        "has_tracking_override": skein::box_tracking(&name).is_some(),
+        "own_git_name": own_identity.clone().map(|(n, _)| n).unwrap_or_default(),
+        "own_git_email": own_identity.map(|(_, e)| e).unwrap_or_default(),
+        "own_disk": std::fs::read_to_string(
+            std::path::Path::new(&skein::box_state(&name)).join("disk"),
+        )
+        .unwrap_or_default()
+        .trim()
+        .to_string(),
+        // and what is actually in force
+        "effective_connection": skein::connection_for_box(&name).map(|c| c.label).unwrap_or_default(),
+        "effective_git_name": git_name,
+        "effective_git_email": git_email,
+        "effective_disk_mb": skein::box_disk_limit(&name),
+        "repo_connection": repo
+            .and_then(|r| skein::connection_for_repo(&r))
+            .map(|c| c.label)
+            .unwrap_or_default(),
+    }))
+    .into_response()
+}
+
+/// Change one box's disk allowance. Live — nothing restarts, and the next board refresh reads it.
+///
+/// It can be live precisely because the limit is accounting rather than a kernel quota: the fleet's
+/// disk is one filesystem shared by every box, so this is the number skein measures against, not a
+/// wall the box hits. Absent `limit` restores the fleet default; an empty one means unlimited.
+async fn api_set_box_disk(Path(name): Path<String>, Json(r): Json<DiskReq>) -> Response {
+    match skein::set_box_disk_limit(&name, r.limit.as_deref()) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DiskReq {
+    #[serde(default)]
+    limit: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

@@ -743,6 +743,93 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
     )
 }
 
+/// How much disk each box is using, in MiB — every box at once, in one round trip.
+///
+/// Measured rather than enforced, and that distinction is the honest part of this: the fleet's disk
+/// is a single filesystem shared by every box, so nothing in the kernel stops one from filling it.
+/// A limit here is a number skein checks and reports, not a wall the box hits — which is why it can
+/// be changed while a box runs, and why it is worth having at all: the alternative is finding out
+/// when some *other* box's build dies with ENOSPC and no indication of who took the space.
+///
+/// `du -sxm`, one process for the lot: measured at 0.2s for a 3.2 GB tree, so a board tick can pay
+/// for it. `-x` keeps it on the sandbox's own filesystem — a box's store is a host mount, and
+/// walking virtiofs to count bytes that are not on this disk would be both slow and wrong.
+pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Default::default();
+    }
+    if !cfg!(test) {
+        let cache = DISK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, map)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_secs(30) {
+                return map.clone();
+            }
+        }
+    }
+    let script = format!("du -sxm {root}/*/ 2>/dev/null", root = fleet_root());
+    let map: std::collections::HashMap<String, u64> = own_sandbox(&sandbox)
+        .exec(&script, Duration::from_secs(60))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (mb, path) = line.trim().split_once(char::is_whitespace)?;
+            let name = path.trim().trim_end_matches('/').rsplit('/').next()?;
+            Some((name.to_string(), mb.trim().parse().ok()?))
+        })
+        .collect();
+    if !cfg!(test) {
+        *DISK_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((std::time::Instant::now(), map.clone()));
+    }
+    map
+}
+
+static DISK_CACHE: std::sync::Mutex<
+    Option<(std::time::Instant, std::collections::HashMap<String, u64>)>,
+> = std::sync::Mutex::new(None);
+
+/// This box's disk allowance in MiB: its own if it has one, else the fleet-wide default, `None` for
+/// unlimited. Read at every check, so changing it takes effect on the next refresh — no restart.
+pub fn box_disk_limit(name: &str) -> Option<u64> {
+    let own = std::fs::read_to_string(std::path::Path::new(&box_state(name)).join("disk"))
+        .ok()
+        .map(|s| s.trim().to_string());
+    match own {
+        // An empty override is a decision — this box is allowed to use the whole disk.
+        Some(v) if v.is_empty() => None,
+        Some(v) => parse_mib(&v),
+        None => parse_mib(&load_config().box_disk_max),
+    }
+}
+
+/// Give one box a different allowance, or hand it back to the default. Takes effect immediately.
+pub fn set_box_disk_limit(name: &str, limit: Option<&str>) -> Result<(), String> {
+    let dir = std::path::PathBuf::from(box_state(name));
+    let path = dir.join("disk");
+    let Some(limit) = limit else {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("clearing {}: {e}", path.display()))
+            }
+            _ => Ok(()),
+        };
+    };
+    // Three states, and only two of them are a size: `none` says this box may use the whole disk,
+    // which is different from having no opinion (that is `None`, and inherits the default).
+    let limit = match limit.trim().to_lowercase().as_str() {
+        "none" | "unlimited" => "",
+        _ => limit.trim(),
+    };
+    if !limit.is_empty() && parse_mib(limit).is_none() {
+        return Err(format!(
+            "{limit:?} is not a size — try 10g, 512m, or `none` for unlimited"
+        ));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    write_atomic(&path, &dir, limit.as_bytes())
+}
+
 /// Who a box commits as: its own choice, else the configured default, else the host clone's.
 ///
 /// Three sources because each answers a different question. A box set at creation is working on
@@ -2627,6 +2714,56 @@ mod tests {
         assert!(
             identity_script("", "").is_empty(),
             "nothing configured and nothing on the host ⇒ nothing to run"
+        );
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Memory has a kernel ceiling per box; disk has one filesystem and no ceiling at all. So the
+    /// allowance is a number skein measures against — which is exactly what lets it change under a
+    /// running box, and why it must never be described as a quota.
+    #[test]
+    fn a_boxs_disk_allowance_is_its_own_and_changes_without_a_restart() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        save_config(&Config::default()).unwrap();
+        assert_eq!(
+            box_disk_limit("web-main"),
+            Some(10 * 1024),
+            "10g by default — a fleet where every box may take the whole disk has no default at all"
+        );
+
+        set_box_disk_limit("web-main", Some("40g")).unwrap();
+        assert_eq!(box_disk_limit("web-main"), Some(40 * 1024));
+        assert_eq!(
+            box_disk_limit("web-other"),
+            Some(10 * 1024),
+            "one box's allowance is not a decision about the rest"
+        );
+
+        // `none` is a decision — this box may use the whole disk — and distinct from having no
+        // opinion, which is what a cleared field means and inherits the default again.
+        set_box_disk_limit("web-main", Some("none")).unwrap();
+        assert_eq!(box_disk_limit("web-main"), None);
+        set_box_disk_limit("web-main", Some("unlimited")).unwrap();
+        assert_eq!(box_disk_limit("web-main"), None);
+        set_box_disk_limit("web-main", None).unwrap();
+        assert_eq!(box_disk_limit("web-main"), Some(10 * 1024));
+
+        // A size that parses to nothing would read as "limited" and behave as "unlimited".
+        assert!(set_box_disk_limit("web-main", Some("plenty")).is_err());
+        assert_eq!(box_disk_limit("web-main"), Some(10 * 1024));
+
+        save_config(&Config {
+            box_disk_max: String::new(),
+            ..Config::default()
+        })
+        .unwrap();
+        assert_eq!(
+            box_disk_limit("web-main"),
+            None,
+            "blank default ⇒ unlimited"
         );
         std::env::remove_var("SKEIN_HOME");
     }
