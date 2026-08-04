@@ -824,6 +824,8 @@
       <input id="nb-branch" placeholder="my-feature" autocomplete="off" spellcheck="false" />
       <label class="nb-lbl">agent</label>
       <select id="nb-agent"></select>
+      <label class="nb-lbl">work tracking</label>
+      <select id="nb-sync"></select>
       <div class="nb-foot"><span class="hint">creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
     </div>
   </div>
@@ -2907,11 +2909,30 @@ function currentRepoId() {
   if (repos.length) return repos[0].id;
   return "box";
 }
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; Promise.all([loadRuntimes(),loadSettings(),loadRepos()]).then(fillRepoSelect); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync()]).then(() => { fillRepoSelect(); fillSyncSelect(); }); nbBranch.focus(); }
+
+// The tracking choice belongs to the box, not only to its repo: two boxes on the same repo can be
+// one claiming from the backlog and one doing something nobody filed. "Repo default" stays the
+// first option so the common case is still one keystroke.
+function fillSyncSelect() {
+  const el = document.getElementById("nb-sync");
+  const repo = (repos || []).find(r => r.id === currentRepoId());
+  const conns = (syncStatus.connections || []);
+  const inherited = conns.find(c => c.id === (repo || {}).sync_connection);
+  const opts = [
+    `<option value="">repo default${inherited ? ` — ${esc(inherited.label)}` : " — not tracked"}</option>`,
+    `<option value="none">not tracked</option>`,
+    ...conns.map(c => `<option value="${esc(c.id)}">${esc(c.label)}${c.ready ? "" : " (not ready)"}</option>`),
+  ];
+  el.innerHTML = opts.join("");
+}
 // Open the new-box dialog with a specific repo preselected (the per-repo ＋ in the sidebar).
 function openNewBoxFor(repoId) {
   newbox.classList.add("open"); nbBranch.value = "";
-  loadRepos().then(() => { if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId; nbBranch.focus(); });
+  Promise.all([loadRepos(), loadSync()]).then(() => {
+    if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId;
+    fillSyncSelect(); nbBranch.focus();
+  });
 }
 function closeNewBox() { newbox.classList.remove("open"); }
 // Prompt for a repo URL/path and register it, then refresh the repo list.
@@ -2975,10 +2996,18 @@ function launchBox(branch) {
   const id = currentRepoId();
   const agent = nbAgent.value || settings.default_agent || runtimes[0]?.id;
   const name = `${id}-${slug(branch)}`;                 // e.g. thing-feat-auth
+  const sync = document.getElementById("nb-sync").value;
   closeNewBox();
   select(name);
   view = { box: name, mode: "term", kind: "agent" };
-  if (!sessions.has(name)) createSession(name, "agent", branch, agent);   // launch mode — real branch (feat/auth)
+  // Before the launch, not after: provisioning reads the choice, so a token minted against the
+  // repo's default and corrected afterwards would already be the wrong one.
+  const chosen = sync === "" ? Promise.resolve()
+    : fetch(`/api/boxes/${encodeURIComponent(name)}/tracking`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ connection: sync === "none" ? "" : sync }),
+      }).catch(e => toast(`could not set work tracking: ${e.message}`));
+  chosen.then(() => { if (!sessions.has(name)) createSession(name, "agent", branch, agent); });
   applyView();
 }
 document.getElementById("set-go").addEventListener("click", saveSettings);
@@ -2995,6 +3024,7 @@ settingsModal().addEventListener("input", e => { if (e.target.closest(".set-pane
 settingsModal().addEventListener("change", e => { if (e.target.closest(".set-pane")) markDirty(true); });
 // Click the backdrop (not the dialog) to dismiss — expected of a modal, and it was missing.
 settingsModal().addEventListener("mousedown", e => { if (e.target === settingsModal()) closeSettings(); });
+document.getElementById("nb-repo").addEventListener("change", fillSyncSelect);
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));
 nbBranch.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); launchBox(nbBranch.value); }

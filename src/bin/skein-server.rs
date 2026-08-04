@@ -147,6 +147,7 @@ async fn main() {
             "/api/sync/connections/:id/token",
             axum::routing::delete(api_forget_connection_token),
         )
+        .route("/api/boxes/:name/tracking", post(api_set_box_tracking))
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
         .route("/api/pick-path", post(api_pick_path))
@@ -370,6 +371,25 @@ async fn api_set_repo_settings(
 /// stored, which is the whole question the settings screen needs answered.
 async fn api_sync_status() -> Json<skein::SyncStatus> {
     Json(skein::sync_status())
+}
+
+/// Record which work tracker a box claims through — or that it claims through none.
+///
+/// Written *before* the box launches, so provisioning finds the answer already there rather than
+/// minting a token against the repo's default and having it corrected afterwards. Absent
+/// `connection` clears the override and returns the box to its repo's setting.
+async fn api_set_box_tracking(Path(name): Path<String>, Json(r): Json<TrackingReq>) -> Response {
+    match skein::set_box_tracking(&name, r.connection.as_deref()) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TrackingReq {
+    /// `Some("<id>")` to track there, `Some("")` for untracked, absent to inherit the repo.
+    #[serde(default)]
+    connection: Option<String>,
 }
 
 #[derive(Deserialize)]

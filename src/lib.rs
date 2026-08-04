@@ -4194,6 +4194,77 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert_eq!(shorten("/other/x"), "/other/x");
     }
 
+    /// A box chooses at creation; the repo's setting is the default it starts from.
+    ///
+    /// Without this, "use sync for this box?" could only be answered for every box of a repo at
+    /// once — so one box doing untracked exploratory work meant either untracking its repo or
+    /// minting it a token against a backlog it will never claim from.
+    #[test]
+    fn a_box_can_claim_somewhere_other_than_its_repo_or_nowhere_at_all() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        env::set_var("SKEIN_LS_CMD", "false");
+        upsert_connection(
+            Some("team"),
+            "team",
+            "https://team.example",
+            Some("pat_team"),
+        )
+        .unwrap();
+        upsert_connection(
+            Some("solo"),
+            "solo",
+            "https://solo.example",
+            Some("pat_solo"),
+        )
+        .unwrap();
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "/src/web".into(),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: "team".into(),
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+
+        assert_eq!(
+            connection_for_box("web-main").map(|c| c.id),
+            Some("team".to_string()),
+            "no choice of its own means the repo's"
+        );
+
+        set_box_tracking("web-main", Some("solo")).unwrap();
+        assert_eq!(
+            connection_for_box("web-main").map(|c| c.id),
+            Some("solo".to_string()),
+            "the box's own choice wins over its repo's"
+        );
+        assert_eq!(
+            connection_for_box("web-other").map(|c| c.id),
+            Some("team".to_string()),
+            "and it is one box's choice, not the repo's — its siblings are untouched"
+        );
+
+        // Empty is a decision, not an absence: this box claims nowhere.
+        set_box_tracking("web-main", Some("")).unwrap();
+        assert!(connection_for_box("web-main").is_none());
+        assert_eq!(sync_gateway_for_box("web-main"), "");
+
+        // Clearing hands the box back to its repo, rather than leaving it permanently untracked.
+        set_box_tracking("web-main", None).unwrap();
+        assert_eq!(
+            connection_for_box("web-main").map(|c| c.id),
+            Some("team".to_string())
+        );
+        // Idempotent: clearing a box that never chose is not an error.
+        set_box_tracking("web-main", None).unwrap();
+    }
+
     #[test]
     fn a_repo_claims_work_through_the_connection_it_picks() {
         let _g = env_lock();

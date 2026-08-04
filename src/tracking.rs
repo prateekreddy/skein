@@ -391,7 +391,19 @@ pub fn connection_for_repo(repo: &Repo) -> Option<SyncConnection> {
 /// single-repo layout) falls back to the sole connection when there is exactly one, because then
 /// there is nothing to guess. With two, guessing is how a token gets minted against the wrong
 /// backlog.
+/// A box's own answer, when it was given one at creation, overrides its repo's.
+///
+/// The repo-level setting is a *default*, and it was the only setting there was — so a box on a
+/// tracked repo was tracked whether or not that made sense for the work, and the only way to say
+/// otherwise was to change the setting for every box of that repo at once.
 pub fn connection_for_box(name: &str) -> Option<SyncConnection> {
+    if let Some(chosen) = box_tracking(name) {
+        // An empty override is not a missing one: it is "this box does not claim work".
+        let chosen = chosen.trim().to_string();
+        return (!chosen.is_empty())
+            .then(|| load_connections().into_iter().find(|c| c.id == chosen))
+            .flatten();
+    }
     match repo_for_box(name) {
         Some(repo) => connection_for_repo(&repo),
         None => {
@@ -399,6 +411,36 @@ pub fn connection_for_box(name: &str) -> Option<SyncConnection> {
             (list.len() == 1).then(|| list.remove(0))
         }
     }
+}
+
+/// Where a box's own tracking choice is recorded — beside its other durable host-side state, so it
+/// survives the box being rebuilt, resized or migrated.
+fn box_tracking_path(name: &str) -> PathBuf {
+    skein_home().join("boxes").join(name).join("tracking")
+}
+
+/// The box's own choice: `Some(id)` to claim through that connection, `Some("")` to claim through
+/// none, `None` when it never made one and inherits the repo's.
+pub fn box_tracking(name: &str) -> Option<String> {
+    fs::read_to_string(box_tracking_path(name))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Record (or clear) that choice. `None` returns the box to its repo's default.
+pub fn set_box_tracking(name: &str, choice: Option<&str>) -> Result<(), String> {
+    let path = box_tracking_path(name);
+    let Some(choice) = choice else {
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(format!("clearing {}: {e}", path.display()))
+            }
+            _ => Ok(()),
+        };
+    };
+    let dir = path.parent().ok_or("no parent directory")?;
+    fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    write_atomic(&path, dir, choice.trim().as_bytes())
 }
 
 /// The gateway's MCP endpoint for a configured base URL. Accepts either spelling, so a pasted
