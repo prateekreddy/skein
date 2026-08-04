@@ -12,9 +12,8 @@ use crate::runtime::*;
 use crate::util::*;
 use crate::{
     agent_for_box, ai_says_hold, box_liveness, branch_from_box, ensure_kit, ensure_store,
-    fleet_boxes, launch_spec, locate_registry, parse_registry, record_repo_mirror, repo_for_box,
-    store_dir, store_for_box, sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness,
-    Repo,
+    launch_spec, locate_registry, parse_registry, record_repo_mirror, repo_for_box, store_dir,
+    store_for_box, sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness, Repo,
 };
 use chrono::Utc;
 use std::env;
@@ -294,16 +293,21 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
-    let boxes = fleet_boxes().ok_or("cannot verify box state (`sbx ls` unavailable)")?;
-    let live = boxes
-        .iter()
-        .find(|b| b.name == name)
-        .ok_or_else(|| format!("box {name:?} does not exist"))?
-        .live;
-    if live != Some(Liveness::Running) {
-        return Err(format!(
-            "box {name:?} is not running; attach/start it before resuming"
-        ));
+    // `box_liveness`, not `sbx ls` directly: a box in the fleet is not a sandbox, so it never
+    // appears there and every one of them answered "box does not exist" — the cockpit's Continue
+    // button, dead for the entire fleet.
+    match box_liveness(name) {
+        Some(Liveness::Running) => {}
+        Some(_) => {
+            return Err(format!(
+                "box {name:?} is not running; attach/start it before resuming"
+            ))
+        }
+        None => {
+            return Err(format!(
+                "cannot tell whether box {name:?} is running; attach/start it before resuming"
+            ))
+        }
     }
     let p = if prompt.trim().is_empty() {
         "Yes, please proceed."
@@ -320,7 +324,15 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
             .replace("{runtime}", &sh_quote(runtime.info.id)),
         _ => {
             let guest = runtime.headless_resume.replace("{prompt}", &sh_quote(p));
-            format!("sbx exec {} bash -lc {}", sh_quote(name), sh_quote(&guest))
+            // Through the box's placement, never `sbx exec <box>`: that names a sandbox, and for a
+            // fleet box there is none — or worse, an unrelated one wearing the same name.
+            place_of(name)
+                .ok_or("invalid box name")?
+                .exec_argv(&guest)
+                .iter()
+                .map(|arg| sh_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
         }
     };
 
