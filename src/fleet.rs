@@ -916,14 +916,17 @@ pub fn recover_ignored(name: &str) -> Result<String, String> {
         let archive = format!("{staging}/ignored-rescue.tgz");
         let script = format!(
             "set -e; cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; mkdir -p {stage}; \
-             {sweep} \
-             if [ -s {stage}/list ]; then tar --null -T {stage}/list -czf {archive}; \
-             else tar -czf {archive} --files-from /dev/null; fi; \
-             rm -f {stage}/list; \
+             {sweep} {pack} \
              tar -tzf {archive} | wc -l",
             stage = sh_quote(&staging),
             archive = sh_quote(&archive),
-            sweep = ignored_sweep(&staging, "list", "/dev/null"),
+            sweep = ignored_sweep(&staging, "list", &format!("{staging}/{SKIPPED_FILE}")),
+            pack = pack_carried(
+                &staging,
+                "list",
+                "ignored-rescue.tgz",
+                &format!("{staging}/{SKIPPED_FILE}")
+            ),
         );
         let count = old
             .exec(&script, Duration::from_secs(600))
@@ -936,8 +939,17 @@ pub fn recover_ignored(name: &str) -> Result<String, String> {
             .trim()
             .to_string();
         // `-k` is the whole safety property: extract only what is not already there.
+        //
+        // Except a broken symlink, which is not a file the box is maintaining — it is the wreckage
+        // of an earlier move. `/run/sandbox/source` is a `--clone` sandbox's bind of the host repo,
+        // and a `.env` symlinked into it arrives in the fleet pointing at a mount that is not there.
+        // Left in place it would also *win* against `-k` and block the very content that fixes it.
+        // Only links into that mount, and only ones that already resolve to nothing: narrow enough
+        // that nothing else can be caught by it.
         let restore = format!(
-            "cd {tree}; tar -xzkf {archive} 2>/dev/null || true; rm -f {archive}",
+            "cd {tree}; \
+             find . -xtype l -lname '/run/sandbox/*' -print -delete 2>/dev/null || true; \
+             tar -xzkf {archive} 2>/dev/null || true; rm -f {archive}",
             tree = sh_quote(&format!("{}/tree", box_root(name))),
             archive = sh_quote(&archive),
         );
@@ -1009,11 +1021,8 @@ fn ignored_sweep(dir: &str, list: &str, skipped: &str) -> String {
 /// Whatever is refused is written to [`SKIPPED_FILE`] and reported by the caller.
 fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, home: &str) -> String {
     let s = sh_quote(snapshot);
-    let sweep_ignored = ignored_sweep(
-        snapshot,
-        "untracked.list",
-        &format!("{snapshot}/{SKIPPED_FILE}"),
-    );
+    let skipped = format!("{snapshot}/{SKIPPED_FILE}");
+    let sweep_ignored = ignored_sweep(snapshot, "untracked.list", &skipped);
     format!(
         "set -e; mkdir -p {s}; \
          git bundle create {s}/repo.bundle --all; \
@@ -1021,15 +1030,57 @@ fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, hom
          git diff --binary > {s}/worktree.patch; \
          git ls-files --others --exclude-standard -z -- . ':(exclude).claude' ':(exclude).claude/**' > {s}/untracked.list; \
          {sweep_ignored}\
-         if [ -s {s}/untracked.list ]; then tar --null -T {s}/untracked.list -czf {s}/untracked.tgz; \
-         else tar -czf {s}/untracked.tgz --files-from /dev/null; fi; \
-         rm -f {s}/untracked.list; \
+         {pack}\
          printf '{{\"box\":\"%s\",\"branch\":\"%s\",\"head\":\"%s\"}}\\n' {n} \
            \"$(git rev-parse --abbrev-ref HEAD)\" \"$(git rev-parse HEAD)\" > {s}/manifest.json; \
          {agent_state}",
         n = sh_quote(name),
+        pack = pack_carried(snapshot, "untracked.list", "untracked.tgz", &skipped),
         // A box already in the fleet host-binds its transcript; one being migrated in does not.
         agent_state = agent_state_tar(snapshot, transcript_is_vm_local, home),
+    )
+}
+
+/// Tar the swept paths, resolving the symlinks that would not survive the move.
+///
+/// A `--clone` sandbox bind-mounts the host repository at `/run/sandbox/source`, and a box's `.env`
+/// is often a symlink into it — that is how the box reads the host's environment file without a
+/// copy. tar preserves a symlink *as a symlink*, so the rescue faithfully carried a pointer to a
+/// mount that does not exist in the fleet, and the box got a dangling link where its config should
+/// be. It looked like the file was there, which is the worst of both outcomes.
+///
+/// So a symlink is carried as a symlink only while it still points inside the tree, where it will
+/// mean the same thing after the move. One that points outside is carried as its *content*, since
+/// the thing worth keeping is what it resolves to. One that already resolves to nothing is reported
+/// rather than carried — there is nothing behind it to take.
+///
+/// Two passes into one archive rather than two archives: `-r` appends, `-h` dereferences, and each
+/// path appears exactly once, so an extraction that refuses to overwrite still lands the right thing.
+fn pack_carried(dir: &str, list: &str, archive: &str, skipped: &str) -> String {
+    let d = sh_quote(dir);
+    format!(
+        "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
+         : > {d}/carry.list; : > {d}/deref.list; \
+         while IFS= read -r -d '' p; do \
+           if [ -L \"$p\" ]; then \
+             if [ ! -e \"$p\" ]; then \
+               printf '%s (dangling symlink -> %s)\\n' \"$p\" \"$(readlink \"$p\")\" >> {skipped_q}; \
+               continue; \
+             fi; \
+             case \"$(readlink -f \"$p\" 2>/dev/null)\" in \
+               \"$root\"/*) ;; \
+               *) printf '%s\\0' \"$p\" >> {d}/deref.list; continue ;; \
+             esac; \
+           fi; \
+           printf '%s\\0' \"$p\" >> {d}/carry.list; \
+         done < {d}/{list}; \
+         if [ -s {d}/carry.list ]; then tar --null -T {d}/carry.list -cf {d}/carry.tar; \
+         else tar -cf {d}/carry.tar --files-from /dev/null; fi; \
+         if [ -s {d}/deref.list ]; then tar --null -T {d}/deref.list -rhf {d}/carry.tar; fi; \
+         gzip -c {d}/carry.tar > {archive_q}; \
+         rm -f {d}/carry.tar {d}/carry.list {d}/deref.list {d}/{list}; ",
+        skipped_q = sh_quote(skipped),
+        archive_q = sh_quote(&format!("{dir}/{archive}")),
     )
 }
 
@@ -2183,6 +2234,22 @@ mod tests {
         // Plain untracked files must still be carried, exactly as before.
         fs::write(tree.join("notes.txt"), "scratch\n").unwrap();
 
+        // The three symlink shapes, which is where the rescue went wrong. A `--clone` box's `.env`
+        // is a link into `/run/sandbox/source` — the host repo's bind mount — and carrying the LINK
+        // hands the fleet box a pointer to a mount that does not exist there.
+        use std::os::unix::fs::symlink;
+        let outside = dir.join("host-repo");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("env.real"), "FROM_HOST=1\n").unwrap();
+        symlink(outside.join("env.real"), tree.join(".env.host")).unwrap();
+        symlink("notes.txt", tree.join("notes.link")).unwrap();
+        symlink("/run/sandbox/source/.env.gone", tree.join(".env.dangling")).unwrap();
+        fs::write(
+            tree.join(".gitignore"),
+            ".env\n.env.host\n.env.dangling\n.skein/\nnode_modules/\nbig.bin\n",
+        )
+        .unwrap();
+
         let script = snapshot_script(
             &snapshot.to_string_lossy(),
             "demo-main",
@@ -2210,6 +2277,35 @@ mod tests {
         let skipped = fs::read_to_string(snapshot.join(SKIPPED_FILE)).unwrap();
         assert!(skipped.contains("node_modules/"), "{skipped}");
         assert!(skipped.contains("big.bin"), "{skipped}");
+
+        // A link out of the tree is carried as its CONTENT: what it points at will not be there
+        // after the move, and the content is the thing worth keeping.
+        let unpacked = dir.join("unpacked");
+        fs::create_dir_all(&unpacked).unwrap();
+        let out = sh(
+            &unpacked,
+            &format!("tar -xzf {}/untracked.tgz", snapshot.display()),
+        );
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            !unpacked.join(".env.host").is_symlink(),
+            "a link into a mount the fleet does not have is a dangling link there"
+        );
+        assert_eq!(
+            fs::read_to_string(unpacked.join(".env.host")).unwrap(),
+            "FROM_HOST=1\n"
+        );
+        // A link INSIDE the tree still means the same thing after the move, so it stays a link.
+        assert!(
+            unpacked.join("notes.link").is_symlink(),
+            "an in-tree symlink must not be flattened into a copy"
+        );
+        // And one that already resolves to nothing is reported, not carried: there is nothing there.
+        assert!(
+            skipped.contains(".env.dangling"),
+            "a broken link must be named, not silently dropped: {skipped}"
+        );
+        assert!(!unpacked.join(".env.dangling").exists());
     }
 
     // The rescue reads a stopped VM and writes into a live box, so its guards matter more than its
