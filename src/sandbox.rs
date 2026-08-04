@@ -262,21 +262,25 @@ pub fn drop_dest(batch: &str, rel: &str) -> Result<(String, String), String> {
     Ok((dir, path))
 }
 
-/// The argv that streams stdin into `path` inside `name`'s sandbox, creating `dir` first (that's how
-/// a folder drop recreates its tree). `-i` and *not* `-t`: a pty would mangle the binary bytes.
+/// The argv that streams stdin into `path` inside box `name`, creating `dir` first (that's how a
+/// folder drop recreates its tree). `-i` and *not* `-t`: a pty would mangle the binary bytes.
+///
+/// Through the box's **placement**, because a fleet box is not a sandbox: `sbx exec -i <box>` names
+/// something sbx has never heard of, and every paste, drop and file pick into a fleet box failed
+/// with `no sandbox named …` reported to the browser as "attach failed".
+///
+/// Returns the full argv including `sbx`, since where a box lives decides the program as well as its
+/// arguments — a legacy box is still `sbx exec`, a fleet box is `sbx exec … nsenter …`.
 pub fn box_write_argv(name: &str, dir: &str, path: &str) -> Result<Vec<String>, String> {
-    if !valid_name(name) {
-        return Err("invalid box name".into());
-    }
+    let place = place_of(name).ok_or_else(|| format!("no box named {name}"))?;
     let inner = format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path));
-    Ok(vec![
-        "exec".into(),
-        "-i".into(),
-        name.into(),
-        "sh".into(),
-        "-c".into(),
-        inner,
-    ])
+    Ok(place.write_argv(&inner))
+}
+
+/// The argv that runs a one-off shell command in box `name`, wherever it lives. `None` for a name
+/// that is not a box — every path into a box is gated on that.
+pub fn box_exec_argv(name: &str, script: &str) -> Option<Vec<String>> {
+    Some(place_of(name)?.exec_argv(script))
 }
 
 /// Resume a paused box headlessly — the one-click "continue" primitive (step 6). Sends `prompt` as

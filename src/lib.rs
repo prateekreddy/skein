@@ -2875,6 +2875,12 @@ mod tests {
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         env::remove_var("SKEIN_AGENT");
+        // This is the sandbox-per-box path, which is now the opt-in one.
+        save_config(&Config {
+            fleet_sandbox: String::new(),
+            ..Config::default()
+        })
+        .unwrap();
         let store = home.join("st").join(".claude");
         let repo = Repo {
             id: "thing".into(),
@@ -2911,6 +2917,12 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
+        // The sandbox-per-box path — the fleet builds its session a different way.
+        save_config(&Config {
+            fleet_sandbox: String::new(),
+            ..Config::default()
+        })
+        .unwrap();
         let repo = Repo {
             id: "skein".into(),
             source: "s".into(),
@@ -4074,10 +4086,23 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         }])
         .unwrap();
 
+        // The fleet is the default now: reservations sum and eight of them do not fit on one Mac.
+        let fleet = launch_command("web-feat-x", "feat/x");
+        assert!(
+            fleet.contains(" start 'web-feat-x' --branch 'feat/x' --agent 'claude'"),
+            "a box goes into the shared sandbox unless someone asks otherwise: {fleet}"
+        );
+
+        // A sandbox per box stays fully supported — it is opted into by clearing the name.
+        save_config(&Config {
+            fleet_sandbox: String::new(),
+            ..load_config()
+        })
+        .unwrap();
         let own = launch_command("web-feat-x", "feat/x");
         assert!(
             own.starts_with("sbx create --clone --kit "),
-            "the default is still a sandbox per box: {own}"
+            "clearing the fleet must still give a box its own microVM: {own}"
         );
 
         save_config(&Config {
@@ -6085,18 +6110,49 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
 
     #[test]
     fn box_write_argv_creates_the_dir_and_avoids_a_pty() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+
+        // A box with a sandbox of its own: the sandbox IS the box, and the argv says so.
         let argv = box_write_argv(
             "thing-x",
             "/tmp/skein-drop-b1",
             "/tmp/skein-drop-b1/a b.pdf",
         )
         .unwrap();
-        assert_eq!(&argv[..5], ["exec", "-i", "thing-x", "sh", "-c"]);
-        assert_eq!(
-            argv[5],
-            "mkdir -p '/tmp/skein-drop-b1' && cat > '/tmp/skein-drop-b1/a b.pdf'"
+        assert_eq!(&argv[..4], ["sbx", "exec", "-i", "thing-x"]);
+        assert!(
+            argv.last().unwrap()
+                == "mkdir -p '/tmp/skein-drop-b1' && cat > '/tmp/skein-drop-b1/a b.pdf'"
         );
         assert!(box_write_argv("../escape", "/tmp/x", "/tmp/x/y").is_err());
+
+        // A box in the fleet is NOT a sandbox. `sbx exec -i <box>` names nothing, and every paste,
+        // drop and file pick into a fleet box failed with "no sandbox named …" — surfaced in the
+        // browser as "attach failed", which points at the terminal rather than at the upload.
+        record_place(
+            "thing-x",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 4242,
+                home: "/boxes/thing-x/home".into(),
+                tree: "/boxes/thing-x/tree".into(),
+                sock: "/boxes/thing-x/session.sock".into(),
+            },
+        )
+        .unwrap();
+        let placed = box_write_argv("thing-x", "/tmp/d", "/tmp/d/f.png").unwrap();
+        assert_eq!(&placed[..4], ["sbx", "exec", "-i", "skein-fleet"]);
+        assert!(
+            placed.iter().any(|a| a.contains("nsenter")),
+            "the write has to land in the box's namespace, not the sandbox's: {placed:?}"
+        );
+        assert!(
+            placed.last().unwrap().contains("cat > '/tmp/d/f.png'"),
+            "{placed:?}"
+        );
+        env::remove_var("SKEIN_HOME");
     }
 
     #[test]

@@ -71,11 +71,18 @@ pub struct Config {
     pub ai_enrichment: bool,
     /// The one sbx sandbox that hosts every box, when several boxes share one.
     ///
-    /// Empty ⇒ skein's original model: one sandbox per box, each its own microVM. That is the
-    /// default and stays it, because switching is not free — a shared sandbox trades per-box
-    /// memory *reservations* for a shared pool, and trades a VM boundary between boxes for a
-    /// namespace one. Worth it when N reservations no longer fit; not worth it before.
-    #[serde(default)]
+    /// The fleet is the default. Empty ⇒ skein's original model: one sandbox per box, each its own
+    /// microVM, still fully supported for anyone who wants a VM boundary between boxes.
+    ///
+    /// It became the default because the alternative does not scale on one machine: a microVM's
+    /// memory is a *reservation* whether the box is working or idle, and reservations sum. Eight
+    /// boxes at ~18.6 GB each do not fit in 36 GB; eight boxes sharing one ceiling do.
+    ///
+    /// Defaulted rather than left empty for a second reason, learned the hard way: an empty value
+    /// means "legacy" and every field here has a serde default, so one partial config write silently
+    /// unmade the whole fleet. A default that names the usual sandbox degrades to a working fleet
+    /// instead of to a different architecture.
+    #[serde(default = "default_fleet_sandbox")]
     pub fleet_sandbox: String,
     /// Memory for the fleet sandbox (`sbx -m`), e.g. "26g".
     ///
@@ -138,6 +145,12 @@ pub struct Config {
     pub box_memory_high: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
+}
+
+/// The sandbox a fleet lives in unless told otherwise. One name, because a host with two fleets has
+/// deliberately configured the second one.
+fn default_fleet_sandbox() -> String {
+    "skein-fleet".to_string()
 }
 
 fn default_box_disk_max() -> String {
@@ -216,7 +229,7 @@ impl Default for Config {
             confirm_destroy: true,
             ssh_key: String::new(),
             ai_enrichment: false,
-            fleet_sandbox: String::new(),
+            fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
             fleet_disk: String::new(),

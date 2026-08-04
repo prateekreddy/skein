@@ -1137,9 +1137,10 @@ async fn stream_upload(
         rel = format!("paste.{ext}");
     }
     let (dir, path) = skein::drop_dest(&batch, &rel)?;
+    // The argv carries its own program: where the box lives decides that too.
     let argv = skein::box_write_argv(name, &dir, &path)?;
-    let mut child = tokio::process::Command::new("sbx")
-        .args(&argv)
+    let mut child = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -1194,8 +1195,13 @@ async fn stream_upload(
 /// to mistake for the real file. Bounded: a wedged box must not hold the response open.
 async fn discard_partial(name: &str, path: &str) {
     let inner = format!("rm -f {}", skein::sh_quote(path));
-    let child = tokio::process::Command::new("sbx")
-        .args(["exec", name, "sh", "-c", &inner])
+    // Through the placement, like the write it is undoing — `sbx exec <box>` names no sandbox in the
+    // fleet, so the cleanup would fail exactly when the upload it is cleaning up did.
+    let Some(argv) = skein::box_exec_argv(name, &inner) else {
+        return;
+    };
+    let child = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
