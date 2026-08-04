@@ -1638,35 +1638,54 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
     let kit = ensure_kit()?;
     let kit_path = kit.to_string_lossy().into_owned();
     let _ = ensure_gh_secret();
-    let mut create = Command::new("sbx");
-    create.args([
-        "create",
-        "--clone",
-        "--kit",
-        &kit_path,
-        "--name",
-        &replacement.target,
-        &replacement.target_runtime,
-        &repo.work,
-        &repo.store,
-    ]);
-    let out = bounded_output(
-        &mut create,
-        "sbx create replacement",
-        Duration::from_secs(600),
-    )?;
-    if !out.status.success() {
-        return Err(format!(
-            "sbx create failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    // A takeover builds a whole new box, so it has to build one the same way everything else does.
+    // Left as `sbx create` it handed the replacement its own microVM — the reservation the fleet
+    // exists to stop — and the box came up with no placement record, so skein would then address it
+    // as a sandbox named after itself.
+    if !fleet_sandbox().is_empty() {
+        fleet::start_box(
+            &replacement.target,
+            &repo,
+            &replacement.branch,
+            "exec bash -l",
+        )?;
+    } else {
+        let mut create = Command::new("sbx");
+        create.args([
+            "create",
+            "--clone",
+            "--kit",
+            &kit_path,
+            "--name",
+            &replacement.target,
+            &replacement.target_runtime,
+            &repo.work,
+            &repo.store,
+        ]);
+        let out = bounded_output(
+            &mut create,
+            "sbx create replacement",
+            Duration::from_secs(600),
+        )?;
+        if !out.status.success() {
+            return Err(format!(
+                "sbx create failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
     }
+    // Every `tmux` here is the BOX's server, which in a shared sandbox means socket-qualified. Bare,
+    // two boxes would both find a live `skein-agent` on the sandbox's one server and the takeover
+    // would attach its new runtime to another box's session. Same rule as `agent_attach_argv`.
+    let place = place_of(&replacement.target).unwrap_or_else(|| own_sandbox(&replacement.target));
+    let tmux = place.tmux();
     let shell = format!(
-        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {}; tmux new-session -d -s skein-agent {:?}; {TMUX_CONFIGURE}tmux set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
+        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {}; {tmux} new-session -d -s skein-agent {:?}; {configure}{tmux} set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
         runtime.info.executable,
         runtime.interactive_setup,
         runtime.update_before_start,
         guarded_agent_command(runtime.info.id, runtime.interactive_start),
+        configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} ")),
     );
     sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
 }
