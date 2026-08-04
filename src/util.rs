@@ -183,8 +183,22 @@ pub(crate) fn run_capture(prog: &str, args: &[&str]) -> Result<(String, String, 
 /// boots a microVM. Capturing its output closes stdin, so the prompt reads EOF and sbx aborts with
 /// "user cancelled operation": a question nobody was shown, reported as a refusal.
 pub(crate) fn run_attached(prog: &str, args: &[&str]) -> Result<i32, String> {
+    run_attached_env(prog, args, &[])
+}
+
+/// [`run_attached`] with extra environment for the child.
+///
+/// Some of what sbx can be told is not a flag: the sandbox's disk sizes are read from the
+/// environment (`DOCKER_SANDBOXES_ROOT_SIZE`), not from `sbx create`'s argv. Setting them in *this*
+/// process instead would leak into every other child skein spawns for the rest of the run.
+pub(crate) fn run_attached_env(
+    prog: &str,
+    args: &[&str],
+    extra_env: &[(String, String)],
+) -> Result<i32, String> {
     let mut c = Command::new(prog);
     c.args(args);
+    c.envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     if let Ok(repo) = env::var("SKEIN_REPO") {
         if !repo.is_empty() {
             c.current_dir(repo);
@@ -202,8 +216,19 @@ pub(crate) fn run_capture_for(
     args: &[&str],
     timeout: Duration,
 ) -> Result<(String, String, i32), String> {
+    run_capture_for_env(prog, args, timeout, &[])
+}
+
+/// [`run_capture_for`] with extra environment for the child — see [`run_attached_env`].
+pub(crate) fn run_capture_for_env(
+    prog: &str,
+    args: &[&str],
+    timeout: Duration,
+    extra_env: &[(String, String)],
+) -> Result<(String, String, i32), String> {
     let mut c = Command::new(prog);
     c.args(args);
+    c.envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
     if let Ok(repo) = env::var("SKEIN_REPO") {
         if !repo.is_empty() {
             c.current_dir(repo);

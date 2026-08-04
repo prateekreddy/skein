@@ -891,6 +891,7 @@
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
             <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Fleet disk</span><span class="desc">one filesystem shared by every box, <b>20G</b> by default. Memory stopped summing when boxes started sharing a sandbox; disk did not. Fixed when the sandbox is created, so changing it rebuilds.</span><input id="set-fleetdisk" placeholder="20g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Per-box hard cap</span><span class="desc">the most memory <b>one</b> box may use (cgroup <code>memory.max</code>). This is what stops a runaway build taking the fleet down with it: without a cap the kernel kills whichever process it likes, which is another box's agent as readily as the guilty one. Blank ⇒ 70% of fleet memory — high enough for a big build, low enough that two boxes can't exhaust the VM.</span><input id="set-boxmax" placeholder="(70% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <div class="set-field"><span class="set-title">Apply ceilings to running boxes</span><span class="desc">Unlike fleet memory, a per-box ceiling is <b>live</b> — it changes on a running box straight away, with nothing to save or restart. Use this after editing the two fields above; no rebuild, no interruption to any box mid-turn.</span><button id="set-applylimits" class="btn" type="button">Apply to running boxes</button></div>
@@ -2547,6 +2548,7 @@ function openSettings(pane = "repos") {
     document.getElementById("set-base").value = settings.base_branch || "";
     document.getElementById("set-fleetmem").value = settings.fleet_memory || "";
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
+    document.getElementById("set-fleetdisk").value = settings.fleet_disk || "";
     document.getElementById("set-boxmax").value = settings.box_memory_max || "";
     document.getElementById("set-boxhigh").value = settings.box_memory_high || "";
     document.getElementById("set-sshkey").value = settings.ssh_key || "";
@@ -2813,6 +2815,7 @@ function settingsPayload() {
     base_branch: document.getElementById("set-base").value.trim(),
     fleet_memory: document.getElementById("set-fleetmem").value.trim(),
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
+    fleet_disk: document.getElementById("set-fleetdisk").value.trim(),
     box_memory_max: document.getElementById("set-boxmax").value.trim(),
     box_memory_high: document.getElementById("set-boxhigh").value.trim(),
     ssh_key: document.getElementById("set-sshkey").value.trim(),
@@ -2858,13 +2861,14 @@ function applyBoxLimits() {
 function resizeFleet() {
   const memory = document.getElementById("set-fleetmem").value.trim();
   const cpus = document.getElementById("set-fleetcpus").value.trim();
-  if (!confirm(`Rebuild the fleet sandbox at ${memory || "the default"} memory?\n\n` +
+  const disk = document.getElementById("set-fleetdisk").value.trim();
+  if (!confirm(`Rebuild the fleet sandbox at ${memory || "the default"} memory${disk ? ` and ${disk} disk` : ""}?\n\n` +
                `Every box's unpushed work and conversation is saved to the host first, and the ` +
                `sandbox is left alone unless all of it saved. Boxes then restart on their branches.`)) return;
   const btn = document.getElementById("set-resize");
   btn.disabled = true; btn.textContent = "rebuilding…";
   fetch("/api/fleet/resize", { method:"POST", headers:{"Content-Type":"application/json"},
-                               body: JSON.stringify({ memory, cpus }) })
+                               body: JSON.stringify({ memory, cpus, disk }) })
     .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
     .then(res => {
       const failed = res.failed || [];

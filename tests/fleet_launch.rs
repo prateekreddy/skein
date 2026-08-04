@@ -495,7 +495,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     })
     .unwrap();
     // This box belongs to no registered repo, so its work has nowhere to be saved.
-    let err = resize_fleet("8g", "4").expect_err("resize must refuse");
+    let err = resize_fleet("8g", "4", "").expect_err("resize must refuse");
     assert!(
         err.contains("no registered repo") && err.contains("untouched"),
         "the refusal must say the sandbox was left alone: {err}"

@@ -6231,7 +6231,10 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             use std::io::Write as _;
             let mut child = Command::new("bash")
                 .arg(&script)
-                .env("SANDBOX_VM_ID", "boxA")
+                // See the mailbox round-trip test: the box wins over the VM, and leaving SKEIN_BOX
+                // to be inherited files this turn's tokens under whichever box ran the test.
+                .env("SKEIN_BOX", "boxA")
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
                 .env("CLAUDE_PROJECT_DIR", &project_dir)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())

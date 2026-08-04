@@ -94,6 +94,18 @@ pub struct Config {
     /// means *all* of them, and a fleet compiling on every core makes the host's own UI stutter.
     #[serde(default)]
     pub fleet_cpus: String,
+    /// Root filesystem size for the fleet sandbox, e.g. "60g". Empty ⇒ sbx's default of 20 GB.
+    ///
+    /// Not a flag: sbx reads this from `DOCKER_SANDBOXES_ROOT_SIZE` in the environment of the
+    /// process that starts its daemon, so skein passes it to `sbx create` rather than putting it in
+    /// the argv. **It is fixed when the sandbox is created** — changing it later means recreating
+    /// the sandbox, which discards every box's VM-local checkout, so snapshot first.
+    ///
+    /// 20 GB is one shared disk for the whole fleet, and it is the ceiling that binds first: eight
+    /// boxes had used 7.8 GB of it with two `target/` directories doing most of that. A per-box VM
+    /// never had to share.
+    #[serde(default)]
+    pub fleet_disk: String,
     /// The hard memory cap for ONE box (cgroup `memory.max`). Empty ⇒ derived from
     /// [`Config::fleet_memory`].
     ///
@@ -190,6 +202,7 @@ impl Default for Config {
             fleet_sandbox: String::new(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
+            fleet_disk: String::new(),
             box_memory_max: String::new(),
             box_memory_high: String::new(),
             sync_gateway_url: String::new(),

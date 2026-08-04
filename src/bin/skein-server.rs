@@ -750,7 +750,7 @@ async fn api_fleet_limits() -> Response {
 /// 200 with the boxes that failed to come back: their work is already snapshotted on the host, so a
 /// partial return is a retry (`skein start <box>`), not a failure of the resize.
 async fn api_fleet_resize(Json(r): Json<ResizeReq>) -> Response {
-    match skein::resize_fleet(&r.memory, &r.cpus) {
+    match skein::resize_fleet(&r.memory, &r.cpus, &r.disk) {
         Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -762,6 +762,9 @@ struct ResizeReq {
     memory: String,
     #[serde(default)]
     cpus: String,
+    /// Root filesystem size. Empty keeps the configured one — see [`skein::Config::fleet_disk`].
+    #[serde(default)]
+    disk: String,
 }
 
 /// Post a message into the shared mailbox (from skein). `to` is a vmid or "broadcast".

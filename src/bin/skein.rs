@@ -43,10 +43,28 @@ fn main() {
             ),
         },
         "login" => cmd_login(rest.first().map(String::as_str)),
-        "resize" => match rest.first() {
-            Some(memory) => cmd_resize(memory, rest.get(1).map(String::as_str).unwrap_or("")),
-            None => Err("usage: skein resize <memory> [cpus]   e.g. skein resize 26g".into()),
-        },
+        "resize" => {
+            // `--disk` rather than a third positional: disk is the one of the three that is usually
+            // changed alone, and `skein resize 26g "" 60g` is a trap worth not building.
+            let disk = flag(rest, "--disk").unwrap_or_default();
+            let positional: Vec<&String> = rest
+                .iter()
+                .take_while(|a| !a.starts_with("--"))
+                .collect::<Vec<_>>();
+            match (positional.first(), disk.is_empty()) {
+                (Some(memory), _) => cmd_resize(
+                    memory,
+                    positional.get(1).map(|s| s.as_str()).unwrap_or(""),
+                    &disk,
+                ),
+                // Disk alone still needs a memory size to rebuild at, and the configured one is the
+                // right answer — nobody asking for a bigger disk is also asking to be re-sized.
+                (None, false) => cmd_resize(&skein::load_config().fleet_memory, "", &disk),
+                (None, true) => Err("usage: skein resize <memory> [cpus] [--disk <size>]   \
+                     e.g. skein resize 26g   |   skein resize --disk 60g"
+                    .into()),
+            }
+        }
         "migrate" => match rest.first() {
             Some(name) => cmd_migrate(name),
             None => Err("usage: skein migrate <box>   (moves it into the shared sandbox)".into()),
@@ -90,6 +108,7 @@ skein remove <id>     unregister a repo (files left on disk)\n  \
 skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbox)\n  \
 skein login <runtime> authenticate once in the shared sandbox; every box inherits it\n  \
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
+                      (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
 skein migrate <box>   move an existing box into the shared sandbox (old one is stopped, not removed)\n  \
 skein recover <box>   fetch ignored files (.env, .skein/) an early migration left behind\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
@@ -559,11 +578,13 @@ fn run_sbx(argv: &[String]) -> Result<(), String> {
 /// A CLI command and not only a cockpit button because this is the one operation that destroys the
 /// sandbox: `sbx create` may ask for confirmation, and a server has no terminal to answer with — so
 /// the riskiest path needs to be runnable somewhere a person is sitting.
-fn cmd_resize(memory: &str, cpus: &str) -> Result<(), String> {
-    eprintln!(
-        "{DIM}skein:{RESET} saving every box's work, then rebuilding the sandbox at {memory}…"
-    );
-    let failed = skein::resize_fleet(memory, cpus)?;
+fn cmd_resize(memory: &str, cpus: &str, disk: &str) -> Result<(), String> {
+    let size = match disk.trim() {
+        "" => memory.to_string(),
+        d => format!("{memory}, disk {d}"),
+    };
+    eprintln!("{DIM}skein:{RESET} saving every box's work, then rebuilding the sandbox at {size}…");
+    let failed = skein::resize_fleet(memory, cpus, disk)?;
     if failed.is_empty() {
         eprintln!("{DIM}skein:{RESET} resized; every box came back");
     } else {

@@ -316,7 +316,12 @@ mod tests {
             Command::new("bash")
                 .arg(&mailbox_sh)
                 .args(args)
-                .env("SANDBOX_VM_ID", vmid)
+                // The box, and a *different* sandbox — which is the precedence the script now has
+                // and the whole reason it stopped keying on the VM. Inherited otherwise: a test run
+                // inside a fleet box picks up the real `SKEIN_BOX` from its own environment, and
+                // every message gets filed under that box instead of boxA/boxB.
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
                 .output()
                 .expect("run mailbox.sh")
         };

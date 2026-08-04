@@ -135,6 +135,23 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
     argv
 }
 
+/// The environment `sbx create` needs for what its argv cannot carry — today, the sandbox's disk.
+///
+/// sbx takes memory and CPUs as flags but reads disk sizes from its *daemon's* environment
+/// (documented: root filesystem 20 GB by default, `DOCKER_SANDBOXES_ROOT_SIZE` to change it). So
+/// this only lands if the daemon starts with the create — a daemon already running keeps the size it
+/// booted with, and the fleet's disk is fixed for the life of the sandbox either way.
+///
+/// One shared 20 GB disk is the fleet's real ceiling. Memory stopped summing when boxes started
+/// sharing a sandbox; disk started summing for exactly the same reason.
+pub fn create_env() -> Vec<(String, String)> {
+    let disk = load_config().fleet_disk.trim().to_string();
+    if disk.is_empty() {
+        return Vec::new();
+    }
+    vec![("DOCKER_SANDBOXES_ROOT_SIZE".to_string(), disk)]
+}
+
 /// Every host directory the fleet sandbox must be able to see.
 ///
 /// [`fleet_workspace`] covers repos skein manages, whose work clone and store both live under it.
@@ -346,13 +363,15 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
             // sandbox mounts several. When a terminal is there, hand it over — the question is for
             // the person running the command. When there isn't (the server), capture it, but on a
             // budget that fits booting a microVM rather than the 30s action timeout.
+            let env = create_env();
             let failure = if std::io::stdin().is_terminal() {
-                match run_attached("sbx", &args)? {
+                match run_attached_env("sbx", &args, &env)? {
                     0 => None,
                     code => Some(format!("sbx exited {code}")),
                 }
             } else {
-                let (out, err, code) = run_capture_for("sbx", &args, Duration::from_secs(900))?;
+                let (out, err, code) =
+                    run_capture_for_env("sbx", &args, Duration::from_secs(900), &env)?;
                 match code {
                     0 => None,
                     _ => Some({
@@ -362,9 +381,16 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
                 }
             };
             if let Some(detail) = failure {
+                // The hand-run line must carry the environment too, or a fleet configured for a
+                // bigger disk is quietly recreated at the default 20 GB by the very command the
+                // error told someone to type.
+                let prefix = env
+                    .iter()
+                    .map(|(k, v)| format!("{k}={} ", sh_quote(v)))
+                    .collect::<String>();
                 return Err(format!(
                     "creating fleet sandbox {sandbox}: {detail}\n\
-                     if that was a confirmation you never saw, create it once by hand:\n  sbx {}",
+                     if that was a confirmation you never saw, create it once by hand:\n  {prefix}sbx {}",
                     args.join(" ")
                 ));
             }
@@ -820,7 +846,9 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
     match realign_transcript(name) {
         Ok(0) => {}
         Ok(n) => eprintln!("skein: pointed {n} transcript file(s) at {name}'s working directory"),
-        Err(e) => eprintln!("skein: {name} came up, but its conversation could not be located ({e})"),
+        Err(e) => {
+            eprintln!("skein: {name} came up, but its conversation could not be located ({e})")
+        }
     }
 
     // A box that started without a ceiling started *successfully*, so nothing else would ever say
@@ -1366,7 +1394,7 @@ pub struct BoxSnapshot {
 /// host, in each repo's store. A box that fails to come back can be retried with `skein start`, and
 /// the provisioning script restores it from the launch spec it already carries. Failing the whole
 /// resize because the fourth box's clone timed out would help nobody.
-pub fn resize_fleet(memory: &str, cpus: &str) -> Result<Vec<String>, String> {
+pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured; nothing to resize".into());
@@ -1418,6 +1446,12 @@ pub fn resize_fleet(memory: &str, cpus: &str) -> Result<Vec<String>, String> {
     save_config(&Config {
         fleet_memory: memory.trim().to_string(),
         fleet_cpus: cpus.trim().to_string(),
+        // Empty keeps the configured disk rather than resetting it to sbx's 20 GB: `skein resize
+        // 32g` is a memory change, and it must not silently shrink the disk back on the way past.
+        fleet_disk: match disk.trim() {
+            "" => config.fleet_disk.clone(),
+            d => d.to_string(),
+        },
         ..config
     })?;
     // Not the 30s action budget: tearing a microVM down is slower than a status query, and a
@@ -2050,6 +2084,36 @@ mod tests {
 
     // The ceiling exists so ONE runaway box cannot take the fleet down with it. That means max sits
     // below the fleet total (or it protects nothing) and high sits below max (or the kernel kills
+    /// The fleet's disk is one shared filesystem, and sbx takes its size from the environment rather
+    /// than from `sbx create`'s argv — so a knob that only reached the argv would set nothing at all.
+    #[test]
+    fn the_fleets_disk_size_travels_in_the_environment_not_the_argv() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        save_config(&Config::default()).unwrap();
+        assert!(
+            create_env().is_empty(),
+            "unset must leave sbx on its own default rather than pinning one skein invented"
+        );
+
+        save_config(&Config {
+            fleet_disk: "60g".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        assert_eq!(
+            create_env(),
+            vec![("DOCKER_SANDBOXES_ROOT_SIZE".to_string(), "60g".to_string())]
+        );
+        let argv = create_argv("skein-fleet", &[]);
+        assert!(
+            !argv.iter().any(|a| a.contains("60g")),
+            "sbx create has no disk flag; putting one in the argv would be rejected: {argv:?}"
+        );
+    }
+
     // the box instead of throttling it, turning a slow build into a lost turn).
     #[test]
     fn a_boxs_ceiling_protects_the_fleet_and_throttles_before_it_kills() {
