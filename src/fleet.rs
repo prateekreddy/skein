@@ -21,7 +21,8 @@ use crate::place::{
     Place, PlaceRecord,
 };
 use crate::repos::{
-    branch_of, is_git_url, launch_spec, load_repos, repo_for_box, write_launch_spec_for_agent, Repo,
+    branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, remote_origin_url, repo_for_box,
+    write_launch_spec_for_agent, Repo,
 };
 use crate::util::*;
 use crate::{agent_for_box, fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
@@ -562,20 +563,34 @@ pub fn realign_transcript(name: &str) -> Result<usize, String> {
 /// closed by remote host" here while an ordinary `ssh -T` succeeds and records the key itself.
 /// (I read that one keyscan failure as "port 22 is closed" and was wrong — the transport is fine.)
 /// `accept-new` trusts an unknown host once and still refuses a CHANGED key, which is the property
-/// worth keeping. Hosts come from the registered repos, so a self-hosted forge needs no naming here.
-/// Best-effort: an HTTPS repo needs none of this, and refusing to launch over it would be absurd.
-pub fn ensure_known_hosts(sandbox: &str) {
+/// worth keeping. Best-effort: an HTTPS repo needs none of this, and refusing to launch over it
+/// would be absurd.
+///
+/// Every SSH host any box might reach, from both places a repo names one.
+///
+/// `source` is where a box CLONES from; a repo adopted in place has a path there and an SSH URL on
+/// its `origin`, which is where its boxes PUSH. Reading only `source` meant the four adopted repos
+/// contributed no hosts at all — precisely the repos whose boxes now have an SSH origin.
+fn ssh_hosts() -> Vec<String> {
     let mut hosts: Vec<String> = load_repos()
         .iter()
-        .filter(|repo| repo.source.starts_with("git@") || repo.source.starts_with("ssh://"))
-        .filter_map(|repo| host_of(&repo.source).map(str::to_string))
+        .flat_map(|repo| {
+            [
+                repo.source.clone(),
+                remote_origin_url(&repo.work).unwrap_or_default(),
+            ]
+        })
+        .filter(|url| is_ssh_url(url))
+        .filter_map(|url| host_of(&url).map(|h| h.to_string()))
         .collect();
     hosts.sort();
     hosts.dedup();
-    if hosts.is_empty() {
-        return;
-    }
-    let script = format!(
+    hosts
+}
+
+/// The shell that pins those hosts into whichever `$HOME` it runs in.
+fn known_hosts_script(hosts: &[String]) -> String {
+    format!(
         "mkdir -p \"$HOME/.ssh\" && chmod 700 \"$HOME/.ssh\"; \
          for h in {hosts}; do \
            ssh-keygen -F \"$h\" >/dev/null 2>&1 && continue; \
@@ -587,9 +602,34 @@ pub fn ensure_known_hosts(sandbox: &str) {
             .map(|h| sh_quote(h))
             .collect::<Vec<_>>()
             .join(" "),
-    );
-    if let Err(e) = own_sandbox(sandbox).exec(&script, Duration::from_secs(120)) {
+    )
+}
+
+pub fn ensure_known_hosts(sandbox: &str) {
+    let hosts = ssh_hosts();
+    if hosts.is_empty() {
+        return;
+    }
+    if let Err(e) = own_sandbox(sandbox).exec(&known_hosts_script(&hosts), Duration::from_secs(120))
+    {
         eprintln!("skein: could not pin SSH host keys in {sandbox} ({e}); a box cloning over SSH will fail host key verification");
+    }
+}
+
+/// The same trust, inside the box — where the agent's own `git push` runs.
+///
+/// The sandbox's `known_hosts` does not reach a box: every box has a private HOME, and that is the
+/// point of it. Cloning never noticed because it runs in the sandbox namespace, so the gap only
+/// showed when a box first pushed to a real remote and got `Host key verification failed` — read as
+/// a credentials problem, and the credentials were fine the whole time.
+pub fn ensure_box_known_hosts(name: &str) {
+    let hosts = ssh_hosts();
+    if hosts.is_empty() {
+        return;
+    }
+    let Some(place) = place_of(name) else { return };
+    if let Err(e) = place.exec(&known_hosts_script(&hosts), Duration::from_secs(120)) {
+        eprintln!("skein: could not pin SSH host keys in {name} ({e}); pushing over SSH from it will fail host key verification");
     }
 }
 
@@ -843,7 +883,7 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
     // Only an adopted repo needs this: a URL source already clones from the place it pushes to.
     let upstream = match crate::is_git_url(&repo.source) {
         true => String::new(),
-        false => crate::remote_origin_url(&repo.work).unwrap_or_default(),
+        false => remote_origin_url(&repo.work).unwrap_or_default(),
     };
     if has_tree {
         eprintln!("skein: {name} already has a checkout; keeping it");
@@ -906,6 +946,10 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
     // transcript. Measured on lattice-feat-design-codex-claude: the work restored, the conversation
     // did not. It is idempotent — a box that already has a conversation at its own slug keeps it —
     // so the honest place for it is wherever a box comes up, not on one path through that.
+    // After provisioning, because it writes into the box's private HOME, and on every start because
+    // a repo registered since the box was built adds a host it has never trusted.
+    ensure_box_known_hosts(name);
+
     match realign_transcript(name) {
         Ok(0) => {}
         Ok(n) => eprintln!("skein: pointed {n} transcript file(s) at {name}'s working directory"),
@@ -1945,6 +1989,7 @@ pub fn read_anchor(sandbox: &str, name: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::save_repos;
     use crate::testutil::*;
 
     // The layout is load-bearing rather than cosmetic: box-session.sh binds the box's own /tmp and
@@ -2366,6 +2411,51 @@ mod tests {
              deliberate choice: {repair}"
         );
         assert!(repair.contains("git remote set-url origin 'git@github.com:o/r.git'"));
+    }
+
+    /// The hosts to trust come from where boxes PUSH as well as where they clone. An adopted repo
+    /// has a path for a source and its remote only on `origin` — so reading `source` alone left the
+    /// box with no `known_hosts` entry for the one host it actually talks to.
+    #[test]
+    fn host_trust_covers_the_remote_a_box_pushes_to() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let work = home.join("adopted");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "git@gitlab.example.com:o/r.git"]);
+
+        save_repos(&[Repo {
+            id: "adopted".into(),
+            // Adopted in place: the source is the checkout, not a URL.
+            source: work.to_string_lossy().into_owned(),
+            work: work.to_string_lossy().into_owned(),
+            store: home.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            check: String::new(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+
+        assert_eq!(
+            ssh_hosts(),
+            vec!["gitlab.example.com".to_string()],
+            "a repo whose only SSH URL is on origin still needs its host trusted"
+        );
+        assert!(
+            known_hosts_script(&ssh_hosts()).contains("StrictHostKeyChecking=accept-new"),
+            "trust an unknown host once; still refuse a CHANGED one"
+        );
     }
 
     #[test]
