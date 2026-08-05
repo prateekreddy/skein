@@ -2024,17 +2024,44 @@ fn archive_script(name: &str, archive: &str) -> String {
     )
 }
 
-/// Put one box back into a freshly rebuilt sandbox, exactly as it was.
+/// Put one box back into a freshly rebuilt sandbox, exactly as it was, and drop the copy.
+///
+/// The delete is the point of doing it here rather than leaving it to a caller: an archive is the
+/// size of the box, so a resize that kept them would leave gigabytes on the host every time it ran —
+/// measured, 16 GiB of boxes against 61 GiB free, which is two resizes before the Mac is full. Once
+/// `tar -x` has succeeded the bytes are back where they belong and the copy is redundant.
+///
+/// `set -e` is what makes that safe: the `rm` is only reached if the extraction returned zero, so a
+/// resize that fails partway keeps the only copy of the box it could not restore. That copy is then
+/// deliberately left behind — the caller says where it is, because at that point it is the box.
 fn restore_box(fleet: &Place, name: &str, archive: &str) -> Result<(), String> {
-    let script = format!(
-        "set -e; mkdir -p {root}; tar -C {root} -xf {archive}",
-        root = sh_quote(&box_root(name)),
-        archive = sh_quote(archive),
-    );
     fleet
-        .exec(&script, Duration::from_secs(1800))
+        .exec(&restore_script(name, archive), Duration::from_secs(1800))
         .map(|_| ())
         .map_err(|e| format!("could not put {name} back: {e}"))
+}
+
+/// The shell [`restore_box`] runs. Its own function for the same reason [`archive_script`] is: the
+/// ordering here — extract, *then* delete, under `set -e` — is the whole safety property.
+fn restore_script(name: &str, archive: &str) -> String {
+    format!(
+        "set -e; mkdir -p {root}; tar -C {root} -xf {archive}; rm -f {archive}",
+        root = sh_quote(&box_root(name)),
+        archive = sh_quote(archive),
+    )
+}
+
+/// Whether a box should have a session again after the rebuild.
+///
+/// A resize puts the fleet back as it found it, so a box that was deliberately stopped stays
+/// stopped — its checkout is restored either way, and `skein start` is then a session start. This
+/// used to start everything with a placement record, which woke every stale box on the board.
+///
+/// An empty map is the sweep saying it could not tell, not that nothing was running, and everything
+/// starts. That is the safer way to be wrong: a box wrongly started is a nuisance, a box wrongly
+/// left stopped reads as a resize that lost it.
+fn should_come_back(was_live: &std::collections::HashMap<String, bool>, name: &str) -> bool {
+    was_live.is_empty() || was_live.get(name).copied().unwrap_or(false)
 }
 
 /// Refuse a resize that would fill the host disk, before anything is destroyed.
@@ -2047,14 +2074,26 @@ fn restore_box(fleet: &Place, name: &str, archive: &str) -> Result<(), String> {
 /// A fifth over the measured size, because `du` counts what the boxes use and `tar` writes a little
 /// more (headers, and no sparse-file handling).
 fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
+    // `key value` lines rather than three bare numbers, because the third is absent whenever no
+    // leftovers exist and positional parsing would then read the free space as the leftover size.
     let script = format!(
-        "du -sxm {root} 2>/dev/null | cut -f1; df -Pm {state} | awk 'NR==2{{print $4}}'",
+        "echo \"boxes $(du -sxm {root} 2>/dev/null | cut -f1)\"; \
+         echo \"free $(df -Pm {state} | awk 'NR==2{{print $4}}')\"; \
+         echo \"stale $(cat {state}/*/resize-*.tar 2>/dev/null | wc -c | awk '{{print int($1/1048576)}}')\"",
         root = sh_quote(&fleet_root()),
         state = sh_quote(&box_state_root()),
     );
     let out = fleet.exec(&script, Duration::from_secs(300))?;
-    let mut lines = out.lines().filter_map(|l| l.trim().parse::<u64>().ok());
-    let (Some(boxes), Some(free)) = (lines.next(), lines.next()) else {
+    let read = |key: &str| -> Option<u64> {
+        out.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix(&format!("{key} "))?
+                .trim()
+                .parse()
+                .ok()
+        })
+    };
+    let (Some(boxes), Some(free)) = (read("boxes"), read("free")) else {
         // Unmeasurable is not the same as too small, and refusing on it would make a resize
         // impossible for anyone whose `df` says something unexpected.
         eprintln!("skein: could not measure the space a resize needs; continuing");
@@ -2062,10 +2101,22 @@ fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
     };
     let needed = boxes + boxes / 5;
     if free < needed {
+        let stale = read("stale").unwrap_or(0);
         return Err(format!(
             "copying the boxes out needs about {needed} MiB and the host has {free} MiB free — \
-             resize aborted with the sandbox untouched. The boxes are {boxes} MiB; freeing space, \
-             or `skein stop`ping boxes you do not need, makes room."
+             resize aborted with the sandbox untouched. The boxes are {boxes} MiB.{}",
+            match stale {
+                // A successful resize deletes its copies as it restores them, so anything left is
+                // from one that did not finish — and that is worth saying, because it is both the
+                // space and, for whichever box it belongs to, the only copy of its work.
+                0 => " Freeing space, or `skein stop`ping boxes you do not need, makes room."
+                    .to_string(),
+                mib => format!(
+                    " {mib} MiB of that is held by copies from a resize that did not finish, under \
+                     {}: check whether those boxes came back before deleting them.",
+                    box_state_root()
+                ),
+            }
         ));
     }
     Ok(())
@@ -2105,6 +2156,21 @@ pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>,
     // Space before work: the archives are the size of the boxes, and discovering the host is full
     // after the sandbox is gone would be the worst possible moment to discover it.
     room_to_copy_out(&fleet)?;
+    // Who was actually running, captured before anything else and never asked again: a resize must
+    // put the fleet back as it found it, and starting a box that was deliberately stopped is not
+    // that. Asked here rather than in phase 3 because by then every session is gone — after the
+    // rebuild, "was this box running?" is a question the sandbox can no longer answer.
+    //
+    // `invalidate` first because a remembered answer is not good enough for a decision this coarse,
+    // and it is exactly what invalidate is for: the next caller waits for the truth (see `Gate`).
+    LIVENESS_GATE.invalidate();
+    let was_live = fleet_liveness();
+    // An empty map means the sweep could not tell, not that nothing was running. Starting
+    // everything is the safer failure here — a box wrongly started is a nuisance, a box wrongly
+    // left stopped looks like a resize that lost it.
+    if was_live.is_empty() {
+        eprintln!("skein: could not tell which boxes were running; all of them will be started");
+    }
     // The login next, because it lives in the sandbox's HOME and the rebuild destroys it.
     // `ensure_fleet` restores it afterwards — but only if something captured it BEFORE the destroy,
     // and its own call runs after `sbx create`, when the sandbox is empty and there is nothing left
@@ -2132,6 +2198,7 @@ pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>,
         let archive = archive_box(&fleet, name, &run)
             .map_err(|e| format!("{e} — resize aborted with the sandbox untouched"))?;
         carried.push(Carried {
+            live: should_come_back(&was_live, name),
             name: name.clone(),
             repo: repo.clone(),
             branch,
@@ -2209,6 +2276,13 @@ pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>,
             failed.push(box_.name.clone());
             continue;
         }
+        // Restored but deliberately not started: it was not running when the resize began, and a
+        // resize puts the fleet back as it found it. Its checkout is there, so `skein start` is a
+        // session start whenever it is wanted.
+        if !box_.live {
+            eprintln!("skein: {} restored, left stopped as it was", box_.name);
+            continue;
+        }
         if let Err(e) = start_box(&box_.name, &box_.repo, &box_.branch, "exec bash -l") {
             eprintln!("skein: {} did not come back: {e}", box_.name);
             failed.push(box_.name.clone());
@@ -2226,6 +2300,8 @@ struct Carried {
     repo: Repo,
     branch: String,
     archive: String,
+    /// Whether this box had a live session before the rebuild, and so should have one after.
+    live: bool,
 }
 
 /// Point a box's launch spec at the snapshot it must restore from on its next start.
@@ -2685,6 +2761,48 @@ mod tests {
             !script.contains("--exclude=./tmp") && !script.contains("--exclude=./home"),
             "nothing else is excluded — an exact copy is the point: {script}"
         );
+    }
+
+    /// An archive is the size of the box, so keeping them is how a resize fills the host: measured,
+    /// 16 GiB of boxes against 61 GiB free is two resizes before the Mac is full. It must go once
+    /// its bytes are back — and *only* then, or a failed restore would delete the only copy.
+    #[test]
+    fn the_copy_is_deleted_once_it_is_back_and_never_before() {
+        let archive = box_archive("web-main", "resize-x");
+        let script = restore_script("web-main", &archive);
+
+        let (Some(extract), Some(delete)) = (script.find("tar -C"), script.find("rm -f")) else {
+            panic!("a restore must both extract and delete: {script}");
+        };
+        assert!(
+            extract < delete,
+            "the copy is deleted after the extraction, never before: {script}"
+        );
+        assert!(
+            script.starts_with("set -e;"),
+            "and only if the extraction succeeded — without `set -e` a failed tar still reaches \
+             the rm, which would delete the only copy of a box that did not come back: {script}"
+        );
+    }
+
+    /// A resize puts the fleet back as it found it. Starting every box with a placement record woke
+    /// every stale box on the board, which is not the same fleet.
+    #[test]
+    fn a_resize_restores_every_box_but_only_restarts_the_ones_that_were_running() {
+        let swept = std::collections::HashMap::from([
+            ("busy".to_string(), true),
+            ("idle".to_string(), false),
+        ]);
+        assert!(should_come_back(&swept, "busy"));
+        assert!(!should_come_back(&swept, "idle"));
+        // A box the sweep never mentioned has no session to have been in.
+        assert!(!should_come_back(&swept, "unheard-of"));
+
+        // But an empty sweep is "cannot tell", not "nothing was running" — and being wrong that way
+        // round loses a box rather than merely waking one.
+        let blind = std::collections::HashMap::new();
+        assert!(should_come_back(&blind, "busy"));
+        assert!(should_come_back(&blind, "idle"));
     }
 
     // The layout is load-bearing rather than cosmetic: box-session.sh binds the box's own /tmp and
