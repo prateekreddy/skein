@@ -206,16 +206,29 @@ fn under(path: &str, dir: &str) -> bool {
 
 /// How the sandbox's memory is divided, in MiB.
 ///
-/// Four claims on one VM, and until this existed only the first was written down:
+/// Three claims on one VM, and until this existed only the first was written down:
 ///
-/// * **boxes** — everything the agents and their builds run, under `/sys/fs/cgroup/skein`;
-/// * **docker** — the containers the boxes start, which dockerd places under
-///   `/sys/fs/cgroup/docker`, nowhere near a box's own cgroup;
+/// * **boxes** — the whole workload: everything the agents and their builds run under
+///   `/sys/fs/cgroup/skein`, *and* the containers they start, which dockerd places under
+///   `/sys/fs/cgroup/docker` where no per-box ceiling reaches;
 /// * **plumbing** — the sandbox's own container: its init, the ssh-agent forwarder, dockerd and
-///   containerd themselves. It is a *child of* `/docker`, so the ceiling written there covers this
-///   too and has to be sized for both;
-/// * **reserve** — everything outside both cgroups: the kernel, and the VM-level services that
+///   containerd themselves;
+/// * **reserve** — everything outside the workload: the kernel, and the VM-level services that
 ///   answer the host. Capped by nobody, because it is what everything else is measured against.
+///
+/// The workload is **one** share rather than a boxes half and a Docker half, and that is the whole
+/// of what "bounded together" means here. Splitting it read like two protections and was one and a
+/// half: only `skein` can actually be capped ([`fleet_limits`] says why `docker` cannot), so the
+/// Docker half was never a ceiling on Docker — it was memory withheld from the boxes on Docker's
+/// behalf. A fleet whose boxes wanted 20 GB with no container running was told no, and the third
+/// held back for `docker build` protected nothing, because nothing was written on that cgroup.
+///
+/// So the pool is shared and taken first-come: a box may fill it when Docker is idle, and a build
+/// may fill it when the boxes are. What that gives up is the guarantee that the two *cannot* reach
+/// the total between them — a container is bounded by `--memory` on the container that asked for
+/// it, not by this. What it buys is that neither one idles memory the other needs, and the reserve
+/// and plumbing shares — the ones that keep the sandbox answering at all — are untouched by the
+/// merge.
 ///
 /// The reserve is the point of the whole exercise. There is no swap in the sandbox, so reaching the
 /// VM's memory is not a slowdown, it is the kernel's global OOM killer choosing a victim — and it
@@ -225,7 +238,6 @@ fn under(path: &str, dir: &str) -> bool {
 /// total converts that into an OOM *inside* the offending cgroup, which kills a build.
 pub struct MemoryPlan {
     pub boxes: u64,
-    pub docker: u64,
     pub plumbing: u64,
     pub reserve: u64,
 }
@@ -249,14 +261,12 @@ pub fn memory_plan() -> Option<MemoryPlan> {
     // than needing to be owned. This is headroom for dockerd and containerd growing with the number
     // of containers, not a share of the workload.
     let plumbing = 512.min(total / 8);
-    let available = total.saturating_sub(reserve + plumbing);
-    // A third to Docker. Boxes are the workload and get the larger share; Docker is a tool some of
-    // them reach for, and it is measured here at all only because its memory lands outside every
-    // per-box ceiling skein sets.
-    let docker = available / 3;
+    // Everything left over is the workload's, in one share. A third of it used to be set aside for
+    // Docker; see [`MemoryPlan`] for why holding it back protected nothing and cost the boxes a
+    // third of the fleet whenever no container was running.
+    let boxes = total.saturating_sub(reserve + plumbing);
     Some(MemoryPlan {
-        boxes: available - docker,
-        docker,
+        boxes,
         plumbing,
         reserve,
     })
@@ -313,7 +323,7 @@ pub fn box_limits() -> String {
 /// per-box limit reaches it. That reasoning was right about the hole and wrong about the patch,
 /// because of what else lives in that cgroup: the sandbox's own container is a child of it, so
 /// `/sys/fs/cgroup/docker` holds init, `socat`, dockerd and containerd — the machinery that answers
-/// `sbx exec`. Adding [`MemoryPlan::plumbing`] to its share was an attempt to leave that machinery
+/// `sbx exec`. Adding the plumbing share to its ceiling was an attempt to leave that machinery
 /// room, and it does not work, because the failure is not about the size of the number.
 ///
 /// Measured on this fleet while it was wedged, with `memory.high` at 7.57 GiB and the cgroup at
@@ -330,8 +340,13 @@ pub fn box_limits() -> String {
 /// picks its victim from a cgroup containing pid 1 — trading a stuck build for a dead sandbox.
 ///
 /// So Docker is bounded where the overshoot can be attributed and killed safely — `--memory` on the
-/// container that asked for it — and not at the cgroup it shares with the sandbox. [`MemoryPlan`]
-/// still sets aside a share for it, but as a share the boxes may not take, not a cap on Docker.
+/// container that asked for it — and not at the cgroup it shares with the sandbox.
+///
+/// Which leaves `skein` as the one ceiling, and it is therefore sized to the whole workload rather
+/// than to a boxes-only share of it. [`MemoryPlan`] no longer keeps a third back for Docker: that
+/// third was withheld from the boxes on behalf of a cgroup nothing is written on, so it bought no
+/// protection and cost the fleet real memory every hour no container was running. One pool, one
+/// ceiling, taken first-come.
 ///
 /// Applied on every box start rather than once, because dockerd recreates `/sys/fs/cgroup/docker`
 /// from scratch when the sandbox cycles, taking any limit written on it with it. That is also why
@@ -350,7 +365,7 @@ pub fn fleet_limits() -> String {
     // machine twice the real size is not a ceiling. The launcher scales by what it actually finds.
     format!(
         "total={}M,skein={},docker=max/max",
-        plan.boxes + plan.docker + plan.plumbing + plan.reserve,
+        plan.boxes + plan.plumbing + plan.reserve,
         ceiling(plan.boxes),
     )
 }
@@ -3127,7 +3142,7 @@ mod tests {
             let total_mib = parse_mib(total).unwrap();
             let plan = memory_plan().unwrap();
             assert_eq!(
-                plan.boxes + plan.docker + plan.plumbing + plan.reserve,
+                plan.boxes + plan.plumbing + plan.reserve,
                 total_mib,
                 "the shares must account for the whole VM at {total}"
             );
@@ -3155,9 +3170,17 @@ mod tests {
                 boxes_high < boxes_max,
                 "throttle before killing, the same way a box does: {spec}"
             );
+            // One ceiling over the whole workload — the boxes and the containers they start share a
+            // pool now rather than each being handed a slice. What it must still leave untouched is
+            // the plumbing and the reserve, because those are what answers the host: the merge is
+            // between the two workload shares, never into the sandbox's own.
             assert!(
-                boxes_max + plan.docker + plan.plumbing < total_mib,
-                "the boxes' ceiling has to leave Docker and the sandbox their share: {spec}"
+                boxes_max + plan.plumbing < total_mib,
+                "the workload's ceiling has to leave the sandbox its own share: {spec}"
+            );
+            assert!(
+                total_mib - boxes_max >= plan.reserve,
+                "the reserve survives the merge, or the VM has nothing to answer with: {spec}"
             );
             // Docker is named in order to be left uncapped, and `max` is the only value that says
             // so — a number here throttles the sandbox's own init and socat, which share that
