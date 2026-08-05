@@ -84,17 +84,44 @@ apply_fleet_ceilings() {
     # Only ever narrow what is already there. Creating `docker` ourselves would hand dockerd a
     # cgroup it did not make and expects to own; a sandbox with no inner Docker simply has none.
     [ -d "$dir" ] || continue
+    # Both halves are read before EITHER is written, so an unreadable spec leaves the cgroup as it
+    # found it. Half a ceiling is worse than none: a `high` with no `max` above it is the shape that
+    # throttles forever, which is the failure this pair of limits exists to avoid.
+    #
+    # A value is either `max` — a ceiling deliberately withheld, WRITTEN rather than skipped so that
+    # a fleet an older skein capped has that cap taken back off — or a number of MiB, scaled below.
+    # Anything else is a word from a newer skein than this launcher, and the check happens here
+    # rather than inside `$(( ))` because arithmetic does not fail on a word it cannot read: under
+    # `set -u` it aborts the shell. That is not hypothetical. A skein that began sending
+    # `docker=max/max` to sandboxes still carrying the launcher before it took every box in the
+    # fleet down — the launcher died before tmux, so each reconnect entered an anchor pid from the
+    # last boot and reported `nsenter: cannot open /proc/<pid>/ns/user`, an error about namespaces
+    # for a fleet that needed a file copied.
+    #
+    # A launcher is older than the skein driving it more often than not, because the sandbox keeps
+    # whichever copy it was last given. So an unfamiliar ceiling has to be one it skips, not one it
+    # dies on: skipping costs this cgroup its limit and says so, and the box still starts.
+    readable=yes
+    for half in "${spec##*/}" "${spec%%/*}"; do
+      case "$half" in
+        max) ;;
+        *) case "${half%M}" in
+             "" | *[!0-9]*)
+               echo "skein: ignoring the ceilings on ${dir##*/}: '$half' is not a size this launcher understands — it is older than the skein that sent it" >&2
+               readable=""
+               ;;
+           esac ;;
+      esac
+    done
+    [ -n "$readable" ] || continue
     # `high` before `max`, because these are written over a cgroup that may already be busy: the
     # soft limit makes the kernel reclaim, so the hard one lands on a cgroup that has just given
     # back its page cache rather than on one still over the line, which would be killed on the spot.
     for want in "memory.high ${spec##*/}" "memory.max ${spec%%/*}"; do
       file="${want%% *}"
       mib="${want#* }"
-      # `max` is a ceiling deliberately withheld, and it is WRITTEN rather than skipped: a fleet an
-      # older skein capped still carries that cap, and only a write takes it back off. Nothing to
-      # scale either — no ceiling is no ceiling on a VM of any size.
       if [ "$mib" = max ]; then
-        value=max
+        value=max          # nothing to scale: no ceiling is no ceiling on a VM of any size
       else
         mib="${mib%M}"
         [ -n "$scale" ] && mib=$(( mib * actual / planned ))
@@ -307,7 +334,12 @@ if [ -n "$limits" ]; then
   if sudo mkdir -p "$cgroup_root" 2>/dev/null \
     && sudo sh -c 'echo "+memory +pids" > '"$cgroup_root"'/cgroup.subtree_control' 2>/dev/null \
     && sudo mkdir -p "$cg" 2>/dev/null; then
-    apply_fleet_ceilings
+    # In a subshell, so that no way this can fail becomes a box that will not start. The guard above
+    # closes the one that bit; this closes the shape. `set -u` aborts the shell it runs in, and the
+    # spec here comes from a *newer* skein than the launcher reading it, so the next token nobody
+    # anticipated would do again exactly what `max` did. A subshell makes the blast radius the
+    # ceilings rather than the session. Nothing downstream reads what it sets.
+    ( apply_fleet_ceilings ) || echo "skein: the shared ceilings could not be applied for $box; it starts under whatever is already on those cgroups" >&2
     for kv in $(printf '%s' "$limits" | tr ',' ' '); do
       case "$kv" in
         max=*)  sudo sh -c 'echo "$1" > "$2"' _ "${kv#max=}"  "$cg/memory.max"  2>/dev/null || true ;;

@@ -3534,9 +3534,12 @@ function loadResources() {
     if (!r || !r.mem_total) { strip.className = "gauges"; return; }
     const pct = (n, d) => d > 0 ? (n * 100 / d) : 0;
     // Memory is stacked because a single "used" figure cannot answer the question you actually ask
-    // when the sandbox is slow: which of its claims is holding it. Boxes and docker are the two
-    // cgroups skein caps; "other" is everything outside both — the VM's own services and the kernel.
+    // when the sandbox is slow: which of its claims is holding it. Boxes and docker are drawn apart
+    // for that reason and *summed* against the ceiling, because they share one — the workload is a
+    // single pool taken first-come, not a slice each. "other" is everything outside both: the VM's
+    // own services and the kernel, which is what the reserve keeps back.
     const other = Math.max(0, r.mem_used - r.boxes - r.docker);
+    const workload = r.boxes + r.docker;
     // A gauge with no denominator is dropped rather than drawn at zero: `df` cannot always see the
     // fleet root, and "disk 0.0/0.0G" reads as a full disk to anyone glancing at it.
     const rows = [
@@ -3545,8 +3548,10 @@ function loadResources() {
         { w: pct(r.docker, r.mem_total), cls: "docker" },
         { w: pct(other, r.mem_total), cls: "other" },
       ], `${GIB(r.mem_used)}/${GIB(r.mem_total)}G`,
-        [`boxes ${GIB(r.boxes)}G` + (r.boxes_max ? ` of ${GIB(r.boxes_max)}G allowed` : " (no ceiling set)"),
-         `docker ${GIB(r.docker)}G` + (r.docker_max ? ` of ${GIB(r.docker_max)}G allowed` : " (no ceiling set)"),
+        [`boxes ${GIB(r.boxes)}G · docker ${GIB(r.docker)}G`,
+         r.workload_max
+           ? `${GIB(workload)}G of ${GIB(r.workload_max)}G allowed — they share one pool, taken first-come`
+           : "no ceiling set on the workload",
          `the VM's own services and kernel ${GIB(other)}G`,
          `${GIB(r.mem_total - r.mem_used)}G still available`].join("\n")),
       r.disk_total && gaugeRow("disk", [{ w: pct(r.disk_used, r.disk_total), cls: "other" }],

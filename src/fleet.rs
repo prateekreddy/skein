@@ -1076,15 +1076,15 @@ pub struct FleetResources {
     pub cpus: u64,
     pub load1: f64,
     pub load5: f64,
-    /// What [`memory_plan`] intends the boxes to be allowed, so the gauge can draw the ceiling
-    /// beside the usage. Zero when no fleet total is configured to divide.
-    pub boxes_max: u64,
-    /// Always zero, and the gauge reads that as "no ceiling set" — which is the truth. See
-    /// [`fleet_limits`]: the docker cgroup is deliberately uncapped, because it holds the sandbox's
-    /// own init and service processes as well as the containers. Kept as a field rather than
-    /// removed so the strip still says so out loud, where a missing row would just look like a
-    /// ceiling nobody had got round to.
-    pub docker_max: u64,
+    /// What [`memory_plan`] allows the workload — `boxes` and `docker` **together**, because they
+    /// share one pool taken first-come rather than holding a slice each. One number, so the gauge
+    /// cannot imply two separate allowances where there is one. Zero when no fleet total is
+    /// configured to divide.
+    ///
+    /// It is what the *plan* allows, not what any single cgroup enforces: only `skein` carries a
+    /// ceiling (see [`fleet_limits`] for why `docker` cannot), so this is the line the workload is
+    /// meant to stay under, and `docker` can cross it without being stopped.
+    pub workload_max: u64,
     /// True while the sandbox is failing to answer — see [`crate::Gate`]. The figures are then the
     /// last ones that arrived, and saying so is the difference between stale and wrong.
     pub stale: bool,
@@ -1122,7 +1122,7 @@ pub fn fleet_resources() -> Option<FleetResources> {
     // The ceilings come from the host's own config, not the guest, so they are always current even
     // when the figures beside them are the last ones that arrived.
     if let Some(plan) = memory_plan() {
-        resources.boxes_max = plan.boxes;
+        resources.workload_max = plan.boxes;
     }
     resources.stale = RESOURCE_GATE.degraded();
     Some(resources)
@@ -3332,6 +3332,106 @@ mod tests {
         assert!(
             noisy.contains("not the 26624M"),
             "a sandbox smaller than skein was told must say so, not silently differ: {noisy}"
+        );
+    }
+
+    /// A ceiling this launcher cannot read costs the ceiling, not the box.
+    ///
+    /// The sandbox keeps whichever `box-session.sh` it was last given, so the launcher applying a
+    /// spec is routinely OLDER than the skein that sent it. When that gap first opened it took the
+    /// whole fleet down: skein began sending `docker=max/max`, the installed launcher fed `max` to
+    /// `$(( ))`, and `set -u` aborted the shell before it reached tmux — so every box stopped
+    /// starting and each reconnect reported `nsenter: cannot open /proc/<pid>/ns/user`, an error
+    /// about namespaces for a fleet that needed a file copied.
+    ///
+    /// `heal_fleet` narrows that window; it cannot close it, because the next unfamiliar token will
+    /// reach some sandbox before the launcher that understands it does. So the launcher has to
+    /// degrade rather than die, and this asserts the three properties that means: an unreadable
+    /// cgroup is skipped and says so, a readable one beside it is still applied, and neither half
+    /// of an unreadable pair is written — a `high` with no `max` above it is the throttle-forever
+    /// shape these two limits exist together to avoid.
+    ///
+    /// Run against the real launcher for the same reason as the test above: the logic is shell, and
+    /// a Rust assertion about it would prove nothing.
+    #[test]
+    fn an_unreadable_ceiling_is_skipped_rather_than_fatal() {
+        let dir = tempdir();
+        let root = std::path::Path::new(&dir);
+        for cgroup in ["skein", "docker"] {
+            std::fs::create_dir_all(root.join("cgroup").join(cgroup)).unwrap();
+        }
+        std::fs::write(root.join("meminfo"), "MemTotal:       27262976 kB\n").unwrap();
+        let body = BOX_SESSION_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
+            .take_while(|l| *l != "}")
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()))
+            .replace("/proc/meminfo", &root.join("meminfo").to_string_lossy())
+            + "\n}";
+        // `set -uo pipefail` as the real launcher has it — without it this proves nothing, since
+        // the failure being guarded against is precisely what `set -u` does to an unread word.
+        let run = |spec: &str| -> (String, bool) {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "set -uo pipefail\n\
+                     sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+                     {body}\n\
+                     fleet_limits='total=26624M,skein=15975M/14377M,{spec}'\n\
+                     apply_fleet_ceilings\n\
+                     echo REACHED-THE-END\n"
+                ))
+                .output()
+                .expect("run the launcher's ceiling logic");
+            (
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+                String::from_utf8_lossy(&out.stdout).contains("REACHED-THE-END"),
+            )
+        };
+        let wrote = |cgroup: &str, file: &str| -> Option<String> {
+            std::fs::read_to_string(root.join("cgroup").join(cgroup).join(file))
+                .ok()
+                .map(|s| s.trim().to_string())
+        };
+
+        // A word no launcher of this vintage knows — `max` was one of these once.
+        let (said, finished) = run("docker=somethingnew/somethingnew");
+        assert!(
+            finished,
+            "the launcher died on a ceiling it could not read, so no box in this fleet starts"
+        );
+        assert!(
+            said.contains("somethingnew"),
+            "a skipped ceiling has to name itself, or the fleet runs unbounded and silently: {said}"
+        );
+        assert_eq!(
+            wrote("docker", "memory.max"),
+            None,
+            "a ceiling that could not be read must leave the cgroup as it found it"
+        );
+        assert_eq!(
+            wrote("skein", "memory.max").as_deref(),
+            Some("15975M"),
+            "one unreadable cgroup must not cost the others theirs — skein is the ceiling that \
+             actually bounds the workload"
+        );
+
+        // Half-readable is the dangerous one: `high` alone throttles against a ceiling that is not
+        // there, which is the wedge that started all of this.
+        for cgroup in ["skein", "docker"] {
+            for file in ["memory.max", "memory.high"] {
+                let _ = std::fs::remove_file(root.join("cgroup").join(cgroup).join(file));
+            }
+        }
+        let (_, finished) = run("docker=notasize/7188M");
+        assert!(finished, "still not fatal when only one half is unreadable");
+        assert_eq!(
+            wrote("docker", "memory.high"),
+            None,
+            "a `high` written without the `max` above it is the throttle-forever shape: both halves \
+             are read before either is written"
         );
     }
 
