@@ -736,3 +736,96 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     std::env::remove_var("SKEIN_LS_CMD");
     let _ = fs::remove_dir_all(&root);
 }
+
+/// A fleet outlives the skein that made it, so restarting the server has to repair one.
+///
+/// The sandbox keeps whichever `box-session.sh` it was last given. Upgrade the host and the two
+/// disagree: this skein passes a spec the installed launcher cannot read, the launcher exits before
+/// tmux, and every reconnect enters an anchor pid from the last boot — `nsenter: cannot open
+/// /proc/<pid>/ns/user`, forever, because nothing on the reconnect path ever replaced the copy that
+/// could not start. Nothing else in a run observes that mismatch, which is why the repair belongs to
+/// the restart.
+///
+/// And it must not cost a VM boot. Starting the cockpit is not a request to run the fleet, so a
+/// sleeping sandbox is asked about (`sbx ls`) rather than asked *of* (`sbx exec`) — the launcher it
+/// carries is repaired by `ensure_box_session` on the path that wakes it instead.
+#[test]
+fn a_server_restart_repairs_a_fleet_that_predates_it() {
+    let _guard = serialize();
+    let root = scratch();
+    write_fake_sbx(&root.join("bin"));
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            root.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    std::env::set_var("SKEIN_HOME", root.join("skein"));
+    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    save_config(&Config {
+        fleet_sandbox: FLEET.into(),
+        fleet_memory: "26g".into(),
+        ..Config::default()
+    })
+    .expect("configure a fleet");
+
+    // The launcher an older skein left behind, in the one place the sandbox looks for it.
+    install_launcher(FLEET).expect("install box-session.sh");
+    let launcher = box_session_path();
+    let stale = "#!/usr/bin/env bash\nexit 9 # an older skein's copy\n";
+    fs::write(&launcher, stale).unwrap();
+
+    // ---- asleep: repaired later, not woken now ----
+    std::env::set_var(
+        "SKEIN_LS_CMD",
+        format!(r#"echo '[{{"name":"{FLEET}","status":"stopped"}}]'"#),
+    );
+    heal_fleet().expect("a sleeping fleet is nothing to repair, not a failure");
+    assert_eq!(
+        fs::read_to_string(&launcher).unwrap(),
+        stale,
+        "a sleeping fleet must be left alone: booting a VM is not what starting a cockpit means"
+    );
+
+    // ---- awake: the copy out there becomes this binary's copy ----
+    std::env::set_var(
+        "SKEIN_LS_CMD",
+        format!(r#"echo '[{{"name":"{FLEET}","status":"running"}}]'"#),
+    );
+    await_ls(Some(Liveness::Running));
+    heal_fleet().expect("heal a running fleet");
+    let now = fs::read_to_string(&launcher).unwrap();
+    assert_ne!(
+        now, stale,
+        "a running fleet keeps the launcher it was given"
+    );
+    assert!(
+        now.contains("apply_fleet_ceilings"),
+        "the launcher installed is the embedded one, whole: {now:.120}"
+    );
+
+    std::env::remove_var("SKEIN_LS_CMD");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Wait until `fleet_boxes` serves what `sbx ls` is now saying about the fleet sandbox.
+///
+/// Changing what sbx says is not the same as skein seeing it. The answer is gated (1.5s), and once
+/// it ages out the *first* caller is handed the remembered one while the refresh runs behind — that
+/// is deliberate, so a wedged daemon makes the cockpit stale instead of making it stop, and it is
+/// exactly why a test cannot assume its next call reflects the change it just made. Bounded, so a
+/// gate that never comes round fails the assertion it was called for rather than hanging the suite.
+fn await_ls(want: Option<Liveness>) {
+    for _ in 0..60 {
+        if fleet_boxes()
+            .unwrap_or_default()
+            .iter()
+            .any(|b| b.name == FLEET && b.live == want)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

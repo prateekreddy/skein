@@ -457,6 +457,58 @@ pub fn apply_box_limits() -> Result<Vec<String>, String> {
     Ok(failed)
 }
 
+/// Bring a fleet that already exists into line with the skein that has just started.
+///
+/// A fleet sandbox is long-lived and skein is not: the sandbox keeps the launcher and the cgroup
+/// ceilings it was last given, and nothing about restarting the server replaced either. So an
+/// upgrade landed in a state where the *host* had one skein and the *sandbox* had the last one's
+/// idea of how to start a box — and where the two disagree about the spec they pass between them,
+/// every box in that fleet stops starting until something reinstalls the launcher. That happened:
+/// a launcher that could not read `docker=max/max` exited before tmux, so each reconnect found no
+/// session, and the stale anchor pid it then entered read as `nsenter: cannot open
+/// /proc/<pid>/ns/user` — an error about namespaces, for a fleet that needed a file copied.
+///
+/// Repairing it on server start rather than on the settings save that changed the number, because
+/// the mismatch is not caused by a setting: it is caused by *this binary* being newer than the copy
+/// out there, which is exactly what a restart means and nothing else observes.
+///
+/// Both halves are idempotent — the launcher is written whole, and the ceilings are values, not
+/// deltas — so a fleet that was already current pays two `sbx exec` calls and changes nothing.
+///
+/// **Only a sandbox already awake.** Waking one costs a VM boot, and starting the cockpit is not a
+/// request to run the fleet — `sbx ls` is asked instead of the sandbox itself, so a sleeping fleet
+/// is left asleep. It is not left stale either: [`ensure_box_session`] reinstalls the launcher on
+/// the path that wakes it, so the repair happens when the fleet is next actually used.
+pub fn heal_fleet() -> Result<(), String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Ok(()); // one sandbox per box — no shared launcher to be stale
+    }
+    // `None` is "sbx did not answer", not "asleep", and both mean the same thing here: don't touch
+    // it. A fleet skein cannot see is one it cannot repair either.
+    let awake = crate::fleet_boxes().is_some_and(|boxes| {
+        boxes
+            .iter()
+            .any(|b| b.name == sandbox && b.live == Some(crate::Liveness::Running))
+    });
+    if !awake {
+        return Ok(());
+    }
+    install_launcher(&sandbox)?;
+    // The same call the cockpit's "apply now" makes, and for the same reason it is handed back to
+    // the launcher rather than written from here: these numbers are a share of the *configured*
+    // fleet size, and only the sandbox knows what it really got (see `fleet_limits`).
+    let ceilings = format!(
+        "SKEIN_FLEET_LIMITS={} {} --ceilings",
+        sh_quote(&fleet_limits()),
+        sh_quote(&box_session_path())
+    );
+    own_sandbox(&sandbox)
+        .exec(&ceilings, Duration::from_secs(30))
+        .map(|_| ())
+        .map_err(|e| format!("reapplying the shared ceilings in {sandbox}: {e}"))
+}
+
 /// A memory size as MiB. Accepts what sbx accepts (`26g`, `512M`, a bare byte count).
 ///
 /// `None` rather than a guess when it cannot be read: a mis-parsed ceiling is worse than no ceiling,
@@ -2546,6 +2598,17 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
             "box {name} has no checkout in {} — `skein start {name}` to build one",
             record.sandbox
         ));
+    }
+    // The launcher first, and this is not belt-and-braces. A sandbox keeps whichever copy of
+    // `box-session.sh` was installed when it was last provisioned, so a fleet that predates the
+    // running skein starts its boxes with an older launcher — and the failure is total rather than
+    // partial, because a launcher that cannot parse what this skein passes it exits before tmux and
+    // leaves the anchor pid naming a process from the last boot. What anyone sees then is
+    // `nsenter: cannot open /proc/<pid>/ns/user` on every reconnect, forever, since nothing on this
+    // path ever replaced the copy that could not start. [`heal_fleet`] does this at server start
+    // too; here it also covers a sandbox that was asleep then and is being woken now.
+    if let Err(e) = install_launcher(&record.sandbox) {
+        eprintln!("skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there", record.sandbox);
     }
     fleet.exec(
         &session_script(name, "skein-shell", "exec bash -l"),

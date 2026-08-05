@@ -86,6 +86,13 @@ async fn main() {
     if let Err(e) = skein::ensure_kit() {
         eprintln!("skein: kit not installed ({e}); native launch will fall back to $SKEIN_KIT");
     }
+    // Bring an existing fleet sandbox into line with this binary: it keeps the launcher and the
+    // ceilings it was last given, and an upgrade that changes what skein passes the launcher stops
+    // every box in that fleet starting until the copy out there is replaced. A restart is the only
+    // moment that mismatch is observable. Skips a sleeping fleet rather than booting a VM to fix it.
+    if let Err(e) = skein::heal_fleet() {
+        eprintln!("skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings");
+    }
     // Seed the host gh token into sbx (global) so boxes can fetch/push/open PRs. Best-effort and
     // quiet — many setups rely on a proxy injecting credentials instead. Skip with $SKEIN_NO_GH_SECRET.
     if let Err(e) = skein::ensure_gh_secret() {
