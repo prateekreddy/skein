@@ -3,7 +3,7 @@
 
 use crate::runtime::*;
 use crate::util::*;
-use crate::{fleet_boxes, load_registry, load_repos, load_views, FLEET_DEGRADED};
+use crate::{fleet_boxes, fleet_degraded, load_registry, load_repos, load_views};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -27,6 +27,10 @@ pub struct HealthReport {
     /// Whether AI enrichment is on and can actually run. Never `ok: false` — it is opt-in, so
     /// "off" is a correct state, not a fault; the detail says what turning it on would buy.
     pub ai: HealthCheck,
+    /// How the fleet sandbox's memory is divided between the boxes, its inner Docker daemon, and
+    /// the reserve that keeps the sandbox itself answering. Worth a line of its own because when
+    /// this is wrong the symptom is not a message — it is a sandbox that stops responding.
+    pub memory: HealthCheck,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
@@ -46,6 +50,34 @@ pub fn health_report() -> HealthReport {
             "on — rationed Haiku over your subscription, on demand and cached per turn-end".into()
         },
     };
+    // Named in GiB rather than MiB: these are numbers a person compares against how much memory the
+    // Mac has, and 15975 does not read as "about sixteen gigabytes" at a glance.
+    let gib = |mib: u64| format!("{:.1}G", mib as f64 / 1024.0);
+    let memory = match (crate::fleet_sandbox().is_empty(), crate::memory_plan()) {
+        (true, _) => HealthCheck {
+            ok: true,
+            detail: "one sandbox per box — each has its own VM, and nothing to divide".into(),
+        },
+        (false, Some(plan)) => HealthCheck {
+            ok: true,
+            detail: format!(
+                "{} across all boxes, {} for the sandbox's Docker daemon, {} kept back for the \
+                 sandbox itself",
+                gib(plan.boxes),
+                gib(plan.docker),
+                gib(plan.reserve)
+            ),
+        },
+        // A fleet whose total is unset has no ceiling anywhere: not per box, not on the boxes
+        // together, not on Docker. One build can then reach the VM's memory, and with no swap the
+        // kernel's global OOM killer picks a victim by badness rather than by blame.
+        (false, None) => HealthCheck {
+            ok: false,
+            detail: "no memory ceiling anywhere: Settings → Fleet memory names no size, so one \
+                     box's build can take the sandbox down with it"
+                .into(),
+        },
+    };
     let registry = match load_registry() {
         Ok((boxes, path)) => HealthCheck {
             ok: true,
@@ -57,7 +89,7 @@ pub fn health_report() -> HealthReport {
         },
     };
     let fleet = fleet_boxes();
-    let fleet_degraded = FLEET_DEGRADED.load(std::sync::atomic::Ordering::Relaxed);
+    let fleet_degraded = fleet_degraded();
     let sbx = HealthCheck {
         ok: program_on_path("sbx") && fleet.is_some() && !fleet_degraded,
         detail: match &fleet {
@@ -198,6 +230,7 @@ pub fn health_report() -> HealthReport {
         probes,
         mailbox,
         ai,
+        memory,
         dark_boxes,
         stale_boxes,
         runtimes: supported_runtimes(),

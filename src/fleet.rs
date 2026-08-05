@@ -190,6 +190,47 @@ fn under(path: &str, dir: &str) -> bool {
     path == dir || path.starts_with(&format!("{dir}/"))
 }
 
+/// How the sandbox's memory is divided, in MiB.
+///
+/// Three claims on one VM, and until this existed only the first was written down:
+///
+/// * **boxes** — everything the agents and their builds run, under `/sys/fs/cgroup/skein`;
+/// * **docker** — the sandbox's inner Docker daemon and every container any box starts, under
+///   `/sys/fs/cgroup/docker`, which is nowhere near a box's cgroup;
+/// * **reserve** — the kernel, virtiofs, and the sandbox's own plumbing, capped by nobody because
+///   it is what everything else is measured against.
+///
+/// The reserve is the point of the whole exercise. There is no swap in the sandbox, so reaching the
+/// VM's memory is not a slowdown, it is the kernel's global OOM killer choosing a victim — and it
+/// picks by badness, not by blame, so the process it kills is as likely to be what answers the host
+/// as the build that caused it. A sandbox whose plumbing was killed is exactly a sandbox that
+/// "stops responding" and only comes back when it is cycled. Keeping the shares' sum below the
+/// total converts that into an OOM *inside* the offending cgroup, which kills a build.
+pub struct MemoryPlan {
+    pub boxes: u64,
+    pub docker: u64,
+    pub reserve: u64,
+}
+
+/// The division above, or `None` when [`Config::fleet_memory`] names no number to divide.
+pub fn memory_plan() -> Option<MemoryPlan> {
+    let total = parse_mib(&load_config().fleet_memory)?;
+    // A tenth, and never less than 2 GiB: the plumbing's appetite is roughly fixed, so a percentage
+    // alone starves a small fleet. Never more than half either, so a tiny configured total still
+    // leaves something to work in rather than reserving the whole machine from itself.
+    let reserve = (total / 10).clamp(2048.min(total / 2), total / 2);
+    let available = total.saturating_sub(reserve);
+    // A third to Docker. Boxes are the workload and get the larger share; Docker is a tool some of
+    // them reach for, and it is measured here at all only because its memory lands outside every
+    // per-box ceiling skein sets.
+    let docker = available / 3;
+    Some(MemoryPlan {
+        boxes: available - docker,
+        docker,
+        reserve,
+    })
+}
+
 /// The per-box cgroup limits, as the `key=value,…` spec `box-session.sh` applies.
 ///
 /// Memory only. **CPU is deliberately not capped**: `cpu.weight` is already equal for every box, so
@@ -198,22 +239,26 @@ fn under(path: &str, dir: &str) -> bool {
 /// Memory is different because it is not reclaimable on demand: two boxes wanting 20 GB do not each
 /// get 13 slowly, they hit the wall and the kernel starts killing things.
 ///
-/// `max` is what stops one box taking the fleet down with it. `high` sits below it so the kernel
-/// throttles and reclaims first — a box that briefly overshoots gets slower rather than losing its
-/// turn. Defaults derive from the fleet total: 70% and 55%, so one box can still run a big build
-/// while two of them cannot exhaust the VM between them.
+/// `max` is what stops one box taking the rest of the boxes down with it. `high` sits below it so
+/// the kernel throttles and reclaims first — a box that briefly overshoots gets slower rather than
+/// losing its turn.
+///
+/// Defaults are 70% and 55% **of the boxes' share** ([`memory_plan`]), not of the whole VM. They
+/// were once fractions of the fleet total, which read like a protection and was not one: 70% of the
+/// VM each, with nothing capping the sum, meant any two boxes could exhaust it between them. What
+/// bounds the fleet is the ceiling on their shared parent; this bounds one box against the others.
 ///
 /// `pids.max` is the fork-bomb guard; a runaway spawn loop in one box would otherwise exhaust the
 /// VM's pid space and no box could start a process.
 pub fn box_limits() -> String {
     let config = load_config();
-    let fleet_mib = parse_mib(&config.fleet_memory);
+    let share = memory_plan().map(|plan| plan.boxes);
     let pick = |explicit: &str, fraction: u64| -> Option<String> {
         let explicit = explicit.trim();
         if !explicit.is_empty() {
             return Some(explicit.to_string());
         }
-        fleet_mib.map(|total| format!("{}M", (total * fraction / 100).max(512)))
+        share.map(|boxes| format!("{}M", (boxes * fraction / 100).max(512)))
     };
     let mut parts = Vec::new();
     if let Some(max) = pick(&config.box_memory_max, 70) {
@@ -224,6 +269,34 @@ pub fn box_limits() -> String {
     }
     parts.push("pids=8192".to_string());
     parts.join(",")
+}
+
+/// The ceilings on the two cgroups that hold everything a box can cause, as the `<cgroup>=max/high`
+/// spec `box-session.sh` applies. Empty when no fleet total is configured to divide.
+///
+/// Both are needed and neither is a per-box concern. `skein` is the parent of every box's cgroup,
+/// so it is the only place the boxes' *sum* can be bounded — a per-box ceiling never could be.
+/// `docker` is where a box's `docker build` and `docker compose up` actually run: the sandbox has
+/// one Docker daemon shared by every box, its containers are placed under `/sys/fs/cgroup/docker`
+/// by dockerd, and nothing skein writes on a box's cgroup reaches them. Measured on a live fleet
+/// nine minutes after boot, with the boxes' own cgroups holding 1 GB of anonymous memory between
+/// them: `docker` held 2.3 GB and had peaked at 10.5 GB, with `memory.max` and `pids.max` both
+/// unset. That is the hole every per-box ceiling was quietly leaking through.
+///
+/// Applied on every box start rather than once, because dockerd recreates `/sys/fs/cgroup/docker`
+/// from scratch when the sandbox cycles, taking any limit written on it with it.
+pub fn fleet_limits() -> String {
+    let Some(plan) = memory_plan() else {
+        return String::new();
+    };
+    // `high` below `max` for the same reason it is per box: past it the kernel reclaims and
+    // throttles, so a fleet that briefly overshoots gets slower instead of losing a box.
+    let ceiling = |mib: u64| format!("{mib}M/{}M", (mib * 9 / 10).max(512));
+    format!(
+        "skein={},docker={}",
+        ceiling(plan.boxes),
+        ceiling(plan.docker)
+    )
 }
 
 /// Why a box has no memory ceiling, or `None` when it has one.
@@ -266,6 +339,36 @@ pub fn apply_box_limits() -> Result<Vec<String>, String> {
     let limits = box_limits();
     let fleet = own_sandbox(&sandbox);
     let mut failed = Vec::new();
+    // The shared ceilings first, and reported under a name no box answers to. They are what keeps
+    // the sandbox itself alive (see `fleet_limits`), so a run that fixed every box and silently
+    // left these unwritten would have skipped the important half.
+    for kv in fleet_limits().split(',').filter(|kv| !kv.is_empty()) {
+        let Some((cgroup, spec)) = kv.split_once('=') else {
+            continue;
+        };
+        let (max, high) = spec.split_once('/').unwrap_or((spec, spec));
+        let dir = format!("/sys/fs/cgroup/{cgroup}");
+        let write = |value: &str, file: &str| {
+            format!(
+                "printf '%s\\n' {} | sudo tee {dir}/{file} >/dev/null",
+                sh_quote(value)
+            )
+        };
+        // A sandbox with no inner Docker has no `docker` cgroup, and that is not a failure.
+        //
+        // `high` before `max`: this is written over a cgroup already holding a running fleet, so
+        // the soft limit gets the kernel reclaiming first and the hard one then lands on a cgroup
+        // that has given its page cache back — rather than on one still over the line, which the
+        // kernel would resolve by killing something in it.
+        let script = format!(
+            "test -d {dir} || exit 0; {} && {}",
+            write(high, "memory.high"),
+            write(max, "memory.max")
+        );
+        if fleet.exec(&script, Duration::from_secs(30)).is_err() {
+            failed.push(format!("the fleet's {cgroup} ceiling"));
+        }
+    }
     for (name, _) in placed_boxes(&sandbox) {
         let mut writes = Vec::new();
         for kv in limits.split(',') {
@@ -802,35 +905,34 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
     if sandbox.is_empty() {
         return Default::default();
     }
-    if !cfg!(test) {
-        let cache = DISK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, map)) = cache.as_ref() {
-            if at.elapsed() < Duration::from_secs(30) {
-                return map.clone();
-            }
-        }
-    }
-    let script = format!("du -sxm {root}/*/ 2>/dev/null", root = fleet_root());
-    let map: std::collections::HashMap<String, u64> = own_sandbox(&sandbox)
-        .exec(&script, Duration::from_secs(60))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let (mb, path) = line.trim().split_once(char::is_whitespace)?;
-            let name = path.trim().trim_end_matches('/').rsplit('/').next()?;
-            Some((name.to_string(), mb.trim().parse().ok()?))
+    let fresh = if cfg!(test) {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(30)
+    };
+    DISK_GATE
+        .get(fresh, || {
+            let script = format!("du -sxm {root}/*/ 2>/dev/null", root = fleet_root());
+            let out = own_sandbox(&sandbox)
+                .exec(&script, Duration::from_secs(60))
+                .ok()?;
+            Some(
+                out.lines()
+                    .filter_map(|line| {
+                        let (mb, path) = line.trim().split_once(char::is_whitespace)?;
+                        let name = path.trim().trim_end_matches('/').rsplit('/').next()?;
+                        Some((name.to_string(), mb.trim().parse().ok()?))
+                    })
+                    .collect(),
+            )
         })
-        .collect();
-    if !cfg!(test) {
-        *DISK_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((std::time::Instant::now(), map.clone()));
-    }
-    map
+        .unwrap_or_default()
 }
 
-static DISK_CACHE: std::sync::Mutex<
-    Option<(std::time::Instant, std::collections::HashMap<String, u64>)>,
-> = std::sync::Mutex::new(None);
+/// See [`crate::Gate`]: remembered, asked by one caller at a time, and asked less often while the
+/// sandbox is failing to answer — a `du` over every box is the most expensive question skein asks
+/// on a tick, and the last thing a struggling sandbox should be handed more of.
+static DISK_GATE: crate::Gate<std::collections::HashMap<String, u64>> = crate::Gate::new();
 
 /// This box's disk allowance in MiB: its own if it has one, else the fleet-wide default, `None` for
 /// unlimited. Read at every check, so changing it takes effect on the next refresh — no restart.
@@ -1002,7 +1104,12 @@ fn forget_turn_state(repo: &Repo, name: &str) {
 /// The shell that starts a box: its namespace, its tmux server, and the agent inside it.
 pub fn session_script(name: &str, session: &str, agent_command: &str) -> String {
     format!(
-        "{launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
+        // The shared ceilings ride in the environment rather than as an eighth positional, because
+        // the launcher already installed in a running sandbox does not know about them: a new
+        // argument would be read as part of the command, and every box restart would fail until
+        // something reinstalled the script. An old launcher ignores an environment variable.
+        "SKEIN_FLEET_LIMITS={fleet_q} \
+         {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         name_q = sh_quote(name),
         root_q = sh_quote(&box_root(name)),
@@ -1010,6 +1117,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         session_q = sh_quote(session),
         state_q = sh_quote(&box_state(name)),
         limits_q = sh_quote(&box_limits()),
+        fleet_q = sh_quote(&fleet_limits()),
         cmd_q = sh_quote(agent_command),
     )
 }
@@ -2056,7 +2164,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     )?;
     // The sweep just became wrong in the other direction; a stale "dead" answer would send the very
     // next caller through this again.
-    *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    LIVENESS_GATE.invalidate();
     // What was observed is that the tmux server was gone, not *why*. A cycled sandbox is the common
     // cause and the one this exists for, but it is not the only one — a killed server or an OOM'd
     // box reach here identically — and asserting it sends anyone debugging to look for a restart
@@ -2065,11 +2173,11 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 1.5s micro-cache over the fleet's liveness sweep, for the same reason [`crate::fleet_boxes`] has
-/// one: the board asks per box, and a refresh must not become one `sbx exec` per box per tick.
-static LIVENESS_CACHE: std::sync::Mutex<
-    Option<(std::time::Instant, std::collections::HashMap<String, bool>)>,
-> = std::sync::Mutex::new(None);
+/// Micro-cache over the fleet's liveness sweep, for the same reason [`crate::fleet_boxes`] has one:
+/// the board asks per box, and a refresh must not become one `sbx exec` per box per tick. A
+/// [`crate::Gate`] for the same reason too — see the note there — since this is the `sbx exec` skein
+/// runs most often, and the one that kept a slow daemon slow.
+static LIVENESS_GATE: crate::Gate<std::collections::HashMap<String, bool>> = crate::Gate::new();
 
 /// Which boxes in the fleet sandbox have a live session — asked of the sandbox, in one round-trip.
 ///
@@ -2085,34 +2193,32 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
     if sandbox.is_empty() {
         return Default::default();
     }
-    if !cfg!(test) {
-        let cache = LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, map)) = cache.as_ref() {
-            if at.elapsed() < Duration::from_millis(1500) {
-                return map.clone();
-            }
-        }
-    }
-    let script = format!(
-        "for d in {root}/*/; do n=${{d%/}}; n=${{n##*/}}; s=\"$d/session.sock\"; \
-         if [ -S \"$s\" ] && tmux -S \"$s\" has-session 2>/dev/null; then echo \"$n 1\"; \
-         else echo \"$n 0\"; fi; done",
-        root = fleet_root()
-    );
-    let map: std::collections::HashMap<String, bool> = own_sandbox(&sandbox)
-        .exec(&script, Duration::from_secs(15))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let (name, live) = line.trim().split_once(' ')?;
-            Some((name.to_string(), live == "1"))
+    let fresh = if cfg!(test) {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(1500)
+    };
+    LIVENESS_GATE
+        .get(fresh, || {
+            let script = format!(
+                "for d in {root}/*/; do n=${{d%/}}; n=${{n##*/}}; s=\"$d/session.sock\"; \
+                 if [ -S \"$s\" ] && tmux -S \"$s\" has-session 2>/dev/null; then echo \"$n 1\"; \
+                 else echo \"$n 0\"; fi; done",
+                root = fleet_root()
+            );
+            let out = own_sandbox(&sandbox)
+                .exec(&script, Duration::from_secs(15))
+                .ok()?;
+            Some(
+                out.lines()
+                    .filter_map(|line| {
+                        let (name, live) = line.trim().split_once(' ')?;
+                        Some((name.to_string(), live == "1"))
+                    })
+                    .collect(),
+            )
         })
-        .collect();
-    if !cfg!(test) {
-        *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((std::time::Instant::now(), map.clone()));
-    }
-    map
+        .unwrap_or_default()
 }
 
 /// The command that authenticates `runtime` inside the fleet sandbox, and why it differs per runtime.
@@ -2247,7 +2353,7 @@ mod tests {
         let _g = env_lock();
         let dir = tempdir();
         std::env::set_var("SKEIN_HOME", &dir);
-        *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        LIVENESS_GATE.invalidate();
 
         record_place(
             "web-main",
@@ -2301,7 +2407,7 @@ mod tests {
         // Carried one: it goes on to re-issue. It gets no further than the liveness check here, and
         // that is the point — the assertion is that it TRIED, without a live gateway to try against.
         std::env::set_var("FAKE_BOX_HAS_CRED", "1");
-        *LIVENESS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        LIVENESS_GATE.invalidate();
         fs::write(&log, "").unwrap();
         remint_tracker_token("web-main");
         assert!(
@@ -2464,13 +2570,14 @@ mod tests {
             parse_mib(raw).unwrap()
         };
         let (max, high) = (get("max"), get("high"));
+        let share = memory_plan().unwrap().boxes;
         assert!(
-            max < 26624,
-            "a cap at or above the fleet total protects nothing: {spec}"
+            max < share,
+            "a cap at or above what all the boxes share protects nothing: {spec}"
         );
         assert!(high < max, "high must throttle before max kills: {spec}");
         assert!(
-            max > 26624 / 2,
+            max > share / 2,
             "a cap this tight makes a normal build fail; the point is one box CAN be big: {spec}"
         );
         assert!(
@@ -2491,6 +2598,89 @@ mod tests {
         })
         .unwrap();
         assert!(box_limits().contains("max=4g"), "{}", box_limits());
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The invariant a per-box ceiling never expressed and could not: what everything adds up to.
+    ///
+    /// Boxes were capped at 70% of the VM *each* with nothing capping their sum, and the sandbox's
+    /// Docker daemon — where a box's `docker build` actually runs — was capped at nothing at all.
+    /// Two busy boxes, or one docker-heavy one, could reach the VM's memory; with no swap that is
+    /// the global OOM killer choosing a victim by badness rather than by blame, and what it kills
+    /// is as readily the thing that answers the host as the build that caused it. That is the
+    /// sandbox "not responding" until someone cycles it.
+    #[test]
+    fn every_claim_on_the_sandbox_together_leaves_it_room_to_answer() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        for total in ["4g", "8g", "26g", "64g"] {
+            save_config(&Config {
+                fleet_memory: total.into(),
+                ..Config::default()
+            })
+            .unwrap();
+            let total_mib = parse_mib(total).unwrap();
+            let plan = memory_plan().unwrap();
+            assert_eq!(
+                plan.boxes + plan.docker + plan.reserve,
+                total_mib,
+                "the shares must account for the whole VM at {total}"
+            );
+            assert!(
+                plan.reserve >= (2048).min(total_mib / 2),
+                "the sandbox's own plumbing is what stops answering first at {total}"
+            );
+
+            // And the spec the launcher applies has to name BOTH — capping the boxes' parent while
+            // leaving dockerd unbounded moves the hole rather than closing it.
+            let spec = fleet_limits();
+            let ceiling = |cgroup: &str| -> (u64, u64) {
+                let pair = spec
+                    .split(',')
+                    .find_map(|p| p.strip_prefix(&format!("{cgroup}=")))
+                    .unwrap_or_else(|| panic!("{cgroup} missing from {spec}"));
+                let (max, high) = pair.split_once('/').expect("max/high");
+                (parse_mib(max).unwrap(), parse_mib(high).unwrap())
+            };
+            let (boxes_max, boxes_high) = ceiling("skein");
+            let (docker_max, docker_high) = ceiling("docker");
+            assert_eq!(boxes_max, plan.boxes);
+            assert_eq!(docker_max, plan.docker);
+            assert!(
+                boxes_high < boxes_max && docker_high < docker_max,
+                "throttle before killing, the same way a box does: {spec}"
+            );
+            assert!(
+                boxes_max + docker_max < total_mib,
+                "if the ceilings can be reached together they are not ceilings: {spec}"
+            );
+        }
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The launcher is the only thing that runs on every box start, which is what the Docker
+    /// ceiling needs: dockerd rebuilds its cgroup from scratch when the sandbox cycles and takes
+    /// any limit written on it along with it.
+    #[test]
+    fn the_launcher_is_handed_the_shared_ceilings_as_well_as_the_boxs_own() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            ..Config::default()
+        })
+        .unwrap();
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            script.contains(&fleet_limits()),
+            "the box would start under a ceiling nobody had applied: {script}"
+        );
+        assert!(
+            script.contains(&box_limits()),
+            "and its own ceiling still has to get there: {script}"
+        );
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -3382,8 +3572,15 @@ mod tests {
         std::env::set_var("SKEIN_HOME", tempdir());
         let script = session_script("web-main", "skein-agent", "claude --continue");
         assert!(
-            script.starts_with("'/boxes/.skein/box-session.sh' 'web-main'"),
+            script.contains("'/boxes/.skein/box-session.sh' 'web-main'"),
             "{script}"
+        );
+        // The shared ceilings lead, in the environment: an already-installed launcher that knows
+        // nothing about them ignores a variable, where it would have read an argument as part of
+        // the agent's command line.
+        assert!(
+            script.starts_with("SKEIN_FLEET_LIMITS="),
+            "the ceilings must not be positional: {script}"
         );
         assert!(script.contains("'/boxes/web-main' '/boxes/web-main/anchor.pid' 'skein-agent'"));
         // The host-side state dir the box binds its conversation from — a HOST path, not a /boxes

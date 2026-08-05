@@ -540,75 +540,57 @@ pub struct SbxBox {
     pub dir: String,
 }
 
-/// 1.5s micro-cache over `sbx ls`: `load_views` used to re-run it once at the top and then again
-/// via `lookup_dir` for every box the registry didn't know (`read_journal` → `lookup_dir` →
+/// Micro-cache over `sbx ls`: `load_views` used to re-run it once at the top and then again via
+/// `lookup_dir` for every box the registry didn't know (`read_journal` → `lookup_dir` →
 /// `fleet_boxes`) — an N-box fleet paid 1+N subprocess spawns per 2s tick, times open browser tabs.
-static FLEET_CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<Vec<SbxBox>>)>> =
-    std::sync::Mutex::new(None);
-static FLEET_LAST_GOOD: std::sync::Mutex<Option<Vec<SbxBox>>> = std::sync::Mutex::new(None);
-static FLEET_DEGRADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+///
+/// A [`Gate`] rather than a plain cache, because the tabs were still multiplying: the answer is
+/// only remembered once the first `sbx ls` *returns*, so every tab that missed together spawned its
+/// own. See the note on `Gate` — it also carries the last good answer and the backoff that lets a
+/// struggling daemon recover instead of being re-asked every 1.5s forever.
+static FLEET_GATE: Gate<Vec<SbxBox>> = Gate::new();
+
+/// How often skein is willing to spawn `sbx ls` while it is answering.
+const FLEET_FRESH: Duration = Duration::from_millis(1500);
 
 /// Enumerate the fleet from sbx. `None` when sbx can't be consulted (not installed, errored,
-/// unparseable, or hung past the timeout) — callers then fall back to the registry. Override with
-/// `$SKEIN_LS_CMD` (run via `sh -c`; must emit the `sbx ls --json` shape). Micro-cached — see
-/// FLEET_CACHE.
+/// unparseable, or hung past the timeout) *and* nothing was ever learned — callers then fall back to
+/// the registry. Override with `$SKEIN_LS_CMD` (run via `sh -c`; must emit the `sbx ls --json`
+/// shape). Micro-cached — see [`FLEET_GATE`].
 pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
-    // cfg!(test): tests swap $SKEIN_LS_CMD per case and run in parallel — a process-wide cache
-    // would serve one test's fleet to another. Prod (server/CLI) keeps it.
-    if !cfg!(test) {
-        let cache = FLEET_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, boxes)) = cache.as_ref() {
-            if at.elapsed() < Duration::from_millis(1500) {
-                return boxes.clone();
-            }
-        }
-    }
-    let mut cmd = match env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) {
-        Some(c) => {
-            let mut sh = Command::new("sh");
-            sh.arg("-c").arg(c);
-            sh
-        }
-        None => {
-            let mut sbx = Command::new("sbx");
-            sbx.args(["ls", "--json"]);
-            sbx
-        }
-    };
-    // Bounded: a wedged sbx daemon used to hang this .output() forever — and with it every
-    // fleet-snapshot task, accumulating stuck blocking threads until the board went permanently
-    // blank. A timeout degrades to the registry fallback instead.
-    let fresh = output_with_timeout(&mut cmd, Duration::from_secs(5))
-        .filter(|o| o.status.success())
-        .and_then(|o| parse_boxes_checked(&String::from_utf8_lossy(&o.stdout)));
-    // Unit tests deliberately swap the command between cases. Keep their calls isolated; exercise
-    // last-known-good selection through its pure helper below instead of leaking global state.
-    let boxes = if cfg!(test) {
-        fresh
+    // Zero: tests swap $SKEIN_LS_CMD per case and run in parallel — a process-wide gate would serve
+    // one test's fleet to another. Prod (server/CLI) keeps it.
+    let fresh = if cfg!(test) {
+        Duration::ZERO
     } else {
-        let mut last_good = FLEET_LAST_GOOD.lock().unwrap_or_else(|e| e.into_inner());
-        let (resolved, degraded) = resolve_fleet(fresh, &mut last_good);
-        FLEET_DEGRADED.store(degraded, std::sync::atomic::Ordering::Relaxed);
-        resolved
+        FLEET_FRESH
     };
-    *FLEET_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((std::time::Instant::now(), boxes.clone()));
-    boxes
+    FLEET_GATE.get(fresh, || {
+        let mut cmd = match env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) {
+            Some(c) => {
+                let mut sh = Command::new("sh");
+                sh.arg("-c").arg(c);
+                sh
+            }
+            None => {
+                let mut sbx = Command::new("sbx");
+                sbx.args(["ls", "--json"]);
+                sbx
+            }
+        };
+        // Bounded: a wedged sbx daemon used to hang this .output() forever — and with it every
+        // fleet-snapshot task, accumulating stuck blocking threads until the board went permanently
+        // blank. A timeout degrades to the registry fallback instead.
+        output_with_timeout(&mut cmd, Duration::from_secs(5))
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_boxes_checked(&String::from_utf8_lossy(&o.stdout)))
+    })
 }
 
-/// A successful response (including an empty fleet) replaces last-known-good. A transport/command/
-/// parse failure reuses last-known-good instead of resurrecting stale registry-only boxes.
-fn resolve_fleet(
-    fresh: Option<Vec<SbxBox>>,
-    last_good: &mut Option<Vec<SbxBox>>,
-) -> (Option<Vec<SbxBox>>, bool) {
-    match fresh {
-        Some(boxes) => {
-            *last_good = Some(boxes.clone());
-            (Some(boxes), false)
-        }
-        None => (last_good.clone(), true),
-    }
+/// Whether the fleet snapshot on offer is a remembered one because the last `sbx ls` failed. The
+/// cockpit says so rather than presenting stale data as live.
+pub fn fleet_degraded() -> bool {
+    FLEET_GATE.degraded()
 }
 
 /// One box's run-state from sbx — a single-box view of [`fleet_boxes`].
@@ -2760,21 +2742,81 @@ mod tests {
             live: Some(Liveness::Running),
             dir: "/work".into(),
         };
-        let mut last_good = None;
-        let (fresh, degraded) = resolve_fleet(Some(vec![box_]), &mut last_good);
-        assert_eq!(fresh.unwrap().len(), 1);
-        assert!(!degraded);
+        // A minute, so nothing here ages out mid-test: what is under test is which answer the gate
+        // hands back, not when it decides to ask again.
+        let long = Duration::from_secs(60);
+        let gate: Gate<Vec<SbxBox>> = Gate::new();
 
-        let (retained, degraded) = resolve_fleet(None, &mut last_good);
-        assert_eq!(retained.unwrap()[0].name, "live-box");
-        assert!(degraded);
+        assert_eq!(gate.get(long, || Some(vec![box_])).unwrap().len(), 1);
+        assert!(!gate.degraded());
 
-        let (empty, degraded) = resolve_fleet(Some(vec![]), &mut last_good);
-        assert!(empty.unwrap().is_empty());
-        assert!(!degraded);
-        let (retained_empty, degraded) = resolve_fleet(None, &mut last_good);
-        assert!(retained_empty.unwrap().is_empty());
-        assert!(degraded);
+        // A failure must not report the fleet gone — the board would blank itself on one slow tick.
+        gate.invalidate();
+        assert_eq!(gate.get(long, || None).unwrap()[0].name, "live-box");
+        assert!(gate.degraded());
+
+        // An empty fleet is an *answer*, not a failure: it replaces last-known-good, and the boxes
+        // that were there do not come back the next time sbx cannot be reached.
+        gate.invalidate();
+        assert!(gate.get(long, || Some(vec![])).unwrap().is_empty());
+        assert!(!gate.degraded());
+        gate.invalidate();
+        assert!(gate.get(long, || None).unwrap().is_empty());
+        assert!(gate.degraded());
+    }
+
+    /// The property the board's tick depends on: however many callers arrive together, the sandbox
+    /// is asked once. Check-then-act gave every browser tab its own subprocess, because the answer
+    /// was only remembered once the first one returned.
+    #[test]
+    fn concurrent_callers_ask_the_sandbox_once_between_them() {
+        static GATE: Gate<u32> = Gate::new();
+        static ASKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        GATE.invalidate();
+        ASKS.store(0, std::sync::atomic::Ordering::Relaxed);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    GATE.get(Duration::from_secs(60), || {
+                        ASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Long enough that the others are certainly waiting on the lane rather
+                        // than having missed each other by luck.
+                        std::thread::sleep(Duration::from_millis(50));
+                        Some(1)
+                    })
+                });
+            }
+        });
+        assert_eq!(
+            ASKS.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "eight simultaneous callers must cost one subprocess, not eight"
+        );
+    }
+
+    /// The property that lets a struggling daemon recover: consecutive failures space the attempts
+    /// out instead of re-arming at the same interval, and one success puts it straight back.
+    #[test]
+    fn repeated_failure_asks_less_often_and_success_restores_the_cadence() {
+        let gate: Gate<u32> = Gate::new();
+        let fresh = Duration::from_millis(100);
+        assert_eq!(gate.interval(fresh), fresh, "healthy: ask at the full rate");
+
+        for expected in [200u64, 400, 800] {
+            gate.invalidate();
+            gate.get(fresh, || None);
+            assert_eq!(gate.interval(fresh), Duration::from_millis(expected));
+        }
+        // Capped, so a daemon that comes back is still noticed within half a minute.
+        for _ in 0..20 {
+            gate.invalidate();
+            gate.get(fresh, || None);
+        }
+        assert_eq!(gate.interval(fresh), GATE_MAX_INTERVAL);
+
+        gate.invalidate();
+        gate.get(fresh, || Some(7));
+        assert_eq!(gate.interval(fresh), fresh);
     }
 
     #[test]

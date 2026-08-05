@@ -251,6 +251,138 @@ pub(crate) fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
     run_capture("sh", &["-c", cmd])
 }
 
+// ───────────────────────── asking the sandbox without making it worse ─────────────────────────
+//
+// Everything skein knows about a *running* fleet it learns by spawning a subprocess: `sbx ls` for
+// the sandboxes, `sbx exec` for the questions only the guest can answer. The board asks every 2s,
+// per open tab, forever — so these are not occasional calls, they are a permanent load, and the way
+// they were written turned a slow daemon into a stuck one.
+//
+// Two properties are missing from a plain "remember it for 1.5s", and both matter only when things
+// are already going wrong, which is exactly when they matter:
+//
+// **Single flight.** Check-then-act means every caller that misses the cache together spawns its
+// own subprocess, because the cache is only written when the first one *returns*. One browser tab
+// was one call; five tabs were five simultaneous calls, every tick, and a sick daemon got five
+// times the load a healthy one did.
+//
+// **Backoff.** On failure the old code re-armed at the same 1.5s and asked again — so a daemon that
+// had gone slow was asked more often than it could answer, and every attempt was SIGKILLed at its
+// timeout with the guest-side work left running. Nothing in that loop lets it recover; the only
+// event that ever broke it was the user restarting the daemon, which is the one thing that makes
+// these calls fail *fast*. Doubling the interval per consecutive failure lets a struggling daemon
+// drain its backlog instead of being handed a fresh one every second and a half.
+
+/// A remembered answer to a question only a subprocess can answer: fresh for a while, asked by one
+/// caller at a time, and asked progressively less often while the answers keep failing.
+pub(crate) struct Gate<T> {
+    cell: std::sync::Mutex<Asked<T>>,
+    /// Consecutive failures — the backoff exponent, reset by any success.
+    fails: std::sync::atomic::AtomicU32,
+    /// Held for the duration of an ask, so concurrent callers wait for that one answer instead of
+    /// each starting their own.
+    lane: std::sync::Mutex<()>,
+}
+
+struct Asked<T> {
+    /// When the last ask *finished*, successfully or not — the clock the interval runs against.
+    at: Option<std::time::Instant>,
+    /// The last answer actually obtained. Sticky across failures on purpose: it is what a caller
+    /// gets while the sandbox is unreachable, so the board keeps its last picture of the fleet
+    /// instead of blanking on one slow tick.
+    good: Option<T>,
+}
+
+/// However bad it gets, keep asking this often — a daemon that came back must be noticed.
+pub(crate) const GATE_MAX_INTERVAL: Duration = Duration::from_secs(30);
+
+impl<T: Clone> Gate<T> {
+    pub(crate) const fn new() -> Self {
+        Gate {
+            cell: std::sync::Mutex::new(Asked {
+                at: None,
+                good: None,
+            }),
+            fails: std::sync::atomic::AtomicU32::new(0),
+            lane: std::sync::Mutex::new(()),
+        }
+    }
+
+    /// The answer, asking `take` for a new one only when the remembered one has aged out.
+    ///
+    /// A `fresh` of zero disables the gate entirely — no remembering, no single flight. Unit tests
+    /// swap the underlying command per case and run in parallel, so one test's fleet must never be
+    /// served to another.
+    pub(crate) fn get(&self, fresh: Duration, take: impl FnOnce() -> Option<T>) -> Option<T> {
+        if fresh.is_zero() {
+            return take();
+        }
+        if let Some(remembered) = self.remembered(fresh) {
+            return remembered;
+        }
+        let _lane = self.lane.lock().unwrap_or_else(|e| e.into_inner());
+        // Whoever held the lane may have just answered this for us while we waited.
+        if let Some(remembered) = self.remembered(fresh) {
+            return remembered;
+        }
+        let taken = take();
+        let mut cell = self.cell.lock().unwrap_or_else(|e| e.into_inner());
+        match taken {
+            Some(value) => {
+                self.fails.store(0, std::sync::atomic::Ordering::Relaxed);
+                cell.good = Some(value);
+            }
+            // A failed ask keeps the last good answer rather than reporting the fleet gone.
+            None => {
+                self.fails
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // Re-armed either way — that is what makes the *next* ask the backed-off one.
+        cell.at = Some(std::time::Instant::now());
+        cell.good.clone()
+    }
+
+    /// How long the current answer stands: `fresh` while the sandbox is answering, doubling per
+    /// consecutive failure up to [`GATE_MAX_INTERVAL`].
+    pub(crate) fn interval(&self, fresh: Duration) -> Duration {
+        let fails = self
+            .fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(16);
+        fresh
+            .saturating_mul(1u32 << fails)
+            .clamp(fresh, GATE_MAX_INTERVAL.max(fresh))
+    }
+
+    /// The standing answer while it is still young enough to serve, or `None` meaning "go ask".
+    /// Nested, because "we asked and got nothing" is itself an answer worth not re-asking for.
+    fn remembered(&self, fresh: Duration) -> Option<Option<T>> {
+        let interval = self.interval(fresh);
+        let cell = self.cell.lock().unwrap_or_else(|e| e.into_inner());
+        cell.at
+            .filter(|at| at.elapsed() < interval)
+            .map(|_| cell.good.clone())
+    }
+
+    /// Whether the last ask failed — so the cockpit can say it is showing a remembered answer
+    /// rather than present stale data as live.
+    pub(crate) fn degraded(&self) -> bool {
+        self.fails.load(std::sync::atomic::Ordering::Relaxed) > 0
+    }
+
+    /// Expire the standing answer, so the next caller asks. For the moments when skein itself has
+    /// just changed it — started a box, stopped one — and must not serve the old one back.
+    ///
+    /// Expires the *clock*, not the last good answer: if the ask that follows fails, falling back
+    /// to what was true a moment ago still beats reporting that the fleet has gone. And it leaves
+    /// the failure count alone, because that records whether the sandbox is answering, which skein
+    /// having changed something says nothing about. Any successful ask clears it.
+    pub(crate) fn invalidate(&self) {
+        self.cell.lock().unwrap_or_else(|e| e.into_inner()).at = None;
+    }
+}
+
 // ───────────────────────────── attachments: paste / drop into a box ─────────────────────────────
 //
 // The agent runs *inside* the sandbox: it can't see the user's clipboard, their Downloads folder, or

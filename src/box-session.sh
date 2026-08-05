@@ -20,7 +20,7 @@
 # Each private path is seeded from the sandbox's copy on first start, which is how a box inherits a
 # working, logged-in agent and then diverges from it.
 #
-# usage: box-session.sh <box> <root> <pidfile> <session> <state> <cmd…>
+# usage: [SKEIN_FLEET_LIMITS=…] box-session.sh <box> <root> <pidfile> <session> <state> <limits> <cmd…>
 #
 # Starts the box and RETURNS; the box keeps running. <cmd…> becomes the agent inside tmux session
 # <session>, and that tmux server is what holds the namespace open (see "the anchor" below).
@@ -54,6 +54,15 @@ state="${5:?missing host state dir}"
 # none, which is why the warning below fires either way.
 limits="${6-}"
 shift 6
+# The ceilings on everything that is NOT one box, as `<cgroup>=<max>/<high>` pairs, e.g.
+# "skein=15975M/14377M,docker=7987M/7188M".
+#
+# In the environment rather than a seventh positional so that skein and this script can be updated
+# independently: a sandbox keeps whichever copy of this file was installed when it was built, and an
+# argument it did not expect would be read as part of the agent command — every box restart failing
+# until something reinstalled the launcher. Unset here so it does not follow the agent into the box.
+fleet_limits="${SKEIN_FLEET_LIMITS-}"
+unset SKEIN_FLEET_LIMITS
 [ "$#" -gt 0 ] || { echo "skein: no command to run" >&2; exit 2; }
 
 case "$box" in
@@ -213,6 +222,38 @@ rm -f "$sock"
 # while a box waits, which is the waste this design exists to end. Memory cannot be shared that way:
 # two boxes wanting 20G do not each get 13 slowly, they hit the wall and the kernel starts killing
 # processes — as readily another box's agent as the guilty one.
+# The ceilings on everything that is not one box — and the ones that actually keep the sandbox
+# answering, because a per-box ceiling cannot bound a sum and does not reach inside Docker.
+#
+# `skein` is the parent of every box's cgroup, so it is the only place the boxes *together* can be
+# bounded. `docker` is where a box's `docker build` or `docker compose up` really runs: the sandbox
+# has ONE Docker daemon shared by every box, dockerd places its containers under
+# /sys/fs/cgroup/docker, and nothing written on a box's own cgroup reaches them.
+#
+# Why it matters more than the per-box limit: there is no swap here, so reaching the VM's memory is
+# not a slowdown, it is the kernel's global OOM killer picking a victim by badness rather than by
+# blame — as readily whatever answers the host as the build that caused it. That is a sandbox that
+# stops responding until it is cycled. Bounded cgroups turn the same overshoot into an OOM inside
+# the guilty one, which kills a build.
+#
+# Written on every box start, not once: dockerd recreates its cgroup when the sandbox cycles, and
+# takes any limit written on it along too.
+apply_fleet_ceilings() {
+  [ -n "$fleet_limits" ] || return 0
+  for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
+    dir="/sys/fs/cgroup/${pair%%=*}"
+    spec="${pair#*=}"
+    # Only ever narrow what is already there. Creating `docker` ourselves would hand dockerd a
+    # cgroup it did not make and expects to own; a sandbox with no inner Docker simply has none.
+    [ -d "$dir" ] || continue
+    # `high` before `max`, because these are written over a cgroup that may already be busy: the
+    # soft limit makes the kernel reclaim, so the hard one lands on a cgroup that has just given
+    # back its page cache rather than on one still over the line, which would be killed on the spot.
+    sudo sh -c 'echo "$1" > "$2"' _ "${spec##*/}" "$dir/memory.high" 2>/dev/null || true
+    sudo sh -c 'echo "$1" > "$2"' _ "${spec%%/*}" "$dir/memory.max"  2>/dev/null || true
+  done
+}
+
 if [ -n "$limits" ]; then
   cgroup_root="/sys/fs/cgroup/skein"
   cg="$cgroup_root/$box"
@@ -222,6 +263,7 @@ if [ -n "$limits" ]; then
   if sudo mkdir -p "$cgroup_root" 2>/dev/null \
     && sudo sh -c 'echo "+memory +pids" > '"$cgroup_root"'/cgroup.subtree_control' 2>/dev/null \
     && sudo mkdir -p "$cg" 2>/dev/null; then
+    apply_fleet_ceilings
     for kv in $(printf '%s' "$limits" | tr ',' ' '); do
       case "$kv" in
         max=*)  sudo sh -c 'echo "$1" > "$2"' _ "${kv#max=}"  "$cg/memory.max"  2>/dev/null || true ;;

@@ -479,11 +479,37 @@ fn cmd_doctor() -> Result<(), String> {
         // The ceiling is the whole reason one runaway box does not take the others down.
         if probe("sudo mkdir -p /sys/fs/cgroup/skein 2>/dev/null && echo yes") == "yes" {
             println!(
-                "{OK} ceilings      cgroup delegation works {DIM}({}){RESET}",
+                "{OK} ceilings      cgroup delegation works {DIM}(per box: {}){RESET}",
                 skein::box_limits()
             );
         } else {
             println!("{BAD} ceilings      no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box");
+        }
+        // What actually bounds the sandbox, and read back from the kernel rather than reported from
+        // config: a per-box cap can never bound their sum, and it does not reach inside the Docker
+        // daemon they share, where a box's `docker build` really runs. A ceiling skein computed and
+        // failed to write looks identical from the host until the sandbox stops answering.
+        for (cgroup, what) in [
+            ("skein", "all boxes together"),
+            ("docker", "the sandbox's Docker daemon"),
+        ] {
+            let live = probe(&format!(
+                "cat /sys/fs/cgroup/{cgroup}/memory.max 2>/dev/null"
+            ));
+            match live.as_str() {
+                "" => println!("{DIM}·{RESET} {cgroup:<13} no such cgroup {DIM}({what}){RESET}"),
+                "max" => println!(
+                    "{BAD} {cgroup:<13} UNBOUNDED — {what} can reach the VM's memory, and with no \
+                     swap that ends the sandbox rather than the build"
+                ),
+                bytes => {
+                    let gib = bytes
+                        .parse::<u64>()
+                        .map(|b| format!("{:.1}G", b as f64 / 1024.0 / 1024.0 / 1024.0))
+                        .unwrap_or_else(|_| bytes.to_string());
+                    println!("{OK} {cgroup:<13} capped at {gib} {DIM}({what}){RESET}");
+                }
+            }
         }
         // A mount that is missing produces a box with no store, which looks entirely healthy.
         for path in skein::fleet_mounts() {

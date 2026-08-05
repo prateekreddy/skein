@@ -3478,7 +3478,9 @@ function loadHealth() {
         + "background:#f0b429;color:#08090b;font:600 12px/1 sans-serif;padding:7px 13px;border-radius:0 0 8px 8px";
       banner.onclick = openSettings; document.body.append(banner);
     }
-    const failed = ["registry","sbx","git","probes","mailbox"].filter(key => !health[key]?.ok);
+    // "memory" among them because a fleet with no ceiling has no symptom until the sandbox stops
+    // answering — and by then the banner is not what you are looking at.
+    const failed = ["registry","sbx","git","probes","mailbox","memory"].filter(key => !health[key]?.ok);
     const stale = health.stale_boxes?.length || 0, dark = health.dark_boxes?.length || 0;
     banner.textContent = `environment: ${failed.join(", ") || "probe updates"}${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}`;
     banner.title = [
