@@ -1961,69 +1961,172 @@ pub struct BoxSnapshot {
     pub dir: String,
 }
 
-/// Change the fleet sandbox's memory or CPUs, carrying every box's work across.
+/// Where a box's resize archive lands: beside that box's other durable host-side state.
 ///
-/// sbx fixes both at creation, so this destroys the sandbox and rebuilds it. Every box's checkout is
-/// VM-local — the thing that makes builds fast — so all of it has to come out first and go back
-/// after. The sequence is:
+/// It has to be a host path, because the whole point is surviving the VM that holds everything else.
+/// [`box_state`] is already mounted into the sandbox for exactly that reason, and already per box.
+fn box_archive(name: &str, run: &str) -> String {
+    format!("{}/{run}.tar", box_state(name))
+}
+
+/// Copy one box out of the sandbox, whole, onto the host.
 ///
-///   snapshot every box → record each snapshot in its launch spec → destroy → recreate → restart
+/// A **byte copy, not a reconstruction.** [`snapshot_box`] writes a git bundle, two patches and a
+/// tarball of untracked files, from which the box is rebuilt on a fresh clone — that is the right
+/// shape for a migration, where the destination is a different sandbox and often a different repo
+/// state. It is the wrong shape here, where the destination is the same box in a rebuilt VM: the
+/// reconstruction is slower (it re-clones), less faithful (the box comes back reassembled rather
+/// than as it was), and it is where the fragility lives — the restore marker, the launch-spec
+/// rewrite, the transcript realignment. `tar` has none of that, and carries `/tmp` besides, so a
+/// resize is invisible to whatever the agent had half-finished there.
 ///
-/// **Nothing is destroyed until every box has been snapshotted.** A partial snapshot is not a
-/// partial resize, it is lost work, and the boxes that would lose it are exactly the ones whose
-/// state could not be read — so a single failure aborts with the sandbox still standing and every
-/// box still in it. That ordering is the entire safety property of this function.
+/// Uncompressed on purpose. The bulk of a box is git objects and `node_modules`, which are already
+/// compressed; gzip would spend minutes of CPU to save little, where the write itself is seconds.
 ///
-/// Restarting is best-effort *by design*: once the snapshots are written they are durable, on the
-/// host, in each repo's store. A box that fails to come back can be retried with `skein start`, and
-/// the provisioning script restores it from the launch spec it already carries. Failing the whole
-/// resize because the fourth box's clone timed out would help nobody.
+/// Sockets need no exclusion — `tar` skips them with a warning and carries on, which is what should
+/// happen to a tmux socket whose server is about to die. `anchor.pid` does need one: it names a
+/// process in a VM that will not exist, and restoring it would leave a box claiming an anchor that
+/// was never there.
+fn archive_box(fleet: &Place, name: &str, run: &str) -> Result<String, String> {
+    let archive = box_archive(name, run);
+    let mb = fleet
+        .exec(&archive_script(name, &archive), Duration::from_secs(1800))
+        .map_err(|e| format!("could not copy {name} out of the sandbox: {e}"))?;
+    eprintln!("skein: {name} copied out ({} MiB)", mb.trim());
+    Ok(archive)
+}
+
+/// The shell [`archive_box`] runs. Its own function so what the sandbox is asked to do is testable
+/// without one — the exclusions here are the difference between a box that comes back and a box that
+/// comes back claiming an anchor that does not exist.
+fn archive_script(name: &str, archive: &str) -> String {
+    format!(
+        "set -e; mkdir -p {state}; \
+         tar -C {root} --exclude=./anchor.pid --warning=no-file-ignored -cf {archive} . ; \
+         du -sm {archive} | cut -f1",
+        state = sh_quote(&box_state(name)),
+        root = sh_quote(&box_root(name)),
+        archive = sh_quote(archive),
+    )
+}
+
+/// Put one box back into a freshly rebuilt sandbox, exactly as it was.
+fn restore_box(fleet: &Place, name: &str, archive: &str) -> Result<(), String> {
+    let script = format!(
+        "set -e; mkdir -p {root}; tar -C {root} -xf {archive}",
+        root = sh_quote(&box_root(name)),
+        archive = sh_quote(archive),
+    );
+    fleet
+        .exec(&script, Duration::from_secs(1800))
+        .map(|_| ())
+        .map_err(|e| format!("could not put {name} back: {e}"))
+}
+
+/// Refuse a resize that would fill the host disk, before anything is destroyed.
+///
+/// The archives are the size of the boxes — every checkout, every `node_modules`, every `/tmp` —
+/// and they land on the Mac's own disk. Measured here at 16 GiB of boxes against 61 GiB free, which
+/// fits and is not comfortable. Running the host out of space *during* a resize would be the worst
+/// possible moment for it: the sandbox is gone and the rescue is half-written.
+///
+/// A fifth over the measured size, because `du` counts what the boxes use and `tar` writes a little
+/// more (headers, and no sparse-file handling).
+fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
+    let script = format!(
+        "du -sxm {root} 2>/dev/null | cut -f1; df -Pm {state} | awk 'NR==2{{print $4}}'",
+        root = sh_quote(&fleet_root()),
+        state = sh_quote(&box_state_root()),
+    );
+    let out = fleet.exec(&script, Duration::from_secs(300))?;
+    let mut lines = out.lines().filter_map(|l| l.trim().parse::<u64>().ok());
+    let (Some(boxes), Some(free)) = (lines.next(), lines.next()) else {
+        // Unmeasurable is not the same as too small, and refusing on it would make a resize
+        // impossible for anyone whose `df` says something unexpected.
+        eprintln!("skein: could not measure the space a resize needs; continuing");
+        return Ok(());
+    };
+    let needed = boxes + boxes / 5;
+    if free < needed {
+        return Err(format!(
+            "copying the boxes out needs about {needed} MiB and the host has {free} MiB free — \
+             resize aborted with the sandbox untouched. The boxes are {boxes} MiB; freeing space, \
+             or `skein stop`ping boxes you do not need, makes room."
+        ));
+    }
+    Ok(())
+}
+
+/// Change the fleet sandbox's memory or CPUs, carrying every box across.
+///
+/// sbx fixes both at creation — on Apple silicon it is Virtualization.framework underneath, where a
+/// VM's memory is fixed in its configuration and validated at start — so this destroys the sandbox
+/// and rebuilds it. Every box's checkout is VM-local, which is the thing that makes builds fast, so
+/// all of it has to come out first and go back after. The sequence is:
+///
+///   copy every box out → destroy → recreate → copy every box back → restart
+///
+/// The boxes are copied **whole**, `/tmp` included, rather than reconstructed from a snapshot. See
+/// [`archive_box`] for why: the box that comes back is the box that left, so nothing downstream has
+/// to know a resize happened.
+///
+/// **Nothing is destroyed until every box is safely on the host.** A partial copy is not a partial
+/// resize, it is lost work, and the boxes that would lose it are exactly the ones that could not be
+/// read — so a single failure aborts with the sandbox still standing and every box still in it. That
+/// ordering is the entire safety property of this function.
+///
+/// Restarting is best-effort *by design*: once the archives are written they are durable, on the
+/// host, beside each box's other state. A box that fails to come back can be retried with
+/// `skein start` — the tree is already there, so that is a session start rather than a rebuild.
+/// Failing the whole resize because the fourth box's session timed out would help nobody.
 pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured; nothing to resize".into());
     }
     let boxes = placed_boxes(&sandbox);
+    let fleet = own_sandbox(&sandbox);
 
     // ---- phase 1: get everything out, or change nothing ----
-    // The login first, because it lives in the sandbox's HOME and the rebuild destroys it.
+    // Space before work: the archives are the size of the boxes, and discovering the host is full
+    // after the sandbox is gone would be the worst possible moment to discover it.
+    room_to_copy_out(&fleet)?;
+    // The login next, because it lives in the sandbox's HOME and the rebuild destroys it.
     // `ensure_fleet` restores it afterwards — but only if something captured it BEFORE the destroy,
     // and its own call runs after `sbx create`, when the sandbox is empty and there is nothing left
     // to save. Measured the hard way: a login made between two resizes was gone after the second.
     sync_fleet_login(&sandbox);
-    let mut snapshots: Vec<BoxSnapshot> = Vec::new();
+    let mut carried: Vec<Carried> = Vec::new();
     let run = format!("resize-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
     for (name, _) in &boxes {
+        // The repo and branch are not needed to *save* the box any more — the archive is the whole
+        // box — but `start_box` still needs them to bring it back, and finding that out after the
+        // sandbox is destroyed would strand it. So they are still checked here, before anything.
         let repo = repo_for_box(name).ok_or_else(|| {
             format!(
-                "box {name} belongs to no registered repo, so its work has nowhere to be saved — \
+                "box {name} belongs to no registered repo, so nothing could start it again — \
                  resize aborted with the sandbox untouched"
             )
         })?;
         let branch = branch_of(name).unwrap_or_default();
         if branch.trim().is_empty() {
             return Err(format!(
-                "box {name} has no recorded branch to restore onto — resize aborted with the \
+                "box {name} has no recorded branch to come back on — resize aborted with the \
                  sandbox untouched"
             ));
         }
-        let dir = snapshot_box(name, &repo.store, &run).map_err(|e| {
-            format!(
-                "could not save {name}'s work ({e}) — resize aborted with the sandbox untouched"
-            )
-        })?;
-        snapshots.push(BoxSnapshot {
+        let archive = archive_box(&fleet, name, &run)
+            .map_err(|e| format!("{e} — resize aborted with the sandbox untouched"))?;
+        carried.push(Carried {
             name: name.clone(),
-            agent: agent_for_box(name),
             repo: repo.clone(),
             branch,
-            dir,
+            archive,
         });
     }
-    // Only now, with every box's work on the host, is the launch spec rewritten to restore from it.
-    for snap in &snapshots {
-        write_restore_launch_spec(snap)?;
-    }
+    // No launch spec is rewritten here, unlike a migration. A restored box needs no instructions:
+    // its tree is already on disk when `start_box` looks, so that path keeps the checkout and starts
+    // the session rather than cloning and reconstructing.
 
     // ---- phase 2: the destructive part ----
     let config = load_config();
@@ -2069,21 +2172,46 @@ pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>,
     ensure_fleet(&sandbox, &fleet_mounts()).map_err(|e| {
         format!(
             "{sandbox} is not usable yet: {e}\n\
-             every box's work is saved in its repo store under {run}, and nothing is lost. \
+             every box is copied out to its own state directory as {run}.tar, and nothing is lost. \
              `{again}` is safe to re-run — creating the sandbox is idempotent, so it retries only \
-             the step that failed, and each box restores on its next `skein start`"
+             the step that failed"
         )
     })?;
 
     // ---- phase 3: bring them back ----
+    // Restore first, start second, per box: `start_box` decides what to do by looking for a tree, so
+    // the archive has to be back on disk before it looks. A box that fails to restore is not started
+    // at all — starting it would clone a fresh checkout over the top and quietly discard the work
+    // this whole function exists to carry.
+    let fleet = own_sandbox(&sandbox);
     let mut failed = Vec::new();
-    for snap in &snapshots {
-        if let Err(e) = start_box(&snap.name, &snap.repo, &snap.branch, "exec bash -l") {
-            eprintln!("skein: {} did not come back: {e}", snap.name);
-            failed.push(snap.name.clone());
+    for box_ in &carried {
+        if let Err(e) = restore_box(&fleet, &box_.name, &box_.archive) {
+            eprintln!(
+                "skein: {}: {e} — its copy is intact at {}, so retrying the resize or restoring by \
+                 hand still recovers it; NOT starting it, because that would clone over the top",
+                box_.name, box_.archive
+            );
+            failed.push(box_.name.clone());
+            continue;
+        }
+        if let Err(e) = start_box(&box_.name, &box_.repo, &box_.branch, "exec bash -l") {
+            eprintln!("skein: {} did not come back: {e}", box_.name);
+            failed.push(box_.name.clone());
         }
     }
     Ok(failed)
+}
+
+/// One box on its way across a rebuild: where its copy is, and what `start_box` needs to bring it
+/// back. Deliberately not [`BoxSnapshot`], whose `dir` is a path *relative to a repo store* because
+/// that is the form a launch spec carries. A resize writes no launch spec and its archive is an
+/// absolute host path, so sharing the type would mean two meanings for one field.
+struct Carried {
+    name: String,
+    repo: Repo,
+    branch: String,
+    archive: String,
 }
 
 /// Point a box's launch spec at the snapshot it must restore from on its next start.
@@ -2503,6 +2631,46 @@ mod tests {
         // loses the disk gauge, not the memory one.
         let partial = parse_resources("mem_total 4096\nmem_used 900\n").unwrap();
         assert_eq!((partial.mem_total, partial.disk_total), (4096, 0));
+    }
+
+    /// A resize copies the box, it does not rebuild it — so the archive has to be the whole box, and
+    /// it has to land somewhere that outlives the VM being destroyed.
+    #[test]
+    fn a_resize_copies_the_whole_box_to_a_place_the_rebuild_cannot_reach() {
+        let archive = box_archive("web-main", "resize-x");
+
+        // On the host, under the box's own state directory — mounted into the sandbox precisely so
+        // it survives one. A copy written anywhere under the fleet root would die with the very
+        // thing it exists to outlive.
+        assert!(
+            archive.starts_with(&box_state("web-main")),
+            "the copy belongs beside the box's other durable host state: {archive}"
+        );
+        assert!(
+            !archive.starts_with(&fleet_root()),
+            "never under {}, which `sbx rm -f` destroys",
+            fleet_root()
+        );
+
+        let script = archive_script("web-main", &archive);
+        // The whole box, `/tmp` and all: `tar -C <root> … .` rather than naming `tree` and `home`,
+        // so a resize is invisible to whatever the agent had half-finished in scratch space.
+        assert!(
+            script.contains(&format!("tar -C {} ", sh_quote(&box_root("web-main")))),
+            "the archive is taken from the box root, whole: {script}"
+        );
+        // The one exclusion that matters. `anchor.pid` names a process in the VM about to be
+        // destroyed; restored, it would have the box claim a namespace that was never recreated.
+        // Sockets need no exclusion — tar skips them and warns, which is right for a tmux socket
+        // whose server is about to die, and `--warning=no-file-ignored` keeps that off the console.
+        assert!(
+            script.contains("--exclude=./anchor.pid"),
+            "a stale anchor pid must not survive the rebuild: {script}"
+        );
+        assert!(
+            !script.contains("--exclude=./tmp") && !script.contains("--exclude=./home"),
+            "nothing else is excluded — an exact copy is the point: {script}"
+        );
     }
 
     // The layout is load-bearing rather than cosmetic: box-session.sh binds the box's own /tmp and
