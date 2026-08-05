@@ -41,7 +41,15 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// cannot read. A test's scratch space outliving the test is a leak like any other; it just takes
 /// longer to notice.
 ///
-/// Derefs to `Path`, so it is used exactly as the `PathBuf` it replaced.
+/// Derefs to `Path`, so it is used exactly as the `PathBuf` it replaced. Bind it to a name —
+/// `tempdir().join("x")` drops the guard on the spot and deletes the directory before the test has
+/// used it, which the test then silently recreates.
+///
+/// **Two directories a run still survive this**, and they are not removal failures — instrumenting
+/// `drop` showed `remove_dir_all` never erroring. They are *recreated* after the guard has removed
+/// them, by work that outlives the test that started it: [`crate::Gate`] refreshes behind its
+/// caller on a spawned thread, and a thread still running when the test ends writes through an
+/// env var that still names the deleted path. Bounded and understood, against ~180 a run before.
 pub(crate) struct TempDir(PathBuf);
 
 impl Drop for TempDir {
@@ -56,10 +64,13 @@ impl Drop for TempDir {
 
 /// Make a tree removable again, since tests create files and directories that deliberately are not.
 fn reopen(dir: &std::path::Path) {
+    // The mode BEFORE the listing. A directory at 000 cannot be read, so asking first returns
+    // nothing and leaves the tree exactly as unremovable as it was — which is how this leaked on
+    // its first attempt: the one shape it existed to handle was the one it skipped.
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() && !path.is_symlink() {

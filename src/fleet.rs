@@ -3497,6 +3497,10 @@ mod tests {
             !argv.iter().any(|a| a.contains("60g")),
             "sbx create has no disk flag; putting one in the argv would be rejected: {argv:?}"
         );
+        // Restored, or the next test to take `env_lock` inherits a SKEIN_HOME naming a
+        // directory this test's guard has already removed — and writes through it, which
+        // recreates the tree as a leak nobody owns.
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // the box instead of throttling it, turning a slow build into a lost turn).
@@ -4065,6 +4069,10 @@ mod tests {
             known_hosts_script(&ssh_hosts()).contains("StrictHostKeyChecking=accept-new"),
             "trust an unknown host once; still refuse a CHANGED one"
         );
+        // Restored, or the next test to take `env_lock` inherits a SKEIN_HOME naming a
+        // directory this test's guard has already removed — and writes through it, which
+        // recreates the tree as a leak nobody owns.
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A box has a private HOME and a freshly cloned tree, so it starts with no committer at all —
@@ -4580,7 +4588,8 @@ mod tests {
     #[test]
     fn a_new_session_does_not_inherit_the_previous_ones_turn_state() {
         use std::fs;
-        let store = tempdir().join("store").join(".claude");
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store").join(".claude");
         for dir in ["status", "sessions", "hook-log", "telemetry"] {
             fs::create_dir_all(store.join(dir)).unwrap();
         }

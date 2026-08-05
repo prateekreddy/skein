@@ -3332,11 +3332,14 @@ mod tests {
 
     #[test]
     fn shared_home_links_two_private_homes_and_refuses_real_path() {
-        let store = tempdir().join("store/.claude");
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store/.claude");
         ensure_store(&store).unwrap();
         let helper = store.join("skein/bin/shared-home.sh");
-        let home_a = tempdir().join("home-a");
-        let home_b = tempdir().join("home-b");
+        let home_a_tmp = tempdir();
+        let home_a = home_a_tmp.join("home-a");
+        let home_b_tmp = tempdir();
+        let home_b = home_b_tmp.join("home-b");
         fs::create_dir_all(&home_a).unwrap();
         fs::create_dir_all(&home_b).unwrap();
 
@@ -3383,9 +3386,12 @@ mod tests {
     fn agent_guide_uses_native_instruction_files_without_prompt_hook_bloat() {
         use std::os::unix::fs::symlink;
 
-        let store = tempdir().join("store/.claude");
-        let home = tempdir().join("home");
-        let work = tempdir().join("work");
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store/.claude");
+        let home_tmp = tempdir();
+        let home = home_tmp.join("home");
+        let work_tmp = tempdir();
+        let work = work_tmp.join("work");
         ensure_store(&store).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
         fs::create_dir_all(&work).unwrap();
@@ -3444,8 +3450,10 @@ mod tests {
 
     #[test]
     fn codex_hook_installer_preserves_user_hooks_and_is_idempotent() {
-        let store = tempdir().join("store/.claude");
-        let home = tempdir().join("home");
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store/.claude");
+        let home_tmp = tempdir();
+        let home = home_tmp.join("home");
         ensure_store(&store).unwrap();
         fs::create_dir_all(home.join(".codex")).unwrap();
         fs::write(
@@ -3482,9 +3490,12 @@ mod tests {
 
         let _g = env_lock();
         let skein_home = tempdir();
-        let work = tempdir().join("work");
-        let store = tempdir().join("store/.claude");
-        let box_home = tempdir().join("box-home");
+        let work_tmp = tempdir();
+        let work = work_tmp.join("work");
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store/.claude");
+        let box_home_tmp = tempdir();
+        let box_home = box_home_tmp.join("box-home");
         fs::create_dir_all(&work).unwrap();
         fs::create_dir_all(&box_home).unwrap();
         assert!(Command::new("git")
@@ -3524,7 +3535,8 @@ mod tests {
         }])
         .unwrap();
 
-        let bin = tempdir().join("bin");
+        let bin_tmp = tempdir();
+        let bin = bin_tmp.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let sbx = bin.join("sbx");
         fs::write(
@@ -4419,6 +4431,10 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
         // Idempotent: clearing a box that never chose is not an error.
         set_box_tracking("web-main", None).unwrap();
+        // Restored, or the next test to take `env_lock` inherits a SKEIN_HOME naming a
+        // directory this test's guard has already removed — and writes through it, which
+        // recreates the tree as a leak nobody owns.
+        std::env::remove_var("SKEIN_HOME");
     }
 
     #[test]
@@ -6378,7 +6394,8 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         //
         // Runs the installed script, not a Rust-side model of it, because the bug was in the shell.
         let _g = env_lock();
-        let store = tempdir().join("store").join(".claude");
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store").join(".claude");
         ensure_store(&store).unwrap();
         let script = store.join("skein").join("bin").join("box-status.sh");
         let project_dir = store.parent().unwrap().to_path_buf();

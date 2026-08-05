@@ -1391,7 +1391,8 @@ mod tests {
     #[test]
     fn read_pane_ignores_an_observation_that_has_gone_stale() {
         let _g = env_lock();
-        let store = tempdir().join(".claude");
+        let store_tmp = tempdir();
+        let store = store_tmp.join(".claude");
         fs::create_dir_all(store.join("status")).unwrap();
         let reg = store.join("sandboxes.json");
         fs::write(
