@@ -47,6 +47,9 @@ fn main() {
             // `--disk` rather than a third positional: disk is the one of the three that is usually
             // changed alone, and `skein resize 26g "" 60g` is a trap worth not building.
             let disk = flag(rest, "--disk").unwrap_or_default();
+            // A bare switch, not a value: what it means is "I have accepted the loss", and a flag
+            // that takes an argument invites `--drop-docker false` meaning the opposite.
+            let drop_docker = rest.iter().any(|a| a == "--drop-docker");
             let positional: Vec<&String> = rest
                 .iter()
                 .take_while(|a| !a.starts_with("--"))
@@ -56,11 +59,15 @@ fn main() {
                     memory,
                     positional.get(1).map(|s| s.as_str()).unwrap_or(""),
                     &disk,
+                    drop_docker,
                 ),
                 // Disk alone still needs a memory size to rebuild at, and the configured one is the
                 // right answer — nobody asking for a bigger disk is also asking to be re-sized.
-                (None, false) => cmd_resize(&skein::load_config().fleet_memory, "", &disk),
-                (None, true) => Err("usage: skein resize <memory> [cpus] [--disk <size>]   \
+                (None, false) => {
+                    cmd_resize(&skein::load_config().fleet_memory, "", &disk, drop_docker)
+                }
+                (None, true) => Err("usage: skein resize <memory> [cpus] [--disk <size>] \
+                     [--drop-docker]   \
                      e.g. skein resize 26g   |   skein resize --disk 60g"
                     .into()),
             }
@@ -604,13 +611,19 @@ fn run_sbx(argv: &[String]) -> Result<(), String> {
 /// A CLI command and not only a cockpit button because this is the one operation that destroys the
 /// sandbox: `sbx create` may ask for confirmation, and a server has no terminal to answer with — so
 /// the riskiest path needs to be runnable somewhere a person is sitting.
-fn cmd_resize(memory: &str, cpus: &str, disk: &str) -> Result<(), String> {
+fn cmd_resize(memory: &str, cpus: &str, disk: &str, drop_docker: bool) -> Result<(), String> {
     let size = match disk.trim() {
         "" => memory.to_string(),
         d => format!("{memory}, disk {d}"),
     };
     eprintln!("{DIM}skein:{RESET} saving every box's work, then rebuilding the sandbox at {size}…");
-    let failed = skein::resize_fleet(memory, cpus, disk)?;
+    if drop_docker {
+        eprintln!(
+            "{DIM}skein:{RESET} --drop-docker: /var/lib/docker goes with the sandbox, images and \
+             volumes included"
+        );
+    }
+    let failed = skein::resize_fleet(memory, cpus, disk, drop_docker)?;
     if failed.is_empty() {
         eprintln!("{DIM}skein:{RESET} resized; every box came back");
     } else {

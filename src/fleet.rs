@@ -2338,6 +2338,90 @@ fn should_come_back(was_live: &std::collections::HashMap<String, bool>, name: &s
 ///
 /// A fifth over the measured size, because `du` counts what the boxes use and `tar` writes a little
 /// more (headers, and no sparse-file handling).
+/// What a resize would destroy in `/var/lib/docker`, named so the person running it can decide.
+///
+/// A resize is `sbx rm -f` and `sbx create`, and `/var/lib/docker` is a **separate disk** made with
+/// the sandbox and destroyed with it. [`archive_box`] copies [`fleet_root`] — the boxes' checkouts —
+/// and nothing else, so every image and volume goes. That is fine for most of what is in there:
+/// a pulled image comes back with `docker pull`, and a build cache is a cache. It is not fine for
+/// the two kinds of thing nothing can recreate — an image that was **built here** and never pushed,
+/// and a **named volume**, which exists precisely because someone wanted data to outlive a
+/// container. Measured on this fleet: 45 GB of `/var/lib/docker`, including two locally-built
+/// images and three named volumes.
+///
+/// Locally built is read as "has no repo digest". A digest is what an image gets by being pulled
+/// from or pushed to a registry, so its absence means no registry has a copy. That over-reports a
+/// pulled image someone has since retagged, and that is the right way to be wrong: this decides
+/// whether to *ask*, and asking about something recoverable costs a sentence.
+///
+/// Anonymous volumes are excluded — a 64-hex name is one Docker made up for a container that did
+/// not ask for a name, and treating those as precious would refuse every resize forever.
+///
+/// `Err` is "could not ask", not "nothing to lose", and the caller must not read it as the latter:
+/// a wedged dockerd answers no question at all, and that is the state this fleet is most often in
+/// when someone reaches for a resize.
+/// The one shell [`docker_state_at_risk`] runs, printing `volume <name>` and `image <tag>` lines.
+///
+/// Its own constant so it can be run against a stub `docker` in a test — the filtering *is* the
+/// decision here, and an assertion about the Rust that reads the output would prove nothing about
+/// which images and volumes actually reach it.
+///
+/// `echo asked` is the marker that distinguishes "Docker answered, and holds nothing worth saving"
+/// from "Docker did not answer". Without it both are the empty string, and the safe reading of one
+/// is the unsafe reading of the other.
+const DOCKER_PROBE_SH: &str = "docker volume ls --format '{{.Name}}' 2>/dev/null \
+     | grep -vx '[0-9a-f]\\{64\\}' | sed 's/^/volume /'; \
+     docker image ls --digests --format '{{.Digest}} {{.Repository}}:{{.Tag}}' 2>/dev/null \
+     | awk '$1==\"<none>\" && $2!=\"<none>:<none>\" {print \"image\", $2}'; \
+     echo asked";
+
+fn docker_state_at_risk(fleet: &Place) -> Result<Vec<String>, String> {
+    let out = fleet
+        .exec(DOCKER_PROBE_SH, Duration::from_secs(60))
+        .map_err(|e| format!("asking Docker what it is holding: {e}"))?;
+    if !out.lines().any(|l| l.trim() == "asked") {
+        return Err("Docker did not answer".into());
+    }
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("volume ") || l.starts_with("image "))
+        .map(str::to_string)
+        .collect())
+}
+
+/// The refusal itself, as text — its own function so the wording is testable without a sandbox.
+///
+/// Long on purpose. This stops a command the person deliberately typed, so it has to say what would
+/// go, why skein cannot carry it, how to carry it by hand, and how to proceed anyway. A refusal that
+/// only says no gets worked around by the shortest available route, which here is `sbx rm -f`.
+fn docker_refusal(at_risk: &[String]) -> String {
+    // Capped: a fleet with forty volumes should not bury the last line, which is the one that says
+    // how to proceed.
+    const SHOWN: usize = 8;
+    let listed: Vec<&str> = at_risk.iter().take(SHOWN).map(String::as_str).collect();
+    let more = at_risk.len().saturating_sub(listed.len());
+    format!(
+        "a resize destroys /var/lib/docker, and it is holding {} thing{} nothing can put back — \
+         resize aborted with the sandbox untouched.\n  {}{}\n  \
+         That disk is created with the sandbox and destroyed with it, and skein's copy carries the \
+         boxes' checkouts only. Images without a repo digest were built here and are on no \
+         registry; named volumes are data someone asked to outlive a container.\n  \
+         Save them first — `docker save -o <file> <image>` and, per volume, \
+         `docker run --rm -v <volume>:/v -v {state}:/out alpine tar -C /v -cf /out/<volume>.tar .` \
+         — writing to {state}, which is on the host and survives the rebuild.\n  \
+         Or pass --drop-docker to resize anyway and lose them.",
+        at_risk.len(),
+        if at_risk.len() == 1 { "" } else { "s" },
+        listed.join("\n  "),
+        match more {
+            0 => String::new(),
+            n => format!("\n  …and {n} more"),
+        },
+        state = box_state_root(),
+    )
+}
+
 fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
     // `key value` lines rather than three bare numbers, because the third is absent whenever no
     // leftovers exist and positional parsing would then read the free space as the leftover size.
@@ -2409,7 +2493,12 @@ fn room_to_copy_out(fleet: &Place) -> Result<(), String> {
 /// host, beside each box's other state. A box that fails to come back can be retried with
 /// `skein start` — the tree is already there, so that is a session start rather than a rebuild.
 /// Failing the whole resize because the fourth box's session timed out would help nobody.
-pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>, String> {
+pub fn resize_fleet(
+    memory: &str,
+    cpus: &str,
+    disk: &str,
+    drop_docker: bool,
+) -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured; nothing to resize".into());
@@ -2421,6 +2510,27 @@ pub fn resize_fleet(memory: &str, cpus: &str, disk: &str) -> Result<Vec<String>,
     // Space before work: the archives are the size of the boxes, and discovering the host is full
     // after the sandbox is gone would be the worst possible moment to discover it.
     room_to_copy_out(&fleet)?;
+    // Then what the copy does NOT cover. `/var/lib/docker` is a disk of its own, destroyed with the
+    // sandbox and carried by nothing, so a resize silently discards every locally-built image and
+    // named volume in it — 45 GB of them on this fleet. Refused rather than warned: a warning is
+    // read after the fact, and there is no after the fact for `sbx rm -f`.
+    if !drop_docker {
+        match docker_state_at_risk(&fleet) {
+            Ok(at_risk) if !at_risk.is_empty() => return Err(docker_refusal(&at_risk)),
+            Ok(_) => {}
+            // Could not ask, which is not the same as nothing to lose — and a wedged dockerd is the
+            // state this fleet is most often in when someone reaches for a resize. Refusing on
+            // silence is the only reading that cannot destroy something nobody was told about.
+            Err(why) => {
+                return Err(format!(
+                    "could not check what Docker is holding ({why}), and a resize destroys \
+                     /var/lib/docker — resize aborted with the sandbox untouched.\n  \
+                     Restart the daemon and try again, or pass --drop-docker to resize anyway and \
+                     lose whatever is in there."
+                ))
+            }
+        }
+    }
     // Who was actually running, captured before anything else and never asked again: a resize must
     // put the fleet back as it found it, and starting a box that was deliberately stopped is not
     // that. Asked here rather than in phase 3 because by then every session is gone — after the
@@ -2991,6 +3101,93 @@ mod tests {
             r.docker,
             r.mem_used
         );
+    }
+
+    /// A resize destroys `/var/lib/docker`, so it has to know what is in there worth keeping.
+    ///
+    /// The filtering is the decision, so it is run for real against a stub `docker` rather than
+    /// asserted about: what must survive the filter is an image nothing can re-pull and a volume
+    /// someone named, and what must not is everything a `docker pull` or a rebuild puts back.
+    /// Getting the second half wrong is not harmless — a resize that refuses over a dangling image
+    /// refuses forever, and the way round it is `sbx rm -f`, which loses the boxes too.
+    #[test]
+    fn the_resize_asks_docker_only_about_what_it_could_not_put_back() {
+        let dir = tempdir();
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // Real shapes: a pulled image carries a digest, one built here does not, a dangling layer
+        // has neither name nor tag, and an anonymous volume is 64 hex characters Docker chose.
+        std::fs::write(
+            bin.join("docker"),
+            "#!/bin/sh\ncase \"$1 $2\" in\n\
+             \"volume ls\") printf 'thing-cargo\\nthing-target\\n\
+             3f2a91b8c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1\\n' ;;\n\
+             \"image ls\") printf 'sha256:aa11 pgvector/pgvector:pg16\\n\
+             <none> thing-rust:local\\n<none> thing-ocr:local\\n<none> <none>:<none>\\n' ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            bin.join("docker"),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(DOCKER_PROBE_SH)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .expect("run the probe");
+        let lines: Vec<&str> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| Box::leak(l.to_string().into_boxed_str()) as &str)
+            .collect();
+
+        assert_eq!(
+            lines,
+            vec![
+                "volume thing-cargo",
+                "volume thing-target",
+                "image thing-rust:local",
+                "image thing-ocr:local",
+                "asked",
+            ],
+            "kept: named volumes and images no registry has a copy of. dropped: the anonymous \
+             volume, the pulled image, the dangling layer"
+        );
+    }
+
+    /// The refusal has to be worth reading, because the alternative to reading it is `sbx rm -f`.
+    #[test]
+    fn the_refusal_names_what_would_go_and_how_to_proceed_anyway() {
+        let at_risk: Vec<String> = ["image thing-rust:local", "volume thing-cargo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let said = docker_refusal(&at_risk);
+        assert!(said.contains("thing-rust:local") && said.contains("thing-cargo"));
+        assert!(
+            said.contains("sandbox untouched"),
+            "the first thing to know is that nothing has happened yet: {said}"
+        );
+        assert!(
+            said.contains("docker save") && said.contains("tar -C /v"),
+            "refusing without saying how to keep them just moves the problem: {said}"
+        );
+        assert!(
+            said.contains("--drop-docker"),
+            "a refusal with no way past it gets worked around outside skein: {said}"
+        );
+        // A fleet with forty volumes must not bury the line that says how to proceed.
+        let many: Vec<String> = (0..40).map(|i| format!("volume v{i}")).collect();
+        let long = docker_refusal(&many);
+        assert!(long.contains("…and 32 more") && long.contains("--drop-docker"));
     }
 
     /// Two disks or one, drawn honestly either way.

@@ -889,7 +889,7 @@ async fn api_fleet_resources() -> Response {
 /// 200 with the boxes that failed to come back: their work is already snapshotted on the host, so a
 /// partial return is a retry (`skein start <box>`), not a failure of the resize.
 async fn api_fleet_resize(Json(r): Json<ResizeReq>) -> Response {
-    match skein::resize_fleet(&r.memory, &r.cpus, &r.disk) {
+    match skein::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {
         Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -904,6 +904,12 @@ struct ResizeReq {
     /// Root filesystem size. Empty keeps the configured one — see [`skein::Config::fleet_disk`].
     #[serde(default)]
     disk: String,
+    /// Proceed even though the rebuild destroys locally-built images and named volumes.
+    ///
+    /// Defaults to false, so a client that predates this field gets the refusal rather than the
+    /// destruction — which is the right way round for a field that means "yes, lose it".
+    #[serde(default)]
+    drop_docker: bool,
 }
 
 /// Post a message into the shared mailbox (from skein). `to` is a vmid or "broadcast".
