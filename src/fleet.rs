@@ -925,7 +925,7 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
         Duration::from_secs(30)
     };
     DISK_GATE
-        .get(fresh, || {
+        .get(fresh, move || {
             let script = format!("du -sxm {root}/*/ 2>/dev/null", root = fleet_root());
             let out = own_sandbox(&sandbox)
                 .exec(&script, Duration::from_secs(60))
@@ -1012,7 +1012,7 @@ pub fn fleet_resources() -> Option<FleetResources> {
     } else {
         Duration::from_secs(30)
     };
-    let mut resources = RESOURCE_GATE.get(fresh, || {
+    let mut resources = RESOURCE_GATE.get(fresh, move || {
         let out = own_sandbox(&sandbox)
             .exec(&resource_script(), Duration::from_secs(20))
             .ok()?;
@@ -2346,7 +2346,7 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
         Duration::from_millis(1500)
     };
     LIVENESS_GATE
-        .get(fresh, || {
+        .get(fresh, move || {
             let script = format!(
                 "for d in {root}/*/; do n=${{d%/}}; n=${{n##*/}}; s=\"$d/session.sock\"; \
                  if [ -S \"$s\" ] && tmux -S \"$s\" has-session 2>/dev/null; then echo \"$n 1\"; \

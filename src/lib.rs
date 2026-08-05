@@ -2745,7 +2745,11 @@ mod tests {
         // A minute, so nothing here ages out mid-test: what is under test is which answer the gate
         // hands back, not when it decides to ask again.
         let long = Duration::from_secs(60);
-        let gate: Gate<Vec<SbxBox>> = Gate::new();
+        // Static because the gate now refreshes behind its caller, which needs it to outlive the
+        // call. Every `get` here is preceded by an `invalidate`, so nothing carries between cases.
+        static GATE: Gate<Vec<SbxBox>> = Gate::new();
+        let gate = &GATE;
+        gate.invalidate();
 
         assert_eq!(gate.get(long, || Some(vec![box_])).unwrap().len(), 1);
         assert!(!gate.degraded());
@@ -2794,11 +2798,85 @@ mod tests {
         );
     }
 
+    /// What a caller pays when the sandbox is wedged. Measured against a hung sbx daemon, a board
+    /// refresh walked four gates in series and took 31 seconds to hand back the answers it already
+    /// had — so the property is that ageing out costs the caller *nothing* once the gate holds one.
+    #[test]
+    fn an_aged_out_answer_is_served_at_once_and_refreshed_behind_the_caller() {
+        static GATE: Gate<u32> = Gate::new();
+        static ASKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        use std::sync::atomic::Ordering::Relaxed;
+        const HUNG: Duration = Duration::from_millis(300);
+        let fresh = Duration::from_millis(20);
+        GATE.invalidate();
+        ASKS.store(0, Relaxed);
+
+        // Cold: nothing to serve, so this caller does have to wait.
+        assert_eq!(GATE.get(fresh, || Some(1)), Some(1));
+        assert_eq!(
+            ASKS.load(Relaxed),
+            0,
+            "the cold ask is the one under test next"
+        );
+
+        // Now aged out, with the sandbox hung. The caller must not wait on it.
+        std::thread::sleep(fresh * 2);
+        let began = std::time::Instant::now();
+        let answer = GATE.get(fresh, || {
+            ASKS.fetch_add(1, Relaxed);
+            std::thread::sleep(HUNG);
+            Some(2)
+        });
+        assert_eq!(
+            answer,
+            Some(1),
+            "the remembered answer, not a wait for a new one"
+        );
+        assert!(
+            began.elapsed() < HUNG / 2,
+            "a stale gate must not make its caller sit out the timeout: waited {:?}",
+            began.elapsed()
+        );
+
+        // …and the refresh really did run, so the *next* caller finds a fresh answer.
+        std::thread::sleep(HUNG * 2);
+        assert_eq!(
+            ASKS.load(Relaxed),
+            1,
+            "exactly one refresh, behind the caller"
+        );
+        assert_eq!(
+            GATE.get(fresh, || Some(3)),
+            Some(2),
+            "refreshed to the new value"
+        );
+    }
+
+    /// The exception, and why it is one: `invalidate` means skein has just *changed* the thing being
+    /// asked about, so the remembered answer is wrong rather than merely old. Serving it while a
+    /// refresh ran behind would show a box as stopped immediately after starting it.
+    #[test]
+    fn a_gate_skein_has_invalidated_makes_its_caller_wait_for_the_truth() {
+        static GATE: Gate<u32> = Gate::new();
+        let fresh = Duration::from_millis(20);
+        GATE.invalidate();
+        assert_eq!(GATE.get(fresh, || Some(1)), Some(1));
+
+        GATE.invalidate();
+        assert_eq!(
+            GATE.get(fresh, || Some(2)),
+            Some(2),
+            "an invalidated gate must return what it just asked for, not what it remembered"
+        );
+    }
+
     /// The property that lets a struggling daemon recover: consecutive failures space the attempts
     /// out instead of re-arming at the same interval, and one success puts it straight back.
     #[test]
     fn repeated_failure_asks_less_often_and_success_restores_the_cadence() {
-        let gate: Gate<u32> = Gate::new();
+        static GATE: Gate<u32> = Gate::new();
+        let gate = &GATE;
+        gate.invalidate();
         let fresh = Duration::from_millis(100);
         assert_eq!(gate.interval(fresh), fresh, "healthy: ask at the full rate");
 

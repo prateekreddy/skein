@@ -282,6 +282,9 @@ pub(crate) struct Gate<T> {
     /// Held for the duration of an ask, so concurrent callers wait for that one answer instead of
     /// each starting their own.
     lane: std::sync::Mutex<()>,
+    /// Set while a refresh runs behind a caller, so the ones arriving during it serve the remembered
+    /// answer rather than each spawning a thread that would only queue on the lane.
+    refreshing: std::sync::atomic::AtomicBool,
 }
 
 struct Asked<T> {
@@ -305,21 +308,88 @@ impl<T: Clone> Gate<T> {
             }),
             fails: std::sync::atomic::AtomicU32::new(0),
             lane: std::sync::Mutex::new(()),
+            refreshing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     /// The answer, asking `take` for a new one only when the remembered one has aged out.
     ///
+    /// **A caller waits only when there is nothing to serve it.** Once the gate holds an answer,
+    /// ageing out costs the caller nothing: it gets the remembered one immediately and the ask runs
+    /// behind it, so the next caller finds a fresh one. That is the difference between a wedged
+    /// subprocess making the cockpit *slightly stale* and making it *stop*: measured against a hung
+    /// sbx daemon, a board refresh walked four gates in series and took 31 seconds, because each one
+    /// made its caller sit out the full timeout before handing back the very answer it already had.
+    /// Nothing about that wait improved the answer — the value returned was the remembered one
+    /// either way.
+    ///
+    /// Waiting is still right in exactly two cases, and both are preserved:
+    ///
+    /// * **nothing remembered yet** — a cold gate has nothing to hand back, so the first caller has
+    ///   to go and find out;
+    /// * **[`invalidate`](Self::invalidate)d** — skein has just changed the thing being asked about
+    ///   (started a box, stopped one) and *knows* the remembered answer is wrong. Serving it while a
+    ///   refresh runs behind would show a box as stopped immediately after starting it.
+    ///
+    /// The two are one condition in the data: no clock (`at == None`) means either never asked or
+    /// deliberately expired, and both must block. An aged-out clock means merely old, which must not.
+    ///
     /// A `fresh` of zero disables the gate entirely — no remembering, no single flight. Unit tests
     /// swap the underlying command per case and run in parallel, so one test's fleet must never be
     /// served to another.
-    pub(crate) fn get(&self, fresh: Duration, take: impl FnOnce() -> Option<T>) -> Option<T> {
+    pub(crate) fn get(
+        &'static self,
+        fresh: Duration,
+        take: impl FnOnce() -> Option<T> + Send + 'static,
+    ) -> Option<T>
+    where
+        T: Send + 'static,
+    {
         if fresh.is_zero() {
             return take();
         }
         if let Some(remembered) = self.remembered(fresh) {
             return remembered;
         }
+        if let Some(good) = self.servable_while_stale() {
+            self.refresh_behind(fresh, take);
+            return Some(good);
+        }
+        self.ask(fresh, take)
+    }
+
+    /// The remembered answer when it is merely old, or `None` when the caller must wait for a real
+    /// one. See [`get`](Self::get) for why those are the same two cases.
+    fn servable_while_stale(&self) -> Option<T> {
+        let cell = self.cell.lock().unwrap_or_else(|e| e.into_inner());
+        cell.at.and(cell.good.clone())
+    }
+
+    /// Run the ask on a thread of its own, at most one at a time.
+    ///
+    /// The flag rather than the lane: a caller that finds the lane held could simply return, but it
+    /// would have paid for a thread to discover that. Since every caller arriving during a refresh
+    /// takes this path, that is a thread per caller per tick against a daemon that is, by
+    /// construction, already the slow thing.
+    fn refresh_behind(
+        &'static self,
+        fresh: Duration,
+        take: impl FnOnce() -> Option<T> + Send + 'static,
+    ) where
+        T: Send + 'static,
+    {
+        use std::sync::atomic::Ordering;
+        if self.refreshing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        std::thread::spawn(move || {
+            self.ask(fresh, take);
+            self.refreshing.store(false, Ordering::Release);
+        });
+    }
+
+    /// Ask, and remember the answer. Blocking, single-flighted, and the only writer of the clock.
+    fn ask(&self, fresh: Duration, take: impl FnOnce() -> Option<T>) -> Option<T> {
         let _lane = self.lane.lock().unwrap_or_else(|e| e.into_inner());
         // Whoever held the lane may have just answered this for us while we waited.
         if let Some(remembered) = self.remembered(fresh) {
@@ -371,8 +441,11 @@ impl<T: Clone> Gate<T> {
         self.fails.load(std::sync::atomic::Ordering::Relaxed) > 0
     }
 
-    /// Expire the standing answer, so the next caller asks. For the moments when skein itself has
-    /// just changed it — started a box, stopped one — and must not serve the old one back.
+    /// Expire the standing answer, so the next caller asks — and *waits* for the reply rather than
+    /// being handed the old one while a refresh runs behind it. For the moments when skein itself
+    /// has just changed the thing being asked about — started a box, stopped one — and therefore
+    /// knows the remembered answer to be wrong, as opposed to merely old. Ageing out is the other
+    /// case and is deliberately cheaper; see [`get`](Self::get).
     ///
     /// Expires the *clock*, not the last good answer: if the ask that follows fails, falling back
     /// to what was true a moment ago still beats reporting that the fleet has gone. And it leaves
