@@ -1176,6 +1176,18 @@ pub struct FleetResources {
     pub docker: u64,
     pub disk_total: u64,
     pub disk_used: u64,
+    /// `/var/lib/docker` — images, volumes and build cache. **A different disk from the one above**,
+    /// and that is why it is measured separately rather than folded in: sbx gives a sandbox two, a
+    /// root filesystem sized by `DOCKER_SANDBOXES_ROOT_SIZE` and this one by
+    /// `DOCKER_SANDBOXES_DOCKER_SIZE`, so filling one says nothing about the other.
+    ///
+    /// Without it the gauge answered the wrong question confidently. Measured here: the boxes' disk
+    /// 37% full while this one was at 76%, so a build that ran out of space did so against a strip
+    /// showing two thirds free — the disk that filled was not the disk being drawn.
+    ///
+    /// Zero when Docker shares the boxes' filesystem, so the same bytes are never drawn twice.
+    pub images_total: u64,
+    pub images_used: u64,
     pub cpus: u64,
     pub load1: f64,
     pub load5: f64,
@@ -1241,7 +1253,10 @@ fn resource_script() -> String {
          END{{print \"mem_total\", int(t/1024); print \"mem_used\", int((t-a)/1024)}}' /proc/meminfo; \
          echo \"cpus $(nproc 2>/dev/null || echo 0)\"; \
          awk '{{print \"load1\", $1; print \"load5\", $2}}' /proc/loadavg; \
-         df -Pm {root} 2>/dev/null | awk 'NR==2{{print \"disk_total\", $2; print \"disk_used\", $3}}'; \
+         df -Pm {root} 2>/dev/null \
+         | awk 'NR==2{{print \"disk_dev\", $1; print \"disk_total\", $2; print \"disk_used\", $3}}'; \
+         df -Pm /var/lib/docker 2>/dev/null \
+         | awk 'NR==2{{print \"images_dev\", $1; print \"images_total\", $2; print \"images_used\", $3}}'; \
          for c in skein skein/containers docker; do \
          awk -v c=$c '/^anon /{{print c, int($2/1048576)}}' \
          /sys/fs/cgroup/$c/memory.stat 2>/dev/null; done",
@@ -1262,6 +1277,8 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
     // read and one is chosen below rather than summed.
     let mut nested: Option<u64> = None;
     let mut outside = 0;
+    // Which device each `df` answered about, so the same filesystem is never drawn twice.
+    let (mut root_dev, mut images_dev) = (String::new(), String::new());
     for line in out.lines() {
         let Some((key, value)) = line.trim().split_once(' ') else {
             continue;
@@ -1276,6 +1293,10 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
             "docker" => outside = number(),
             "disk_total" => r.disk_total = number(),
             "disk_used" => r.disk_used = number(),
+            "disk_dev" => root_dev = value.to_string(),
+            "images_total" => r.images_total = number(),
+            "images_used" => r.images_used = number(),
+            "images_dev" => images_dev = value.to_string(),
             "cpus" => r.cpus = number(),
             "load1" => r.load1 = value.parse().unwrap_or(0.0),
             "load5" => r.load5 = value.parse().unwrap_or(0.0),
@@ -1297,6 +1318,17 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
             r.boxes = r.boxes.saturating_sub(containers);
         }
         None => r.docker = outside,
+    }
+    // sbx gives `/var/lib/docker` a disk of its own, but it does not have to: a sandbox built
+    // without one has Docker on the same filesystem as the boxes, and drawing that as a second
+    // gauge would show the same bytes twice under two names. Compared by device rather than by
+    // path, which is the only comparison that answers "is this the same storage".
+    // Both empty means neither `df` answered, which is not the two being the same device — the
+    // figures are already zero there, and treating "unknown" as "matched" would be a coincidence
+    // waiting to be relied on.
+    if !images_dev.is_empty() && images_dev == root_dev {
+        r.images_total = 0;
+        r.images_used = 0;
     }
     (r.mem_total > 0).then_some(r)
 }
@@ -2223,10 +2255,29 @@ fn archive_box(fleet: &Place, name: &str, run: &str) -> Result<String, String> {
 /// The shell [`archive_box`] runs. Its own function so what the sandbox is asked to do is testable
 /// without one — the exclusions here are the difference between a box that comes back and a box that
 /// comes back claiming an anchor that does not exist.
+///
+/// **As root, and that is not a convenience.** A box is a general-purpose machine: it holds files
+/// its own user cannot read — a fixture at mode 000, a root-owned build artifact, whatever a
+/// container left behind — and `tar` exits non-zero on the first one it cannot open. Under the
+/// `set -e` above that aborts the copy, and one unreadable file in one box then refuses the whole
+/// fleet's resize. Which is what happened: 6,494 directories left by this project's own test suite,
+/// each holding one deliberately unreadable file, and a resize of eight boxes stopped on the
+/// seventh with the six already copied left to clean up.
+///
+/// Root also makes the copy *faithful*, which is the point of a byte copy: ownership and modes come
+/// back as they were rather than as whoever ran the resize.
+///
+/// Deliberately NOT `--ignore-failed-read`. That turns the same situation into an archive missing
+/// files nobody was told about, and a box restored short of its own contents is a worse outcome
+/// than a resize that refused to start.
+///
+/// The archive is handed back to the invoking user afterwards, so the rest of the run — `du` here,
+/// and the host reading it later — does not need root to touch what root has just written.
 fn archive_script(name: &str, archive: &str) -> String {
     format!(
         "set -e; mkdir -p {state}; \
-         tar -C {root} --exclude=./anchor.pid --warning=no-file-ignored -cf {archive} . ; \
+         sudo tar -C {root} --exclude=./anchor.pid --warning=no-file-ignored -cf {archive} . ; \
+         sudo chown \"$(id -u):$(id -g)\" {archive}; \
          du -sm {archive} | cut -f1",
         state = sh_quote(&box_state(name)),
         root = sh_quote(&box_root(name)),
@@ -2255,7 +2306,11 @@ fn restore_box(fleet: &Place, name: &str, archive: &str) -> Result<(), String> {
 /// ordering here — extract, *then* delete, under `set -e` — is the whole safety property.
 fn restore_script(name: &str, archive: &str) -> String {
     format!(
-        "set -e; mkdir -p {root}; tar -C {root} -xf {archive}; rm -f {archive}",
+        // Root on the way back too, and for the matching reason: the archive holds modes and owners
+        // the invoking user cannot recreate, and an unprivileged extract would either fail on them
+        // or quietly hand every file to whoever ran the resize. As root, `tar` restores the
+        // ownership recorded in the archive, which is what makes this a copy rather than a rebuild.
+        "set -e; sudo mkdir -p {root}; sudo tar -C {root} -xf {archive}; rm -f {archive}",
         root = sh_quote(&box_root(name)),
         archive = sh_quote(archive),
     )
@@ -2908,16 +2963,22 @@ mod tests {
 
     /// Verbatim output of [`resource_script`] on a live fleet, so the parser is tested against what
     /// the guest actually prints rather than against what this file assumes it prints.
-    const LIVE_REPLY: &str = "mem_total 26377\nmem_used 2947\ncpus 11\nload1 0.57\nload5 0.75\n\
-                              disk_total 60168\ndisk_used 17782\nskein 1252\ndocker 855\n";
+    const LIVE_REPLY: &str = "mem_total 26377\nmem_used 11215\ncpus 11\nload1 6.89\nload5 5.48\n\
+                              disk_dev overlay\ndisk_total 60168\ndisk_used 20986\n\
+                              images_dev /dev/vdd\nimages_total 50089\nimages_used 45433\n\
+                              skein 1440\ndocker 8880\n";
 
     #[test]
     fn the_gauge_reads_a_live_reply_and_the_shares_fit_inside_the_total() {
         let r = parse_resources(LIVE_REPLY).expect("a reply with a memory total is a reply");
-        assert_eq!((r.mem_total, r.mem_used), (26377, 2947));
-        assert_eq!((r.boxes, r.docker), (1252, 855));
-        assert_eq!((r.disk_total, r.disk_used, r.cpus), (60168, 17782, 11));
-        assert_eq!((r.load1, r.load5), (0.57, 0.75));
+        assert_eq!((r.mem_total, r.mem_used), (26377, 11215));
+        assert_eq!((r.boxes, r.docker), (1440, 8880));
+        assert_eq!((r.disk_total, r.disk_used, r.cpus), (60168, 20986, 11));
+        assert_eq!((r.load1, r.load5), (6.89, 5.48));
+        // Docker's own disk, which the strip did not draw at all until this: the reply above is a
+        // fleet whose boxes' disk is a third full while the one Docker writes to is at 91%. A build
+        // that ran out of space there did so against a gauge showing two thirds free.
+        assert_eq!((r.images_total, r.images_used), (50089, 45433));
         // The stacked memory bar draws boxes + docker + everything-else against the total, so a
         // reading where the parts exceed the whole is one that renders as a bar past its own end.
         // This is exactly what `memory.current` produced — 11.0 GB and 10.8 GB against 2.9 GB used —
@@ -2929,6 +2990,39 @@ mod tests {
             r.boxes,
             r.docker,
             r.mem_used
+        );
+    }
+
+    /// Two disks or one, drawn honestly either way.
+    ///
+    /// sbx gives a sandbox a root filesystem and a separate `/var/lib/docker`, sized by two
+    /// different create-time variables — so filling one says nothing about the other, and a single
+    /// disk gauge answered the wrong question confidently. But it does not *have* to be two: a
+    /// sandbox built without the second has Docker on the boxes' own filesystem, and drawing that
+    /// as a second gauge would show the same bytes twice under two names. Told apart by device,
+    /// which is the only comparison that answers "is this the same storage".
+    #[test]
+    fn dockers_disk_is_drawn_when_it_is_its_own_and_never_drawn_twice() {
+        let head = "mem_total 26377\nmem_used 900\n";
+
+        let two = parse_resources(&format!(
+            "{head}disk_dev overlay\ndisk_total 60168\ndisk_used 20986\n\
+             images_dev /dev/vdd\nimages_total 50089\nimages_used 45433\n"
+        ))
+        .unwrap();
+        assert_eq!((two.disk_used, two.images_used), (20986, 45433));
+
+        // One filesystem answering both questions: the boxes' gauge already counts these bytes.
+        let one = parse_resources(&format!(
+            "{head}disk_dev overlay\ndisk_total 60168\ndisk_used 20986\n\
+             images_dev overlay\nimages_total 60168\nimages_used 20986\n"
+        ))
+        .unwrap();
+        assert_eq!(one.disk_used, 20986);
+        assert_eq!(
+            (one.images_total, one.images_used),
+            (0, 0),
+            "a zero denominator is how the strip drops a row, which is what one disk should draw"
         );
     }
 
@@ -3111,6 +3205,48 @@ mod tests {
             "and only if the extraction succeeded — without `set -e` a failed tar still reaches \
              the rm, which would delete the only copy of a box that did not come back: {script}"
         );
+    }
+
+    /// A box holds files its own user cannot read, so both halves of the copy run as root.
+    ///
+    /// `tar` exits non-zero on the first file it cannot open, and under the `set -e` that makes the
+    /// delete safe, that aborts the copy — so one unreadable file in one box refuses the whole
+    /// fleet's resize. Which is exactly what happened: this project's own test suite had left 6,494
+    /// directories under a box's `/tmp`, each holding one file at mode 000, and a resize of eight
+    /// boxes stopped on the seventh with six already copied out.
+    ///
+    /// Root on the way back too, or the extract either fails on those same modes or quietly hands
+    /// every file to whoever ran the resize — and ownership surviving is what makes this a copy
+    /// rather than a rebuild.
+    #[test]
+    fn the_copy_runs_as_root_at_both_ends_because_a_box_is_not_all_readable_by_one_user() {
+        let archive = box_archive("web-main", "resize-x");
+        let out = archive_script("web-main", &archive);
+        let back = restore_script("web-main", &archive);
+
+        assert!(
+            out.contains("sudo tar -C"),
+            "an unreadable file anywhere in the box would abort the resize: {out}"
+        );
+        assert!(
+            back.contains("sudo tar -C"),
+            "the archive holds owners and modes an unprivileged extract cannot restore: {back}"
+        );
+        // Root wrote it, so the rest of the run — `du` here, the host reading it later — would
+        // otherwise be touching a file it does not own.
+        assert!(
+            out.contains("sudo chown"),
+            "an archive left owned by root is one the invoking user cannot clean up: {out}"
+        );
+        // Never `--ignore-failed-read`: that trades a resize that refused to start for a box
+        // restored short of its own contents, with nobody told which files went missing.
+        for script in [&out, &back] {
+            assert!(
+                !script.contains("ignore-failed-read"),
+                "a copy that silently drops what it could not read is worse than one that stops: \
+                 {script}"
+            );
+        }
     }
 
     /// A resize puts the fleet back as it found it. Starting every box with a placement record woke

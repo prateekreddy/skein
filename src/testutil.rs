@@ -9,6 +9,7 @@ use crate::Sandbox;
 use chrono::Utc;
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -32,15 +33,70 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A fresh temp directory, unique per process and per call.
-pub(crate) fn tempdir() -> PathBuf {
+/// A fresh temp directory, unique per process and per call, **removed when the test ends**.
+///
+/// The guard is the whole point. Without it every `cargo test` run left its directories behind, and
+/// they accumulated: measured in one box, 6,494 of them holding 5 GB — most of that box's disk, and
+/// enough to abort a fleet resize, because among them is the mode-000 fixture below that `tar`
+/// cannot read. A test's scratch space outliving the test is a leak like any other; it just takes
+/// longer to notice.
+///
+/// Derefs to `Path`, so it is used exactly as the `PathBuf` it replaced.
+pub(crate) struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        // Best-effort: a test that has already failed must report *its* failure, not a cleanup
+        // error on top of it. Modes are reset first because tests deliberately create unreadable
+        // files, and a directory at mode 000 cannot be removed without opening it.
+        reopen(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Make a tree removable again, since tests create files and directories that deliberately are not.
+fn reopen(dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && !path.is_symlink() {
+            reopen(&path);
+        } else {
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o644));
+        }
+    }
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for TempDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for TempDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
+}
+
+pub(crate) fn tempdir() -> TempDir {
     let d = env::temp_dir().join(format!(
         "skein-test-{}-{}",
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&d).unwrap();
-    d
+    TempDir(d)
 }
 
 /// An RFC3339 timestamp `s` seconds in the past — for ageing a signal without sleeping.

@@ -3557,6 +3557,14 @@ function loadResources() {
       r.disk_total && gaugeRow("disk", [{ w: pct(r.disk_used, r.disk_total), cls: "other" }],
         `${GIB(r.disk_used)}/${GIB(r.disk_total)}G`,
         `${GIB(r.disk_total - r.disk_used)}G free on the filesystem holding every box's checkout`),
+      // Its own row, not a segment of the one above: this is a different disk with a different
+      // size, so the two do not share a denominator and a stacked bar would be a lie. Drawn in the
+      // docker accent so the strip reads the same way down — this row and the docker segment of the
+      // memory bar are the same thing's two costs.
+      r.images_total && gaugeRow("images", [{ w: pct(r.images_used, r.images_total), cls: "docker" }],
+        `${GIB(r.images_used)}/${GIB(r.images_total)}G`,
+        `${GIB(r.images_total - r.images_used)}G free on /var/lib/docker — images, volumes and build cache\n`
+        + `a separate disk from the boxes' own, fixed when the fleet was created: filling this one does not show up above`),
       // Load, not a percentage: CPU is deliberately uncapped and fair-shared, so what matters is
       // whether boxes are queueing for cores — which is load against core count, nothing else.
       r.cpus && gaugeRow("cpu", [{ w: pct(r.load1, r.cpus), cls: "other" }],
