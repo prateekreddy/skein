@@ -138,13 +138,27 @@ pub fn create_argv(sandbox: &str, mounts: &[String]) -> Vec<String> {
 
 /// The environment `sbx create` needs for what its argv cannot carry — today, the sandbox's disk.
 ///
-/// sbx takes memory and CPUs as flags but reads disk sizes from its *daemon's* environment
-/// (documented: root filesystem 20 GB by default, `DOCKER_SANDBOXES_ROOT_SIZE` to change it). So
-/// this only lands if the daemon starts with the create — a daemon already running keeps the size it
-/// booted with, and the fleet's disk is fixed for the life of the sandbox either way.
+/// sbx takes memory and CPUs as flags but disk as an environment variable, read from the *create
+/// command's* own environment: `DOCKER_SANDBOXES_ROOT_SIZE=40g sbx run claude` is the documented
+/// form, and this is the same thing for `sbx create`. Root defaults to 20 GB.
 ///
-/// One shared 20 GB disk is the fleet's real ceiling. Memory stopped summing when boxes started
-/// sharing a sandbox; disk started summing for exactly the same reason.
+/// This used to claim the value came from the *daemon's* environment, so it only landed if the
+/// daemon happened to start with the create. That is wrong, and the running fleet is the proof: it
+/// carries the configured 60g on a `vdb` of exactly 60G under a daemon that had been up for hours.
+/// The correction matters because the false version made the disk setting look unreliable, and
+/// invited working around it.
+///
+/// What is true is the second half: **the size is fixed for the life of the sandbox.** sbx has no
+/// resize — its whole verb list is `login run ls stop rm create exec cp ports` — so changing a disk
+/// means a new sandbox, exactly as changing memory does. [`resize_fleet`] is that path for both.
+///
+/// One shared disk is the fleet's real ceiling. Memory stopped summing when boxes started sharing a
+/// sandbox; disk started summing for exactly the same reason.
+///
+/// There is a **second** disk this does not set: `DOCKER_SANDBOXES_DOCKER_SIZE`, the Docker data
+/// disk at `/var/lib/docker`, 50 GB by default and sparse. It is where every box's `docker build`
+/// output actually lands, so on a fleet — one Docker daemon shared by every box — it sums the same
+/// way the root does, and skein neither sizes nor measures it.
 pub fn create_env() -> Vec<(String, String)> {
     let disk = load_config().fleet_disk.trim().to_string();
     if disk.is_empty() {
