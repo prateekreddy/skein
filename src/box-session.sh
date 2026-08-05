@@ -65,8 +65,32 @@ set -uo pipefail
 # describing a VM that does not exist — and a ceiling worked out for a machine twice this size is
 # not a ceiling. Only ever downward: a sandbox with MORE memory than skein was told about keeps the
 # reserve skein intended rather than being handed the surplus nobody asked for.
+# The cgroup dockerd is told to put containers in — a CHILD of skein, so the one ceiling on skein
+# covers the boxes and the containers they start together. That nesting is the whole point: the two
+# share a pool taken first-come rather than holding a reservation each.
+#
+# Made here rather than left to runc, and made even when no box has started yet, because the
+# controller has to be delegated down the chain before a container lands in it: a cgroup whose
+# parent has not been handed `memory` cannot have a memory limit, and the container would silently
+# be the one thing in the fleet nothing bounds. runc does enable controllers up the path it creates,
+# so this is belt to its braces — and it costs two mkdirs on a path that already exists.
+#
+# `containers` is a name no box can collide with: box names come from git branches, and skein's own
+# validation rejects a name that is not a single path component, so nothing else creates it here.
+ensure_container_cgroup() {
+  # Make each level, THEN delegate it — a controller can only be handed to a cgroup that exists, and
+  # only by a parent that was handed it first. Doing these in the wrong order leaves `containers`
+  # there but with no memory controller in it, which is worse than not making it at all: dockerd
+  # would place containers in a cgroup that cannot hold a limit.
+  for c in /sys/fs/cgroup/skein /sys/fs/cgroup/skein/containers; do
+    sudo mkdir -p "$c" 2>/dev/null || return 0
+    sudo sh -c 'echo "+memory +pids" > "$1/cgroup.subtree_control"' _ "$c" 2>/dev/null || true
+  done
+}
+
 apply_fleet_ceilings() {
   [ -n "${fleet_limits:-}" ] || return 0
+  ensure_container_cgroup
   planned=""
   for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
     case "$pair" in total=*) planned="${pair#total=}"; planned="${planned%M}" ;; esac

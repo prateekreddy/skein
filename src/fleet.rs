@@ -208,9 +208,9 @@ fn under(path: &str, dir: &str) -> bool {
 ///
 /// Three claims on one VM, and until this existed only the first was written down:
 ///
-/// * **boxes** — the whole workload: everything the agents and their builds run under
-///   `/sys/fs/cgroup/skein`, *and* the containers they start, which dockerd places under
-///   `/sys/fs/cgroup/docker` where no per-box ceiling reaches;
+/// * **boxes** — the whole workload, and all of it under `/sys/fs/cgroup/skein`: everything the
+///   agents and their builds run, *and* the containers they start, which dockerd is pointed at
+///   [`CONTAINER_CGROUP`] so that they land inside the same parent rather than beside it;
 /// * **plumbing** — the sandbox's own container: its init, the ssh-agent forwarder, dockerd and
 ///   containerd themselves;
 /// * **reserve** — everything outside the workload: the kernel, and the VM-level services that
@@ -224,11 +224,11 @@ fn under(path: &str, dir: &str) -> bool {
 /// held back for `docker build` protected nothing, because nothing was written on that cgroup.
 ///
 /// So the pool is shared and taken first-come: a box may fill it when Docker is idle, and a build
-/// may fill it when the boxes are. What that gives up is the guarantee that the two *cannot* reach
-/// the total between them — a container is bounded by `--memory` on the container that asked for
-/// it, not by this. What it buys is that neither one idles memory the other needs, and the reserve
-/// and plumbing shares — the ones that keep the sandbox answering at all — are untouched by the
-/// merge.
+/// may fill it when the boxes are. Sharing it does not mean giving up the bound. The containers are
+/// nested *inside* the cgroup that carries the ceiling, so the two are held to the total between
+/// them by the same one limit that holds the boxes — and an overshoot is an OOM in whichever of
+/// them caused it, never in the sandbox's own processes. The reserve and plumbing shares, the ones
+/// that keep the sandbox answering at all, are untouched by the merge.
 ///
 /// The reserve is the point of the whole exercise. There is no swap in the sandbox, so reaching the
 /// VM's memory is not a slowdown, it is the kernel's global OOM killer choosing a victim — and it
@@ -339,14 +339,21 @@ pub fn box_limits() -> String {
 /// `memory.max` is no better placed. It kills rather than stalls, and the OOM it would trigger
 /// picks its victim from a cgroup containing pid 1 — trading a stuck build for a dead sandbox.
 ///
-/// So Docker is bounded where the overshoot can be attributed and killed safely — `--memory` on the
-/// container that asked for it — and not at the cgroup it shares with the sandbox.
+/// So the containers are moved instead of the ceiling. [`install_docker_config`] points dockerd at
+/// [`CONTAINER_CGROUP`] — `skein/containers`, a child of the boxes' own parent — and what stays
+/// behind in `/docker` is the sandbox itself, which nothing caps and nothing should.
 ///
-/// Which leaves `skein` as the one ceiling, and it is therefore sized to the whole workload rather
-/// than to a boxes-only share of it. [`MemoryPlan`] no longer keeps a third back for Docker: that
-/// third was withheld from the boxes on behalf of a cgroup nothing is written on, so it bought no
-/// protection and cost the fleet real memory every hour no container was running. One pool, one
-/// ceiling, taken first-come.
+/// That is what makes `skein` the one ceiling *and* a real one. It is sized to the whole workload,
+/// and once dockerd has been pointed inside it, the whole workload is what it actually holds:
+/// boxes and containers under one limit, taken first-come, with an overshoot killed in whichever
+/// of them caused it and never in the sandbox's own processes. [`MemoryPlan`] keeps no third back
+/// for Docker, because a reservation is the opposite of a shared pool — it was memory withheld
+/// from the boxes on behalf of a cgroup nothing was written on, buying no protection and idling
+/// real memory every hour no container ran.
+///
+/// Until a fleet has cycled, its containers are still in `/docker` and outside this ceiling: the
+/// setting only decides where the *next* dockerd puts them, and restarting dockerd to hurry it
+/// would stop every running container. Uncapped for one more boot is the cheaper wrong.
 ///
 /// Applied on every box start rather than once, because dockerd recreates `/sys/fs/cgroup/docker`
 /// from scratch when the sandbox cycles, taking any limit written on it with it. That is also why
@@ -495,6 +502,14 @@ pub fn heal_fleet() -> Result<(), String> {
         return Ok(());
     }
     install_launcher(&sandbox)?;
+    // Best-effort and reported rather than fatal: this only decides where the *next* dockerd puts
+    // its containers, so failing it costs the merged pool its enforcement, not the fleet its boxes.
+    if let Err(e) = install_docker_config(&sandbox) {
+        eprintln!(
+            "skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \
+             stay outside the ceiling"
+        );
+    }
     // The same call the cockpit's "apply now" makes, and for the same reason it is handed back to
     // the launcher rather than written from here: these numbers are a share of the *configured*
     // fleet size, and only the sandbox knows what it really got (see `fleet_limits`).
@@ -508,6 +523,83 @@ pub fn heal_fleet() -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| format!("reapplying the shared ceilings in {sandbox}: {e}"))
 }
+
+/// Where dockerd is told to put the containers it runs: **inside** the workload cgroup, beside the
+/// boxes rather than in a tree of its own.
+///
+/// This is what makes the merged pool real. [`memory_plan`] gives the boxes and the containers they
+/// start one share between them, and until dockerd is told this, that share was an intention with
+/// nothing enforcing it — `/sys/fs/cgroup/skein` bounded only the boxes, and a container could take
+/// as much again beside it. Nested here, the one ceiling on `skein` covers both, first-come, which
+/// is what "one pool" was supposed to mean.
+///
+/// It has to be a *child* of `skein` rather than a sibling with its own ceiling, because a second
+/// ceiling would be a second reservation — the boxes idling memory the containers may not have and
+/// the other way round, which is the thing the merge removed.
+pub const CONTAINER_CGROUP: &str = "/skein/containers";
+
+/// Point the sandbox's dockerd at [`CONTAINER_CGROUP`].
+///
+/// **Why this can be done at all, when capping `/sys/fs/cgroup/docker` could not.** That cgroup is
+/// where dockerd puts its containers *and* where the sandbox's own container lives — init, socat,
+/// dockerd, containerd — so every ceiling written there hit the machinery that answers `sbx exec`
+/// rather than the build that overshot. `cgroup-parent` moves only the containers. What is left in
+/// `/docker` is the sandbox itself, which is what [`MemoryPlan::plumbing`] and the reserve are for
+/// and which nothing caps.
+///
+/// **It takes effect at the next dockerd start, not now.** `cgroup-parent` is not one of the
+/// options dockerd re-reads on SIGHUP, and restarting dockerd here would stop every running
+/// container — this sandbox has no live-restore, so a database someone is using would go down to
+/// apply a memory ceiling. Written and left for the next cycle instead. Containers already running
+/// stay where they are, outside the ceiling, until they are next recreated.
+///
+/// **Merged, never clobbered, and validated before it lands.** A `daemon.json` that does not parse
+/// stops dockerd starting at all, so the failure this guards against is a fleet with no Docker: the
+/// existing file is read first and kept if it holds other settings, a file that cannot be parsed is
+/// reported and left exactly as it is rather than overwritten with something valid, and the new
+/// content is re-read from disk before it replaces the old one.
+fn install_docker_config(sandbox: &str) -> Result<(), String> {
+    let script = format!(
+        "sudo mkdir -p /etc/docker && sudo python3 - /etc/docker/daemon.json {}",
+        sh_quote(CONTAINER_CGROUP)
+    );
+    own_sandbox(sandbox)
+        .write(
+            &script,
+            DOCKER_CONFIG_PY.as_bytes(),
+            Duration::from_secs(30),
+        )
+        .map(|_| ())
+        .map_err(|e| format!("writing /etc/docker/daemon.json in {sandbox}: {e}"))
+}
+
+/// The edit [`install_docker_config`] makes, as a program rather than a shell one-liner: it is a
+/// read-modify-write of a file that stops dockerd booting when it is wrong, and that is worth being
+/// able to read.
+const DOCKER_CONFIG_PY: &str = r#"import json, os, sys
+path, parent = sys.argv[1], sys.argv[2]
+try:
+    config = json.load(open(path))
+    if not isinstance(config, dict):
+        raise ValueError("the top level is not an object")
+except FileNotFoundError:
+    config = {}          # no config at all is the normal case, not a problem
+except Exception as e:
+    # Deliberately not repaired. Something else wrote this, and replacing it with a valid file of
+    # our own would take away settings dockerd is running on.
+    sys.exit("skein: %s is not readable as JSON (%s); leaving it alone" % (path, e))
+if config.get("cgroup-parent") == parent:
+    sys.exit(0)
+config["cgroup-parent"] = parent
+# Written beside the real file and re-read before it replaces it, so a half-written or unparseable
+# result can never become the file dockerd starts from. `os.replace` is atomic within a filesystem.
+scratch = path + ".skein-new"
+with open(scratch, "w") as f:
+    f.write(json.dumps(config, indent=2) + "\n")
+json.load(open(scratch))
+os.replace(scratch, path)
+print("skein: dockerd will place containers under %s from its next start" % parent)
+"#;
 
 /// A memory size as MiB. Accepts what sbx accepts (`26g`, `512M`, a bare byte count).
 ///
@@ -619,6 +711,17 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     // so a rebuilt sandbox has its login back before the first box seeds from it.
     sync_fleet_login(sandbox);
     ensure_known_hosts(sandbox);
+    // Here as well as in `heal_fleet`, because a sandbox this call has just *created* would
+    // otherwise run its whole first life with containers outside the ceiling: the server that made
+    // it is already running, so the next restart is the earliest healing would reach it. Reported
+    // rather than fatal for the same reason as there — it costs the merged pool its enforcement,
+    // not the fleet its boxes.
+    if let Err(e) = install_docker_config(sandbox) {
+        eprintln!(
+            "skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \
+             stay outside the ceiling"
+        );
+    }
     install_launcher(sandbox)
 }
 
@@ -1139,7 +1242,7 @@ fn resource_script() -> String {
          echo \"cpus $(nproc 2>/dev/null || echo 0)\"; \
          awk '{{print \"load1\", $1; print \"load5\", $2}}' /proc/loadavg; \
          df -Pm {root} 2>/dev/null | awk 'NR==2{{print \"disk_total\", $2; print \"disk_used\", $3}}'; \
-         for c in skein docker; do \
+         for c in skein skein/containers docker; do \
          awk -v c=$c '/^anon /{{print c, int($2/1048576)}}' \
          /sys/fs/cgroup/$c/memory.stat 2>/dev/null; done",
         root = sh_quote(&fleet_root()),
@@ -1155,6 +1258,10 @@ fn resource_script() -> String {
 /// denominator is zero rather than drawing a bar against nothing.
 fn parse_resources(out: &str) -> Option<FleetResources> {
     let mut r = FleetResources::default();
+    // Where the containers are is a question with two answers during a migration, so both homes are
+    // read and one is chosen below rather than summed.
+    let mut nested: Option<u64> = None;
+    let mut outside = 0;
     for line in out.lines() {
         let Some((key, value)) = line.trim().split_once(' ') else {
             continue;
@@ -1165,7 +1272,8 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
             "mem_total" => r.mem_total = number(),
             "mem_used" => r.mem_used = number(),
             "skein" => r.boxes = number(),
-            "docker" => r.docker = number(),
+            "skein/containers" => nested = Some(number()),
+            "docker" => outside = number(),
             "disk_total" => r.disk_total = number(),
             "disk_used" => r.disk_used = number(),
             "cpus" => r.cpus = number(),
@@ -1173,6 +1281,22 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
             "load5" => r.load5 = value.parse().unwrap_or(0.0),
             _ => {}
         }
+    }
+    // Containers live *inside* `skein` once dockerd has been pointed at them, so `skein` counts them
+    // and the two figures have to be separated rather than added — added, the strip would draw the
+    // same memory twice and a bar of parts would exceed the whole it is drawn against.
+    //
+    // Chosen on whether the nested cgroup EXISTS, not on whether it holds anything: an empty one is
+    // a fleet that has cycled and simply has no container running, and falling back then would put
+    // the sandbox's own daemons under the `docker` label. `/sys/fs/cgroup/docker` is not a synonym
+    // for the old home — after the move it holds only the sandbox's own container, which belongs to
+    // the plumbing share and is counted in `other`.
+    match nested {
+        Some(containers) => {
+            r.docker = containers;
+            r.boxes = r.boxes.saturating_sub(containers);
+        }
+        None => r.docker = outside,
     }
     (r.mem_total > 0).then_some(r)
 }
@@ -2805,6 +2929,113 @@ mod tests {
             r.boxes,
             r.docker,
             r.mem_used
+        );
+    }
+
+    /// Once dockerd is pointed at [`CONTAINER_CGROUP`], the containers are counted *inside* `skein`
+    /// — so reading both cgroups and adding them would draw the same memory twice and put the parts
+    /// of the stacked bar past the whole they are drawn against, which is the exact fault the
+    /// `anon`-instead-of-`current` fix was for.
+    ///
+    /// Both layouts are live at once during a migration, because the setting only takes effect at
+    /// the next dockerd start: a fleet that has not cycled still has its containers in `/docker`.
+    /// So the choice is made on whether the nested cgroup EXISTS, not on whether it holds anything.
+    /// An empty one means a fleet that has cycled and has no container running — falling back then
+    /// would label the sandbox's own daemons, which is all that is left in `/docker`, as Docker.
+    #[test]
+    fn containers_are_counted_once_wherever_dockerd_has_put_them() {
+        let head = "mem_total 26377\nmem_used 2947\n";
+
+        // Cycled: `skein` is boxes AND containers, and the nested figure separates them.
+        let moved = parse_resources(&format!(
+            "{head}skein 2100\nskein/containers 855\ndocker 106\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            (moved.boxes, moved.docker),
+            (1245, 855),
+            "the containers' share belongs to them, not to the boxes that started them"
+        );
+        assert!(
+            moved.boxes + moved.docker <= moved.mem_used,
+            "counted twice, the parts of the bar exceed the whole"
+        );
+
+        // Cycled, nothing running: the empty nested cgroup is still the answer. Falling back here
+        // would report the sandbox's own init and dockerd — all `/docker` holds now — as Docker.
+        let idle = parse_resources(&format!(
+            "{head}skein 1252\nskein/containers 0\ndocker 106\n"
+        ))
+        .unwrap();
+        assert_eq!((idle.boxes, idle.docker), (1252, 0));
+
+        // Not yet cycled: no nested cgroup at all, so the old home is where they still are.
+        let legacy = parse_resources(&format!("{head}skein 1252\ndocker 855\n")).unwrap();
+        assert_eq!((legacy.boxes, legacy.docker), (1252, 855));
+    }
+
+    /// `/etc/docker/daemon.json` is a file that stops dockerd starting *at all* when it is wrong, so
+    /// the failure being guarded against is a fleet with no Docker. Run for real rather than
+    /// asserted about, because what matters is what Python does to the file, not what this file
+    /// believes it does.
+    #[test]
+    fn pointing_dockerd_at_the_workload_cgroup_never_costs_an_existing_config() {
+        let dir = tempdir();
+        let path = std::path::Path::new(&dir).join("daemon.json");
+        let run = || -> std::process::Output {
+            use std::io::Write;
+            let mut child = std::process::Command::new("python3")
+                .args(["-", &path.to_string_lossy(), CONTAINER_CGROUP])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("python3");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(DOCKER_CONFIG_PY.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+
+        // No file is the normal case, not an error.
+        assert!(run().status.success());
+        assert_eq!(read()["cgroup-parent"], CONTAINER_CGROUP);
+
+        // Settings someone else put there survive: this adds a key, it does not own the file.
+        std::fs::write(&path, r#"{"log-driver":"json-file","dns":["1.1.1.1"]}"#).unwrap();
+        assert!(run().status.success());
+        assert_eq!(read()["log-driver"], "json-file");
+        assert_eq!(read()["dns"][0], "1.1.1.1");
+        assert_eq!(read()["cgroup-parent"], CONTAINER_CGROUP);
+
+        // Idempotent — this runs on every server start.
+        let again = run();
+        assert!(again.status.success());
+        assert!(
+            String::from_utf8_lossy(&again.stdout).is_empty(),
+            "a config already pointed at the right place is not news"
+        );
+
+        // And a file that cannot be parsed is LEFT ALONE. Replacing it with a valid file of our own
+        // would take away whatever dockerd is currently running on; refusing costs only the ceiling.
+        let broken = "{ this is not json";
+        std::fs::write(&path, broken).unwrap();
+        let refused = run();
+        assert!(!refused.status.success());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "a config skein cannot read is one it must not overwrite"
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("leaving it alone"),
+            "and it has to say so, or the ceiling is silently absent"
         );
     }
 
