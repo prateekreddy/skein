@@ -305,22 +305,38 @@ pub fn box_limits() -> String {
 /// The ceilings on the two cgroups that hold everything a box can cause, as the `<cgroup>=max/high`
 /// spec `box-session.sh` applies. Empty when no fleet total is configured to divide.
 ///
-/// Both are needed and neither is a per-box concern. `skein` is the parent of every box's cgroup,
-/// so it is the only place the boxes' *sum* can be bounded — a per-box ceiling never could be.
-/// `docker` is where a box's `docker build` and `docker compose up` actually run: the sandbox has
-/// one Docker daemon shared by every box, its containers are placed under `/sys/fs/cgroup/docker`
-/// by dockerd, and nothing skein writes on a box's cgroup reaches them. Measured on a live fleet
-/// nine minutes after boot, with the boxes' own cgroups holding 1 GB of anonymous memory between
-/// them: `docker` held 2.3 GB and had peaked at 10.5 GB, with `memory.max` and `pids.max` both
-/// unset. That is the hole every per-box ceiling was quietly leaking through.
+/// `skein` is the parent of every box's cgroup, so it is the only place the boxes' *sum* can be
+/// bounded — a per-box ceiling never could be. It is the one ceiling here, and it is a number.
+///
+/// `docker` is named too, but only to be handed `max/max` — an explicit *absence* of a ceiling.
+/// Earlier versions capped it, on the reasoning that a box's `docker build` runs there and no
+/// per-box limit reaches it. That reasoning was right about the hole and wrong about the patch,
+/// because of what else lives in that cgroup: the sandbox's own container is a child of it, so
+/// `/sys/fs/cgroup/docker` holds init, `socat`, dockerd and containerd — the machinery that answers
+/// `sbx exec`. Adding [`MemoryPlan::plumbing`] to its share was an attempt to leave that machinery
+/// room, and it does not work, because the failure is not about the size of the number.
+///
+/// Measured on this fleet while it was wedged, with `memory.high` at 7.57 GiB and the cgroup at
+/// 7.73 GiB of *anonymous* memory behind 73 MiB of page cache: `pgscan` 43,232 MiB against
+/// `pgsteal` 45 MiB. The kernel scanned 43 GB to recover 45 MB — 1,695 throttle events a second,
+/// ten of eleven cores, indefinitely. `memory.high` throttles by stalling the allocator until
+/// reclaim catches up, which is humane when the overshoot is brief and there is cache to give back.
+/// A linker holding 3.4 GB for ten minutes with no swap satisfies neither: there is nothing to
+/// reclaim, so the stall never ends. And because init and `socat` share the cgroup, the stall lands
+/// on the sandbox's own service path — new `sbx exec` calls hang while established streams, already
+/// faulted in, keep flowing. The VM had 16 GB free throughout.
+///
+/// `memory.max` is no better placed. It kills rather than stalls, and the OOM it would trigger
+/// picks its victim from a cgroup containing pid 1 — trading a stuck build for a dead sandbox.
+///
+/// So Docker is bounded where the overshoot can be attributed and killed safely — `--memory` on the
+/// container that asked for it — and not at the cgroup it shares with the sandbox. [`MemoryPlan`]
+/// still sets aside a share for it, but as a share the boxes may not take, not a cap on Docker.
 ///
 /// Applied on every box start rather than once, because dockerd recreates `/sys/fs/cgroup/docker`
-/// from scratch when the sandbox cycles, taking any limit written on it with it.
-///
-/// The `docker` ceiling is the boxes' share **plus** [`MemoryPlan::plumbing`], because that cgroup
-/// is not only the boxes' containers: the sandbox's own container — its init, dockerd, containerd,
-/// the ssh-agent forwarder — is a child of it too. Capping it at the workload's share alone would
-/// have quietly squeezed the daemon running the workload.
+/// from scratch when the sandbox cycles, taking any limit written on it with it. That is also why
+/// `max/max` is written rather than simply omitted: a fleet an older skein already capped keeps
+/// that cap until something writes over it.
 pub fn fleet_limits() -> String {
     let Some(plan) = memory_plan() else {
         return String::new();
@@ -333,10 +349,9 @@ pub fn fleet_limits() -> String {
     // rebuilding leaves this describing a VM that does not exist — and a ceiling worked out for a
     // machine twice the real size is not a ceiling. The launcher scales by what it actually finds.
     format!(
-        "total={}M,skein={},docker={}",
+        "total={}M,skein={},docker=max/max",
         plan.boxes + plan.docker + plan.plumbing + plan.reserve,
         ceiling(plan.boxes),
-        ceiling(plan.docker + plan.plumbing)
     )
 }
 
@@ -994,9 +1009,14 @@ pub struct FleetResources {
     pub cpus: u64,
     pub load1: f64,
     pub load5: f64,
-    /// What [`memory_plan`] intends the boxes and the docker cgroup to be allowed, so the gauge can
-    /// draw the ceiling beside the usage. Zero when no fleet total is configured to divide.
+    /// What [`memory_plan`] intends the boxes to be allowed, so the gauge can draw the ceiling
+    /// beside the usage. Zero when no fleet total is configured to divide.
     pub boxes_max: u64,
+    /// Always zero, and the gauge reads that as "no ceiling set" — which is the truth. See
+    /// [`fleet_limits`]: the docker cgroup is deliberately uncapped, because it holds the sandbox's
+    /// own init and service processes as well as the containers. Kept as a field rather than
+    /// removed so the strip still says so out loud, where a missing row would just look like a
+    /// ceiling nobody had got round to.
     pub docker_max: u64,
     /// True while the sandbox is failing to answer — see [`crate::Gate`]. The figures are then the
     /// last ones that arrived, and saying so is the difference between stale and wrong.
@@ -1036,7 +1056,6 @@ pub fn fleet_resources() -> Option<FleetResources> {
     // when the figures beside them are the last ones that arrived.
     if let Some(plan) = memory_plan() {
         resources.boxes_max = plan.boxes;
-        resources.docker_max = plan.docker + plan.plumbing;
     }
     resources.stale = RESOURCE_GATE.degraded();
     Some(resources)
@@ -3119,30 +3138,36 @@ mod tests {
                 "the VM's own services are what stop answering first at {total}"
             );
 
-            // And the spec the launcher applies has to name BOTH — capping the boxes' parent while
-            // leaving dockerd unbounded moves the hole rather than closing it.
+            // The spec the launcher applies has to name both cgroups, but it caps only one of them.
             let spec = fleet_limits();
-            let ceiling = |cgroup: &str| -> (u64, u64) {
-                let pair = spec
-                    .split(',')
+            let pair = |cgroup: &str| -> &str {
+                spec.split(',')
                     .find_map(|p| p.strip_prefix(&format!("{cgroup}=")))
-                    .unwrap_or_else(|| panic!("{cgroup} missing from {spec}"));
-                let (max, high) = pair.split_once('/').expect("max/high");
-                (parse_mib(max).unwrap(), parse_mib(high).unwrap())
+                    .unwrap_or_else(|| panic!("{cgroup} missing from {spec}"))
             };
-            let (boxes_max, boxes_high) = ceiling("skein");
-            let (docker_max, docker_high) = ceiling("docker");
+            let (boxes_max, boxes_high) = pair("skein").split_once('/').expect("max/high");
+            let (boxes_max, boxes_high) = (
+                parse_mib(boxes_max).unwrap(),
+                parse_mib(boxes_high).unwrap(),
+            );
             assert_eq!(boxes_max, plan.boxes);
-            // Not `plan.docker`: the sandbox's own container is a child of the same cgroup, so the
-            // ceiling has to cover the daemon as well as what it runs.
-            assert_eq!(docker_max, plan.docker + plan.plumbing);
             assert!(
-                boxes_high < boxes_max && docker_high < docker_max,
+                boxes_high < boxes_max,
                 "throttle before killing, the same way a box does: {spec}"
             );
             assert!(
-                boxes_max + docker_max < total_mib,
-                "if the ceilings can be reached together they are not ceilings: {spec}"
+                boxes_max + plan.docker + plan.plumbing < total_mib,
+                "the boxes' ceiling has to leave Docker and the sandbox their share: {spec}"
+            );
+            // Docker is named in order to be left uncapped, and `max` is the only value that says
+            // so — a number here throttles the sandbox's own init and socat, which share that
+            // cgroup, and hangs `sbx exec` while established streams keep flowing. Withholding the
+            // ceiling has to be written rather than omitted, or a fleet an older skein capped keeps
+            // that cap for as long as it lives.
+            assert_eq!(
+                pair("docker"),
+                "max/max",
+                "a bounded docker cgroup throttles the machinery that answers sbx: {spec}"
             );
             // And what they are a share OF, so the sandbox can check the share against itself.
             assert!(
@@ -3175,7 +3200,7 @@ mod tests {
             // Drops the `sh -c <script> _` the real call passes, leaving the value and the path.
             "sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
              {body}\n\
-             fleet_limits='total=26624M,skein=15975M/14377M,docker=7987M/7188M'\n\
+             fleet_limits='total=26624M,skein=15975M/14377M,docker=max/max'\n\
              apply_fleet_ceilings\n",
             body = BOX_SESSION_SH
                 .lines()
@@ -3203,7 +3228,9 @@ mod tests {
         };
         let quiet = run();
         assert_eq!(read("skein", "memory.max"), "15975M");
-        assert_eq!(read("docker", "memory.max"), "7987M");
+        // Written, not left alone: this is how a fleet an older skein capped gets uncapped.
+        assert_eq!(read("docker", "memory.max"), "max");
+        assert_eq!(read("docker", "memory.high"), "max");
         assert!(
             !quiet.contains("scaling"),
             "nothing to scale, so nothing to say: {quiet}"
@@ -3213,8 +3240,9 @@ mod tests {
         std::fs::write(root.join("meminfo"), "MemTotal:       13631488 kB\n").unwrap();
         let noisy = run();
         assert_eq!(read("skein", "memory.max"), "7987M", "half of 15975");
-        assert_eq!(read("docker", "memory.max"), "3993M", "half of 7987");
         assert_eq!(read("skein", "memory.high"), "7188M");
+        // Half of no ceiling is still no ceiling — scaling must not turn `max` into a number.
+        assert_eq!(read("docker", "memory.max"), "max");
         assert!(
             noisy.contains("not the 26624M"),
             "a sandbox smaller than skein was told must say so, not silently differ: {noisy}"

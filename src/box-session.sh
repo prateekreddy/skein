@@ -45,15 +45,16 @@ set -uo pipefail
 # answering, because a per-box ceiling cannot bound a sum and does not reach inside Docker.
 #
 # `skein` is the parent of every box's cgroup, so it is the only place the boxes *together* can be
-# bounded. `docker` is where a box's `docker build` or `docker compose up` really runs: the sandbox
-# has ONE Docker daemon shared by every box, dockerd places its containers under
-# /sys/fs/cgroup/docker, and nothing written on a box's own cgroup reaches them.
-#
-# Why it matters more than the per-box limit: there is no swap here, so reaching the VM's memory is
+# bounded. That is the ceiling worth having: there is no swap here, so reaching the VM's memory is
 # not a slowdown, it is the kernel's global OOM killer picking a victim by badness rather than by
 # blame — as readily whatever answers the host as the build that caused it. That is a sandbox that
-# stops responding until it is cycled. Bounded cgroups turn the same overshoot into an OOM inside
+# stops responding until it is cycled. A bounded cgroup turns the same overshoot into an OOM inside
 # the guilty one, which kills a build.
+#
+# `docker` arrives here too, but as `max/max` — see `fleet_limits` in fleet.rs for why it is named
+# only in order to be left uncapped. Briefly: that cgroup is not just a box's `docker build`, it
+# also holds the sandbox's own init, socat and dockerd, so a ceiling there throttles or kills the
+# machinery that answers `sbx exec` rather than the workload that overshot.
 #
 # Written on every box start, not once: dockerd recreates its cgroup when the sandbox cycles, and
 # takes any limit written on it along too.
@@ -88,9 +89,18 @@ apply_fleet_ceilings() {
     # back its page cache rather than on one still over the line, which would be killed on the spot.
     for want in "memory.high ${spec##*/}" "memory.max ${spec%%/*}"; do
       file="${want%% *}"
-      mib="${want#* }"; mib="${mib%M}"
-      [ -n "$scale" ] && mib=$(( mib * actual / planned ))
-      sudo sh -c 'echo "$1" > "$2"' _ "${mib}M" "$dir/$file" 2>/dev/null || true
+      mib="${want#* }"
+      # `max` is a ceiling deliberately withheld, and it is WRITTEN rather than skipped: a fleet an
+      # older skein capped still carries that cap, and only a write takes it back off. Nothing to
+      # scale either — no ceiling is no ceiling on a VM of any size.
+      if [ "$mib" = max ]; then
+        value=max
+      else
+        mib="${mib%M}"
+        [ -n "$scale" ] && mib=$(( mib * actual / planned ))
+        value="${mib}M"
+      fi
+      sudo sh -c 'echo "$1" > "$2"' _ "$value" "$dir/$file" 2>/dev/null || true
     done
   done
 }
