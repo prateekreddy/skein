@@ -292,8 +292,13 @@ pub fn fleet_limits() -> String {
     // `high` below `max` for the same reason it is per box: past it the kernel reclaims and
     // throttles, so a fleet that briefly overshoots gets slower instead of losing a box.
     let ceiling = |mib: u64| format!("{mib}M/{}M", (mib * 9 / 10).max(512));
+    // `total` is what these are a share OF, and it travels with them because only the sandbox can
+    // check it. sbx fixes a sandbox's memory when it is created, so editing Fleet memory without
+    // rebuilding leaves this describing a VM that does not exist — and a ceiling worked out for a
+    // machine twice the real size is not a ceiling. The launcher scales by what it actually finds.
     format!(
-        "skein={},docker={}",
+        "total={}M,skein={},docker={}",
+        plan.boxes + plan.docker + plan.reserve,
         ceiling(plan.boxes),
         ceiling(plan.docker)
     )
@@ -342,32 +347,19 @@ pub fn apply_box_limits() -> Result<Vec<String>, String> {
     // The shared ceilings first, and reported under a name no box answers to. They are what keeps
     // the sandbox itself alive (see `fleet_limits`), so a run that fixed every box and silently
     // left these unwritten would have skipped the important half.
-    for kv in fleet_limits().split(',').filter(|kv| !kv.is_empty()) {
-        let Some((cgroup, spec)) = kv.split_once('=') else {
-            continue;
-        };
-        let (max, high) = spec.split_once('/').unwrap_or((spec, spec));
-        let dir = format!("/sys/fs/cgroup/{cgroup}");
-        let write = |value: &str, file: &str| {
-            format!(
-                "printf '%s\\n' {} | sudo tee {dir}/{file} >/dev/null",
-                sh_quote(value)
-            )
-        };
-        // A sandbox with no inner Docker has no `docker` cgroup, and that is not a failure.
-        //
-        // `high` before `max`: this is written over a cgroup already holding a running fleet, so
-        // the soft limit gets the kernel reclaiming first and the hard one then lands on a cgroup
-        // that has given its page cache back — rather than on one still over the line, which the
-        // kernel would resolve by killing something in it.
-        let script = format!(
-            "test -d {dir} || exit 0; {} && {}",
-            write(high, "memory.high"),
-            write(max, "memory.max")
-        );
-        if fleet.exec(&script, Duration::from_secs(30)).is_err() {
-            failed.push(format!("the fleet's {cgroup} ceiling"));
-        }
+    //
+    // Handed back to the launcher rather than written from here, because the half that matters can
+    // only be done inside: these numbers are a share of the *configured* fleet size, and the
+    // sandbox is the only thing that knows what it really got. Reinstalled first, so a sandbox
+    // built before `--ceilings` existed gets the copy that has it.
+    install_launcher(&sandbox)?;
+    let ceilings = format!(
+        "SKEIN_FLEET_LIMITS={} {} --ceilings",
+        sh_quote(&fleet_limits()),
+        sh_quote(&box_session_path())
+    );
+    if fleet.exec(&ceilings, Duration::from_secs(30)).is_err() {
+        failed.push("the fleet's shared ceilings".to_string());
     }
     for (name, _) in placed_boxes(&sandbox) {
         let mut writes = Vec::new();
@@ -2655,8 +2647,81 @@ mod tests {
                 boxes_max + docker_max < total_mib,
                 "if the ceilings can be reached together they are not ceilings: {spec}"
             );
+            // And what they are a share OF, so the sandbox can check the share against itself.
+            assert!(
+                spec.starts_with(&format!("total={total_mib}M,")),
+                "without the total, a sandbox smaller than the config says gets ceilings that \
+                 cannot bound it: {spec}"
+            );
         }
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The gap between what skein is *configured* for and what the sandbox actually got. sbx fixes
+    /// a sandbox's memory when it is created, so editing Fleet memory without rebuilding leaves the
+    /// config describing a VM that does not exist — and ceilings worked out for a machine twice the
+    /// real size bound nothing at all. Run against the real launcher, with a fake cgroup tree and a
+    /// fake `/proc/meminfo`, because the scaling lives in shell and an assertion about the Rust
+    /// half would prove nothing about it.
+    #[test]
+    fn ceilings_shrink_to_the_memory_the_sandbox_really_has() {
+        let dir = tempdir();
+        let root = std::path::Path::new(&dir);
+        for cgroup in ["skein", "docker"] {
+            std::fs::create_dir_all(root.join("cgroup").join(cgroup)).unwrap();
+        }
+        // A sandbox with MORE than skein was told about keeps the ceilings as computed: the reserve
+        // is deliberate, and a surplus nobody configured is not an invitation to spend it.
+        std::fs::write(root.join("meminfo"), "MemTotal:       41943040 kB\n").unwrap();
+        // The launcher's own function, with `sudo` and the cgroup root redirected at the fixture.
+        let harness = format!(
+            // Drops the `sh -c <script> _` the real call passes, leaving the value and the path.
+            "sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+             {body}\n\
+             fleet_limits='total=26624M,skein=15975M/14377M,docker=7987M/7188M'\n\
+             apply_fleet_ceilings\n",
+            body = BOX_SESSION_SH
+                .lines()
+                .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()))
+                .replace("/proc/meminfo", &root.join("meminfo").to_string_lossy())
+                + "\n}",
+        );
+        let run = || -> String {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&harness)
+                .output()
+                .expect("run the launcher's ceiling logic");
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        };
+        let read = |cgroup: &str, file: &str| -> String {
+            std::fs::read_to_string(root.join("cgroup").join(cgroup).join(file))
+                .unwrap_or_else(|e| panic!("{cgroup}/{file}: {e}"))
+                .trim()
+                .to_string()
+        };
+        let quiet = run();
+        assert_eq!(read("skein", "memory.max"), "15975M");
+        assert_eq!(read("docker", "memory.max"), "7987M");
+        assert!(
+            !quiet.contains("scaling"),
+            "nothing to scale, so nothing to say: {quiet}"
+        );
+
+        // Half the configured size — every ceiling comes out halved, and says so.
+        std::fs::write(root.join("meminfo"), "MemTotal:       13631488 kB\n").unwrap();
+        let noisy = run();
+        assert_eq!(read("skein", "memory.max"), "7987M", "half of 15975");
+        assert_eq!(read("docker", "memory.max"), "3993M", "half of 7987");
+        assert_eq!(read("skein", "memory.high"), "7188M");
+        assert!(
+            noisy.contains("not the 26624M"),
+            "a sandbox smaller than skein was told must say so, not silently differ: {noisy}"
+        );
     }
 
     /// The launcher is the only thing that runs on every box start, which is what the Docker

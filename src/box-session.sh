@@ -41,6 +41,72 @@
 # rather than a missing flag, which is why it is written down here and asserted in place.rs.
 set -uo pipefail
 
+# The ceilings on everything that is not one box — and the ones that actually keep the sandbox
+# answering, because a per-box ceiling cannot bound a sum and does not reach inside Docker.
+#
+# `skein` is the parent of every box's cgroup, so it is the only place the boxes *together* can be
+# bounded. `docker` is where a box's `docker build` or `docker compose up` really runs: the sandbox
+# has ONE Docker daemon shared by every box, dockerd places its containers under
+# /sys/fs/cgroup/docker, and nothing written on a box's own cgroup reaches them.
+#
+# Why it matters more than the per-box limit: there is no swap here, so reaching the VM's memory is
+# not a slowdown, it is the kernel's global OOM killer picking a victim by badness rather than by
+# blame — as readily whatever answers the host as the build that caused it. That is a sandbox that
+# stops responding until it is cycled. Bounded cgroups turn the same overshoot into an OOM inside
+# the guilty one, which kills a build.
+#
+# Written on every box start, not once: dockerd recreates its cgroup when the sandbox cycles, and
+# takes any limit written on it along too.
+#
+# The numbers arrive as a share of the CONFIGURED fleet size, and this scales them to the memory the
+# kernel here actually reports. The two are not always the same: sbx fixes a sandbox's memory when
+# it is created, so editing Fleet memory in the cockpit without rebuilding leaves the config
+# describing a VM that does not exist — and a ceiling worked out for a machine twice this size is
+# not a ceiling. Only ever downward: a sandbox with MORE memory than skein was told about keeps the
+# reserve skein intended rather than being handed the surplus nobody asked for.
+apply_fleet_ceilings() {
+  [ -n "${fleet_limits:-}" ] || return 0
+  planned=""
+  for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
+    case "$pair" in total=*) planned="${pair#total=}"; planned="${planned%M}" ;; esac
+  done
+  actual="$(awk '/^MemTotal:/ {print int($2/1024); exit}' /proc/meminfo 2>/dev/null)"
+  scale=""
+  if [ -n "$planned" ] && [ -n "$actual" ] && [ "$actual" -lt "$planned" ] 2>/dev/null; then
+    scale="yes"
+    echo "skein: this sandbox has ${actual}M, not the ${planned}M skein is configured for; scaling the shared ceilings to fit" >&2
+  fi
+  for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
+    case "$pair" in total=*) continue ;; esac
+    dir="/sys/fs/cgroup/${pair%%=*}"
+    spec="${pair#*=}"
+    # Only ever narrow what is already there. Creating `docker` ourselves would hand dockerd a
+    # cgroup it did not make and expects to own; a sandbox with no inner Docker simply has none.
+    [ -d "$dir" ] || continue
+    # `high` before `max`, because these are written over a cgroup that may already be busy: the
+    # soft limit makes the kernel reclaim, so the hard one lands on a cgroup that has just given
+    # back its page cache rather than on one still over the line, which would be killed on the spot.
+    for want in "memory.high ${spec##*/}" "memory.max ${spec%%/*}"; do
+      file="${want%% *}"
+      mib="${want#* }"; mib="${mib%M}"
+      [ -n "$scale" ] && mib=$(( mib * actual / planned ))
+      sudo sh -c 'echo "$1" > "$2"' _ "${mib}M" "$dir/$file" 2>/dev/null || true
+    done
+  done
+}
+
+# `--ceilings`: apply the shared ceilings and stop, starting nothing. A cgroup limit is live, so
+# changing Fleet memory in the cockpit takes effect without restarting a box — and this is the whole
+# of what "apply now" means. skein calls back into this file for it rather than carrying a second
+# copy of the logic, because the half that matters (scaling to the memory the VM really has) can
+# only be done from in here.
+if [ "${1-}" = "--ceilings" ]; then
+  fleet_limits="${SKEIN_FLEET_LIMITS-}"
+  apply_fleet_ceilings
+  exit 0
+fi
+
+
 box="${1:?usage: box-session.sh <box> <root> <pidfile> <session> <state> <cmd…>}"
 root="${2:?missing box root}"
 pidfile="${3:?missing pidfile}"
@@ -222,38 +288,6 @@ rm -f "$sock"
 # while a box waits, which is the waste this design exists to end. Memory cannot be shared that way:
 # two boxes wanting 20G do not each get 13 slowly, they hit the wall and the kernel starts killing
 # processes — as readily another box's agent as the guilty one.
-# The ceilings on everything that is not one box — and the ones that actually keep the sandbox
-# answering, because a per-box ceiling cannot bound a sum and does not reach inside Docker.
-#
-# `skein` is the parent of every box's cgroup, so it is the only place the boxes *together* can be
-# bounded. `docker` is where a box's `docker build` or `docker compose up` really runs: the sandbox
-# has ONE Docker daemon shared by every box, dockerd places its containers under
-# /sys/fs/cgroup/docker, and nothing written on a box's own cgroup reaches them.
-#
-# Why it matters more than the per-box limit: there is no swap here, so reaching the VM's memory is
-# not a slowdown, it is the kernel's global OOM killer picking a victim by badness rather than by
-# blame — as readily whatever answers the host as the build that caused it. That is a sandbox that
-# stops responding until it is cycled. Bounded cgroups turn the same overshoot into an OOM inside
-# the guilty one, which kills a build.
-#
-# Written on every box start, not once: dockerd recreates its cgroup when the sandbox cycles, and
-# takes any limit written on it along too.
-apply_fleet_ceilings() {
-  [ -n "$fleet_limits" ] || return 0
-  for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
-    dir="/sys/fs/cgroup/${pair%%=*}"
-    spec="${pair#*=}"
-    # Only ever narrow what is already there. Creating `docker` ourselves would hand dockerd a
-    # cgroup it did not make and expects to own; a sandbox with no inner Docker simply has none.
-    [ -d "$dir" ] || continue
-    # `high` before `max`, because these are written over a cgroup that may already be busy: the
-    # soft limit makes the kernel reclaim, so the hard one lands on a cgroup that has just given
-    # back its page cache rather than on one still over the line, which would be killed on the spot.
-    sudo sh -c 'echo "$1" > "$2"' _ "${spec##*/}" "$dir/memory.high" 2>/dev/null || true
-    sudo sh -c 'echo "$1" > "$2"' _ "${spec%%/*}" "$dir/memory.max"  2>/dev/null || true
-  done
-}
-
 if [ -n "$limits" ]; then
   cgroup_root="/sys/fs/cgroup/skein"
   cg="$cgroup_root/$box"
