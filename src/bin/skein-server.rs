@@ -137,6 +137,7 @@ async fn main() {
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/fleet/resize", post(api_fleet_resize))
         .route("/api/fleet/limits", post(api_fleet_limits))
+        .route("/api/fleet/resources", get(api_fleet_resources))
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
         .route(
@@ -854,6 +855,20 @@ async fn api_fleet_limits() -> Response {
     match skein::apply_box_limits() {
         Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// What the fleet's VM is using right now: memory, disk, load.
+///
+/// `spawn_blocking` for the same reason `api_events` uses it — behind this is an `sbx exec`, and
+/// running one on an async worker stalls every terminal websocket that worker is pumping.
+///
+/// 204 rather than an error when there is no fleet: a board with each box in its own sandbox has no
+/// single machine to gauge, and that is a normal configuration rather than something to warn about.
+async fn api_fleet_resources() -> Response {
+    match tokio::task::spawn_blocking(skein::fleet_resources).await {
+        Ok(Some(r)) => Json(r).into_response(),
+        _ => StatusCode::NO_CONTENT.into_response(),
     }
 }
 

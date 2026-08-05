@@ -78,6 +78,23 @@
   .counts .seg { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
   .counts .n { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
   .counts .pip { width:7px; height:7px; border-radius:50%; }
+  /* Fleet gauges: what the one shared VM is using. Deliberately quiet — this is a thing you glance
+     at on your way to a box, never a thing you act on, so it reads as chrome until a bar goes hot. */
+  .gauges { display:none; flex-direction:column; gap:5px; margin:-8px 0 16px; }
+  .gauges.on { display:flex; }
+  .gauges.stale { opacity:.45; }                       /* last known figures, sandbox not answering */
+  .ga { display:grid; grid-template-columns:34px 1fr auto; align-items:center; gap:8px;
+        font-family:var(--mono); font-size:10px; color:var(--faint); }
+  .ga .gk { text-transform:lowercase; letter-spacing:.02em; }
+  .ga .gv { color:var(--dim); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .ga .gbar { height:4px; border-radius:3px; background:var(--inset);
+              border:1px solid var(--border); overflow:hidden; display:flex; }
+  .ga .gseg { height:100%; transition:width var(--dur-med) ease; }
+  .ga .gseg.boxes { background:var(--accent); }
+  .ga .gseg.docker { background:var(--working); }
+  .ga .gseg.other { background:var(--faint); }
+  .ga.warm .gseg.other, .ga.warm .gseg.boxes { background:var(--waiting); }
+  .ga.hot .gseg.other, .ga.hot .gseg.boxes { background:var(--attn); }
   .right { margin-left:auto; display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
   .kbtn { display:inline-flex; align-items:center; gap:6px; flex:none; white-space:nowrap; line-height:1;
           font-family:var(--mono); font-size:11px;
@@ -742,6 +759,7 @@
             <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
         </header>
+        <div class="gauges" id="gauges" title="the fleet sandbox's own VM — refreshed every 30s"></div>
         <div id="fleet"></div>
         <footer class="keyhints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
       </div>
@@ -3491,6 +3509,63 @@ function loadHealth() {
   }).catch(() => {});
 }
 
+// ---------- fleet gauges ----------
+// Every box in the fleet shares one VM's memory, disk and cores, and until this strip existed the
+// only way to see how much of any of them was left was to ask the sandbox by hand — usually after
+// something had already been OOM-killed. It is read-only and approximate on purpose: the host
+// re-asks the sandbox at most every 30s (see `fleet_resources`), so these figures are a glance, not
+// a measurement, and nothing on the board is decided from them.
+const GIB = mib => mib >= 102400 ? Math.round(mib / 1024) : (mib / 1024).toFixed(1);
+// A stacked bar of `[{w, cls}]` plus the label on its right. Segments are drawn in order and their
+// widths are percentages of the whole, so the caller decides what "full" means for its gauge.
+function gaugeRow(key, segs, label, hint) {
+  const used = segs.reduce((a, s) => a + s.w, 0);
+  const heat = used >= 92 ? " hot" : used >= 78 ? " warm" : "";
+  return `<div class="ga${heat}" title="${esc(hint)}"><span class="gk">${esc(key)}</span>`
+    + `<span class="gbar">${segs.map(s => `<span class="gseg ${s.cls}" style="width:${Math.min(100, s.w).toFixed(1)}%"></span>`).join("")}</span>`
+    + `<span class="gv">${esc(label)}</span></div>`;
+}
+function loadResources() {
+  if (DEMO) return;
+  // 204 = no fleet sandbox configured, which is a normal board rather than a fault: hide the strip
+  // and say nothing. Same for a fetch that fails — the health banner already carries that news.
+  fetch("/api/fleet/resources").then(r => r.status === 200 ? r.json() : null).then(r => {
+    const strip = document.getElementById("gauges");
+    if (!r || !r.mem_total) { strip.className = "gauges"; return; }
+    const pct = (n, d) => d > 0 ? (n * 100 / d) : 0;
+    // Memory is stacked because a single "used" figure cannot answer the question you actually ask
+    // when the sandbox is slow: which of its claims is holding it. Boxes and docker are the two
+    // cgroups skein caps; "other" is everything outside both — the VM's own services and the kernel.
+    const other = Math.max(0, r.mem_used - r.boxes - r.docker);
+    // A gauge with no denominator is dropped rather than drawn at zero: `df` cannot always see the
+    // fleet root, and "disk 0.0/0.0G" reads as a full disk to anyone glancing at it.
+    const rows = [
+      r.mem_total && gaugeRow("mem", [
+        { w: pct(r.boxes, r.mem_total), cls: "boxes" },
+        { w: pct(r.docker, r.mem_total), cls: "docker" },
+        { w: pct(other, r.mem_total), cls: "other" },
+      ], `${GIB(r.mem_used)}/${GIB(r.mem_total)}G`,
+        [`boxes ${GIB(r.boxes)}G` + (r.boxes_max ? ` of ${GIB(r.boxes_max)}G allowed` : " (no ceiling set)"),
+         `docker ${GIB(r.docker)}G` + (r.docker_max ? ` of ${GIB(r.docker_max)}G allowed` : " (no ceiling set)"),
+         `the VM's own services and kernel ${GIB(other)}G`,
+         `${GIB(r.mem_total - r.mem_used)}G still available`].join("\n")),
+      r.disk_total && gaugeRow("disk", [{ w: pct(r.disk_used, r.disk_total), cls: "other" }],
+        `${GIB(r.disk_used)}/${GIB(r.disk_total)}G`,
+        `${GIB(r.disk_total - r.disk_used)}G free on the filesystem holding every box's checkout`),
+      // Load, not a percentage: CPU is deliberately uncapped and fair-shared, so what matters is
+      // whether boxes are queueing for cores — which is load against core count, nothing else.
+      r.cpus && gaugeRow("cpu", [{ w: pct(r.load1, r.cpus), cls: "other" }],
+        `${r.load1.toFixed(1)}/${r.cpus}`,
+        `load average ${r.load1.toFixed(2)} (1m) · ${r.load5.toFixed(2)} (5m) across ${r.cpus} cores\n`
+        + `over ${r.cpus} means boxes are waiting for a core, not that anything is wrong`),
+    ];
+    strip.innerHTML = rows.filter(Boolean).join("");
+    strip.className = "gauges on" + (r.stale ? " stale" : "");
+    if (r.stale) strip.title = "the sandbox is not answering — these are the last figures that arrived";
+    else strip.title = "the fleet sandbox's own VM — refreshed every 30s";
+  }).catch(() => {});
+}
+
 // ---------- demo seed (only used under ?demo) ----------
 const DEMO_REPOS = [
   { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/.claude", agent:"claude" },
@@ -3556,6 +3631,10 @@ if (DEMO) {
   loadSync().then(renderDockbar);
   loadHealth();
   setInterval(loadHealth, 15000);
+  // Polled at half the host's own refresh interval so a change surfaces within one cycle of it; the
+  // Gate behind the endpoint means the extra polls cost a map lookup, not an `sbx exec`.
+  loadResources();
+  setInterval(loadResources, 15000);
 }
 </script>
 </body>

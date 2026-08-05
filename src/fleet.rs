@@ -948,6 +948,139 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
 /// on a tick, and the last thing a struggling sandbox should be handed more of.
 static DISK_GATE: crate::Gate<std::collections::HashMap<String, u64>> = crate::Gate::new();
 
+/// What the fleet's one VM is actually using right now — the gauge behind [`fleet_resources`].
+///
+/// Sized in MiB throughout, because that is what every other number in this module speaks and the
+/// browser should not have to know which unit each field arrived in.
+///
+/// `boxes` and `docker` are the two cgroups [`fleet_limits`] writes ceilings on. They are here
+/// rather than a single VM total because a single total cannot answer the question you ask when the
+/// sandbox is struggling: *what* is holding it. 12 GB in the boxes is the agents working; 12 GB in
+/// `docker` is a container someone forgot, in a cgroup no per-box limit reaches.
+///
+/// Memory *used* is `MemTotal - MemAvailable`, not `MemTotal - MemFree`. Free is nearly always small
+/// and nearly always meaningless — the kernel spends idle memory on page cache and hands it back on
+/// demand — so a gauge drawn from it reads as a permanently full machine.
+///
+/// The two cgroup figures are `anon` from `memory.stat`, **not** `memory.current`, and the two are
+/// not interchangeable: `current` counts page cache, which `MemAvailable` has already treated as
+/// free. Measured on this fleet, `current` reported 11.0 GB for the boxes and 10.8 GB for docker
+/// against a whole-VM `mem_used` of 2.9 GB — two parts of a bar, each four times the bar. `anon`
+/// gave 1.2 GB and 0.8 GB, which sum inside the total and leave the VM's own services visible as
+/// the difference. It is also the memory that *matters* here, being the part the kernel cannot
+/// reclaim its way out of and therefore the part that ends in an OOM kill.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct FleetResources {
+    pub mem_total: u64,
+    pub mem_used: u64,
+    pub boxes: u64,
+    pub docker: u64,
+    pub disk_total: u64,
+    pub disk_used: u64,
+    pub cpus: u64,
+    pub load1: f64,
+    pub load5: f64,
+    /// What [`memory_plan`] intends the boxes and the docker cgroup to be allowed, so the gauge can
+    /// draw the ceiling beside the usage. Zero when no fleet total is configured to divide.
+    pub boxes_max: u64,
+    pub docker_max: u64,
+    /// True while the sandbox is failing to answer — see [`crate::Gate`]. The figures are then the
+    /// last ones that arrived, and saying so is the difference between stale and wrong.
+    pub stale: bool,
+}
+
+/// The fleet VM's memory, disk and CPU, in one round trip.
+///
+/// `None` when no fleet sandbox is configured — there is no VM to ask — or when one has never
+/// answered. Deliberately coarse and deliberately stale-tolerant: this is a gauge you glance at, not
+/// a number anything decides on, so it is worth at most one `sbx exec` every 30 seconds and worth
+/// nothing at all when the sandbox is busy. The [`crate::Gate`] enforces both, and backs off further
+/// while the sandbox is unwell — a struggling VM being asked how it feels every 2 seconds is how
+/// skein used to keep it struggling.
+///
+/// One shell, printing `key value` lines, because the alternative is five round trips to build one
+/// strip. `df` is asked about [`fleet_root`] rather than `/`: box roots are the only disk skein can
+/// account for, and on a filesystem the boxes do not share the number would be answering about
+/// somebody else's storage.
+pub fn fleet_resources() -> Option<FleetResources> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return None;
+    }
+    let fresh = if cfg!(test) {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(30)
+    };
+    let mut resources = RESOURCE_GATE.get(fresh, || {
+        let out = own_sandbox(&sandbox)
+            .exec(&resource_script(), Duration::from_secs(20))
+            .ok()?;
+        parse_resources(&out)
+    })?;
+    // The ceilings come from the host's own config, not the guest, so they are always current even
+    // when the figures beside them are the last ones that arrived.
+    if let Some(plan) = memory_plan() {
+        resources.boxes_max = plan.boxes;
+        resources.docker_max = plan.docker + plan.plumbing;
+    }
+    resources.stale = RESOURCE_GATE.degraded();
+    Some(resources)
+}
+
+/// The one shell [`fleet_resources`] runs, printing `key value` lines.
+///
+/// Its own function so the wire format is readable in one place and testable without a sandbox —
+/// the parser below is only correct against exactly this output.
+fn resource_script() -> String {
+    format!(
+        "awk '/^MemTotal:/{{t=$2}} /^MemAvailable:/{{a=$2}} \
+         END{{print \"mem_total\", int(t/1024); print \"mem_used\", int((t-a)/1024)}}' /proc/meminfo; \
+         echo \"cpus $(nproc 2>/dev/null || echo 0)\"; \
+         awk '{{print \"load1\", $1; print \"load5\", $2}}' /proc/loadavg; \
+         df -Pm {root} 2>/dev/null | awk 'NR==2{{print \"disk_total\", $2; print \"disk_used\", $3}}'; \
+         for c in skein docker; do \
+         awk -v c=$c '/^anon /{{print c, int($2/1048576)}}' \
+         /sys/fs/cgroup/$c/memory.stat 2>/dev/null; done",
+        root = sh_quote(&fleet_root()),
+    )
+}
+
+/// `key value` lines into a [`FleetResources`], or `None` when the reply carried no memory total.
+///
+/// That last condition is the point of returning an `Option`: `sbx exec` can succeed while the guest
+/// prints nothing usable — a sandbox mid-boot, a `/proc` not yet mounted — and without the check the
+/// [`Gate`](crate::Gate) would remember a zeroed machine as a good answer and stop asking for 30
+/// seconds. Missing individual fields are fine and stay zero; the browser hides a gauge whose
+/// denominator is zero rather than drawing a bar against nothing.
+fn parse_resources(out: &str) -> Option<FleetResources> {
+    let mut r = FleetResources::default();
+    for line in out.lines() {
+        let Some((key, value)) = line.trim().split_once(' ') else {
+            continue;
+        };
+        let value = value.trim();
+        let number = || value.parse::<u64>().unwrap_or(0);
+        match key {
+            "mem_total" => r.mem_total = number(),
+            "mem_used" => r.mem_used = number(),
+            "skein" => r.boxes = number(),
+            "docker" => r.docker = number(),
+            "disk_total" => r.disk_total = number(),
+            "disk_used" => r.disk_used = number(),
+            "cpus" => r.cpus = number(),
+            "load1" => r.load1 = value.parse().unwrap_or(0.0),
+            "load5" => r.load5 = value.parse().unwrap_or(0.0),
+            _ => {}
+        }
+    }
+    (r.mem_total > 0).then_some(r)
+}
+
+/// See [`crate::Gate`]. Asked rarely and backed off hard: nothing depends on this answer, so it must
+/// never be a reason the sandbox is busy.
+static RESOURCE_GATE: crate::Gate<FleetResources> = crate::Gate::new();
+
 /// This box's disk allowance in MiB: its own if it has one, else the fleet-wide default, `None` for
 /// unlimited. Read at every check, so changing it takes effect on the next refresh — no restart.
 pub fn box_disk_limit(name: &str) -> Option<u64> {
@@ -2333,6 +2466,44 @@ mod tests {
     use super::*;
     use crate::save_repos;
     use crate::testutil::*;
+
+    /// Verbatim output of [`resource_script`] on a live fleet, so the parser is tested against what
+    /// the guest actually prints rather than against what this file assumes it prints.
+    const LIVE_REPLY: &str = "mem_total 26377\nmem_used 2947\ncpus 11\nload1 0.57\nload5 0.75\n\
+                              disk_total 60168\ndisk_used 17782\nskein 1252\ndocker 855\n";
+
+    #[test]
+    fn the_gauge_reads_a_live_reply_and_the_shares_fit_inside_the_total() {
+        let r = parse_resources(LIVE_REPLY).expect("a reply with a memory total is a reply");
+        assert_eq!((r.mem_total, r.mem_used), (26377, 2947));
+        assert_eq!((r.boxes, r.docker), (1252, 855));
+        assert_eq!((r.disk_total, r.disk_used, r.cpus), (60168, 17782, 11));
+        assert_eq!((r.load1, r.load5), (0.57, 0.75));
+        // The stacked memory bar draws boxes + docker + everything-else against the total, so a
+        // reading where the parts exceed the whole is one that renders as a bar past its own end.
+        // This is exactly what `memory.current` produced — 11.0 GB and 10.8 GB against 2.9 GB used —
+        // and the reason those two figures are `anon` from `memory.stat` instead.
+        assert!(
+            r.boxes + r.docker <= r.mem_used,
+            "the cgroups' share must fit inside what the VM is using: \
+             {} + {} against {}",
+            r.boxes,
+            r.docker,
+            r.mem_used
+        );
+    }
+
+    #[test]
+    fn a_reply_that_names_no_memory_is_not_remembered_as_a_zeroed_machine() {
+        // A sandbox mid-boot answers `sbx exec` successfully and prints nothing useful. Taking that
+        // as an answer would park a machine of zero bytes behind the Gate for the next 30 seconds.
+        assert!(parse_resources("").is_none());
+        assert!(parse_resources("cpus 8\nload1 0.10\n").is_none());
+        // Missing pieces of a real reply are fine — a fleet root on a filesystem `df` cannot see
+        // loses the disk gauge, not the memory one.
+        let partial = parse_resources("mem_total 4096\nmem_used 900\n").unwrap();
+        assert_eq!((partial.mem_total, partial.disk_total), (4096, 0));
+    }
 
     // The layout is load-bearing rather than cosmetic: box-session.sh binds the box's own /tmp and
     // $HOME over the sandbox's, so anything skein must read from OUTSIDE the box — the tmux socket
