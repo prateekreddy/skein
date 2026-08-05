@@ -192,13 +192,16 @@ fn under(path: &str, dir: &str) -> bool {
 
 /// How the sandbox's memory is divided, in MiB.
 ///
-/// Three claims on one VM, and until this existed only the first was written down:
+/// Four claims on one VM, and until this existed only the first was written down:
 ///
 /// * **boxes** — everything the agents and their builds run, under `/sys/fs/cgroup/skein`;
-/// * **docker** — the sandbox's inner Docker daemon and every container any box starts, under
-///   `/sys/fs/cgroup/docker`, which is nowhere near a box's cgroup;
-/// * **reserve** — the kernel, virtiofs, and the sandbox's own plumbing, capped by nobody because
-///   it is what everything else is measured against.
+/// * **docker** — the containers the boxes start, which dockerd places under
+///   `/sys/fs/cgroup/docker`, nowhere near a box's own cgroup;
+/// * **plumbing** — the sandbox's own container: its init, the ssh-agent forwarder, dockerd and
+///   containerd themselves. It is a *child of* `/docker`, so the ceiling written there covers this
+///   too and has to be sized for both;
+/// * **reserve** — everything outside both cgroups: the kernel, and the VM-level services that
+///   answer the host. Capped by nobody, because it is what everything else is measured against.
 ///
 /// The reserve is the point of the whole exercise. There is no swap in the sandbox, so reaching the
 /// VM's memory is not a slowdown, it is the kernel's global OOM killer choosing a victim — and it
@@ -209,17 +212,30 @@ fn under(path: &str, dir: &str) -> bool {
 pub struct MemoryPlan {
     pub boxes: u64,
     pub docker: u64,
+    pub plumbing: u64,
     pub reserve: u64,
 }
 
 /// The division above, or `None` when [`Config::fleet_memory`] names no number to divide.
 pub fn memory_plan() -> Option<MemoryPlan> {
     let total = parse_mib(&load_config().fleet_memory)?;
-    // A tenth, and never less than 2 GiB: the plumbing's appetite is roughly fixed, so a percentage
-    // alone starves a small fleet. Never more than half either, so a tiny configured total still
-    // leaves something to work in rather than reserving the whole machine from itself.
-    let reserve = (total / 10).clamp(2048.min(total / 2), total / 2);
-    let available = total.saturating_sub(reserve);
+    // A fixed gigabyte plus 2%, because what this covers is mostly *fixed*: the VM's own services
+    // do not grow with the size of the VM, and only the kernel's own structures (page tables,
+    // per-cpu areas, slab) scale at all. A flat percentage therefore reserves far too much of a big
+    // fleet and, at 10%, was 4.6× what a live 26 GiB sandbox actually had outside both cgroups —
+    // measured at 574 MiB, of which 191 MiB was unreclaimable kernel memory.
+    //
+    // It is not tighter than that because the failure it prevents is not graceful. With no swap,
+    // overshooting is an instant kill rather than a slowdown, and the victim is chosen across the
+    // whole VM — so the cost of being wrong is a dead sandbox, not a slow one. Never more than half
+    // either, so a tiny configured total still leaves something to work in.
+    let reserve = (1024 + total / 50).min(total / 2);
+    // Small and flat: the sandbox's own container holds 70 MiB of anonymous memory on a live fleet.
+    // The ~1.7 GiB beside it is page cache and dentry slab, which reclaims under pressure rather
+    // than needing to be owned. This is headroom for dockerd and containerd growing with the number
+    // of containers, not a share of the workload.
+    let plumbing = 512.min(total / 8);
+    let available = total.saturating_sub(reserve + plumbing);
     // A third to Docker. Boxes are the workload and get the larger share; Docker is a tool some of
     // them reach for, and it is measured here at all only because its memory lands outside every
     // per-box ceiling skein sets.
@@ -227,6 +243,7 @@ pub fn memory_plan() -> Option<MemoryPlan> {
     Some(MemoryPlan {
         boxes: available - docker,
         docker,
+        plumbing,
         reserve,
     })
 }
@@ -285,6 +302,11 @@ pub fn box_limits() -> String {
 ///
 /// Applied on every box start rather than once, because dockerd recreates `/sys/fs/cgroup/docker`
 /// from scratch when the sandbox cycles, taking any limit written on it with it.
+///
+/// The `docker` ceiling is the boxes' share **plus** [`MemoryPlan::plumbing`], because that cgroup
+/// is not only the boxes' containers: the sandbox's own container — its init, dockerd, containerd,
+/// the ssh-agent forwarder — is a child of it too. Capping it at the workload's share alone would
+/// have quietly squeezed the daemon running the workload.
 pub fn fleet_limits() -> String {
     let Some(plan) = memory_plan() else {
         return String::new();
@@ -298,9 +320,9 @@ pub fn fleet_limits() -> String {
     // machine twice the real size is not a ceiling. The launcher scales by what it actually finds.
     format!(
         "total={}M,skein={},docker={}",
-        plan.boxes + plan.docker + plan.reserve,
+        plan.boxes + plan.docker + plan.plumbing + plan.reserve,
         ceiling(plan.boxes),
-        ceiling(plan.docker)
+        ceiling(plan.docker + plan.plumbing)
     )
 }
 
@@ -2615,13 +2637,15 @@ mod tests {
             let total_mib = parse_mib(total).unwrap();
             let plan = memory_plan().unwrap();
             assert_eq!(
-                plan.boxes + plan.docker + plan.reserve,
+                plan.boxes + plan.docker + plan.plumbing + plan.reserve,
                 total_mib,
                 "the shares must account for the whole VM at {total}"
             );
+            // Measured at 574 MiB outside both cgroups on a live 26 GiB fleet. A gigabyte is the
+            // floor because what it covers barely scales with the size of the VM.
             assert!(
-                plan.reserve >= (2048).min(total_mib / 2),
-                "the sandbox's own plumbing is what stops answering first at {total}"
+                plan.reserve >= (1024).min(total_mib / 2),
+                "the VM's own services are what stop answering first at {total}"
             );
 
             // And the spec the launcher applies has to name BOTH — capping the boxes' parent while
@@ -2638,7 +2662,9 @@ mod tests {
             let (boxes_max, boxes_high) = ceiling("skein");
             let (docker_max, docker_high) = ceiling("docker");
             assert_eq!(boxes_max, plan.boxes);
-            assert_eq!(docker_max, plan.docker);
+            // Not `plan.docker`: the sandbox's own container is a child of the same cgroup, so the
+            // ceiling has to cover the daemon as well as what it runs.
+            assert_eq!(docker_max, plan.docker + plan.plumbing);
             assert!(
                 boxes_high < boxes_max && docker_high < docker_max,
                 "throttle before killing, the same way a box does: {spec}"

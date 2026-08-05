@@ -61,10 +61,11 @@ pub fn health_report() -> HealthReport {
         (false, Some(plan)) => HealthCheck {
             ok: true,
             detail: format!(
-                "{} across all boxes, {} for the sandbox's Docker daemon, {} kept back for the \
-                 sandbox itself",
+                "{} across all boxes, {} for the containers they start, {} for the sandbox's own \
+                 daemons, {} kept back for the VM's services and the kernel",
                 gib(plan.boxes),
                 gib(plan.docker),
+                gib(plan.plumbing),
                 gib(plan.reserve)
             ),
         },
