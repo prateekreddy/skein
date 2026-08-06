@@ -733,6 +733,10 @@ pub fn heal_fleet() -> Result<(), String> {
         return Ok(());
     }
     install_launcher(&sandbox)?;
+    // Here as well as in `ensure_fleet`, and this is the call that matters for switching it on: a
+    // server restart is when the setting is read, and a fleet that has been up for days would
+    // otherwise never install an agent until the next box start.
+    heal_fleet_agent(&sandbox);
     // Best-effort and reported rather than fatal: this only decides where the *next* dockerd puts
     // its containers, so failing it costs the merged pool its enforcement, not the fleet its boxes.
     if let Err(e) = install_docker_config(&sandbox) {
@@ -953,19 +957,32 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
              stay outside the ceiling"
         );
     }
-    // Only when a port has been configured — no port means the fleet was never meant to have an
-    // agent, and installing one would be skein acquiring a second way in that nobody asked for.
-    // Reported rather than fatal: without it every call takes `sbx exec`, which is what it did
-    // before the agent existed, so the fleet still works and only its resilience is reduced.
-    if load_config().fleet_agent {
-        if let Err(e) = ensure_fleet_agent(sandbox) {
-            eprintln!(
-                "skein: could not start the in-sandbox agent ({e}); every call falls back to \
-                 `sbx exec`"
-            );
-        }
-    }
+    heal_fleet_agent(sandbox);
     install_launcher(sandbox)
+}
+
+/// Bring the in-sandbox agent into line with this binary and this config, if it is wanted.
+///
+/// Shared by [`ensure_fleet`] and [`heal_fleet`] so the two cannot drift, and called from *both*
+/// because they answer different moments: `ensure_fleet` runs when a box starts, `heal_fleet` when
+/// the server does. Wiring it only into the first is a bug this had — turning the setting on did
+/// nothing at all until someone happened to start a box, and said nothing about why.
+///
+/// Only when it is switched on: an agent nobody asked for is a second way into the sandbox that
+/// nobody asked for. Reported rather than fatal, because without it every call takes `sbx exec` —
+/// which is what it did before the agent existed, so the fleet still works and only its resilience
+/// is reduced.
+fn heal_fleet_agent(sandbox: &str) {
+    if !load_config().fleet_agent {
+        return;
+    }
+    match ensure_fleet_agent(sandbox) {
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "skein: the in-sandbox agent is not serving ({e}); every call falls back to \
+             `sbx exec`, which is what it did before the agent existed"
+        ),
+    }
 }
 
 /// Install the tools a box needs in order to exist at all.
@@ -3373,6 +3390,85 @@ mod tests {
         // Started only when it is not already up, so an ensure on a healthy fleet is a no-op rather
         // than a second Python process fighting for the port.
         assert!(argv.contains("has-session"), "unconditional start:\n{argv}");
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Healing a running fleet must install the agent, not just the launcher.
+    ///
+    /// This is the regression that shipped: `ensure_fleet_agent` was wired only into `ensure_fleet`,
+    /// which runs when a *box* starts. `heal_fleet` runs when the *server* starts, and that is the
+    /// moment the setting is actually read — so turning it on did nothing at all until someone
+    /// happened to start a box, and said nothing about why. Observed on a live fleet: the launcher
+    /// had a fresh timestamp from the restart and `fleet-agent.py` was simply absent.
+    ///
+    /// A test of the shared helper would not have caught it, because the defect was `heal_fleet`
+    /// never reaching the helper. So this drives `heal_fleet` itself.
+    #[test]
+    fn healing_a_running_fleet_installs_the_agent_too() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true, "fleet_sandbox": "skein-fleet" }).to_string(),
+        )
+        .unwrap();
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        // Reports the fleet as running so `heal_fleet` does not skip it, and records everything else.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 if [ \"$1\" = ls ]; then \
+                   echo '{{\"sandboxes\":[{{\"name\":\"skein-fleet\",\"status\":\"running\"}}]}}'; \
+                   exit 0; fi\ncat >/dev/null\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let _ = heal_fleet();
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+
+        assert!(
+            argv.contains(&fleet_agent_path()),
+            "a server restart healed the launcher but never installed the agent:\n{argv}"
+        );
+        assert!(
+            argv.contains(AGENT_SESSION),
+            "the agent was installed but never started:\n{argv}"
+        );
+        // The launcher still gets healed — the agent is an addition, not a replacement.
+        assert!(argv.contains(&box_session_path()), "{argv}");
+
+        // And with the setting off, none of it happens: an agent nobody asked for is a second way
+        // into the sandbox nobody asked for.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(&log, "").unwrap();
+        let _ = heal_fleet();
+        let off = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !off.contains(&fleet_agent_path()),
+            "installed when off:\n{off}"
+        );
+        assert!(
+            off.contains(&box_session_path()),
+            "healing stopped entirely:\n{off}"
+        );
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
