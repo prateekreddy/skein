@@ -1372,6 +1372,17 @@ async fn terminal_session(
     // `nsenter: cannot open /proc/<pid>/ns/user` — a namespace error for a box that just needs
     // starting again. A no-op for a live box and for one that owns its sandbox.
     if launch.is_none() {
+        // A box that does not exist cannot be attached to, and trying is not harmless: `sbx exec`
+        // names a sandbox, sbx says it has never heard of it, the browser reconnects, and the loop
+        // buries the real error from the failed start under a message about a sandbox that was
+        // never meant to exist. Say what is wrong once and stop, rather than forever and mislead.
+        let boxed = name.clone();
+        if let Ok(Some(why)) =
+            tokio::task::spawn_blocking(move || skein::absent_box_reason(&boxed)).await
+        {
+            let _ = socket.send(Message::Text(format!("skein: {why}"))).await;
+            return;
+        }
         let boxed = name.clone();
         if let Ok(Err(e)) =
             tokio::task::spawn_blocking(move || skein::ensure_box_session(&boxed)).await

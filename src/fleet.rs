@@ -3130,9 +3130,45 @@ pub fn sync_fleet_login(sandbox: &str) {
 /// A no-op for a box with a live session, and for a box that isn't placed (its sandbox is its box,
 /// and sbx starts that itself). Never clones: a missing tree is a different problem and saying so is
 /// more useful than silently rebuilding one.
+/// Why this box cannot be attached to at all, when that is knowable. `None` ⇒ go ahead and try.
+///
+/// A box with no placement used to be assumed legacy — one that owns a sandbox named after itself,
+/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start
+/// **failed**, which has no placement for the same reason it has no checkout: it was never created.
+///
+/// Treating the second as the first is what produced the loop: the terminal addressed it as its own
+/// sandbox, sbx answered `no sandbox named …`, the browser reconnected, and the real error from
+/// `skein start` — printed once, at the top — scrolled away behind an endless repeat of a message
+/// about a sandbox that was never meant to exist. Worse, sbx's advice there is `sbx create AGENT
+/// WORKSPACE`, which builds exactly the per-box VM the fleet exists to replace.
+pub fn absent_box_reason(name: &str) -> Option<String> {
+    if shared_record(name).is_some() || fleet_sandbox().is_empty() {
+        return None;
+    }
+    // Only claim a box is missing when sbx has answered at least once. `None` is "cannot tell",
+    // and refusing a terminal on that would be worse than letting sbx speak for itself.
+    //
+    // Note what this does *not* guarantee: [`crate::Gate`] serves the last good snapshot while sbx
+    // is failing, so this can be reading a stale list. That is safe in the direction that matters —
+    // a box created since the snapshot has a placement record, which is checked first, and a
+    // *legacy* sandbox created in that window is the one case this could misjudge. The alternative,
+    // trusting nothing but a fresh answer, would put the loop back every time sbx is unwell.
+    let boxes = crate::fleet_boxes()?;
+    if boxes.iter().any(|b| b.name == name) {
+        return None; // a genuine legacy box: its sandbox is right there
+    }
+    Some(format!(
+        "box {name} does not exist: no placement in the fleet, and no sandbox of its own.\r\n\
+         Its last start failed, and the error came from that run rather than from this terminal.\r\n\
+         Run `skein start {name} --branch <branch>` on the host to see it.\r\n\
+         Do not run `sbx create` — this fleet shares one sandbox, and a per-box one reserves a \
+         whole VM's memory whether or not the box is working.\r\n"
+    ))
+}
+
 pub fn ensure_box_session(name: &str) -> Result<(), String> {
     let Some(record) = shared_record(name) else {
-        return Ok(()); // legacy box — sbx owns its lifecycle
+        return Ok(()); // legacy box, or one never created — see `absent_box_reason`
     };
     if fleet_liveness().get(name).copied().unwrap_or(false) {
         return Ok(());
@@ -3390,6 +3426,68 @@ mod tests {
         // Started only when it is not already up, so an ensure on a healthy fleet is a no-op rather
         // than a second Python process fighting for the port.
         assert!(argv.contains("has-session"), "unconditional start:\n{argv}");
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A box that was never created must say so, not be addressed as its own sandbox.
+    ///
+    /// The three states are genuinely different and were collapsed into one: **placed** (a fleet
+    /// box, attach normally), **legacy** (no placement but a sandbox of its own, also fine), and
+    /// **absent** (neither — its start failed). The third was being treated as the second, so the
+    /// terminal ran `sbx exec <name>`, sbx said it had never heard of the sandbox, the browser
+    /// reconnected, and the real error scrolled away behind the repeat.
+    #[test]
+    fn a_box_that_was_never_created_says_so_instead_of_looping() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
+        )
+        .unwrap();
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sbx");
+        // sbx knows about the fleet and about one legacy box, and nothing else.
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho '{\"sandboxes\":[\
+             {\"name\":\"skein-fleet\",\"status\":\"running\"},\
+             {\"name\":\"old-box\",\"status\":\"running\"}]}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // Absent: no placement, and sbx has never heard of it.
+        let why = absent_box_reason("example-box-1").expect("an absent box to be named as absent");
+        assert!(why.contains("does not exist"), "{why}");
+        assert!(why.contains("skein start example-box-1"), "no way forward: {why}");
+        // The advice sbx gives here would cost a whole VM's reservation, so it is contradicted.
+        assert!(why.contains("Do not run `sbx create`"), "{why}");
+
+        // Legacy: no placement, but a sandbox of its own. Attaching is correct and must not refuse.
+        assert!(absent_box_reason("old-box").is_none());
+
+        // Placed: a fleet box attaches through its placement.
+        record_place(
+            "placed-box",
+            &crate::place::PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: 42,
+                home: "/home/agent".into(),
+                tree: "/boxes/placed-box/tree".into(),
+                sock: "/boxes/placed-box/session.sock".into(),
+            },
+        )
+        .unwrap();
+        assert!(absent_box_reason("placed-box").is_none());
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
