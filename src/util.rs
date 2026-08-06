@@ -526,6 +526,27 @@ pub(crate) fn json_str(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 
+/// The head of `text` within a **byte** budget, never splitting a character.
+///
+/// The byte-budgeted sibling of [`clip`], and the distinction is the reason both exist: `clip` caps
+/// what a person will *read*, so it counts characters; this caps what will be *transferred*, so it
+/// counts bytes. Counting characters for a transfer budget would also mean walking a multi-megabyte
+/// diff to decide where to cut it.
+///
+/// `String::truncate` and a raw slice both panic on a byte index inside a character, and a large
+/// diff is the likeliest place of all to meet one at an arbitrary offset. Rounds the cut *inward*,
+/// so the result stays within budget rather than growing to keep a character whole.
+pub(crate) fn clip_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// Cut a string to `max` chars on a char boundary, marking that it was cut.
 pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -620,6 +641,26 @@ mod tests {
         assert_eq!(ago(86_400), "1d ago");
         // A clock that moved backwards must not render "-3s ago" on the board.
         assert_eq!(ago(-5), "0s ago");
+    }
+
+    #[test]
+    fn a_byte_budget_never_cuts_a_character_in_half() {
+        // The shape that panicked in the field: the budget lands inside a 3-byte '…'. A raw slice
+        // at these indices is `start byte index N is not a char boundary`, not a mis-render.
+        let s = "abc…def"; // 3 + 3 + 3 bytes
+        assert_eq!(s.len(), 9);
+        for max in 0..=s.len() {
+            // The real assertion is that it does not panic for any budget — every index through the
+            // '…' is one `String::truncate` would have aborted on.
+            assert!(clip_bytes(s, max).len() <= max, "over budget at {max}");
+            assert!(s.starts_with(clip_bytes(s, max)));
+        }
+        // Rounding goes *inward*, so a budget that splits the '…' drops it whole rather than
+        // keeping a fragment that busts the budget it was given.
+        assert_eq!(clip_bytes(s, 4), "abc");
+        // Exact fits and over-budget inputs are returned untouched.
+        assert_eq!(clip_bytes(s, 6), "abc…");
+        assert_eq!(clip_bytes(s, 99), s);
     }
 
     #[test]

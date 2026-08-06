@@ -111,7 +111,9 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
         if let Ok(raw) = sbx_guest_output(name, &diff_script(&diff_base_refs()), DIFF_TIMEOUT) {
             let (base, mut patch) = split_diff(&raw);
             if patch.len() > DIFF_CAP {
-                patch.truncate(DIFF_CAP);
+                // Not `String::truncate`: it panics on a byte index inside a character, and a diff
+                // is the likeliest place to meet one — any non-ASCII line the cap happens to land in.
+                patch = clip_bytes(&patch, DIFF_CAP).to_string();
                 patch.push_str("\n\n# … diff truncated by skein (too large to render) …\n");
             }
             return Some(Answer::from_box(Diff { patch, base }));
