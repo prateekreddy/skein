@@ -25,8 +25,10 @@ use crate::{skein_home, valid_name};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// How a box's sandbox is reached.
@@ -197,6 +199,257 @@ pub fn place_of(name: &str) -> Option<Place> {
     })
 }
 
+/// Where skein keeps the agent's shared secret.
+///
+/// `~/.skein`, which is host-private — never the shared `.claude` store. The store is mounted into
+/// every box, and this token authorises running commands as the sandbox in *any* box's namespace: a
+/// copy inside a box would hand one box the run of all of them.
+fn agent_token_path() -> PathBuf {
+    skein_home().join("fleet-agent.token")
+}
+
+/// The agent's shared secret, or `None` when there isn't one yet — in which case there is no agent
+/// to talk to and every call takes the `sbx exec` path, which is exactly the pre-agent behaviour.
+pub fn agent_token() -> Option<String> {
+    let token = fs::read_to_string(agent_token_path()).ok()?;
+    let token = token.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+/// The agent's token, generating one on first use.
+///
+/// Kept rather than rotated on every install: rotating would invalidate the token of a sandbox that
+/// is up and serving, and the reinstall that rotated it is exactly the moment skein is least able to
+/// push the new one in.
+///
+/// 32 bytes from the OS, hex-encoded. Not a UUID or a timestamp — this is the only thing standing
+/// between anything that can reach the port and running commands as the sandbox.
+pub fn ensure_agent_token() -> Result<String, String> {
+    if let Some(existing) = agent_token() {
+        return Ok(existing);
+    }
+    let mut raw = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut raw))
+        .map_err(|e| format!("reading /dev/urandom for a fleet agent token: {e}"))?;
+    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+
+    let home = skein_home();
+    fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
+    let path = agent_token_path();
+    write_atomic(&path, &home, token.as_bytes())?;
+    // 0600 after the write, not before: `write_atomic` renames a fresh temp file over the target,
+    // so a mode set on the old one would not survive.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("securing {}: {e}", path.display()))?;
+    }
+    Ok(token)
+}
+
+/// Whether the agent actually answers on `port` — a real connection, not a reported mapping.
+///
+/// This is the difference between "published" and "working", and sbx makes it a real distinction:
+/// a mapping survives `sbx rm` and is reported by `sbx ports` while every connection through it is
+/// refused (docker/sbx-releases#297). skein destroys and recreates the fleet sandbox on every
+/// resize, so it meets that state routinely — and a healer that trusted the mapping would call the
+/// broken one healthy forever.
+///
+/// `/health` is unauthenticated for exactly this: whether the transport is worth using must not
+/// depend on the token being current, or a token mismatch would look like a dead sandbox.
+pub fn agent_answers(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    // Short: this runs while deciding whether to *bother* with the agent, and a slow no is worse
+    // than a fast one — the fallback is sitting right there.
+    let budget = Duration::from_secs(2);
+    let Ok(mut stream) = agent_connect(port, budget) else {
+        return false;
+    };
+    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut reply = String::new();
+    // Whatever it is, it is small; a peer that floods this is not the agent.
+    let _ = stream.take(4096).read_to_string(&mut reply);
+    reply.contains("skein-fleet-agent")
+}
+
+/// The one connection to the in-sandbox agent, held open and reused.
+///
+/// **Held** is the entire point, not an optimisation. The stall this transport exists to survive is
+/// asymmetric — it hangs calls that need a *new* channel into the sandbox while established ones
+/// keep flowing — so a client that opened a fresh connection per request would reproduce the very
+/// failure it was built to avoid, and would do so only under load, where it would look like the
+/// agent had made no difference at all.
+///
+/// One connection rather than a pool: skein's callers are already funnelled through `Gate`, so at
+/// most one of these questions is in flight at a time. A pool would add reconnection states to
+/// reason about in exchange for concurrency nothing asks for.
+static AGENT: Mutex<Option<TcpStream>> = Mutex::new(None);
+
+/// What the agent said. `status` is HTTP's; `exit` is the script's, and the two mean different
+/// things — see [`Place::via_agent`], where confusing them would re-run a side effect.
+struct AgentReply {
+    status: u16,
+    exit: i32,
+    out: Vec<u8>,
+    err: String,
+}
+
+/// POST one script to the agent over the held connection, reconnecting once if it has gone.
+///
+/// A keep-alive connection can be closed by the peer at any time — the agent restarting, an idle
+/// reaper, the sandbox cycling — and that is ordinary, not a fault. So a failure on a *reused*
+/// connection is retried once on a fresh one; a failure on a fresh connection is reported.
+fn agent_post(
+    port: u16,
+    token: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<AgentReply, String> {
+    let mut held = AGENT.lock().unwrap_or_else(|e| e.into_inner());
+    let reused = held.is_some();
+    // Whatever is held, or a new one. A connection that will not open at all is the sandbox being
+    // unreachable rather than a stale socket, so it fails here instead of being retried below.
+    let mut stream = match held.take() {
+        Some(s) => s,
+        None => agent_connect(port, timeout)?,
+    };
+    match agent_exchange(&mut stream, token, body) {
+        Ok(reply) => {
+            *held = Some(stream);
+            return Ok(reply);
+        }
+        // It was freshly opened and still failed: that is the sandbox, not the socket.
+        Err(e) if !reused => return Err(e),
+        Err(_) => {}
+    }
+    // The held connection was stale. Ordinary for keep-alive — the agent restarting, an idle
+    // reaper, the sandbox cycling — so it costs one reconnect and not a reported failure.
+    let mut stream = agent_connect(port, timeout)?;
+    let reply = agent_exchange(&mut stream, token, body)?;
+    *held = Some(stream);
+    Ok(reply)
+}
+
+fn agent_connect(port: u16, timeout: Duration) -> Result<TcpStream, String> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let stream = TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("fleet agent: connect {port}: {e}"))?;
+    // Deadlines on both halves: without them a sandbox that accepts the connection and then stops
+    // answering blocks this thread forever, which is the failure the transport exists to prevent.
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    // Same reason the server sets it: the requests are small and latency matters more than packing.
+    stream.set_nodelay(true).ok();
+    Ok(stream)
+}
+
+/// One request/response on an already-open socket.
+///
+/// Hand-rolled rather than reached for from a crate: this speaks HTTP/1.1 to loopback, to a peer
+/// skein itself installs, with `Content-Length` framing on both sides and no TLS, redirects,
+/// chunking or content negotiation. A client crate would bring an async runtime into a synchronous
+/// call path that runs on tokio worker threads, which is a deadlock to reason about in exchange for
+/// features this wire has none of.
+fn agent_exchange(stream: &mut TcpStream, token: &str, body: &[u8]) -> Result<AgentReply, String> {
+    let head = format!(
+        "POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("fleet agent: write: {e}"))?;
+
+    const MAX_HEAD: usize = 64 * 1024;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if buf.len() > MAX_HEAD {
+            return Err("fleet agent: response header too large".into());
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err("fleet agent: connection closed mid-header".into()),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("fleet agent: read: {e}")),
+        }
+    };
+
+    let header_text = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+    let mut lines = header_text.lines();
+    let status = lines
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .ok_or("fleet agent: unparseable status line")?;
+    let header = |name: &str| {
+        header_text
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_string())
+    };
+    let length: usize = header("Content-Length")
+        .and_then(|v| v.parse().ok())
+        .ok_or("fleet agent: response has no Content-Length")?;
+
+    let mut out = buf.split_off(head_end + 4);
+    out.reserve(length.saturating_sub(out.len()));
+    while out.len() < length {
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err("fleet agent: connection closed mid-body".into()),
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("fleet agent: read body: {e}")),
+        }
+    }
+    out.truncate(length);
+
+    Ok(AgentReply {
+        status,
+        exit: header("X-Skein-Exit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(-1),
+        err: header("X-Skein-Stderr")
+            .map(|v| decode_b64(&v))
+            .unwrap_or_default(),
+        out,
+    })
+}
+
+/// Just enough base64 to read the agent's stderr header back. Standard alphabet, padding tolerated,
+/// anything unrecognised dropped — this decodes an error message, so a malformed one must degrade to
+/// a poor message rather than to a failure that hides the error it was carrying.
+fn decode_b64(s: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut bits: u32 = 0;
+    let mut have = 0;
+    let mut out = Vec::new();
+    for byte in s.bytes() {
+        let Some(value) = ALPHABET.iter().position(|c| *c == byte) else {
+            continue;
+        };
+        bits = (bits << 6) | value as u32;
+        have += 6;
+        if have >= 8 {
+            have -= 8;
+            out.push((bits >> have) as u8);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// A box that is its own sandbox — skein's original model.
 ///
 /// For the argv builders that must produce *something* for a name `place_of` rejects: they used to
@@ -330,6 +583,72 @@ impl Place {
         argv
     }
 
+    /// The JSON `fleet-agent.py` expects — the placement, not a pre-built shell.
+    ///
+    /// Sending the *address* rather than the argv is deliberate. The agent lives inside the sandbox
+    /// and therefore outlives the skein that installed it, so a host newer than the agent must not
+    /// be able to hand it a command shape it does not understand. That is not a hypothetical
+    /// failure: a launcher older than the skein driving it is what took the whole fleet down once.
+    /// Fields the agent does not recognise are ignored; a field it needs and does not get makes the
+    /// request fail loudly, and the caller falls back to `sbx exec`.
+    fn agent_request(&self, script: &str, timeout: Duration) -> serde_json::Value {
+        let mut req = serde_json::json!({
+            "script": script,
+            "timeout": timeout.as_secs_f64(),
+        });
+        if let Where::Shared {
+            ns_pid, home, tree, ..
+        } = &self.at
+        {
+            req["ns_pid"] = (*ns_pid).into();
+            req["home"] = home.as_str().into();
+            req["tree"] = tree.as_str().into();
+            req["name"] = self.name.as_str().into();
+        }
+        req
+    }
+
+    /// Run `script` through the held connection, or `None` when there is no usable agent.
+    ///
+    /// The `Option`/`Result` nesting is the whole contract and is not decoration:
+    ///
+    /// - `None` — the *transport* was unavailable (not configured, no token, connection refused,
+    ///   the agent answered 5xx). The script never ran, so the caller may safely try `sbx exec`.
+    /// - `Some(Err)` — the script ran and *failed*. The caller must not retry: half of what skein
+    ///   sends a box has a side effect, and a fallback here would apply it twice.
+    ///
+    /// Getting that distinction backwards is the one way this can be worse than no transport at all.
+    fn via_agent(&self, script: &str, timeout: Duration) -> Option<Result<Vec<u8>, String>> {
+        if !load_config().fleet_agent {
+            return None;
+        }
+        // The port skein published and *verified*, not the one it was configured with: a pinned
+        // port that never came up must not send every call into a connection that cannot answer.
+        let port = crate::fleet::recorded_agent_port()?;
+        if port == 0 {
+            return None;
+        }
+        let token = agent_token()?;
+        let body = serde_json::to_vec(&self.agent_request(script, timeout)).ok()?;
+        // A generous margin over the script's own budget: the agent enforces `timeout` itself and
+        // answers 504, and a socket deadline that fired first would turn its answer into silence.
+        let reply = agent_post(port, &token, &body, timeout + Duration::from_secs(5)).ok()?;
+        match reply.status {
+            200 if reply.exit == 0 => Some(Ok(reply.out)),
+            200 => Some(Err(if reply.err.trim().is_empty() {
+                format!("fleet agent: command exited {}", reply.exit)
+            } else {
+                reply.err.trim().to_string()
+            })),
+            // The agent's own timeout. The script *started*, so this is not a fallback case however
+            // much it looks like one: re-running it on `sbx exec` would apply any side effect twice.
+            504 => Some(Err("fleet agent: the command did not finish in time".into())),
+            // 400/403/404/5xx — the agent refused or broke before running anything, so the script
+            // never started and `sbx exec` is free to try it.
+            _ => None,
+        }
+    }
+
     fn command(&self, script: &str) -> Command {
         let argv = self.exec_argv(script);
         let mut command = Command::new(&argv[0]);
@@ -349,6 +668,11 @@ impl Place {
     /// Separate from [`Place::exec`] because a lossy UTF-8 hop corrupts every image and PDF the
     /// Files tab serves — the bug is silent and the file merely looks broken.
     pub fn bytes(&self, script: &str, timeout: Duration) -> Result<Vec<u8>, String> {
+        // The agent first when there is one, `sbx exec` when there is not — and `sbx exec` is what
+        // every fleet has until someone configures a port, so this changes nothing by upgrading.
+        if let Some(answered) = self.via_agent(script, timeout) {
+            return answered;
+        }
         let mut command = self.command(script);
         let out = bounded_output(&mut command, "sbx exec", timeout)?;
         if !out.status.success() {
@@ -441,6 +765,212 @@ impl Place {
 mod tests {
     use super::*;
     use crate::testutil::*;
+
+    /// Drives the **real** `fleet-agent.py` over the **real** client, because the thing worth
+    /// testing here is the wire, and a stubbed transport would agree with whatever the client
+    /// happened to send. Python is present wherever this runs for the same reason it is present in
+    /// the sandbox.
+    struct RunningAgent {
+        child: std::process::Child,
+        port: u16,
+    }
+
+    impl Drop for RunningAgent {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            // The pooled connection outlives this process otherwise, and the next test to use the
+            // transport would reuse a socket whose peer is gone.
+            *AGENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    /// Start the agent on a free port with `token`, and wait for it to actually answer.
+    fn start_agent(home: &std::path::Path, token: &str) -> RunningAgent {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let token_file = home.join("fleet-agent.token");
+        fs::write(&token_file, token).unwrap();
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("fleet-agent.py");
+        let child = Command::new("python3")
+            .arg(&script)
+            .arg(port.to_string())
+            .arg(&token_file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("python3 to start the agent");
+        let agent = RunningAgent { child, port };
+        // Poll rather than sleep a guessed interval: a fixed wait is either flaky or slow.
+        for _ in 0..100 {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return agent;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("agent never listened on {port}");
+    }
+
+    /// Turn the transport on and tell it which port is *verified* — the two the client reads.
+    fn point_config_at(home: &std::path::Path, port: u16) {
+        let config = serde_json::json!({ "fleet_agent": true });
+        fs::write(home.join("config.json"), config.to_string()).unwrap();
+        fs::write(home.join("fleet-agent.port"), port.to_string()).unwrap();
+    }
+
+    #[test]
+    fn without_an_agent_every_call_takes_the_sbx_path() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // Switched off: the transport declines before it looks at anything else. This is the
+        // default, so it is also the assertion that upgrading changes nothing.
+        assert!(own_sandbox("fleet")
+            .via_agent("echo hi", Duration::from_secs(5))
+            .is_none());
+        // On, but no port has been verified yet — publishing may not have happened or may have
+        // failed. Not a reason to fail the call; a reason to use `sbx exec`.
+        fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true }).to_string(),
+        )
+        .unwrap();
+        assert!(own_sandbox("fleet")
+            .via_agent("echo hi", Duration::from_secs(5))
+            .is_none());
+        // A port but no token is the same answer — skein must not fall through to an unauthenticated
+        // request, and must not fail the call either.
+        point_config_at(&home, 1);
+        assert!(own_sandbox("fleet")
+            .via_agent("echo hi", Duration::from_secs(5))
+            .is_none());
+        // A port nothing is listening on: still "never ran", so the caller may retry on sbx.
+        fs::write(home.join("fleet-agent.token"), "t").unwrap();
+        assert!(own_sandbox("fleet")
+            .via_agent("echo hi", Duration::from_secs(5))
+            .is_none());
+    }
+
+    #[test]
+    fn the_token_is_generated_once_and_kept_out_of_reach() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let first = ensure_agent_token().expect("a token to be generated");
+        assert_eq!(first.len(), 64, "32 bytes, hex: {first}");
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Kept, not rotated: rotating on a reinstall would invalidate the token of a sandbox that
+        // is up and serving, at the moment skein is least able to push a new one in.
+        assert_eq!(ensure_agent_token().unwrap(), first);
+        assert_eq!(agent_token().as_deref(), Some(first.as_str()));
+
+        // Host-private, and readable by nobody else: this authorises running commands as the
+        // sandbox in any box's namespace.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(home.join("fleet-agent.token"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "token is group/world readable: {mode:o}");
+        }
+
+        // A blank token is not a token. Left as one, skein would offer it to the agent and the
+        // agent would refuse — but the interesting half is that a *fresh* one gets generated.
+        fs::write(home.join("fleet-agent.token"), "   \n").unwrap();
+        assert!(agent_token().is_none());
+        assert_ne!(ensure_agent_token().unwrap(), first);
+    }
+
+    #[test]
+    fn the_agent_runs_the_script_and_tells_the_two_kinds_of_failure_apart() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let agent = start_agent(&home, "s3cret");
+        point_config_at(&home, agent.port);
+        let fleet = own_sandbox("fleet");
+
+        // stdout comes back whole, and as bytes — the Files tab serves images through this path.
+        let out = fleet
+            .via_agent("printf 'hi\\n'", Duration::from_secs(10))
+            .expect("the agent to answer")
+            .expect("the script to succeed");
+        assert_eq!(out, b"hi\n");
+
+        // Raw bytes survive: a lossy UTF-8 hop here is the bug that made every PDF look broken.
+        let raw = fleet
+            .via_agent("printf '\\xff\\xfe'", Duration::from_secs(10))
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw, vec![0xff, 0xfe]);
+
+        // A script that FAILS is `Some(Err)` — never `None` — or the caller would run it again on
+        // sbx and apply its side effect twice. The box's own words come back, not "exited 1".
+        let failed = fleet
+            .via_agent(
+                "echo 'the box said this' >&2; exit 3",
+                Duration::from_secs(10),
+            )
+            .expect("the agent to answer")
+            .expect_err("the script to fail");
+        assert!(failed.contains("the box said this"), "{failed}");
+
+        // A script that OUTRUNS its budget also ran, so it is a failure and not a fallback.
+        let timed_out = fleet
+            .via_agent("sleep 5", Duration::from_millis(300))
+            .expect("the agent to answer")
+            .expect_err("the script to time out");
+        assert!(timed_out.contains("did not finish"), "{timed_out}");
+
+        // A wrong token is the agent refusing before it runs anything, so sbx may still try.
+        fs::write(home.join("fleet-agent.token"), "wrong").unwrap();
+        assert!(fleet.via_agent("echo hi", Duration::from_secs(5)).is_none());
+    }
+
+    #[test]
+    fn the_connection_is_reused_and_survives_the_agent_closing_it() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let agent = start_agent(&home, "s3cret");
+        point_config_at(&home, agent.port);
+        let fleet = own_sandbox("fleet");
+
+        for i in 0..5 {
+            let out = fleet
+                .via_agent(&format!("echo {i}"), Duration::from_secs(10))
+                .unwrap()
+                .unwrap();
+            assert_eq!(out, format!("{i}\n").into_bytes());
+        }
+        // The held socket is the point of the whole transport: after five calls there is still
+        // exactly one, not five.
+        assert!(AGENT.lock().unwrap_or_else(|e| e.into_inner()).is_some());
+
+        // Now sever it the way a restarting agent or an idle reaper would. The next call must
+        // reconnect rather than report a failure the caller would read as "the sandbox is gone".
+        {
+            let mut held = AGENT.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(dead) = held.take() {
+                let _ = dead.shutdown(std::net::Shutdown::Both);
+                *held = Some(dead);
+            }
+        }
+        let after = fleet
+            .via_agent("echo back", Duration::from_secs(10))
+            .expect("a severed connection to be re-established")
+            .unwrap();
+        assert_eq!(after, b"back\n");
+    }
 
     // A write that fails used to report `sbx exec exited 1` and drop the reason on the floor, which
     // is how "mkdir: cannot create directory '/boxes': Permission denied" reached nobody.

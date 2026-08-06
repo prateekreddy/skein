@@ -145,6 +145,31 @@ pub struct Config {
     pub box_memory_high: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sync_gateway_url: String,
+    /// Run an agent inside the fleet sandbox and talk to it over a held-open connection. Off by
+    /// default.
+    ///
+    /// With it on, the small frequent calls (liveness, resources, disk) go over one connection skein
+    /// keeps open instead of a fresh `sbx exec` each time. That is not about volume — `Gate` already
+    /// keeps those under one a second, flat in box count — but about which of them survives a
+    /// struggling sandbox: a stalled service path hangs *new* exec calls while *established* streams
+    /// keep flowing, so the board goes blind while the boxes it watches are fine.
+    ///
+    /// Off by default because it is a second way into the sandbox, and a fleet that has not been
+    /// given one should not acquire it by upgrading. Every call falls back to `sbx exec` when the
+    /// agent does not answer, so turning it on cannot make skein less able to reach a box.
+    #[serde(default)]
+    pub fleet_agent: bool,
+    /// Pin the agent's **host** port instead of letting skein choose and re-choose one. 0 ⇒ choose.
+    ///
+    /// Normally skein publishes a port, checks that the agent actually answers on it, and moves to
+    /// another when it does not — which it must, because an sbx port mapping outlives the sandbox it
+    /// was made for and keeps being reported as published while every connection through it is
+    /// refused (docker/sbx-releases#297), a state every resize produces.
+    ///
+    /// Pin it when something else needs to know the number in advance. A pinned port is tried and
+    /// never silently replaced: healing onto a different one would make the pin a suggestion.
+    #[serde(default)]
+    pub fleet_agent_port: u16,
 }
 
 /// The sandbox a fleet lives in unless told otherwise. One name, because a host with two fleets has
@@ -239,6 +264,8 @@ impl Default for Config {
             box_memory_max: String::new(),
             box_memory_high: String::new(),
             sync_gateway_url: String::new(),
+            fleet_agent: false,
+            fleet_agent_port: 0,
         }
     }
 }

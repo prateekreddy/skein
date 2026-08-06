@@ -34,6 +34,9 @@ use std::time::Duration;
 /// The fleet sandbox hosts boxes from *many* repos, so it cannot be served out of any one repo's
 /// store — and shipping it through a store would put runtime tooling in shared data besides.
 const BOX_SESSION_SH: &str = include_str!("box-session.sh");
+/// The in-sandbox agent, shipped in the binary for the same reason the launcher is: an installer
+/// that fetched it would need the network working at exactly the moment things are going wrong.
+const FLEET_AGENT_PY: &str = include_str!("fleet-agent.py");
 
 /// Where box roots live inside the fleet sandbox.
 ///
@@ -54,6 +57,234 @@ pub fn fleet_root() -> String {
 /// Where the launcher is installed inside the fleet sandbox.
 pub fn box_session_path() -> String {
     format!("{}/.skein/box-session.sh", fleet_root())
+}
+
+/// Where the in-sandbox agent is installed. Beside the launcher, for the same reason: the fleet
+/// root outlives the sandbox's `/tmp` and belongs to skein rather than to any one box.
+pub fn fleet_agent_path() -> String {
+    format!("{}/.skein/fleet-agent.py", fleet_root())
+}
+
+/// Where the agent's token lives **inside** the sandbox.
+///
+/// Deliberately not under [`fleet_root`]'s box directories and never in the shared `.claude` store:
+/// the store is mounted into every box, and this token authorises running commands in *any* box's
+/// namespace. A copy inside one box would hand that box the run of all of them.
+pub fn fleet_agent_token_path() -> String {
+    format!("{}/.skein/fleet-agent.token", fleet_root())
+}
+
+/// The port the agent listens on **inside** the sandbox. Fixed, and deliberately so.
+///
+/// Only skein's agent listens inside the sandbox, so there is nothing here to collide with — while
+/// the *host* side collides with everything else on the machine. Splitting them that way means a
+/// host-side conflict is re-published with one call and never has to restart the agent, or reach
+/// into a sandbox that may be exactly the thing not answering.
+pub const AGENT_SANDBOX_PORT: u16 = 8317;
+
+/// Where skein records the host port it published and verified.
+///
+/// State, not configuration: skein chooses this and re-chooses it when healing, so it does not
+/// belong in the file the user edits. [`crate::config::Config::fleet_agent_port`] stays the user's
+/// to pin when they want a particular number.
+fn agent_port_path() -> std::path::PathBuf {
+    skein_home().join("fleet-agent.port")
+}
+
+/// The host port skein last published and saw working, if any.
+pub fn recorded_agent_port() -> Option<u16> {
+    std::fs::read_to_string(agent_port_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn record_agent_port(port: u16) {
+    let home = skein_home();
+    let _ = std::fs::create_dir_all(&home);
+    let _ = crate::util::write_atomic(&agent_port_path(), &home, port.to_string().as_bytes());
+}
+
+/// A host port nothing is listening on right now.
+///
+/// Asked of the OS rather than scanned, which is both faster and honest about what "free" means.
+/// It is a hint and not a reservation — the port can be taken between here and the publish — but
+/// every caller verifies afterwards by connecting, so a lost race costs one retry and not a lie.
+fn free_host_port() -> Option<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()?
+        .local_addr()
+        .ok()
+        .map(|a| a.port())
+}
+
+/// Publish the agent's port to the host, and keep it published. Returns the working host port.
+///
+/// The healing is the point, and it is built around a specific sbx behaviour: a port mapping
+/// survives `sbx rm` and is still *reported* by `sbx ports` while every connection through it is
+/// refused (docker/sbx-releases#297). skein recreates the fleet sandbox on every resize, so it
+/// reaches that state routinely. Anything that healed by reading `sbx ports` would therefore call
+/// the broken mapping healthy forever — so every candidate here is judged by whether the agent
+/// **answers**, never by what sbx says about it.
+///
+/// Order of preference: the pinned port if the user set one, then the last one that worked, then a
+/// fresh one from the OS. A port that is already working is returned untouched — the common case is
+/// a no-op with a single connection to prove it.
+pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
+    let pinned = load_config().fleet_agent_port;
+    // Already working: nothing to publish, and re-publishing a healthy mapping is how a working
+    // fleet acquires a broken one.
+    for candidate in [pinned, recorded_agent_port().unwrap_or(0)] {
+        if candidate != 0 && crate::place::agent_answers(candidate) {
+            record_agent_port(candidate);
+            return Ok(candidate);
+        }
+    }
+
+    let mut tried: Vec<String> = Vec::new();
+    // A pinned port is tried first and only once: the user asked for that number, and quietly
+    // serving a different one would make the pin a suggestion.
+    let candidates: Vec<u16> = if pinned != 0 {
+        vec![pinned]
+    } else {
+        // Three chances at a fresh port. More would be thrashing a sandbox that is likely unwell;
+        // fewer would give up on a single lost race with something else binding the port.
+        std::iter::repeat_with(free_host_port)
+            .take(3)
+            .flatten()
+            .collect()
+    };
+
+    for port in candidates {
+        match publish_agent_port(sandbox, port) {
+            Ok(()) => {
+                if crate::place::agent_answers(port) {
+                    record_agent_port(port);
+                    return Ok(port);
+                }
+                // Published and still silent. Either the agent is not up — the caller starts it
+                // before this, so that is a real failure — or this is the phantom mapping above.
+                tried.push(format!("{port}: published but the agent did not answer"));
+            }
+            Err(why) => tried.push(format!("{port}: {why}")),
+        }
+    }
+    Err(format!(
+        "could not publish the fleet agent's port ({}). \
+         The board falls back to `sbx exec`, which still works — only its resilience is reduced.",
+        tried.join("; ")
+    ))
+}
+
+/// One `sbx ports … --publish` call.
+///
+/// Its own function so the wire format is in one readable place: `HOST:SANDBOX/PROTOCOL`, which is
+/// sbx's spelling and not a guess — an unpublish verb does not exist, which is why healing moves to
+/// a new port rather than tidying up the old one.
+fn publish_agent_port(sandbox: &str, host_port: u16) -> Result<(), String> {
+    let mapping = format!("{host_port}:{AGENT_SANDBOX_PORT}/tcp");
+    let (out, err, code) = run_capture_for(
+        "sbx",
+        &["ports", sandbox, "--publish", &mapping],
+        Duration::from_secs(30),
+    )?;
+    if code == 0 {
+        return Ok(());
+    }
+    let detail = if err.trim().is_empty() { out } else { err };
+    Err(detail.trim().to_string())
+}
+
+/// The tmux session the agent runs in, on the sandbox's own socket.
+///
+/// tmux rather than `nohup`/`setsid` because the sandbox already has it (the substrate installs it,
+/// since a box without tmux cannot exist) and because it makes the agent *inspectable*: whether it
+/// is running is one `has-session`, and its output is a pane someone can read when it misbehaves.
+const AGENT_SESSION: &str = "skein-fleet-agent";
+
+/// Install the agent and make sure it is running. Idempotent, and safe to call on every ensure.
+///
+/// Returns the token, so the caller can record the same secret host-side — the two must agree, and
+/// generating it in one place and returning it is how they cannot drift.
+///
+/// **This does not publish the port.** Reaching the agent from the host needs `sbx ports`, and skein
+/// deliberately does not run it: the syntax is sbx's, the mapping is the host's business, and a
+/// skein that guessed wrong would open a port nobody asked for. Publish it by hand, then put the
+/// host-side port in `fleet_agent_port` — see [`crate::config::Config::fleet_agent_port`].
+pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
+    let token = crate::place::ensure_agent_token()?;
+    let place = own_sandbox(sandbox);
+
+    // The script first, over stdin: it is large, and `sbx exec`'s argv is visible in every process
+    // listing on the host.
+    let path = fleet_agent_path();
+    let dir = fleet_agent_path();
+    let dir = dir
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("/boxes/.skein");
+    place
+        .write(
+            &format!(
+                "mkdir -p {} && cat > {} && chmod 700 {}",
+                sh_quote(dir),
+                sh_quote(&path),
+                sh_quote(&path)
+            ),
+            FLEET_AGENT_PY.as_bytes(),
+            Duration::from_secs(30),
+        )
+        .map_err(|e| format!("installing the fleet agent in {sandbox}: {e}"))?;
+
+    // The token over stdin too, and for a stronger reason than size: an argument would put the
+    // secret in `ps` on the host and in the shell history of anything that logged the call.
+    let token_path = fleet_agent_token_path();
+    place
+        .write(
+            &format!(
+                "umask 077 && cat > {} && chmod 600 {}",
+                sh_quote(&token_path),
+                sh_quote(&token_path)
+            ),
+            token.as_bytes(),
+            Duration::from_secs(30),
+        )
+        .map_err(|e| format!("installing the fleet agent token in {sandbox}: {e}"))?;
+
+    // Start before publishing: `ensure_fleet_agent_port` judges a mapping by whether the agent
+    // answers through it, so publishing first would fail every candidate and burn all three.
+    start_fleet_agent(sandbox)?;
+    ensure_fleet_agent_port(sandbox)?;
+    Ok(token)
+}
+
+/// Start the agent if it is not already up, and leave it supervised.
+///
+/// The `while true` is the supervision: a Python process that dies — OOM-killed, a bug, a signal —
+/// must come back, because everything that depends on it degrades silently to `sbx exec` and the
+/// only symptom is the board being as fragile as it was before. The `sleep 2` keeps a crash-loop
+/// from becoming a busy loop on a sandbox that is already unwell.
+///
+/// The port is read back from the host's config so the sandbox and the host agree on one number,
+/// and it is the *sandbox-side* port here — what `sbx ports` maps to the host is the host's business.
+pub fn start_fleet_agent(sandbox: &str) -> Result<(), String> {
+    let port = AGENT_SANDBOX_PORT;
+    let script = format!(
+        "tmux has-session -t {session} 2>/dev/null && exit 0; \
+         tmux new-session -d -s {session} {inner}",
+        session = sh_quote(AGENT_SESSION),
+        inner = sh_quote(&format!(
+            "while true; do python3 {} {} {}; sleep 2; done",
+            sh_quote(&fleet_agent_path()),
+            port,
+            sh_quote(&fleet_agent_token_path()),
+        )),
+    );
+    own_sandbox(sandbox)
+        .exec(&script, Duration::from_secs(30))
+        .map(|_| ())
+        .map_err(|e| format!("starting the fleet agent in {sandbox}: {e}"))
 }
 
 /// Where the provisioning script is installed inside the fleet sandbox.
@@ -721,6 +952,18 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
             "skein: could not point dockerd at the workload cgroup ({e}); containers in {sandbox} \
              stay outside the ceiling"
         );
+    }
+    // Only when a port has been configured — no port means the fleet was never meant to have an
+    // agent, and installing one would be skein acquiring a second way in that nobody asked for.
+    // Reported rather than fatal: without it every call takes `sbx exec`, which is what it did
+    // before the agent existed, so the fleet still works and only its resilience is reduced.
+    if load_config().fleet_agent {
+        if let Err(e) = ensure_fleet_agent(sandbox) {
+            eprintln!(
+                "skein: could not start the in-sandbox agent ({e}); every call falls back to \
+                 `sbx exec`"
+            );
+        }
     }
     install_launcher(sandbox)
 }
@@ -3070,6 +3313,173 @@ mod tests {
     use super::*;
     use crate::save_repos;
     use crate::testutil::*;
+
+    /// The agent's install must put the token on **stdin**, never in the argv.
+    ///
+    /// `sbx exec`'s argv is visible in `ps` on the host and in the shell history of anything that
+    /// logs the call, and this secret authorises running commands as the sandbox in any box's
+    /// namespace. A fake `sbx` records exactly what it was handed, so the assertion is about what
+    /// crossed the process boundary rather than about how the caller was written.
+    #[test]
+    fn installing_the_agent_never_puts_the_token_in_an_argument() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true }).to_string(),
+        )
+        .unwrap();
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncat >/dev/null\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // The publish half cannot succeed here — nothing is listening for `agent_answers` to find,
+        // which is exactly right: a mapping is only real if the agent answers through it. The
+        // install and start still have to have happened, and that is what this asserts.
+        let token = crate::place::ensure_agent_token().unwrap();
+        let _ = ensure_fleet_agent("skein-fleet");
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+
+        assert!(
+            !argv.contains(&token),
+            "the token reached the argv, where `ps` can read it:\n{argv}"
+        );
+        // It did get *sent*, just not as an argument: the write that carries it names its path.
+        assert!(
+            argv.contains(&fleet_agent_token_path()),
+            "the token was never installed at all:\n{argv}"
+        );
+        // And the agent is started rather than merely dropped on disk — an installed agent nothing
+        // launched is indistinguishable from no agent, except that it looks like it worked.
+        assert!(
+            argv.contains(AGENT_SESSION),
+            "the agent was installed but never started:\n{argv}"
+        );
+        // Started only when it is not already up, so an ensure on a healthy fleet is a no-op rather
+        // than a second Python process fighting for the port.
+        assert!(argv.contains("has-session"), "unconditional start:\n{argv}");
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A published port only counts when the agent **answers** through it.
+    ///
+    /// This is the whole healing contract, and it exists because sbx keeps reporting a mapping as
+    /// published after the sandbox it belonged to is gone, while every connection through it is
+    /// refused (docker/sbx-releases#297). skein recreates the fleet sandbox on every resize, so it
+    /// meets that state routinely — and a healer that believed `sbx ports` would sit on the broken
+    /// mapping forever. Driven with a fake `sbx` that "publishes" everything successfully and a
+    /// real listener on exactly one port, which is that bug in miniature.
+    #[test]
+    fn a_port_is_only_healed_onto_when_the_agent_actually_answers() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // A listener that answers /health exactly as the agent does. This is the ONLY working port;
+        // the fake `sbx` below claims success for every one of them.
+        let live = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let working = live.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in live.incoming().flatten() {
+                let mut stream = stream;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\nskein-fleet-agent");
+            }
+        });
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("ports.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // A recorded port that no longer answers is precisely the post-resize phantom. Healing must
+        // leave it, not trust it.
+        let phantom = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let dead = phantom.local_addr().unwrap().port();
+        drop(phantom);
+        record_agent_port(dead);
+
+        // A pin is honoured and never silently replaced — otherwise the pin is a suggestion.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true, "fleet_agent_port": working }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(ensure_fleet_agent_port("skein-fleet").unwrap(), working);
+        assert_eq!(recorded_agent_port(), Some(working));
+
+        // A pin that does not answer fails rather than wandering onto another port, and says so.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true, "fleet_agent_port": dead }).to_string(),
+        )
+        .unwrap();
+        record_agent_port(dead);
+        let err = ensure_fleet_agent_port("skein-fleet").unwrap_err();
+        assert!(err.contains("did not answer"), "{err}");
+        assert!(
+            err.contains("sbx exec"),
+            "the fallback must be stated: {err}"
+        );
+
+        // The publish actually went through sbx, in sbx's own spelling.
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.contains(&format!(
+                "ports skein-fleet --publish {dead}:{AGENT_SANDBOX_PORT}/tcp"
+            )),
+            "wrong publish wire format:\n{calls}"
+        );
+
+        // A working port that is ALREADY recorded is returned without republishing: re-publishing a
+        // healthy mapping is how a working fleet acquires a broken one.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true }).to_string(),
+        )
+        .unwrap();
+        record_agent_port(working);
+        let before = std::fs::read_to_string(&log).unwrap_or_default().len();
+        assert_eq!(ensure_fleet_agent_port("skein-fleet").unwrap(), working);
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap_or_default().len(),
+            before,
+            "a healthy port was republished"
+        );
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
 
     /// Verbatim output of [`resource_script`] on a live fleet, so the parser is tested against what
     /// the guest actually prints rather than against what this file assumes it prints.
