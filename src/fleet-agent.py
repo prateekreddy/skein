@@ -154,10 +154,17 @@ def main():
     if not Handler.token:
         sys.exit("refusing to serve with an empty token")
 
-    # Loopback only. The port reaches the host through sbx's own publishing, which binds the host
-    # side; binding 0.0.0.0 here would additionally expose command execution to anything that can
-    # route to the sandbox, which is a different and much larger promise than the one being made.
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # All interfaces, and it has to be. sbx forwards a published port to the sandbox's *routable*
+    # address the way Docker does, not to its loopback — so a server bound to 127.0.0.1 accepts
+    # nothing through the mapping. Measured: three published ports in a row reported success and
+    # refused every connection, while `/proc/net/tcp` showed this socket as `0100007F:207D`.
+    #
+    # What that widens: any box in the fleet can now reach this port. That is not a new capability —
+    # boxes already share this network namespace, and any box can already drive any other through
+    # the host cockpit — and it is inside the stated boundary, which puts no wall between boxes. The
+    # token is what stands between reaching the port and using it, so it stays the only guard that
+    # matters and must never be weakened to compensate for the bind address.
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     print(f"skein-fleet-agent listening on 127.0.0.1:{port}", flush=True)
     server.serve_forever()

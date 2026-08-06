@@ -142,16 +142,28 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
         }
     }
 
+    // Mappings sbx already has for our sandbox port, before making another one. sbx has no
+    // unpublish verb, so every new mapping is permanent — publishing one per server restart would
+    // accumulate them forever, and each dead one is exactly the phantom that #297 describes. Reuse
+    // is the only way not to leak.
     let mut tried: Vec<String> = Vec::new();
+    for port in existing_agent_ports(sandbox) {
+        if settled_answer(port) {
+            record_agent_port(port);
+            return Ok(port);
+        }
+        tried.push(format!("{port}: an existing mapping, still silent"));
+    }
+
     // A pinned port is tried first and only once: the user asked for that number, and quietly
     // serving a different one would make the pin a suggestion.
     let candidates: Vec<u16> = if pinned != 0 {
         vec![pinned]
     } else {
-        // Three chances at a fresh port. More would be thrashing a sandbox that is likely unwell;
-        // fewer would give up on a single lost race with something else binding the port.
+        // Two chances, not more. Each attempt that fails leaves a mapping behind that nothing can
+        // remove, so the cost of trying again is permanent clutter in the sandbox's port table.
         std::iter::repeat_with(free_host_port)
-            .take(3)
+            .take(2)
             .flatten()
             .collect()
     };
@@ -159,7 +171,7 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
     for port in candidates {
         match publish_agent_port(sandbox, port) {
             Ok(()) => {
-                if crate::place::agent_answers(port) {
+                if settled_answer(port) {
                     record_agent_port(port);
                     return Ok(port);
                 }
@@ -175,6 +187,53 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
          The board falls back to `sbx exec`, which still works — only its resilience is reduced.",
         tried.join("; ")
     ))
+}
+
+/// Does the agent answer on `port`, allowing a moment for a fresh mapping to come up?
+///
+/// A publish returns before its forwarder is necessarily accepting, and a single immediate check
+/// gets an instant refusal rather than a timeout — so it reads as "broken" and moves on, burning a
+/// port that would have worked a second later. Since a burnt port cannot be unpublished, that
+/// mistake is permanent, which is what makes the wait worth more than the latency.
+fn settled_answer(port: u16) -> bool {
+    // No waiting under test: the fixtures either listen already or never will, so the window would
+    // only be spent sleeping — it took the suite from 2.7s to 15s, which is how a test file stops
+    // being run often enough to be worth having.
+    let attempts = if cfg!(test) { 1 } else { 6 };
+    for attempt in 0..attempts {
+        if crate::place::agent_answers(port) {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    false
+}
+
+/// Host ports sbx already forwards to [`AGENT_SANDBOX_PORT`] in this sandbox.
+///
+/// Parsed from the table `sbx ports <sandbox>` prints — `HOST IP / HOST PORT / SANDBOX PORT /
+/// PROTOCOL` — because the alternative is publishing a new mapping on every server restart and
+/// never being able to remove any of them. Deduplicated: the same host port is listed once per
+/// address family (`127.0.0.1` and `::1`), and they are one mapping.
+fn existing_agent_ports(sandbox: &str) -> Vec<u16> {
+    let Ok((out, _, 0)) = run_capture_for("sbx", &["ports", sandbox], Duration::from_secs(20))
+    else {
+        return Vec::new();
+    };
+    let mut found: Vec<u16> = out
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let host_port: u16 = cols.nth(1)?.parse().ok()?;
+            let sandbox_port: u16 = cols.next()?.parse().ok()?;
+            (sandbox_port == AGENT_SANDBOX_PORT).then_some(host_port)
+        })
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// One `sbx ports … --publish` call.
