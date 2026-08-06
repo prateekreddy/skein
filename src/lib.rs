@@ -2314,12 +2314,12 @@ pub fn read_journal(name: &str) -> Option<String> {
         .and_then(|d| fs::read_to_string(Path::new(d).join(".skein").join("journal.md")).ok());
     let txt = from_store.or(from_dir)?;
     let tail: Vec<&str> = txt.lines().rev().take(40).collect();
-    let mut s: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let s: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    // The tail, because a journal's last entry is the one worth showing. Counted in chars: this was
+    // a byte slice, and a journal long enough to cut with an `…` anywhere in it panicked the thread
+    // doing the cutting — see `keep_tail`.
     const CAP: usize = 4000;
-    if s.len() > CAP {
-        let cut = s.len() - CAP;
-        s = format!("…\n{}", &s[cut..]);
-    }
+    let s = keep_tail(&s, CAP);
     Some(s).filter(|s| !s.trim().is_empty())
 }
 

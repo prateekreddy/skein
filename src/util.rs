@@ -535,6 +535,26 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
     format!("{kept}…")
 }
 
+/// [`clip`] from the other end: keep the **last** `max` chars, marking that the start was dropped.
+///
+/// For the sources where the news is at the end — a journal, a log tail — so the cap has to fall on
+/// the part already read rather than the part just written.
+///
+/// Chars rather than bytes, and that is the whole reason this is a function rather than a slice.
+/// `&s[s.len() - max..]` reads like a size budget and is a panic waiting for its first non-ASCII
+/// character: it aborts the moment the cut lands inside one. It did — a box whose journal ran past
+/// the cap and happened to contain an `…` took a server worker thread down with "byte index 18674
+/// is not a char boundary", and every caller of the digest with it. A cap is a display concern and
+/// must never be able to fail.
+pub(crate) fn keep_tail(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().skip(count - max).collect();
+    format!("…{kept}")
+}
+
 /// First non-empty line of `s`, whitespace-collapsed and capped — the inbox headline. None when
 /// `s` is blank.
 pub(crate) fn first_line(s: &str) -> Option<String> {
@@ -611,5 +631,37 @@ mod tests {
         assert_eq!(file_ago(&f).as_deref(), Some("0s ago"));
         assert!(file_ago(&dir.join("nope")).is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A cap is a display concern, so it must not be able to fail — and as a byte slice it could.
+    ///
+    /// The journal that found this was an ordinary one: long enough to cut, with an `…` where the
+    /// cut landed. `&s[s.len() - 4000..]` then aborted the thread doing the cutting rather than the
+    /// request that asked, so the whole cockpit lost a worker to one box's punctuation.
+    #[test]
+    fn a_cap_falls_between_characters_however_wide_they_are() {
+        assert_eq!(keep_tail("short", 10), "short");
+        assert_eq!(keep_tail("abcdefghij", 4), "…ghij");
+        // The head is what goes; `clip` is the same rule from the other end.
+        assert_eq!(clip("abcdefghij", 4), "abcd…");
+        // Multi-byte, and cut at every offset through it: each one is a byte index the naive slice
+        // would have panicked on, and the answer is always a whole character.
+        let wide = "…é日本語…ü";
+        for max in 0..=wide.chars().count() + 2 {
+            let out = keep_tail(wide, max);
+            assert!(
+                wide.ends_with(out.trim_start_matches('…')),
+                "the tail is kept whole at {max}: {out}"
+            );
+        }
+        // The shape that panicked, reproduced: an ellipsis straddling the cut.
+        let journal = format!("{}… did: reset onto master", "x".repeat(5000));
+        let out = keep_tail(&journal, 4000);
+        assert_eq!(
+            out.chars().count(),
+            4001,
+            "the marker plus the cap: {out:.40}"
+        );
+        assert!(out.ends_with("did: reset onto master"));
     }
 }
