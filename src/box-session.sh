@@ -305,6 +305,66 @@ sys.exit(1)
 PY
 }
 
+# Only the login moves, and it is merged rather than copied over.
+#
+# `.credentials.json` is not just the agent's login: it also holds an `mcpOAuth` block per MCP
+# server, keyed by name and a hash of the server's URL. Those are per-repo — a box's work-tracking
+# gateway is its repo's, which is the same reason `~/.claude.json` is kept private — so a whole-file
+# copy hands one box's MCP grants to another and, worse, DISCARDS whatever the receiving box had.
+# Not merged, replaced: a box's own gateway token disappears the first time any other box wins the
+# recency race, and the symptom is an MCP server that asks to be authorised again for no reason.
+#
+# Today every box happens to point at the same gateway, so nothing visibly breaks. The second repo
+# with its own gateway is when it would — silently, and a long way from this file.
+#
+# So: take the login keys, leave everything else in the destination alone. A `null` is skipped for
+# the same reason a logout is: an absent credential must never overwrite a present one. The
+# destination keeps the source's mtime, as `cp -p` gave it, or the two would take turns being
+# "newer" and copy back and forth on every start.
+merge_login() {
+  python3 - "$1" "$2" 2>/dev/null <<'PY'
+import json, os, sys, tempfile
+src, dst = sys.argv[1], sys.argv[2]
+# The whole of a codex auth.json, and only the agent's block of a claude credentials file.
+LOGIN = ("claudeAiOauth", "tokens", "OPENAI_API_KEY", "last_refresh")
+try:
+    incoming = json.load(open(src))
+except Exception:
+    sys.exit(1)
+if not isinstance(incoming, dict):
+    sys.exit(1)
+try:
+    merged = json.load(open(dst))
+    if not isinstance(merged, dict):
+        merged = {}
+except Exception:
+    merged = {}
+moved = False
+for key in LOGIN:
+    if incoming.get(key) is not None:
+        merged[key] = incoming[key]
+        moved = True
+if not moved:
+    sys.exit(1)
+where = os.path.dirname(dst) or "."
+os.makedirs(where, exist_ok=True)
+handle, temp = tempfile.mkstemp(dir=where)
+try:
+    with os.fdopen(handle, "w") as out:
+        json.dump(merged, out)
+    os.chmod(temp, 0o600)
+    os.replace(temp, dst)
+except Exception:
+    try:
+        os.unlink(temp)
+    except OSError:
+        pass
+    sys.exit(1)
+stat = os.stat(src)
+os.utime(dst, (stat.st_atime, stat.st_mtime))
+PY
+}
+
 # Said once and out loud, because the alternative is a fleet that quietly stops sharing logins. The
 # degradation is deliberate: with no way to tell a login from a husk, nothing propagates at all —
 # which costs a login per box, where guessing would cost the fleet its credentials.
@@ -317,11 +377,9 @@ for rel in ".claude/.credentials.json" ".codex/auth.json"; do
   carries_login "$mine" && mine_ok=1
   carries_login "$canon" && canon_ok=1
   if [ "$mine_ok" = 1 ] && { [ "$canon_ok" = 0 ] || [ "$mine" -nt "$canon" ]; }; then
-    mkdir -p "$(dirname "$canon")" 2>/dev/null \
-      && cp -p "$mine" "$canon" 2>/dev/null && chmod 600 "$canon" 2>/dev/null
+    merge_login "$mine" "$canon"
   elif [ "$canon_ok" = 1 ] && { [ "$mine_ok" = 0 ] || [ "$canon" -nt "$mine" ]; }; then
-    mkdir -p "$(dirname "$mine")" 2>/dev/null \
-      && cp -p "$canon" "$mine" 2>/dev/null && chmod 600 "$mine" 2>/dev/null
+    merge_login "$canon" "$mine"
   fi
 done
 

@@ -3525,6 +3525,116 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// Run the launcher's own credential sync over two fixture homes, handing back what each holds
+    /// afterwards as `(box, sandbox)`.
+    ///
+    /// `newer` names the side that gets the later mtime — the tiebreak the rule used to apply to
+    /// everything — so each case can say what should happen *despite* it. Stamped rather than slept
+    /// into order: writing the two a second apart cost the suite ten seconds, and a suite slow
+    /// enough to skip stops catching things.
+    fn credential_sync(
+        root: &std::path::Path,
+        box_has: Option<&str>,
+        sandbox_has: Option<&str>,
+        newer: &str,
+    ) -> (String, String) {
+        let block = BOX_SESSION_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("carries_login() {"))
+            .take_while(|l| !l.starts_with("done"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\ndone";
+        let rel = ".claude/.credentials.json";
+        let home = root.join("boxhome");
+        let sandbox = root.join("sandboxhome");
+        for base in [&home, &sandbox] {
+            let _ = std::fs::remove_dir_all(base);
+            std::fs::create_dir_all(base.join(".claude")).unwrap();
+        }
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let new = old + Duration::from_secs(10);
+        for (which, body) in [("box", box_has), ("sandbox", sandbox_has)] {
+            let Some(body) = body else { continue };
+            let base = if which == "box" { &home } else { &sandbox };
+            std::fs::write(base.join(rel), body).unwrap();
+            let when = if which == newer { new } else { old };
+            std::fs::File::options()
+                .write(true)
+                .open(base.join(rel))
+                .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(when)))
+                .unwrap();
+        }
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "set -uo pipefail\nhome={home}\nexport HOME={sandbox}\n{block}\n",
+                home = home.display(),
+                sandbox = sandbox.display(),
+            ))
+            .output()
+            .expect("bash to run the launcher's credential sync");
+        assert!(
+            out.status.success(),
+            "the sync itself failed, which would abort the box start: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (
+            std::fs::read_to_string(home.join(rel)).unwrap_or_default(),
+            std::fs::read_to_string(sandbox.join(rel)).unwrap_or_default(),
+        )
+    }
+
+    /// Sharing a login must neither share nor destroy a box's MCP grants.
+    ///
+    /// `.credentials.json` holds an `mcpOAuth` block per MCP server as well as the agent's login,
+    /// and those are per-repo: a box's work-tracking gateway belongs to its repository, which is the
+    /// same reason `~/.claude.json` is kept private. The sync copied the file whole, so one box's
+    /// grants landed in another and — the half that actually breaks things — the receiving box's own
+    /// grants were *discarded* rather than merged. The symptom is an MCP server asking to be
+    /// authorised again for no reason, a long way from this code.
+    ///
+    /// Latent today, because every box in the fleet happens to point at one gateway. The second repo
+    /// with its own is when it would bite.
+    #[test]
+    fn syncing_a_login_leaves_each_boxs_own_mcp_grants_alone() {
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        // Two boxes, two repos, two gateways — the shape the fleet does not have yet.
+        let with_mcp = |token: &str, server: &str, grant: &str| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"r"}},"mcpOAuth":{{"{server}":{{"accessToken":"{grant}"}}}}}}"#
+            )
+        };
+        let (box_after, sandbox_after) = credential_sync(
+            root,
+            Some(&with_mcp("sk-old", "sync|aaaa", "mcp-for-my-repo")),
+            Some(&with_mcp("sk-new", "sync|bbbb", "mcp-for-another-repo")),
+            "sandbox",
+        );
+
+        // The login travels, which is the point of the sync.
+        assert!(
+            box_after.contains("sk-new"),
+            "the newer login did not reach the box:\n{box_after}"
+        );
+        // And the box keeps its own gateway grant, which is the point of this test.
+        assert!(
+            box_after.contains("mcp-for-my-repo"),
+            "the box's own MCP grant was destroyed by a login sync:\n{box_after}"
+        );
+        assert!(
+            !box_after.contains("mcp-for-another-repo"),
+            "another repo's MCP grant was handed to this box:\n{box_after}"
+        );
+        // Symmetrically: nothing of the sandbox's moved but its login.
+        assert!(
+            sandbox_after.contains("mcp-for-another-repo")
+                && !sandbox_after.contains("mcp-for-my-repo"),
+            "the sandbox's MCP grants were disturbed:\n{sandbox_after}"
+        );
+    }
+
     /// A logout must not propagate, however new it is.
     ///
     /// Credentials sync both ways between a box and the sandbox so that logging in once is enough.
@@ -3539,66 +3649,15 @@ mod tests {
     /// wins. These are the four states that can meet, driven through the launcher's own code.
     #[test]
     fn a_logged_out_box_cannot_log_out_the_fleet() {
-        let block = BOX_SESSION_SH
-            .lines()
-            .skip_while(|l| !l.starts_with("carries_login() {"))
-            .take_while(|l| !l.starts_with("done"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\ndone";
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
-        let rel = ".claude/.credentials.json";
         // A real login, and the husk a logout leaves: identical structure, blanked tokens. The husk
         // is what the fleet actually had, so it is written as it was found rather than invented.
         let login = r#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"sk-ref","expiresAt":1786308957532},"mcpOAuth":{"sync|a":{"accessToken":"mcp-token"}}}"#;
         let husk = r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0},"mcpOAuth":{"sync|a":{"accessToken":"mcp-token"}}}"#;
-
-        // `newer` decides which file gets the later mtime — the tiebreak the old rule used for
-        // everything. Each case says what the sync should do *despite* it.
-        let run =
-            |box_has: Option<&str>, sandbox_has: Option<&str>, newer: &str| -> (String, String) {
-                let home = root.join("boxhome");
-                let sandbox = root.join("sandboxhome");
-                for base in [&home, &sandbox] {
-                    let _ = std::fs::remove_dir_all(base);
-                    std::fs::create_dir_all(base.join(".claude")).unwrap();
-                }
-                // Stamped rather than slept into order. Ordering these by writing them a second apart
-                // cost the suite ten seconds, and a suite slow enough to skip is one that stops
-                // catching things — the same trade already made for the agent's settle window.
-                let old = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-                let new = old + Duration::from_secs(10);
-                for (which, body) in [("box", box_has), ("sandbox", sandbox_has)] {
-                    let Some(body) = body else { continue };
-                    let base = if which == "box" { &home } else { &sandbox };
-                    std::fs::write(base.join(rel), body).unwrap();
-                    let when = if which == newer { new } else { old };
-                    std::fs::File::options()
-                        .write(true)
-                        .open(base.join(rel))
-                        .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(when)))
-                        .unwrap();
-                }
-                let out = std::process::Command::new("bash")
-                    .arg("-c")
-                    .arg(format!(
-                        "set -uo pipefail\nhome={home}\nexport HOME={sandbox}\n{block}\n",
-                        home = home.display(),
-                        sandbox = sandbox.display(),
-                    ))
-                    .output()
-                    .expect("bash to run the launcher's credential sync");
-                assert!(
-                    out.status.success(),
-                    "the sync itself failed, which would abort the box start: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                (
-                    std::fs::read_to_string(home.join(rel)).unwrap_or_default(),
-                    std::fs::read_to_string(sandbox.join(rel)).unwrap_or_default(),
-                )
-            };
+        let run = |box_has: Option<&str>, sandbox_has: Option<&str>, newer: &str| {
+            credential_sync(root, box_has, sandbox_has, newer)
+        };
 
         // The regression: a fresh logout must not overwrite an older, working login.
         let (box_side, sandbox_side) = run(Some(husk), Some(login), "box");

@@ -26,9 +26,8 @@ instead of needing the *right* box to restart. It reads other boxes' private hom
 consistent with the stated model (boxes are isolated from each other's state, not their identity)
 but is still a widening, so it wants a decision rather than a commit.
 
-Also unexamined: `.credentials.json` carries per-repo `mcpOAuth` blocks as well as the agent login,
-and syncing the file whole therefore syncs those between boxes of *different* repos. That may be
-undesirable for the same reason `~/.claude.json` is kept private.
+The `mcpOAuth` half is fixed: the sync now merges the login keys instead of copying the file, so a
+box keeps its own per-repo MCP grants and never receives another repo's.
 
 ---
 
