@@ -269,12 +269,57 @@ done
 # Newest wins, in whichever direction. A login anywhere becomes the seed for every box started after
 # it. Safe because every box here is the same person — boxes are isolated from each other's *state*,
 # not from each other's identity — and the file is written whole, so there is no half-copied token.
+#
+# But a credentials file is not the same thing as a login, and that is what "newest" cannot see. A
+# logged-out agent leaves the file exactly where it was with its tokens blanked — same shape, same
+# keys, empty strings — and that husk is NEWER than the working copy it replaced. Newest-wins then
+# propagates the logout: the husk flows up on the next box start, every box created afterwards seeds
+# from it, and every box that starts pulls it back down over a login that was fine. One logged-out
+# box takes the fleet with it, which is precisely the "log in to each box separately" this exists to
+# prevent. Observed in the fleet: boxes holding `"accessToken": ""` with the structure intact.
+#
+# So a file only competes if it carries a login. Between two that do, newest still wins; one that
+# does not never overwrites one that does, in either direction, whatever the mtimes say. A logout
+# therefore stays where it happened, and a login anywhere still heals everything started after it.
+#
+# Named blocks rather than "a non-empty token anywhere": this same file also carries per-repo MCP
+# OAuth, and an MCP token says nothing about whether the agent itself is signed in.
+carries_login() {
+  [ -s "$1" ] || return 1
+  python3 - "$1" 2>/dev/null <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+# `data` itself for the flat shapes; the named blocks for the nested ones. Never mcpOAuth.
+for block in (data.get("claudeAiOauth"), data.get("tokens"), data):
+    if not isinstance(block, dict):
+        continue
+    for key in ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY"):
+        if str(block.get(key) or "").strip():
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# Said once and out loud, because the alternative is a fleet that quietly stops sharing logins. The
+# degradation is deliberate: with no way to tell a login from a husk, nothing propagates at all —
+# which costs a login per box, where guessing would cost the fleet its credentials.
+command -v python3 >/dev/null 2>&1 \
+  || echo "skein: no python3 here, so logins cannot be shared between boxes; each will need its own" >&2
+
 for rel in ".claude/.credentials.json" ".codex/auth.json"; do
   mine="$home/$rel"; canon="$HOME/$rel"
-  if [ -e "$mine" ] && { [ ! -e "$canon" ] || [ "$mine" -nt "$canon" ]; }; then
+  mine_ok=0; canon_ok=0
+  carries_login "$mine" && mine_ok=1
+  carries_login "$canon" && canon_ok=1
+  if [ "$mine_ok" = 1 ] && { [ "$canon_ok" = 0 ] || [ "$mine" -nt "$canon" ]; }; then
     mkdir -p "$(dirname "$canon")" 2>/dev/null \
       && cp -p "$mine" "$canon" 2>/dev/null && chmod 600 "$canon" 2>/dev/null
-  elif [ -e "$canon" ] && { [ ! -e "$mine" ] || [ "$canon" -nt "$mine" ]; }; then
+  elif [ "$canon_ok" = 1 ] && { [ "$mine_ok" = 0 ] || [ "$canon" -nt "$mine" ]; }; then
     mkdir -p "$(dirname "$mine")" 2>/dev/null \
       && cp -p "$canon" "$mine" 2>/dev/null && chmod 600 "$mine" 2>/dev/null
   fi

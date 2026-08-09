@@ -9,25 +9,26 @@ with the item rather than rediscovered.
 
 ## Broken now
 
-### Shared login is not shared — every box has to be logged in separately
+### Shared login: the poisoning is fixed, the recovery is on box-restart cadence
 
-**Symptom.** A new box starts logged out; `claude` has to be authenticated in each one by hand.
+The cause was that credentials synced by mtime alone, and a logout leaves a *newer* file than the
+login it replaced — so one logged-out box propagated its emptiness to the sandbox and from there to
+everything else. Fixed: a file only competes if it carries a login.
 
-**Lead, not yet confirmed.** `box-session.sh` binds a private `~/.claude` per box and seeds it from
-the sandbox's copy on first start — that seeding is how a box is supposed to inherit a logged-in
-agent (see the header comment, and the `.credentials.json` note around the transcript binds). Two
-ways it goes wrong, and they want different fixes:
+What remains is a lag rather than a fault. Healing happens when a box **starts**, so the fleet
+recovers as boxes restart and not before. If a login is needed sooner than that, restarting any
+logged-in box pushes its credentials up and every later start picks them up.
 
-- the sandbox's own `~/.claude/.credentials.json` is missing or expired, so every box seeds from
-  nothing — fix the seed source, and boxes heal on next start;
-- the seed only runs when the private dir is absent, so a box created before a re-login keeps the
-  stale copy forever — fix by re-seeding credentials specifically, not the whole directory.
+Worth considering, not yet done: heal from the whole fleet rather than only from the sandbox's copy
+— on start, if neither this box nor the sandbox carries a login, take the newest one that does from
+`/boxes/*/home/.claude/.credentials.json`. It would repair everything from a single box start
+instead of needing the *right* box to restart. It reads other boxes' private homes, which is
+consistent with the stated model (boxes are isolated from each other's state, not their identity)
+but is still a widening, so it wants a decision rather than a commit.
 
-Check which by comparing the sandbox's `~/.claude/.credentials.json` against a fresh box's.
-
-**Care needed.** Credentials must not land in the shared store, and boxes must not share one
-`~/.claude` wholesale — the private bind exists because `~/.claude.json` carries per-repo MCP
-servers, and sharing it hands every box the same work-tracking gateway.
+Also unexamined: `.credentials.json` carries per-repo `mcpOAuth` blocks as well as the agent login,
+and syncing the file whole therefore syncs those between boxes of *different* repos. That may be
+undesirable for the same reason `~/.claude.json` is kept private.
 
 ---
 

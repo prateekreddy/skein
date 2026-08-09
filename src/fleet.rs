@@ -3525,6 +3525,122 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// A logout must not propagate, however new it is.
+    ///
+    /// Credentials sync both ways between a box and the sandbox so that logging in once is enough.
+    /// "Newest wins" was the whole rule, and it cannot see the difference that matters: a logged-out
+    /// agent leaves the file in place with its tokens blanked, and that husk is *newer* than the
+    /// working copy it replaced. So a single logged-out box flowed its emptiness up on the next
+    /// start, seeded every box created after it, and pulled it back down over logins that were fine
+    /// — turning "log in once" into "log in to each box separately", which is the bug this was
+    /// built to prevent. Found in the live fleet as boxes holding `"accessToken": ""`.
+    ///
+    /// Direction is not the fix and neither is order; the fix is that a file without a login never
+    /// wins. These are the four states that can meet, driven through the launcher's own code.
+    #[test]
+    fn a_logged_out_box_cannot_log_out_the_fleet() {
+        let block = BOX_SESSION_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("carries_login() {"))
+            .take_while(|l| !l.starts_with("done"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\ndone";
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        let rel = ".claude/.credentials.json";
+        // A real login, and the husk a logout leaves: identical structure, blanked tokens. The husk
+        // is what the fleet actually had, so it is written as it was found rather than invented.
+        let login = r#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"sk-ref","expiresAt":1786308957532},"mcpOAuth":{"sync|a":{"accessToken":"mcp-token"}}}"#;
+        let husk = r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0},"mcpOAuth":{"sync|a":{"accessToken":"mcp-token"}}}"#;
+
+        // `newer` decides which file gets the later mtime — the tiebreak the old rule used for
+        // everything. Each case says what the sync should do *despite* it.
+        let run =
+            |box_has: Option<&str>, sandbox_has: Option<&str>, newer: &str| -> (String, String) {
+                let home = root.join("boxhome");
+                let sandbox = root.join("sandboxhome");
+                for base in [&home, &sandbox] {
+                    let _ = std::fs::remove_dir_all(base);
+                    std::fs::create_dir_all(base.join(".claude")).unwrap();
+                }
+                // Stamped rather than slept into order. Ordering these by writing them a second apart
+                // cost the suite ten seconds, and a suite slow enough to skip is one that stops
+                // catching things — the same trade already made for the agent's settle window.
+                let old = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+                let new = old + Duration::from_secs(10);
+                for (which, body) in [("box", box_has), ("sandbox", sandbox_has)] {
+                    let Some(body) = body else { continue };
+                    let base = if which == "box" { &home } else { &sandbox };
+                    std::fs::write(base.join(rel), body).unwrap();
+                    let when = if which == newer { new } else { old };
+                    std::fs::File::options()
+                        .write(true)
+                        .open(base.join(rel))
+                        .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(when)))
+                        .unwrap();
+                }
+                let out = std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(format!(
+                        "set -uo pipefail\nhome={home}\nexport HOME={sandbox}\n{block}\n",
+                        home = home.display(),
+                        sandbox = sandbox.display(),
+                    ))
+                    .output()
+                    .expect("bash to run the launcher's credential sync");
+                assert!(
+                    out.status.success(),
+                    "the sync itself failed, which would abort the box start: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                (
+                    std::fs::read_to_string(home.join(rel)).unwrap_or_default(),
+                    std::fs::read_to_string(sandbox.join(rel)).unwrap_or_default(),
+                )
+            };
+
+        // The regression: a fresh logout must not overwrite an older, working login.
+        let (box_side, sandbox_side) = run(Some(husk), Some(login), "box");
+        assert!(
+            sandbox_side.contains("sk-live"),
+            "a newer logout overwrote the sandbox's login — one box logs out the fleet:\n{sandbox_side}"
+        );
+        assert!(
+            box_side.contains("sk-live"),
+            "the logged-out box was not healed from the sandbox's login:\n{box_side}"
+        );
+
+        // And the same in the other direction: the sandbox being the one that went stale.
+        let (box_side, sandbox_side) = run(Some(login), Some(husk), "sandbox");
+        assert!(
+            box_side.contains("sk-live") && sandbox_side.contains("sk-live"),
+            "a login was lost to a newer husk on the sandbox side:\nbox {box_side}\nsandbox {sandbox_side}"
+        );
+
+        // Two real logins still resolve by recency, which is what makes "log in anywhere" work.
+        let fresher = login.replace("sk-live", "sk-fresh");
+        let (box_side, sandbox_side) = run(Some(login), Some(&fresher), "sandbox");
+        assert!(
+            box_side.contains("sk-fresh") && sandbox_side.contains("sk-fresh"),
+            "the newer of two logins did not win:\nbox {box_side}\nsandbox {sandbox_side}"
+        );
+
+        // Two husks are nothing to choose between, and neither is worth copying anywhere.
+        let (box_side, sandbox_side) = run(Some(husk), Some(husk), "box");
+        assert!(
+            !box_side.contains("sk-live") && !sandbox_side.contains("sk-live"),
+            "invented a login from two logouts"
+        );
+
+        // A box that has never run seeds from the sandbox — the original "log in once".
+        let (box_side, _) = run(None, Some(login), "sandbox");
+        assert!(
+            box_side.contains("sk-live"),
+            "a new box did not inherit the login:\n{box_side}"
+        );
+    }
+
     /// `sudo` in a box explains itself instead of failing incomprehensibly — and only in a box.
     ///
     /// Two halves, and shipping either alone is worse than shipping neither:
