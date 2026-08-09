@@ -5095,6 +5095,50 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
     }
 
+    /// Nothing a misheard word can reach is hard to undo.
+    ///
+    /// Speech recognition is wrong sometimes — that is not a defect to engineer away, it is the
+    /// medium. So the design constraint is not accuracy, it is *blast radius*: every verb the ear
+    /// accepts is either read-only or reversible, and the destructive ones are absent rather than
+    /// confirmed. A confirmation is the wrong answer here because the whole point of the ear is that
+    /// you are not looking at the screen; a dialog you cannot see is a dialog you will dismiss by
+    /// saying the next thing.
+    ///
+    /// The second half is subtler and just as easy to lose: the ear has to reach you *inside a
+    /// focused terminal*. The fleet keymap deliberately yields every key to one, so push-to-talk
+    /// cannot live there — answering a box while heads-down in another one is the entire use, and an
+    /// ear that only works on the board is an ear you would never reach for.
+    #[test]
+    fn a_misheard_word_cannot_cost_a_branch() {
+        let page = include_str!("web/index.html");
+        let verbs: String = page
+            .lines()
+            .skip_while(|l| !l.contains("const VOICE_VERBS"))
+            .take_while(|l| !l.starts_with("];"))
+            .collect();
+        assert!(
+            verbs.contains("resumeBox"),
+            "the verb table was not found at all"
+        );
+        for reckless in ["destroyBox", "mergePr", "stopBox", "shipBox", "takeover"] {
+            assert!(
+                !verbs.contains(reckless),
+                "`{reckless}` is reachable by voice; a word heard wrong must cost a glance, not work"
+            );
+        }
+        // Push-to-talk on its own handler, keyed by code so it survives a focused terminal.
+        assert!(
+            page.contains("AltRight"),
+            "the ear has no push-to-talk key, so it can only be reached from the board"
+        );
+        // The fleet keymap must still hand every key to a terminal — the ear works *because* that
+        // guard is there, and removing it would be a far worse regression than losing the ear.
+        assert!(
+            page.contains("if (inTerm || inField) return;"),
+            "the fleet keymap stopped yielding to a focused terminal"
+        );
+    }
+
     /// The button only appears when there is something to deliver, so the signal behind it has to be
     /// quiet by default — an indicator that is always lit is one nobody reads.
     #[test]

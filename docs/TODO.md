@@ -33,15 +33,18 @@ box keeps its own per-repo MCP grants and never receives another repo's.
 
 ## Voice — the rest of it
 
-The mouth is built (skein speaks the ask when a box needs you, `index.html`). What is not:
+The mouth and the ear are both built. What is not:
 
-### The ear — push-to-talk and a closed verb set
+### Try it for a day and cut what annoys
 
-Hold a key, speak, release. `yes / no / next / skip / show me / stop / merge it`, plus `tell it …`
-which sends the rest verbatim to `/api/boxes/:name/resume`. Box names resolved against the live
-board rather than transcribed — the vocabulary is small and already in the page, which is the whole
-reason this can work where general dictation cannot. Pronoun binding (`it` = the box just announced)
-so a name rarely has to be said at all.
+The verb set is a guess until it is used: `yes / continue / next / show me / open / what needs me /
+continue all`, plus `tell it …`. Expect the ordering of `voiceTarget` to be the part that feels
+wrong first — it prefers the box the mouth last named, then the selected row, then the only one
+owed an answer.
+
+Deliberately absent, and worth keeping absent unless the daily use argues otherwise: stop, merge,
+ship, destroy. A confirmation is not the answer for those, because the point of the ear is that you
+are not looking at the screen.
 
 ### Settle whether on-device recognition actually engages
 

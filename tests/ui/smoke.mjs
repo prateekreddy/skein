@@ -639,6 +639,43 @@ await check("the switch silences it", async () => {
   if (said.length) throw new Error(`silenced and still talking: ${JSON.stringify(said)}`);
 });
 
+// The ear. Headless Chromium has no recogniser, so one is stood in — everything downstream of the
+// transcript is the page's own code, which is where the whole design lives.
+await check("holding the key opens an ear, and releasing it acts on what was said", async () => {
+  await page.evaluate(() => {
+    window.__started = 0;
+    window.SpeechRecognition = class {
+      constructor() { window.__rec = this; }
+      start() { window.__started++; }
+      stop() { this.onresult?.({ resultIndex: 0, results: [Object.assign([{ transcript: "what needs me" }], { isFinal: true })] }); this.onend?.(); }
+    };
+    window.__said = [];
+    speechSynthesis.speak = u => window.__said.push(u.text);
+  });
+  // Press and hold: the mic must NOT open on the keydown itself, or every ⌥-chord would trip it.
+  await page.keyboard.down("AltRight");
+  if (await page.evaluate(() => window.__started)) throw new Error("a tap opened the mic — ⌥ chords would trip it constantly");
+  await page.waitForTimeout(400);
+  if (!(await page.evaluate(() => window.__started))) throw new Error("holding the key never opened the mic");
+  await page.keyboard.up("AltRight");
+  await settle(300);
+  const said = await page.evaluate(() => window.__said.splice(0));
+  if (!said.length) throw new Error(`"what needs me" did nothing`);
+});
+await check("what it heard is on screen, so a misfire is visible", async () => {
+  const strip = await mustSee("#vstrip.show", "the heard-it strip");
+  if (!(await strip.textContent()).includes("what needs me"))
+    throw new Error("the strip does not show the words it acted on");
+});
+await check("a chord is not a held mic", async () => {
+  await page.evaluate(() => { window.__started = 0; });
+  await page.keyboard.down("AltRight");
+  await page.keyboard.press("BracketLeft");   // ⌥[ — a real tab chord this page binds
+  await page.waitForTimeout(400);
+  await page.keyboard.up("AltRight");
+  if (await page.evaluate(() => window.__started)) throw new Error("⌥[ opened the microphone");
+});
+
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
   if (noise.length) throw new Error(noise.join(" | "));

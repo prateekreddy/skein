@@ -341,6 +341,20 @@
     opacity:0; transform:translateY(8px); transition:opacity var(--dur), transform var(--dur); pointer-events:none; }
   #toast.show { opacity:1; transform:none; pointer-events:auto; }
   #toast a { color:var(--accent); text-decoration:none; }
+  /* What it heard, shown while it hears it. A voice command that misfires is invisible otherwise —
+     you would only see the effect and have to guess at the cause — so the words are always on
+     screen before they are acted on. Centred and low, out of the way of the board and the tabs. */
+  #vstrip { position:fixed; left:50%; bottom:18px; transform:translate(-50%,8px); z-index:81;
+    background:var(--overlay); border:1px solid var(--border-3); border-radius:999px; padding:9px 18px;
+    font-size:13px; color:var(--dim); box-shadow:0 12px 40px rgba(0,0,0,.5); display:flex; gap:9px;
+    align-items:center; max-width:min(680px,80vw); opacity:0; pointer-events:none;
+    transition:opacity var(--dur), transform var(--dur); }
+  #vstrip.show { opacity:1; transform:translate(-50%,0); }
+  #vstrip .vdot { width:9px; height:9px; border-radius:50%; background:var(--attn); flex:none; }
+  #vstrip.hot .vdot { animation:vpulse 1s ease-in-out infinite; }
+  #vstrip .vtext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #vstrip.heard .vtext { color:var(--text); }
+  @keyframes vpulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
 
   .dockbody { position:relative; flex:1; min-height:0; }
   .termarea, .diffpane, .sesspane, .filespane, .txpane { position:absolute; inset:0; display:none; }
@@ -2211,6 +2225,238 @@ function beep() {
     o.start(); o.stop(audioCtx.currentTime + .36);
   } catch {}
 }
+// ---------- the ear: hold a key, say a short thing ----------
+//
+// The pair to the mouth, and it only earns its place if it works *without* coming back to the board:
+// you are in another window, skein says a box wants permission, you answer. So this listens through
+// a held key that reaches you wherever you are — including inside a focused terminal, which the
+// fleet keymap deliberately yields every key to.
+//
+// Deliberately a closed set of short commands rather than open dictation. The vocabulary that
+// matters here is not English, it is *this fleet* — ten box names the page already knows — and
+// resolving against a list beats transcribing a name every time. `tell it …` is the one open path,
+// and it sends its words verbatim rather than trying to understand them.
+//
+// Nothing here is hard to undo. No destroy, no merge, no ship: a misheard word must cost a glance,
+// never a branch. The verbs are continue, next, show, open, and read-me-the-inbox.
+let lastSpoken = null;   // the box the mouth last named — what "it" binds to
+let hearing = null;      // the live SpeechRecognition, when one is running
+let heardFinal = "";
+
+const vstrip = () => {
+  let el = document.getElementById("vstrip");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "vstrip";
+    el.innerHTML = `<span class="vdot"></span><span class="vtext"></span>`;
+    document.body.append(el);
+  }
+  return el;
+};
+let vstripT;
+function showHeard(text, state) {
+  const el = vstrip();
+  el.querySelector(".vtext").textContent = text;
+  el.classList.toggle("hot", state === "listening");
+  el.classList.toggle("heard", state !== "listening");
+  el.classList.add("show");
+  clearTimeout(vstripT);
+  if (state !== "listening") vstripT = setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+/// Box names as they might be *said*, matched against a transcript that has none of the punctuation.
+/// Two passes because a name is spelled for reading: `example-box-1` is said "era s six" or "era s6", and
+/// the space is the part no transcriber agrees on — so the second pass removes them from both sides.
+function boxFromWords(text) {
+  const flat = s => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const said = text.toLowerCase();
+  const loose = flat(text);
+  let best = null;
+  for (const b of boxes) {
+    for (const label of [b.name, b.branch || ""]) {
+      if (!label) continue;
+      const spoken = label.toLowerCase().replace(/[-_/]+/g, " ");
+      const hit = said.includes(spoken) || (flat(label).length > 3 && loose.includes(flat(label)));
+      // Longest match wins, so "gadget demo preperation" is not claimed by "gadget demo".
+      if (hit && (!best || label.length > best.label.length)) best = { box: b, label };
+    }
+  }
+  return best?.box || null;
+}
+
+/// Which box a command is about, in the order a person means it.
+///
+/// The point of the ordering is that you rarely have to say a name at all: the mouth just told you
+/// which box is asking, so "it" is that one. Saying `example-box-1` out loud is the thing this design is
+/// most trying to avoid.
+function voiceTarget(text) {
+  const named = boxFromWords(text);
+  if (named) return named;
+  const live = name => boxes.find(b => b.name === name);
+  return (
+    live(lastSpoken) ||
+    live(sel) ||
+    // If exactly one box is owed an answer there is no ambiguity to resolve.
+    (b => (b.length === 1 ? b[0] : null))(
+      boxes.filter(b => ["attn", "error"].includes(groupOf(b.state)))
+    )
+  );
+}
+
+// Longest phrases first, so "continue all" is never eaten by "continue". `needs` marks the verbs
+// that act on one box and therefore have to resolve a target before they can run.
+const VOICE_VERBS = [
+  { say: ["continue all", "continue everything", "resume everything", "all of them"],
+    run: () => { batchResume(); return "continuing everything that only needs a nudge"; } },
+  { say: ["what needs me", "whats waiting", "what is waiting", "read the inbox", "status"],
+    run: () => { sayInbox(); return null; } },
+  { say: ["next", "skip", "next one"],
+    run: () => { nextNeedsYou(); return "next"; } },
+  { say: ["yes", "yeah", "yep", "continue", "proceed", "go ahead", "approve", "do it", "carry on"],
+    needs: true, run: b => { resumeBox(b.name); return `continuing ${b.name}`; } },
+  { say: ["show me", "show", "the diff", "diff"],
+    needs: true, run: b => { openDiff(b.name); return `showing ${b.name}`; } },
+  { say: ["open", "attach", "take me there", "go there"],
+    needs: true, run: b => { openTerminal(b.name); return `opening ${b.name}`; } },
+];
+
+/// `tell it <words>` / `tell <box> <words>` — the one open path, sent verbatim.
+///
+/// Verbatim on purpose: this is the case where the words *are* the content, so anything clever done
+/// to them here is damage. It goes to the same `/resume` the board's continue button uses, which
+/// takes a prompt.
+function voiceTell(text) {
+  const m = text.match(/^tell\s+(.+)$/s);
+  if (!m) return null;
+  let rest = m[1];
+  const named = boxFromWords(rest);
+  if (named) {
+    const spoken = named.name.toLowerCase().replace(/[-_]+/g, " ");
+    const at = rest.toLowerCase().indexOf(spoken);
+    if (at >= 0) rest = rest.slice(0, at) + rest.slice(at + spoken.length);
+  } else {
+    rest = rest.replace(/^(it|that|this|them|him|her|the box)\b/i, "");
+  }
+  // "tell it TO use the real database" — the connective belongs to the sentence, not the prompt.
+  const prompt = rest.replace(/^\s*(to|that)\b/i, "").trim();
+  const box = named || voiceTarget("");
+  if (!box) return { spoken: "I don't know which box you mean" };
+  if (!prompt) return { spoken: "nothing to send" };
+  toast(`sending to ${box.name}…`);
+  fetch(`/api/boxes/${encodeURIComponent(box.name)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  })
+    .then(r => r.json())
+    .then(d => toast(d.ok ? `sent to ${box.name}` : "send failed: " + (d.error || "").split("\n")[0]))
+    .catch(() => toast("send failed"));
+  return { spoken: `told ${box.name}` };
+}
+
+function heard(raw) {
+  // Punctuation is the transcriber's guess at prosody and means nothing to a verb table.
+  const text = raw.toLowerCase().replace(/[.,!?;]+$/g, "").trim();
+  if (!text) return;
+  const told = voiceTell(text);
+  if (told) return showHeard(`“${raw}” → ${told.spoken}`, "done");
+  for (const verb of VOICE_VERBS) {
+    const hit = verb.say.find(phrase => text === phrase || text.startsWith(phrase + " "));
+    if (!hit) continue;
+    if (!verb.needs) {
+      const said = verb.run();
+      return showHeard(said ? `“${raw}” → ${said}` : `“${raw}”`, "done");
+    }
+    const box = voiceTarget(text);
+    if (!box) return showHeard(`“${raw}” → which box?`, "done");
+    return showHeard(`“${raw}” → ${verb.run(box)}`, "done");
+  }
+  // Said plainly rather than guessed at. A voice surface that acts on a maybe is worse than one that
+  // asks again, because the cost of a wrong guess here is a box being sent something.
+  showHeard(`“${raw}” — not a command I know`, "done");
+}
+
+/// Start listening, or do nothing if this browser has no recogniser.
+function listen() {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition || hearing) return;
+  let r;
+  try { r = new Recognition(); } catch { return; }
+  r.lang = "en-US";
+  r.continuous = false;
+  r.interimResults = true;
+  r.maxAlternatives = 1;
+  // On-device when the browser can: it keeps working with the network down, and the words never
+  // leave the machine. Best-effort — where it is unsupported the browser uses its own default, and
+  // a two-second command is the least sensitive thing on this page either way.
+  try { r.processLocally = true; } catch {}
+  // The fleet's own vocabulary. Box names and branches are exactly the words a general recogniser
+  // gets wrong, and exactly the ones skein knows. Proposed rather than shipped, so it is offered and
+  // ignored where it is not understood — resolution against the live board is what actually carries
+  // this, and it works either way.
+  try {
+    if (window.SpeechRecognitionPhrase && r.phrases) {
+      for (const b of boxes) r.phrases.push(new SpeechRecognitionPhrase(b.name.replace(/[-_]+/g, " "), 3.0));
+    }
+  } catch {}
+  heardFinal = "";
+  r.onresult = e => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) heardFinal += t;
+      else interim += t;
+    }
+    showHeard(heardFinal + interim || "listening…", "listening");
+  };
+  r.onerror = e => {
+    hearing = null;
+    if (e.error === "not-allowed") showHeard("the microphone is blocked for this page", "done");
+    else if (e.error !== "aborted" && e.error !== "no-speech") showHeard(`could not listen (${e.error})`, "done");
+    else vstrip().classList.remove("show");
+  };
+  r.onend = () => {
+    hearing = null;
+    if (heardFinal.trim()) heard(heardFinal.trim());
+    else vstrip().classList.remove("show");
+  };
+  hearing = r;
+  try { r.start(); showHeard("listening…", "listening"); }
+  catch { hearing = null; }
+}
+function stopListening() {
+  // `stop` rather than `abort`: it finalises what was already said instead of discarding it, which
+  // is the difference between releasing the key and changing your mind.
+  try { hearing?.stop(); } catch {}
+}
+
+// Push to talk on a held Right-⌥, and it lives in its own handler for the reason the tab chords
+// below do: the fleet keymap yields every key to a focused terminal, and answering a box *while
+// heads-down in another one* is the entire use.
+//
+// Held, not tapped. The delay is what keeps this out of the way of ⌥-chords — ⌥[ and friends press
+// Alt too — since a chord's second key arrives long before the window elapses and cancels it. It
+// also happens to be how push-to-talk should feel.
+let pttTimer = null;
+const PTT_HOLD = 260;
+document.addEventListener("keydown", e => {
+  if (e.code !== "AltRight" || e.repeat) {
+    // Any other key while Alt is down means a chord, not a held mic.
+    if (pttTimer && e.code !== "AltRight") { clearTimeout(pttTimer); pttTimer = null; }
+    return;
+  }
+  if (pttTimer || hearing) return;
+  pttTimer = setTimeout(() => { pttTimer = null; listen(); }, PTT_HOLD);
+});
+document.addEventListener("keyup", e => {
+  if (e.code !== "AltRight") return;
+  if (pttTimer) { clearTimeout(pttTimer); pttTimer = null; }
+  stopListening();
+});
+// Losing the window with the key down would otherwise leave the mic open for as long as the tab
+// lives — the one failure of a push-to-talk that nobody notices until they hear themselves back.
+window.addEventListener("blur", stopListening);
+
 // ---------- the mouth: skein says which box needs you ----------
 //
 // The point is the one moment skein exists for: "which of my agents needs me right now" — answered
@@ -2362,7 +2608,12 @@ function notify(snapshot) {
     }
     prevState[b.name] = g;
   }
-  if (turned.length === 1) say(utteranceFor(turned[0][0], turned[0][1]));
+  if (turned.length === 1) {
+    // What "it" means from here on. The whole point of announcing a box by name is that you should
+    // not then have to say that name back — "yes" and "show me" are what a person actually says.
+    lastSpoken = turned[0][0].name;
+    say(utteranceFor(turned[0][0], turned[0][1]));
+  }
   else if (turned.length > 1) {
     // Lead with what is owed rather than with the total: two finishing and one blocked is one
     // actionable fact, and "three boxes changed" buries it.
@@ -2377,7 +2628,10 @@ function notify(snapshot) {
 function sayInbox() {
   const need = boxes.filter(b => ["error", "attn"].includes(groupOf(b.state)));
   if (!need.length) return say("Nothing needs you.");
-  if (need.length === 1) return say(utteranceFor(need[0], groupOf(need[0].state)));
+  if (need.length === 1) {
+    lastSpoken = need[0].name;
+    return say(utteranceFor(need[0], groupOf(need[0].state)));
+  }
   say(`${need.length} boxes need you. ` + need.map(b => sayName(b.name)).join(", ") + ".");
 }
 function pushNote(body, tag) {
@@ -2497,6 +2751,9 @@ function commands() {
     { sec:"Actions", label:(alertsOn?"Disable":"Enable")+" desktop alerts", run:()=>document.getElementById("alerts").click() },
     { sec:"Actions", label:(voiceOn?"Silence":"Speak")+" boxes that need you", run:()=>document.getElementById("voice").click() },
     { sec:"Actions", label:"Read what needs me", run:sayInbox },
+    // Click-to-talk for the same commands the held key takes. `continuous:false` ends the
+    // recognition on a pause by itself, so this needs no second click to stop it.
+    { sec:"Actions", label:"Listen for a command", run:listen, meta:"hold ⌥ right" },
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });
