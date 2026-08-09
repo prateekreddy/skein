@@ -1355,8 +1355,20 @@ pub fn ensure_box_known_hosts(name: &str) {
 /// the seam that makes the launch path testable is also the seam that hid its first real step.
 pub fn ensure_fleet_root(sandbox: &str) -> Result<(), String> {
     let root = sh_quote(&fleet_root());
+    // Escalate only when there is something to escalate for. `/boxes` sits at the filesystem root
+    // where an unprivileged mkdir cannot reach, so in production this still falls through to sudo
+    // exactly as before — but a fleet root anywhere writable is now made without it.
+    //
+    // That is not a tidiness argument, it is a testability one. `$SKEIN_FLEET_ROOT` points the
+    // integration test at a temp dir specifically so the launch path can be exercised without a
+    // sandbox, and reaching for sudo regardless made the whole test unrunnable anywhere sudo is not
+    // available — which now includes every box, since a box is a user namespace and sudo cannot work
+    // in one. The test that guards `box-session.sh` was therefore red exactly where that file is
+    // edited. `mkdir -p` on an existing directory succeeds, so the second `-w` is what keeps an
+    // unwritable-but-present root falling through rather than being called done.
     let script = format!(
         "[ -w {root} ] && exit 0; \
+         mkdir -p {root} 2>/dev/null && [ -w {root} ] && exit 0; \
          sudo mkdir -p {root} && sudo chown \"$(id -u):$(id -g)\" {root} && chmod 755 {root}"
     );
     own_sandbox(sandbox)
@@ -3329,6 +3341,23 @@ static LIVENESS_GATE: crate::Gate<std::collections::HashMap<String, bool>> = cra
 ///
 /// Every box at once because the board refreshes all of them, and a stopped sandbox answers for none
 /// of them: an empty map means "cannot tell", which the caller reports rather than inventing.
+/// Forget the remembered sweep, so the next caller waits for the truth instead of being handed the
+/// last picture.
+///
+/// skein already does this internally wherever it changes what the sweep would see — starting a box,
+/// restarting a dead session, resizing the fleet. This exposes it for the one case that is outside
+/// skein: something *else* stopped a box, so the gate is holding an answer that is not merely stale
+/// but wrong, and a warm gate serves that answer immediately while refreshing behind the caller.
+/// That behaviour is deliberate and worth keeping — it is what stops the board blanking on a slow
+/// tick — which is exactly why the caller who knows better has to say so.
+///
+/// The integration test needs it because `cfg!(test)` is false from `tests/`: the library it links
+/// was built without it, so the "no gate under test" escape inside this module does not apply there,
+/// and one test was being served the previous test's fleet.
+pub fn forget_fleet_liveness() {
+    LIVENESS_GATE.invalidate();
+}
+
 pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {

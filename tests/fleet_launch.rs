@@ -590,9 +590,14 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // read a real credential file, which is exactly how it was caught.
     let sandbox_home = root.join("sandbox-home");
     fs::create_dir_all(sandbox_home.join(".claude")).unwrap();
+    // Shaped like the real thing, because the sync now reads it rather than moving it about: it
+    // tells a login from the husk a logout leaves, and it carries only the login across. A
+    // placeholder like `{"tok":"…"}` passed straight through the old copy and would say nothing
+    // about either. The `mcpOAuth` block is what the sandbox must KEEP when a box's login arrives —
+    // those grants are per-repo, and copying the file whole used to discard the receiver's.
     fs::write(
         sandbox_home.join(".claude/.credentials.json"),
-        br#"{"tok":"SEEDED"}"#,
+        br#"{"claudeAiOauth":{"accessToken":"SEEDED","refreshToken":"r"},"mcpOAuth":{"sync|sandbox":{"accessToken":"GRANT-SHARED"}}}"#,
     )
     .unwrap();
     let real_home = std::env::var("HOME").unwrap_or_default();
@@ -677,19 +682,32 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // A re-login inside the box, made just before the session dies: it is newer than the sandbox's
     // copy, so the restart must carry it back — otherwise a rotated token means one login per box.
     let box_cred = PathBuf::from(format!("{}/home/.claude/.credentials.json", box_root(name)));
-    assert_eq!(
-        fs::read_to_string(&box_cred).unwrap_or_default(),
-        r#"{"tok":"SEEDED"}"#,
-        "a new box inherits the sandbox's login rather than asking for its own"
+    let seeded = fs::read_to_string(&box_cred).unwrap_or_default();
+    assert!(
+        seeded.contains("SEEDED"),
+        "a new box inherits the sandbox's login rather than asking for its own: {seeded}"
     );
     std::thread::sleep(Duration::from_millis(1100)); // mtime granularity, not a race
-    fs::write(&box_cred, br#"{"tok":"RELOGIN"}"#).unwrap();
+                                                     // A re-login, and a grant of this box's own alongside it. Both are written here because the two
+                                                     // must travel differently: the login belongs to the person and goes everywhere, the grant
+                                                     // belongs to this box's repository and goes nowhere.
+    fs::write(
+        &box_cred,
+        br#"{"claudeAiOauth":{"accessToken":"RELOGIN","refreshToken":"r"},"mcpOAuth":{"sync|box":{"accessToken":"GRANT-MINE"}}}"#,
+    )
+    .unwrap();
     place
         .exec(
             &format!("tmux -S {} kill-server", box_sock(name)),
             Duration::from_secs(30),
         )
         .ok();
+    // The server was killed behind skein's back, which is the one thing the gate cannot know. A warm
+    // gate hands back its last picture immediately and refreshes behind the caller — deliberately,
+    // so the board never blanks on a slow tick — so without this the assertion reads whatever the
+    // *previous* test left there. Skein invalidates at every point it changes the fleet itself; this
+    // is that, for a change skein did not make.
+    forget_fleet_liveness();
     assert_eq!(
         fleet_liveness().get(name).copied(),
         Some(false),
@@ -725,10 +743,22 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // ---- one login, reused by every box, in whichever direction it was made ----
     // Seeding alone answers "log in once" only for a box that has never run. A re-login inside a
     // box must reach the next box too, or a rotated token quietly means one login per box.
-    assert_eq!(
-        fs::read_to_string(sandbox_home.join(".claude/.credentials.json")).unwrap_or_default(),
-        r#"{"tok":"RELOGIN"}"#,
-        "a login made inside a box must become the seed for the next one"
+    let reconciled =
+        fs::read_to_string(sandbox_home.join(".claude/.credentials.json")).unwrap_or_default();
+    assert!(
+        reconciled.contains("RELOGIN"),
+        "a login made inside a box must become the seed for the next one: {reconciled}"
+    );
+    // The other half, and the one that fails silently: the login travelled, and nothing else did.
+    // Copying the file whole would have handed the sandbox this box's per-repo grant and destroyed
+    // the sandbox's own — surfacing much later as an MCP server asking to be authorised again.
+    assert!(
+        reconciled.contains("GRANT-SHARED"),
+        "the sandbox's own MCP grant was destroyed by a login sync: {reconciled}"
+    );
+    assert!(
+        !reconciled.contains("GRANT-MINE"),
+        "one box's per-repo MCP grant escaped into the shared copy: {reconciled}"
     );
 
     let _ = stop_box(name);

@@ -131,6 +131,16 @@ runs again if it failed.
 
 ## Verification gaps
 
+### `cfg!(test)` is false in `tests/`, so process-global gates leak between integration tests
+
+The library an integration test links was built without `cfg(test)`, so every "no gate under test"
+escape inside `src/` is inactive there. A warm gate then serves one test the previous test's answer
+— immediately, while refreshing behind the caller, which is the behaviour that stops the board
+blanking and is worth keeping.
+
+`fleet_liveness` is handled (`forget_fleet_liveness`). The other gates — `FLEET_GATE`, `DISK_GATE`,
+resources — have the same exposure the moment an integration test touches them.
+
 ### The browser smoke test cannot run in a box
 
 `tests/ui/smoke.mjs` needs chromium's system libraries, and a box has no working `sudo` to install
