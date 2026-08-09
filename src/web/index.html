@@ -754,6 +754,7 @@
             <span class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span>
             <span class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></span>
             <span class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span>
+            <span class="kbtn ghost" id="voice" title="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></span>
             <span class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
             <span class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)">⌘K</span>
             <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
@@ -2210,6 +2211,119 @@ function beep() {
     o.start(); o.stop(audioCtx.currentTime + .36);
   } catch {}
 }
+// ---------- the mouth: skein says which box needs you ----------
+//
+// The point is the one moment skein exists for: "which of my agents needs me right now" — answered
+// while you are heads-down in an editor on the other monitor, without you looking at anything. The
+// board already knows *when* (the transition below) and *what* (`headline`, the box's actual ask),
+// so speaking is only a matter of saying it well.
+//
+// `speechSynthesis` rather than anything bought: it is already in the browser, it uses the Mac's own
+// voices, it costs nothing per minute, it needs no key, and it keeps working with the network down.
+//
+// Silence is the design. It speaks on a real transition into needing you, only while the cockpit is
+// unfocused, at most one sentence per tick, and a burst becomes a count instead of a monologue. A
+// narrator that reads every state change gets switched off within the hour and never switched on.
+let voiceOn = false;
+try { voiceOn = localStorage.getItem("skein.voice") === "1"; } catch {}
+
+// Prefer a voice that runs on the machine: no network, no latency, and it still works on a plane.
+// Named preferences first because the default en-US voice is not always the nicest one installed.
+const VOICE_PICKS = ["Samantha", "Alex", "Ava", "Allison", "Daniel", "Karen", "Moira"];
+let pickedVoice = null;
+function pickVoice() {
+  if (pickedVoice) return pickedVoice;
+  let all = [];
+  try { all = speechSynthesis.getVoices() || []; } catch {}
+  // Empty on the first call in most browsers — the list arrives asynchronously, and `voiceschanged`
+  // below re-runs this. Returning null meanwhile is fine: the utterance just uses the default.
+  if (!all.length) return null;
+  const en = all.filter(v => /^en\b/i.test(v.lang || ""));
+  const pool = en.length ? en : all;
+  for (const want of VOICE_PICKS) {
+    const hit = pool.find(v => (v.name || "").includes(want));
+    if (hit) return (pickedVoice = hit);
+  }
+  return (pickedVoice = pool.find(v => v.localService) || pool[0] || null);
+}
+try { speechSynthesis.addEventListener("voiceschanged", () => { pickedVoice = null; pickVoice(); }); } catch {}
+
+// A box name is written to be read, not spoken: `example-box-3` said literally is three
+// words run together, and `example-box-1` comes out as a word. Hyphens and underscores become pauses, and
+// a letter/digit boundary gets a space so "S6" is "S 6" rather than a syllable.
+const sayName = n => String(n || "").replace(/[-_]+/g, " ").replace(/([A-Za-z])(\d)/g, "$1 $2");
+
+// Headlines are agent prose, and agent prose is full of things that are unbearable out loud: absolute
+// paths, URLs, backticked identifiers, markdown. Speaking `/boxes/example-box-6/tree/src/place.rs`
+// costs eight seconds and communicates nothing — the basename communicates all of it. This is the
+// single biggest difference between a voice that helps and one that gets muted.
+function forSpeech(text) {
+  let s = String(text || "");
+  s = s.replace(/`+/g, " ");                                  // code spans: the ticks are noise
+  s = s.replace(/\*\*?|__|~~/g, " ");                          // markdown emphasis
+  s = s.replace(/https?:\/\/\S+/g, " a link ");                // nobody wants a URL read out
+  // A path becomes its basename. Deliberately not every token with a slash in it — "and/or" and
+  // "24/7" are words, not paths — so a token qualifies only by looking like one: rooted at /, ~/ or
+  // ./, or ending in something with a file extension.
+  s = s.replace(/\S+/g, token => {
+    if (!token.includes("/")) return token;
+    const last = token.split("/").filter(Boolean).pop() || token;
+    const isPath = /^[~.]?\//.test(token) || /^[\w.-]+\.[A-Za-z]{1,8}$/.test(last);
+    return isPath ? last : token;
+  });
+  s = s.replace(/\s+/g, " ").trim();
+  // Close the gap the strippers left. A backtick becomes a space so `a`+`b` does not fuse into one
+  // word — but a span that ended right before punctuation then reads as "build ?", and a speech
+  // engine hears that space as a pause in the wrong place.
+  s = s.replace(/\s+([,.;:!?])/g, "$1");
+  // One breath. A long ask is a reason to look, not something to recite — the row on the board has
+  // the full text, and cutting at a sentence boundary keeps what was said grammatical.
+  if (s.length > 160) {
+    const cut = s.slice(0, 160);
+    const stop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
+    s = (stop > 60 ? cut.slice(0, stop + 1) : cut.replace(/\s+\S*$/, "")) + "…";
+  }
+  return s;
+}
+
+function say(text) {
+  if (!voiceOn || !text) return;
+  try {
+    // A queue one deep. Ten boxes flipping while you were at lunch must not become ten sentences
+    // read to an empty room — and cancelling instead would truncate whatever is mid-word, which
+    // sounds broken rather than busy.
+    if (speechSynthesis.pending) return;
+    const u = new SpeechSynthesisUtterance(text);
+    // Slightly quick: this is a status line, not a story, and the default cadence feels sedated.
+    u.rate = 1.08;
+    u.volume = 0.85;
+    const v = pickVoice();
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  } catch {}
+}
+
+// What a box that just stopped is actually asking. The kind matters more than the words: "wants
+// permission" and "needs you to sign in" want completely different things from you, and a single
+// "needs a decision" for both is what makes you go and look — which is the cost this is removing.
+const VERB = {
+  permission: "wants permission",
+  question: "asks",
+  trust: "needs you to trust the folder",
+  auth: "needs you to sign in",
+};
+function utteranceFor(b, group) {
+  const name = sayName(b.name);
+  const head = forSpeech(b.headline);
+  if (group === "error") return head ? `${name} hit an error. ${head}` : `${name} hit an error.`;
+  if (group === "done") return `${name} finished.`;
+  const verb = VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
+  // Trust and auth are self-explaining — appending the box's last words to them adds length and no
+  // information, because the ask is the state itself rather than anything the agent said.
+  if (!head || b.blocked_kind === "trust" || b.blocked_kind === "auth") return `${name} ${verb}.`;
+  return `${name} ${verb}. ${head}`;
+}
+
 // setFavicon does a synchronous canvas draw + toDataURL PNG encode — real main-thread cost (tens
 // of ms), unlike the near-free DOM writes elsewhere in notify(). notify() runs on every 2s fleet
 // tick regardless of whether anything changed, so without this guard that encode cost was paid every
@@ -2226,17 +2340,45 @@ function notify(snapshot) {
   // `!hasFocus()`, not `document.hidden`: the all-day case is skein visible on one monitor while the
   // dev works in an editor on another — the tab is visible but unfocused, and still needs the ping.
   const away = !document.hasFocus();
+  // Collected rather than spoken inline: several boxes can turn in one 2s tick, and reading four
+  // sentences to an empty room is how a useful voice becomes an intolerable one. One turn is said
+  // in full; more than one becomes a count, which is all you can act on anyway.
+  const turned = [];
   for (const b of snapshot) {
     const g = groupOf(b.state), was = prevState[b.name];
     // `was &&`: a tab (re)opened mid-fleet starts with an empty prevState — without it, restoring
     // the board in the background fired a burst of notifications for every already-paused box.
-    if (was && g !== was && alertsOn && away) {
-      if (g === "attn") { pushNote(`${b.name} needs a decision`, b.name); beep(); }
-      else if (g === "error") { pushNote(`${b.name} hit an error`, b.name); beep(); }
-      else if (g === "done") pushNote(`${b.name} finished`, b.name);
+    if (was && g !== was) {
+      if (alertsOn && away) {
+        if (g === "attn") { pushNote(`${b.name} needs a decision`, b.name); beep(); }
+        else if (g === "error") { pushNote(`${b.name} hit an error`, b.name); beep(); }
+        else if (g === "done") pushNote(`${b.name} finished`, b.name);
+      }
+      // Voice is gated on its own switch, not on `alertsOn`: notifications need a permission the
+      // browser may have refused, and speaking needs none — tying them together would silence the
+      // half that still works. Still only while away, because a board you are looking at has
+      // already told you.
+      if (voiceOn && away && ["attn", "error", "done"].includes(g)) turned.push([b, g]);
     }
     prevState[b.name] = g;
   }
+  if (turned.length === 1) say(utteranceFor(turned[0][0], turned[0][1]));
+  else if (turned.length > 1) {
+    // Lead with what is owed rather than with the total: two finishing and one blocked is one
+    // actionable fact, and "three boxes changed" buries it.
+    const owed = turned.filter(([, g]) => g !== "done").length;
+    say(owed ? `${owed} of ${turned.length} boxes need you.` : `${turned.length} boxes finished.`);
+  }
+}
+
+// Read the inbox on demand — the same sentence the mouth would have spoken, for when you *are*
+// looking at the board but do not want to read it, and as the honest way to hear what it sounds
+// like before trusting it to speak on its own.
+function sayInbox() {
+  const need = boxes.filter(b => ["error", "attn"].includes(groupOf(b.state)));
+  if (!need.length) return say("Nothing needs you.");
+  if (need.length === 1) return say(utteranceFor(need[0], groupOf(need[0].state)));
+  say(`${need.length} boxes need you. ` + need.map(b => sayName(b.name)).join(", ") + ".");
 }
 function pushNote(body, tag) {
   if (Notification.permission !== "granted") return;
@@ -2263,6 +2405,30 @@ document.getElementById("alerts").addEventListener("click", async () => {
   el.style.color = alertsOn ? "var(--done)" : "";
   el.title = alertsOn ? "Desktop alerts on — you'll be pinged when a box needs you" : "Desktop alerts when a box needs you";
 });
+function paintVoice() {
+  const el = document.getElementById("voice");
+  if (!el) return;
+  el.style.color = voiceOn ? "var(--done)" : "";
+  el.title = voiceOn
+    ? "Speaking when a box needs you — click to silence"
+    : "Say out loud when a box needs you";
+}
+document.getElementById("voice").addEventListener("click", () => {
+  voiceOn = !voiceOn;
+  try { localStorage.setItem("skein.voice", voiceOn ? "1" : "0"); } catch {}
+  paintVoice();
+  if (voiceOn) {
+    // Spoken from inside the click on purpose, and it is not just feedback: Safari will not start
+    // speech that did not originate in a user gesture, and every later utterance fires from a timer
+    // while the tab is unfocused. Saying something here is what makes those audible at all — the
+    // same trap the AudioContext above is primed against.
+    say("Voice on.");
+  } else {
+    // Stop mid-word rather than finishing the sentence: the click means "be quiet now".
+    try { speechSynthesis.cancel(); } catch {}
+  }
+});
+paintVoice();
 // Refocusing acknowledges the alert styling but must not lie: keep the live count in the title.
 window.addEventListener("focus", () => { notify(boxes); });
 
@@ -2329,6 +2495,8 @@ function commands() {
     { sec:"Actions", label:"Broadcast to all boxes…", run:()=>{ openMailbox(); setTimeout(()=>{ document.getElementById("mbx-to").value="broadcast"; document.getElementById("mbx-body").focus(); },50); } },
     { sec:"Actions", label:"Jump to next box that needs you", run:nextNeedsYou, meta:"]" },
     { sec:"Actions", label:(alertsOn?"Disable":"Enable")+" desktop alerts", run:()=>document.getElementById("alerts").click() },
+    { sec:"Actions", label:(voiceOn?"Silence":"Speak")+" boxes that need you", run:()=>document.getElementById("voice").click() },
+    { sec:"Actions", label:"Read what needs me", run:sayInbox },
     { sec:"Actions", label:"Reconnect live stream", run:connect },
   ];
   if (sessions.size) acts.unshift({ sec:"Actions", label:"Close all terminal sessions", run:()=>[...sessions.keys()].forEach(closeSession) });

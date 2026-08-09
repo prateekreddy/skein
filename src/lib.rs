@@ -5061,6 +5061,40 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
     }
 
+    /// The cockpit speaks the box's *own ask*, and it speaks on its own switch.
+    ///
+    /// Two things about the mouth fail silently, which is the worst way for a voice to fail — you
+    /// cannot tell "nothing needs me" from "it stopped talking". Both are one careless edit away:
+    ///
+    /// 1. **The words.** Speaking `headline` is the whole point — "example-box-1 wants permission. Run
+    ///    rm -rf build?" is actionable where "example-box-1 needs a decision" is only a reason to go and
+    ///    look, which is the trip this feature exists to save. Folding it back onto the notification
+    ///    text would sound identical to someone who never heard the good version.
+    /// 2. **The switch.** Notifications need a browser permission that may have been refused;
+    ///    speaking needs none. Gating voice on `alertsOn` would silence the half that still works,
+    ///    for people who had already said no to the half that does not.
+    #[test]
+    fn the_cockpit_speaks_the_boxs_own_ask_on_a_switch_of_its_own() {
+        let page = include_str!("web/index.html");
+        let view = BoxView {
+            headline: Some("Run rm -rf build?".into()),
+            ..BoxView::default()
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(
+            json.contains("\"headline\":\"Run rm -rf build?\""),
+            "the fleet snapshot stopped carrying the ask, so there is nothing to say: {json}"
+        );
+        assert!(
+            page.contains("b.headline") && page.contains("forSpeech"),
+            "the cockpit no longer speaks the box's own words"
+        );
+        assert!(
+            page.contains("voiceOn && away"),
+            "voice lost its own switch — gated on alerts, it dies wherever notifications were refused"
+        );
+    }
+
     /// The button only appears when there is something to deliver, so the signal behind it has to be
     /// quiet by default — an indicator that is always lit is one nobody reads.
     #[test]

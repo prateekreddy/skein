@@ -562,6 +562,83 @@ await check("the result lands on the row as a chip you can reopen", async () => 
   await page.keyboard.press("Escape");
 });
 
+// ---------- the mouth ----------
+// The one section here that does not assert something visible, because there is nothing to see: the
+// output is sound. Everything else about the rule still holds — this is the real page in a real
+// browser running the real `notify()`, with only the speaker itself replaced by a recorder. A stub
+// of the page's own logic would agree with whatever the page happened to do.
+console.log("\nvoice");
+const spoken = () => page.evaluate(() => window.__said.splice(0));
+await check("the speaker is wired to a switch of its own", async () => {
+  await page.evaluate(() => {
+    window.__said = [];
+    // Record instead of speak. Headless Chromium has no voices, so a real utterance would be
+    // silently dropped and every assertion below would pass on an empty room.
+    speechSynthesis.speak = u => window.__said.push(u.text);
+    Object.defineProperty(speechSynthesis, "pending", { get: () => false, configurable: true });
+    // The board only speaks while you are looking elsewhere, which in a headless run is ambiguous —
+    // pin it, so this tests the announcement and not Playwright's idea of focus.
+    document.hasFocus = () => false;
+  });
+  await page.click("#voice");
+  const said = await spoken();
+  if (!said.length) throw new Error("turning voice on said nothing — Safari needs that gesture to speak later");
+  if (!/voice on/i.test(said[0])) throw new Error(`expected a confirmation, got ${JSON.stringify(said[0])}`);
+});
+await check("a box that starts asking says what it is asking", async () => {
+  const said = await page.evaluate(() => {
+    // Two snapshots: the first seeds the prior state (a fresh tab must not announce a fleet that
+    // was already paused), the second is the turn.
+    const working = [{ name: "example-box-1", state: "working", pause: "none" }];
+    const asking = [{ name: "example-box-1", state: "needs-input", pause: "ask", blocked_kind: "permission",
+                      headline: "Run `rm -rf /boxes/smoke/tree/build`?" }];
+    notify(working); window.__said.length = 0;
+    notify(asking);
+    return window.__said.slice();
+  });
+  if (said.length !== 1) throw new Error(`expected one sentence, got ${JSON.stringify(said)}`);
+  const line = said[0];
+  if (!/era s 6/i.test(line)) throw new Error(`the name is unspoken or unreadable: ${JSON.stringify(line)}`);
+  if (!/wants permission/.test(line)) throw new Error(`the kind of ask is missing: ${JSON.stringify(line)}`);
+  if (!/rm -rf build/.test(line)) throw new Error(`the ask itself is missing or the path was read out: ${JSON.stringify(line)}`);
+  if (/`|\/boxes\//.test(line)) throw new Error(`unspeakable text survived: ${JSON.stringify(line)}`);
+});
+await check("a burst becomes a count, not a monologue", async () => {
+  const said = await page.evaluate(() => {
+    const calm = ["a", "b", "c"].map(n => ({ name: n, state: "working", pause: "none" }));
+    const turned = [{ name: "a", state: "needs-input", pause: "ask", headline: "one?" },
+                    { name: "b", state: "needs-input", pause: "ask", headline: "two?" },
+                    { name: "c", state: "done", pause: "none" }];
+    notify(calm); window.__said.length = 0;
+    notify(turned);
+    return window.__said.slice();
+  });
+  if (said.length !== 1) throw new Error(`a burst must collapse to one utterance, got ${JSON.stringify(said)}`);
+  if (!/2 of 3 boxes need you/.test(said[0])) throw new Error(`expected the owed count, got ${JSON.stringify(said[0])}`);
+});
+await check("silence when nothing turned, and when you are looking at the board", async () => {
+  const said = await page.evaluate(() => {
+    const asking = [{ name: "example-box-1", state: "needs-input", pause: "ask", headline: "still?" }];
+    notify(asking); window.__said.length = 0;
+    notify(asking);                       // same state twice: nothing turned, nothing to say
+    document.hasFocus = () => true;
+    notify([{ name: "example-box-1", state: "done", pause: "none" }]);   // a real turn, but you are here
+    document.hasFocus = () => false;
+    return window.__said.slice();
+  });
+  if (said.length) throw new Error(`it spoke when it should not have: ${JSON.stringify(said)}`);
+});
+await check("the switch silences it", async () => {
+  await page.click("#voice");            // off
+  const said = await page.evaluate(() => {
+    window.__said.length = 0;
+    notify([{ name: "example-box-1", state: "working", pause: "none" }]);
+    notify([{ name: "example-box-1", state: "needs-input", pause: "ask", headline: "anything?" }]);
+    return window.__said.slice();
+  });
+  if (said.length) throw new Error(`silenced and still talking: ${JSON.stringify(said)}`);
+});
+
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
   if (noise.length) throw new Error(noise.join(" | "));
