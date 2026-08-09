@@ -1139,12 +1139,139 @@ async fn api_upload(
 /// finite — this keeps a runaway (or fat-fingered) upload from filling the sandbox's disk.
 const UPLOAD_CAP: u64 = 2 * 1024 * 1024 * 1024;
 
+/// How long one attachment may take end to end. Generous, because the limit that matters is the
+/// user's patience and their upstairs bandwidth — a 900 MB video over a slow link is a legitimate
+/// upload, not a stall. It exists so that a box which stops reading cannot hold the connection (and
+/// the agent's child) forever.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Where an upload's bytes go: the in-sandbox agent when there is one, `sbx exec -i` when there is
+/// not. Both stream, so neither the host nor the box holds the whole file; the difference is only
+/// which channel into the sandbox carries it — and which of the two still answers during a stall.
+enum Sink {
+    /// The agent's connection, driven from a blocking thread.
+    ///
+    /// A thread and a channel rather than a direct call because [`skein::AgentWrite`] is
+    /// synchronous — it owns a plain `TcpStream` — and writing to it from this async loop would
+    /// block a tokio worker for the length of the upload. That is the freeze this file already
+    /// documents twice: every terminal websocket scheduled on that worker starves until it ends.
+    /// The channel is bounded, so backpressure still reaches the browser rather than the queue
+    /// growing to the size of the file.
+    Agent {
+        chunks: tokio::sync::mpsc::Sender<Option<Vec<u8>>>,
+        done: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    },
+    Child {
+        child: tokio::process::Child,
+        stdin: tokio::process::ChildStdin,
+    },
+}
+
+impl Sink {
+    /// Feed the agent from a blocking thread. `None` on the channel is the end marker: the writer
+    /// has to tell "that was everything" from "the caller gave up", because only the first commits.
+    fn over(write: skein::AgentWrite) -> Sink {
+        let (chunks, mut pieces) = tokio::sync::mpsc::channel::<Option<Vec<u8>>>(8);
+        let done = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let mut write = write;
+            while let Some(piece) = pieces.blocking_recv() {
+                match piece {
+                    Some(chunk) => write.push(&chunk)?,
+                    None => return write.finish(),
+                }
+            }
+            // The sender went away without ending the body. Dropping `write` here closes the
+            // connection mid-chunk, which is what tells the agent to kill the half-written file.
+            Err("upload abandoned".into())
+        });
+        Sink::Agent {
+            chunks,
+            done: Some(done),
+        }
+    }
+
+    async fn push(&mut self, chunk: &[u8]) -> Result<(), String> {
+        use tokio::io::AsyncWriteExt as _;
+        match self {
+            Sink::Agent { chunks, done } => {
+                if chunks.send(Some(chunk.to_vec())).await.is_ok() {
+                    return Ok(());
+                }
+                // The writer is gone, so it failed — and *its* error says why ("No space left on
+                // device"), where this end only knows that a channel closed.
+                match Self::verdict(done.take()).await {
+                    Err(e) => Err(e),
+                    Ok(()) => Err("the write into the box ended early".into()),
+                }
+            }
+            Sink::Child { stdin, .. } => stdin
+                .write_all(chunk)
+                .await
+                .map_err(|e| format!("writing file to box: {e}")),
+        }
+    }
+
+    async fn finish(self) -> Result<(), String> {
+        match self {
+            Sink::Agent { chunks, done } => {
+                // A closed channel is not an error to report here: the writer failed, and joining
+                // it below produces the reason.
+                let _ = chunks.send(None).await;
+                Self::verdict(done).await
+            }
+            Sink::Child { child, stdin } => {
+                use tokio::io::AsyncWriteExt as _;
+                let mut stdin = stdin;
+                stdin.shutdown().await.ok();
+                drop(stdin); // EOF for `cat`
+                let out = child
+                    .wait_with_output()
+                    .await
+                    .map_err(|e| format!("sbx exec failed: {e}"))?;
+                if out.status.success() {
+                    return Ok(());
+                }
+                Err(format!(
+                    "sbx exec failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ))
+            }
+        }
+    }
+
+    /// Give up, leaving nothing running. The partial file is removed by the caller either way.
+    async fn abandon(self) {
+        match self {
+            Sink::Agent { chunks, done } => {
+                drop(chunks);
+                if let Some(handle) = done {
+                    let _ = handle.await;
+                }
+            }
+            Sink::Child { mut child, stdin } => {
+                drop(stdin);
+                let _ = child.kill().await;
+            }
+        }
+    }
+
+    async fn verdict(
+        done: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    ) -> Result<(), String> {
+        match done {
+            Some(handle) => handle
+                .await
+                .unwrap_or_else(|e| Err(format!("the write into the box failed: {e}"))),
+            None => Err("the write into the box failed".into()),
+        }
+    }
+}
+
 async fn stream_upload(
     name: &str,
     headers: &axum::http::HeaderMap,
     body: axum::body::Body,
 ) -> Result<String, String> {
-    use tokio::io::AsyncWriteExt as _;
     let hdr = |k: &'static str| {
         headers
             .get(k)
@@ -1169,16 +1296,45 @@ async fn stream_upload(
         rel = format!("paste.{ext}");
     }
     let (dir, path) = skein::drop_dest(&batch, &rel)?;
-    // The argv carries its own program: where the box lives decides that too.
-    let argv = skein::box_write_argv(name, &dir, &path)?;
-    let mut child = tokio::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("sbx exec not runnable: {e}"))?;
-    let mut sink = child.stdin.take().ok_or("no stdin pipe")?;
+
+    // Which channel carries it is decided here, before a single byte is read, and that ordering is
+    // the whole reason it is decided on the declared length rather than the real one: an upload is
+    // read off a network socket exactly once, so by the time the truth is known there is no second
+    // copy to fall back with. A browser sending a file or a blob always declares it; anything that
+    // does not, or that declares more than the agent will carry, takes `sbx exec -i`, which streams
+    // from a pipe and has no ceiling.
+    let declared: Option<u64> = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+    let carried = match declared {
+        Some(n) if n <= skein::AGENT_WRITE_CAP => {
+            let (box_name, dir, path) = (name.to_string(), dir.clone(), path.clone());
+            tokio::task::spawn_blocking(move || {
+                skein::begin_box_write(&box_name, &dir, &path, UPLOAD_TIMEOUT)
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        _ => None,
+    };
+    let mut sink = match carried {
+        Some(write) => Sink::over(write),
+        None => {
+            // The argv carries its own program: where the box lives decides that too.
+            let argv = skein::box_write_argv(name, &dir, &path)?;
+            let mut child = tokio::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("sbx exec not runnable: {e}"))?;
+            let stdin = child.stdin.take().ok_or("no stdin pipe")?;
+            Sink::Child { child, stdin }
+        }
+    };
     let mut stream = body.into_data_stream();
     let mut total: u64 = 0;
     // Collect the failure instead of returning from inside the loop: the partial file has to be
@@ -1198,28 +1354,17 @@ async fn stream_upload(
             failed = Some(format!("too large (cap {} MB)", UPLOAD_CAP / (1024 * 1024)));
             break;
         }
-        if let Err(e) = sink.write_all(&chunk).await {
-            failed = Some(format!("writing file to box: {e}"));
+        if let Err(e) = sink.push(&chunk).await {
+            failed = Some(e);
             break;
         }
     }
-    sink.shutdown().await.ok();
-    drop(sink); // EOF for `cat`
     if let Some(e) = failed {
-        let _ = child.kill().await;
+        sink.abandon().await;
         discard_partial(name, &path).await;
         return Err(e);
     }
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("sbx exec failed: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "sbx exec failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
+    sink.finish().await?;
     Ok(path)
 }
 
@@ -1228,20 +1373,14 @@ async fn stream_upload(
 async fn discard_partial(name: &str, path: &str) {
     let inner = format!("rm -f {}", skein::sh_quote(path));
     // Through the placement, like the write it is undoing — `sbx exec <box>` names no sandbox in the
-    // fleet, so the cleanup would fail exactly when the upload it is cleaning up did.
-    let Some(argv) = skein::box_exec_argv(name, &inner) else {
-        return;
-    };
-    let child = tokio::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn();
-    if let Ok(mut child) = child {
-        let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
-    }
+    // fleet, so the cleanup would fail exactly when the upload it is cleaning up did. And through
+    // the agent when there is one, for the same reason: the moment a half-written file most needs
+    // removing is the moment a fresh `sbx exec` is least likely to come back.
+    let name = name.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        skein::place_of(&name).map(|place| place.exec(&inner, Duration::from_secs(10)))
+    })
+    .await;
 }
 
 /// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.

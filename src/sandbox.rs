@@ -278,8 +278,32 @@ pub fn box_write_argv(name: &str, dir: &str, path: &str) -> Result<Vec<String>, 
         return Err("invalid box name".into());
     }
     let place = place_of(name).ok_or_else(|| format!("no box named {name}"))?;
-    let inner = format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path));
-    Ok(place.write_argv(&inner))
+    Ok(place.write_argv(&box_write_script(dir, path)))
+}
+
+/// The script both write paths run, so the two cannot drift into writing different files.
+fn box_write_script(dir: &str, path: &str) -> String {
+    format!("mkdir -p {} && cat > {}", sh_quote(dir), sh_quote(path))
+}
+
+/// Begin a streamed write into box `name` over the in-sandbox agent.
+///
+/// `None` when there is no agent to carry it — no fleet agent configured, none answering, or one
+/// too old to know the endpoint. The caller then spawns [`box_write_argv`] instead: the same script
+/// with the same stdin, and one more thing that stops working when the daemon stalls.
+///
+/// Nothing has been sent when this returns `None`, which is what makes that fallback safe. Once it
+/// returns a handle the write has begun — see [`crate::place::AgentWrite`].
+pub fn begin_box_write(
+    name: &str,
+    dir: &str,
+    path: &str,
+    timeout: Duration,
+) -> Option<crate::place::AgentWrite> {
+    if !valid_name(name) {
+        return None;
+    }
+    place_of(name)?.begin_write(&box_write_script(dir, path), timeout)
 }
 
 /// The argv that runs a one-off shell command in box `name`, wherever it lives. `None` for a name

@@ -311,11 +311,46 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
         )
         .map_err(|e| format!("installing the fleet agent token in {sandbox}: {e}"))?;
 
+    // The script has just been written; the process serving is whatever started before that, and
+    // `start_fleet_agent` leaves a running session alone. So an upgrade would install a newer agent
+    // and never run it — the setting on, the port answering, and every new endpoint quietly missing
+    // while the host fell back to `sbx exec` for the calls that needed it. Retire it first.
+    retire_stale_agent(sandbox);
+
     // Start before publishing: `ensure_fleet_agent_port` judges a mapping by whether the agent
     // answers through it, so publishing first would fail every candidate and burn all three.
     start_fleet_agent(sandbox)?;
     ensure_fleet_agent_port(sandbox)?;
     Ok(token)
+}
+
+/// Stop an agent that is older than the one skein has just installed, so the supervisor starts the
+/// new one. A no-op when nothing is serving or what is serving is current.
+///
+/// Silent about failure on purpose: every outcome is recoverable by the code that follows. A kill
+/// that did not land leaves the old agent up, which still carries `/exec`; a kill that landed and a
+/// start that did not is reported by `ensure_fleet_agent_port`, which connects to find out.
+fn retire_stale_agent(sandbox: &str) {
+    let Some(port) = recorded_agent_port() else {
+        return;
+    };
+    match crate::place::agent_protocol(port) {
+        // Nothing answering, or already current — `start_fleet_agent` handles both.
+        None => return,
+        Some(version) if version >= crate::place::AGENT_PROTOCOL => return,
+        Some(_) => {}
+    }
+    // Killing the session is what retires the agent: the session *is* the `while true` supervisor,
+    // so ending it stops the restart as well as the process. `pkill` is for a python that somehow
+    // outlived its supervisor, and is allowed to find nothing.
+    let script = format!(
+        "tmux kill-session -t {session} 2>/dev/null; pkill -f {path} 2>/dev/null; true",
+        session = sh_quote(AGENT_SESSION),
+        path = sh_quote(&fleet_agent_path()),
+    );
+    // Over `sbx exec` and never the agent: this kills the process that would be carrying the reply,
+    // so a successful retirement would come back as a transport failure.
+    let _ = own_sandbox(sandbox).exec_sbx(&script, Duration::from_secs(30));
 }
 
 /// Start the agent if it is not already up, and leave it supervised.
@@ -3485,6 +3520,116 @@ mod tests {
         // Started only when it is not already up, so an ensure on a healthy fleet is a no-op rather
         // than a second Python process fighting for the port.
         assert!(argv.contains("has-session"), "unconditional start:\n{argv}");
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// An `sbx` that records what it was handed and succeeds. Returns the log and the PATH to put
+    /// back, so an assertion can be about what crossed the process boundary rather than about how
+    /// the caller was written.
+    fn recording_sbx(home: &std::path::Path) -> (std::path::PathBuf, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncat >/dev/null\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        (log, path)
+    }
+
+    /// A stand-in agent that answers every request with `body`. Enough for the only question
+    /// [`retire_stale_agent`] asks — how old is the thing currently serving — without needing a real
+    /// one, which would be the wrong fixture anyway: the case worth testing is an agent this build
+    /// cannot produce.
+    fn fake_agent(body: String) -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut seen = [0u8; 1024];
+                let _ = stream.read(&mut seen);
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        port
+    }
+
+    /// The agent lives in the sandbox and outlives the skein that installed it, and
+    /// `start_fleet_agent` leaves a running session alone — so installing a newer script does not
+    /// mean a newer agent is serving. Without this, an upgrade lands on disk and never runs: the
+    /// setting on, the port answering, and every new endpoint quietly missing while the host falls
+    /// back to `sbx exec` for exactly the calls that needed it.
+    #[test]
+    fn an_agent_older_than_this_skein_is_retired_so_the_new_one_can_start() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true }).to_string(),
+        )
+        .unwrap();
+        let (log, path) = recording_sbx(&home);
+
+        // What is running in the fleet today: an agent from before versions existed, which answers
+        // with its name alone.
+        let old = fake_agent("skein-fleet-agent".into());
+        std::fs::write(home.join("fleet-agent.port"), old.to_string()).unwrap();
+
+        let _ = ensure_fleet_agent("skein-fleet");
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            argv.contains("kill-session"),
+            "an agent too old to serve this build was left running:\n{argv}"
+        );
+        // And retired over `sbx exec` into the sandbox, never over the agent — that call kills the
+        // process that would carry its own reply, so a successful retirement would report as a
+        // failure and the healer would go on to report the fleet broken.
+        assert!(
+            argv.lines()
+                .any(|l| l.contains("kill-session") && l.starts_with("exec skein-fleet")),
+            "the retirement did not go through sbx into the sandbox:\n{argv}"
+        );
+
+        // An agent that already speaks this build is left alone. Restarting a healthy one on every
+        // ensure would drop the held connection — and the board's liveness with it — for nothing.
+        std::fs::write(&log, "").unwrap();
+        let current = fake_agent(format!(
+            "skein-fleet-agent {}",
+            crate::place::AGENT_PROTOCOL
+        ));
+        std::fs::write(home.join("fleet-agent.port"), current.to_string()).unwrap();
+        retire_stale_agent("skein-fleet");
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap_or_default(),
+            "",
+            "a current agent was restarted for no reason"
+        );
+
+        // Nothing recorded means nothing is known to be serving; starting is the next step either
+        // way, and killing on a guess would take out an agent that was working.
+        std::fs::remove_file(home.join("fleet-agent.port")).unwrap();
+        retire_stale_agent("skein-fleet");
+        assert_eq!(std::fs::read_to_string(&log).unwrap_or_default(), "");
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
