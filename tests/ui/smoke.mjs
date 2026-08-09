@@ -676,6 +676,17 @@ await check("a chord is not a held mic", async () => {
   if (await page.evaluate(() => window.__started)) throw new Error("⌥[ opened the microphone");
 });
 
+await check("the board says which transport is carrying calls", async () => {
+  // The fixture has no fleet agent, so this is the "quietly off" state — the one that has been
+  // invisible three times and the reason this row exists.
+  const row = await mustSee("#gauges .ga.tp", "the transport row");
+  const text = (await row.textContent()).trim();
+  if (!/sbx exec/.test(text)) throw new Error(`expected the fallback to be named, got "${text}"`);
+  // An indicator that says something is wrong without saying what to do is just another red light.
+  const hint = await row.getAttribute("title");
+  if (!/fleet_agent/.test(hint)) throw new Error("the tooltip never names the setting that changes it");
+});
+
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
   if (noise.length) throw new Error(noise.join(" | "));

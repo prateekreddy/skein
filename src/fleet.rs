@@ -1584,6 +1584,50 @@ pub struct FleetResources {
 /// strip. `df` is asked about [`fleet_root`] rather than `/`: box roots are the only disk skein can
 /// account for, and on a filesystem the boxes do not share the number would be answering about
 /// somebody else's storage.
+/// Which way skein is actually reaching the fleet, as opposed to which way it was configured to.
+///
+/// This exists because the difference has been invisible three times running, and each time the
+/// symptom was the same: everything works, only less resiliently, so nothing draws attention to it.
+/// The transport was wired into one call site and not the other; the port was published but never
+/// answered; and the setting was simply off while both of us believed it on. A degraded transport
+/// that says nothing is indistinguishable from a healthy one right up until the daemon stalls, which
+/// is the one moment it was supposed to help.
+///
+/// Deliberately not folded into [`fleet_resources`]: that asks the *sandbox* and can fail, and this
+/// is a host-side fact — a setting and a loopback connection — that must stay answerable when the
+/// sandbox does not. The two only share a poll.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Transport {
+    /// The `fleet_agent` setting. False means every call spawns `sbx exec`, as before the agent.
+    pub configured: bool,
+    /// The host port skein published and verified, 0 when it never got one.
+    pub port: u16,
+    /// What answers there now — 0 for nothing, 1 for an agent from before versions existed.
+    pub speaks: u32,
+    /// What this build needs. `speaks < wants` is an agent an upgrade has not yet replaced.
+    pub wants: u32,
+}
+
+pub fn transport_state() -> Transport {
+    let wants = crate::place::AGENT_PROTOCOL;
+    if !load_config().fleet_agent {
+        return Transport {
+            wants,
+            ..Default::default()
+        };
+    }
+    let port = recorded_agent_port().unwrap_or(0);
+    Transport {
+        configured: true,
+        port,
+        // A real connection, not the mapping sbx reports: a published port survives `sbx rm` and is
+        // still listed while every connection through it is refused, so asking is the only answer
+        // that means anything.
+        speaks: crate::place::agent_protocol(port).unwrap_or(0),
+        wants,
+    }
+}
+
 pub fn fleet_resources() -> Option<FleetResources> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
@@ -3944,6 +3988,66 @@ mod tests {
             }
         });
         port
+    }
+
+    /// The board says which transport is actually carrying calls, not which one was asked for.
+    ///
+    /// Three times now the transport has been silently off — wired into one call site and not the
+    /// other, published on a port that never answered, and simply not switched on — and every time
+    /// the symptom was identical: everything works, only fragile again, which nothing draws
+    /// attention to until the stall it was meant to survive. So the indicator has to report what
+    /// skein will *do*, never what was configured or what happens to be listening.
+    #[test]
+    fn the_board_reports_the_transport_it_will_actually_use() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let current = crate::place::AGENT_PROTOCOL;
+
+        // Off: the state the fleet was found in. No port, no probe, no claim.
+        let off = transport_state();
+        assert!(!off.configured && off.speaks == 0, "{off:?}");
+        assert_eq!(
+            off.wants, current,
+            "the board must say which version it needs"
+        );
+
+        // On, but nothing was ever published — the honest answer is still `sbx exec`.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": true }).to_string(),
+        )
+        .unwrap();
+        let unpublished = transport_state();
+        assert!(unpublished.configured && unpublished.speaks == 0 && unpublished.port == 0);
+
+        // An agent answering, and an older one: the difference the board has to show, because a v1
+        // carries the frequent calls while everything newer silently falls back.
+        for (spoke, label) in [
+            (1u32, "an agent from before versions existed"),
+            (current, "current"),
+        ] {
+            let body = if spoke == 1 {
+                "skein-fleet-agent".to_string()
+            } else {
+                format!("skein-fleet-agent {spoke}")
+            };
+            let port = fake_agent(body);
+            std::fs::write(home.join("fleet-agent.port"), port.to_string()).unwrap();
+            let seen = transport_state();
+            assert_eq!(seen.speaks, spoke, "{label}: {seen:?}");
+            assert_eq!(seen.port, port);
+        }
+
+        // And the switch wins over the wire: an agent may be sitting there answering, but with the
+        // setting off skein is not using it, so the board must not say that it is.
+        std::fs::write(home.join("config.json"), serde_json::json!({}).to_string()).unwrap();
+        let ignored = transport_state();
+        assert!(
+            !ignored.configured && ignored.speaks == 0,
+            "reported an agent skein will not call: {ignored:?}"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The agent lives in the sandbox and outlives the skein that installed it, and

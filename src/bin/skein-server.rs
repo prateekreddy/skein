@@ -145,6 +145,7 @@ async fn main() {
         .route("/api/fleet/resize", post(api_fleet_resize))
         .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/fleet/resources", get(api_fleet_resources))
+        .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
         .route(
@@ -872,6 +873,18 @@ async fn api_fleet_limits() -> Response {
 ///
 /// 204 rather than an error when there is no fleet: a board with each box in its own sandbox has no
 /// single machine to gauge, and that is a normal configuration rather than something to warn about.
+/// How skein is reaching the fleet right now. Its own endpoint rather than a field on the resources
+/// above, because that one asks the sandbox and 204s when the sandbox will not answer — and "the
+/// sandbox is unreachable" is exactly when you want to know which transport was being used.
+async fn api_fleet_transport() -> Json<skein::Transport> {
+    // Blocking: it opens a socket to the agent. Cheap, but not on an async worker.
+    Json(
+        tokio::task::spawn_blocking(skein::transport_state)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
 async fn api_fleet_resources() -> Response {
     match tokio::task::spawn_blocking(skein::fleet_resources).await {
         Ok(Some(r)) => Json(r).into_response(),
