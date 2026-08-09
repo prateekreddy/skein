@@ -5095,6 +5095,124 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
     }
 
+    /// A box that failed to install its plugins tries again; a box that succeeded does not.
+    ///
+    /// The marker used to be written unconditionally, and every step in that block is `|| true`. So
+    /// a box that could not reach the marketplace — no network yet, an unauthenticated agent, a slow
+    /// first boot — finished having installed nothing and was marked done permanently. Verified in
+    /// this fleet: the marker present since Aug 4, and `claude plugin list` empty.
+    ///
+    /// It also recorded only *that* it ran, never *what* was wanted, so enabling a plugin later
+    /// reached no box that already existed. That half has not bitten yet only because nothing has
+    /// been enabled — it would have, on the first one.
+    #[test]
+    fn a_box_retries_the_plugins_it_failed_to_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let block: String = BOOTSTRAP_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("marker="))
+            .take_while(|l| !l.starts_with("# --- surface unread"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        let home = root.join("home");
+        let store = root.join("store");
+        let bin = root.join("bin");
+        for d in [&home.join(".claude"), &store, &bin] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            store.join("settings.json"),
+            r#"{"enabledPlugins":{"beta@market":true,"alpha@market":true,"off@market":false}}"#,
+        )
+        .unwrap();
+
+        // A `claude` whose installs either work or silently do not — which is the whole question
+        // here, since the real one fails exactly that quietly.
+        let fake_claude = |installs: bool| {
+            let script = format!(
+                "#!/bin/sh\ncase \"$1 $2\" in\n\
+                 'plugin list') cat {listed} 2>/dev/null || true ;;\n\
+                 'plugin install') {act} ;;\n\
+                 *) : ;;\nesac\nexit 0\n",
+                listed = root.join("listed").display(),
+                act = if installs {
+                    format!("echo \"$3\" >> {}", root.join("listed").display())
+                } else {
+                    ":".to_string()
+                },
+            );
+            std::fs::write(bin.join("claude"), script).unwrap();
+            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        };
+        let marker = home.join(".claude/.skein-plugins-materialized");
+        let run = || {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "set -uo pipefail\nexport HOME={home}\nexport PATH={bin}:$PATH\nstore={store}\n\
+                     {block}\nwait\n",
+                    home = home.display(),
+                    bin = bin.display(),
+                    store = store.display(),
+                ))
+                .output()
+                .expect("bash to run the bootstrap's plugin block");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            std::fs::read_to_string(&marker).unwrap_or_default()
+        };
+
+        // Installs that quietly do nothing must leave no marker, or this box never tries again.
+        fake_claude(false);
+        assert_eq!(
+            run(),
+            "",
+            "a box that installed nothing was marked done for good"
+        );
+        assert!(
+            !marker.exists(),
+            "the marker was written despite installing nothing"
+        );
+
+        // Now they work. The marker records the set, sorted, and only the enabled ones.
+        fake_claude(true);
+        let done = run();
+        assert_eq!(done, "alpha@market beta@market ", "recorded: {done:?}");
+        assert!(
+            !done.contains("off@market"),
+            "a disabled plugin was installed anyway"
+        );
+
+        // Same set again is a no-op — no reinstalling on every single box start.
+        std::fs::remove_file(root.join("listed")).unwrap();
+        fake_claude(false);
+        assert_eq!(
+            run(),
+            "alpha@market beta@market ",
+            "a settled box did the work again"
+        );
+
+        // Enabling one more must reach a box that already exists. This is the half that would have
+        // bitten on the first plugin ever enabled: the old marker said "done" and meant it forever.
+        std::fs::write(
+            store.join("settings.json"),
+            r#"{"enabledPlugins":{"beta@market":true,"alpha@market":true,"gamma@market":true}}"#,
+        )
+        .unwrap();
+        fake_claude(true);
+        assert_eq!(
+            run(),
+            "alpha@market beta@market gamma@market ",
+            "a newly enabled plugin never reached an existing box"
+        );
+    }
+
     /// Nothing a misheard word can reach is hard to undo.
     ///
     /// Speech recognition is wrong sometimes — that is not a defect to engineer away, it is the

@@ -197,18 +197,42 @@ if command -v jq >/dev/null 2>&1; then
   ) 9>"$store/.sandboxes.lock" 2>/dev/null || true
 fi
 
-# --- materialise the settings' enabled plugins (once per box, backgrounded) ----------------------
+# --- materialise the settings' enabled plugins (backgrounded) ------------------------------------
+#
+# The marker records WHICH plugins are known to be installed, not merely that this ran once. Both
+# halves of that matter, and the earlier version got both wrong:
+#
+#   * it wrote the marker unconditionally, and every step here is `|| true`. A box that could not
+#     reach the marketplace — no network yet, an unauthenticated agent, a slow first boot — finished
+#     having installed nothing and was marked done for good. Silently, and permanently.
+#   * it recorded nothing about *what* was wanted, so enabling a plugin later never reached a box
+#     that already existed. The setting would look applied and only new boxes would have it.
+#
+# So: re-run whenever the wanted set differs from what was last confirmed, and record only what is
+# actually present afterwards. A failure leaves the marker alone and the next box start tries again.
 marker="$HOME/.claude/.skein-plugins-materialized"
 settings="$store/settings.json"
-if [ ! -f "$marker" ] && command -v claude >/dev/null 2>&1 && [ -f "$settings" ] && command -v jq >/dev/null 2>&1; then
+wanted=""
+if [ -f "$settings" ] && command -v jq >/dev/null 2>&1; then
+  # Sorted, so the same set never looks like a different one and re-installs on every start.
+  wanted="$(jq -r '.enabledPlugins // {} | to_entries[] | select(.value==true) | .key' "$settings" 2>/dev/null | sort | tr '\n' ' ')"
+fi
+if [ -n "$wanted" ] && [ "$wanted" != "$(cat "$marker" 2>/dev/null || true)" ] \
+   && command -v claude >/dev/null 2>&1; then
   (
     claude plugin marketplace add anthropics/claude-plugins-official >/dev/null 2>&1 || true
     have="$(claude plugin list 2>/dev/null || true)"
-    while IFS= read -r id; do
-      [ -z "$id" ] && continue
+    for id in $wanted; do
       printf '%s' "$have" | grep -qF "$id" || claude plugin install "$id" --scope project >/dev/null 2>&1 || true
-    done < <(jq -r '.enabledPlugins // {} | to_entries[] | select(.value==true) | .key' "$settings" 2>/dev/null)
-    touch "$marker"
+    done
+    # Asked again rather than assumed: `plugin install` is best-effort above, so the only honest
+    # record of what happened is what the agent lists now. Anything missing means this box is not
+    # done, and leaving the marker unwritten is what brings it back here next start.
+    have="$(claude plugin list 2>/dev/null || true)"
+    for id in $wanted; do
+      printf '%s' "$have" | grep -qF "$id" || exit 0
+    done
+    printf '%s' "$wanted" > "$marker"
   ) >/dev/null 2>&1 &
 fi
 

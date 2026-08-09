@@ -121,11 +121,6 @@ real root, a fleet box cannot (see the sudo shim in `box-session.sh`).
 
 ### Merge `modules-and-shared-sandbox` into `master`
 
-### `enabledPlugins` in `sandbox-bootstrap.sh` is a setting nobody retries
-
-Same shape as the fleet-agent bug already fixed: a marker file is written once and the work never
-runs again if it failed.
-
 ### `agent-memory-consolidation` has no `origin` remote
 
 ### The cockpit's white background has never been diagnosed
