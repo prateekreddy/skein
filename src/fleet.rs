@@ -3525,6 +3525,175 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// `sudo` in a box explains itself instead of failing incomprehensibly — and only in a box.
+    ///
+    /// Two halves, and shipping either alone is worse than shipping neither:
+    ///
+    /// 1. **Written but never bound** is this repo's most-repeated bug — a thing installed on disk
+    ///    that nothing ever reaches. The shim would sit in `$root/bin` while every agent kept
+    ///    reading "owned by uid 65534, should be 0" and kept trying to chown it.
+    /// 2. **Bound too widely** would be far worse than the problem it fixes. The sandbox's own
+    ///    `sudo` is what `ensure_substrate` installs tmux and jq with — the very substrate this
+    ///    message tells people to ask for. Shadowing it fleet-wide would stop new sandboxes being
+    ///    provisioned at all, and the shim's own advice would become impossible to follow.
+    #[test]
+    fn sudo_in_a_box_says_why_rather_than_failing_in_hex() {
+        let launcher = BOX_SESSION_SH;
+        let shim = launcher
+            .lines()
+            .skip_while(|l| !l.contains("cat > \"$root/bin/sudo\""))
+            .take_while(|l| *l != "SHIM")
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            shim.contains("does not work inside a box"),
+            "the shim no longer says what happened"
+        );
+        assert!(
+            shim.contains("--user") && shim.contains("substrate"),
+            "a refusal with no way forward is the error message it replaced: {shim}"
+        );
+        assert!(
+            launcher.contains(r#"binds+=(--ro-bind "$root/bin/sudo" "$sudo_real")"#),
+            "the shim is written but never bound, so nothing in a box would ever run it"
+        );
+        // Inside the namespace only. `binds` is applied by the box's bwrap and by nothing else, so
+        // being in that array is exactly the scope this needs — and `--dev-bind / /` above it means
+        // a bind added anywhere outside it would reach the whole sandbox.
+        assert!(
+            !launcher.contains("chmod 755 /usr/bin/sudo")
+                && !launcher.contains("rm -f /usr/bin/sudo"),
+            "the sandbox's real sudo must be left alone — ensure_substrate provisions with it"
+        );
+        // The launcher is bash (it uses arrays); a shim that only parses under bash would still be
+        // run by /bin/sh as `sudo`, so it is checked with the shell that will actually execute it.
+        let checked = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("/dev/stdin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                let body = shim
+                    .split_once('\n')
+                    .map(|x| x.1)
+                    .unwrap_or_default()
+                    .to_string();
+                c.stdin.take().unwrap().write_all(body.as_bytes())?;
+                c.wait()
+            });
+        assert!(
+            checked.map(|s| s.success()).unwrap_or(false),
+            "the shim is not a valid POSIX shell script, so `sudo` would fail on a syntax error \
+             instead of explaining anything"
+        );
+    }
+
+    /// The shim is skipped rather than allowed to fail, because failing here stops the box starting.
+    ///
+    /// bwrap cannot mount a file onto a symlink, and on Debian `sudo` is one
+    /// (`/usr/bin/sudo` → `/etc/alternatives/sudo` → `/usr/bin/sudo.ws`). Binding the name instead
+    /// of the resolved binary makes bwrap try to *create* the destination, which fails on a
+    /// `/usr/bin` no unprivileged user can write — and takes the whole box down with it:
+    ///
+    /// ```text
+    /// bwrap: Can't create file at /usr/bin/sudo: No such file or directory
+    /// ```
+    ///
+    /// That is the trade this shim must never make. A worse error message is a nuisance; a box that
+    /// will not start is an outage. So every uncertain step skips, and this proves it skips on the
+    /// shape that actually broke it.
+    #[test]
+    fn a_sudo_it_cannot_shim_is_left_alone_rather_than_breaking_the_box() {
+        let block = BOX_SESSION_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("sudo_real=$(command -v sudo"))
+            .take_while(|l| *l != "fi")
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\nfi";
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        let bin = root.join("fakebin");
+        std::fs::create_dir_all(&bin).unwrap();
+
+        // A PATH with no system `sudo` on it at all, so "there is no sudo here" is a state this can
+        // actually reach. Inheriting the real PATH makes every case find /usr/bin/sudo — including
+        // the ones meant to find nothing, which is how a test like this passes while proving
+        // nothing. The block still needs the handful of tools it runs, so they are linked in.
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        for tool in ["readlink", "mkdir", "chmod", "cat"] {
+            let from = ["/usr/bin", "/bin"]
+                .iter()
+                .map(|d| std::path::Path::new(d).join(tool))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| panic!("{tool} is needed to run the launcher's sudo block"));
+            std::os::unix::fs::symlink(from, tools.join(tool)).unwrap();
+        }
+
+        // `binds` printed at the end is the whole assertion: it is what the box's bwrap is handed,
+        // so an entry here is a mount attempted and an empty array is the shim declining.
+        let run = |sudo_is: &dyn Fn(&std::path::Path)| -> String {
+            let _ = std::fs::remove_file(bin.join("sudo"));
+            sudo_is(&bin);
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "set -uo pipefail\nbinds=()\nroot={root}\nexport PATH={bin}:{tools}\n\
+                     {block}\nprintf '%s\\n' \"${{binds[@]:-}}\"\n",
+                    root = root.display(),
+                    bin = bin.display(),
+                    tools = tools.display(),
+                ))
+                .output()
+                .expect("bash to run the launcher's sudo block");
+            assert!(
+                out.status.success(),
+                "the block itself failed, which would abort the box start: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        // The shape that broke it: a name that resolves to nothing. `command -v` still finds it —
+        // which is why the original check was not enough.
+        let dangling = run(&|bin| {
+            std::os::unix::fs::symlink("/nonexistent/sudo.ws", bin.join("sudo")).unwrap();
+        });
+        assert!(
+            !dangling.contains("--ro-bind"),
+            "a dangling sudo was bound anyway; bwrap would refuse and the box would not start:\n{dangling}"
+        );
+
+        // No sudo at all: nothing to shim, and nothing to say about it.
+        let absent = run(&|_| {});
+        assert!(
+            !absent.contains("--ro-bind"),
+            "bound a sudo that is not there:\n{absent}"
+        );
+
+        // And the case it is actually for — bound, and bound at the RESOLVED binary rather than at
+        // the symlink, which is the fix itself.
+        let real = bin.join("sudo.ws");
+        std::fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
+        let present = run(&|bin| {
+            std::os::unix::fs::symlink(bin.join("sudo.ws"), bin.join("sudo")).unwrap();
+        });
+        assert!(
+            present.contains("--ro-bind") && present.contains(&real.to_string_lossy().to_string()),
+            "the shim did not reach a sudo that is genuinely there:\n{present}"
+        );
+        assert!(
+            std::fs::read_to_string(root.join("bin/sudo"))
+                .unwrap_or_default()
+                .contains("does not work inside a box"),
+            "the shim was bound but its body was never written"
+        );
+    }
+
     /// An `sbx` that records what it was handed and succeeds. Returns the log and the PATH to put
     /// back, so an assertion can be about what crossed the process boundary rather than about how
     /// the caller was written.

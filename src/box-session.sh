@@ -320,6 +320,61 @@ case "$root" in
   *) mkdir -p "$root/vartmp" || exit 1; binds+=(--bind "$root/vartmp" /var/tmp) ;;
 esac
 
+# `sudo` cannot work in here, and the way it fails is worse than it not existing: the real one says
+# "/etc/sudo.conf is owned by uid 65534, should be 0", which is true, unfixable, and explains
+# nothing. An agent that reads that tries to chown it, retries, and eventually abandons the task.
+#
+# Unfixable because only this box's uid is mapped into its user namespace, so every root-owned file
+# reads as `nobody` — and even with the ownership check satisfied, setuid cannot grant uid 0 inside
+# a namespace you created yourself. There is no configuration that makes it work.
+#
+# It is also the right behaviour, which is the part the message has to convey: the boxes share one
+# filesystem, so an `apt-get install` in here would change the toolchain under every other box in
+# the fleet. System packages belong to the substrate, installed once for all of them.
+#
+# Bound only inside this namespace. The sandbox's own sudo is untouched and must be — `ensure_substrate`
+# uses it to install the substrate this message tells people to ask for, and `ensure_container_cgroup`
+# above runs it on every box start.
+#
+# Bound over the RESOLVED binary, never over `sudo` as PATH spells it. On Debian that name is a
+# symlink chain (/usr/bin/sudo → /etc/alternatives/sudo → /usr/bin/sudo.ws), and bwrap cannot mount
+# a file onto a symlink: it tries to create the destination instead, fails on a /usr/bin no
+# unprivileged user can write, and takes the whole box start down with
+# `bwrap: Can't create file at /usr/bin/sudo`. Found by `a_box_lives_and_dies_inside_the_fleet_sandbox`,
+# which is exactly the trade this shim must never make — a worse error message is a nuisance, a box
+# that will not start is not.
+#
+# So every step is a reason to skip rather than to fail: no sudo, a chain that does not resolve, a
+# target that is not a regular file. Skipping costs the old cryptic message; failing costs the box.
+sudo_real=$(command -v sudo 2>/dev/null || true)
+[ -n "$sudo_real" ] && sudo_real=$(readlink -e "$sudo_real" 2>/dev/null || true)
+if [ -n "$sudo_real" ] && [ -f "$sudo_real" ]; then
+  mkdir -p "$root/bin" || exit 1
+  cat > "$root/bin/sudo" <<'SHIM'
+#!/bin/sh
+cat >&2 <<'WHY'
+skein: sudo does not work inside a box, and cannot be made to.
+
+A box is a user namespace that maps only your own uid, so root-owned files read as `nobody` and
+setuid cannot grant uid 0. The real sudo refuses with "owned by uid 65534, should be 0" — that is
+the cause, and no chown or config fixes it.
+
+It is also deliberate. Every box in this fleet shares one filesystem, so installing a system
+package here would change the toolchain under all of them.
+
+Instead:
+  * Install into your own home, which needs no root:
+      pip install --user X   ·   cargo install X   ·   npm i -g X (with a user prefix)
+      or drop a binary in ~/.local/bin
+  * If it genuinely has to be a system package, it belongs in the fleet's substrate — installed
+    once for every box. Ask for it there rather than here.
+WHY
+exit 1
+SHIM
+  chmod 755 "$root/bin/sudo" || exit 1
+  binds+=(--ro-bind "$root/bin/sudo" "$sudo_real")
+fi
+
 # Starting a box is not the same as adding a session to one. This creates the namespace, so running
 # it twice would build a SECOND namespace and server for the same box: the new server takes over the
 # socket, the anchor pid moves to it, and the first namespace is stranded with no way left to address
