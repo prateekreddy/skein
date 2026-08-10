@@ -185,12 +185,28 @@ Revisit only if a streaming download endpoint earns its keep.
 
 ### Retire the per-VM box model
 
-Once every box is on the fleet. Note the capability difference before doing it: a legacy box had
-real root, a fleet box cannot (see the sudo shim in `box-session.sh`).
+**Blocked on a check only the host can do**, and worth stating because it is not obvious from a box:
+a legacy box is its own sbx sandbox, so it does not appear under `/boxes/` at all. `sbx ls` on the
+host is the only way to know none remains, and removing the fallback while one exists strands it.
+
+Scope, measured: `place_of(name).unwrap_or_else(|| own_sandbox(name))` is the shape everywhere, and
+there are **62 legacy references across 7 files** (`config.rs`, `repos.rs`, `sandbox.rs`,
+`tracking.rs`, `mailbox.rs`, `fleet.rs`, `lib.rs`). That is its own session, not a tail-end cleanup.
+
+Note the capability difference before doing it: a legacy box had real root, a fleet box cannot (see
+the sudo shim in `box-session.sh`).
 
 ### The docs still describe one sandbox per box
 
-`README.md`, `ARCHITECTURE.md`, `docs/self-sufficient.md`.
+**Done for `README.md` and `ARCHITECTURE.md`.** The latter mattered more than a tidy-up: its "hard
+constraint" section asserted boxes were separate microVM kernels and ruled out SQLite across boxes
+on that basis. They share one kernel now, so the constraint was forbidding a design that is
+available — the file-based mailbox stays, but on the honest grounds (mail must outlive a box that
+never read it), not a kernel boundary that no longer exists.
+
+`docs/self-sufficient.md` still describes the old `sbx create --clone` per-box launcher. It reads as
+a design note about how the launcher was derived rather than as current reference, so it wants a
+decision — update it, or mark it historical — rather than an edit.
 
 ### Merge `modules-and-shared-sandbox` into `master`
 

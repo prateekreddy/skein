@@ -4,27 +4,46 @@
 
 ```
 HOST (your Mac)
-├─ skein            ← this tool: TUI/CLI control surface (+ future daemon)
-├─ sbx              ← isolation: one microVM per box (`--clone`)
-└─ skein-shared/.claude/      ← the shared store, bind-mounted into every box
+├─ skein            ← this tool: web cockpit / CLI control surface
+├─ sbx              ← ONE microVM for the whole fleet
+└─ skein-shared/.claude/      ← the shared store, bind-mounted into the sandbox
      ├─ sandboxes.json         registry (who's running, branch, lastSeen, status)
-     ├─ mailbox/               cross-box messages
+     ├─ mailbox/               cross-box messages (and cross-PROJECT ones)
      └─ memory/ skills/ …      the shared brain
 
-BOX A (microVM)   BOX B (microVM)   …      ← each a separate kernel; all mount the shared store
+THE FLEET SANDBOX (one microVM, one kernel)
+├─ BOX A   ← a bwrap namespace: private $HOME bound over /home/agent, own tmux session
+├─ BOX B   ← same, and it cannot see A's home
+└─ …       ← shared between them: the kernel, /run/user/1000, the pid namespace, ~/.local
 ```
+
+**One sandbox, many boxes.** Each sbx sandbox *reserves* its memory ceiling whether or not it is
+working, and reservations sum — on a 36 GB Mac, ~18.6 GB each meant two boxes and no laptop. So a
+box stopped being a VM and became a **bwrap namespace** inside one shared VM. Its private `$HOME` is
+bound over `/home/agent`, with a short list of deliberate escapes (`~/.local` for the agent CLIs,
+`~/.claude/sessions/` for box-to-box messaging); everything unanticipated is private by default,
+because the opposite default corrupts two boxes quietly.
+
+"A box is not a sandbox" is the single most common source of bugs in this codebase — every box in
+the fleet shares one `SANDBOX_VM_ID`, one hostname, and one tmux server, so anything keyed on those
+silently addresses the wrong box or all of them at once.
 
 Skein runs on the **host**. It reads the shared store and drives `sbx` + `git` + `gh`. It does
 **not** run inside the boxes and does **not** own state the bootstrap already owns.
 
 ## The hard constraint (why some designs are off the table)
 
-The boxes are **separate microVM kernels** that merely bind-mount one host directory. That rules out
-two tempting shortcuts:
+**This section used to say boxes were separate microVM kernels.** They are not, and the difference
+is not academic: it un-forbids things that were correctly forbidden under the old topology. What
+follows is what still holds.
 
-- **No SQLite shared *across boxes* over the mount.** SQLite's WAL/locking assumes one host with
-  shared memory; across VM kernels it corrupts. So the *cross-box* comms layer stays **file-based**
-  (the current `mailbox.sh` / `sandboxes.json`), which is safe precisely because it avoids this.
+- **SQLite across boxes is no longer ruled out by the kernel.** The old argument was sound for the
+  old shape — WAL locking assumes one host with shared memory, and across VM kernels it corrupts.
+  Boxes now share one kernel and one page cache, so that objection is gone. The cross-box comms
+  layer stays **file-based** anyway, on its own merits: mail is a file, so it survives a box that
+  dies before reading it. Live conversation between boxes uses the runtime's own session messaging
+  (`ListAgents` / `SendMessage`), which works because the inbox sockets and the pid namespace are
+  shared — direct evidence that the kernel boundary is gone.
 - **No in-repo shared store.** An sbx mount lands at its absolute host path with no remap, so an
   in-repo store would collide with the `git clone` target. Hence the sibling location.
 
@@ -37,7 +56,7 @@ These aren't preferences; they're forced by the runtime. Skein is designed aroun
 
 | Concern | Reused (existing wheel) | Skein adds |
 |---|---|---|
-| Per-agent isolation | **sbx** (`--clone` microVMs) | nothing — calls the CLI |
+| Per-agent isolation | **sbx** (one shared microVM) + **bwrap** (a namespace per box) | the private-$HOME bind and its escape list |
 | Shared memory / skills / hooks | **existing shared `.claude` store** | nothing — reads it |
 | Cross-box messaging (now) | **existing `mailbox.sh`** (files) | a read/compose view |
 | Registry of boxes | **existing `sandboxes.json`** (bootstrap-written) | reads + renders + reacts |
@@ -55,8 +74,9 @@ If a capability already lives in one of those, Skein calls it; it does not grow 
   redraw), a durable **job queue** (launch / fetch-diff / merge / archive, with retries), simple
   **scheduling** and **named locks**. honker is Rust-native, so it's a direct crate dependency, not a
   binding. This replaces hand-rolling a queue/bus.
-- **No — the cross-box mailbox.** See the hard constraint above: SQLite over the shared mount across
-  microVMs is unsafe. Keep files there for now.
+- **No — the cross-box mailbox.** Not because SQLite is unsafe here any more (see the hard constraint
+  above — one kernel now), but because mail must outlive a box that never read it, and a file does.
+  Live box-to-box conversation is the runtime's own `SendMessage`, not a queue skein owns.
 - **Future, if we want real-time cross-box comms:** route boxes → host over HTTP
   (`host.docker.internal`) into the host's honker DB. That makes honker the single source of truth
   for comms **without** SQLite-over-mount. A later phase, not v0.

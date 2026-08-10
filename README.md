@@ -1,9 +1,10 @@
 # skein
 
-> See and steer your fleet of agent sandboxes. A thin control surface over `sbx`
-> microVM boxes + a mounted shared store — the layer Conductor-likes have but
-> that's missing from the sbx workflow. *Compose, don't reinvent* — see
-> [`ARCHITECTURE.md`](ARCHITECTURE.md); the why is in [`VISION.md`](VISION.md).
+> See and steer your fleet of agent boxes. A thin control surface over one shared `sbx`
+> microVM (a bwrap namespace per box) and a mounted shared store — the layer
+> Conductor-likes have but that's missing from the sbx workflow. *Compose, don't
+> reinvent* — see [`ARCHITECTURE.md`](ARCHITECTURE.md); the why is in
+> [`VISION.md`](VISION.md).
 
 **Status:** v0 — a live **web cockpit** (fleet board over SSE) with an **embedded
 per-box terminal** (click a box → talk to that agent in the browser) + a CLI. The goal
@@ -43,7 +44,7 @@ commits, the agent's `.skein/journal.md`, and its last message, so you can catch
 scrollback. No model tokens are spent building any of this. Each box also gets a second **Shell** tab
 (`sbx exec -it <box> /bin/bash`) for running commands yourself, and **attachments** — paste, drag-and-drop,
 or the 📎 button — hand the agent any file or folder: a screenshot, a PDF, a spreadsheet, a video, a whole
-sample corpus. The agent can't see your clipboard or your disk (it runs in the microVM), so skein streams
+sample corpus. The agent can't see your clipboard or your disk (it runs in the sandbox), so skein streams
 each one into the box under `/tmp/skein-drop-<batch>/` (one directory per drop, so a dropped folder keeps
 its structure) and pastes the in-box path — the folder's path for a folder — into the prompt for the agent
 to open. Streamed, not buffered, so a large video costs the host no memory. Open sessions stay live as
