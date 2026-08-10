@@ -28,3 +28,23 @@ prints a screenshot path and keeps the fixture for inspection.
 
 Not wired into `cargo test` on purpose: it needs node and a browser, which the Rust toolchain can't
 assume. Run it before shipping anything that touches `src/web/index.html`.
+
+## `voice.mjs` — what the mouth says, without a browser
+
+```sh
+node tests/ui/voice.mjs           # no setup, no chromium, runs inside a box
+```
+
+The smoke test above cannot run in a box (chromium's system libraries need a working `sudo`), so
+everything about the voice shipped unverified — and shipped wrong. `waiting`, a box that ended its
+turn and wants your next instruction, counted as "needs you" for the tab title and the needs-you
+navigation and was left out of both voice paths. The tab said *3 need you* while the mouth stayed
+shut, and "read what needs me" answered *nothing needs you* with boxes waiting on screen.
+
+The sentences are pure functions of a fleet snapshot, so this lifts them out of `index.html` by name
+and runs them directly — a test that works in the place the fix gets written. It asserts what is
+**said**, and when: the grace period before a standing debt is announced, that the same debt is not
+repeated, and that a changed one earns a new sentence.
+
+If you rename one of the lifted declarations the test fails loudly rather than silently testing
+nothing.

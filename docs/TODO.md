@@ -74,6 +74,11 @@ The mouth and the ear are both built. What is not:
 
 ### Try it for a day and cut what annoys
 
+Two defects are already fixed and worth knowing about when judging the rest: `waiting` was missing
+from both voice paths, and the mouth only ever spoke at the *instant* of a change while you were
+away — so a box that turned while you were looking at the board was never announced at all.
+`tests/ui/voice.mjs` covers both.
+
 The verb set is a guess until it is used: `yes / continue / next / show me / open / what needs me /
 continue all`, plus `tell it …`. Expect the ordering of `voiceTarget` to be the part that feels
 wrong first — it prefers the box the mouth last named, then the selected row, then the only one
@@ -180,4 +185,11 @@ resources — have the same exposure the moment an integration test touches them
 
 `tests/ui/smoke.mjs` needs chromium's system libraries, and a box has no working `sudo` to install
 them — the shim above explains why. It downloads but will not launch. Run it on the host after any
-`src/web/index.html` change; the voice checks in it are currently unrun.
+`src/web/index.html` change.
+
+This is not academic: it is why the voice shipped with `waiting` missing from both of its paths and
+spoke nothing while boxes sat waiting. `tests/ui/voice.mjs` closes that particular hole by lifting
+the pure sentence-building functions out of the page and running them in plain node, which works in
+a box — but everything about the page that needs a *browser* is still only covered on the host.
+Anything testable without one belongs in the node test, precisely because that is the one that gets
+run where the code is written.

@@ -991,6 +991,13 @@ const GROUPS = [
   { key:"stale",   label:"stale",     match:s => s === "stale" || s === "unknown" },
 ];
 const groupOf = s => (GROUPS.find(g => g.match(s)) || GROUPS[GROUPS.length-1]).key;
+// What "owed to you" means, in one place. It was written out three times and they disagreed: the
+// tab title and the needs-you navigation counted `waiting`, and both voice paths did not — so the
+// title said "3 need you" while the mouth stayed shut, and "read what needs me" answered "nothing
+// needs you" with boxes visibly waiting on screen. `waiting` is a box that ended its turn and wants
+// your next instruction, which is the most ordinary way a box needs you there is.
+const NEEDS_YOU = ["error", "attn", "waiting"];
+const owedIn = list => list.filter(b => NEEDS_YOU.includes(groupOf(b.state)));
 const labelOf = s => ["needs-input","needs-decision","blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 // coerce to integers — these land in innerHTML, so never interpolate raw box-reported values
@@ -1276,7 +1283,7 @@ function select(name, soft) {
 }
 function move(d) { if (!order.length) return; let i = sel ? order.indexOf(sel) : -1; i = (i+d+order.length)%order.length; select(order[i]); }
 function nextNeedsYou() {
-  const need = boxes.filter(b => ["error","attn","waiting"].includes(groupOf(b.state))).map(b => b.name);
+  const need = owedIn(boxes).map(b => b.name);
   if (!need.length) return; const i = sel ? need.indexOf(sel) : -1; select(need[(i+1)%need.length]);
 }
 
@@ -2573,6 +2580,9 @@ function utteranceFor(b, group) {
   const head = forSpeech(b.headline);
   if (group === "error") return head ? `${name} hit an error. ${head}` : `${name} hit an error.`;
   if (group === "done") return `${name} finished.`;
+  // A box that ended its turn. Distinct from `attn` on purpose: nothing is blocking it, it has said
+  // its piece and stopped, so "needs a decision" would overstate what it is asking for.
+  if (group === "waiting") return head ? `${name} is waiting. ${head}` : `${name} is waiting.`;
   const verb = VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
   // Trust and auth are self-explaining — appending the box's last words to them adds length and no
   // information, because the ask is the state itself rather than anything the agent said.
@@ -2590,7 +2600,8 @@ function utteranceFor(b, group) {
 // so it must keep resyncing every tick or it'd stay stuck at "skein" after a tab refocus.)
 let lastNeedCount = -1;
 function notify(snapshot) {
-  const need = snapshot.filter(b => ["error","attn","waiting"].includes(groupOf(b.state))).length;
+  const owed = owedIn(snapshot);
+  const need = owed.length;
   document.title = need ? `(${need}) skein · ${need} need you` : "skein";
   if (need !== lastNeedCount) { lastNeedCount = need; setFavicon(need); }
   // `!hasFocus()`, not `document.hidden`: the all-day case is skein visible on one monitor while the
@@ -2614,10 +2625,11 @@ function notify(snapshot) {
       // browser may have refused, and speaking needs none — tying them together would silence the
       // half that still works. Still only while away, because a board you are looking at has
       // already told you.
-      if (voiceOn && away && ["attn", "error", "done"].includes(g)) turned.push([b, g]);
+      if (voiceOn && away && [...NEEDS_YOU, "done"].includes(g)) turned.push([b, g]);
     }
     prevState[b.name] = g;
   }
+  sayStandingDebt(owed, away, turned.length > 0);
   if (turned.length === 1) {
     // What "it" means from here on. The whole point of announcing a box by name is that you should
     // not then have to say that name back — "yes" and "show me" are what a person actually says.
@@ -2632,17 +2644,51 @@ function notify(snapshot) {
   }
 }
 
+// The sentence for a set of boxes that are owed something. Shared, so what you hear on demand and
+// what the board says on its own cannot drift into two different accounts of the same fleet.
+function owedSentence(need) {
+  if (!need.length) return "Nothing needs you.";
+  if (need.length === 1) {
+    lastSpoken = need[0].name;
+    return utteranceFor(need[0], groupOf(need[0].state));
+  }
+  return `${need.length} boxes need you. ` + need.map(b => sayName(b.name)).join(", ") + ".";
+}
+
+// Say what is *still* owed, not only the moment it became owed.
+//
+// The mouth used to speak on state transitions alone, and only while you were away — so a box that
+// turned while you were looking at the board was marked seen and never spoken, and it could then sit
+// waiting for an hour in silence. "Things are waiting for me and it said nothing" was the ordinary
+// outcome, not an edge case: you are usually looking at the board at the moment work stops.
+//
+// So the debt is announced once it has stood for a grace period. The grace is what keeps this from
+// being unbearable — glancing at a terminal for ten seconds must not be narrated — and the key is
+// what stops it repeating: the same set is said once, and a *changed* set is what earns another
+// sentence.
+const OWED_GRACE_MS = 20000;
+let awaySince = 0, owedSpokenKey = null;
+function sayStandingDebt(owed, away, alreadySpeaking) {
+  if (!voiceOn) return;
+  if (!away) { awaySince = 0; return; }
+  if (!awaySince) awaySince = Date.now();
+  const key = owed.map(b => b.name).sort().join("|");
+  // Nothing owed: forget what was said, so the next thing to go wrong is announced rather than
+  // suppressed as a repeat of a set that no longer exists.
+  if (!key) { owedSpokenKey = null; return; }
+  // A transition is being spoken on this same tick — let that sentence stand, and take the credit
+  // for it, so the debt is not read out twice in a row.
+  if (alreadySpeaking) { owedSpokenKey = key; return; }
+  if (Date.now() - awaySince < OWED_GRACE_MS || key === owedSpokenKey) return;
+  owedSpokenKey = key;
+  say(owedSentence(owed));
+}
+
 // Read the inbox on demand — the same sentence the mouth would have spoken, for when you *are*
 // looking at the board but do not want to read it, and as the honest way to hear what it sounds
 // like before trusting it to speak on its own.
 function sayInbox() {
-  const need = boxes.filter(b => ["error", "attn"].includes(groupOf(b.state)));
-  if (!need.length) return say("Nothing needs you.");
-  if (need.length === 1) {
-    lastSpoken = need[0].name;
-    return say(utteranceFor(need[0], groupOf(need[0].state)));
-  }
-  say(`${need.length} boxes need you. ` + need.map(b => sayName(b.name)).join(", ") + ".");
+  say(owedSentence(owedIn(boxes)));
 }
 function pushNote(body, tag) {
   if (Notification.permission !== "granted") return;
