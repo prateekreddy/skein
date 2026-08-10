@@ -1872,7 +1872,7 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    let merged = settings_with_probe(&current);
+    let merged = settings_with_sync_gateway(&settings_with_probe(&current), store);
     let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
     write_atomic(&settings, store, &bytes)?;
 
@@ -1917,6 +1917,53 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         &skein_dir,
         &codex_bytes,
     )
+}
+
+/// Point this repo's boxes at the gateway their connection names, by setting `SYNC_MCP_URL` in the
+/// store's `settings.json`.
+///
+/// The store *is* project scope for every box of the repo, and `env` is honoured there — so one
+/// write reaches every box at once, including boxes that do not exist yet. That is what makes wiring
+/// a repo to a tracker one action rather than one action per box: the sync plugin declares its
+/// server as `${SYNC_MCP_URL:-<upstream's own default>}`, so without this a box would silently talk
+/// to upstream's gateway instead of yours.
+///
+/// The URL is not a credential — it is the same string the settings screen shows — which is why it
+/// can live in a store shared by every box of the repo, while the OAuth grant that authenticates
+/// against it stays box-private.
+///
+/// Absent connection ⇒ the key is *removed* rather than left behind: a repo unwired from its tracker
+/// must stop pointing boxes at it, and a stale URL here would outlive the decision to disconnect.
+fn settings_with_sync_gateway(existing: &serde_json::Value, store: &Path) -> serde_json::Value {
+    let mut out = existing.clone();
+    // The repo is found from the store rather than passed in, because every caller of this already
+    // has the store and only some of them have the repo.
+    let gateway = load_repos()
+        .into_iter()
+        .find(|r| Path::new(&r.store) == store)
+        .and_then(|r| crate::tracking::connection_for_repo(&r))
+        .map(|c| c.gateway_url)
+        .filter(|u| !u.trim().is_empty())
+        .map(|u| crate::tracking::sync_mcp_url(&u));
+
+    let Some(env) = out.get_mut("env") else {
+        if let Some(url) = gateway {
+            out["env"] = serde_json::json!({ "SYNC_MCP_URL": url });
+        }
+        return out;
+    };
+    // Anything already here belongs to the repo — this owns exactly one key in it.
+    if let Some(map) = env.as_object_mut() {
+        match gateway {
+            Some(url) => {
+                map.insert("SYNC_MCP_URL".into(), serde_json::Value::String(url));
+            }
+            None => {
+                map.remove("SYNC_MCP_URL");
+            }
+        }
+    }
+    out
 }
 
 /// Add skein's probe hooks to a `settings.json` value, preserving every existing hook and never
@@ -5587,6 +5634,127 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(!store.join("skills/work-tracking/SKILL.md").exists());
         // And nothing was stamped, so fixing the cause and starting again still works.
         assert!(!boxhome.join(".local/state/skein").exists());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// Wiring a repo to a tracker points every box of it at that gateway, in one write.
+    ///
+    /// The store is project scope for every box of the repo, and `env` is honoured there — so this
+    /// reaches boxes that do not exist yet, which is what makes it one action per repo instead of
+    /// one per box. Without it the plugin falls back to the default gateway compiled into it, and a
+    /// box would quietly claim work on somebody else's tracker.
+    #[test]
+    fn a_repos_store_points_its_boxes_at_the_gateway_its_connection_names() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        fs::create_dir_all(&store).unwrap();
+
+        crate::tracking::save_connections(&[crate::tracking::SyncConnection {
+            id: "c1".into(),
+            label: "ours".into(),
+            gateway_url: "https://gw.test".into(),
+        }])
+        .unwrap();
+        let repo = Repo {
+            id: "r1".into(),
+            source: "s".into(),
+            work: "/w".into(),
+            store: store.display().to_string(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: "c1".into(),
+            sync_gateway_url: String::new(),
+        };
+        save_repos(std::slice::from_ref(&repo)).unwrap();
+
+        ensure_store(&store).unwrap();
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap()).unwrap()
+        };
+        // `/mcp` under the base, the same normalisation every other caller uses — a pasted endpoint
+        // must not become `/mcp/mcp`.
+        assert_eq!(read()["env"]["SYNC_MCP_URL"], "https://gw.test/mcp");
+
+        // Unwired again: the key goes, rather than outliving the decision to disconnect. A stale URL
+        // here is worse than none — it keeps pointing boxes at a tracker the repo has left.
+        save_repos(&[Repo {
+            sync_connection: String::new(),
+            ..repo
+        }])
+        .unwrap();
+        ensure_store(&store).unwrap();
+        assert!(
+            read()["env"].get("SYNC_MCP_URL").is_none(),
+            "an unwired repo must stop pointing its boxes anywhere: {}",
+            read()["env"]
+        );
+
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// A box with no minted token is still wired up: the URL alone is enough now.
+    ///
+    /// The token stopped being what Claude authenticates with the moment the plugin took over the
+    /// server — it signs in over OAuth. Gating the whole install on a token would mean a repo could
+    /// not be pointed at a tracker without one being minted per box, which is the per-box work this
+    /// change exists to remove.
+    #[test]
+    fn the_url_alone_wires_a_box_up_and_the_token_is_only_codexs() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("CLAUDE.md"), "# proj\n").unwrap();
+
+        let bin = home.join("fakebin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = home.join("claude.log");
+        fs::write(
+            bin.join("claude"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The URL arrives the way the store now supplies it, with no token anywhere.
+        let boxhome = home.join("boxhome");
+        fs::create_dir_all(&boxhome).unwrap();
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-install.sh"))
+            .env("HOME", &boxhome)
+            .env("WORKSPACE_DIR", &project)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("SYNC_MCP_URL", "https://gw.test/mcp")
+            .env_remove("SYNC_GATEWAY_URL")
+            .env_remove("SYNC_AGENT_TOKEN")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.contains("plugin install sync@sync"),
+            "no token is not a reason to skip the plugin: {} / {calls}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let settings: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(boxhome.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["env"]["SYNC_MCP_URL"], "https://gw.test/mcp");
+        // And Codex gets nothing rather than a `Bearer ` that 401s on first use — a registration
+        // that looks complete is a worse place to find out than here.
+        assert!(!boxhome.join(".codex/config.toml").exists());
+
         env::remove_var("SKEIN_HOME");
     }
 

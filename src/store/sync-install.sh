@@ -46,7 +46,15 @@ cred="$HOME/.config/sync/env"
 url="${SYNC_GATEWAY_URL:-}"
 token="${SYNC_AGENT_TOKEN:-}"
 
-if [ -z "$url" ] || [ -z "$token" ]; then
+# The URL is what makes a box wired; the token is not, any more. Claude reaches the gateway through
+# the plugin's OAuth, so requiring a minted token before doing anything would gate the whole install
+# on a credential only Codex still uses — and a box could not be given a tracker without one being
+# minted for it. The token is checked where it is spent, in the Codex block.
+#
+# The URL can arrive two ways now: this box-private file, or `SYNC_MCP_URL` from the store's
+# settings, which the host writes once per repo. Either is enough.
+[ -n "$url" ] || url="${SYNC_MCP_URL:-}"
+if [ -z "$url" ]; then
   # The common case at box startup. Quiet on purpose: a box with no tracker is not a broken box.
   exit 0
 fi
@@ -195,9 +203,14 @@ fi
 # Still a registration, and it has to be: plugins are a Claude Code feature. Codex cannot load one,
 # so the token route is not a fallback here, it is the only route — which is also why the minted
 # token is still worth writing into a box even though Claude no longer uses it.
+# Skipped without a token rather than written with an empty one: a bearer header of `Bearer ` is a
+# registration that looks complete and 401s on the first call, which is a worse place to discover
+# the credential is missing than here.
 codex_registered="no"
 codex_cfg="$HOME/.codex/config.toml"
-if command -v codex >/dev/null 2>&1 || [ -f "$codex_cfg" ]; then
+if [ -z "$token" ]; then
+  :
+elif command -v codex >/dev/null 2>&1 || [ -f "$codex_cfg" ]; then
   mkdir -p "$HOME/.codex" 2>/dev/null || true
   if [ -n "${SKEIN_SYNC_FORCE:-}" ] && [ -f "$codex_cfg" ]; then
     tmpcfg="$codex_cfg.skein.tmp"

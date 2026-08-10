@@ -21,10 +21,20 @@ skein's registration would shadow the plugin it had just installed, leaving a bo
 and a dead monitor beside them. The old entry is actively removed, because every box wired before
 this change still carries one.
 
-The gateway URL still comes from the same place: the connection configured in Settings, written into
-the box by `sync_provision_box`. What changed is where it lands — `SYNC_MCP_URL` in the box's
-`~/.claude/settings.json`, which is the seam the plugin declares (`${SYNC_MCP_URL:-…}`) and the only
-one that survives a plugin update.
+The gateway URL still comes from the same place — the connection configured in Settings — and lands
+as `SYNC_MCP_URL`, which is the seam the plugin declares (`${SYNC_MCP_URL:-…}`) and the only one that
+survives a plugin update. It is written in **two** places, for two different reasons:
+
+- **the repo's store `settings.json`**, by `ensure_probe_in` on every launch. The store is project
+  scope for every box of the repo and `env` is honoured there, so one write reaches every box at
+  once *including boxes that do not exist yet*. This is what makes wiring a repo to a tracker one
+  action rather than one per box. Unwiring the repo removes the key, so a disconnected repo stops
+  pointing its boxes anywhere.
+- **the box's own `~/.claude/settings.json`**, by `sync-install.sh`, for a box provisioned directly.
+
+Neither is a credential — it is the same string the settings screen shows — which is why it can live
+in a store shared by every box of the repo, while the OAuth grant that authenticates against it stays
+box-private.
 
 Authentication moves with it: the plugin signs in over OAuth rather than carrying a minted token.
 That is upstream's primary path, and the sync repo's own box already runs this way.
@@ -32,6 +42,11 @@ That is upstream's primary path, and the sync repo's own box already runs this w
 **Codex still registers by token**, and that is not a fallback — plugins are a Claude Code feature,
 so for Codex the TOML block is the only way it ever gets these tools. That is also why
 `sync_provision_box` still mints a token.
+
+It is the *only* thing the token is for now, which is why `sync-install.sh` no longer requires one to
+run: a URL alone wires a box up. Requiring a token first would have meant a repo could not be pointed
+at a tracker without one being minted for every box of it — the per-box work this arrangement exists
+to remove.
 
 **So the vendored skill below is now the Codex fallback, not the primary.** The plugin ships this
 skill and keeps it current; skein's copy is pinned to whatever commit was last pulled here, and two
