@@ -2230,7 +2230,18 @@ if (window.visualViewport) {
 }
 
 // ---------- attention: title / favicon / notifications ----------
+// Remembered across loads, exactly as the voice switch is. It was not, and that is most of "alerts
+// don't work": the browser permission survives forever, so the bell looked settled, but `alertsOn`
+// came back false on every reload and every reopened tab — and it is the flag `notify()` actually
+// checks. You turned alerts on once and were never pinged again.
+//
+// Gated on the live permission too, so revoking it in the browser turns the switch off rather than
+// leaving it lit over a channel that silently drops everything.
 let alertsOn = false;
+try {
+  alertsOn = localStorage.getItem("skein.alerts") === "1"
+    && "Notification" in window && Notification.permission === "granted";
+} catch {}
 function setFavicon(count) {
   const c = document.createElement("canvas"); c.width = c.height = 32; const x = c.getContext("2d");
   x.fillStyle = count ? "#f85149" : "#7c7cf0"; const r = 7;
@@ -2640,7 +2651,9 @@ function notify(snapshot) {
     }
     prevState[b.name] = g;
   }
-  sayStandingDebt(owed, away, turned.length > 0);
+  // The whole fleet, not `owed`: the debt tracker has to see a box *stop* being owed to know it may
+  // be forgotten. Handed only the owed subset it cannot tell "answered" from "never existed".
+  sayStandingDebt(snapshot, away, turned.map(([b]) => b.name));
   if (turned.length === 1) {
     // What "it" means from here on. The whole point of announcing a box by name is that you should
     // not then have to say that name back — "yes" and "show me" are what a person actually says.
@@ -2673,22 +2686,21 @@ function owedSentence(need) {
 // waiting for an hour in silence. "Things are waiting for me and it said nothing" was the ordinary
 // outcome, not an edge case: you are usually looking at the board at the moment work stops.
 //
-// So the debt is announced once it has stood for a grace period. The grace is what keeps this from
-// being unbearable — glancing at a terminal for ten seconds must not be narrated — and the key is
-// what stops it repeating: the same set is said once, and a *changed* set is what earns another
-// sentence.
-// Two clocks, and they answer different objections.
+// So the debt is announced once it has stood for a while. Three rules, answering three different
+// objections — and the third was missing, which made this a nag.
 //
 // GRACE is about you: glancing at a terminal for ten seconds must not be narrated.
 //
-// SETTLE is about the box, and it is the one that stops this being unusable. `waiting` is mostly
-// TRANSIENT — a box passes through it between turns — so a set keyed on "who is owed" changes every
-// time one blinks, and every change would have earned a sentence. A box has to have been owed for a
-// while before it is worth saying out loud, which is also the honest test of whether it is really
-// waiting on you rather than on itself.
+// SETTLE is about the box. `waiting` is mostly TRANSIENT — a box passes through it between turns —
+// so a box has to have been owed for a while before it is worth saying out loud, which is also the
+// honest test of whether it is really waiting on you rather than on itself.
+//
+// ONCE PER BOX is about the fact that you heard it. A debt is news exactly once; after that it is
+// something you already know and have decided about. Parking a box because there is no more work for
+// it is a normal thing to do, and a voice that will not let you is worse than no voice.
 const OWED_GRACE_MS = 20000;
 const OWED_SETTLE_MS = 12000;
-let awaySince = 0, owedSpokenKey = null, stateSince = {};
+let awaySince = 0, spokenOwed = new Set(), stateSince = {};
 
 // The boxes that have been owed long enough to be worth a sentence.
 //
@@ -2709,21 +2721,43 @@ function settledOwed(snapshot) {
   return owedIn(snapshot).filter(b => now - stateSince[b.name].at >= OWED_SETTLE_MS);
 }
 
-function sayStandingDebt(snapshot, away, alreadySpeaking) {
+// A box stays remembered as announced until it has been NOT owed for as long as it had to be owed
+// to earn a sentence in the first place.
+//
+// The missing half of the settle window, and the whole of the "it keeps reminding me" bug. A box
+// flickers out of `waiting` for a tick constantly — that is what SETTLE exists to absorb on the way
+// in — but on the way out it was forgotten instantly. So one box, parked deliberately because there
+// was no more work, blinked, re-settled twelve seconds later, and was announced again. And again.
+// Symmetry is the fix: the same hysteresis in both directions.
+function forgetSettledDebts(snapshot) {
+  const now = Date.now();
+  const group = new Map(snapshot.map(b => [b.name, groupOf(b.state)]));
+  spokenOwed = new Set([...spokenOwed].filter(name => {
+    if (!group.has(name)) return false;                    // gone from the fleet entirely
+    if (NEEDS_YOU.includes(group.get(name))) return true;  // still owed — obviously still said
+    // Owed until recently: hold the memory, so a blink cannot re-earn a sentence. Once it has
+    // genuinely been working this long, needing you again is real news and is announced.
+    return now - (stateSince[name]?.at ?? 0) < OWED_SETTLE_MS;
+  }));
+}
+
+function sayStandingDebt(snapshot, away, spokenNow) {
   const owed = settledOwed(snapshot);
   if (!voiceOn) return;
   if (!away) { awaySince = 0; return; }
   if (!awaySince) awaySince = Date.now();
-  const key = owed.map(b => b.name).sort().join("|");
-  // Nothing owed: forget what was said, so the next thing to go wrong is announced rather than
-  // suppressed as a repeat of a set that no longer exists.
-  if (!key) { owedSpokenKey = null; return; }
-  // A transition is being spoken on this same tick — let that sentence stand, and take the credit
-  // for it, so the debt is not read out twice in a row.
-  if (alreadySpeaking) { owedSpokenKey = key; return; }
-  if (Date.now() - awaySince < OWED_GRACE_MS || key === owedSpokenKey) return;
-  owedSpokenKey = key;
-  say(owedSentence(owed));
+  forgetSettledDebts(snapshot);
+  // A transition is being spoken on this same tick — let that sentence stand and take the credit for
+  // those boxes. Anything else that settled is said on the *next* tick rather than stacked onto it.
+  if (spokenNow.length) { for (const n of spokenNow) spokenOwed.add(n); return; }
+  if (Date.now() - awaySince < OWED_GRACE_MS) return;
+  // Once per box, not once per change to the set. Keyed on the owed *set*, this re-read the whole
+  // list every time any box entered or left it — so the boxes that had been waiting all along were
+  // named again in every sentence, which is the other half of saying the same thing over and over.
+  const fresh = owed.filter(b => !spokenOwed.has(b.name));
+  if (!fresh.length) return;
+  for (const b of fresh) spokenOwed.add(b.name);
+  say(owedSentence(fresh));
 }
 
 // Read the inbox on demand — the same sentence the mouth would have spoken, for when you *are*
@@ -2740,10 +2774,39 @@ function pushNote(body, tag) {
     n.onclick = () => { try { window.focus(); } catch {} if (boxes.some(b => b.name === tag)) openTerminal(tag); };
   } catch {}
 }
+function paintAlerts() {
+  const el = document.getElementById("alerts");
+  if (!el) return;
+  el.style.color = alertsOn ? "var(--done)" : "";
+  el.title = alertsOn
+    ? "Desktop alerts on — you'll be pinged when a box needs you. Click to silence"
+    : !("Notification" in window)
+      ? "This browser won't deliver notifications from this page — open the cockpit on localhost"
+      : Notification.permission === "denied"
+        ? "Your browser is blocking notifications for this site — allow them in site settings"
+        : "Desktop alerts when a box needs you";
+}
 document.getElementById("alerts").addEventListener("click", async () => {
-  if (!("Notification" in window)) return;
+  // Say why instead of doing nothing. The Notification API is absent outside a secure context, so
+  // reaching the cockpit on a LAN address rather than localhost made this button dead and silent —
+  // indistinguishable from alerts that are on and simply never firing.
+  if (!("Notification" in window)) {
+    toast("Notifications need a secure context — reach the cockpit on http://127.0.0.1 rather than a LAN address.");
+    paintAlerts();
+    return;
+  }
+  // A switch that only switches on is not a switch. The palette offered "Disable desktop alerts"
+  // and re-enabled them instead, because a second click re-read the still-granted permission.
+  if (alertsOn) {
+    alertsOn = false;
+    try { localStorage.setItem("skein.alerts", "0"); } catch {}
+    paintAlerts();
+    return;
+  }
   const p = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
   alertsOn = p === "granted";
+  if (!alertsOn) toast("Your browser blocked notifications for this site — allow them in site settings to be pinged.");
+  try { localStorage.setItem("skein.alerts", alertsOn ? "1" : "0"); } catch {}
   // Create + resume the AudioContext inside this click: browsers only allow audio started from a
   // user gesture, and beep() fires from a timer when the tab is unfocused — a context created there
   // is born suspended and plays silence. Priming it here makes the "needs you" beep actually audible.
@@ -2753,9 +2816,7 @@ document.getElementById("alerts").addEventListener("click", async () => {
       if (audioCtx.state === "suspended") audioCtx.resume();
     } catch {}
   }
-  const el = document.getElementById("alerts");
-  el.style.color = alertsOn ? "var(--done)" : "";
-  el.title = alertsOn ? "Desktop alerts on — you'll be pinged when a box needs you" : "Desktop alerts when a box needs you";
+  paintAlerts();
 });
 function paintVoice() {
   const el = document.getElementById("voice");
@@ -2781,6 +2842,7 @@ document.getElementById("voice").addEventListener("click", () => {
   }
 });
 paintVoice();
+paintAlerts();
 // Refocusing acknowledges the alert styling but must not lie: keep the live count in the title.
 window.addEventListener("focus", () => { notify(boxes); });
 

@@ -52,9 +52,9 @@ const say = t => { if (t) spoken.push(t); };
 
 const source = [
   "GROUPS", "groupOf", "NEEDS_YOU", "owedIn", "sayName", "forSpeech", "VERB",
-  // `awaySince` brings `owedSpokenKey` with it — they share one declaration.
+  // `awaySince` brings `spokenOwed` and `stateSince` with it — they share one declaration.
   "utteranceFor", "owedSentence", "OWED_GRACE_MS", "OWED_SETTLE_MS", "awaySince",
-  "settledOwed", "sayStandingDebt",
+  "settledOwed", "forgetSettledDebts", "sayStandingDebt",
 ].map(grab).join("\n");
 
 // The lifted code closes over two variables the page owns elsewhere. They are declared here rather
@@ -68,7 +68,7 @@ const scope = new Function(
    return { groupOf, owedIn, utteranceFor, owedSentence, sayStandingDebt,
             NEEDS_YOU, OWED_GRACE_MS, OWED_SETTLE_MS,
             setVoice: v => { voiceOn = v; },
-            reset: () => { awaySince = 0; owedSpokenKey = null; stateSince = {}; } };`,
+            reset: () => { awaySince = 0; spokenOwed = new Set(); stateSince = {}; } };`,
 );
 
 let failures = 0;
@@ -119,7 +119,7 @@ const realNow = Date.now;
 let T = 1_700_000_000_000;
 Date.now = () => T;
 const fleet = states => Object.entries(states).map(([n, s]) => box(n, s));
-const tick = (states, away = true, speaking = false) => V.sayStandingDebt(fleet(states), away, speaking);
+const tick = (states, away = true, spokenNow = []) => V.sayStandingDebt(fleet(states), away, spokenNow);
 
 spoken = []; V.reset();
 tick({ "web-main": "waiting" }, false);
@@ -165,15 +165,58 @@ tick({ "web-main": "waiting", api: "error" });
 check("a newcomer that has not settled yet does not change the sentence", spoken, []);
 T += V.OWED_SETTLE_MS + 1;
 tick({ "web-main": "waiting", api: "error" });
-check("but once it settles, the changed set earns one", spoken, ["2 boxes need you. web main, api."]);
+// Only the newcomer. Re-reading the whole list here is what made this a nag: web-main had already
+// been announced, and naming it again in every subsequent sentence is saying the same thing over.
+check("but once it settles, the newcomer earns a sentence of its own", spoken, ["api hit an error."]);
 
 // A transition is being announced on the same tick — that sentence stands alone.
 spoken = []; V.reset();
 tick({ "web-main": "waiting" });
 T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
-tick({ "web-main": "waiting" }, true, true);
+tick({ "web-main": "waiting" }, true, ["web-main"]);
 tick({ "web-main": "waiting" });
 check("never reads the debt out on top of a transition it just announced", spoken, []);
+
+// --- and then it shuts up -----------------------------------------------------------------------
+// The nag. A box you parked on purpose — there is no more work for it — must be mentioned once and
+// then left alone, however long you stay away and however much the rest of the fleet moves.
+spoken = []; V.reset();
+tick({ "web-main": "waiting", api: "working" });
+T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
+tick({ "web-main": "waiting", api: "working" });
+check("says a parked box once", spoken, ["web main is waiting."]);
+spoken = [];
+for (let i = 0; i < 40; i++) { T += 2000; tick({ "web-main": "waiting", api: "working" }); }
+check("and does not bring it up again for the next eighty seconds", spoken, []);
+
+// THE bug: `waiting` blinks constantly, and forgetting instantly meant every blink re-earned the
+// same sentence. The memory has to outlast a flicker exactly as entry has to outlast one.
+spoken = [];
+for (let i = 0; i < 5; i++) {
+  T += 2000; tick({ "web-main": "working", api: "working" });   // blink out…
+  T += 2000; tick({ "web-main": "waiting", api: "working" });   // …and back
+  T += V.OWED_SETTLE_MS + 1;
+  tick({ "web-main": "waiting", api: "working" });              // settled again
+}
+check("a box that blinks out of waiting is not re-announced when it settles back", spoken, []);
+
+// But a box that genuinely goes back to work and later needs you again IS news.
+spoken = [];
+tick({ "web-main": "working", api: "working" });
+T += V.OWED_SETTLE_MS * 3;
+tick({ "web-main": "working", api: "working" });
+T += 2000;
+tick({ "web-main": "waiting", api: "working" });
+T += V.OWED_SETTLE_MS + 1;
+tick({ "web-main": "waiting", api: "working" });
+check("but a box that worked and then needed you again is announced", spoken, ["web main is waiting."]);
+
+// A newcomer is named on its own — not as a re-reading of everyone already owed.
+spoken = [];
+tick({ "web-main": "waiting", api: "waiting" });
+T += V.OWED_SETTLE_MS + 1;
+tick({ "web-main": "waiting", api: "waiting" });
+check("a second box earns a sentence about itself, not the whole list again", spoken, ["api is waiting."]);
 
 // Silence means silence.
 spoken = []; V.reset(); V.setVoice(false);
