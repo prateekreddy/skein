@@ -266,6 +266,25 @@ pub const AGENT_PROTOCOL: u32 = 2;
 /// "until the box's disk fills".
 pub const AGENT_WRITE_CAP: u64 = 1 << 30;
 
+/// How long to wait to get *in* to the agent, before deciding it is not there.
+///
+/// Long, and deliberately so — the two-second budget this replaces had the failure backwards. It was
+/// reasoned as "a slow no is worse than a fast one, the fallback is sitting right there", which
+/// holds only if the fallback is healthy. It is not: `sbx exec` is the call that stalls under load,
+/// and load is exactly when a busy sandbox is slow to accept. So the old budget gave up on the
+/// working transport at the one moment it was worth waiting for, and fell back to the stalling one.
+///
+/// Measured here: one box legitimately holding 9.5 of 11 cores, which is the shared sandbox working
+/// as intended — `cpu.weight` is equal and uncapped, so a lone box gets the machine and hands it
+/// back under contention.
+///
+/// It costs less than it looks. A port with nothing behind it is *refused* immediately rather than
+/// timing out, which covers both the ordinary "agent not installed" case and sbx's phantom mappings
+/// (docker/sbx-releases#297), which refuse every connection while still being reported by
+/// `sbx ports`. The budget is only ever spent when something is genuinely listening and too busy to
+/// answer — which is the case this transport exists for.
+const AGENT_CONNECT: Duration = Duration::from_secs(30);
+
 /// The placement for a streamed write travels as a header, and Python's `http.server` refuses a
 /// header line over 64 KB. Nothing skein sends comes near it; declining rather than truncating means
 /// a caller that someday does falls back to `sbx exec` instead of writing a mangled script.
@@ -311,9 +330,7 @@ pub fn agent_protocol(port: u16) -> Option<u32> {
     if port == 0 {
         return None;
     }
-    // Short: this runs while deciding whether to *bother* with the agent, and a slow no is worse
-    // than a fast one — the fallback is sitting right there.
-    let mut stream = agent_connect(port, Duration::from_secs(2)).ok()?;
+    let mut stream = agent_connect(port, AGENT_CONNECT).ok()?;
     health_over(&mut stream)
 }
 
@@ -521,10 +538,10 @@ impl AgentWrite {
         // and the held connection is what liveness, resources and the board poll through — an
         // upload that borrowed it would blind the cockpit for the duration, which is a worse
         // version of the failure this transport was built to prevent.
-        // Two budgets, not one. Getting in has to be quick — this decision is made on a request
-        // thread and `sbx exec` is sitting right there — while the body itself may legitimately
-        // take an hour, so its deadlines are widened only once the agent has proved it is there.
-        let mut stream = agent_connect(port, Duration::from_secs(2)).ok()?;
+        // Two budgets, not one: getting in is bounded by AGENT_CONNECT, while the body itself may
+        // legitimately take an hour, so its deadlines are widened only once the agent has proved it
+        // is there.
+        let mut stream = agent_connect(port, AGENT_CONNECT).ok()?;
         // Ask before committing. An agent installed by an older skein has no `/write`, and would
         // say so only after the entire body had been sent — with no way back, because an upload's
         // bytes come off a network socket that has already been drained. One round trip, on the
@@ -975,6 +992,32 @@ impl Place {
 mod tests {
     use super::*;
     use crate::testutil::*;
+
+    /// The whole justification for a 30-second connect budget is that a dead port never spends it.
+    ///
+    /// If that is wrong, every call into a fleet whose agent is not installed — which is the state
+    /// skein degrades to, and the state it must stay usable in — pays half a minute before falling
+    /// back to `sbx exec`, and the board becomes unusable exactly when it is already unwell. The
+    /// kernel refuses a connection to a closed local port outright, and this asserts that skein is
+    /// relying on a refusal rather than on a timeout.
+    #[test]
+    fn nothing_listening_costs_nothing_however_long_the_budget_is() {
+        // Bound then dropped: the OS gave us this number, so nothing else is on it, and by the time
+        // the probe runs the listener is gone.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("a free port");
+
+        let started = std::time::Instant::now();
+        assert_eq!(agent_protocol(port), None, "nothing is listening there");
+        let spent = started.elapsed();
+        assert!(
+            spent < Duration::from_secs(5),
+            "a closed port must be refused, not waited out — took {spent:?} of a {AGENT_CONNECT:?} \
+             budget, so every call in a fleet with no agent would pay it"
+        );
+    }
 
     /// Drives the **real** `fleet-agent.py` over the **real** client, because the thing worth
     /// testing here is the wire, and a stubbed transport would agree with whatever the client
