@@ -4,7 +4,7 @@ The files beside this one come from `git@github.com:prateekreddy/sync.git` — t
 fronts Plane. It changes; these have to follow, or a box is drilled in a contract the server no
 longer honours.
 
-Last synced from: **`6e3f703`**, 2026-08-10.
+Last synced from: **`e113f18`**, 2026-08-10.
 
 This file stays in the skein repo. `ensure_probe_in` ships only the documents into a store, so
 nothing here reaches a box.
@@ -23,18 +23,27 @@ this change still carries one.
 
 The gateway URL still comes from the same place — the connection configured in Settings — and lands
 as `SYNC_MCP_URL`, which is the seam the plugin declares (`${SYNC_MCP_URL:-…}`) and the only one that
-survives a plugin update. It is written in **two** places, for two different reasons:
+survives a plugin update. It travels in two steps:
 
-- **the repo's store `settings.json`**, by `ensure_probe_in` on every launch. The store is project
-  scope for every box of the repo and `env` is honoured there, so one write reaches every box at
-  once *including boxes that do not exist yet*. This is what makes wiring a repo to a tracker one
-  action rather than one per box. Unwiring the repo removes the key, so a disconnected repo stops
-  pointing its boxes anywhere.
-- **the box's own `~/.claude/settings.json`**, by `sync-install.sh`, for a box provisioned directly.
+1. **the host publishes it** into the repo's store as `skein/sync/gateway`, from `ensure_probe_in` on
+   every launch. Unwiring the repo deletes the file, so a disconnected repo stops pointing its boxes
+   anywhere.
+2. **each box reads it on start** and writes it into its own `~/.claude/settings.json`, from
+   `sync-install.sh`.
 
-Neither is a credential — it is the same string the settings screen shows — which is why it can live
-in a store shared by every box of the repo, while the OAuth grant that authenticates against it stays
-box-private.
+That is still one action per repo — every box of it picks the URL up by starting, including boxes
+that do not exist yet — but it goes the long way round for a measured reason.
+
+**`env` in the store's `settings.json` does not work for this.** Project-scope `env` does not reach a
+plugin's `.mcp.json` expansion. Tested in a box: with `SYNC_MCP_URL` set only in project settings and
+cleared from the environment, `claude mcp list` still showed the plugin resolving to the default
+gateway compiled into it. Set in *user* settings, it resolved to the configured one. The docs say
+`env` is honoured in all scopes; for this purpose it is not, so the store carries data a script reads
+rather than settings something else is trusted to apply.
+
+The URL is not a credential — it is the same string the settings screen shows — which is why it can
+live in a store shared by every box of the repo, while the OAuth grant that authenticates against it
+stays box-private.
 
 Authentication moves with it: the plugin signs in over OAuth rather than carrying a minted token.
 That is upstream's primary path, and the sync repo's own box already runs this way.

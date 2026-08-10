@@ -1872,9 +1872,10 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    let merged = settings_with_sync_gateway(&settings_with_probe(&current), store);
+    let merged = settings_with_probe(&current);
     let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
     write_atomic(&settings, store, &bytes)?;
+    publish_sync_gateway(store)?;
 
     let skein_dir = store.join("skein");
     write_atomic(
@@ -1919,23 +1920,26 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
     )
 }
 
-/// Point this repo's boxes at the gateway their connection names, by setting `SYNC_MCP_URL` in the
-/// store's `settings.json`.
+/// Publish the gateway this repo's boxes should use, as a file in the store.
 ///
-/// The store *is* project scope for every box of the repo, and `env` is honoured there — so one
-/// write reaches every box at once, including boxes that do not exist yet. That is what makes wiring
-/// a repo to a tracker one action rather than one action per box: the sync plugin declares its
-/// server as `${SYNC_MCP_URL:-<upstream's own default>}`, so without this a box would silently talk
-/// to upstream's gateway instead of yours.
+/// A file rather than `env.SYNC_MCP_URL` in the store's `settings.json`, and that is a correction:
+/// project-scope `env` does **not** reach the plugin's `.mcp.json` expansion. Measured in a box —
+/// with the variable set only in project settings and stripped from the environment, the plugin
+/// still resolved to the default gateway compiled into it. User scope does work, so the arrangement
+/// is: the host publishes the URL here, and `sync-install.sh` reads it on box start and writes it
+/// into that box's own `~/.claude/settings.json`.
 ///
-/// The URL is not a credential — it is the same string the settings screen shows — which is why it
+/// The effect is the same one write per repo — every box of it picks the URL up by starting, and
+/// boxes that do not exist yet get it too — but it rests on a mechanism that was tested rather than
+/// one that reads plausibly.
+///
+/// The URL is not a credential; it is the string the settings screen already shows. That is why it
 /// can live in a store shared by every box of the repo, while the OAuth grant that authenticates
 /// against it stays box-private.
 ///
-/// Absent connection ⇒ the key is *removed* rather than left behind: a repo unwired from its tracker
-/// must stop pointing boxes at it, and a stale URL here would outlive the decision to disconnect.
-fn settings_with_sync_gateway(existing: &serde_json::Value, store: &Path) -> serde_json::Value {
-    let mut out = existing.clone();
+/// No connection ⇒ the file is *removed*: a repo unwired from its tracker must stop pointing boxes
+/// at it, and a stale URL here would outlive the decision to disconnect.
+fn publish_sync_gateway(store: &Path) -> Result<(), String> {
     // The repo is found from the store rather than passed in, because every caller of this already
     // has the store and only some of them have the repo.
     let gateway = load_repos()
@@ -1946,24 +1950,19 @@ fn settings_with_sync_gateway(existing: &serde_json::Value, store: &Path) -> ser
         .filter(|u| !u.trim().is_empty())
         .map(|u| crate::tracking::sync_mcp_url(&u));
 
-    let Some(env) = out.get_mut("env") else {
-        if let Some(url) = gateway {
-            out["env"] = serde_json::json!({ "SYNC_MCP_URL": url });
+    let dir = store.join("skein").join("sync");
+    let path = dir.join("gateway");
+    match gateway {
+        Some(url) => {
+            fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+            write_atomic(&path, &dir, format!("{url}\n").as_bytes())
         }
-        return out;
-    };
-    // Anything already here belongs to the repo — this owns exactly one key in it.
-    if let Some(map) = env.as_object_mut() {
-        match gateway {
-            Some(url) => {
-                map.insert("SYNC_MCP_URL".into(), serde_json::Value::String(url));
-            }
-            None => {
-                map.remove("SYNC_MCP_URL");
-            }
-        }
+        None => match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("removing {}: {e}", path.display())),
+        },
     }
-    out
 }
 
 /// Add skein's probe hooks to a `settings.json` value, preserving every existing hook and never
@@ -5670,15 +5669,16 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         save_repos(std::slice::from_ref(&repo)).unwrap();
 
         ensure_store(&store).unwrap();
-        let read = || -> serde_json::Value {
-            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap()).unwrap()
-        };
+        let gateway = store.join("skein/sync/gateway");
         // `/mcp` under the base, the same normalisation every other caller uses — a pasted endpoint
         // must not become `/mcp/mcp`.
-        assert_eq!(read()["env"]["SYNC_MCP_URL"], "https://gw.test/mcp");
+        assert_eq!(
+            fs::read_to_string(&gateway).unwrap().trim(),
+            "https://gw.test/mcp"
+        );
 
-        // Unwired again: the key goes, rather than outliving the decision to disconnect. A stale URL
-        // here is worse than none — it keeps pointing boxes at a tracker the repo has left.
+        // Unwired again: the file goes, rather than outliving the decision to disconnect. A stale
+        // URL here is worse than none — it keeps pointing boxes at a tracker the repo has left.
         save_repos(&[Repo {
             sync_connection: String::new(),
             ..repo
@@ -5686,9 +5686,8 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         .unwrap();
         ensure_store(&store).unwrap();
         assert!(
-            read()["env"].get("SYNC_MCP_URL").is_none(),
-            "an unwired repo must stop pointing its boxes anywhere: {}",
-            read()["env"]
+            !gateway.exists(),
+            "an unwired repo must stop pointing its boxes anywhere"
         );
 
         env::remove_var("SKEIN_HOME");
@@ -5725,7 +5724,11 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         .unwrap();
         fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
 
-        // The URL arrives the way the store now supplies it, with no token anywhere.
+        // The URL arrives the way the host publishes it for the whole repo — a file in the store,
+        // no token and no environment override anywhere. This is the chain end to end: the host
+        // writes one file, and a box start turns it into that box's own user-scope setting, which
+        // is the scope the plugin actually reads.
+        fs::write(store.join("skein/sync/gateway"), "https://gw.test/mcp\n").unwrap();
         let boxhome = home.join("boxhome");
         fs::create_dir_all(&boxhome).unwrap();
         let out = Command::new("bash")
@@ -5733,7 +5736,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             .env("HOME", &boxhome)
             .env("WORKSPACE_DIR", &project)
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-            .env("SYNC_MCP_URL", "https://gw.test/mcp")
+            .env_remove("SYNC_MCP_URL")
             .env_remove("SYNC_GATEWAY_URL")
             .env_remove("SYNC_AGENT_TOKEN")
             .output()
@@ -5923,6 +5926,12 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             .env("WORKSPACE_DIR", &project)
             .env_remove("SYNC_GATEWAY_URL")
             .env_remove("SYNC_AGENT_TOKEN")
+            // Cleared explicitly, because this one is inherited from the *developer's* environment
+            // rather than set by the fixture: Claude Code injects `env` from settings into every
+            // subprocess it spawns, so a machine that has this variable set at all would otherwise
+            // make the installer wire a box up here and the test would fail describing a bug that
+            // does not exist.
+            .env_remove("SYNC_MCP_URL")
             .output()
             .unwrap();
         assert!(out.status.success(), "it must never gate a box's startup");

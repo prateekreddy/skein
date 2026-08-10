@@ -26,6 +26,13 @@ line, and the board's transport row shows `settings / unreadable` in place of `o
 appears and the transport row is amber, the config was fine and the failure is downstream — the
 server's `skein: the in-sandbox agent is not serving (…)` line names it.
 
+### Codex is parked, deliberately
+
+`sync-install.sh` still writes Codex's `[mcp_servers.sync]` TOML when a token exists, but nothing
+about the Codex path has been verified since the plugin took over, and the vendored skill it depends
+on is now skipped on any box where the plugin installed. Revisit when Codex is actually used —
+including whether the token is still worth minting at all.
+
 ### Upstream: the lease monitor reads a session id nothing sets
 
 In `prateekreddy/sync` at `6e3f703`, `plugin/bin/sync-monitor` uses

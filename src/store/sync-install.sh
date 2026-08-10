@@ -51,9 +51,16 @@ token="${SYNC_AGENT_TOKEN:-}"
 # on a credential only Codex still uses — and a box could not be given a tracker without one being
 # minted for it. The token is checked where it is spent, in the Codex block.
 #
-# The URL can arrive two ways now: this box-private file, or `SYNC_MCP_URL` from the store's
-# settings, which the host writes once per repo. Either is enough.
+# The URL can arrive three ways, in order of how specific they are: the box's own credential file,
+# an environment override, then the repo-wide gateway the host publishes into the store. The last is
+# what makes wiring a repo one action — every box of it reads the same file on start.
+#
+# Read here and written into this box's OWN `~/.claude/settings.json` further down, rather than left
+# for Claude Code to pick up from the store's settings: project-scope `env` does not reach the
+# plugin's `.mcp.json`. Measured, not assumed — with the variable set only in project settings, the
+# plugin still resolved to the default gateway compiled into it. User scope does work.
 [ -n "$url" ] || url="${SYNC_MCP_URL:-}"
+[ -n "$url" ] || url="$(sed -n '1s/[[:space:]]*$//p' "$src/gateway" 2>/dev/null)"
 if [ -z "$url" ]; then
   # The common case at box startup. Quiet on purpose: a box with no tracker is not a broken box.
   exit 0
