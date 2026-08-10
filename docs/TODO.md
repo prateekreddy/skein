@@ -33,18 +33,26 @@ about the Codex path has been verified since the plugin took over, and the vendo
 on is now skipped on any box where the plugin installed. Revisit when Codex is actually used —
 including whether the token is still worth minting at all.
 
-### Upstream: the lease monitor reads a session id nothing sets
+### The installed sync plugin is 0.2.0, whose lease monitor keeps nothing alive
 
-In `prateekreddy/sync` at `6e3f703`, `plugin/bin/sync-monitor` uses
-`${CLAUDE_SESSION_ID:-default}.watch` while `plugin/bin/sync-session` (which *writes* that file)
-resolves the session from hook stdin, falling back to `CLAUDE_CODE_SESSION_ID`. Confirmed in a box:
-`CLAUDE_CODE_SESSION_ID` is set, `CLAUDE_SESSION_ID` is not.
+**Not an upstream report any more — upstream fixed it.** `plugin/bin/sync-monitor` on `main` now
+resolves through a shared `sync-paths.sh` (`sync_session_id` → `CLAUDE_CODE_SESSION_ID`), and its
+comment describes the same defect in the same terms: it "used to read CLAUDE_SESSION_ID — a variable
+Claude Code does not set — and fall back to `default.watch`, so it polled a file nothing ever writes
+and kept nothing alive, quietly, forever."
 
-So the harvest hook writes `<session>.watch` and the monitor reads `default.watch`, finds no
-credential, and the lease keepalive does nothing — the exact failure the monitor was built to
-prevent, in the silent form its own README warns about ("a guard nobody knows is disabled").
-`sync-session` carries a comment about this precise mistake, so it was fixed in one file and not the
-other. Not skein's to fix; report it upstream.
+What is left is a **version** problem, and it is live. The plugin installed in these boxes is
+**0.2.0** (marketplace at `392d6ab`), whose `sync-monitor` still has
+`WATCH_FILE="$TOKEN_DIR/${CLAUDE_SESSION_ID:-default}.watch"` and no `sync_session_id` at all. So the
+lease keepalive in every box does nothing, silently — the failure its own README warns about, "a
+guard nobody knows is disabled". Upstream knows: `sync-monitor` calls out 0.2.0 by name as predating
+the fix, and `8fac188` makes a monitor left behind by an update stop rather than pretend.
+
+Fix is to update the plugin, not to patch anything. While doing it, note our submodule pin is
+`e113f18` and `main` is `c573fd1` — sixteen commits, most of them lease and monitor correctness
+(reconciliation returning finished items to the pool, a 410 blinding the monitor for 17 minutes, a
+credential that aged out reading as a takeover). Bumping the pin also means re-vendoring the skill,
+which `the_shipped_skill_is_upstreams_verbatim` will insist on.
 
 ### Shared login: the poisoning is fixed, the recovery is on box-restart cadence
 
