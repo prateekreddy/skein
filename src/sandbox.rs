@@ -749,7 +749,8 @@ pub(crate) fn agent_attach_argv(
         ""
     };
     let instruction = agent_instruction_setup(runtime);
-    let command = guarded_agent_command(agent, command);
+    let command = crate::runtime::for_box(command, name);
+    let command = guarded_agent_command(agent, &command);
     let place = place_of(name).unwrap_or_else(|| own_sandbox(name));
     // Every `tmux` below is this box's server: bare under the original model, socket-qualified when
     // the sandbox is shared. Session names are identical either way, so without the socket two boxes

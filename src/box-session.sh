@@ -252,6 +252,27 @@ seed_paths=(".claude" ".claude.json" ".codex" ".gitconfig" ".bashrc" ".profile")
 # startup, so every fleet box would have failed to come up.
 share_paths=(".local" ".cargo" ".rustup" ".npm")
 
+# And one that is deliberately STATE, which every other entry above is not.
+#
+# Claude Code ships session-to-session messaging: `ListAgents` finds the other sessions, `SendMessage`
+# talks to them. In this fleet the TRANSPORT is already shared and always was — every session's inbox
+# socket lands in `/run/user/1000/cc-socks/`, which belongs to the sandbox, and nine of them were
+# visible from inside one box when this was measured. What was private is the DISCOVERY: a session
+# registers itself in `~/.claude/sessions/<pid>.json`, `.claude` is seeded per box, so each box could
+# see only itself and `ListAgents` answered "no reachable agents" over a directory of live sockets.
+#
+# Sharing this one directory — not `.claude`, which holds the credentials and the conversation
+# history that must stay per box — is the whole fix, and it costs no skein code: box-to-box messaging
+# becomes a feature of the runtime rather than a thing skein carries.
+#
+# Safe to share by construction, which is worth stating because "shared state" is what the block
+# above exists to prevent. The files are keyed by PID; every box's agent runs in the sandbox's single
+# PID namespace (that is why one socket directory holds them all), so the names cannot collide and
+# liveness checks against a pid mean what they say. A stale entry is a dead pid, which is exactly
+# what the runtime already prunes.
+mkdir -p "$HOME/.claude/sessions" 2>/dev/null || true
+share_paths+=(".claude/sessions")
+
 for rel in "${seed_paths[@]}"; do
   mine="$home/$rel"
   [ -e "$mine" ] && continue

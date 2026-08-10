@@ -70,14 +70,18 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         statusline_input: None,
         instruction_file: ".claude/CLAUDE.md",
         instruction_override: "",
-        interactive_start: "claude",
+        // Named after the box, because the name is the address. With the session registry shared
+        // (see `share_paths` in box-session.sh) every box's agent is reachable via `SendMessage`,
+        // and an unnamed session shows up in another box's `ListAgents` as a pid — which is not
+        // something anyone can address, and not something the fleet has any other name for.
+        interactive_start: "claude --name '{box}'",
         // `|| claude` is not belt-and-braces: a box can legitimately have nothing to continue — a
         // cross-runtime replacement box whose new agent was never spoken to, a box whose transcript
         // was cleared, a session killed before its first turn. There `claude --continue` exits with
         // "No conversation found", the tmux session dies with it, and every reconnect replayed that
         // same failure. Fall back to a fresh conversation (the takeover brief is on disk, so the new
         // agent still picks up the context). Mirrors Codex's `resume --last || codex` below.
-        interactive_resume: "claude --continue || claude",
+        interactive_resume: "claude --name '{box}' --continue || claude --name '{box}'",
         headless_resume: "claude --continue --print {prompt} || claude --print {prompt}",
         context_export: r####"project="$HOME/.claude/projects/$(printf '%s' "$root" | sed 's#/#-#g')"; latest="$(find "$project" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'def text: if type == "string" then . elif type == "array" then map(if type == "string" then . elif .type == "text" then (.text // empty) else empty end) | join("\n") else "" end; select(.type == "user" or .type == "assistant") | (.message.role // .type) as $role | ((.message.content // empty) | text) as $body | select($body != "") | "### \($role)\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
@@ -190,6 +194,18 @@ pub(crate) fn agent_instruction_setup(runtime: &RuntimeAdapter) -> String {
     format!(
         r#"root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"; store="$root/.claude"; if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; elif [ -L "$store" ]; then store="$(readlink -f "$store")"; fi; helper="$store/skein/bin/agent-guide.sh"; if [ -r "$helper" ]; then bash "$helper" "$store" {instruction} {override_} || echo 'skein: durable agent guidance could not be refreshed' >&2; else echo 'skein: agent guide helper is unavailable; restart the host server to refresh this store' >&2; fi"#
     )
+}
+
+/// Resolve `{box}` in a runtime's start command, on the host, where the box's name is known.
+///
+/// Deliberately not `$SKEIN_BOX` left for the box to expand. The command is embedded double-quoted
+/// in the attach shell, and that shell is a fresh entry into the box's namespace — a different
+/// process lineage from the session `box-session.sh` exported that variable into, so it would be
+/// unset there. The obvious fallback, `$(hostname)`, is the trap: in a shared sandbox every box
+/// reports `skein-fleet`, so all of them would answer to one name and `SendMessage` would have
+/// nothing to address. A box is not a sandbox, in its newest costume.
+pub(crate) fn for_box(command: &str, name: &str) -> String {
+    command.replace("{box}", name)
 }
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {

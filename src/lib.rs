@@ -1684,7 +1684,10 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         runtime.info.executable,
         runtime.interactive_setup,
         runtime.update_before_start,
-        guarded_agent_command(runtime.info.id, runtime.interactive_start),
+        guarded_agent_command(
+            runtime.info.id,
+            &crate::runtime::for_box(runtime.interactive_start, &replacement.target),
+        ),
         configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} ")),
     );
     sbx_guest_output(&replacement.target, &shell, Duration::from_secs(660)).map(|_| ())
@@ -2161,6 +2164,20 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // the browser PTY than the inline renderer, and equals `CLAUDE_CODE_NO_FLICKER=1` without needing
     // an env var (sbx has no --env). Additive: never clobber a `tui` already set in the store.
     root.entry("tui").or_insert_with(|| json!("fullscreen"));
+    // Deliver box-to-box messages instead of holding them for approval.
+    //
+    // With the session registry shared (`share_paths` in box-session.sh) every box's agent is
+    // reachable by `SendMessage`, and a held message is the worst of the three outcomes: the sender
+    // is told it was delivered, the recipient is never prompted while it is mid-turn, and the
+    // message surfaces — if at all — long after it mattered. Indistinguishable from silent loss,
+    // which is the failure the mailbox was built to avoid in the first place.
+    //
+    // Safe here for the reason the whole fleet model is: every box is the same person. Boxes are
+    // isolated from each other's *state*, never from each other's identity, and a message from
+    // another box is this user talking to themselves. `or_insert` — a store that has taken its own
+    // position on this keeps it, and a repo may only ever tighten it.
+    root.entry("crossSessionInbound")
+        .or_insert_with(|| json!("accept"));
     // A default status line so a box shows context/usage out of the box. `or_insert` — a store that
     // already sets its own `statusLine` keeps it.
     let status_line = root.entry("statusLine").or_insert_with(
@@ -4386,8 +4403,9 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         )
         .unwrap();
         let restored = initial_attach_argv_as("web-feat-x", "claude").join(" ");
+        // `--name` sits between the two, so this asserts the pair rather than the spelling.
         assert!(
-            restored.contains("claude --continue"),
+            restored.contains("claude --name") && restored.contains("--continue"),
             "the restored conversation would have gone unread: {restored}"
         );
         // The fallback is what makes this safe for a cross-runtime takeover, whose target has no
@@ -6709,7 +6727,8 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             .last()
             .unwrap()
             .contains("tmux new-session -d -s skein-agent"));
-        assert!(a.last().unwrap().contains("claude --continue"));
+        assert!(a.last().unwrap().contains("claude --name"));
+        assert!(a.last().unwrap().contains("--continue"));
         assert!(a.last().unwrap().contains("timeout 120 claude update"));
         assert!(
             a.last().unwrap().find("tmux has-session").unwrap()
@@ -6724,7 +6743,14 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             .last()
             .unwrap()
             .contains("tmux new-session -d -s skein-agent"));
-        assert!(first.last().unwrap().contains(r#""claude ||"#));
+        // A fresh start, guarded — and carrying THIS box's name, resolved on the host. A leftover
+        // `{box}` or a `$SKEIN_BOX` for the attach shell to expand would both name every box in the
+        // sandbox the same thing, which is the failure `for_box` exists to prevent.
+        assert!(first
+            .last()
+            .unwrap()
+            .contains(r#""claude --name 'thing-x' ||"#));
+        assert!(!first.last().unwrap().contains("{box}"));
         assert!(!first.last().unwrap().contains("--continue"));
         // a start that fails outright holds the session open as a shell instead of vanishing and
         // leaving the next attach to die on tmux's "can't find session".
@@ -6741,7 +6767,13 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
         // Both real runtimes fall back to a fresh conversation: a replacement/cleared box has no
         // transcript, and without the fallback "No conversation found" killed the session on attach.
-        assert_eq!(agent_resume_cmd("claude"), "claude --continue || claude");
+        // The raw template, `{box}` unresolved — `for_box` fills it in at the call sites above,
+        // where the name is known. Asserted as a template on purpose: the placeholder being here is
+        // what gives `for_box` something to do, and its absence would silently un-name every box.
+        assert_eq!(
+            agent_resume_cmd("claude"),
+            "claude --name '{box}' --continue || claude --name '{box}'"
+        );
         assert!(agent_resume_cmd("codex").contains("resume --last"));
         assert!(agent_resume_cmd("codex").contains("||"));
         assert_eq!(agent_resume_cmd("shell"), "shell");

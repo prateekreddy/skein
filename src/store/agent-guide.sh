@@ -34,6 +34,8 @@ cat >>"$tmp" <<'GUIDE'
 - `$HOME/shared` is durable, project-scoped, read-write, and live across this repo's Claude/Codex boxes. Use it for reference documents, sample corpora, captures, and working notes.
 - Real `$HOME` remains box-private. Never place credentials, agent runtime state, caches, repositories, build outputs, sockets, or locks in `shared`; coordinate concurrent edits to the same file.
 - Shared project context lives under `.claude`: `memory/` is team memory, `skills/` contains reusable workflows, and `mailbox/` contains cross-box handoffs. Treat a root `CLAUDE.md`, when present, as project guidance alongside `AGENTS.md`.
+- **To reach another box, talk to it directly**: `ListAgents` names every live box in this fleet, `SendMessage` reaches one. That is a conversation — the other box answers — so prefer it whenever the box you want is running.
+- The mailbox is for what messaging cannot do: a box that is **not running** (mail waits on disk and is delivered at its next turn boundary), a **Codex** box (it cannot receive a message), and **another project** (`all-projects`, or `project:<repo-id>`). Use it there and nowhere else.
 - Full guide: `.claude/skein/SHARED-HOME.md`.
 <!-- skein:shared-home:end -->
 GUIDE

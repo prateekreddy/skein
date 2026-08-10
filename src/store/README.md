@@ -16,6 +16,27 @@ Skein installs `jq` during box setup as the single JSON dependency. It does not 
 second agent CLI. A failed `jq` install is recorded in `skein/boot/<vmid>.json` and shown by the
 cockpit health banner instead of silently pretending signals work.
 
+**Box-to-box: talk directly, and fall back to the mailbox.** Claude Code's own
+session messaging works across this fleet — `ListAgents` names every live box,
+`SendMessage` reaches one, and the reply comes back. Skein does nothing to carry it: the
+inbox sockets were always shared (they belong to the sandbox), and the only missing piece
+was discovery, which `box-session.sh` now supplies by sharing `~/.claude/sessions/`
+between boxes. Sessions are named after their box, so the name in `ListAgents` is the
+name you already use everywhere else.
+
+Prefer it for anything conversational — it is synchronous, and the other box can answer
+rather than merely receive. The mailbox keeps the three jobs messaging cannot do, and
+they are not edge cases:
+
+- **the box is not running.** A message needs a live session; mail waits on disk and is
+  delivered at the box's next turn boundary, whenever that is.
+- **the box is Codex.** It has no equivalent, so mail is the only channel that reaches it.
+- **the box is in another project.** `all-projects` / `project:<repo-id>`, relayed
+  host-side (below). Messaging has no notion of a project at all.
+
+Durability is the real distinction: mail is a file, so it survives a box that dies before
+reading it. A message to a session that goes away is simply gone.
+
 **Mailbox delivery is turn-boundary, not just SessionStart.** `mailbox.sh inbox` runs
 on every `UserPromptSubmit` (surfaces unread mail as context at the start of a turn)
 and `mailbox.sh stop-check` runs on every `Stop` (blocks the stop with an error if mail
