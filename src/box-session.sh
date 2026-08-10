@@ -434,6 +434,52 @@ for rel in ".claude/.credentials.json" ".codex/auth.json"; do
   fi
 done
 
+# Deliver box-to-box messages instead of holding them for approval — and do it in the BOX's own
+# settings, which is user scope.
+#
+# This was written into the project store first, and that is the wrong scope for it. A repository's
+# settings can only ever TIGHTEN this: "your own 'accept' cannot override a repo tightening", in
+# Claude Code's own words, so `accept` there grants nothing at all. Measured the expensive way — a
+# real message to a fleet box expired unapproved while the store cheerfully said accept.
+#
+# It is the sibling of sharing `~/.claude/sessions/` above: that makes a box findable, this makes it
+# answerable. Without both, a message is delivered to a session that never sees it, and the sender is
+# told it arrived — the silent loss the mailbox exists to avoid.
+#
+# Only when absent, and never over an unparseable file: a box whose user has taken a position on this
+# keeps it, including a deliberate `hold`.
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$home/.claude/settings.json" 2>/dev/null <<'PY' || true
+import json, os, sys, tempfile
+p = sys.argv[1]
+try:
+    with open(p) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        sys.exit(0)
+except FileNotFoundError:
+    data = {}
+except Exception:
+    sys.exit(0)
+if "crossSessionInbound" in data:
+    sys.exit(0)
+data["crossSessionInbound"] = "accept"
+d = os.path.dirname(p) or "."
+os.makedirs(d, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=d)
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, p)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+PY
+fi
+
 # $HOME first, then the shared escapes ON TOP of it. bwrap resolves every source against the
 # ORIGINAL filesystem, so these still name the sandbox's real directories even though each
 # destination now sits inside the box's private HOME — a symlink could not do this, because the

@@ -2164,20 +2164,14 @@ fn settings_with_probe(existing: &serde_json::Value) -> serde_json::Value {
     // the browser PTY than the inline renderer, and equals `CLAUDE_CODE_NO_FLICKER=1` without needing
     // an env var (sbx has no --env). Additive: never clobber a `tui` already set in the store.
     root.entry("tui").or_insert_with(|| json!("fullscreen"));
-    // Deliver box-to-box messages instead of holding them for approval.
+    // NOT `crossSessionInbound` — deliberately, and this is where it was tried first.
     //
-    // With the session registry shared (`share_paths` in box-session.sh) every box's agent is
-    // reachable by `SendMessage`, and a held message is the worst of the three outcomes: the sender
-    // is told it was delivered, the recipient is never prompted while it is mid-turn, and the
-    // message surfaces — if at all — long after it mattered. Indistinguishable from silent loss,
-    // which is the failure the mailbox was built to avoid in the first place.
-    //
-    // Safe here for the reason the whole fleet model is: every box is the same person. Boxes are
-    // isolated from each other's *state*, never from each other's identity, and a message from
-    // another box is this user talking to themselves. `or_insert` — a store that has taken its own
-    // position on this keeps it, and a repo may only ever tighten it.
-    root.entry("crossSessionInbound")
-        .or_insert_with(|| json!("accept"));
+    // This file is the project store, which is REPO scope, and a repository's settings can only ever
+    // *tighten* that setting: "your own 'accept' cannot override a repo tightening", in Claude
+    // Code's own words. So `accept` here grants nothing, while looking exactly like it does — a real
+    // message to a fleet box expired unapproved with this in place. It is set on each box's own
+    // settings by `box-session.sh` instead, which is user scope, next to the registry share that
+    // makes the box findable in the first place.
     // A default status line so a box shows context/usage out of the box. `or_insert` — a store that
     // already sets its own `statusLine` keeps it.
     let status_line = root.entry("statusLine").or_insert_with(
