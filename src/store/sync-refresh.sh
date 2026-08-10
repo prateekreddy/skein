@@ -114,6 +114,16 @@ for pair in "skill:$store/skills/work-tracking/SKILL.md:$src/work-tracking.skill
     if cp "$ref" "$dest" 2>/dev/null; then
       record "$name" "$ref_sha"
       changed=$((changed + 1))
+      # The skill's two linked pages ride with it rather than being classified on their own. They
+      # have no separate manifest entry because nothing edits them in isolation: they are reached
+      # only by a link from SKILL.md, so their state is whatever SKILL.md's is. Refreshing the entry
+      # point and leaving the pages it links to at an older revision is the one combination that
+      # would read as current and not be.
+      if [ "$name" = "skill" ]; then
+        for page in organising troubleshooting; do
+          cp "$src/work-tracking.$page.md" "${dest%/*}/$page.md" 2>/dev/null || true
+        done
+      fi
     else
       echo "[sync] could not write $dest" >&2
     fi

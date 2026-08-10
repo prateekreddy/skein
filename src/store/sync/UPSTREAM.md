@@ -1,19 +1,44 @@
 # Where these documents come from
 
-The three files beside this one come from `git@github.com:prateekreddy/sync.git` — the gateway that
+The files beside this one come from `git@github.com:prateekreddy/sync.git` — the gateway that
 fronts Plane. It changes; these have to follow, or a box is drilled in a contract the server no
 longer honours.
 
-Last synced from: **`d284b4e`**, 2026-07-31.
+Last synced from: **`6e3f703`**, 2026-08-10.
 
-This file stays in the skein repo. `ensure_probe_in` ships only the three documents into a store, so
+This file stays in the skein repo. `ensure_probe_in` ships only the documents into a store, so
 nothing here reaches a box.
+
+## Upstream ships a plugin now, and it changes what this copy is for
+
+Since `6e3f703` the sync repo is its own single-plugin marketplace (`plugin marketplace add
+prateekreddy/sync`, `plugin install sync@sync`). The plugin carries the MCP server, the skill, a
+lease **monitor**, and session **hooks** — none of which skein has any other source for.
+
+`sync-install.sh` installs it, and still registers the gateway itself with a minted
+`sync_agent_…` token. Both, deliberately:
+
+- The plugin registers `sync` over **OAuth**, which opens a browser. Upstream's own onboarding says
+  headless agents cannot do that and points them at the token route, which stays supported. A box is
+  headless.
+- A hand-added `sync` entry **wins** over a plugin's, and the plugin's is skipped with a note. That
+  is upstream's documented behaviour and here it is the behaviour we want: the box authenticates
+  with its own token and still gets the monitor, the hooks and the skill.
+
+The hooks and the monitor do not depend on which entry won — the hooks read the session id from
+their own stdin, and the monitor authenticates with a capability URL harvested from `claim`'s result.
+
+**So the vendored skill below is now the Codex fallback, not the primary.** Plugins are a Claude Code
+feature; a Codex box gets the server from a TOML block and would otherwise get no skill at all.
+`sync-install.sh` skips the copy when the plugin is installed and there is no Codex on the box.
 
 ## What comes from where
 
 | Ours | Upstream | How |
 |---|---|---|
-| `work-tracking.skill.md` | `skills/work-tracking/SKILL.md` | **copied verbatim** |
+| `work-tracking.skill.md` | `plugin/skills/work-tracking/SKILL.md` | **copied verbatim** |
+| `work-tracking.organising.md` | `plugin/skills/work-tracking/organising.md` | **copied verbatim** |
+| `work-tracking.troubleshooting.md` | `plugin/skills/work-tracking/troubleshooting.md` | **copied verbatim** |
 | `work-tracking.block.md` | `AGENTS.md` § Work tracking, `docs/onboarding.md` § Add the rules to CLAUDE.md, `server/src/mcphttp.ts` `INSTRUCTIONS` | derived — reworded, and it carries a line about the tracker being the record that upstream does not |
 | `work-tracking.memory.md` | the same three | derived — the subset that must fire unprompted, in skein's memory format, with `[[…]]` links to the starter-kit memories |
 
@@ -45,10 +70,16 @@ the copy is complete on its own.
 
 ```bash
 git submodule update --remote upstream/sync
-cp upstream/sync/skills/work-tracking/SKILL.md src/store/sync/work-tracking.skill.md
-cargo test the_shipped_skill                    # green means the copy matches the pin
+R=upstream/sync/plugin/skills/work-tracking
+cp $R/SKILL.md           src/store/sync/work-tracking.skill.md
+cp $R/organising.md      src/store/sync/work-tracking.organising.md
+cp $R/troubleshooting.md src/store/sync/work-tracking.troubleshooting.md
+cargo test the_shipped_skill                    # green means the copies match the pin
 git add upstream/sync src/store/sync            # the bumped pin is part of the commit
 ```
+
+All three, always. `SKILL.md` links to the other two by name, so refreshing the entry point alone
+leaves a box following a link to an older revision — current on its face and stale one hop in.
 
 Then check the two derived files, which no copy can keep current:
 

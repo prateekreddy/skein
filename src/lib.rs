@@ -1705,11 +1705,19 @@ pub fn replace_box(source: &str, target_runtime: &str) -> Result<Replacement, St
 /// existing box has to be wireable too. See `sync_provision_box`.
 const SYNC_INSTALL_SH: &str = include_str!("store/sync-install.sh");
 const SYNC_REFRESH_SH: &str = include_str!("store/sync-refresh.sh");
-/// The three documents that installer places, once a box is actually registered: the always-on
-/// rules, the memory, and the on-demand skill for Plane's full surface.
+/// The documents that installer places, once a box is actually registered: the always-on rules, the
+/// memory, and the on-demand skill for Plane's full surface.
+///
+/// The skill is three files because upstream's is, and `SKILL.md` links to the other two by name —
+/// shipping it alone would hand a box a playbook with two dead ends in it. They are only used where
+/// the sync *plugin* cannot go, which today means Codex: the plugin carries this same skill and
+/// keeps it current, so a box with the plugin gets it from there instead of from a vendored copy
+/// pinned to whatever commit skein last pulled.
 const SYNC_BLOCK_MD: &str = include_str!("store/sync/work-tracking.block.md");
 const SYNC_MEMORY_MD: &str = include_str!("store/sync/work-tracking.memory.md");
 const SYNC_SKILL_MD: &str = include_str!("store/sync/work-tracking.skill.md");
+const SYNC_ORGANISING_MD: &str = include_str!("store/sync/work-tracking.organising.md");
+const SYNC_TROUBLESHOOTING_MD: &str = include_str!("store/sync/work-tracking.troubleshooting.md");
 
 const PROBE_STATUS_SH: &str = include_str!("probe/box-status.sh");
 // box-pane.sh: NOT hook-driven. Started detached by the attach command (see agent_attach_argv)
@@ -1854,6 +1862,8 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("work-tracking.block.md", SYNC_BLOCK_MD),
         ("work-tracking.memory.md", SYNC_MEMORY_MD),
         ("work-tracking.skill.md", SYNC_SKILL_MD),
+        ("work-tracking.organising.md", SYNC_ORGANISING_MD),
+        ("work-tracking.troubleshooting.md", SYNC_TROUBLESHOOTING_MD),
     ] {
         write_atomic(&sync.join(file), &sync, body.as_bytes())?;
     }
@@ -3298,6 +3308,8 @@ mod tests {
             "skein/sync/work-tracking.block.md",
             "skein/sync/work-tracking.memory.md",
             "skein/sync/work-tracking.skill.md",
+            "skein/sync/work-tracking.organising.md",
+            "skein/sync/work-tracking.troubleshooting.md",
         ] {
             assert!(store.join(f).is_file(), "missing {f}");
         }
@@ -5433,6 +5445,14 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
         assert!(calls.contains("Bearer sync_agent_abc"), "{calls}");
         assert!(calls.contains("--scope user"), "{calls}");
+        // The plugin as well as the token entry. The two are not alternatives: the token is what
+        // authenticates a headless box, and the plugin is the only source of the lease monitor and
+        // the session hooks. A hand-added entry wins over the plugin's own, which is the point.
+        assert!(
+            calls.contains("plugin marketplace add prateekreddy/sync"),
+            "{calls}"
+        );
+        assert!(calls.contains("plugin install sync@sync"), "{calls}");
 
         // The rules land only after registration, and they land in the STORE — this repo's
         // `.claude` — so every box of the repo sees them, not just the one that was wired up.
@@ -5443,7 +5463,14 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             "it appends, never replaces"
         );
         assert!(store.join("memory/work-tracking.md").is_file());
+        // Still shipped here because this box has Codex, which cannot install a Claude Code plugin
+        // and would otherwise be left with the tools and no playbook for them. The sibling test
+        // covers the other half: with the plugin and no Codex, this copy is skipped.
         assert!(store.join("skills/work-tracking/SKILL.md").is_file());
+        assert!(store.join("skills/work-tracking/organising.md").is_file());
+        assert!(store
+            .join("skills/work-tracking/troubleshooting.md")
+            .is_file());
         let index = fs::read_to_string(store.join("memory/MEMORY.md")).unwrap();
         assert!(index.contains("(work-tracking.md)"));
 
@@ -5544,6 +5571,61 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::remove_var("SKEIN_HOME");
     }
 
+    /// With the plugin installed and no Codex on the box, skein must NOT also write its own copy of
+    /// the skill.
+    ///
+    /// Two copies of one skill is a fork, not a redundancy. The vendored copy is pinned to whatever
+    /// upstream commit skein last pulled, so the first time an argument name changes the box holds
+    /// two contradictory descriptions of the same tool with nothing to say which is older — and the
+    /// skill's own advice is to trust the tool list over anything written in it, which is advice a
+    /// stale copy gives just as confidently.
+    #[test]
+    fn the_plugins_skill_is_not_shadowed_by_a_vendored_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("CLAUDE.md"), "# proj\n").unwrap();
+
+        let bin = home.join("fakebin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        // No `.codex/config.toml` and no `codex` on PATH — a Claude-only box, where the plugin is
+        // the whole story.
+        let boxhome = home.join("boxhome");
+        fs::create_dir_all(&boxhome).unwrap();
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-install.sh"))
+            .env("HOME", &boxhome)
+            .env("WORKSPACE_DIR", &project)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("SYNC_GATEWAY_URL", "https://gw.test/")
+            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        assert!(
+            !store.join("skills/work-tracking/SKILL.md").exists(),
+            "the plugin ships this skill and keeps it current; skein's pinned copy must not sit \
+             beside it: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The two skein still owns, because the plugin cannot write either: the block is per-repo
+        // and always in context, and the memory is in skein's own format.
+        let claude_md = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
+        assert!(claude_md.contains("## Work tracking"), "{claude_md}");
+        assert!(store.join("memory/work-tracking.md").is_file());
+
+        env::remove_var("SKEIN_HOME");
+    }
+
     // A box with no credentials is not a broken box: startup runs this on every box, so it has to
     // be silent and change nothing until there is something to register.
     #[test]
@@ -5590,24 +5672,47 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
     // the upgrade.
     #[test]
     fn the_shipped_skill_is_upstreams_verbatim() {
-        let upstream = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("upstream/sync/skills/work-tracking/SKILL.md");
-        let Ok(theirs) = fs::read_to_string(&upstream) else {
-            // A checkout without `--recursive`. Not a failure — the vendored copy is complete on its
-            // own — but say so, because a guard that quietly checks nothing is worse than none.
-            eprintln!(
-                "skipping drift check: {} is absent — run `git submodule update --init`",
-                upstream.display()
+        // The plugin's copy, which is where this skill lives now that upstream ships one. All three
+        // files, because `SKILL.md` links to the other two by name — a drift check on the entry
+        // point alone would pass while the box followed a link to a stale page.
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("upstream/sync/plugin/skills/work-tracking");
+        for (theirs, ours, name) in [
+            (
+                dir.join("SKILL.md"),
+                SYNC_SKILL_MD,
+                "work-tracking.skill.md",
+            ),
+            (
+                dir.join("organising.md"),
+                SYNC_ORGANISING_MD,
+                "work-tracking.organising.md",
+            ),
+            (
+                dir.join("troubleshooting.md"),
+                SYNC_TROUBLESHOOTING_MD,
+                "work-tracking.troubleshooting.md",
+            ),
+        ] {
+            let Ok(upstream) = fs::read_to_string(&theirs) else {
+                // A checkout without `--recursive`. Not a failure — the vendored copies are complete
+                // on their own — but say so, because a guard that quietly checks nothing is worse
+                // than none.
+                eprintln!(
+                    "skipping drift check: {} is absent — run `git submodule update --init`",
+                    theirs.display()
+                );
+                return;
+            };
+            assert_eq!(
+                ours,
+                upstream,
+                "the vendored {name} has drifted from upstream/sync. Do not edit the copy: change \
+                 it in the sync repo, then `cp {} src/store/sync/{name}` and update the commit in \
+                 src/store/sync/UPSTREAM.md",
+                theirs.display()
             );
-            return;
-        };
-        assert_eq!(
-            SYNC_SKILL_MD,
-            theirs,
-            "the vendored skill has drifted from upstream/sync. Do not edit the copy: change it in \
-             the sync repo, then `cp upstream/sync/skills/work-tracking/SKILL.md \
-             src/store/sync/work-tracking.skill.md` and update the commit in src/store/sync/UPSTREAM.md"
-        );
+        }
     }
 
     // The block is derived by hand, not copied, so the verbatim check above cannot speak for it —

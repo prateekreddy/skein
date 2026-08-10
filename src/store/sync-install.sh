@@ -71,6 +71,17 @@ registered="no"
 # Claude Code. User scope rather than local: the box is single-purpose, and a user-scoped server is
 # found whichever directory the agent starts in. The credential lands in the box's own
 # ~/.claude.json, which is private to this box.
+#
+# Upstream ships a plugin now, and it registers this same server itself — over OAuth, with no token
+# anywhere. A box cannot use that: the flow opens a browser, and upstream's own onboarding says so
+# ("Headless agents cannot do this"). The token route below is what it points headless boxes at
+# instead, and it stays supported.
+#
+# So both are installed, and they do not fight: a hand-added `sync` entry WINS over a plugin's, and
+# the plugin's is skipped with a note. That is upstream's documented behaviour, and here it is the
+# behaviour we want — the box authenticates with its own minted token, and the plugin still brings
+# the parts that have no other source (see below).
+plugin="no"
 if command -v claude >/dev/null 2>&1; then
   claude mcp remove sync -s user >/dev/null 2>&1 || claude mcp remove sync >/dev/null 2>&1 || true
   if claude mcp add --transport http sync "$url" \
@@ -78,6 +89,28 @@ if command -v claude >/dev/null 2>&1; then
     registered="yes"
   else
     echo "[sync] claude mcp add failed — check the gateway URL and token" >&2
+  fi
+
+  # The plugin carries three things skein has no copy of and cannot write: the lease MONITOR, which
+  # keeps a claim alive as a process rather than as an obligation the model must remember; the
+  # session HOOKS (hand work back on exit, report what is still held on resume, fence `git push`
+  # against a lapsed lease); and the skill, now three files where skein vendored one.
+  #
+  # The monitor is the one that matters most here. A box compacts constantly, and a lease kept alive
+  # by "call heartbeat periodically" is a promise across a context boundary — upstream removed it for
+  # exactly the failure it caused: the lease lapsed, another agent took the item, and the two
+  # collided. A process cannot be talked out of running.
+  #
+  # The marketplace is a private repo, so this clones over the box's forwarded ssh-agent. Fail-soft
+  # like everything else here: a box without the plugin is the box we had yesterday.
+  if claude plugin list 2>/dev/null | grep -q 'sync@sync'; then
+    plugin="yes"
+  elif claude plugin marketplace add prateekreddy/sync >/dev/null 2>&1 \
+       && claude plugin install sync@sync >/dev/null 2>&1; then
+    plugin="yes"
+    echo "[sync] installed the sync plugin — lease monitor, session hooks and the skill" >&2
+  else
+    echo "[sync] could not install the sync plugin (needs ssh access to prateekreddy/sync); the tracker still works, without the lease monitor or the push fence" >&2
   fi
 fi
 
@@ -160,9 +193,29 @@ fi
 
 # 3. The skill. Loaded only when the model judges it relevant, which is why it can afford to be the
 # long one — Plane's whole surface and what each tool answers.
-if mkdir -p "$store/skills/work-tracking" 2>/dev/null \
+#
+# Skipped when the plugin is installed AND there is no Codex here, because the plugin ships this
+# skill itself and keeps it current. Two copies of one skill is not a redundancy, it is a fork: the
+# vendored one is pinned to whatever upstream commit was last pulled into skein, so the moment an
+# argument name changes the box is being taught two contradictory versions of the same tool and
+# nothing says which is older.
+#
+# Codex is why this is a condition rather than a deletion. Plugins are a Claude Code feature; a Codex
+# box gets the MCP server from the TOML block above and would get no skill at all. There, skein's
+# copy is the only copy.
+want_skill="yes"
+if [ "$plugin" = "yes" ] && ! command -v codex >/dev/null 2>&1 && [ ! -f "$codex_cfg" ]; then
+  want_skill="no"
+fi
+if [ "$want_skill" = "yes" ] \
+   && mkdir -p "$store/skills/work-tracking" 2>/dev/null \
    && [ ! -e "$store/skills/work-tracking/SKILL.md" ] \
    && cp "$src/work-tracking.skill.md" "$store/skills/work-tracking/SKILL.md" 2>/dev/null; then
+  # The two pages SKILL.md links to. Copied without guarding on their own absence, because they are
+  # only ever written together with it — and a SKILL.md whose links go nowhere is the one outcome
+  # worth avoiding here.
+  cp "$src/work-tracking.organising.md" "$store/skills/work-tracking/organising.md" 2>/dev/null || true
+  cp "$src/work-tracking.troubleshooting.md" "$store/skills/work-tracking/troubleshooting.md" 2>/dev/null || true
   note skill "$src/work-tracking.skill.md"
 fi
 
