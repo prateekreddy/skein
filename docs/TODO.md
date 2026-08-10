@@ -48,11 +48,16 @@ lease keepalive in every box does nothing, silently — the failure its own READ
 guard nobody knows is disabled". Upstream knows: `sync-monitor` calls out 0.2.0 by name as predating
 the fix, and `8fac188` makes a monitor left behind by an update stop rather than pretend.
 
-Fix is to update the plugin, not to patch anything. While doing it, note our submodule pin is
-`e113f18` and `main` is `c573fd1` — sixteen commits, most of them lease and monitor correctness
-(reconciliation returning finished items to the pool, a 410 blinding the monitor for 17 minutes, a
-credential that aged out reading as a takeover). Bumping the pin also means re-vendoring the skill,
-which `the_shipped_skill_is_upstreams_verbatim` will insist on.
+**Done.** This box updated to 0.4.7 (marketplace `c573fd1`) and `sync-install.sh` now refreshes the
+marketplace on every start, so no box can freeze on a version again — the marker goes back to
+answering only "does this box have the plugin", which is the one question it should ever have
+answered. Every other box picks it up on its next start.
+
+The vendored skill needed nothing: the sixteen commits between `e113f18` and `c573fd1` are all
+server, lease and monitor logic (reconciliation about to return every finished item to the pool, one
+410 blinding the monitor for 17 minutes, a credential that aged out reading as a takeover) and
+`plugin/skills/` is byte-identical across the range. So the submodule pin can be bumped whenever
+convenient without re-vendoring or touching the always-on block.
 
 ### Shared login: the poisoning is fixed, the recovery is on box-restart cadence
 

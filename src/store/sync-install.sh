@@ -89,12 +89,46 @@ stamp="$state/sync-$slug.done"
 #
 # Per box rather than per project, because `plugin install` is user-scoped — one box, one answer,
 # whatever repo it is working in.
+
+# Which version this box is serving, read from the marketplace checkout the plugin loads from.
+plugin_version() {
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$HOME/.claude/plugins/marketplaces/sync/plugin/.claude-plugin/plugin.json" 2>/dev/null | head -1
+}
+
+# Keep it CURRENT, not merely present.
+#
+# The marker answers "does this box have the plugin", and that is the only question it should be
+# answering. It was quietly answering "which version" as well: a box that installed once never looked
+# again, so the fleet sat on 0.2.0 for months — the version whose lease monitor reads a session id
+# Claude Code does not set, polls a file nothing writes, and therefore keeps no claim alive at all.
+# Silently, which is the worst way for a guard to fail: everything looks armed. Presence stays a
+# decision the box owns; the version is not a decision and must not be frozen by one.
+#
+# `marketplace update` is the whole mechanism — the marketplace checkout IS what the plugin loads
+# from, so refreshing it refreshes the plugin. Time-boxed and fail-soft, because a box that cannot
+# reach the marketplace must still start, with whatever it already has.
+#
+# Announced only when the version actually moves. A coordination plugin changing under you without a
+# word is how a confusing morning starts, and silence is the default the rest of this script keeps.
+refresh_plugin() {
+  local before after
+  before="$(plugin_version)"
+  timeout 150 claude plugin marketplace update sync >/dev/null 2>&1 || return 0
+  after="$(plugin_version)"
+  if [ -n "$after" ] && [ "$before" != "$after" ]; then
+    echo "[sync] plugin updated ${before:-none} -> $after" >&2
+  fi
+  return 0
+}
+
 plugin="no"
 plugin_marker="$state/sync-plugin.done"
 if [ -e "$plugin_marker" ] && [ -z "${SKEIN_SYNC_FORCE:-}" ]; then
-  # Already handled once. Believed without asking `claude`, so the steady state of every box start
-  # is a file test rather than a subprocess.
+  # Already handled once, so the presence question is a file test rather than a subprocess. The
+  # version question is not answerable from a file test, and is the one that went stale.
   plugin="yes"
+  command -v claude >/dev/null 2>&1 && refresh_plugin
 elif command -v claude >/dev/null 2>&1; then
   # The plugin carries three things skein has no copy of and cannot write: the lease MONITOR, which
   # keeps a claim alive as a process rather than as an obligation the model must remember; the
@@ -111,6 +145,10 @@ elif command -v claude >/dev/null 2>&1; then
   # its to take.
   if claude plugin list 2>/dev/null | grep -q 'sync@sync'; then
     plugin="yes"
+    # Installed by hand, and still kept current. `marketplace update` pulls from whatever source that
+    # marketplace was added from, so a box pointed at a local checkout stays pointed at it — this
+    # updates the plugin without taking the decision of where it comes from.
+    refresh_plugin
   # The marketplace is a private repo, so this clones over the box's forwarded ssh-agent. Fail-soft
   # like everything else here: a box without the plugin is the box we had yesterday.
   elif claude plugin marketplace add prateekreddy/sync >/dev/null 2>&1 \
