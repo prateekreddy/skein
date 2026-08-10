@@ -1281,7 +1281,9 @@ function render(snapshot) {
   renderTabs();          // tab status follows registry status
   notify(boxes);
   refreshDock();         // the dockbar tracks the viewed box's live state, not just view changes
-  if (!restored) restoreSessions();   // first snapshot: reopen the tabs from before a reload
+  // Reopen the tabs from before a reload — and keep trying on later snapshots, because the first
+  // one can arrive before the fleet does.
+  if (!restored) restoreSessions(); else openPending();
 }
 function refreshRow(name) { const el = rowEls.get(name), b = boxes.find(x => x.name === name); if (el && b) updateRow(el, b, el.dataset.showRepo === "1"); }
 
@@ -1529,31 +1531,71 @@ function closeSession(id) {
 // Persist the open tabs + active view so a page reload can pick the session back up. The agent
 // session lives inside the sandbox (tmux + `claude --continue`), so reattaching just continues it.
 function persistView() {
-  try { localStorage.setItem("skein.view", JSON.stringify({
+  try {
     // In tab order, not open order: restoreSessions replays this list, so the arrangement survives.
-    open: orderedSessions().map(s => ({ box: s.box, kind: s.kind, runtime: s.runtime })),
-    box: view.box, mode: view.mode, kind: view.kind })); } catch {}
+    const open = orderedSessions().map(s => ({ box: s.box, kind: s.kind, runtime: s.runtime }));
+    // Tabs still waiting for their box to show up are part of "what was open", and leaving them out
+    // is how a delayed restore became a permanent loss: the first snapshot arrived without the
+    // fleet in it, nothing was reopened, and the very next persist wrote `open: []` over the only
+    // record that those tabs had ever existed.
+    for (const p of pendingRestore) {
+      if (!open.some(o => o.box === p.box && o.kind === p.kind)) open.push(p);
+    }
+    // Same for the active view: until it is restored, the saved one is still the truth about where
+    // you were, and `view` is merely where the page starts.
+    const active = view.box ? view : (pendingView || view);
+    localStorage.setItem("skein.view", JSON.stringify({
+      open, box: active.box, mode: active.mode, kind: active.kind }));
+  } catch {}
 }
 // On the first fleet snapshot, reopen whatever was open before the reload (filtered to boxes that
 // still exist), and reattach — continuing the previous session rather than starting cold.
 let restored = false;
+// What the last session had open, still waiting for its boxes to appear. Held separately from
+// `sessions` because these are not open yet, and folded back into `persistView` so waiting cannot
+// destroy them.
+let pendingRestore = [];
+let pendingView = null;
 function restoreSessions() {
   restored = true;
   let saved; try { saved = JSON.parse(localStorage.getItem("skein.view") || "null"); } catch {}
   if (!saved) return;
+  pendingRestore = (saved.open || []).map(o => (
+    // back-compat: the old format was a bare list of names
+    typeof o === "string"
+      ? { box: o, kind: "agent", runtime: null }
+      : { box: o.box, kind: o.kind === "shell" ? "shell" : "agent", runtime: o.runtime || null }
+  )).filter(o => o.box);
+  pendingView = saved.box ? { box: saved.box, mode: saved.mode, kind: saved.kind } : null;
+  openPending();
+}
+// Reopen what the fleet can account for, and run on EVERY snapshot rather than only the first.
+//
+// It used to be first-snapshot-only, which quietly assumed the first snapshot is complete. It is
+// not: the server serves the last good fleet list while `sbx ls` is slow or failing, so a reload
+// during a stall got an empty one, filtered every saved tab out as "that box no longer exists", and
+// never looked again.
+//
+// An empty snapshot is therefore not evidence of anything — it is the one case that caused the bug —
+// so nothing is given up on until the fleet has actually reported. A box missing from a snapshot
+// that DOES list boxes is genuinely gone, and that is when its tab is dropped.
+function openPending() {
+  if (!pendingRestore.length && !pendingView) return;
+  if (!boxes.length) return;
   const exist = new Set(boxes.map(b => b.name));
-  for (const o of (saved.open || [])) {
-    const box = typeof o === "string" ? o : o.box;          // back-compat: old format was [name]
-    const kind = (typeof o === "object" && o.kind === "shell") ? "shell" : "agent";
-    const runtime = typeof o === "object" ? o.runtime : null;
-    if (exist.has(box) && !sessions.has(sidOf(box, kind))) createSession(box, kind, null, runtime);
+  for (const o of pendingRestore) {
+    if (exist.has(o.box) && !sessions.has(sidOf(o.box, o.kind))) {
+      createSession(o.box, o.kind, null, o.runtime);
+    }
   }
-  if (saved.box && exist.has(saved.box)) {
-    const mode = ["diff", "session", "files", "tx"].includes(saved.mode) ? saved.mode : "term";
-    showBox(saved.box, mode, saved.kind === "shell" ? "shell" : "agent");
+  pendingRestore = [];
+  if (pendingView && exist.has(pendingView.box)) {
+    const mode = ["diff", "session", "files", "tx"].includes(pendingView.mode) ? pendingView.mode : "term";
+    showBox(pendingView.box, mode, pendingView.kind === "shell" ? "shell" : "agent");
   } else {
     applyView();
   }
+  pendingView = null;
 }
 // Reconnect a disconnected session: drop the dead one and open a fresh socket to the same box.
 // Reconnecting builds a fresh xterm (rewiring a live one risks double-registering onData, i.e.

@@ -10,41 +10,7 @@
 // out of index.html and runs them, which is a test that works where the fix is being written.
 //
 //   node tests/ui/voice.mjs
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const page = readFileSync(join(root, "src", "web", "index.html"), "utf8");
-
-// Lift one top-level declaration out of the page by name. Brace-matched rather than regex-to-
-// end-of-line, because these span lines; a wrong slice would throw here rather than silently test
-// a truncated function.
-function grab(name) {
-  for (const start of [`function ${name}(`, `const ${name} =`, `let ${name} =`]) {
-    const at = page.indexOf(`\n${start}`);
-    if (at < 0) continue;
-    const from = at + 1;
-    const isFn = start.startsWith("function");
-    let depth = 0, opened = false;
-    for (let i = from; i < page.length; i++) {
-      const c = page[i];
-      if (isFn) {
-        // Braces only. Counting the parameter list's parens too would end the function at `)` on
-        // its very first line, which is a slice that parses and tests nothing.
-        if (c === "{") { depth++; opened = true; }
-        else if (c === "}" && --depth === 0 && opened) return page.slice(from, i + 1);
-        continue;
-      }
-      if (c === "{" || c === "[" || c === "(") depth++;
-      else if (c === "}" || c === "]" || c === ")") depth--;
-      // A declaration ends at the first line break outside any bracket — which is also the right
-      // answer for `let a = 0, b = null;`, where there are no brackets to have opened at all.
-      else if (c === "\n" && depth === 0) return page.slice(from, i);
-    }
-  }
-  throw new Error(`could not lift \`${name}\` out of index.html — did it get renamed?`);
-}
+import { grab, harness } from "./lift.mjs";
 
 // The page's output channels, stubbed to record instead of speak or interrupt. Both are driven by
 // one announcer now, so both are recorded here and asserted with the same rules.
@@ -78,12 +44,7 @@ const scope = new Function(
             reset: () => { awaySince = 0; spokenOwed = new Set(); stateSince = {}; } };`,
 );
 
-let failures = 0;
-function check(what, got, want) {
-  const ok = JSON.stringify(got) === JSON.stringify(want);
-  if (!ok) { failures++; console.error(`✗ ${what}\n   got  ${JSON.stringify(got)}\n   want ${JSON.stringify(want)}`); }
-  else console.log(`✓ ${what}`);
-}
+const { check, done } = harness();
 
 const V = scope(say, pushNote, beep);
 const box = (name, state, extra = {}) => ({ name, state, ...extra });
@@ -283,5 +244,4 @@ check("and the backlog survives, so switching one on tells you what you missed",
 
 Date.now = realNow;
 
-console.log(failures ? `\n${failures} failed` : "\nall good");
-process.exit(failures ? 1 : 0);
+done();

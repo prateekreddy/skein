@@ -29,6 +29,17 @@ prints a screenshot path and keeps the fixture for inspection.
 Not wired into `cargo test` on purpose: it needs node and a browser, which the Rust toolchain can't
 assume. Run it before shipping anything that touches `src/web/index.html`.
 
+## `tabs.mjs` — do your open tabs survive a reload
+
+```sh
+node tests/ui/tabs.mjs            # no setup, no chromium, runs inside a box
+```
+
+The restore path is a pure function of (what was saved, what the fleet reports), so it runs without
+a page. It pins the case that lost tabs for good: a reload landing while `sbx ls` is slow got an
+empty first snapshot, read it as "those boxes are gone", and then persisted an empty list over the
+saved one. An empty snapshot is not evidence; a populated one is.
+
 ## `voice.mjs` — what the mouth says, without a browser
 
 ```sh
