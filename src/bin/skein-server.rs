@@ -145,6 +145,7 @@ async fn main() {
         .route("/api/fleet/resize", post(api_fleet_resize))
         .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/fleet/resources", get(api_fleet_resources))
+        .route("/api/fleet/load", get(api_fleet_load))
         .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
@@ -880,6 +881,20 @@ async fn api_fleet_transport() -> Json<skein::Transport> {
     // Blocking: it opens a socket to the agent. Cheap, but not on an async worker.
     Json(
         tokio::task::spawn_blocking(skein::transport_state)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+/// Per-box CPU, memory and process count.
+///
+/// Its own endpoint rather than a field on `/api/fleet/resources`, because the two are asked for at
+/// different moments and cost different amounts: the gauge strip polls every 30 seconds and must
+/// stay cheap, while this measures a rate over half a second and is only wanted when something looks
+/// wrong. Folding it in would have put that half-second into every poll.
+async fn api_fleet_load() -> Json<Vec<skein::BoxLoad>> {
+    Json(
+        tokio::task::spawn_blocking(skein::box_loads)
             .await
             .unwrap_or_default(),
     )

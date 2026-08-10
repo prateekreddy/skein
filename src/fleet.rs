@@ -1655,6 +1655,93 @@ pub fn transport_state() -> Transport {
     }
 }
 
+/// What one box is using right now.
+///
+/// The fleet gauge answers "is the sandbox in trouble", which is the wrong question when the answer
+/// is yes: the next thing you want is *which box*, and nothing could tell you. One box saturating
+/// every core is legitimate here — `cpu.weight` is equal and uncapped on purpose, so a lone box gets
+/// the whole machine and gives it back under contention — but "legitimate" and "what you wanted"
+/// are different, and you cannot judge which without seeing the name.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct BoxLoad {
+    pub name: String,
+    /// CPUs in use, measured rather than reported: `usage_usec` twice over a known interval. A
+    /// cgroup only carries a running total, so a single read says how much CPU a box has used since
+    /// it started — which is a fine way to rank yesterday's builds and no way at all to find what is
+    /// busy now.
+    pub cores: f64,
+    /// `memory.current` — everything the box is charged for, including page cache it could give
+    /// back. `anon` is what the fleet gauge stacks, because that is the part an OOM turns on.
+    pub mem: u64,
+    pub pids: u64,
+}
+
+/// Every box's live usage, in one round trip.
+///
+/// Not behind the resource gate: this is asked for deliberately rather than polled, and a cached
+/// answer to "what is eating the machine *now*" is worse than a slow one. The half-second inside
+/// the script is the measurement interval, not latency to hide.
+pub fn box_loads() -> Vec<BoxLoad> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Vec::new();
+    }
+    own_sandbox(&sandbox)
+        .exec(BOX_LOAD_SCRIPT, Duration::from_secs(20))
+        .map(|out| parse_box_loads(&out, BOX_LOAD_INTERVAL_US))
+        .unwrap_or_default()
+}
+
+const BOX_LOAD_INTERVAL_US: f64 = 500_000.0;
+
+/// Two samples of every box cgroup, separated by the interval above.
+///
+/// `usage_usec` is cumulative, so the pair is the whole point — and both are taken in one shell so
+/// the interval is the sandbox's own clock rather than a round trip that might stall between them.
+const BOX_LOAD_SCRIPT: &str = "\
+cd /sys/fs/cgroup/skein 2>/dev/null || exit 0; \
+for d in */; do n=${d%/}; \
+  printf 'a %s %s\\n' \"$n\" \"$(awk '/^usage_usec/{print $2}' \"$d/cpu.stat\" 2>/dev/null)\"; done; \
+sleep 0.5; \
+for d in */; do n=${d%/}; \
+  printf 'b %s %s %s %s\\n' \"$n\" \
+    \"$(awk '/^usage_usec/{print $2}' \"$d/cpu.stat\" 2>/dev/null)\" \
+    \"$(cat \"$d/memory.current\" 2>/dev/null)\" \
+    \"$(cat \"$d/pids.current\" 2>/dev/null)\"; done";
+
+/// Turn the script's two passes into a rate per box. Its own function so the arithmetic is testable
+/// without a sandbox — the parser is only correct against exactly the output above.
+fn parse_box_loads(out: &str, interval_us: f64) -> Vec<BoxLoad> {
+    let mut first: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    let mut loads = Vec::new();
+    for line in out.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        match f.first() {
+            Some(&"a") if f.len() >= 3 => {
+                if let Ok(v) = f[2].parse() {
+                    first.insert(f[1], v);
+                }
+            }
+            Some(&"b") if f.len() >= 5 => {
+                let (name, used) = (f[1], f[2].parse::<u64>().unwrap_or(0));
+                // A box that appeared between the two passes has no baseline. Reporting it at zero
+                // is honest — it has been observed for no time at all — and beats inventing a rate
+                // from a total that has been accumulating since it started.
+                let before = first.get(name).copied().unwrap_or(used);
+                loads.push(BoxLoad {
+                    name: name.to_string(),
+                    cores: (used.saturating_sub(before) as f64 / interval_us).max(0.0),
+                    mem: f[3].parse().unwrap_or(0),
+                    pids: f[4].parse().unwrap_or(0),
+                });
+            }
+            _ => {}
+        }
+    }
+    loads.sort_by(|a, b| b.cores.total_cmp(&a.cores).then(a.name.cmp(&b.name)));
+    loads
+}
+
 pub fn fleet_resources() -> Option<FleetResources> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
@@ -3560,6 +3647,44 @@ mod tests {
     use super::*;
     use crate::save_repos;
     use crate::testutil::*;
+
+    /// A box's CPU is a *rate*, and the cgroup only offers a running total.
+    ///
+    /// Reading `usage_usec` once and reporting it ranks boxes by how much CPU they have burned since
+    /// they started, which puts yesterday's long build permanently at the top and never shows what
+    /// is busy now. The difference between two samples over a known interval is the whole
+    /// measurement.
+    #[test]
+    fn a_boxs_cpu_is_the_difference_between_two_samples() {
+        // Half a second of wall clock; `busy` burns two full cores in it, `idle` none.
+        let out = "\
+a busy 1000000
+a idle 5000000
+b busy 2000000 4294967296 312
+b idle 5000000 1048576 4
+";
+        let loads = parse_box_loads(out, 500_000.0);
+        assert_eq!(loads.len(), 2);
+        // Sorted by what you opened this to find out.
+        assert_eq!(loads[0].name, "busy");
+        assert_eq!(loads[0].cores, 2.0);
+        assert_eq!(loads[0].mem, 4_294_967_296);
+        assert_eq!(loads[0].pids, 312);
+        assert_eq!(loads[1].name, "idle");
+        assert_eq!(loads[1].cores, 0.0);
+    }
+
+    /// A box that appears between the two passes has no baseline, and must not be handed one.
+    ///
+    /// Treating a missing first sample as zero would subtract from it — reporting a box's entire
+    /// lifetime of CPU as if it had all happened in half a second, which is both enormous and
+    /// exactly the box that just started doing nothing.
+    #[test]
+    fn a_box_that_arrives_mid_measurement_is_reported_at_zero() {
+        let loads = parse_box_loads("b newcomer 900000000 1048576 3\n", 500_000.0);
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].cores, 0.0, "not 1800 cores");
+    }
 
     /// The agent's install must put the token on **stdin**, never in the argv.
     ///

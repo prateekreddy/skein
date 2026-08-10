@@ -747,8 +747,19 @@
   .row.live-head .htext { color:var(--working); font-family:var(--mono); }
   .row.live-head .headline::before { content:"▸"; color:var(--working); flex:none; }
   /* away digest — "while you were gone" */
-  #away { position:fixed; inset:0; z-index:120; background:rgba(0,0,0,.45); display:none; align-items:flex-start; justify-content:center; }
-  #away.open { display:flex; }
+  #away, #load { position:fixed; inset:0; z-index:120; background:rgba(0,0,0,.45); display:none; align-items:flex-start; justify-content:center; }
+  #away.open, #load.open { display:flex; }
+  /* The load rows share the away card's shell; only the bar is theirs. */
+  .lrow { display:flex; align-items:center; gap:10px; padding:9px 16px; border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent); cursor:pointer; }
+  .lrow:last-child { border-bottom:0; }
+  .lrow:hover { background:var(--inset); }
+  .lrow .nm { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; }
+  .lrow .bar { width:120px; height:6px; border-radius:3px; background:var(--inset); overflow:hidden; flex:none; }
+  .lrow .bar i { display:block; height:100%; background:var(--working); }
+  .lrow.hot .bar i { background:var(--attn); }
+  .lrow .fig { font-family:var(--mono); font-size:11px; color:var(--dim); white-space:nowrap; flex:none; }
+  .lrow .fig b { color:var(--text-2); font-weight:600; }
+
   .away-card { margin-top:8vh; width:min(560px,92vw); background:var(--panel); border:1px solid var(--border-2); border-radius:14px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.5); }
   .away-head { display:flex; align-items:center; gap:8px; padding:13px 16px; border-bottom:1px solid var(--line); }
   .away-head b { font-size:14px; } .away-head .sub { color:var(--faint); font-size:12px; } .away-head .x { margin-left:auto; cursor:pointer; color:var(--dim); }
@@ -2666,9 +2677,40 @@ function owedSentence(need) {
 // being unbearable — glancing at a terminal for ten seconds must not be narrated — and the key is
 // what stops it repeating: the same set is said once, and a *changed* set is what earns another
 // sentence.
+// Two clocks, and they answer different objections.
+//
+// GRACE is about you: glancing at a terminal for ten seconds must not be narrated.
+//
+// SETTLE is about the box, and it is the one that stops this being unusable. `waiting` is mostly
+// TRANSIENT — a box passes through it between turns — so a set keyed on "who is owed" changes every
+// time one blinks, and every change would have earned a sentence. A box has to have been owed for a
+// while before it is worth saying out loud, which is also the honest test of whether it is really
+// waiting on you rather than on itself.
 const OWED_GRACE_MS = 20000;
-let awaySince = 0, owedSpokenKey = null;
-function sayStandingDebt(owed, away, alreadySpeaking) {
+const OWED_SETTLE_MS = 12000;
+let awaySince = 0, owedSpokenKey = null, stateSince = {};
+
+// The boxes that have been owed long enough to be worth a sentence.
+//
+// Tracked here rather than read off `prevState`, which notify() consumes for transitions and
+// overwrites in the same pass — this needs to know *when* a group was entered, not just that it
+// changed.
+function settledOwed(snapshot) {
+  const now = Date.now();
+  const live = new Set();
+  for (const b of snapshot) {
+    live.add(b.name);
+    const g = groupOf(b.state);
+    if (stateSince[b.name]?.g !== g) stateSince[b.name] = { g, at: now };
+  }
+  // A destroyed box must not keep its timestamp: one recreated under the same name would look like
+  // it had been waiting since before it existed.
+  for (const name in stateSince) if (!live.has(name)) delete stateSince[name];
+  return owedIn(snapshot).filter(b => now - stateSince[b.name].at >= OWED_SETTLE_MS);
+}
+
+function sayStandingDebt(snapshot, away, alreadySpeaking) {
+  const owed = settledOwed(snapshot);
   if (!voiceOn) return;
   if (!away) { awaySince = 0; return; }
   if (!awaySince) awaySince = Date.now();
@@ -2742,6 +2784,63 @@ paintVoice();
 // Refocusing acknowledges the alert styling but must not lie: keep the live count in the title.
 window.addEventListener("focus", () => { notify(boxes); });
 
+// ---------- per-box load: which box is eating the machine ----------
+//
+// On demand rather than on the strip, for two reasons. It costs a measured half-second in the
+// sandbox — CPU is a rate, and a cgroup only keeps a running total — and the question is one you ask
+// at a moment ("why is my laptop hot"), not one worth answering thirty times an hour.
+//
+// A box using every core is legitimate: `cpu.weight` is equal and uncapped on purpose, so a lone box
+// gets the whole machine and hands it back the moment another wants it. What was missing is the
+// name — "the fleet is busy" is not something you can act on, and "one box is running its test suite
+// on ten workers" is.
+async function showLoad() {
+  const ov = loadOverlay();
+  ov.querySelector(".away-list").innerHTML = `<div class="lrow"><span class="nm">measuring…</span></div>`;
+  ov.classList.add("open");
+  let rows = [];
+  try { rows = await fetch("/api/fleet/load").then(r => r.ok ? r.json() : []); } catch {}
+  renderLoad(ov, rows);
+}
+function loadOverlay() {
+  let ov = document.getElementById("load");
+  if (!ov) {
+    ov = document.createElement("div"); ov.id = "load"; document.body.append(ov);
+    ov.addEventListener("click", e => {
+      if (e.target === ov || e.target.classList.contains("x")) ov.classList.remove("open");
+    });
+  }
+  ov.innerHTML = `<div class="away-card"><div class="away-head"><b>Load by box</b>`
+    + `<span class="sub">right now</span><span class="x">✕</span></div><div class="away-list"></div></div>`;
+  return ov;
+}
+function renderLoad(ov, rows) {
+  const list = ov.querySelector(".away-list");
+  if (!rows.length) {
+    list.innerHTML = `<div class="lrow"><span class="nm">nothing to report</span>`
+      + `<span class="fig">the sandbox did not answer</span></div>`;
+    return;
+  }
+  // Scaled against the busiest box rather than against the core count: one box at 8 cores of 11 and
+  // one at 0.2 is the shape you want to see, and a bar drawn against 11 renders both as slivers.
+  const top = Math.max(...rows.map(r => r.cores), 0.5);
+  list.innerHTML = "";
+  for (const r of rows) {
+    const row = document.createElement("div");
+    // `containers` is the Docker daemon's own cgroup, not a box — named as such so it is not read
+    // as one that has gone missing from the board.
+    const isBox = boxes.some(b => b.name === r.name);
+    row.className = "lrow" + (r.cores >= top && r.cores > 1 ? " hot" : "");
+    row.innerHTML = `<span class="nm">${esc(isBox ? r.name : r.name + " (docker)")}</span>`
+      + `<span class="bar"><i style="width:${Math.round(Math.min(1, r.cores/top)*100)}%"></i></span>`
+      + `<span class="fig"><b>${r.cores.toFixed(1)}</b> cpu · ${fmtGB(r.mem)} · ${r.pids|0}p</span>`;
+    if (isBox) row.addEventListener("click", () => { ov.classList.remove("open"); select(r.name); });
+    else row.style.cursor = "default";
+    list.append(row);
+  }
+}
+const fmtGB = b => b >= 1073741824 ? `${(b/1073741824).toFixed(1)}G` : `${Math.round(b/1048576)}M`;
+
 // ---------- away digest: "while you were gone" (free — client-side fleet delta) ----------
 let awaySnap = null;
 function snapFleet() {
@@ -2807,6 +2906,7 @@ function commands() {
     { sec:"Actions", label:(alertsOn?"Disable":"Enable")+" desktop alerts", run:()=>document.getElementById("alerts").click() },
     { sec:"Actions", label:(voiceOn?"Silence":"Speak")+" boxes that need you", run:()=>document.getElementById("voice").click() },
     { sec:"Actions", label:"Read what needs me", run:sayInbox },
+    { sec:"Actions", label:"Load by box — who is using the CPU", run:showLoad },
     // Click-to-talk for the same commands the held key takes. `continuous:false` ends the
     // recognition on a pause by itself, so this needs no second click to stop it.
     { sec:"Actions", label:"Listen for a command", run:listen, meta:"hold ⌥ right" },
@@ -2938,6 +3038,7 @@ const KEYMAP = [
     [["↵"], "open the selected box's terminal"],
     [["d"], "open its diff"],
     [["]"], "jump to the next box that needs you"],
+    [["l"], "load by box — which one is using the CPU"],
   ]},
   { sec:"Tabs", items:[
     [["⌥1","…","⌥9"], "switch to the nth open tab (⌥9 is always the last)"],
@@ -3690,6 +3791,7 @@ document.addEventListener("keydown", e => {
     case "d": if (sel) { e.preventDefault(); openDiff(sel); } break;
     case "?": e.preventDefault(); openSettings("keys"); break;
     case "]": e.preventDefault(); nextNeedsYou(); break;
+    case "L": case "l": e.preventDefault(); showLoad(); break;
     case "[": e.preventDefault(); cycleSession(-1); break;
     case "}": e.preventDefault(); cycleSession(1); break;
   }

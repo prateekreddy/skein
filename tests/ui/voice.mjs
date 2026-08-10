@@ -53,7 +53,8 @@ const say = t => { if (t) spoken.push(t); };
 const source = [
   "GROUPS", "groupOf", "NEEDS_YOU", "owedIn", "sayName", "forSpeech", "VERB",
   // `awaySince` brings `owedSpokenKey` with it — they share one declaration.
-  "utteranceFor", "owedSentence", "OWED_GRACE_MS", "awaySince", "sayStandingDebt",
+  "utteranceFor", "owedSentence", "OWED_GRACE_MS", "OWED_SETTLE_MS", "awaySince",
+  "settledOwed", "sayStandingDebt",
 ].map(grab).join("\n");
 
 // The lifted code closes over two variables the page owns elsewhere. They are declared here rather
@@ -65,9 +66,9 @@ const scope = new Function(
   `let voiceOn = true, lastSpoken = null;
    ${source}
    return { groupOf, owedIn, utteranceFor, owedSentence, sayStandingDebt,
-            NEEDS_YOU, OWED_GRACE_MS,
+            NEEDS_YOU, OWED_GRACE_MS, OWED_SETTLE_MS,
             setVoice: v => { voiceOn = v; },
-            reset: () => { awaySince = 0; owedSpokenKey = null; } };`,
+            reset: () => { awaySince = 0; owedSpokenKey = null; stateSince = {}; } };`,
 );
 
 let failures = 0;
@@ -111,53 +112,74 @@ check(
 );
 
 // --- when it speaks --------------------------------------------------------------------------
-// The bug this exists for: a box turns while you are LOOKING at the board, so no transition is ever
-// announced, and it then sits owed in silence.
-const owed = V.owedIn([box("web-main", "waiting")]);
+// Two independent clocks, so the fleet is driven through a controlled one. `waiting` is mostly
+// TRANSIENT — a box passes through it between turns — so "who is owed" changes constantly, and
+// without the settle window every blink would have earned a sentence.
+const realNow = Date.now;
+let T = 1_700_000_000_000;
+Date.now = () => T;
+const fleet = states => Object.entries(states).map(([n, s]) => box(n, s));
+const tick = (states, away = true, speaking = false) => V.sayStandingDebt(fleet(states), away, speaking);
 
 spoken = []; V.reset();
-V.sayStandingDebt(owed, false, false);
+tick({ "web-main": "waiting" }, false);
+T += V.OWED_GRACE_MS + V.OWED_SETTLE_MS;
+tick({ "web-main": "waiting" }, false);
 check("says nothing while you are looking at the board", spoken, []);
 
 spoken = []; V.reset();
-V.sayStandingDebt(owed, true, false);
-check("says nothing the instant you glance away — the grace period", spoken, []);
+tick({ "web-main": "waiting" });
+check("says nothing the instant you glance away — your grace period", spoken, []);
 
-// Same debt, still standing, once the grace has passed.
+// The whole point of the settle window: a box that blinks through `waiting` is not an event.
 spoken = []; V.reset();
-V.sayStandingDebt(owed, true, false);          // starts the clock
-await new Promise(r => setTimeout(r, 5));
-const realNow = Date.now;
-Date.now = () => realNow() + V.OWED_GRACE_MS + 1;
-V.sayStandingDebt(owed, true, false);
+tick({ "web-main": "working" });
+T += V.OWED_GRACE_MS;            // you have been away long enough
+tick({ "web-main": "waiting" }); // …and now it blinks
+T += V.OWED_SETTLE_MS / 2;
+tick({ "web-main": "working" }); // …and is gone again before it settles
+T += V.OWED_SETTLE_MS * 2;
+tick({ "web-main": "working" });
+check("a box that blinks through waiting is never announced", spoken, []);
+
+// Settled, but you have only just looked away.
+spoken = []; V.reset();
+tick({ "web-main": "waiting" });
+T += V.OWED_SETTLE_MS + 1;
+tick({ "web-main": "waiting" });
+check("a settled box still waits on your own grace period", spoken, []);
+
+// Both clocks run out: this is the case that used to be silent forever.
+T += V.OWED_GRACE_MS;
+tick({ "web-main": "waiting" });
 check("speaks a debt that has stood, with no transition to trigger it", spoken, ["web main is waiting."]);
 
-// …and does not go on about it.
 spoken = [];
-V.sayStandingDebt(owed, true, false);
-V.sayStandingDebt(owed, true, false);
+tick({ "web-main": "waiting" });
+tick({ "web-main": "waiting" });
 check("does not repeat the same debt", spoken, []);
 
-// A new box joining the set is a new sentence.
+// A second box, settled in its turn.
 spoken = [];
-V.sayStandingDebt(V.owedIn([box("web-main", "waiting"), box("api", "error")]), true, false);
-check(
-  "but a changed set earns one",
-  spoken,
-  ["2 boxes need you. web main, api."],
-);
+tick({ "web-main": "waiting", api: "error" });
+check("a newcomer that has not settled yet does not change the sentence", spoken, []);
+T += V.OWED_SETTLE_MS + 1;
+tick({ "web-main": "waiting", api: "error" });
+check("but once it settles, the changed set earns one", spoken, ["2 boxes need you. web main, api."]);
 
 // A transition is being announced on the same tick — that sentence stands alone.
 spoken = []; V.reset();
-V.sayStandingDebt(owed, true, true);
-Date.now = () => realNow() + V.OWED_GRACE_MS * 2;
-V.sayStandingDebt(owed, true, false);
+tick({ "web-main": "waiting" });
+T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
+tick({ "web-main": "waiting" }, true, true);
+tick({ "web-main": "waiting" });
 check("never reads the debt out on top of a transition it just announced", spoken, []);
 
 // Silence means silence.
 spoken = []; V.reset(); V.setVoice(false);
-Date.now = () => realNow() + V.OWED_GRACE_MS * 3;
-V.sayStandingDebt(owed, true, false);
+tick({ "web-main": "waiting" });
+T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
+tick({ "web-main": "waiting" });
 check("stays quiet when voice is off", spoken, []);
 V.setVoice(true);
 Date.now = realNow;
