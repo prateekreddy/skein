@@ -5147,9 +5147,15 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             page.contains("b.headline") && page.contains("forSpeech"),
             "the cockpit no longer speaks the box's own words"
         );
+        // The property, not its spelling: both channels are now driven by one announcer, so what
+        // matters is that each still consults its OWN switch there and the two are never conjoined.
         assert!(
-            page.contains("voiceOn && away"),
+            page.contains("if (voiceOn) say(") && page.contains("if (alertsOn) {"),
             "voice lost its own switch — gated on alerts, it dies wherever notifications were refused"
+        );
+        assert!(
+            !page.contains("voiceOn && alertsOn") && !page.contains("alertsOn && voiceOn"),
+            "the two channels were tied together; refusing notifications must not take speech with it"
         );
     }
 

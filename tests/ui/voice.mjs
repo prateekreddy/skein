@@ -46,15 +46,19 @@ function grab(name) {
   throw new Error(`could not lift \`${name}\` out of index.html — did it get renamed?`);
 }
 
-// The mouth's own state. `say` is the page's, stubbed to record instead of speak.
+// The page's output channels, stubbed to record instead of speak or interrupt. Both are driven by
+// one announcer now, so both are recorded here and asserted with the same rules.
 let spoken = [];
 const say = t => { if (t) spoken.push(t); };
+let notes = [];
+const pushNote = (body, tag) => { notes.push(`${body} [${tag}]`); };
+const beep = () => {};
 
 const source = [
   "GROUPS", "groupOf", "NEEDS_YOU", "owedIn", "sayName", "forSpeech", "VERB",
   // `awaySince` brings `spokenOwed` and `stateSince` with it — they share one declaration.
   "utteranceFor", "owedSentence", "OWED_GRACE_MS", "OWED_SETTLE_MS", "awaySince",
-  "settledOwed", "forgetSettledDebts", "sayStandingDebt",
+  "settledOwed", "forgetSettledDebts", "noteFor", "announceStandingDebt",
 ].map(grab).join("\n");
 
 // The lifted code closes over two variables the page owns elsewhere. They are declared here rather
@@ -63,11 +67,14 @@ const source = [
 // rewriting is a worse dependency than a two-line prelude.
 const scope = new Function(
   "say",
-  `let voiceOn = true, lastSpoken = null;
+  "pushNote",
+  "beep",
+  `let voiceOn = true, lastSpoken = null, alertsOn = false;
    ${source}
-   return { groupOf, owedIn, utteranceFor, owedSentence, sayStandingDebt,
+   return { groupOf, owedIn, utteranceFor, owedSentence, announceStandingDebt, noteFor,
             NEEDS_YOU, OWED_GRACE_MS, OWED_SETTLE_MS,
             setVoice: v => { voiceOn = v; },
+            setAlerts: v => { alertsOn = v; },
             reset: () => { awaySince = 0; spokenOwed = new Set(); stateSince = {}; } };`,
 );
 
@@ -78,7 +85,7 @@ function check(what, got, want) {
   else console.log(`✓ ${what}`);
 }
 
-const V = scope(say);
+const V = scope(say, pushNote, beep);
 const box = (name, state, extra = {}) => ({ name, state, ...extra });
 
 // --- what counts as owed ---------------------------------------------------------------------
@@ -119,7 +126,8 @@ const realNow = Date.now;
 let T = 1_700_000_000_000;
 Date.now = () => T;
 const fleet = states => Object.entries(states).map(([n, s]) => box(n, s));
-const tick = (states, away = true, spokenNow = []) => V.sayStandingDebt(fleet(states), away, spokenNow);
+const tick = (states, away = true, speakingAlready = false) =>
+  V.announceStandingDebt(fleet(states), away, speakingAlready);
 
 spoken = []; V.reset();
 tick({ "web-main": "waiting" }, false);
@@ -169,13 +177,16 @@ tick({ "web-main": "waiting", api: "error" });
 // been announced, and naming it again in every subsequent sentence is saying the same thing over.
 check("but once it settles, the newcomer earns a sentence of its own", spoken, ["api hit an error."]);
 
-// A transition is being announced on the same tick — that sentence stands alone.
+// A `done` sentence is being read on the same tick — that one stands alone.
 spoken = []; V.reset();
 tick({ "web-main": "waiting" });
 T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
-tick({ "web-main": "waiting" }, true, ["web-main"]);
+tick({ "web-main": "waiting" }, true, true);
+check("never stacks the debt on top of a sentence already being read", spoken, []);
+// …deferred by a tick, not credited. Crediting it — which is what the set-key version did — silenced
+// these boxes permanently, so a box that settled while something else was announced was never said.
 tick({ "web-main": "waiting" });
-check("never reads the debt out on top of a transition it just announced", spoken, []);
+check("and says it on the next tick instead of losing it", spoken, ["web main is waiting."]);
 
 // --- and then it shuts up -----------------------------------------------------------------------
 // The nag. A box you parked on purpose — there is no more work for it — must be mentioned once and
@@ -225,6 +236,51 @@ T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
 tick({ "web-main": "waiting" });
 check("stays quiet when voice is off", spoken, []);
 V.setVoice(true);
+
+// --- the other channel ---------------------------------------------------------------------------
+// Desktop notifications fired on raw transitions, with none of the above applied to them — so they
+// repeated exactly as the mouth did. They are announced by the same rule now, which is the point:
+// one decision about what is worth interrupting you for, not two that drift.
+spoken = []; notes = []; V.reset(); V.setVoice(false); V.setAlerts(true);
+tick({ "web-main": "waiting", api: "working" });
+T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
+tick({ "web-main": "waiting", api: "working" });
+check("notifies once for a settled box", notes, ["web-main is waiting [web-main]"]);
+notes = [];
+for (let i = 0; i < 20; i++) {
+  T += 2000; tick({ "web-main": "working", api: "working" });   // the same blink…
+  T += 2000; tick({ "web-main": "waiting", api: "working" });
+  T += V.OWED_SETTLE_MS + 1;
+  tick({ "web-main": "waiting", api: "working" });
+}
+check("and does not notify again for the same standing debt", notes, []);
+
+// A crowd becomes a count rather than a stack of banners.
+notes = []; V.reset();
+const crowd = { a: "waiting", b: "waiting", c: "waiting", d: "error" };
+tick(crowd);
+T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
+tick(crowd);
+check("four boxes are one banner, not four", notes, ["4 boxes need you [skein-owed]"]);
+
+// The switches are independent — that is why they are two switches.
+notes = []; spoken = []; V.reset(); V.setAlerts(false); V.setVoice(true);
+tick({ "web-main": "waiting" });
+T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
+tick({ "web-main": "waiting" });
+check("voice alone still speaks with alerts off", [spoken, notes], [["web main is waiting."], []]);
+
+// With both off nothing is announced — and nothing is marked announced either, so turning a channel
+// on tells you what is waiting rather than starting from silence.
+notes = []; spoken = []; V.reset(); V.setVoice(false);
+tick({ "web-main": "waiting" });
+T += V.OWED_SETTLE_MS + V.OWED_GRACE_MS + 1;
+tick({ "web-main": "waiting" });
+check("both off announces nothing", [spoken, notes], [[], []]);
+V.setVoice(true);
+tick({ "web-main": "waiting" });
+check("and the backlog survives, so switching one on tells you what you missed", spoken, ["web main is waiting."]);
+
 Date.now = realNow;
 
 console.log(failures ? `\n${failures} failed` : "\nall good");

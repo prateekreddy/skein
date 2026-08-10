@@ -2632,40 +2632,38 @@ function notify(snapshot) {
   // Collected rather than spoken inline: several boxes can turn in one 2s tick, and reading four
   // sentences to an empty room is how a useful voice becomes an intolerable one. One turn is said
   // in full; more than one becomes a count, which is all you can act on anyway.
-  const turned = [];
+  const finished = [];
   for (const b of snapshot) {
     const g = groupOf(b.state), was = prevState[b.name];
     // `was &&`: a tab (re)opened mid-fleet starts with an empty prevState — without it, restoring
     // the board in the background fired a burst of notifications for every already-paused box.
-    if (was && g !== was) {
-      if (alertsOn && away) {
-        if (g === "attn") { pushNote(`${b.name} needs a decision`, b.name); beep(); }
-        else if (g === "error") { pushNote(`${b.name} hit an error`, b.name); beep(); }
-        else if (g === "done") pushNote(`${b.name} finished`, b.name);
-      }
-      // Voice is gated on its own switch, not on `alertsOn`: notifications need a permission the
-      // browser may have refused, and speaking needs none — tying them together would silence the
-      // half that still works. Still only while away, because a board you are looking at has
-      // already told you.
-      if (voiceOn && away && [...NEEDS_YOU, "done"].includes(g)) turned.push([b, g]);
-    }
+    //
+    // Only `done` is announced off a raw transition. Every "needs you" state used to be too, and a
+    // transition is the wrong signal for those: they flicker — `waiting` especially — and a channel
+    // driven by flicker repeats itself, which is the whole of "it keeps reminding me". They are
+    // announced by announceStandingDebt below, once each, on a settled state. `done` is set by a
+    // person and stays set, so its edge is real and saying it the moment it lands costs nothing.
+    if (was && g !== was && g === "done") finished.push(b);
     prevState[b.name] = g;
+  }
+  // Voice and alerts are gated on their own switches rather than on each other: notifications need a
+  // permission the browser may have refused, and speaking needs none — tying them together would
+  // silence the half that still works. Both only while away, because a board you are looking at has
+  // already told you.
+  if (away && finished.length) {
+    if (alertsOn) for (const b of finished) pushNote(`${b.name} finished`, b.name);
+    if (voiceOn) {
+      if (finished.length === 1) {
+        // What "it" means from here on. The whole point of announcing a box by name is that you
+        // should not then have to say that name back — "yes" and "show me" are what a person says.
+        lastSpoken = finished[0].name;
+        say(utteranceFor(finished[0], "done"));
+      } else say(`${finished.length} boxes finished.`);
+    }
   }
   // The whole fleet, not `owed`: the debt tracker has to see a box *stop* being owed to know it may
   // be forgotten. Handed only the owed subset it cannot tell "answered" from "never existed".
-  sayStandingDebt(snapshot, away, turned.map(([b]) => b.name));
-  if (turned.length === 1) {
-    // What "it" means from here on. The whole point of announcing a box by name is that you should
-    // not then have to say that name back — "yes" and "show me" are what a person actually says.
-    lastSpoken = turned[0][0].name;
-    say(utteranceFor(turned[0][0], turned[0][1]));
-  }
-  else if (turned.length > 1) {
-    // Lead with what is owed rather than with the total: two finishing and one blocked is one
-    // actionable fact, and "three boxes changed" buries it.
-    const owed = turned.filter(([, g]) => g !== "done").length;
-    say(owed ? `${owed} of ${turned.length} boxes need you.` : `${turned.length} boxes finished.`);
-  }
+  announceStandingDebt(snapshot, away, away && voiceOn && finished.length > 0);
 }
 
 // The sentence for a set of boxes that are owed something. Shared, so what you hear on demand and
@@ -2741,23 +2739,43 @@ function forgetSettledDebts(snapshot) {
   }));
 }
 
-function sayStandingDebt(snapshot, away, spokenNow) {
+// The banner's half-sentence. Deliberately not `utteranceFor`, which is written to be *heard* and
+// carries the box's last words — length a notification has no room for and truncates anyway.
+function noteFor(b, group) {
+  if (group === "error") return "hit an error";
+  if (group === "waiting") return "is waiting";
+  return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
+}
+
+// The single announcer for "this box needs you", across both channels. One rule, two outputs — so
+// they cannot drift into disagreeing about what is worth interrupting you for, and so a fix to the
+// nag is a fix to all of it rather than to whichever half was noticed.
+function announceStandingDebt(snapshot, away, speakingAlready) {
   const owed = settledOwed(snapshot);
-  if (!voiceOn) return;
   if (!away) { awaySince = 0; return; }
   if (!awaySince) awaySince = Date.now();
   forgetSettledDebts(snapshot);
-  // A transition is being spoken on this same tick — let that sentence stand and take the credit for
-  // those boxes. Anything else that settled is said on the *next* tick rather than stacked onto it.
-  if (spokenNow.length) { for (const n of spokenNow) spokenOwed.add(n); return; }
+  // Nothing to announce *with*: keep the bookkeeping running but leave the backlog intact, so
+  // turning a channel on tells you what you missed instead of starting from silence.
+  if (!voiceOn && !alertsOn) return;
   if (Date.now() - awaySince < OWED_GRACE_MS) return;
   // Once per box, not once per change to the set. Keyed on the owed *set*, this re-read the whole
   // list every time any box entered or left it — so the boxes that had been waiting all along were
   // named again in every sentence, which is the other half of saying the same thing over and over.
   const fresh = owed.filter(b => !spokenOwed.has(b.name));
   if (!fresh.length) return;
+  // A `done` sentence is being read on this same tick. Let it stand alone and say this on the next
+  // one — deferred, not credited: taking the credit here would silence these boxes permanently.
+  if (speakingAlready) return;
   for (const b of fresh) spokenOwed.add(b.name);
-  say(owedSentence(fresh));
+  if (alertsOn) {
+    // Past a couple, a count is all you can act on — and six banners stacked on a lock screen is the
+    // same nag wearing a different hat.
+    if (fresh.length <= 2) for (const b of fresh) pushNote(`${b.name} ${noteFor(b, groupOf(b.state))}`, b.name);
+    else pushNote(`${fresh.length} boxes need you`, "skein-owed");
+    beep();
+  }
+  if (voiceOn) say(owedSentence(fresh));
 }
 
 // Read the inbox on demand — the same sentence the mouth would have spoken, for when you *are*
