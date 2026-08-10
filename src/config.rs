@@ -221,18 +221,71 @@ pub(crate) fn config_json() -> PathBuf {
     skein_home().join("config.json")
 }
 
-/// Load skein's app settings (defaults if the file is absent/malformed).
+/// Read `config.json`, keeping "absent" and "present but unreadable" apart.
+///
+/// The distinction is the whole point. `Ok(None)` is a first run and not a problem. `Err` is a file
+/// that exists and could not be turned into a [`Config`] — and that case used to be indistinguishable
+/// from the first, because the error was thrown away and defaults returned in its place. One field
+/// serde could not deserialise discarded *every* setting in the file, and since most defaults match
+/// what a working install already had, the only visible symptom was whichever setting happened to
+/// differ. `fleet_agent` defaults to `false`, so the transport silently stopped being installed while
+/// the file said `true` and was right.
+fn read_config() -> Result<Option<Config>, String> {
+    let path = config_json();
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", path.display())),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What is wrong with `config.json`, or `None` when it parses (or is simply not there yet).
+///
+/// Exposed so the board and `skein doctor` can say it out loud. A config skein cannot read is
+/// invisible from the outside: every setting reads back as its default, and a default is
+/// indistinguishable from a choice.
+pub fn config_error() -> Option<String> {
+    read_config().err()
+}
+
+/// Load skein's app settings (defaults if the file is absent or unreadable).
 pub fn load_config() -> Config {
-    fs::read_to_string(config_json())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    match read_config() {
+        Ok(Some(c)) => c,
+        Ok(None) => Config::default(),
+        Err(why) => {
+            // Once per process. This is called on nearly every request, and a line per call would
+            // bury the one line that matters under thousands of copies of itself.
+            static TOLD: std::sync::Once = std::sync::Once::new();
+            TOLD.call_once(|| {
+                eprintln!(
+                    "skein: cannot read your settings ({why}) — every setting is falling back to \
+                     its default until that file parses, including `fleet_agent`, which defaults \
+                     to off. The file is left alone; fix that one line and restart."
+                );
+            });
+            Config::default()
+        }
+    }
 }
 
 /// Persist skein's app settings to `~/.skein/config.json`.
 pub fn save_config(c: &Config) -> Result<(), String> {
     if !valid_runtime(&c.default_agent) {
         return Err(format!("unsupported default runtime {:?}", c.default_agent));
+    }
+    // Refuse rather than overwrite, because this is the moment the settings are lost for good:
+    // `load_config` has just handed the caller defaults for a file it could not parse, so writing
+    // that struct back replaces every setting in the file with a default nobody chose — and the
+    // file is the only copy. One toggle in the cockpit would have been enough.
+    if let Err(why) = read_config() {
+        return Err(format!(
+            "not saving over settings skein cannot read ({why}). Saving now would replace every \
+             setting in that file with a default. Fix or move the file, then save again."
+        ));
     }
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
@@ -267,5 +320,85 @@ impl Default for Config {
             fleet_agent: false,
             fleet_agent_port: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::{env_lock, tempdir};
+
+    /// The exact shape that caused this: valid JSON, the setting the user wanted plainly visible,
+    /// and one *other* field serde cannot deserialise.
+    const ONE_BAD_FIELD: &str = r#"{
+        "fleet_agent": true,
+        "fleet_agent_port": "8317",
+        "ssh_key": "~/.ssh/id_ed25519"
+    }"#;
+
+    #[test]
+    fn a_config_that_does_not_parse_is_reported_rather_than_silently_defaulted() {
+        let _guard = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        fs::write(config_json(), ONE_BAD_FIELD).unwrap();
+
+        // What the old code did, and why it was so hard to see: `fleet_agent` reads back false
+        // while the file says true, because one unrelated field discarded the whole object.
+        assert!(!load_config().fleet_agent);
+        let why = config_error().expect("an unparseable config must be reportable");
+        // serde_json names the type and the position rather than the field, so the locator is what
+        // makes this fixable — "somewhere in your config" would leave the user no better off than
+        // the silence it replaced.
+        assert!(
+            why.contains("line 3") && why.contains("expected u16"),
+            "the complaint must locate the failure, not just name the file: {why}"
+        );
+
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// The data-loss guard. Before this, `load_config` handed the settings screen a struct full of
+    /// defaults and the next POST wrote them back — one toggle in the cockpit replaced every
+    /// setting in the file with a default nobody chose, and the file was the only copy.
+    #[test]
+    fn saving_never_overwrites_settings_skein_could_not_read() {
+        let _guard = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        fs::write(config_json(), ONE_BAD_FIELD).unwrap();
+
+        let err = save_config(&Config::default()).expect_err("must refuse, not overwrite");
+        assert!(
+            err.contains("line 3"),
+            "refusing is only useful if it says what to fix: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(config_json()).unwrap(),
+            ONE_BAD_FIELD,
+            "the user's settings must still be on disk, byte for byte"
+        );
+
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// A first run must not be mistaken for a broken file: there is nothing to protect yet, and
+    /// refusing here would mean skein could never write its first config.
+    #[test]
+    fn an_absent_config_is_not_an_error_and_saves_normally() {
+        let _guard = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+
+        assert!(config_error().is_none());
+        let want = Config {
+            fleet_agent: true,
+            ..Config::default()
+        };
+        save_config(&want).unwrap();
+        assert!(load_config().fleet_agent);
+        assert!(config_error().is_none());
+
+        env::remove_var("SKEIN_HOME");
     }
 }

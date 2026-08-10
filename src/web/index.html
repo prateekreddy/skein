@@ -102,6 +102,9 @@
   .ga.tp.ok   .gt { color:var(--done); }
   .ga.tp.warn .gt { color:var(--waiting); }
   .ga.tp.off  .gt { color:var(--faint); }
+  /* Louder than `warn`, and the only transport state that is: the others are a fleet running with
+     less resilience than you asked for, while this one is skein not knowing what you asked for. */
+  .ga.tp.bad  .gt, .ga.tp.bad .gv { color:var(--attn); }
   .right { margin-left:auto; display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
   .kbtn { display:inline-flex; align-items:center; gap:6px; flex:none; white-space:nowrap; line-height:1;
           font-family:var(--mono); font-size:11px;
@@ -3966,6 +3969,17 @@ function gaugeRow(key, segs, label, hint) {
 function transportRow(t) {
   if (!t) return "";
   const at = t.port ? `:${t.port}` : "";
+  // Settings first, because it changes what every other state below means. A config skein cannot
+  // parse is thrown away whole, so `configured` reads false whatever the file actually says — the
+  // setting looks off while being on, which is precisely the shape that hid a missing agent for two
+  // days. "Off" is a choice; this is skein not knowing the choice.
+  if (t.settings)
+    return gaugeText("bad", "settings", "unreadable",
+      "skein could not read ~/.skein/config.json, so EVERY setting is falling back to its default — "
+      + "including the transport, which defaults to `sbx exec`. Whatever the file says is not in "
+      + "effect.\n\n" + t.settings
+      + "\n\nThe file has not been overwritten, and saving settings is refused until it parses. "
+      + "Fix that one line and restart.");
   if (!t.configured)
     return gaugeText("off", "sbx exec", "",
       "Every call into the fleet spawns a new `sbx exec`. That works, but it is the call that hangs "
@@ -4005,7 +4019,9 @@ function loadResources() {
     if (!r || !r.mem_total) {
       // No figures, but the transport is still worth saying when there is an agent to have an
       // opinion about — a sandbox that stopped answering is the moment the question matters most.
-      const only = t?.configured ? transportRow(t) : "";
+      // Unreadable settings show here too, and for a stronger reason: `configured` is false in that
+      // state, so the old test hid the one row that explains why nothing else is working.
+      const only = (t?.configured || t?.settings) ? transportRow(t) : "";
       strip.innerHTML = only;
       strip.className = only ? "gauges on stale" : "gauges";
       return;

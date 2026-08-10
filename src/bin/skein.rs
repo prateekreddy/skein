@@ -419,6 +419,16 @@ fn cmd_doctor() -> Result<(), String> {
         println!("{WARN} kit           {DIM}not written yet (server startup / `skein add` installs it){RESET}");
     }
     let cfg = skein::load_config();
+    // Before the settings line, because it invalidates everything on it. A config skein cannot
+    // parse is thrown away whole, so every value below is a default it fell back to rather than
+    // anything anyone chose — and a default is indistinguishable from a choice on sight.
+    if let Some(why) = skein::config_error() {
+        println!("{BAD} settings      unreadable — {why}");
+        println!(
+            "{DIM}                every setting below is a fallback default, not your choice; \
+             skein has not overwritten the file{RESET}"
+        );
+    }
     println!(
         "{DIM}·{RESET} settings      gh-seed:{} ssh-key:{} {DIM}(~/.skein/config.json){RESET}",
         on_off(cfg.seed_gh_secret),
@@ -517,6 +527,42 @@ fn cmd_doctor() -> Result<(), String> {
                     println!("{OK} {cgroup:<13} capped at {gib} {DIM}({what}){RESET}");
                 }
             }
+        }
+
+        // How host↔sandbox calls actually travel, asked rather than assumed. Every degradation
+        // here is silent by design — falling back to `sbx exec` is what skein did before the agent
+        // existed, so the fleet keeps working and only its resilience is gone. That makes doctor
+        // the only place it can be seen.
+        let t = skein::transport_state();
+        let at = |p: u16| {
+            if p == 0 {
+                "no port published yet".to_string()
+            } else {
+                format!("port {p}")
+            }
+        };
+        match t {
+            _ if !t.configured => println!(
+                "{DIM}·{RESET} transport     {DIM}`sbx exec` — the in-sandbox agent is off \
+                 (fleet_agent){RESET}"
+            ),
+            _ if t.speaks == 0 => println!(
+                "{BAD} transport     agent wanted but nothing answers ({}) — every call falls back \
+                 to `sbx exec`, so a stalled daemon stalls the board",
+                at(t.port)
+            ),
+            _ if t.speaks < t.wants => println!(
+                "{WARN} transport     agent v{} on {}, this build needs v{} — the calls it does not \
+                 know fall back to `sbx exec`",
+                t.speaks,
+                at(t.port),
+                t.wants
+            ),
+            _ => println!(
+                "{OK} transport     agent v{} on {} {DIM}(calls survive a stalled daemon){RESET}",
+                t.speaks,
+                at(t.port)
+            ),
         }
         // A mount that is missing produces a box with no store, which looks entirely healthy.
         for path in skein::fleet_mounts() {

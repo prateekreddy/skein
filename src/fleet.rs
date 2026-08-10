@@ -811,18 +811,33 @@ pub fn apply_box_limits() -> Result<Vec<String>, String> {
 /// request to run the fleet — `sbx ls` is asked instead of the sandbox itself, so a sleeping fleet
 /// is left asleep. It is not left stale either: [`ensure_box_session`] reinstalls the launcher on
 /// the path that wakes it, so the repair happens when the fleet is next actually used.
+///
+/// A fleet that is asleep and a fleet that could not be *asked* are handled the same way and said
+/// differently. The second is reported, because everything below this point is skipped on a
+/// question that timed out, and a skipped repair that says nothing is indistinguishable from one
+/// that succeeded.
 pub fn heal_fleet() -> Result<(), String> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Ok(()); // one sandbox per box — no shared launcher to be stale
     }
-    // `None` is "sbx did not answer", not "asleep", and both mean the same thing here: don't touch
-    // it. A fleet skein cannot see is one it cannot repair either.
-    let awake = crate::fleet_boxes().is_some_and(|boxes| {
-        boxes
-            .iter()
-            .any(|b| b.name == sandbox && b.live == Some(crate::Liveness::Running))
-    });
+    // "Asleep" and "sbx did not answer" both mean *don't touch it*, and they used to be the same
+    // branch. They are not the same thing to say. Leaving a sleeping fleet asleep is the intent
+    // above; a fleet skein could not *see* is a repair that quietly did not happen — and this gate
+    // stands in front of the launcher, the agent and the docker config alike, so a daemon too busy
+    // to answer within `fleet_boxes`'s budget skips all three and reports nothing. That is the same
+    // stall the in-sandbox agent exists to survive, deciding whether the agent gets installed.
+    let Some(boxes) = crate::fleet_boxes() else {
+        eprintln!(
+            "skein: sbx did not answer, so {sandbox} was not brought into line with this build — \
+             its launcher, agent and docker config are whatever the last server left. They are \
+             repaired on the next box start."
+        );
+        return Ok(());
+    };
+    let awake = boxes
+        .iter()
+        .any(|b| b.name == sandbox && b.live == Some(crate::Liveness::Running));
     if !awake {
         return Ok(());
     }
@@ -1606,13 +1621,24 @@ pub struct Transport {
     pub speaks: u32,
     /// What this build needs. `speaks < wants` is an agent an upgrade has not yet replaced.
     pub wants: u32,
+    /// Why `config.json` could not be read, when it could not be.
+    ///
+    /// Carried here rather than left to its own endpoint because it is the answer to the question
+    /// `configured` provokes. False normally means "you did not ask for the agent"; with this set it
+    /// means "skein does not know what you asked for", because one unparseable field discards the
+    /// whole file and every setting reverts to a default that looks exactly like a choice. Those two
+    /// read identically on the board and are opposite problems.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<String>,
 }
 
 pub fn transport_state() -> Transport {
     let wants = crate::place::AGENT_PROTOCOL;
+    let settings = crate::config_error();
     if !load_config().fleet_agent {
         return Transport {
             wants,
+            settings,
             ..Default::default()
         };
     }
@@ -1625,6 +1651,7 @@ pub fn transport_state() -> Transport {
         // that means anything.
         speaks: crate::place::agent_protocol(port).unwrap_or(0),
         wants,
+        settings,
     }
 }
 
