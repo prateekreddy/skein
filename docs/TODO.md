@@ -9,6 +9,36 @@ with the item rather than rediscovered.
 
 ## Broken now
 
+### The fleet agent still is not installed — the cause is now testable
+
+`fleet-agent.py` in the sandbox is still the Aug 7 v1 and nothing answers on 8317, across two
+server restarts, while the launcher beside it is rewritten on every box start. In `ensure_fleet` the
+agent install runs *immediately before* the launcher install and is non-fatal, so "launcher fresh,
+agent stale" is the signature of the agent step failing or being skipped.
+
+The leading explanation, now fixed but not yet confirmed as the cause: `load_config` silently
+discarded a `config.json` it could not parse and returned defaults, in which `fleet_agent` is false —
+so `heal_fleet_agent` returned on its first line with no message, while the file said `true` and was
+right.
+
+**Settle it after the next deploy**: `skein doctor` now prints the parse error above the settings
+line, and the board's transport row shows `settings / unreadable` in place of `off`. If neither
+appears and the transport row is amber, the config was fine and the failure is downstream — the
+server's `skein: the in-sandbox agent is not serving (…)` line names it.
+
+### Upstream: the lease monitor reads a session id nothing sets
+
+In `prateekreddy/sync` at `6e3f703`, `plugin/bin/sync-monitor` uses
+`${CLAUDE_SESSION_ID:-default}.watch` while `plugin/bin/sync-session` (which *writes* that file)
+resolves the session from hook stdin, falling back to `CLAUDE_CODE_SESSION_ID`. Confirmed in a box:
+`CLAUDE_CODE_SESSION_ID` is set, `CLAUDE_SESSION_ID` is not.
+
+So the harvest hook writes `<session>.watch` and the monitor reads `default.watch`, finds no
+credential, and the lease keepalive does nothing — the exact failure the monitor was built to
+prevent, in the silent form its own README warns about ("a guard nobody knows is disabled").
+`sync-session` carries a comment about this precise mistake, so it was fixed in one file and not the
+other. Not skein's to fix; report it upstream.
+
 ### Shared login: the poisoning is fixed, the recovery is on box-restart cadence
 
 The cause was that credentials synced by mtime alone, and a logout leaves a *newer* file than the
