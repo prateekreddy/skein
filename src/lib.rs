@@ -5439,20 +5439,39 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(run().status.success());
 
         let calls = fs::read_to_string(&log).unwrap();
-        assert!(
-            calls.contains("mcp add --transport http sync https://gw.test/mcp"),
-            "the endpoint is <base>/mcp, exactly once: {calls}"
-        );
-        assert!(calls.contains("Bearer sync_agent_abc"), "{calls}");
-        assert!(calls.contains("--scope user"), "{calls}");
-        // The plugin as well as the token entry. The two are not alternatives: the token is what
-        // authenticates a headless box, and the plugin is the only source of the lease monitor and
-        // the session hooks. A hand-added entry wins over the plugin's own, which is the point.
+        // The plugin IS the registration for Claude now. Upstream ships the same `sync` server
+        // inside it, so skein registering its own would shadow the plugin's — a hand-added entry
+        // wins — and the box would end up with the tools and none of the monitor or hooks.
         assert!(
             calls.contains("plugin marketplace add prateekreddy/sync"),
             "{calls}"
         );
         assert!(calls.contains("plugin install sync@sync"), "{calls}");
+        assert!(
+            !calls.contains("mcp add"),
+            "skein must not register `sync` for Claude any more — the plugin declares it: {calls}"
+        );
+        // And the old one is taken away, because every box wired before today still carries it.
+        assert!(calls.contains("mcp remove sync"), "{calls}");
+
+        // The gateway still comes from the same place; only where it lands has changed. The plugin
+        // declares its url as `${SYNC_MCP_URL:-…}`, which is upstream's supported seam and the only
+        // one that survives a plugin update.
+        let settings: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(boxhome.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["env"]["SYNC_MCP_URL"], "https://gw.test/mcp");
+
+        // Codex keeps the token route: plugins are a Claude Code feature, so for Codex this is not
+        // a fallback, it is the only way it ever gets these tools.
+        let codex = fs::read_to_string(boxhome.join(".codex/config.toml")).unwrap();
+        assert!(codex.contains("[mcp_servers.sync]"), "{codex}");
+        assert!(codex.contains("Bearer sync_agent_abc"), "{codex}");
+        assert!(
+            codex.contains("https://theirs.test"),
+            "it appends, never rewrites: {codex}"
+        );
 
         // The rules land only after registration, and they land in the STORE — this repo's
         // `.claude` — so every box of the repo sees them, not just the one that was wired up.
@@ -5568,6 +5587,95 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         assert!(!store.join("skills/work-tracking/SKILL.md").exists());
         // And nothing was stamped, so fixing the cause and starting again still works.
         assert!(!boxhome.join(".local/state/skein").exists());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// A box wired up before the plugin existed still gets it.
+    ///
+    /// This is the whole reason the plugin sits ahead of the stamp gate. The stamp means "this box
+    /// owns its CLAUDE.md, memory and skill now", and re-asserting over it is what that gate exists
+    /// to prevent — but the plugin is not a re-assertion, it is something upstream started shipping
+    /// after these boxes were wired. Behind the gate it would have reached only boxes created from
+    /// here on, which for an established fleet is none of them.
+    #[test]
+    fn an_already_wired_box_still_picks_up_the_plugin() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        // The box's own CLAUDE.md, as it has evolved since — untouched by anything below.
+        fs::write(project.join("CLAUDE.md"), "# proj\n\nours\n").unwrap();
+
+        let bin = home.join("fakebin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = home.join("claude.log");
+        fs::write(
+            bin.join("claude"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Wired up on some earlier day: the stamp is there, and so is the skill it installed.
+        let boxhome = home.join("boxhome");
+        let state = boxhome.join(".local/state/skein");
+        fs::create_dir_all(&state).unwrap();
+        let slug = project.display().to_string().replace('/', "-");
+        fs::write(state.join(format!("sync-{slug}.done")), "").unwrap();
+
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-install.sh"))
+            .env("HOME", &boxhome)
+            .env("WORKSPACE_DIR", &project)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("SYNC_GATEWAY_URL", "https://gw.test/")
+            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        let calls = fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.contains("plugin install sync@sync"),
+            "a stamped box must still get the plugin: {calls}"
+        );
+        assert!(
+            state.join("sync-plugin.done").is_file(),
+            "and record it, so the next start is a file test rather than a subprocess"
+        );
+        // Everything the stamp protects is still untouched: the gate did its job for the things it
+        // was guarding, and only the plugin came through ahead of it.
+        assert_eq!(
+            fs::read_to_string(project.join("CLAUDE.md")).unwrap(),
+            "# proj\n\nours\n"
+        );
+
+        // Second start: the marker is believed, and `claude` is not asked again.
+        fs::write(&log, "").unwrap();
+        let out = Command::new("bash")
+            .arg(store.join("skein").join("bin").join("sync-install.sh"))
+            .env("HOME", &boxhome)
+            .env("WORKSPACE_DIR", &project)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("SYNC_GATEWAY_URL", "https://gw.test/")
+            .env("SYNC_AGENT_TOKEN", "sync_agent_abc")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(
+            !fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("plugin install"),
+            "installed once, then the box owns it — removing it must stay removed"
+        );
+
         env::remove_var("SKEIN_HOME");
     }
 

@@ -10,11 +10,16 @@
 #   - the kit's startup hook, on every box start (silently does nothing until credentials exist);
 #   - `skein::sync_provision_box`, right after it writes those credentials.
 #
-# Installs three things, and only AFTER registration succeeds:
+# The `sync` MCP server comes from upstream's PLUGIN now, not from a registration of skein's — see
+# the block below for why the two cannot both be present. Codex is the exception, and not as a
+# fallback: plugins are a Claude Code feature, so the TOML block is the only way Codex ever gets
+# these tools.
+#
+# Installs three things, and only AFTER the tools exist:
 #   - a "Work tracking" section in CLAUDE.md (and so in AGENTS.md) — always in context, because
 #     "claim before you start" has to fire when the agent was not thinking about tools at all;
 #   - a memory, so the rules that must fire unprompted survive into a fresh session;
-#   - the `work-tracking` skill — Plane's full surface, loaded on demand.
+#   - the `work-tracking` skill — but only where the plugin is not already shipping it.
 # An instruction to "call capture" in a box with no sync server is a rule the agent cannot follow
 # and will learn to read past, which is worse than no instruction at all.
 #
@@ -53,6 +58,58 @@ fi
 slug="$(printf '%s' "$project" | sed 's#/#-#g')"
 state="$HOME/.local/state/skein"
 stamp="$state/sync-$slug.done"
+
+# --- the plugin, BEFORE the stamp gate ------------------------------------------------------------
+#
+# Ahead of the gate on purpose, and it is the only thing that is. The stamp means "this box owns its
+# CLAUDE.md, its memory and its skill now" — earned, and re-asserting over it is exactly what that
+# gate exists to prevent. The plugin is a different claim: upstream started shipping one after those
+# boxes were wired, so it is not a re-assertion of something the box already owns, it is a thing the
+# box never had. Behind the gate it would reach only boxes created from here on, which for an
+# established fleet means none of them.
+#
+# It gets its own marker for the same reason the stamp exists: install once, then the box owns that
+# too. A box that removes the plugin has made a decision, and a script that reinstalls it every
+# start makes that decision unmakeable.
+#
+# Per box rather than per project, because `plugin install` is user-scoped — one box, one answer,
+# whatever repo it is working in.
+plugin="no"
+plugin_marker="$state/sync-plugin.done"
+if [ -e "$plugin_marker" ] && [ -z "${SKEIN_SYNC_FORCE:-}" ]; then
+  # Already handled once. Believed without asking `claude`, so the steady state of every box start
+  # is a file test rather than a subprocess.
+  plugin="yes"
+elif command -v claude >/dev/null 2>&1; then
+  # The plugin carries three things skein has no copy of and cannot write: the lease MONITOR, which
+  # keeps a claim alive as a process rather than as an obligation the model must remember; the
+  # session HOOKS (hand work back on exit, report what is still held on resume, fence `git push`
+  # against a lapsed lease); and the skill, now three files where skein vendored one.
+  #
+  # The monitor is the one that matters most here. A box compacts constantly, and a lease kept alive
+  # by "call heartbeat periodically" is a promise across a context boundary — upstream removed it for
+  # exactly the failure it caused: the lease lapsed, another agent took the item, and the two
+  # collided. A process cannot be talked out of running.
+  #
+  # Asked before installed, because a box may already have it by hand — the sync repo's own box does,
+  # with its own OAuth grant. Reinstalling over that would be skein taking something that was not
+  # its to take.
+  if claude plugin list 2>/dev/null | grep -q 'sync@sync'; then
+    plugin="yes"
+  # The marketplace is a private repo, so this clones over the box's forwarded ssh-agent. Fail-soft
+  # like everything else here: a box without the plugin is the box we had yesterday.
+  elif claude plugin marketplace add prateekreddy/sync >/dev/null 2>&1 \
+       && claude plugin install sync@sync >/dev/null 2>&1; then
+    plugin="yes"
+    echo "[sync] installed the sync plugin — lease monitor, session hooks and the skill" >&2
+  else
+    echo "[sync] could not install the sync plugin (needs ssh access to prateekreddy/sync); the tracker still works, without the lease monitor or the push fence" >&2
+  fi
+  # Only on success, so a box that failed on a network blip tries again next start rather than
+  # recording a plugin it does not have.
+  [ "$plugin" = "yes" ] && mkdir -p "$state" 2>/dev/null && : > "$plugin_marker" 2>/dev/null
+fi
+
 if [ -e "$stamp" ] && [ -z "${SKEIN_SYNC_FORCE:-}" ]; then
   echo "[sync] already set up — this box owns its tracker config now (SKEIN_SYNC_FORCE=1 to re-apply)" >&2
   exit 0
@@ -68,54 +125,77 @@ esac
 
 registered="no"
 
-# Claude Code. User scope rather than local: the box is single-purpose, and a user-scoped server is
-# found whichever directory the agent starts in. The credential lands in the box's own
-# ~/.claude.json, which is private to this box.
+# Point the plugin's server at THIS fleet's gateway.
 #
-# Upstream ships a plugin now, and it registers this same server itself — over OAuth, with no token
-# anywhere. A box cannot use that: the flow opens a browser, and upstream's own onboarding says so
-# ("Headless agents cannot do this"). The token route below is what it points headless boxes at
-# instead, and it stays supported.
+# The plugin declares its url as `${SYNC_MCP_URL:-<upstream's own>}`, so this variable is the
+# supported seam and the only one that survives a plugin update — there is nothing to edit inside the
+# plugin, and nothing to redo when it changes. The gateway URL still comes from the same place it
+# always did: the connection configured in Settings, written into this box by `sync_provision_box`.
+# What changed is where it lands, not where it comes from.
 #
-# So both are installed, and they do not fight: a hand-added `sync` entry WINS over a plugin's, and
-# the plugin's is skipped with a note. That is upstream's documented behaviour, and here it is the
-# behaviour we want — the box authenticates with its own minted token, and the plugin still brings
-# the parts that have no other source (see below).
-plugin="no"
-if command -v claude >/dev/null 2>&1; then
-  claude mcp remove sync -s user >/dev/null 2>&1 || claude mcp remove sync >/dev/null 2>&1 || true
-  if claude mcp add --transport http sync "$url" \
-       --header "Authorization: Bearer $token" --scope user >/dev/null 2>&1; then
-    registered="yes"
-  else
-    echo "[sync] claude mcp add failed — check the gateway URL and token" >&2
-  fi
+# `~/.claude/settings.json` is Claude Code's own and is bound private per box, so this is box-local
+# and cannot leak one repo's gateway into another's. Merged rather than written: the file already
+# carries marketplaces, enabled plugins and notification settings that are none of our business.
+set_sync_url() {
+  python3 - "$HOME/.claude/settings.json" "$1" <<'PY' 2>/dev/null
+import json, os, sys, tempfile
+path, url = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError
+except FileNotFoundError:
+    data = {}
+except Exception:
+    # A settings file we cannot parse is one we must not rewrite: replacing it would take out
+    # whatever Claude Code is keeping there. Failing here leaves the fallback below to register.
+    sys.exit(1)
+env = data.get("env")
+if not isinstance(env, dict):
+    env = {}
+if env.get("SYNC_MCP_URL") == url:
+    sys.exit(0)
+env["SYNC_MCP_URL"] = url
+data["env"] = env
+os.makedirs(os.path.dirname(path), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w") as f:
+    json.dump(data, f, indent=2)
+os.replace(tmp, path)
+PY
+}
 
-  # The plugin carries three things skein has no copy of and cannot write: the lease MONITOR, which
-  # keeps a claim alive as a process rather than as an obligation the model must remember; the
-  # session HOOKS (hand work back on exit, report what is still held on resume, fence `git push`
-  # against a lapsed lease); and the skill, now three files where skein vendored one.
-  #
-  # The monitor is the one that matters most here. A box compacts constantly, and a lease kept alive
-  # by "call heartbeat periodically" is a promise across a context boundary — upstream removed it for
-  # exactly the failure it caused: the lease lapsed, another agent took the item, and the two
-  # collided. A process cannot be talked out of running.
-  #
-  # The marketplace is a private repo, so this clones over the box's forwarded ssh-agent. Fail-soft
-  # like everything else here: a box without the plugin is the box we had yesterday.
-  if claude plugin list 2>/dev/null | grep -q 'sync@sync'; then
-    plugin="yes"
-  elif claude plugin marketplace add prateekreddy/sync >/dev/null 2>&1 \
-       && claude plugin install sync@sync >/dev/null 2>&1; then
-    plugin="yes"
-    echo "[sync] installed the sync plugin — lease monitor, session hooks and the skill" >&2
+# Claude Code gets the `sync` server from the PLUGIN now, not from a registration of skein's.
+#
+# The two cannot coexist by design: a hand-added `sync` entry WINS and the plugin's is skipped with
+# a note. skein added one on every box it wired, so leaving it in place would shadow the plugin we
+# just installed — the tools would still work, over a long-lived token, and the monitor and hooks
+# would be dead weight beside them.
+#
+# The trade is real and worth naming: the plugin authenticates over OAuth, so a box signs in once in
+# a browser instead of carrying a minted token. That is upstream's primary path, and the sync repo's
+# own box already runs this way.
+if command -v claude >/dev/null 2>&1; then
+  # Removed, not merely no longer written: every box skein wired before today carries one, and a
+  # hand-added entry WINS over a plugin's — so leaving it would shadow the plugin's own server and
+  # the monitor and hooks would sit dead beside a set of tools that still worked. There is no
+  # fallback registration here on purpose. The plugin is the only source of this server now.
+  claude mcp remove sync -s user >/dev/null 2>&1 || claude mcp remove sync >/dev/null 2>&1 || true
+  if set_sync_url "$url"; then
+    [ "$plugin" = "yes" ] && registered="yes"
   else
-    echo "[sync] could not install the sync plugin (needs ssh access to prateekreddy/sync); the tracker still works, without the lease monitor or the push fence" >&2
+    echo "[sync] could not write SYNC_MCP_URL into ~/.claude/settings.json — the plugin would reach its built-in default gateway, not yours" >&2
   fi
 fi
 
 # Codex. Its config is TOML that may carry hand-written entries, so append only when the section is
 # absent and never rewrite it — except on a forced re-apply, which is how a new token arrives.
+#
+# Still a registration, and it has to be: plugins are a Claude Code feature. Codex cannot load one,
+# so the token route is not a fallback here, it is the only route — which is also why the minted
+# token is still worth writing into a box even though Claude no longer uses it.
+codex_registered="no"
 codex_cfg="$HOME/.codex/config.toml"
 if command -v codex >/dev/null 2>&1 || [ -f "$codex_cfg" ]; then
   mkdir -p "$HOME/.codex" 2>/dev/null || true
@@ -129,10 +209,10 @@ if command -v codex >/dev/null 2>&1 || [ -f "$codex_cfg" ]; then
     fi
   fi
   if grep -Fq '[mcp_servers.sync]' "$codex_cfg" 2>/dev/null; then
-    registered="yes"
+    registered="yes"; codex_registered="yes"
   elif printf '\n[mcp_servers.sync]\nurl = "%s"\nhttp_headers = { Authorization = "Bearer %s" }\n' \
          "$url" "$token" >> "$codex_cfg" 2>/dev/null; then
-    registered="yes"
+    registered="yes"; codex_registered="yes"
   else
     echo "[sync] could not write $codex_cfg" >&2
   fi
@@ -194,17 +274,19 @@ fi
 # 3. The skill. Loaded only when the model judges it relevant, which is why it can afford to be the
 # long one — Plane's whole surface and what each tool answers.
 #
-# Skipped when the plugin is installed AND there is no Codex here, because the plugin ships this
-# skill itself and keeps it current. Two copies of one skill is not a redundancy, it is a fork: the
+# Skipped when the plugin is here and Codex is not registered, because the plugin ships this skill
+# itself and keeps it current. Two copies of one skill is not a redundancy, it is a fork: the
 # vendored one is pinned to whatever upstream commit was last pulled into skein, so the moment an
 # argument name changes the box is being taught two contradictory versions of the same tool and
 # nothing says which is older.
 #
-# Codex is why this is a condition rather than a deletion. Plugins are a Claude Code feature; a Codex
-# box gets the MCP server from the TOML block above and would get no skill at all. There, skein's
-# copy is the only copy.
+# The test is whether CODEX GOT THE TOOLS, not whether codex exists. Every box has the binary — the
+# kit installs it — so `command -v codex` is true in all ten of them and a condition written on it
+# never fires, which is a skip that reads like a feature and behaves like nothing. Whether the sync
+# server was actually written into Codex's config is the fact that matters: if Codex has the tools,
+# something has to teach Codex the rules, and the plugin cannot.
 want_skill="yes"
-if [ "$plugin" = "yes" ] && ! command -v codex >/dev/null 2>&1 && [ ! -f "$codex_cfg" ]; then
+if [ "$plugin" = "yes" ] && [ "$codex_registered" = "no" ]; then
   want_skill="no"
 fi
 if [ "$want_skill" = "yes" ] \

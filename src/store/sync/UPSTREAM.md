@@ -15,22 +15,33 @@ Since `6e3f703` the sync repo is its own single-plugin marketplace (`plugin mark
 prateekreddy/sync`, `plugin install sync@sync`). The plugin carries the MCP server, the skill, a
 lease **monitor**, and session **hooks** — none of which skein has any other source for.
 
-`sync-install.sh` installs it, and still registers the gateway itself with a minted
-`sync_agent_…` token. Both, deliberately:
+`sync-install.sh` installs it, and **no longer registers the `sync` MCP server itself** for Claude
+Code. The plugin declares that same server, and a hand-added entry *wins* over a plugin's — so
+skein's registration would shadow the plugin it had just installed, leaving a box with working tools
+and a dead monitor beside them. The old entry is actively removed, because every box wired before
+this change still carries one.
 
-- The plugin registers `sync` over **OAuth**, which opens a browser. Upstream's own onboarding says
-  headless agents cannot do that and points them at the token route, which stays supported. A box is
-  headless.
-- A hand-added `sync` entry **wins** over a plugin's, and the plugin's is skipped with a note. That
-  is upstream's documented behaviour and here it is the behaviour we want: the box authenticates
-  with its own token and still gets the monitor, the hooks and the skill.
+The gateway URL still comes from the same place: the connection configured in Settings, written into
+the box by `sync_provision_box`. What changed is where it lands — `SYNC_MCP_URL` in the box's
+`~/.claude/settings.json`, which is the seam the plugin declares (`${SYNC_MCP_URL:-…}`) and the only
+one that survives a plugin update.
 
-The hooks and the monitor do not depend on which entry won — the hooks read the session id from
-their own stdin, and the monitor authenticates with a capability URL harvested from `claim`'s result.
+Authentication moves with it: the plugin signs in over OAuth rather than carrying a minted token.
+That is upstream's primary path, and the sync repo's own box already runs this way.
 
-**So the vendored skill below is now the Codex fallback, not the primary.** Plugins are a Claude Code
-feature; a Codex box gets the server from a TOML block and would otherwise get no skill at all.
-`sync-install.sh` skips the copy when the plugin is installed and there is no Codex on the box.
+**Codex still registers by token**, and that is not a fallback — plugins are a Claude Code feature,
+so for Codex the TOML block is the only way it ever gets these tools. That is also why
+`sync_provision_box` still mints a token.
+
+**So the vendored skill below is now the Codex fallback, not the primary.** The plugin ships this
+skill and keeps it current; skein's copy is pinned to whatever commit was last pulled here, and two
+copies of one skill is a fork rather than a redundancy. `sync-install.sh` skips it when the plugin is
+installed *and Codex was not registered*.
+
+That condition is about the tools, not about the binary. Every box has `codex` on `PATH` — the kit
+installs it — so a condition written on `command -v codex` is true everywhere and never skips
+anything. Whether the sync server was actually written into Codex's config is the fact that decides
+it: if Codex has the tools, something has to teach Codex the rules, and the plugin cannot.
 
 ## What comes from where
 
