@@ -52,6 +52,24 @@ The cause was that credentials synced by mtime alone, and a logout leaves a *new
 login it replaced — so one logged-out box propagated its emptiness to the sandbox and from there to
 everything else. Fixed: a file only competes if it carries a login.
 
+Two more of the same shape, found by surveying the live fleet on 2026-08-10 and now fixed:
+
+- **the host side never got that fix.** `sync_fleet_login` tested "the sandbox has a file", and a
+  husk is a file — so a logged-out sandbox overwrote the copy in `fleet-home`, which exists solely
+  so a rebuild can restore it. The decision is now `login_move`, tested rather than inline.
+- **mtime was still the tiebreak between two real logins**, and it answers the wrong question: it
+  says when a file was *written*, not which credential is better. A box that starts rewrites its own
+  copy, so it holds the newer mtime whether or not its token is the older one. Ordering is now by
+  `expiresAt`, which can only ever prefer the longer-lived credential; mtime remains the tiebreak for
+  shapes that record no expiry (codex `auth.json`).
+
+The survey itself is the useful artefact — nine boxes held **nine distinct token pairs**, so the
+fleet does not share a live credential in steady state and is not meant to: each box diverges the
+moment it first refreshes, from one seeded login. What was broken was four boxes that had not
+started since their token lapsed (`bridge-a-b-master` a husk from Aug 4, `chassis-statement-
+parsing` and `example-box-7` expired ~Aug 7, `example-box-1` Aug 9) — the restart cadence below, not the
+propagation rule.
+
 What remains is a lag rather than a fault. Healing happens when a box **starts**, so the fleet
 recovers as boxes restart and not before. If a login is needed sooner than that, restarting any
 logged-in box pushes its credentials up and every later start picks them up.

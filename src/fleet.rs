@@ -3336,6 +3336,38 @@ fn fleet_home_dir() -> std::path::PathBuf {
 /// The files that make a login a login, relative to a HOME.
 const LOGIN_FILES: [&str; 2] = [".claude/.credentials.json", ".codex/auth.json"];
 
+/// The token keys that mean "signed in", across both runtimes' shapes.
+const LOGIN_KEYS: [&str; 5] = [
+    "accessToken",
+    "refreshToken",
+    "access_token",
+    "refresh_token",
+    "OPENAI_API_KEY",
+];
+
+/// Does this credentials file actually contain a login?
+///
+/// The named blocks and the top level, never `mcpOAuth`: that block holds a per-repo grant for an
+/// MCP server, and an MCP token says nothing about whether the *agent* is signed in. Counting it
+/// would make every husk look like a login, since the grants survive a logout.
+///
+/// Unparseable or empty ⇒ `false`, which is the safe direction: it only ever declines to propagate.
+fn carries_login(bytes: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let has = |b: Option<&serde_json::Value>| {
+        b.and_then(|b| b.as_object()).is_some_and(|b| {
+            LOGIN_KEYS.iter().any(|k| {
+                b.get(*k)
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| !t.trim().is_empty())
+            })
+        })
+    };
+    has(v.get("claudeAiOauth")) || has(v.get("tokens")) || has(Some(&v))
+}
+
 /// Keep the fleet's login on the host, and put it back into a sandbox that has none.
 ///
 /// `skein login` writes into the sandbox's own HOME, which is VM-local — so a resize destroyed it
@@ -3348,6 +3380,13 @@ const LOGIN_FILES: [&str; 2] = [".claude/.credentials.json", ".codex/auth.json"]
 ///
 /// Best-effort by design: a fleet running on API keys has no login to carry, and failing a launch
 /// over that would be absurd.
+///
+/// And a credentials file is not a login. `box-session.sh` learned that — a logged-out agent leaves
+/// the file in place with its tokens blanked, and that husk is *newer* than the working copy it
+/// replaced — but this side was still "non-empty wins", so the sandbox's husk overwrote the host's
+/// saved login and the fleet lost the copy it keeps precisely so a rebuild can restore it. Same bug,
+/// one layer up. [`carries_login`] is the same test the launcher applies, kept in step by
+/// `the_host_and_the_launcher_agree_on_what_a_login_is`.
 pub fn sync_fleet_login(sandbox: &str) {
     let fleet = own_sandbox(sandbox);
     let dir = fleet_home_dir();
@@ -3359,26 +3398,55 @@ pub fn sync_fleet_login(sandbox: &str) {
                 Duration::from_secs(20),
             )
             .unwrap_or_default();
-        if !in_sandbox.is_empty() {
-            if let Some(parent) = host.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        let saved = std::fs::read(&host).ok();
+        match login_move(&in_sandbox, saved.as_deref()) {
+            LoginMove::Save => {
+                if let Some(parent) = host.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&host, &in_sandbox).is_ok() {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o600));
+                }
             }
-            if std::fs::write(&host, &in_sandbox).is_ok() {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o600));
+            LoginMove::Restore => {
+                let restore = format!(
+                    "mkdir -p \"$(dirname \"$HOME\"/{r})\" && cat > \"$HOME\"/{r} && chmod 600 \"$HOME\"/{r}",
+                    r = sh_quote(rel)
+                );
+                let saved = saved.expect("Restore is only returned when the host has a copy");
+                if let Err(e) = fleet.write(&restore, &saved, Duration::from_secs(30)) {
+                    eprintln!("skein: could not restore the {rel} login into {sandbox}: {e}");
+                }
             }
-            continue;
+            LoginMove::Neither => {}
         }
-        let Ok(saved) = std::fs::read(&host) else {
-            continue;
-        };
-        let restore = format!(
-            "mkdir -p \"$(dirname \"$HOME\"/{r})\" && cat > \"$HOME\"/{r} && chmod 600 \"$HOME\"/{r}",
-            r = sh_quote(rel)
-        );
-        if let Err(e) = fleet.write(&restore, &saved, Duration::from_secs(30)) {
-            eprintln!("skein: could not restore the {rel} login into {sandbox}: {e}");
-        }
+    }
+}
+
+/// Which way a login should move between the sandbox and the host's kept copy.
+#[derive(Debug, PartialEq, Eq)]
+enum LoginMove {
+    /// The sandbox has the live login; the host's copy is refreshed from it.
+    Save,
+    /// The sandbox has none; the host puts its copy back.
+    Restore,
+    /// Nobody has a login to move. Not an error — a fleet on API keys never has one.
+    Neither,
+}
+
+/// The rule, as a decision rather than as control flow — because getting it wrong is silent, and
+/// costs the fleet the copy it keeps precisely so a rebuild can restore it.
+///
+/// "The sandbox has a file" was the old test, and a husk is a file. A logged-out sandbox therefore
+/// overwrote a perfectly good saved login, and after that there was nothing left to heal from.
+fn login_move(in_sandbox: &[u8], on_host: Option<&[u8]>) -> LoginMove {
+    if carries_login(in_sandbox) {
+        return LoginMove::Save;
+    }
+    match on_host {
+        Some(saved) if carries_login(saved) => LoginMove::Restore,
+        _ => LoginMove::Neither,
     }
 }
 
@@ -3765,7 +3833,7 @@ b idle 5000000 1048576 4
     ) -> (String, String) {
         let block = BOX_SESSION_SH
             .lines()
-            .skip_while(|l| !l.starts_with("carries_login() {"))
+            .skip_while(|l| !l.starts_with("login_life() {"))
             .take_while(|l| !l.starts_with("done"))
             .collect::<Vec<_>>()
             .join("\n")
@@ -3923,6 +3991,132 @@ b idle 5000000 1048576 4
             box_side.contains("sk-live"),
             "a new box did not inherit the login:\n{box_side}"
         );
+    }
+
+    /// mtime says when a file was written; `expiresAt` says which credential is better.
+    ///
+    /// They come apart exactly where it costs: a box that starts rewrites its own copy, so it holds
+    /// the newer mtime whether or not its token is the older one — and recency then replaces a valid
+    /// login with a stale one. Found in the live fleet as boxes sitting on tokens that had expired
+    /// days earlier while other boxes held good ones.
+    ///
+    /// Ordering by expiry can only ever prefer the longer-lived credential, so unlike recency it
+    /// cannot lose a working login. That is the property here, driven both directions.
+    #[test]
+    fn the_longer_lived_login_wins_however_recently_the_other_was_written() {
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        let cred = |tok: &str, exp: i64| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"{tok}","refreshToken":"r","expiresAt":{exp}}}}}"#
+            )
+        };
+        let live = cred("sk-live", 1_900_000_000_000);
+        let stale = cred("sk-stale", 1_700_000_000_000);
+
+        let (box_side, sandbox_side) = credential_sync(root, Some(&live), Some(&stale), "sandbox");
+        assert!(
+            box_side.contains("sk-live") && sandbox_side.contains("sk-live"),
+            "a newer *write* of an expired token beat a live login:\nbox {box_side}\nsandbox {sandbox_side}"
+        );
+
+        let (box_side, sandbox_side) = credential_sync(root, Some(&stale), Some(&live), "box");
+        assert!(
+            box_side.contains("sk-live") && sandbox_side.contains("sk-live"),
+            "same loss in the other direction:\nbox {box_side}\nsandbox {sandbox_side}"
+        );
+    }
+
+    /// The host's copy of the fleet login is the last resort, so a husk must never reach it.
+    ///
+    /// `fleet-home` exists for one job: a sandbox rebuild destroys its HOME, and this is what puts
+    /// the login back. The test was "the sandbox has a file", and a logged-out sandbox has a file —
+    /// so a single logout overwrote the saved login and there was then nothing left to restore
+    /// from. Same shape as the bug the launcher was already fixed for, one layer up and untested.
+    #[test]
+    fn a_logged_out_sandbox_cannot_destroy_the_fleets_kept_login() {
+        let login = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        let husk = br#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#;
+
+        // The regression, and the only case that loses data.
+        assert_eq!(
+            login_move(husk, Some(login)),
+            LoginMove::Restore,
+            "a logged-out sandbox overwrote the host's saved login"
+        );
+        // A live sandbox is the live copy; the host follows it, including across a token refresh.
+        assert_eq!(login_move(login, Some(husk)), LoginMove::Save);
+        assert_eq!(login_move(login, None), LoginMove::Save);
+        // A freshly rebuilt sandbox: empty HOME, and the host has the answer.
+        assert_eq!(login_move(b"", Some(login)), LoginMove::Restore);
+        // Nothing anywhere is normal on API keys, and writing a husk into a sandbox helps nobody.
+        assert_eq!(login_move(b"", None), LoginMove::Neither);
+        assert_eq!(login_move(husk, Some(husk)), LoginMove::Neither);
+        assert_eq!(login_move(husk, None), LoginMove::Neither);
+    }
+
+    /// The host and the launcher must not disagree about what a login is.
+    ///
+    /// Two implementations of one rule, in two languages, on either side of the same file: the
+    /// launcher's `login_life` decides what propagates between a box and the sandbox, and the host's
+    /// [`carries_login`] decides what is kept in `fleet-home` for a rebuild to restore. A drift
+    /// between them is a fleet that heals in one direction and poisons in the other, which is
+    /// exactly what "shared login doesn't work" looks like from outside.
+    ///
+    /// The mcpOAuth case is the one worth having: those grants SURVIVE a logout, so counting them
+    /// would make every husk look like a login and put the original bug straight back.
+    #[test]
+    fn the_host_and_the_launcher_agree_on_what_a_login_is() {
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        let block = BOX_SESSION_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("login_life() {"))
+            .take_while(|l| !l.starts_with("better_login() {"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cases: [(&str, bool); 8] = [
+            (
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r"}}"#,
+                true,
+            ),
+            (
+                r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}"#,
+                false,
+            ),
+            // A logout leaves the MCP grants behind. They are not a login.
+            (r#"{"mcpOAuth":{"sync|a":{"accessToken":"grant"}}}"#, false),
+            (r#"{"claudeAiOauth":{"accessToken":"   "}}"#, false),
+            (
+                r#"{"tokens":{"access_token":"a","refresh_token":"b"}}"#,
+                true,
+            ),
+            (r#"{"OPENAI_API_KEY":"sk-x"}"#, true),
+            (r#"{}"#, false),
+            ("not json at all", false),
+        ];
+        for (body, want) in cases {
+            let p = root.join("cred.json");
+            std::fs::write(&p, body).unwrap();
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "set -uo pipefail\n{block}\nlogin_life {}",
+                    p.display()
+                ))
+                .output()
+                .expect("bash to run the launcher's login test");
+            assert_eq!(
+                out.status.success(),
+                want,
+                "the launcher disagrees about `{body}`"
+            );
+            assert_eq!(
+                carries_login(body.as_bytes()),
+                want,
+                "the host disagrees about `{body}`"
+            );
+        }
     }
 
     /// `sudo` in a box explains itself instead of failing incomprehensibly — and only in a box.

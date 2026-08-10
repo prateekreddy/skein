@@ -278,13 +278,26 @@ done
 # box takes the fleet with it, which is precisely the "log in to each box separately" this exists to
 # prevent. Observed in the fleet: boxes holding `"accessToken": ""` with the structure intact.
 #
-# So a file only competes if it carries a login. Between two that do, newest still wins; one that
-# does not never overwrites one that does, in either direction, whatever the mtimes say. A logout
-# therefore stays where it happened, and a login anywhere still heals everything started after it.
+# So a file only competes if it carries a login. One that does not never overwrites one that does,
+# in either direction, whatever the mtimes say. A logout therefore stays where it happened, and a
+# login anywhere still heals everything started after it.
+#
+# And between two that do, mtime is still the wrong question. It says when a file was WRITTEN; the
+# thing being compared is which CREDENTIAL is better, and the answer is in the file — `expiresAt`.
+# The two come apart exactly where it hurts: a box that starts rewrites its copy and so holds the
+# newer mtime whether or not its token is the older one, and a valid login is then replaced by a
+# stale one. Found in the live fleet as boxes sitting on tokens that expired days ago.
+#
+# Ordering by expiry can only ever prefer the credential that lives longer, so unlike recency it
+# cannot cost you a working login. mtime remains the tiebreak for shapes that record no expiry at
+# all (a codex `auth.json`), where there is genuinely nothing better to go on.
 #
 # Named blocks rather than "a non-empty token anywhere": this same file also carries per-repo MCP
 # OAuth, and an MCP token says nothing about whether the agent itself is signed in.
-carries_login() {
+#
+# Prints the epoch-ms this login stops working, or 0 when it carries one that records no expiry.
+# Prints nothing, and fails, when the file carries no login at all — which is the husk test.
+login_life() {
   [ -s "$1" ] || return 1
   python3 - "$1" 2>/dev/null <<'PY'
 import json, sys
@@ -294,15 +307,33 @@ except Exception:
     sys.exit(1)
 if not isinstance(data, dict):
     sys.exit(1)
+KEYS = ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY")
+found, best = False, 0
 # `data` itself for the flat shapes; the named blocks for the nested ones. Never mcpOAuth.
 for block in (data.get("claudeAiOauth"), data.get("tokens"), data):
     if not isinstance(block, dict):
         continue
-    for key in ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY"):
-        if str(block.get(key) or "").strip():
-            sys.exit(0)
-sys.exit(1)
+    if not any(str(block.get(k) or "").strip() for k in KEYS):
+        continue
+    found = True
+    for k in ("expiresAt", "expires_at", "expiry"):
+        v = block.get(k)
+        # `bool` is an int in Python and `True` would read as expiry 1 — a login dated 1970.
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            best = max(best, int(v))
+            break
+if not found:
+    sys.exit(1)
+print(best)
 PY
+}
+
+# Is the first login better than the second? Longer-lived wins; equal expiry (or none recorded on
+# either side) falls back to the mtime tiebreak this rule used to apply to everything.
+better_login() { # $1 $2 = expiries, $3 $4 = the files they came from
+  [ "$1" -gt "$2" ] && return 0
+  [ "$1" -lt "$2" ] && return 1
+  [ "$3" -nt "$4" ]
 }
 
 # Only the login moves, and it is merged rather than copied over.
@@ -373,12 +404,11 @@ command -v python3 >/dev/null 2>&1 \
 
 for rel in ".claude/.credentials.json" ".codex/auth.json"; do
   mine="$home/$rel"; canon="$HOME/$rel"
-  mine_ok=0; canon_ok=0
-  carries_login "$mine" && mine_ok=1
-  carries_login "$canon" && canon_ok=1
-  if [ "$mine_ok" = 1 ] && { [ "$canon_ok" = 0 ] || [ "$mine" -nt "$canon" ]; }; then
+  mine_life="$(login_life "$mine")" || mine_life=""
+  canon_life="$(login_life "$canon")" || canon_life=""
+  if [ -n "$mine_life" ] && { [ -z "$canon_life" ] || better_login "$mine_life" "$canon_life" "$mine" "$canon"; }; then
     merge_login "$mine" "$canon"
-  elif [ "$canon_ok" = 1 ] && { [ "$mine_ok" = 0 ] || [ "$canon" -nt "$mine" ]; }; then
+  elif [ -n "$canon_life" ] && { [ -z "$mine_life" ] || better_login "$canon_life" "$mine_life" "$canon" "$mine"; }; then
     merge_login "$canon" "$mine"
   fi
 done
