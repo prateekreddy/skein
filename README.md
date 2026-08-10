@@ -14,7 +14,8 @@ a ⌘K palette are next (ARCHITECTURE.md § Roadmap).
 
 ```sh
 cargo build --release        # → target/release/{skein, skein-server}
-cargo test                   # units + a black-box run of the real server (tests/server.rs)
+cargo test                   # units, a black-box run of the real server (tests/server.rs), and the
+                             # box hook scripts driven as scripts (tests/turn_state_probe.rs)
 node tests/ui/smoke.mjs      # the cockpit in a browser — run it after touching src/web/index.html
 ```
 

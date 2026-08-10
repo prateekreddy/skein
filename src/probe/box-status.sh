@@ -25,8 +25,9 @@
 #   `matcher` in settings.json — so the modes above are selected by which matcher routed here, wired
 #   as separate Notification entries in `settings_with_probe` (lib.rs), never by reading the payload.
 #   error        (StopFailure)      the turn died on an API error; .error_type → the detail (rate_limit…)
-#   compacting   (PreCompact)       context compaction running — busy, not stuck
-#   compacted    (PostCompact)      compaction done → back to working
+#   compacting   (PreCompact)       context compaction running — busy, not stuck; also writes down
+#                                    where the box was, for `compacted` to restore
+#   compacted    (PostCompact)      compaction done → back to wherever the box was before it
 #   ended        (SessionEnd)       the session terminated; .reason → the detail (logout, exit, …)
 # Why the counter: while the box waits on its own foreground sub-agents Claude Code fires a
 # Notification — without the counter that flips the row to "needs me" even though it's actively working.
@@ -152,6 +153,19 @@ write_status() { # $1 = status key, $2 = optional human detail
   mv "$tmp" "$dir/$vmid.json" 2>/dev/null || rm -f "$tmp" 2>/dev/null
 }
 
+# Where the box already is, as its own file records it — for the modes that must decide from the
+# current state rather than blindly overwrite it (`started`, `compacting`). Empty when there is no
+# file yet, which every caller must treat as "unknown", never as a state.
+current_status() {
+  sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([a-z-]*\)".*/\1/p' "$dir/$vmid.json" 2>/dev/null
+}
+# The human detail beside it, when there is one ("API error: rate limit"). Without this a state
+# restored across a compaction would come back stripped of the very thing that says why.
+current_detail() {
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r '.detail // ""' "$dir/$vmid.json" 2>/dev/null
+}
+
 case "$mode" in
   working)
     adjust reset
@@ -208,10 +222,41 @@ case "$mode" in
     if [ -n "$et" ]; then write_status error "API error: ${et//_/ }"; else write_status error "API error"; fi
     ;;
   compacting)
+    # Write down where the box was before compaction took over the screen, so `compacted` can put
+    # it back. Kept beside the status file rather than in it, because the board must read
+    # `compacting` for the duration — this is a note to the next hook, not a claim about now.
+    cur="$(current_status)"
+    if [ -n "$cur" ] && [ "$cur" != "compacting" ]; then
+      printf '%s\n%s\n' "$cur" "$(current_detail)" >"$dir/$vmid.precompact" 2>/dev/null || true
+    fi
     write_status compacting
     ;;
   compacted)
-    write_status working
+    # A compaction does not change what the box is doing — it only interrupts it. So the honest
+    # answer afterwards is wherever it was, which is what `compacting` wrote down.
+    #
+    # This was an unconditional `working`, which is right for an AUTO compaction (it fires mid-turn
+    # and the turn resumes) and wrong for a manual `/compact`, which you type at the prompt while
+    # the box waits on YOU. The board then read "working" on a box that wanted an instruction, until
+    # the idle Notification a full minute later — or the pane observer — happened to correct it.
+    prev=""
+    pdetail=""
+    if [ -r "$dir/$vmid.precompact" ]; then
+      { IFS= read -r prev; IFS= read -r pdetail; } <"$dir/$vmid.precompact" 2>/dev/null || true
+      # Consume it: a note left behind by a compaction that died before PostCompact must not be
+      # restored onto some later one.
+      rm -f "$dir/$vmid.precompact" 2>/dev/null || true
+    fi
+    case "$prev" in
+      waiting | blocked | needs-input | needs-decision | error | ended | done | working) ;;
+      # No note (an older skein wired PreCompact to a script that left none, or the hook never
+      # fired) or a state this version does not know: fall back to the long-standing behaviour.
+      *)
+        prev=working
+        pdetail=""
+        ;;
+    esac
+    write_status "$prev" "$pdetail"
     ;;
   ended)
     adjust reset
@@ -228,10 +273,11 @@ case "$mode" in
     # exit the agent, and nothing used to clear it — so a box you restarted sat there reading
     # "ended" while its new session waited at the prompt.
     #
-    # Only that transition, because SessionStart fires for several sources: after a compaction the
-    # box is mid-turn and `working` is the truth, and overwriting it with `waiting` would claim the
-    # box wants you when it is busy.
-    cur="$(sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([a-z-]*\)".*/\1/p' "$dir/$vmid.json" 2>/dev/null)"
+    # Only that transition, because SessionStart fires for several sources. The `compact` source
+    # fires between PreCompact and PostCompact, where the state reads `compacting` and the note
+    # holding the real state is already written — claiming `waiting` here would both lie about a
+    # box mid-turn and be overwritten a moment later anyway.
+    cur="$(current_status)"
     if [ "$cur" = "ended" ] || [ -z "$cur" ]; then
       adjust reset
       refresh_branch
