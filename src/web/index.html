@@ -4044,11 +4044,18 @@ function pickAttachment(folder) {
 // Staleness banner: without it, a dead server left the board showing confident, fresh-looking data
 // (ages keep ticking client-side) with only the tiny live pip as a tell. Age the last snapshot
 // visibly so a stale board is never mistaken for a calm one.
+//
+// Thirty seconds, not eight. Eight was chosen against a fleet that answered promptly, and a busy one
+// does not: a box is free to take every core here — that is the shared sandbox working as intended —
+// and the poll behind this banner queues behind it. So the banner spent its time announcing a board
+// that was about to update anyway, which is how a warning becomes something you look past. It is
+// worth reading only when it means the server is actually gone.
+const STALE_AFTER_S = 30;
 let lastTickAt = Date.now();
 setInterval(() => {
   const age = Math.round((Date.now() - lastTickAt) / 1000);
   let ban = document.getElementById("staleban");
-  if (age >= 8) {
+  if (age >= STALE_AFTER_S) {
     if (!ban) {
       ban = document.createElement("div"); ban.id = "staleban";
       ban.style.cssText = "position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:60;"
