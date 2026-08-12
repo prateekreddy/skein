@@ -344,13 +344,29 @@ fn retire_stale_agent(sandbox: &str) {
     // so ending it stops the restart as well as the process. `pkill` is for a python that somehow
     // outlived its supervisor, and is allowed to find nothing.
     let script = format!(
-        "tmux kill-session -t {session} 2>/dev/null; pkill -f {path} 2>/dev/null; true",
+        "tmux kill-session -t {session} 2>/dev/null; pkill -f {pattern} 2>/dev/null; true",
         session = sh_quote(AGENT_SESSION),
-        path = sh_quote(&fleet_agent_path()),
+        pattern = sh_quote(&agent_pkill_pattern(&fleet_agent_path())),
     );
     // Over `sbx exec` and never the agent: this kills the process that would be carrying the reply,
     // so a successful retirement would come back as a transport failure.
     let _ = own_sandbox(sandbox).exec_sbx(&script, Duration::from_secs(30));
+}
+
+/// The pattern that matches the agent process and **only** the agent process.
+///
+/// `pkill -f` matches against a process's whole command line, so the bare path matched far more than
+/// intended: the `while true` supervisor that would restart the agent, the tmux session holding that
+/// supervisor, and any shell whose command line merely mentions the path — including the one running
+/// the `pkill`. Retiring an agent by killing its own supervisor is a stop, not a restart, and that
+/// is precisely what happened when this was run outside its usual sandwich: the agent went away and
+/// nothing brought it back.
+///
+/// Anchoring at `python` fixes it, because that is what distinguishes the process from everything
+/// that merely refers to it. Dots are escaped since `-f` takes an extended regular expression and an
+/// unescaped `.` would match any character.
+fn agent_pkill_pattern(path: &str) -> String {
+    format!("^python[0-9.]* {}( |$)", path.replace('.', "\\."))
 }
 
 /// Start the agent if it is not already up, and leave it supervised.
@@ -4186,6 +4202,63 @@ b idle 5000000 1048576 4
                 carries_login(body.as_bytes()),
                 want,
                 "the host disagrees about `{body}`"
+            );
+        }
+    }
+
+    /// Retiring the agent must not kill the thing that restarts it.
+    ///
+    /// `pkill -f` matches a process's entire command line, and the bare path appears in the command
+    /// line of every process in the chain: the python agent, the `while true` supervisor that
+    /// restarts it, the tmux session holding that supervisor, and any shell that so much as names
+    /// the path — including the one running the `pkill` itself.
+    ///
+    /// This is not theoretical. Run on its own, the old pattern took down the supervisor along with
+    /// the agent, so nothing came back and the transport stayed dead until someone started a new
+    /// tmux session by hand. It was survivable in place only because `retire_stale_agent` is
+    /// sandwiched between `tmux kill-session` and `start_fleet_agent`, which is a dangerous thing
+    /// for a line to depend on.
+    ///
+    /// Checked with `grep -E`, which is the same extended-regex engine `pkill -f` uses, against the
+    /// real command lines taken from `ps` on a live fleet.
+    #[test]
+    fn retiring_the_agent_matches_the_agent_and_nothing_that_restarts_it() {
+        let path = "/boxes/.skein/fleet-agent.py";
+        let pattern = agent_pkill_pattern(path);
+        let matches = |cmdline: &str| -> bool {
+            std::process::Command::new("grep")
+                .arg("-E")
+                .arg(&pattern)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .and_then(|mut c| {
+                    use std::io::Write;
+                    c.stdin.take().unwrap().write_all(cmdline.as_bytes())?;
+                    c.wait()
+                })
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+
+        assert!(
+            matches("python3 /boxes/.skein/fleet-agent.py 8317 /boxes/.skein/fleet-agent.token\n"),
+            "the agent itself is no longer matched, so a stranded python survives: {pattern}"
+        );
+        for spared in [
+            // The supervisor. Killing this is what turned a retirement into an outage.
+            "bash -c while true; do python3 '/boxes/.skein/fleet-agent.py' 8317 '/boxes/.skein/fleet-agent.token'; sleep 2; done\n",
+            // The tmux session that holds it.
+            "tmux new-session -d -s skein-fleet-agent while true; do python3 '/boxes/.skein/fleet-agent.py' 8317 'x'; sleep 2; done\n",
+            // A shell that merely mentions the path — such as the one running this very pkill.
+            "bash -c pkill -f /boxes/.skein/fleet-agent.py\n",
+            "bash -c install -m 700 src/fleet-agent.py /boxes/.skein/fleet-agent.py\n",
+            // A different file that happens to share the prefix.
+            "python3 /boxes/.skein/fleet-agent.python-backup 1 2\n",
+        ] {
+            assert!(
+                !matches(spared),
+                "would be killed and must not be: {spared:?} against {pattern}"
             );
         }
     }

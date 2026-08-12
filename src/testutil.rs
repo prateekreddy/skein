@@ -45,11 +45,17 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// `tempdir().join("x")` drops the guard on the spot and deletes the directory before the test has
 /// used it, which the test then silently recreates.
 ///
-/// **Two directories a run still survive this**, and they are not removal failures — instrumenting
-/// `drop` showed `remove_dir_all` never erroring. They are *recreated* after the guard has removed
-/// them, by work that outlives the test that started it: [`crate::Gate`] refreshes behind its
-/// caller on a spawned thread, and a thread still running when the test ends writes through an
-/// env var that still names the deleted path. Bounded and understood, against ~180 a run before.
+/// **One directory a run still survives this**, and it is not a removal failure — instrumenting
+/// `drop` showed `remove_dir_all` never erroring. It is *recreated* after the guard has removed it,
+/// by work that outlives the test that started it: [`crate::Gate`] refreshes behind its caller on a
+/// spawned thread, and a thread still running when the test ends writes through an env var that
+/// still names the deleted path. Bounded and understood, against ~180 a run before.
+///
+/// It was two a run until [`reopen`] stopped chmodding through symlinks. The second was a genuine
+/// removal failure and a far more expensive one: it left a store directory unreadable, and a single
+/// unreadable path anywhere under `/boxes` makes `du` exit nonzero, which blanked the disk figure
+/// for every box on the board. The survivor above is now the only one, and it is readable — which
+/// is the property that actually matters, more than the count.
 pub(crate) struct TempDir(PathBuf);
 
 impl Drop for TempDir {
@@ -73,7 +79,22 @@ fn reopen(dir: &std::path::Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() && !path.is_symlink() {
+        // Symlinks are skipped outright, and this is the second bug this function has had.
+        // `set_permissions` FOLLOWS a symlink, so chmodding what looked like a harmless link
+        // rewrote the mode of whatever it pointed at — and skein's fixtures are full of them
+        // (`tree/.claude` is a symlink to the store). The store became `drw-r--r--`, which nothing
+        // can descend into, so `remove_dir_all` then failed and left the whole tree behind. The
+        // function that exists to make a tree removable was what made it unremovable.
+        //
+        // Worse, it reaches outside: the target need not be under `dir` at all, so this could
+        // silently re-mode a directory somewhere else entirely.
+        //
+        // Nothing is lost by skipping. A symlink's own mode is meaningless on Linux, and
+        // `remove_dir_all` unlinks the link rather than following it.
+        if path.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
             reopen(&path);
         } else {
             let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o644));
@@ -151,4 +172,62 @@ pub(crate) fn write_session(dir: &std::path::Path, name: &str, last_message: &st
         body.to_string(),
     )
     .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `reopen` must never chmod through a symlink — including out of the tree it was handed.
+    ///
+    /// This is the bug as it happened, and it cost more than a stray directory. skein's fixtures
+    /// symlink `tree/.claude` at the store, `set_permissions` follows symlinks, so runs left a store
+    /// at `drw-r--r--` and a temp tree that could not be removed. Those accumulated to 152
+    /// unreadable paths under `/boxes` — and one unreadable path anywhere is enough to make `du`
+    /// exit nonzero, which blanked the disk figure for every box on the board.
+    ///
+    /// The target sits deliberately *outside* the tree being reopened. Inside, the test would depend
+    /// on readdir order: reach the real directory after the link and it gets chmodded back, hiding
+    /// the bug on some runs and not others. Outside, nothing can put it back.
+    #[test]
+    fn reopening_a_tree_never_chmods_through_a_symlink() {
+        let elsewhere = tempdir();
+        let target = elsewhere.join("store");
+        fs::create_dir_all(target.join("memory")).unwrap();
+
+        let dir = tempdir();
+        std::os::unix::fs::symlink(&target, dir.join("link")).unwrap();
+        reopen(&dir);
+
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "reopen re-moded a directory a symlink pointed at, and one outside its own tree at that"
+        );
+        assert!(
+            fs::read_dir(&target).is_ok(),
+            "the directory can no longer be descended into, so nothing can remove it"
+        );
+    }
+
+    /// And the shape that actually leaked: a store, and a tree that links to it.
+    #[test]
+    fn a_fixture_that_symlinks_its_store_is_still_cleaned_up() {
+        let path;
+        {
+            let dir = tempdir();
+            path = dir.to_path_buf();
+            fs::create_dir_all(dir.join("store/.claude/memory")).unwrap();
+            fs::write(dir.join("store/.claude/memory/m.md"), "x").unwrap();
+            fs::create_dir_all(dir.join("tree")).unwrap();
+            std::os::unix::fs::symlink(dir.join("store/.claude"), dir.join("tree/.claude"))
+                .unwrap();
+        }
+        assert!(
+            !path.exists(),
+            "the temp tree was left behind at {} — these accumulate, and an unreadable one \
+             blanks every box's disk usage",
+            path.display()
+        );
+    }
 }
