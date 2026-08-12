@@ -361,6 +361,34 @@ Skein installs `jq` and mandates `tmux` as the minimal box substrate. Provider-n
 handoffs, and immutable takeover snapshots live once in the mounted shared store; Skein never installs
 both large agent CLIs into every box. `GET /api/health` exposes dependency/hook failures.
 
+### Asking for a system package
+
+A box cannot install one: it is a user namespace mapping a single uid, so `sudo` inside it is
+unfixable rather than unconfigured. The sandbox *around* the boxes has a working root, and one
+install there serves every box in the fleet — which is exactly why it is a decision rather than
+something a box does for itself.
+
+So the install an agent typed becomes a request. Inside a box:
+
+```
+$ sudo apt-get install libnss3
+skein: asked the fleet for apt (libnss3). Request 20260812-093132-560434 is pending approval.
+skein: it installs for every box once approved in the cockpit; nothing is installed yet.
+```
+
+Nothing is installed, and the command still fails. The ask lands in a queue in the fleet root
+(`$SKEIN_FLEET_ROOT/.skein/substrate/requests`), the cockpit's package panel badges it, and the
+fleet's owner approves or denies it there. Approving installs it once, for every box, and by default
+records it in `~/.skein/substrate.json` on the **host** so a rebuilt sandbox reinstalls it — untick
+"remember" at approval time to install it now without recording it. Identical asks collapse into one
+decision however many boxes make them, or however often an agent retries.
+
+This is a chokepoint and an audit trail, not a security boundary: any box can already reach the
+fleet agent's token, and skein deliberately puts no wall between boxes. What it buys is that a
+package changing the toolchain under every box does not get installed because one agent decided to.
+Package names are validated on both sides of the wire, because a name approved here ends up on a
+command line running as root.
+
 ## Shared working files
 
 Every managed Claude and Codex box exposes the repo's durable working-data directory at

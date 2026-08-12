@@ -511,8 +511,23 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #boxset { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open { display:flex; justify-content:center; align-items:flex-start; }
+  /* package requests: one row per ask, with the decision on it */
+  .sq-pkgs { font-family:var(--mono); font-size:12px; color:var(--text); word-break:break-all; }
+  .sq-meta { font-size:11px; color:var(--faint); margin-top:3px; }
+  .sq-row { display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .sq-row label { font-size:11px; color:var(--dim); display:flex; align-items:center; gap:5px; cursor:pointer; }
+  .sq-state { font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; padding:2px 6px; border-radius:5px; border:1px solid var(--line); color:var(--dim); }
+  .sq-state.approved { color:#f0d28a; } .sq-state.installed { color:#9ae6b0; }
+  .sq-state.failed, .sq-state.denied { color:#ffb4ae; }
+  .sq-log { font-family:var(--mono); font-size:10px; color:var(--faint); white-space:pre-wrap;
+            max-height:120px; overflow-y:auto; margin-top:7px; padding:7px 9px;
+            background:var(--inset); border:1px solid var(--line); border-radius:7px; }
+  /* the badge that says something is waiting on a decision */
+  #subqbtn { position:relative; }
+  #subqbtn .badge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+    border-radius:7px; background:var(--attn); color:#fff; font-size:9px; line-height:14px; text-align:center; font-family:var(--mono); }
   /* add-repo modal: derived-id preview + inline result/warning (replaces the native prompt/alert) */
   .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
   .bs-actions { display:flex; gap:8px; flex-wrap:wrap; }
@@ -788,6 +803,7 @@
             <span class="hdiv"></span>
             <span class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span>
             <span class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></span>
+            <span class="kbtn ghost" id="subqbtn" onclick="openSubq()" title="Package requests from boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></span>
             <span class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span>
             <span class="kbtn ghost" id="voice" title="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></span>
             <span class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
@@ -851,6 +867,13 @@
         <textarea id="mbx-body" placeholder="Message to the box(es)… (⌘↵ to send)"></textarea>
         <div class="row2"><span class="hint" id="mbx-hint"></span><button class="primary" id="mbx-send">Send</button></div>
       </div>
+    </div>
+  </div>
+
+  <div id="subq" aria-hidden="true">
+    <div class="mbx-card">
+      <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><span class="x" onclick="closeSubq()">✕</span></div>
+      <div class="mbx-list" id="subq-list"></div>
     </div>
   </div>
 
@@ -3118,6 +3141,106 @@ document.getElementById("mbx-body").addEventListener("keydown", e => {
   e.stopPropagation();
 });
 
+// ---------- package requests (a box asks, the fleet's owner decides) ----------
+//
+// A box cannot install a system package and never will be able to; the sandbox around it can, once,
+// for everyone in it. So `sudo apt-get install X` inside a box files a request instead of failing,
+// and this is where it is answered. Approving installs it for every box in the fleet — which is the
+// reason it is a decision at all rather than something a box just does.
+// Announced-once bookkeeping, in the shape the standing-debt work settled on: remember what has
+// been said rather than what the last snapshot looked like, or a request that stays pending gets
+// re-announced on every poll for as long as it waits.
+const subqAnnounced = new Set();
+let subqPrimed = false;
+function openSubq() { const o = document.getElementById("subq"); o.classList.add("open"); o.setAttribute("aria-hidden","false"); loadSubq(); }
+function closeSubq() { const o = document.getElementById("subq"); o.classList.remove("open"); o.setAttribute("aria-hidden","true"); }
+
+// `installed`/`failed` land on the request itself, so the panel needs no progress channel of its
+// own — approving flips it to `approved` and a later poll shows how it ended.
+function subqCard(r) {
+  const pending = r.state === "pending";
+  const log = (r.log || "").trim();
+  return `
+    <div class="msg">
+      <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
+      <div class="sq-meta">${esc(r.kind || "?")} · asked by <b>${esc(r.box || "?")}</b> · ${esc((r.asked || "").replace("T", " ").replace("Z", ""))}</div>
+      <div class="sq-row">
+        <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
+        ${pending ? `
+          <label><input type="checkbox" checked id="sq-rem-${esc(r.id)}" /> remember for rebuilt sandboxes</label>
+          <button class="kbtn primary" onclick="decideSubq('${esc(r.id)}', true)">Approve &amp; install</button>
+          <button class="kbtn ghost" onclick="decideSubq('${esc(r.id)}', false)">Deny</button>` : ""}
+        ${r.state === "approved" ? `<span class="sq-meta">installing… apt can take a few minutes</span>` : ""}
+        ${r.state === "installed" && r.remember ? `<span class="sq-meta">recorded — a rebuilt sandbox reinstalls it</span>` : ""}
+      </div>
+      ${log ? `<div class="sq-log">${esc(log)}</div>` : ""}
+    </div>`;
+}
+
+function loadSubq() {
+  const list = document.getElementById("subq-list");
+  return fetch("/api/fleet/substrate").then(r => r.json()).then(reqs => {
+    if (!reqs.length) {
+      list.innerHTML = `<div class="note">no requests — a box asks by running the install it wanted, e.g. <code>sudo apt-get install libnss3</code></div>`;
+      return;
+    }
+    // Newest first here, though the API returns oldest-first: the thing needing a decision is
+    // usually the thing that just happened.
+    list.innerHTML = reqs.slice().reverse().map(subqCard).join("");
+  }).catch(() => { list.innerHTML = `<div class="note">could not load package requests</div>`; });
+}
+
+function decideSubq(id, approve) {
+  const rem = document.getElementById("sq-rem-" + id);
+  // Unticked means approve this once without recording it, so a rebuilt sandbox comes back without
+  // it. Denials never record, whatever the box happens to be showing.
+  const remember = approve ? !!(rem && rem.checked) : false;
+  fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ approve, remember }),
+  }).then(r => { if (!r.ok) throw 0; loadSubq(); })
+    .catch(() => toast("could not record that decision"));
+}
+
+// The badge, so a request does not wait unseen for someone to open the panel.
+function paintSubqBadge(n) {
+  const btn = document.getElementById("subqbtn");
+  if (!btn) return;
+  const had = btn.querySelector(".badge");
+  if (had) had.remove();
+  if (n > 0) {
+    const b = document.createElement("span");
+    b.className = "badge";
+    b.textContent = String(n);
+    btn.appendChild(b);
+  }
+  btn.title = n > 0 ? `${n} package request${n === 1 ? "" : "s"} waiting on you` : "Package requests from boxes";
+}
+
+// Returns its promise, so a caller — the test, or anything that wants to poll and then act — can
+// wait for the round trip instead of guessing how many ticks it took.
+function pollSubq() {
+  return fetch("/api/fleet/substrate").then(r => r.json()).then(reqs => {
+    const pending = reqs.filter(r => r.state === "pending");
+    paintSubqBadge(pending.length);
+    // The first poll only seeds: a page reload is not news, and announcing the whole backlog every
+    // time the cockpit is opened is exactly the nagging this channel was fixed to stop.
+    const fresh = pending.filter(r => !subqAnnounced.has(r.id));
+    pending.forEach(r => subqAnnounced.add(r.id));
+    if (subqPrimed && fresh.length && alertsOn) {
+      const what = fresh.map(r => (r.packages || []).join(" ")).join("; ");
+      // The tag is the asking box when there is exactly one, so clicking the notification opens it —
+      // `pushNote` treats a tag that names a box as somewhere to go.
+      pushNote(
+        fresh.length === 1 ? `${fresh[0].box} wants ${what} installed for the fleet` : `${fresh.length} boxes want packages: ${what}`,
+        fresh.length === 1 ? fresh[0].box : "substrate",
+      );
+    }
+    subqPrimed = true;
+    if (document.getElementById("subq").classList.contains("open")) loadSubq();
+  }).catch(() => {});
+}
+
 // ---------- launch a new box ----------
 const newbox = document.getElementById("newbox"), nbBranch = document.getElementById("nb-branch");
 const nbRepo = document.getElementById("nb-repo"), nbRepoLbl = document.getElementById("nb-repo-lbl");
@@ -4420,6 +4543,10 @@ if (DEMO) {
   // Gate behind the endpoint means the extra polls cost a map lookup, not an `sbx exec`.
   loadResources();
   setInterval(loadResources, 15000);
+  // Slower than the rest, deliberately: a package request is answered by a person over minutes, not
+  // by the board over seconds, and this poll execs into the sandbox to read the queue.
+  pollSubq();
+  setInterval(pollSubq, 20000);
 }
 </script>
 </body>

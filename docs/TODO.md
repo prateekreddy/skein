@@ -194,7 +194,9 @@ there are **62 legacy references across 7 files** (`config.rs`, `repos.rs`, `san
 `tracking.rs`, `mailbox.rs`, `fleet.rs`, `lib.rs`). That is its own session, not a tail-end cleanup.
 
 Note the capability difference before doing it: a legacy box had real root, a fleet box cannot (see
-the sudo shim in `box-session.sh`).
+the sudo shim in `box-session.sh`). What a fleet box has instead is a way to *ask* — the shim files
+a package request its owner approves in the cockpit, and the install serves the whole fleet — so the
+gap is narrower than "no root" suggests, but it is not the same capability and never will be.
 
 ### The docs still describe one sandbox per box
 
@@ -233,6 +235,14 @@ resources — have the same exposure the moment an integration test touches them
 `tests/ui/smoke.mjs` needs chromium's system libraries, and a box has no working `sudo` to install
 them — the shim above explains why. It downloads but will not launch. Run it on the host after any
 `src/web/index.html` change.
+
+There is now a way through this, untried at the time of writing: a box can *ask* for those libraries
+(`sudo apt-get install libnss3 …` files a request; the cockpit's package panel approves it) and the
+install lands in the sandbox for every box. If that works, `smoke.mjs` becomes runnable in a box and
+this entry can be closed rather than worked around. Worth doing deliberately, because it is also the
+first real exercise of the request path end to end. Note the browsers themselves are **not** the
+problem — `~/.cache/ms-playwright` re-downloads with `npx playwright install chromium` and was
+deleted once already to reclaim a full disk.
 
 This is not academic: it is why the voice shipped with `waiting` missing from both of its paths and
 spoke nothing while boxes sat waiting. `tests/ui/voice.mjs` closes that particular hole by lifting

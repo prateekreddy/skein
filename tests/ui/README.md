@@ -40,6 +40,18 @@ a page. It pins the case that lost tabs for good: a reload landing while `sbx ls
 empty first snapshot, read it as "those boxes are gone", and then persisted an empty list over the
 saved one. An empty snapshot is not evidence; a populated one is.
 
+## `substrate.mjs` — what an approval actually sends, and how often it nags
+
+```sh
+node tests/ui/substrate.mjs       # no setup, no chromium, runs inside a box
+```
+
+Approving a package installs it under every box in the fleet, so the decision the cockpit sends has
+to be the one its owner made: "remember" on by default, unticking it means install-now-don't-record,
+and a denial records nothing whatever the checkbox shows. It also pins the announcing, because a
+request sits pending until a person answers it — precisely the shape that produced the endless
+re-announcing fixed once already. Announced once, then quiet, however long it waits.
+
 ## `voice.mjs` — what the mouth says, without a browser
 
 ```sh

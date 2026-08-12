@@ -156,6 +156,126 @@ apply_fleet_ceilings() {
   done
 }
 
+# Where a box files a request for a system package, and where the host reads it back.
+#
+# The fleet root rather than the shared `.claude` store, and that distinction is the whole point: the
+# store is per-repo, while one sandbox holds boxes from several repos and a system package changes
+# the toolchain under every one of them. Filing a fleet-wide decision in a per-repo queue would scope
+# it to whichever repo happened to ask first, and hide it from the boxes it also affects.
+substrate_dir() {
+  printf '%s/.skein/substrate' "${SKEIN_FLEET_ROOT:-/boxes}"
+}
+
+# Is this a name apt or npm could actually be asked for?
+#
+# This is the boundary that has to hold, not a politeness check. Everything filed here is eventually
+# spliced into a `sudo apt-get install` that runs as ROOT in the sandbox, so a name shaped like an
+# option or a path traversal must never reach the queue — approving a request must not be a way to
+# get an argument of your choosing onto a privileged command line.
+valid_package() {
+  case "$1" in
+    "" | -*) return 1 ;;          # empty, or shaped like a flag
+    *..*) return 1 ;;             # traversal, however it is spelled
+    *[!A-Za-z0-9._+@/-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# `--request-package <box> <argv…>`: file what a box asked `sudo` to install.
+#
+# The parsing lives here rather than in the shim it is called from because a shim generated into a
+# box's private namespace has nowhere to be tested from, and this is argument handling that ends at
+# a root install — exactly the code that should not be written blind. `tests/substrate_request.rs`
+# drives this entry point directly.
+#
+# Exit codes are the shim's whole vocabulary: 0 filed, 2 "not an install command, say the usual
+# thing", 3 refused. Anything else is this script failing, which the shim also treats as 2.
+request_package() {
+  local box="$1" tool="" verb="" kind="" arg
+  shift
+  # sudo's own options are not the command's. Everything up to the first bare word belongs to sudo.
+  while [ $# -gt 0 ]; do
+    case "$1" in -*) shift ;; *) break ;; esac
+  done
+  tool="${1-}"
+  [ $# -gt 0 ] && shift
+  case "$tool" in
+    apt | apt-get) kind=apt ;;
+    npm) kind=npm ;;
+    *) return 2 ;;
+  esac
+  while [ $# -gt 0 ]; do
+    case "$1" in -*) shift ;; *) verb="$1"; shift; break ;; esac
+  done
+  case "$kind/$verb" in
+    apt/install | npm/install | npm/i | npm/add) ;;
+    *) return 2 ;;
+  esac
+
+  local -a packages=()
+  for arg in "$@"; do
+    case "$arg" in -*) continue ;; esac
+    if ! valid_package "$arg"; then
+      echo "skein: '$arg' is not a package name that can be asked for" >&2
+      return 3
+    fi
+    packages+=("$arg")
+  done
+  [ "${#packages[@]}" -gt 0 ] || return 2
+
+  command -v jq >/dev/null 2>&1 || return 4
+
+  local dir want
+  dir="$(substrate_dir)/requests"
+  mkdir -p "$dir" 2>/dev/null || return 4
+  # The identity of a request is what it would install, so the same ask from two boxes — or twice
+  # from one — is one decision to make rather than a queue that grows every time a stuck agent
+  # retries. Sorted, so argument order is not part of that identity.
+  want="$kind $(printf '%s\n' "${packages[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
+
+  local f state existing
+  for f in "$dir"/*.json; do
+    [ -f "$f" ] || continue
+    state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
+    case "$state" in pending | approved) ;; *) continue ;; esac
+    existing="$(jq -r '(.kind // "") + " " + ((.packages // []) | sort | unique | join(" ")) + " "' "$f" 2>/dev/null)" || continue
+    if [ "$existing" = "$want" ]; then
+      printf 'skein: already asked for (%s) — request %s is %s.\n' \
+        "${packages[*]}" "$(jq -r '.id // "?"' "$f")" "$state"
+      return 0
+    fi
+  done
+
+  local id tmp
+  id="$(date -u +%Y%m%d-%H%M%S)-$$"
+  tmp="$(mktemp "$dir/.tmp.XXXXXX")" || return 4
+  # `--args` puts the packages in as a JSON array of strings rather than a string that has to be
+  # split again later. Nothing downstream re-parses this, which is the point.
+  if ! jq -n --arg id "$id" --arg box "$box" --arg kind "$kind" \
+       --arg asked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       '{id:$id, box:$box, kind:$kind, packages:$ARGS.positional,
+         asked:$asked, state:"pending", decided:"", remember:true, log:""}' \
+       --args "${packages[@]}" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 4
+  fi
+  # Named only once it is complete: the host polls this directory, and a half-written request is a
+  # parse error on its side rather than a request that arrives a moment later.
+  mv -f "$tmp" "$dir/$id.json" 2>/dev/null || { rm -f "$tmp"; return 4; }
+  chmod 644 "$dir/$id.json" 2>/dev/null || true
+
+  printf 'skein: asked the fleet for %s (%s). Request %s is pending approval.\n' \
+    "$kind" "${packages[*]}" "$id"
+  printf 'skein: it installs for every box once approved in the cockpit; nothing is installed yet.\n'
+  return 0
+}
+
+if [ "${1-}" = "--request-package" ]; then
+  shift
+  request_package "$@"
+  exit $?
+fi
+
 # `--ceilings`: apply the shared ceilings and stop, starting nothing. A cgroup limit is live, so
 # changing Fleet memory in the cockpit takes effect without restarting a box — and this is the whole
 # of what "apply now" means. skein calls back into this file for it rather than carrying a second
@@ -550,8 +670,39 @@ sudo_real=$(command -v sudo 2>/dev/null || true)
 [ -n "$sudo_real" ] && sudo_real=$(readlink -e "$sudo_real" 2>/dev/null || true)
 if [ -n "$sudo_real" ] && [ -f "$sudo_real" ]; then
   mkdir -p "$root/bin" || exit 1
-  cat > "$root/bin/sudo" <<'SHIM'
-#!/bin/sh
+  # The box name and the launcher's own path are baked in rather than read from the environment,
+  # because this shim runs in whatever shell an agent happens to have: an attach shell enters the
+  # namespace fresh, without $SKEIN_BOX, and a request filed under an empty box name is a request
+  # nobody can answer. `%q` because a name is not guaranteed to be a bare word.
+  skein_launcher="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+  # `$0` is right when this was started as the launcher, and wrong the moment it is not — sourced,
+  # piped, or run through a wrapper, where it resolves to `bash` in whatever the current directory
+  # happens to be. The failure would be silent: the shim would find no launcher, fall back to the
+  # old refusal, and asking would quietly stop working. So an unusable `$0` falls back to where the
+  # launcher is actually installed, which is the same path `fleet::box_session_path` builds.
+  [ -f "$skein_launcher" ] || skein_launcher="${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh"
+  {
+    printf '#!/bin/sh\n'
+    printf 'skein_box=%q\n' "$box"
+    printf 'skein_launcher=%q\n' "$skein_launcher"
+    cat <<'SHIM'
+# An install here cannot work — see below — but it is also the clearest statement of what someone
+# wanted, so it is turned into a request for the fleet instead of only a refusal. The command still
+# fails, because nothing has been installed yet; what changes is that the ask now goes somewhere.
+out=''
+rc=9
+if [ -x "$skein_launcher" ]; then
+  out=$("$skein_launcher" --request-package "$skein_box" "$@" 2>&1)
+  rc=$?
+fi
+# 0 filed, 3 refused for the name. Both have already said the useful thing; anything else means
+# this was not an install command at all, and falls through to the explanation.
+case "$rc" in
+  0 | 3)
+    [ -n "$out" ] && printf '%s\n' "$out" >&2
+    exit 1
+    ;;
+esac
 cat >&2 <<'WHY'
 skein: sudo does not work inside a box, and cannot be made to.
 
@@ -567,10 +718,14 @@ Instead:
       pip install --user X   ·   cargo install X   ·   npm i -g X (with a user prefix)
       or drop a binary in ~/.local/bin
   * If it genuinely has to be a system package, it belongs in the fleet's substrate — installed
-    once for every box. Ask for it there rather than here.
+    once for every box. Ask for it by running the install you wanted:
+        sudo apt-get install <package>     sudo npm install -g <package>
+    That installs nothing. It files a request for this fleet's owner to approve in the cockpit,
+    and once approved the package is there for every box.
 WHY
 exit 1
 SHIM
+  } > "$root/bin/sudo" || exit 1
   chmod 755 "$root/bin/sudo" || exit 1
   binds+=(--ro-bind "$root/bin/sudo" "$sudo_real")
 fi

@@ -18,6 +18,7 @@ mod runtime;
 mod sandbox;
 mod ship;
 mod signals;
+pub mod substrate;
 #[cfg(test)]
 mod testutil;
 mod tracking;

@@ -147,6 +147,8 @@ async fn main() {
         .route("/api/fleet/resources", get(api_fleet_resources))
         .route("/api/fleet/load", get(api_fleet_load))
         .route("/api/fleet/transport", get(api_fleet_transport))
+        .route("/api/fleet/substrate", get(api_substrate))
+        .route("/api/fleet/substrate/:id", post(api_substrate_decide))
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
         .route(
@@ -877,6 +879,59 @@ async fn api_fleet_limits() -> Response {
 /// How skein is reaching the fleet right now. Its own endpoint rather than a field on the resources
 /// above, because that one asks the sandbox and 204s when the sandbox will not answer — and "the
 /// sandbox is unreachable" is exactly when you want to know which transport was being used.
+/// What boxes have asked the fleet to install.
+async fn api_substrate() -> Json<Vec<skein::substrate::Request>> {
+    // Blocking: it execs into the sandbox to read the queue.
+    Json(
+        tokio::task::spawn_blocking(skein::substrate::fleet_requests)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct DecideReq {
+    approve: bool,
+    /// Whether an approval is also recorded, so a rebuilt sandbox reinstalls it unprompted.
+    /// Defaults to true — the cockpit sends `false` only when its owner unticks it.
+    #[serde(default = "yes")]
+    remember: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Approve or deny one request.
+///
+/// The decision is recorded synchronously and the install is *not* awaited: apt on a cold index is
+/// minutes, and a cockpit button that hangs for minutes is one its owner clicks again. The request's
+/// own state is the progress — `approved` while it runs, then `installed` or `failed` — and the
+/// panel polls it like everything else on the board.
+async fn api_substrate_decide(Path(id): Path<String>, Json(r): Json<DecideReq>) -> Response {
+    let decided = {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || {
+            skein::substrate::fleet_decide(&id, r.approve, r.remember)
+        })
+        .await
+    };
+    match decided {
+        Ok(Ok(req)) => {
+            if r.approve {
+                // Detached deliberately: nothing here reads the result, because the request file is
+                // where the result goes and that is what the cockpit is already watching.
+                tokio::task::spawn_blocking(move || {
+                    let _ = skein::substrate::fleet_install(&id);
+                });
+            }
+            Json(req).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn api_fleet_transport() -> Json<skein::Transport> {
     // Blocking: it opens a socket to the agent. Cheap, but not on an async worker.
     Json(

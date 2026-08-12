@@ -1107,13 +1107,25 @@ fn heal_fleet_agent(sandbox: &str) {
 /// bwrap is checked but never installed: without it there is no isolation to be had, and quietly
 /// continuing would give every box the sandbox's own `/tmp` and `$HOME` — the exact collision this
 /// design exists to prevent.
-pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
-    // apt's output is kept, not discarded: when this step fails it is the only thing that says
-    // whether the mirror was unreachable, sudo refused, or the package simply isn't there — and
-    // "missing required tools: tmux" with the reason thrown away is a dead end.
-    let script = r#"need='';
+/// The provisioning script itself, at module scope so it can be asserted on without a sandbox.
+///
+/// apt's output is kept, not discarded: when this step fails it is the only thing that says whether
+/// the mirror was unreachable, sudo refused, or the package simply isn't there — and "missing
+/// required tools: tmux" with the reason thrown away is a dead end.
+const SUBSTRATE_SCRIPT: &str = r#"need='';
          command -v tmux >/dev/null 2>&1 || need="$need tmux";
          command -v jq   >/dev/null 2>&1 || need="$need jq";
+         # What this fleet's owner has approved, replayed. A sandbox is rebuilt from an image that
+         # knows nothing about it, so without this a rebuild silently comes back missing packages
+         # someone already said yes to — and every box starts asking for them again.
+         #
+         # Kept apart from `need` deliberately: `need` is command-checked at the end, and an
+         # approved package need not be a command at all. `libnss3` installs perfectly and would
+         # still read as missing, failing a launch over a package that is actually there.
+         extra='';
+         for p in $SKEIN_APPROVED_APT; do
+           dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'ok installed' || extra="$extra $p";
+         done;
          # The agent runtimes are substrate too. The `shell` image has neither, and an agent image
          # would only ever carry one of them — so they are installed once, into the sandbox, and
          # every box in it shares them. Measured on a real sandbox: 6s and 3s. What stays per box is
@@ -1127,9 +1139,16 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
              *codex)       command -v codex  >/dev/null 2>&1 || want="$want $p" ;;
              *)            want="$want $p" ;;
            esac;
-         done; npm="$want";
-         [ -n "$need" ] || [ -n "$npm" ] || exit 0;
-         [ -n "$need" ] || { timeout 300 sudo npm install -g $npm >>"$log" 2>&1 || true; exit 0; };
+         done;
+         # Approved npm packages, asked of npm itself rather than of $PATH: a global package need
+         # not put a command on it, so `command -v` would reinstall it on every single launch.
+         for p in $SKEIN_APPROVED_NPM; do
+           npm ls -g --depth=0 "$p" >/dev/null 2>&1 || want="$want $p";
+         done;
+         npm="$want";
+         apt_want="$need$extra";
+         [ -n "$apt_want" ] || [ -n "$npm" ] || exit 0;
+         [ -n "$apt_want" ] || { timeout 300 sudo npm install -g $npm >>"$log" 2>&1 || true; exit 0; };
          # A freshly created sandbox is still running its own first-boot apt, and apt refuses to run
          # twice. Outlast it rather than failing the launch on a race: measured on a real rebuild,
          # where the retry landed on "Could not get lock ... held by process 281 (apt-get)".
@@ -1142,9 +1161,9 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
          # update FIRST. A fresh image ships an empty index, where install reports "Package 'tmux'
          # has no installation candidate" — which reads as a missing package and is a missing index.
          { timeout 180 sudo apt-get update -qq; \
-           timeout 240 sudo apt-get install -y -qq $need \
+           timeout 240 sudo apt-get install -y -qq $apt_want \
              || { sleep 5; timeout 180 sudo apt-get update -qq; \
-                  timeout 240 sudo apt-get install -y -qq $need; }; } >"$log" 2>&1;
+                  timeout 240 sudo apt-get install -y -qq $apt_want; }; } >"$log" 2>&1;
          if [ -n "$npm" ] && command -v npm >/dev/null 2>&1; then
            timeout 300 sudo npm install -g $npm >>"$log" 2>&1 || true;
          fi;
@@ -1155,15 +1174,23 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
              tail -n 25 "$log" | sed 's/^/  | /';
              exit 1;
          } >&2"#;
+
+pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
+    let script = SUBSTRATE_SCRIPT;
     // The packages are named by the caller, not by the script, so a harness can ask for none.
     // Without that seam the integration test — whose `sbx exec` runs on the developer's own machine
     // — npm-installs an agent runtime onto it, which is both a 50s test and software nobody asked
     // for. $SKEIN_RUNTIME_PACKAGES set to empty means "install no runtimes".
     let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
         .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
+    // Read on the host, because the record of what was approved lives there — see
+    // `substrate::manifest_path` for why keeping it in the sandbox would defeat the whole point.
+    let (apt, npm) = crate::substrate::approved_packages();
     let script = format!(
-        "SKEIN_RUNTIME_PACKAGES={}; {script}",
-        sh_quote(packages.trim())
+        "SKEIN_RUNTIME_PACKAGES={}; SKEIN_APPROVED_APT={}; SKEIN_APPROVED_NPM={}; {script}",
+        sh_quote(packages.trim()),
+        sh_quote(&apt.join(" ")),
+        sh_quote(&npm.join(" ")),
     );
     own_sandbox(sandbox)
         .exec(&script, Duration::from_secs(900))
@@ -4119,6 +4146,52 @@ b idle 5000000 1048576 4
         }
     }
 
+    /// An approved package is installed but never command-checked, and the distinction is the
+    /// difference between a fleet that starts and one that does not.
+    ///
+    /// The provisioning script ends by proving its work: for every name it asked apt for, it checks
+    /// `command -v` and fails the launch if the name is not on `$PATH`. That is exactly right for
+    /// tmux and jq, which are commands. It is exactly wrong for the packages this gate exists to
+    /// install — `libnss3` is the reason chromium cannot start in a box, it installs perfectly, and
+    /// it puts no command anywhere. Folding approved packages into `$need` would therefore have
+    /// taken down every fleet launch after the first approval, reporting a package as missing while
+    /// it sat installed. So they go in `$extra`, and only `$need` is ever verified by command.
+    #[test]
+    fn an_approved_package_is_installed_without_being_mistaken_for_a_command() {
+        let s = SUBSTRATE_SCRIPT;
+        assert!(
+            s.contains("apt-get install -y -qq $apt_want"),
+            "approved packages are never installed: {s}"
+        );
+        assert!(
+            s.contains(r#"missing=''; for t in $need;"#),
+            "the command check must iterate $need alone"
+        );
+        assert!(
+            !s.contains("for t in $apt_want") && !s.contains("for t in $extra"),
+            "a library package would be reported missing and fail the launch"
+        );
+        // And it must not reinstall on every launch: a fleet start that always runs apt is a fleet
+        // start that always waits for the dpkg lock.
+        assert!(
+            s.contains("dpkg-query -W") && s.contains("npm ls -g"),
+            "already-installed approved packages are re-installed on every launch: {s}"
+        );
+    }
+
+    /// The approved list reaches the script as one quoted value, whatever is in it.
+    #[test]
+    fn the_approved_packages_cannot_break_out_of_the_assignment() {
+        // `sh_quote` is what stands between the manifest — an ordinary file on the host — and a
+        // root command line, so this asserts the join is quoted rather than interpolated bare.
+        let quoted = sh_quote("libnss3 libatk1.0-0");
+        assert!(
+            quoted.starts_with('\'') && quoted.ends_with('\''),
+            "{quoted}"
+        );
+        assert_eq!(sh_quote("a'; rm -rf /; '"), r#"'a'\''; rm -rf /; '\'''"#);
+    }
+
     /// `sudo` in a box explains itself instead of failing incomprehensibly — and only in a box.
     ///
     /// Two halves, and shipping either alone is worse than shipping neither:
@@ -4133,9 +4206,13 @@ b idle 5000000 1048576 4
     #[test]
     fn sudo_in_a_box_says_why_rather_than_failing_in_hex() {
         let launcher = BOX_SESSION_SH;
+        // Anchored on the heredoc that carries the shim's body rather than on the redirect that
+        // writes it: the body is now preceded by a generated preamble (the box name and the
+        // launcher's path, which cannot be known until a box starts), so the redirect is no longer
+        // the line the body follows.
         let shim = launcher
             .lines()
-            .skip_while(|l| !l.contains("cat > \"$root/bin/sudo\""))
+            .skip_while(|l| !l.contains("cat <<'SHIM'"))
             .take_while(|l| *l != "SHIM")
             .collect::<Vec<_>>()
             .join("\n");
@@ -4201,13 +4278,17 @@ b idle 5000000 1048576 4
     /// shape that actually broke it.
     #[test]
     fn a_sudo_it_cannot_shim_is_left_alone_rather_than_breaking_the_box() {
+        // Ended at the block's last statement rather than at the first bare `fi`: the shim's own
+        // body contains one now (it asks the launcher to file a request before explaining itself),
+        // and stopping there cut the extraction off inside the heredoc — which failed as a syntax
+        // error that looked like the launcher was broken when only this extraction was.
         let block = BOX_SESSION_SH
             .lines()
             .skip_while(|l| !l.starts_with("sudo_real=$(command -v sudo"))
-            .take_while(|l| *l != "fi")
+            .take_while(|l| !l.contains(r#"binds+=(--ro-bind "$root/bin/sudo""#))
             .collect::<Vec<_>>()
             .join("\n")
-            + "\nfi";
+            + "\n  binds+=(--ro-bind \"$root/bin/sudo\" \"$sudo_real\")\nfi";
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
         let bin = root.join("fakebin");
@@ -4236,7 +4317,10 @@ b idle 5000000 1048576 4
             let out = std::process::Command::new("bash")
                 .arg("-c")
                 .arg(format!(
-                    "set -uo pipefail\nbinds=()\nroot={root}\nexport PATH={bin}:{tools}\n\
+                    // `box` because the shim now bakes the box's name into itself, and under
+                    // `set -u` an unset one would fail the block for a reason that has nothing to
+                    // do with what this test is about.
+                    "set -uo pipefail\nbinds=()\nroot={root}\nbox=testbox\nexport PATH={bin}:{tools}\n\
                      {block}\nprintf '%s\\n' \"${{binds[@]:-}}\"\n",
                     root = root.display(),
                     bin = bin.display(),
