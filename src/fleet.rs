@@ -1533,21 +1533,41 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
     };
     DISK_GATE
         .get(fresh, move || {
-            let script = format!("du -sxm {root}/*/ 2>/dev/null", root = fleet_root());
             let out = own_sandbox(&sandbox)
-                .exec(&script, Duration::from_secs(60))
+                .exec(&disk_usage_script(&fleet_root()), Duration::from_secs(60))
                 .ok()?;
-            Some(
-                out.lines()
-                    .filter_map(|line| {
-                        let (mb, path) = line.trim().split_once(char::is_whitespace)?;
-                        let name = path.trim().trim_end_matches('/').rsplit('/').next()?;
-                        Some((name.to_string(), mb.trim().parse().ok()?))
-                    })
-                    .collect(),
-            )
+            Some(parse_disk_usage(&out))
         })
         .unwrap_or_default()
+}
+
+/// `du` over every box, and the `|| true` is the entire point of this being its own function.
+///
+/// `du` exits nonzero if it could not read so much as one directory anywhere in the tree, while
+/// still printing correct totals for everything it *could* read. `exec` treats a nonzero exit as a
+/// failed call, so without this a single unreadable directory — in any box, at any depth — threw
+/// away the disk figures for the whole fleet and every box reported nothing.
+///
+/// That is not hypothetical and not rare: boxes create unreadable directories in the course of
+/// ordinary work (a test asserting behaviour on an unreadable store leaves one behind), and one is
+/// enough. The failure was invisible for a long time because the row chip stays silent below 80% of
+/// a box's allowance, so "no disk figure" and "nothing worth saying" looked identical.
+///
+/// Partial output is the right answer here. A total is worth having even when one subtree could not
+/// be walked, and a `du` that printed nothing at all still parses to an empty map.
+fn disk_usage_script(root: &str) -> String {
+    format!("du -sxm {root}/*/ 2>/dev/null || true")
+}
+
+/// Turn `du -sxm` output into MiB per box. Separate so it can be tested against the real thing.
+fn parse_disk_usage(out: &str) -> std::collections::HashMap<String, u64> {
+    out.lines()
+        .filter_map(|line| {
+            let (mb, path) = line.trim().split_once(char::is_whitespace)?;
+            let name = path.trim().trim_end_matches('/').rsplit('/').next()?;
+            Some((name.to_string(), mb.trim().parse().ok()?))
+        })
+        .collect()
 }
 
 /// See [`crate::Gate`]: remembered, asked by one caller at a time, and asked less often while the
@@ -4168,6 +4188,64 @@ b idle 5000000 1048576 4
                 "the host disagrees about `{body}`"
             );
         }
+    }
+
+    /// One unreadable directory must not blank the disk figures for the whole fleet.
+    ///
+    /// This is the bug as it actually happened, reproduced against real `du`. A box left a directory
+    /// it could not read — an ordinary thing for a box to do — and `du` exited 1 while still
+    /// printing correct totals for every other box. `exec` reads a nonzero exit as a failed call, so
+    /// the totals were discarded and every box on the board reported no disk usage at all.
+    ///
+    /// It hid for a long time because the row chip stays silent below 80% of a box's allowance:
+    /// "skein has no disk figure for this box" and "this box is nowhere near its limit" render
+    /// identically. It only surfaced once the figure was shown unconditionally on hover.
+    #[test]
+    fn a_directory_it_cannot_read_does_not_erase_everyone_elses_disk_usage() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        for b in ["web-main", "api"] {
+            std::fs::create_dir_all(root.join(b).join("tree")).unwrap();
+            std::fs::write(root.join(b).join("tree/f"), vec![0u8; 4096]).unwrap();
+        }
+        // The shape that broke it: readable enough to be descended into, then a directory that is
+        // not. `du` reports what it can and exits nonzero.
+        let shut = root.join("web-main/secret");
+        std::fs::create_dir_all(&shut).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(disk_usage_script(&root.display().to_string()))
+            .output()
+            .expect("sh to run the disk script");
+        // Restored before any assertion can fail, or the temp dir cannot be cleaned up.
+        let _ = std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755));
+
+        assert!(
+            out.status.success(),
+            "a nonzero exit is read as a failed call, and the whole fleet's figures are dropped"
+        );
+        let got = parse_disk_usage(&String::from_utf8_lossy(&out.stdout));
+        assert!(
+            got.contains_key("api"),
+            "the box with nothing wrong lost its figure too: {got:?}"
+        );
+        assert!(
+            got.contains_key("web-main"),
+            "the box with the unreadable directory still has a total: {got:?}"
+        );
+    }
+
+    #[test]
+    fn disk_usage_reads_dus_own_output_and_ignores_anything_else() {
+        let got = parse_disk_usage(
+            "3483\t/boxes/example-box-1/\n21\t/boxes/bridge-a-b-master/\ndu: cannot access 'x'\n\n",
+        );
+        assert_eq!(got.get("example-box-1"), Some(&3483));
+        assert_eq!(got.get("bridge-a-b-master"), Some(&21));
+        assert_eq!(got.len(), 2, "a stray line became a box: {got:?}");
     }
 
     /// An approved package is installed but never command-checked, and the distinction is the
