@@ -40,6 +40,18 @@ a page. It pins the case that lost tabs for good: a reload landing while `sbx ls
 empty first snapshot, read it as "those boxes are gone", and then persisted an empty list over the
 saved one. An empty snapshot is not evidence; a populated one is.
 
+## `resources.mjs` — a box's own cpu, memory and disk on hover
+
+```sh
+node tests/ui/resources.mjs       # no setup, no chromium, runs inside a box
+```
+
+The card has two halves with very different costs, which is the whole design: disk rides on
+`/api/boxes` and is free, while cpu and memory need an `sbx exec` and a half-second cgroup sample.
+So the card must be useful *before* the sandbox answers. This pins that it is never empty, that
+concurrent hovers share one cached request rather than firing one each, and that disk colours itself
+against the box's allowance.
+
 ## `substrate.mjs` — what an approval actually sends, and how often it nags
 
 ```sh

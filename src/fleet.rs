@@ -1701,6 +1701,18 @@ pub struct BoxLoad {
     /// back. `anon` is what the fleet gauge stacks, because that is the part an OOM turns on.
     pub mem: u64,
     pub pids: u64,
+    /// MiB on the fleet's shared disk, and this box's share of it. Merged in from
+    /// [`fleet_disk_usage`] rather than measured here: counting bytes means walking the tree, which
+    /// is seconds per box on a big checkout and has no business inside a half-second CPU sample.
+    /// That walk is already done and already gated, so this costs a map lookup.
+    ///
+    /// Present because "what is eating the machine" is asked about disk at least as often as about
+    /// CPU — and unlike memory, disk is the one the fleet actually runs out of: this sandbox hit
+    /// 100% mid-build while a single box transiently took 25 GB.
+    pub disk_mb: u64,
+    /// What this box is allowed, when it has an allowance. Measured, never enforced — one
+    /// filesystem serves every box — so this says who took the space, not who may.
+    pub disk_limit_mb: Option<u64>,
 }
 
 /// Every box's live usage, in one round trip.
@@ -1713,10 +1725,19 @@ pub fn box_loads() -> Vec<BoxLoad> {
     if sandbox.is_empty() {
         return Vec::new();
     }
-    own_sandbox(&sandbox)
+    let mut loads = own_sandbox(&sandbox)
         .exec(BOX_LOAD_SCRIPT, Duration::from_secs(20))
         .map(|out| parse_box_loads(&out, BOX_LOAD_INTERVAL_US))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Folded in after the sample rather than during it: the disk figures come from their own gate,
+    // and making the CPU measurement wait on a tree walk would widen a half-second interval into
+    // however long `du` takes over every box.
+    let usage = fleet_disk_usage();
+    for load in &mut loads {
+        load.disk_mb = usage.get(&load.name).copied().unwrap_or(0);
+        load.disk_limit_mb = usage.get(&load.name).and(box_disk_limit(&load.name));
+    }
+    loads
 }
 
 const BOX_LOAD_INTERVAL_US: f64 = 500_000.0;
@@ -1760,6 +1781,9 @@ fn parse_box_loads(out: &str, interval_us: f64) -> Vec<BoxLoad> {
                     cores: (used.saturating_sub(before) as f64 / interval_us).max(0.0),
                     mem: f[3].parse().unwrap_or(0),
                     pids: f[4].parse().unwrap_or(0),
+                    // Filled by `box_loads` from the disk gate; the parser only sees the cgroup
+                    // sample, which carries no notion of bytes on disk.
+                    ..Default::default()
                 });
             }
             _ => {}

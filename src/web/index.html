@@ -212,6 +212,20 @@
            padding:0 5px; border-radius:4px; border:1px solid transparent; cursor:pointer; }
   .dchip.near { color:var(--waiting); background:color-mix(in srgb,var(--waiting) 12%,transparent); }
   .dchip.over { color:var(--attn); background:color-mix(in srgb,var(--attn) 14%,transparent); }
+  /* the hover card: a box's own resources, without opening anything. Disk is the reason it exists —
+     it is the one the fleet actually runs out of, and it was reachable only through ⌘K. */
+  #rpop { position:fixed; z-index:80; pointer-events:none; opacity:0; transform:translateY(-2px);
+          transition:opacity var(--dur-fast), transform var(--dur-fast);
+          background:var(--overlay); border:1px solid var(--border-3); border-radius:9px;
+          padding:8px 11px; box-shadow:0 14px 40px rgba(0,0,0,.5); min-width:184px; }
+  #rpop.on { opacity:1; transform:none; }
+  #rpop .rp-n { font-family:var(--mono); font-size:11px; color:var(--text); margin-bottom:5px; }
+  #rpop .rp-r { display:flex; justify-content:space-between; gap:14px; font-size:11px; line-height:1.65; }
+  #rpop .rp-r span:first-child { color:var(--faint); }
+  #rpop .rp-r span:last-child { font-family:var(--mono); color:var(--text-2); }
+  #rpop .rp-r.over span:last-child { color:var(--attn); }
+  #rpop .rp-r.near span:last-child { color:var(--waiting); }
+  #rpop .rp-w { font-size:10px; color:var(--faint); margin-top:6px; }
   /* repo tag: a quiet badge naming the box's repo, shown only when >1 repo is managed */
   .repotag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--faint);
              background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:0 4px; opacity:.85; }
@@ -811,7 +825,7 @@
             <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
         </header>
-        <div class="gauges" id="gauges" title="the fleet sandbox's own VM — refreshed every 30s"></div>
+        <div class="gauges" id="gauges" onclick="showLoad()" style="cursor:pointer" title="the fleet sandbox's own VM — refreshed every 30s. Click for the same broken down by box (cpu, memory, disk)"></div>
         <div id="fleet"></div>
         <footer class="keyhints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>↵</kbd> open · <kbd>d</kbd> diff · <kbd>]</kbd> next · <kbd>⌘K</kbd> palette · <kbd>?</kbd> <span class="lk" onclick="openSettings('keys')">all shortcuts</span> · sessions stay live in the dock</footer>
       </div>
@@ -1113,7 +1127,8 @@ function makeRow(name) {
   });
   // mousemove, not mouseenter: rows shift under a stationary cursor every tick, and mouseenter on
   // the row that arrived under it yanked the j/k keyboard selection to wherever the mouse rested
-  el.addEventListener("mousemove", () => select(name, true));
+  el.addEventListener("mousemove", () => { select(name, true); armResourcePop(name, el); });
+  el.addEventListener("mouseleave", hideResourcePop);
   return el;
 }
 // One-click continue for a single box paused on a trivial "proceed?" — the per-box sibling of the
@@ -2978,7 +2993,8 @@ function renderLoad(ov, rows) {
     row.className = "lrow" + (r.cores >= top && r.cores > 1 ? " hot" : "");
     row.innerHTML = `<span class="nm">${esc(isBox ? r.name : r.name + " (docker)")}</span>`
       + `<span class="bar"><i style="width:${Math.round(Math.min(1, r.cores/top)*100)}%"></i></span>`
-      + `<span class="fig"><b>${r.cores.toFixed(1)}</b> cpu · ${fmtGB(r.mem)} · ${r.pids|0}p</span>`;
+      + `<span class="fig"><b>${r.cores.toFixed(1)}</b> cpu · ${fmtGB(r.mem)} · ${r.pids|0}p`
+      + (r.disk_mb ? ` · ${fmtGb(r.disk_mb)} disk` : "") + `</span>`;
     if (isBox) row.addEventListener("click", () => { ov.classList.remove("open"); select(r.name); });
     else row.style.cursor = "default";
     list.append(row);
@@ -3051,7 +3067,7 @@ function commands() {
     { sec:"Actions", label:(alertsOn?"Disable":"Enable")+" desktop alerts", run:()=>document.getElementById("alerts").click() },
     { sec:"Actions", label:(voiceOn?"Silence":"Speak")+" boxes that need you", run:()=>document.getElementById("voice").click() },
     { sec:"Actions", label:"Read what needs me", run:sayInbox },
-    { sec:"Actions", label:"Load by box — who is using the CPU", run:showLoad },
+    { sec:"Actions", label:"Load by box — who is using the CPU, memory and disk", run:showLoad },
     // Click-to-talk for the same commands the held key takes. `continuous:false` ends the
     // recognition on a pause by itself, so this needs no second click to stop it.
     { sec:"Actions", label:"Listen for a command", run:listen, meta:"hold ⌥ right" },
@@ -3736,6 +3752,79 @@ function diskChip(el, b) {
     + `\n\nnothing stops it — one filesystem serves every box, so this is a measurement, not a quota`
     + `\n\nclick to change this box's allowance`;
 }
+// ---------- a box's resources, on hover ----------
+//
+// Disk is why this exists. It is the one thing the fleet actually runs out of — the sandbox hit 100%
+// mid-build while one box transiently took 25 GB — and until now the only way to see a box's share
+// was ⌘K → "Load by box", which is a thing you have to already know about. The chip on the row still
+// only speaks near the limit, deliberately; this is for when you simply want to look.
+//
+// CPU and memory come from `/api/fleet/load`, which execs into the sandbox and samples cgroups over
+// half a second. Far too expensive per hover, so it is fetched at most once every 15s and reused.
+// Disk needs no fetch at all: it rides on `/api/boxes`, which the board already polls.
+let loadCache = { at: 0, rows: [], inflight: null };
+function loadRows() {
+  const fresh = Date.now() - loadCache.at < 15000;
+  if (fresh) return Promise.resolve(loadCache.rows);
+  if (loadCache.inflight) return loadCache.inflight;
+  loadCache.inflight = fetch("/api/fleet/load")
+    .then(r => (r.ok ? r.json() : []))
+    .catch(() => [])
+    .then(rows => { loadCache = { at: Date.now(), rows, inflight: null }; return rows; });
+  return loadCache.inflight;
+}
+
+let rpopFor = "", rpopTimer = 0;
+function rpopEl() {
+  let el = document.getElementById("rpop");
+  if (!el) { el = document.createElement("div"); el.id = "rpop"; document.body.append(el); }
+  return el;
+}
+function hideResourcePop() {
+  clearTimeout(rpopTimer); rpopTimer = 0; rpopFor = "";
+  const el = document.getElementById("rpop");
+  if (el) el.classList.remove("on");
+}
+// Armed from `mousemove` rather than `mouseenter` for the same reason the row's selection is: rows
+// shift under a stationary cursor every tick, so `mouseenter` fires on whichever row arrives under
+// it. The delay is what keeps a cursor crossing the board from opening ten cards on the way past.
+function armResourcePop(name, row) {
+  if (rpopFor === name) return;
+  clearTimeout(rpopTimer);
+  rpopTimer = setTimeout(() => { rpopFor = name; showResourcePop(name, row); }, 280);
+}
+function resourceRows(name) {
+  const b = boxes.find(x => x.name === name) || {};
+  const r = loadCache.rows.find(x => x.name === name);
+  const used = b.disk_mb, cap = b.disk_limit_mb;
+  // Disk first: it is the reason to look, and the number people are hunting when a build dies with
+  // no room left.
+  const diskCls = (used != null && cap) ? (used >= cap ? "over" : used >= cap * 0.8 ? "near" : "") : "";
+  const disk = used == null ? "—" : cap ? `${fmtGb(used)} / ${fmtGb(cap)}` : fmtGb(used);
+  return `<div class="rp-n">${esc(name)}</div>`
+    + `<div class="rp-r ${diskCls}"><span>disk</span><span>${disk}</span></div>`
+    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem) : "…"}</span></div>`
+    + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : "…"}</span></div>`
+    + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : "…"}</span></div>`
+    + `<div class="rp-w">disk is measured, not enforced — one filesystem serves every box</div>`;
+}
+function showResourcePop(name, row) {
+  const el = rpopEl();
+  el.innerHTML = resourceRows(name);
+  const box = row.getBoundingClientRect();
+  el.classList.add("on");
+  // Placed after it has been measured, and flipped above the row when there is no room below —
+  // otherwise the last row's card is drawn off the bottom of the window, which is exactly where the
+  // longest-running boxes sit.
+  const h = el.getBoundingClientRect().height;
+  const top = box.bottom + 8 + h > window.innerHeight ? Math.max(8, box.top - h - 8) : box.bottom + 8;
+  el.style.top = `${top}px`;
+  el.style.left = `${Math.min(box.left + 22, window.innerWidth - el.getBoundingClientRect().width - 12)}px`;
+  // The live half arrives when the sandbox answers; the card is already up with the disk figure, so
+  // nothing waits on a round trip that may be several seconds behind an `sbx exec` fallback.
+  loadRows().then(() => { if (rpopFor === name) el.innerHTML = resourceRows(name); });
+}
+
 // One box's own settings. Every field is blank-means-inherit, and the placeholder is what it would
 // inherit — so leaving the panel untouched is always the same as never opening it.
 let boxSettingsFor = "";
