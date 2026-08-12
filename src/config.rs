@@ -109,6 +109,25 @@ pub struct Config {
     /// never had to share.
     #[serde(default)]
     pub fleet_disk: String,
+    /// Put dockerd's data on the same filesystem as the boxes, so [`Config::fleet_disk`] sizes
+    /// everything and there is one number to raise instead of two.
+    ///
+    /// A sandbox otherwise carries two disks — the root the boxes live on, and a second one mounted
+    /// at `/var/lib/docker` — each fixed at creation and each with its own ceiling. Two ceilings
+    /// means guessing the split in advance and rebuilding the sandbox when the guess is wrong, which
+    /// is the expensive way to be wrong: changing either size destroys and recreates the VM.
+    ///
+    /// The trade is deliberate and worth stating plainly, because it is a real one. Two disks are
+    /// also two *firewalls*: a runaway `docker build` fills Docker's disk and cannot touch the
+    /// boxes. Measured on this fleet — the root hit 100% while Docker's disk sat at 63% and every
+    /// container kept running. Share them and one runaway takes out both. What is bought is that
+    /// space is fungible: 200 GB of pool beats 100 GB each when the split was never knowable.
+    ///
+    /// Takes effect at dockerd's **next start**, which in practice means the next sandbox. Turning
+    /// it on does not move anything: images and volumes on the old disk stay there, whole and
+    /// untouched, and simply stop being visible to a dockerd now reading somewhere else.
+    #[serde(default = "default_fleet_one_disk")]
+    pub fleet_one_disk: bool,
     /// The most disk **one** box may use, e.g. "10g". Empty ⇒ unlimited.
     ///
     /// The fleet's disk is one filesystem shared by every box, so unlike memory there is no kernel
@@ -180,6 +199,16 @@ fn default_fleet_sandbox() -> String {
 
 fn default_box_disk_max() -> String {
     "10g".to_string()
+}
+
+/// Off by default, and it must stay that way for a fleet that already exists.
+///
+/// Turning this on points dockerd somewhere new at its next start, and the images and volumes on
+/// the old disk stop being visible — not deleted, but gone as far as anything asking Docker is
+/// concerned. Defaulting it on would do that to an existing fleet the next time its daemon
+/// restarted, with nothing having asked for it. It is a choice worth making deliberately.
+fn default_fleet_one_disk() -> bool {
+    false
 }
 
 pub(crate) fn default_true() -> bool {
@@ -311,6 +340,7 @@ impl Default for Config {
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
             fleet_disk: String::new(),
+            fleet_one_disk: default_fleet_one_disk(),
             box_disk_max: default_box_disk_max(),
             git_name: String::new(),
             git_email: String::new(),

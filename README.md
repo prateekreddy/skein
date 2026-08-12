@@ -361,6 +361,27 @@ Skein installs `jq` and mandates `tmux` as the minimal box substrate. Provider-n
 handoffs, and immutable takeover snapshots live once in the mounted shared store; Skein never installs
 both large agent CLIs into every box. `GET /api/health` exposes dependency/hook failures.
 
+### One disk or two
+
+A fleet sandbox carries two disks: the root filesystem the boxes live on (`DOCKER_SANDBOXES_ROOT_SIZE`)
+and a second mounted at `/var/lib/docker` (`DOCKER_SANDBOXES_DOCKER_SIZE`). Both are fixed when the
+sandbox is created — sbx has no resize — so changing either destroys and recreates the VM.
+
+Two ceilings means guessing the split in advance and rebuilding when the guess is wrong. **Docker
+shares the fleet disk** (Settings) removes the guess: dockerd's data root moves to `<fleet-root>/.docker`,
+on the boxes' own filesystem, and `Fleet disk` sizes the lot. One generous number instead of two exact
+ones.
+
+The trade is real and worth stating. Two disks are also two firewalls — a runaway `docker build`
+fills Docker's disk and cannot touch the boxes. Measured on this fleet: the root hit 100% while
+Docker's disk sat at 63% and every container kept running. Share them and one runaway takes out both.
+Off by default for that reason; on when fungible space is worth more than the wall.
+
+It takes effect at dockerd's next start, in practice the next sandbox. Turning it on moves nothing:
+images and volumes on the old disk stay there, whole, and simply stop being visible to a dockerd now
+reading elsewhere. Turning it off again never *removes* the setting, for the same reason — off means
+"stop moving it", not "move it back onto a disk nothing has written to since".
+
 ### Asking for a system package
 
 A box cannot install one: it is a user namespace mapping a single uid, so `sudo` inside it is

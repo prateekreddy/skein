@@ -918,10 +918,27 @@ pub const CONTAINER_CGROUP: &str = "/skein/containers";
 /// existing file is read first and kept if it holds other settings, a file that cannot be parsed is
 /// reported and left exactly as it is rather than overwritten with something valid, and the new
 /// content is re-read from disk before it replaces the old one.
+/// Where dockerd keeps its data when it shares the boxes' disk.
+///
+/// Beside `.skein` in the fleet root rather than under `/var/lib`, for two reasons. It is plainly
+/// skein's doing, next to the other thing skein put there; and the leading dot keeps it out of
+/// `/boxes/*/`, which is how every box is enumerated — a `docker` directory there would read as a
+/// box with no repo, which is a thing `resize_fleet` aborts on.
+pub fn docker_data_root() -> String {
+    format!("{}/.docker", fleet_root())
+}
+
 fn install_docker_config(sandbox: &str) -> Result<(), String> {
+    // Empty when Docker keeps its own disk. Passed either way so the script has one shape.
+    let root = if load_config().fleet_one_disk {
+        docker_data_root()
+    } else {
+        String::new()
+    };
     let script = format!(
-        "sudo mkdir -p /etc/docker && sudo python3 - /etc/docker/daemon.json {}",
-        sh_quote(CONTAINER_CGROUP)
+        "sudo mkdir -p /etc/docker && sudo python3 - /etc/docker/daemon.json {} {}",
+        sh_quote(CONTAINER_CGROUP),
+        sh_quote(&root),
     );
     own_sandbox(sandbox)
         .write(
@@ -938,6 +955,9 @@ fn install_docker_config(sandbox: &str) -> Result<(), String> {
 /// able to read.
 const DOCKER_CONFIG_PY: &str = r#"import json, os, sys
 path, parent = sys.argv[1], sys.argv[2]
+# Empty means "leave Docker on its own disk" — the argument is always passed, so the absent case is
+# a value rather than a different invocation.
+root = sys.argv[3] if len(sys.argv) > 3 else ""
 try:
     config = json.load(open(path))
     if not isinstance(config, dict):
@@ -948,9 +968,16 @@ except Exception as e:
     # Deliberately not repaired. Something else wrote this, and replacing it with a valid file of
     # our own would take away settings dockerd is running on.
     sys.exit("skein: %s is not readable as JSON (%s); leaving it alone" % (path, e))
-if config.get("cgroup-parent") == parent:
+want_root = config.get("data-root") if not root else root
+if config.get("cgroup-parent") == parent and config.get("data-root") == want_root:
     sys.exit(0)
 config["cgroup-parent"] = parent
+# One pool rather than two ceilings: dockerd's data goes on the sandbox's root filesystem, the same
+# one the boxes are on, so a single number sizes the lot. Only ever *set*, never cleared — turning
+# the setting off leaves dockerd reading the data it already has, because removing the key would
+# point it back at an empty disk and make every image and volume vanish without deleting any of it.
+if root:
+    config["data-root"] = root
 # Written beside the real file and re-read before it replaces it, so a half-written or unparseable
 # result can never become the file dockerd starts from. `os.replace` is atomic within a filesystem.
 scratch = path + ".skein-new"
@@ -959,6 +986,8 @@ with open(scratch, "w") as f:
 json.load(open(scratch))
 os.replace(scratch, path)
 print("skein: dockerd will place containers under %s from its next start" % parent)
+if root:
+    print("skein: and keep its data in %s, on the same disk as the boxes" % root)
 "#;
 
 /// A memory size as MiB. Accepts what sbx accepts (`26g`, `512M`, a bare byte count).
@@ -1866,13 +1895,28 @@ fn resource_script() -> String {
          awk '{{print \"load1\", $1; print \"load5\", $2}}' /proc/loadavg; \
          df -Pm {root} 2>/dev/null \
          | awk 'NR==2{{print \"disk_dev\", $1; print \"disk_total\", $2; print \"disk_used\", $3}}'; \
-         df -Pm /var/lib/docker 2>/dev/null \
+         df -Pm {docker} 2>/dev/null \
          | awk 'NR==2{{print \"images_dev\", $1; print \"images_total\", $2; print \"images_used\", $3}}'; \
          for c in skein skein/containers docker; do \
          awk -v c=$c '/^anon /{{print c, int($2/1048576)}}' \
          /sys/fs/cgroup/$c/memory.stat 2>/dev/null; done",
         root = sh_quote(&fleet_root()),
+        // Where dockerd's data actually is, not where it conventionally lives. With one pool,
+        // `/var/lib/docker` is still a mounted disk — it is simply the one nothing writes to any
+        // more, so measuring it would draw a gauge for an empty disk while the disk that filled up
+        // went unreported. Pointed at the pool instead, `disk_dev` and `images_dev` come back as the
+        // same device, which is exactly how the strip already knows to draw one row rather than two.
+        docker = sh_quote(&effective_docker_root()),
     )
+}
+
+/// The directory dockerd keeps its data in, according to the setting that put it there.
+fn effective_docker_root() -> String {
+    if load_config().fleet_one_disk {
+        docker_data_root()
+    } else {
+        "/var/lib/docker".to_string()
+    }
 }
 
 /// `key value` lines into a [`FleetResources`], or `None` when the reply carried no memory total.
@@ -5155,6 +5199,95 @@ b idle 5000000 1048576 4
         assert_eq!((legacy.boxes, legacy.docker), (1252, 855));
     }
 
+    /// One pool: dockerd's data moved onto the disk the boxes are on, so one number sizes both.
+    ///
+    /// Run for real, because what this is really testing is a file that stops dockerd booting when
+    /// it is wrong — and `data-root` is the one key in it that can make every image and volume on
+    /// the machine disappear from view. Three properties matter, and the last is the sharp one:
+    ///
+    /// 1. It lands, alongside the cgroup setting rather than instead of it.
+    /// 2. It is idempotent, since this runs on every server start.
+    /// 3. **Turning the setting off never removes it.** Removing the key would point dockerd back
+    ///    at a disk it has not written to since, and every image and volume would vanish — none of
+    ///    them deleted, all of them gone as far as anything asking Docker is concerned. Off must
+    ///    mean "stop moving it", not "move it back".
+    #[test]
+    fn sharing_one_disk_with_docker_is_set_once_and_never_silently_undone() {
+        let dir = tempdir();
+        let path = std::path::Path::new(&dir).join("daemon.json");
+        let run = |root: &str| -> std::process::Output {
+            use std::io::Write;
+            let mut child = std::process::Command::new("python3")
+                .args(["-", &path.to_string_lossy(), CONTAINER_CGROUP, root])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("python3");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(DOCKER_CONFIG_PY.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        };
+        let pool = "/boxes/.docker";
+
+        assert!(run(pool).status.success());
+        assert_eq!(
+            read()["data-root"],
+            pool,
+            "docker was not moved onto the pool"
+        );
+        assert_eq!(
+            read()["cgroup-parent"],
+            CONTAINER_CGROUP,
+            "moving the data must not cost the memory ceiling"
+        );
+
+        let again = run(pool);
+        assert!(again.status.success());
+        assert!(
+            String::from_utf8_lossy(&again.stdout).is_empty(),
+            "a config already pointed at the pool is not news, and this runs every server start"
+        );
+
+        // The sharp one. Off means stop moving it, not move it back.
+        assert!(run("").status.success());
+        assert_eq!(
+            read()["data-root"],
+            pool,
+            "turning the setting off pointed dockerd back at an empty disk, and every image and \
+             volume on the fleet would read as gone"
+        );
+
+        // And it is added to a config someone else owns, not substituted for it.
+        std::fs::write(&path, r#"{"dns":["1.1.1.1"]}"#).unwrap();
+        assert!(run(pool).status.success());
+        assert_eq!(read()["dns"][0], "1.1.1.1");
+        assert_eq!(read()["data-root"], pool);
+    }
+
+    /// The pool directory must not read as a box.
+    #[test]
+    fn dockers_pool_is_hidden_from_the_box_enumeration_it_sits_beside() {
+        let root = docker_data_root();
+        assert!(
+            root.rsplit('/').next().is_some_and(|n| n.starts_with('.')),
+            "every box is enumerated with `{}/*/`, which a non-dot directory would match — and a \
+             box with no repo is a thing `resize_fleet` refuses to proceed past: {root}",
+            fleet_root()
+        );
+        assert!(
+            root.starts_with(&fleet_root()),
+            "the pool has to be on the boxes' own filesystem or it is not one pool: {root}"
+        );
+    }
+
     /// `/etc/docker/daemon.json` is a file that stops dockerd starting *at all* when it is wrong, so
     /// the failure being guarded against is a fleet with no Docker. Run for real rather than
     /// asserted about, because what matters is what Python does to the file, not what this file
@@ -5163,10 +5296,12 @@ b idle 5000000 1048576 4
     fn pointing_dockerd_at_the_workload_cgroup_never_costs_an_existing_config() {
         let dir = tempdir();
         let path = std::path::Path::new(&dir).join("daemon.json");
+        // The empty third argument is Docker keeping its own disk — the shape every existing fleet
+        // runs in, and the one this test has always been about.
         let run = || -> std::process::Output {
             use std::io::Write;
             let mut child = std::process::Command::new("python3")
-                .args(["-", &path.to_string_lossy(), CONTAINER_CGROUP])
+                .args(["-", &path.to_string_lossy(), CONTAINER_CGROUP, ""])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
