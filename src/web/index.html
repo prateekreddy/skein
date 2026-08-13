@@ -3312,15 +3312,32 @@ function gitqGrantRow(g) {
     </div>`;
 }
 
+// A stored token covers exactly one repository, and the row says so rather than leaving it to be
+// discovered: a token covering three would hand all three to any box that receives it, because the
+// helper that chooses runs inside the box as the agent's own uid.
+function gitqCredRow(c) {
+  return `
+    <div class="msg">
+      <div class="sq-pkgs">${esc(c.repo || (c.repos || []).join(", ") || "?")}</div>
+      <div class="sq-meta">${esc(c.label || c.id)}${c.has_token ? "" : " · no token stored"}</div>
+      ${c.problem ? `<div class="sq-log">unusable — ${esc(c.problem)}</div>` : ""}
+      <div class="sq-row">
+        <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${c.problem ? "refused" : (c.has_token ? "ready" : "incomplete")}</span>
+        <button class="kbtn ghost" onclick="removeGitCred('${esc(c.id)}')">Forget</button>
+      </div>
+    </div>`;
+}
+
 function loadGitq() {
   const list = document.getElementById("gitq-list");
   return fetch("/api/fleet/git-grants").then(r => r.json()).then(d => {
-    const reqs = d.requests || [], grants = d.grants || [];
+    const reqs = d.requests || [], grants = d.grants || [], creds = d.credentials || [];
     let html = "";
-    // Said first and plainly: with no App configured nothing is scoped, so a reader who sees an
-    // empty panel knows whether that means "nobody asked" or "this is not switched on yet".
-    if (!d.app_ready) {
-      html += `<div class="note">no GitHub App configured, so no box is scoped yet — every box keeps the credential it already had. ${esc(d.app_problem || "")}</div>`;
+    // Said first and plainly: with no way to issue a write token nothing is scoped, so a reader
+    // seeing an empty panel knows whether that means "nobody asked" or "not switched on yet".
+    // Keyed on `ready` rather than the App alone — someone using only their own tokens is set up.
+    if (!d.ready) {
+      html += `<div class="note">nothing is scoped yet — every box keeps the credential it already had. Configure a GitHub App in Settings, or add a repository token below. ${esc(d.app_problem || "")}</div>`;
     }
     html += reqs.length
       ? reqs.slice().reverse().map(gitqCard).join("")
@@ -3328,8 +3345,44 @@ function loadGitq() {
     if (grants.length) {
       html += `<div class="mbx-head" style="margin-top:10px"><b>Grants</b></div>` + grants.map(gitqGrantRow).join("");
     }
+    html += `<div class="mbx-head" style="margin-top:10px"><b>Repository tokens</b><span class="sub">instead of the App, one fine-grained PAT per repo</span></div>`;
+    html += creds.length ? creds.map(gitqCredRow).join("")
+      : `<div class="note">none stored — the GitHub App mints per-repo tokens on its own. Add one here only for a repo the App cannot reach.</div>`;
+    html += `
+      <div class="msg">
+        <input id="gq-c-repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
+        <input id="gq-c-token" type="password" placeholder="github_pat_… (write to that one repo)" autocomplete="off" />
+        <div class="sq-row">
+          <button class="kbtn primary" onclick="addGitCred()">Store token</button>
+          <span class="sq-meta">one repository per token — a broader one would hand every repo it covers to whichever box gets it</span>
+        </div>
+      </div>`;
     list.innerHTML = html;
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
+}
+
+function addGitCred() {
+  const repo = (document.getElementById("gq-c-repo").value || "").trim();
+  const token = (document.getElementById("gq-c-token").value || "").trim();
+  if (!repo || !token) { toast("a repository and a token are both needed"); return; }
+  // The id is derived from the repo rather than asked for: it is only a filename, and one token per
+  // repo means the repo already identifies it. Re-storing the same repo replaces its token, which
+  // is what rotating one should do.
+  const id = repo.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  fetch("/api/fleet/git-credentials", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, label: repo, repos: [repo], token }),
+  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); });
+    document.getElementById("gq-c-token").value = "";
+    document.getElementById("gq-c-repo").value = "";
+    loadGitq();
+  }).catch(e => toast(String(e.message || "could not store that token")));
+}
+
+function removeGitCred(id) {
+  fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
+    .then(r => { if (!r.ok) throw 0; loadGitq(); })
+    .catch(() => toast("could not forget that token"));
 }
 
 function decideGitq(id, approve) {

@@ -952,8 +952,12 @@ async fn api_git_grants() -> Json<serde_json::Value> {
         "credentials": skein::gitgate::write_credentials().iter().map(|c| serde_json::json!({
             "id": c.id,
             "label": c.label,
-            "repos": c.repos,
+            "repo": c.repo(),
             "has_token": skein::gitgate::credential_has_token(&c.id),
+            // Carried so an unusable entry can explain itself. One hand-edited to cover three
+            // repositories is listed and refused, and a list that silently omitted it would leave
+            // someone staring at a repo whose token "is configured" and does not work.
+            "problem": c.problem().unwrap_or_default(),
         })).collect::<Vec<_>>(),
     }))
 }
