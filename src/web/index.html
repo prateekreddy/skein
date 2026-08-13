@@ -817,6 +817,7 @@
             <span class="hdiv"></span>
             <span class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span>
             <span class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></span>
+            <span class="kbtn ghost" id="gitqbtn" onclick="openGitq()" title="Repo write access"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
             <span class="kbtn ghost" id="subqbtn" onclick="openSubq()" title="Package requests from boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></span>
             <span class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span>
             <span class="kbtn ghost" id="voice" title="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></span>
@@ -888,6 +889,13 @@
     <div class="mbx-card">
       <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><span class="x" onclick="closeSubq()">✕</span></div>
       <div class="mbx-list" id="subq-list"></div>
+    </div>
+  </div>
+
+  <div id="gitq" aria-hidden="true">
+    <div class="mbx-card">
+      <div class="mbx-head"><b>Repo write access</b><span class="sub">a box writes its own repo and reads the rest</span><span class="x" onclick="closeGitq()">✕</span></div>
+      <div class="mbx-list" id="gitq-list"></div>
     </div>
   </div>
 
@@ -1002,6 +1010,8 @@
             <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <div class="set-field"><span class="set-title">Apply ceilings to running boxes</span><span class="desc">Unlike fleet memory, a per-box ceiling is <b>live</b> — it changes on a running box straight away, with nothing to save or restart. Use this after editing the two fields above; no rebuild, no interruption to any box mid-turn.</span><button id="set-applylimits" class="btn" type="button">Apply to running boxes</button></div>
             <div class="set-field"><span class="set-title">Apply to the running fleet</span><span class="desc">Saving these numbers only changes what the <b>next</b> sandbox is created with — sbx fixes memory and CPUs at creation. Applying them now rebuilds the fleet sandbox: every box's unpushed work and conversation is saved to the host first, and nothing is destroyed unless all of it saved. Boxes come back on their own branches; any that don't can be retried individually.</span><button id="set-resize" class="btn" type="button">Rebuild the fleet at these limits</button></div>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Scope each box's GitHub access to its own repo</span><span class="desc">every box shares one credential unless this is on — measured on this fleet, that was a user token with <code>repo</code>, <code>admin:public_key</code> and <code>gist</code> reaching <b>460 repositories</b> read and write, plus a forwarded ssh-agent signing for any of them. On, a box gets a read-only token for everything and a GitHub App token scoped to <b>its own repository</b> for writing, so a push anywhere else is refused by GitHub — and a box can ask for an exception, which appears under <b>Repo write access</b>. Needs the App below: until one is configured this changes nothing at all. Takes effect at a box's next start; one box can opt out in its own settings.</span></span><input type="checkbox" id="set-gitscope" class="switch"></label>
+            <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">the App that mints per-repository write tokens. Create one with <b>Contents: write</b>, <b>Pull requests: write</b> and <b>Issues: write</b> (the last is what lets a box comment on a PR), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill">✨</span></span><span class="desc">spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked ✨ in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</span></span><input type="checkbox" id="set-ai" class="switch"></label>
@@ -3258,6 +3268,124 @@ function pollSubq() {
   }).catch(() => {});
 }
 
+// ---------- repo write access (a box asking to push somewhere that is not its own) ----------
+//
+// The credential is the boundary, not this panel: a box holds a token scoped to one repository, so
+// a push anywhere else is refused by GitHub whether or not anyone ever opens this. What the panel
+// decides is whether that stops being true for one box and one repo, for a while.
+const gitqAnnounced = new Set();
+let gitqPrimed = false;
+function openGitq() { const o = document.getElementById("gitq"); o.classList.add("open"); o.setAttribute("aria-hidden","false"); loadGitq(); }
+function closeGitq() { const o = document.getElementById("gitq"); o.classList.remove("open"); o.setAttribute("aria-hidden","true"); }
+
+function gitqCard(r) {
+  const pending = r.state === "pending";
+  const reason = (r.reason || "").trim();
+  return `
+    <div class="msg">
+      <div class="sq-pkgs">${esc(r.repo || "?")}</div>
+      <div class="sq-meta">asked by <b>${esc(r.box || "?")}</b> · ${esc((r.asked || "").replace("T", " ").replace("Z", ""))}</div>
+      ${reason ? `<div class="sq-log">${esc(reason)}</div>` : ""}
+      <div class="sq-row">
+        <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
+        ${pending ? `
+          <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(r.id)}" /> hours
+            <input type="checkbox" id="gq-keep-${esc(r.id)}" /> keep indefinitely</label>
+          <button class="kbtn primary" onclick="decideGitq('${esc(r.id)}', true)">Grant write</button>
+          <button class="kbtn ghost" onclick="decideGitq('${esc(r.id)}', false)">Deny</button>` : ""}
+      </div>
+    </div>`;
+}
+
+function gitqGrantRow(g) {
+  // An expired grant is shown rather than hidden: "this box had access until Tuesday" is the answer
+  // to a question this list exists to answer, and a row that silently vanishes answers nothing.
+  const when = g.expires ? esc(g.expires.replace("T", " ").replace("Z", "").slice(0, 16)) : "no expiry";
+  return `
+    <div class="msg">
+      <div class="sq-pkgs">${esc(g.box)} → ${esc(g.repo)}</div>
+      <div class="sq-row">
+        <span class="sq-state ${g.live ? "approved" : ""}">${g.live ? "live" : "expired"}</span>
+        <span class="sq-meta">${when}</span>
+        ${g.live ? `<button class="kbtn ghost" onclick="revokeGitq('${esc(g.box)}','${esc(g.repo)}')">Revoke</button>` : ""}
+      </div>
+    </div>`;
+}
+
+function loadGitq() {
+  const list = document.getElementById("gitq-list");
+  return fetch("/api/fleet/git-grants").then(r => r.json()).then(d => {
+    const reqs = d.requests || [], grants = d.grants || [];
+    let html = "";
+    // Said first and plainly: with no App configured nothing is scoped, so a reader who sees an
+    // empty panel knows whether that means "nobody asked" or "this is not switched on yet".
+    if (!d.app_ready) {
+      html += `<div class="note">no GitHub App configured, so no box is scoped yet — every box keeps the credential it already had. ${esc(d.app_problem || "")}</div>`;
+    }
+    html += reqs.length
+      ? reqs.slice().reverse().map(gitqCard).join("")
+      : `<div class="note">no requests — a box asks with <code>box-session.sh --request-write &lt;box&gt; &lt;owner/name&gt; "&lt;why&gt;"</code></div>`;
+    if (grants.length) {
+      html += `<div class="mbx-head" style="margin-top:10px"><b>Grants</b></div>` + grants.map(gitqGrantRow).join("");
+    }
+    list.innerHTML = html;
+  }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
+}
+
+function decideGitq(id, approve) {
+  const keep = document.getElementById("gq-keep-" + id);
+  const hrs = document.getElementById("gq-h-" + id);
+  // 0 means "never expires" to the API. Ticking keep is the deliberate act; the number is ignored
+  // when it is set, so the two controls cannot disagree about what was granted.
+  const hours = approve ? (keep && keep.checked ? 0 : Math.max(1, parseInt(hrs && hrs.value, 10) || 24)) : 24;
+  fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ approve, hours }),
+  }).then(r => { if (!r.ok) throw 0; loadGitq(); })
+    .catch(() => toast("could not record that decision"));
+}
+
+function revokeGitq(box, repo) {
+  fetch("/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + encodeURIComponent(repo), { method: "DELETE" })
+    .then(r => { if (!r.ok) throw 0; loadGitq(); })
+    .catch(() => toast("could not revoke that grant"));
+}
+
+function paintGitqBadge(n) {
+  const btn = document.getElementById("gitqbtn");
+  if (!btn) return;
+  const had = btn.querySelector(".badge");
+  if (had) had.remove();
+  if (n > 0) {
+    const b = document.createElement("span");
+    b.className = "badge";
+    b.textContent = String(n);
+    btn.appendChild(b);
+  }
+  btn.title = n > 0 ? `${n} write request${n === 1 ? "" : "s"} waiting on you` : "Repo write access";
+}
+
+// Returns its promise, so a caller can wait for the round trip rather than guess at ticks.
+function pollGitq() {
+  return fetch("/api/fleet/git-grants").then(r => r.json()).then(d => {
+    const pending = (d.requests || []).filter(r => r.state === "pending");
+    paintGitqBadge(pending.length);
+    const fresh = pending.filter(r => !gitqAnnounced.has(r.id));
+    pending.forEach(r => gitqAnnounced.add(r.id));
+    // The first poll only seeds: reopening the cockpit is not news.
+    if (gitqPrimed && fresh.length && alertsOn) {
+      pushNote(
+        fresh.length === 1
+          ? `${fresh[0].box} wants to write ${fresh[0].repo}`
+          : `${fresh.length} boxes want write access`,
+        fresh.length === 1 ? fresh[0].box : "gitgate",
+      );
+    }
+    gitqPrimed = true;
+    if (document.getElementById("gitq").classList.contains("open")) loadGitq();
+  }).catch(() => {});
+}
+
 // ---------- launch a new box ----------
 const newbox = document.getElementById("newbox"), nbBranch = document.getElementById("nb-branch");
 const nbRepo = document.getElementById("nb-repo"), nbRepoLbl = document.getElementById("nb-repo-lbl");
@@ -3371,6 +3499,8 @@ function openSettings(pane = "repos") {
     document.getElementById("set-fleetcpus").value = settings.fleet_cpus || "";
     document.getElementById("set-fleetdisk").value = settings.fleet_disk || "";
     document.getElementById("set-onedisk").checked = !!settings.fleet_one_disk;
+    document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
+    document.getElementById("set-ghappid").value = settings.github_app_id || "";
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     document.getElementById("set-gitname").value = settings.git_name || "";
     document.getElementById("set-gitemail").value = settings.git_email || "";
@@ -3638,6 +3768,8 @@ function settingsPayload() {
     fleet_cpus: document.getElementById("set-fleetcpus").value.trim(),
     fleet_disk: document.getElementById("set-fleetdisk").value.trim(),
     fleet_one_disk: document.getElementById("set-onedisk").checked,
+    scope_git_to_repo: document.getElementById("set-gitscope").checked,
+    github_app_id: document.getElementById("set-ghappid").value.trim(),
     box_disk_max: document.getElementById("set-boxdisk").value.trim(),
     git_name: document.getElementById("set-gitname").value.trim(),
     git_email: document.getElementById("set-gitemail").value.trim(),
@@ -4639,6 +4771,10 @@ if (DEMO) {
   // by the board over seconds, and this poll execs into the sandbox to read the queue.
   pollSubq();
   setInterval(pollSubq, 20000);
+  // Same reasoning, same cadence: a write request waits on a person, and reading its queue execs
+  // into the sandbox. Offset from the package poll so the two do not exec on the same tick.
+  pollGitq();
+  setInterval(pollGitq, 23000);
 }
 </script>
 </body>
