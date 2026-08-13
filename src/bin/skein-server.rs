@@ -117,6 +117,32 @@ async fn main() {
             }
         }
     });
+    // Keep every running box's GitHub write token ahead of its expiry.
+    //
+    // An App installation token lives one hour, so this refreshes on a wide margin rather than close
+    // to the edge: a token that lapses does not fail loudly, it silently demotes the box to the
+    // read-only credential and the next push comes back 403 with nothing to explain it. Twenty
+    // minutes gives two clear misses before that happens.
+    //
+    // It is also the only thing that *withdraws* a token — expiry and revocation both take effect
+    // here — so it runs whether or not a browser has the cockpit open, and does nothing at all
+    // until a GitHub App is configured.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(20 * 60));
+        loop {
+            tick.tick().await;
+            let _ = tokio::task::spawn_blocking(|| {
+                // The board's own list, so a destroyed box is not minted for and a box skein cannot
+                // currently see is simply skipped this round rather than losing its token.
+                for view in load_views().unwrap_or_default() {
+                    for problem in skein::gitgate::refresh_tokens(&view.name) {
+                        eprintln!("skein: git token for {}: {problem}", view.name);
+                    }
+                }
+            })
+            .await;
+        }
+    });
     // Bind is loopback-only by default; $SKEIN_ADDR overrides it — e.g. `SKEIN_ADDR=0.0.0.0:7878`
     // to listen on every interface (reachable at the box's tailnet IP/hostname), or a specific host
     // like `SKEIN_ADDR=<tailnet-ip>:7878`. The terminal's origin guard already trusts `*.ts.net` and

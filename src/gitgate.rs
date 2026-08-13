@@ -465,6 +465,14 @@ fn scope_override_path(box_name: &str) -> std::path::PathBuf {
 /// guessing, because the two failure directions are not equal: guessing "fleet" hands a box the
 /// account, and guessing "repo" costs it a push it can ask for.
 pub fn box_is_scoped(box_name: &str) -> bool {
+    // Nothing to mint with is nothing to scope with. Without the App there is no write token for a
+    // box's *own* repo either, so scoping here would not narrow a box's reach — it would take
+    // pushing away from every box in the fleet at once, which is the one outcome this must never
+    // produce. The default may therefore be on from the day it ships: until the App exists it
+    // changes nothing at all, and the moment it does, every box is scoped without a second switch.
+    if app_credentials().is_err() {
+        return false;
+    }
     match std::fs::read_to_string(scope_override_path(box_name))
         .unwrap_or_default()
         .trim()
@@ -972,6 +980,38 @@ mod tests {
             "the slash is encoded, or the slug becomes a directory: {p}"
         );
         assert!(p.contains("web-main"), "{p}");
+    }
+
+    #[test]
+    fn nothing_is_scoped_until_there_is_an_app_to_mint_with() {
+        // The property that makes shipping this safe. `scope_git_to_repo` defaults ON, and if that
+        // took effect before a GitHub App existed, every box would be scoped with no write token for
+        // even its own repo — the whole fleet unable to push, all at once, from a default. Scoping
+        // is therefore gated on being *able* to mint, not merely on being asked to.
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let previous = std::env::var_os("SKEIN_HOME");
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        assert!(
+            crate::config::load_config().scope_git_to_repo,
+            "the default is on, or this test proves nothing"
+        );
+        assert!(
+            app_credentials().is_err(),
+            "a fresh home has no App configured"
+        );
+        assert!(
+            !box_is_scoped("any-box"),
+            "a fleet with no App must behave exactly as it did before this existed"
+        );
+        // Even an explicit per-box `repo` cannot scope a box there is no token for.
+        assert!(!box_is_scoped("asked-for-it"));
+
+        match previous {
+            Some(v) => std::env::set_var("SKEIN_HOME", v),
+            None => std::env::remove_var("SKEIN_HOME"),
+        }
     }
 
     #[test]

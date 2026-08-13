@@ -2298,6 +2298,14 @@ pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> 
             Duration::from_secs(600),
         )?;
     }
+    // Before the session, not after: `box-session.sh` reads the token as it comes up to decide what
+    // `GH_TOKEN` holds, so a token placed afterwards would leave the box's first turn — the one
+    // most likely to push — holding only the read credential. Failures are reported and not fatal:
+    // a box that cannot push its own repo yet is recoverable, a box that will not start is not.
+    for problem in crate::gitgate::refresh_tokens(name) {
+        eprintln!("skein: {name} has no write token yet — {problem}");
+    }
+
     if has_session {
         eprintln!("skein: {name} already has a live session; keeping it");
     } else {
