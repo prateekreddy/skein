@@ -182,6 +182,11 @@ async fn main() {
             axum::routing::delete(api_git_grant_revoke),
         )
         .route("/api/boxes/:name/git-scope", post(api_set_box_git_scope))
+        .route("/api/fleet/git-credentials", post(api_git_credential))
+        .route(
+            "/api/fleet/git-credentials/:id",
+            axum::routing::delete(api_git_credential_remove),
+        )
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
         .route(
@@ -938,7 +943,66 @@ async fn api_git_grants() -> Json<serde_json::Value> {
         })).collect::<Vec<_>>(),
         "app_ready": skein::gitgate::app_credentials().is_ok(),
         "app_problem": skein::gitgate::app_credentials().err().unwrap_or_default(),
+        // Whether a write token can be issued *at all* — by App or by a stored PAT. This is what
+        // scoping is gated on, so it is the honest "is this switched on" answer; `app_ready` alone
+        // would read as off for someone using nothing but their own tokens.
+        "ready": skein::gitgate::can_issue_write_tokens(),
+        // Descriptions only. The tokens themselves live in 0600 files and are never served — the
+        // cockpit learns whether one is set, never what it is.
+        "credentials": skein::gitgate::write_credentials().iter().map(|c| serde_json::json!({
+            "id": c.id,
+            "label": c.label,
+            "repos": c.repos,
+            "has_token": skein::gitgate::credential_has_token(&c.id),
+        })).collect::<Vec<_>>(),
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct CredentialReq {
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    repos: Vec<String>,
+    /// Absent leaves whatever token is stored alone, so editing the repo list does not silently
+    /// clear the credential. An empty string is a deliberate "forget it".
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// Store a fine-grained PAT and the repositories it covers.
+async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response {
+    if let Err(e) = skein::gitgate::set_write_credential(&r.id, &r.label, &r.repos) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    if let Some(token) = r.token {
+        if let Err(e) = skein::gitgate::set_credential_token(&r.id, &token) {
+            return (StatusCode::BAD_REQUEST, e).into_response();
+        }
+    }
+    // Boxes whose repo this now covers can be given it without waiting for the next tick.
+    tokio::task::spawn_blocking(|| {
+        for view in load_views().unwrap_or_default() {
+            let _ = skein::gitgate::refresh_tokens(&view.name);
+        }
+    });
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn api_git_credential_remove(Path(id): Path<String>) -> Response {
+    match skein::gitgate::remove_write_credential(&id) {
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Ok(()) => {
+            // Withdrawn from every box that held it, rather than left live for up to a tick.
+            tokio::task::spawn_blocking(|| {
+                for view in load_views().unwrap_or_default() {
+                    let _ = skein::gitgate::refresh_tokens(&view.name);
+                }
+            });
+            StatusCode::NO_CONTENT.into_response()
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

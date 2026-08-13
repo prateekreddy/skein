@@ -465,12 +465,13 @@ fn scope_override_path(box_name: &str) -> std::path::PathBuf {
 /// guessing, because the two failure directions are not equal: guessing "fleet" hands a box the
 /// account, and guessing "repo" costs it a push it can ask for.
 pub fn box_is_scoped(box_name: &str) -> bool {
-    // Nothing to mint with is nothing to scope with. Without the App there is no write token for a
-    // box's *own* repo either, so scoping here would not narrow a box's reach — it would take
-    // pushing away from every box in the fleet at once, which is the one outcome this must never
-    // produce. The default may therefore be on from the day it ships: until the App exists it
-    // changes nothing at all, and the moment it does, every box is scoped without a second switch.
-    if app_credentials().is_err() {
+    // Nothing to issue with is nothing to scope with. With neither an App nor a stored PAT there is
+    // no write token for a box's *own* repo either, so scoping here would not narrow a box's reach —
+    // it would take pushing away from every box in the fleet at once, which is the one outcome this
+    // must never produce. The default may therefore be on from the day it ships: until one of the
+    // two exists it changes nothing at all, and the moment one does, boxes are scoped with no
+    // second switch to remember.
+    if !can_issue_write_tokens() {
         return false;
     }
     match std::fs::read_to_string(scope_override_path(box_name))
@@ -594,6 +595,183 @@ fn sign_jwt(claim: &str, key_path: &str) -> Result<String, String> {
     Ok(format!("{claim}.{}", b64url(&out.stdout)))
 }
 
+// ───────────────────────────── stored fine-grained PATs ─────────────────────────────
+
+/// A fine-grained PAT its owner minted by hand, and the repositories it covers.
+///
+/// The alternative to the App, for someone who would rather not install one across their account at
+/// all: a token they created themselves, scoped in GitHub's own UI to exactly the repositories they
+/// chose. skein never sees anything wider, and cannot — the token *is* the scope.
+///
+/// The repository list here is a **claim**, not the enforcement. GitHub enforces what the token can
+/// reach; this list is how skein knows which repo to hand it to. Getting it wrong costs a token that
+/// does not work, never one that works too well.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WriteCredential {
+    #[serde(default)]
+    pub id: String,
+    /// What its owner calls it, for the cockpit. Never used as a path.
+    #[serde(default)]
+    pub label: String,
+    /// `owner/name` for each repository this token can write.
+    #[serde(default)]
+    pub repos: Vec<String>,
+}
+
+fn credentials_path() -> std::path::PathBuf {
+    crate::config::skein_home().join("github-pats.json")
+}
+
+/// The token file for one credential — 0600, and never in the JSON above.
+///
+/// Same split, and the same reason, as [`crate::connection_token_path`]: `github-pats.json` is read
+/// by the settings screen, so a token in it would be handed to every browser tab that opens Settings.
+/// The cockpit only ever learns *whether* one is set.
+fn credential_token_path(id: &str) -> std::path::PathBuf {
+    crate::config::skein_home().join("github-pats").join(id)
+}
+
+/// An id becomes a filename, so it is checked like one. A token written to a path a caller chose is
+/// a path traversal wearing a config field's clothes.
+pub fn valid_credential_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Every stored credential, without their tokens.
+pub fn write_credentials() -> Vec<WriteCredential> {
+    std::fs::read_to_string(credentials_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<WriteCredential>>(&s).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| valid_credential_id(&c.id))
+        .collect()
+}
+
+/// Is a token stored for this credential?
+pub fn credential_has_token(id: &str) -> bool {
+    valid_credential_id(id) && credential_token_path(id).exists()
+}
+
+/// The credential that covers `slug`, if one does.
+///
+/// First match wins, and the order is the order its owner arranged them in. A repo covered twice is
+/// a preference, not a conflict — both tokens can write it, so either answer is correct.
+pub fn credential_for(slug: &str) -> Option<(WriteCredential, String)> {
+    write_credentials().into_iter().find_map(|c| {
+        if !c.repos.iter().any(|r| same_repo(r, slug)) {
+            return None;
+        }
+        let token = std::fs::read_to_string(credential_token_path(&c.id))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+        Some((c, token))
+    })
+}
+
+/// Store or replace a credential's description. Its token is set separately.
+pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(), String> {
+    if !valid_credential_id(id) {
+        return Err(format!(
+            "{id:?} is not a credential id (lowercase letters, digits and dashes)"
+        ));
+    }
+    if let Some(bad) = repos.iter().find(|r| !slug_is_nameable(r)) {
+        return Err(format!("{bad:?} is not a repository"));
+    }
+    let mut all = write_credentials();
+    all.retain(|c| c.id != id);
+    all.push(WriteCredential {
+        id: id.to_string(),
+        label: label.trim().to_string(),
+        repos: repos.to_vec(),
+    });
+    let body = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
+    let home = crate::config::skein_home();
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&credentials_path(), &home, body.as_bytes())
+}
+
+/// Store (or, with an empty value, forget) a credential's token.
+///
+/// The mode is set on the temp file *before* the rename. chmod-after-rename leaves a window in which
+/// the real path is world-readable, and not having that window is the whole point.
+pub fn set_credential_token(id: &str, token: &str) -> Result<(), String> {
+    if !valid_credential_id(id) {
+        return Err(format!("not a credential id: {id:?}"));
+    }
+    let path = credential_token_path(id);
+    let token = token.trim();
+    if token.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("clearing the token: {e}")),
+        };
+    }
+    let dir = crate::config::skein_home().join("github-pats");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let tmp = dir.join(format!(".tmp.{}", std::process::id()));
+    std::fs::write(&tmp, token).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// Forget a credential entirely — its description and its token.
+pub fn remove_write_credential(id: &str) -> Result<(), String> {
+    if !valid_credential_id(id) {
+        return Err(format!("not a credential id: {id:?}"));
+    }
+    let _ = set_credential_token(id, "");
+    let all: Vec<WriteCredential> = write_credentials()
+        .into_iter()
+        .filter(|c| c.id != id)
+        .collect();
+    let body = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
+    let home = crate::config::skein_home();
+    crate::util::write_atomic(&credentials_path(), &home, body.as_bytes())
+}
+
+/// Everything a box holding the credential for `slug` could *also* write with it.
+///
+/// The honest number, and the one reason to prefer one PAT per repo. A token covering three repos
+/// hands all three to whichever box gets it: the helper only offers it when git asks about `slug`,
+/// but the token sits in a file the agent can read, and it works against the other two. The App
+/// never has this property — its tokens are minted for one repository — so this is the cost of the
+/// convenience, stated rather than buried.
+pub fn extra_reach(slug: &str) -> Vec<String> {
+    credential_for(slug)
+        .map(|(c, _)| {
+            c.repos
+                .into_iter()
+                .filter(|r| !same_repo(r, slug))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Can this fleet produce a write token at all — by App, or by a stored PAT?
+///
+/// What [`box_is_scoped`] gates on. Scoping with no way to mint would not narrow a box's reach; it
+/// would take pushing away from every box at once.
+pub fn can_issue_write_tokens() -> bool {
+    app_credentials().is_ok()
+        || write_credentials()
+            .iter()
+            .any(|c| !c.repos.is_empty() && credential_has_token(&c.id))
+}
+
 /// The App this fleet mints write tokens with, or why it cannot.
 ///
 /// The id is in `config.json` and the key is a path, because that file is written 0644 and
@@ -627,7 +805,16 @@ pub fn mint_token(slug: &str) -> Result<String, String> {
     if !slug_is_nameable(slug) {
         return Err(format!("{slug:?} is not a repository"));
     }
-    let (app_id, key_path) = app_credentials()?;
+    // A PAT its owner stored for this repository wins over the App, and the precedence is the point
+    // rather than an optimisation: configuring one is a deliberate act that says "reach this repo
+    // this way", usually by someone who did not want an App installed across their account at all.
+    // Deferring to the App would quietly override that choice with the thing it was made to avoid.
+    if let Some((_, token)) = credential_for(slug) {
+        return Ok(token);
+    }
+    let (app_id, key_path) = app_credentials().map_err(|e| {
+        format!("{e}, and no stored token covers {slug} — add one under Repo write access")
+    })?;
     let jwt = sign_jwt(
         &jwt_claim(&app_id, chrono::Utc::now().timestamp()),
         &key_path,
@@ -980,6 +1167,122 @@ mod tests {
             "the slash is encoded, or the slug becomes a directory: {p}"
         );
         assert!(p.contains("web-main"), "{p}");
+    }
+
+    /// A fresh `$SKEIN_HOME`, plus the guard that puts it back.
+    fn fresh_home() -> (std::sync::MutexGuard<'static, ()>, crate::testutil::TempDir) {
+        let lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        (lock, home)
+    }
+
+    #[test]
+    fn a_stored_token_is_preferred_over_the_app_for_the_repos_it_covers() {
+        // The precedence is the feature, not an optimisation. Someone stores a PAT precisely because
+        // they did not want an App reaching across their account — deferring to the App would
+        // override that choice with the exact thing it was made to avoid.
+        let (_lock, _home) = fresh_home();
+        set_write_credential("mine", "my three repos", &["a/one".into(), "a/two".into()]).unwrap();
+        set_credential_token("mine", "github_pat_XYZ").unwrap();
+
+        let (found, token) = credential_for("a/one").expect("a stored token covers a/one");
+        assert_eq!(token, "github_pat_XYZ");
+        assert_eq!(found.label, "my three repos");
+        assert_eq!(
+            mint_token("a/one").unwrap(),
+            "github_pat_XYZ",
+            "the stored token is what a box is given"
+        );
+
+        // And a repo it does not cover falls through — to the App, or to a message naming both ways
+        // of fixing it rather than only the App.
+        assert!(credential_for("b/other").is_none());
+        let why = mint_token("b/other").unwrap_err();
+        assert!(why.contains("b/other"), "{why}");
+        assert!(
+            why.contains("Repo write access"),
+            "the error must say where to add a token: {why}"
+        );
+    }
+
+    #[test]
+    fn one_token_covering_several_repos_says_what_else_it_reaches() {
+        // The cost of the convenience. A token covering three repos hands all three to whichever box
+        // gets it — the helper only offers it when git asks about one, but the file is readable and
+        // the token works against the others. Better shown than discovered.
+        let (_lock, _home) = fresh_home();
+        set_write_credential(
+            "three",
+            "",
+            &["a/one".into(), "a/two".into(), "a/three".into()],
+        )
+        .unwrap();
+        set_credential_token("three", "t").unwrap();
+
+        let mut extra = extra_reach("a/one");
+        extra.sort();
+        assert_eq!(extra, vec!["a/three", "a/two"]);
+        assert!(
+            extra_reach("elsewhere/repo").is_empty(),
+            "a repo no stored token covers reaches nothing extra"
+        );
+    }
+
+    #[test]
+    fn a_token_scoped_to_one_repo_reaches_exactly_that_repo() {
+        // The recommended shape, and the one the App always produces.
+        let (_lock, _home) = fresh_home();
+        set_write_credential("solo", "", &["a/one".into()]).unwrap();
+        set_credential_token("solo", "t").unwrap();
+        assert!(extra_reach("a/one").is_empty());
+    }
+
+    #[test]
+    fn a_credential_without_its_token_cannot_scope_a_fleet() {
+        // Half-configured is the dangerous state: a description with no token would report the fleet
+        // as ready to scope, and every box would come up unable to push.
+        let (_lock, _home) = fresh_home();
+        set_write_credential("half", "", &["a/one".into()]).unwrap();
+        assert!(
+            !can_issue_write_tokens(),
+            "a credential with no token is not a way to issue one"
+        );
+        set_credential_token("half", "t").unwrap();
+        assert!(can_issue_write_tokens());
+        assert!(
+            box_is_scoped("any-box"),
+            "a stored token is enough to scope on, with no App at all"
+        );
+    }
+
+    #[test]
+    fn a_credential_id_cannot_write_its_token_outside_the_token_directory() {
+        let (_lock, _home) = fresh_home();
+        for bad in ["../../evil", "has/slash", "Upper", "-lead", ""] {
+            assert!(!valid_credential_id(bad), "{bad:?} was accepted as an id");
+            assert!(set_credential_token(bad, "t").is_err(), "{bad:?}");
+            assert!(set_write_credential(bad, "", &[]).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_credential_cannot_claim_a_repository_that_is_not_one() {
+        let (_lock, _home) = fresh_home();
+        assert!(set_write_credential("x", "", &["../../etc/shadow".into()]).is_err());
+        assert!(set_write_credential("x", "", &["only-one-part".into()]).is_err());
+    }
+
+    #[test]
+    fn forgetting_a_credential_takes_its_token_with_it() {
+        // A token nothing points at is one nobody rotates, and it would still work.
+        let (_lock, _home) = fresh_home();
+        set_write_credential("gone", "", &["a/one".into()]).unwrap();
+        set_credential_token("gone", "t").unwrap();
+        remove_write_credential("gone").unwrap();
+        assert!(write_credentials().is_empty());
+        assert!(!credential_has_token("gone"), "the token file outlived it");
+        assert!(credential_for("a/one").is_none());
     }
 
     #[test]
