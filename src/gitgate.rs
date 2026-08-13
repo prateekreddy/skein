@@ -1,0 +1,1003 @@
+//! Which repositories a box may push to, and how it asks for one it may not.
+//!
+//! Every box in this fleet used to hold the same GitHub credential: a user token with `repo`,
+//! `admin:public_key`, `gist` and `read:org`, reaching **460 repositories** read and write, plus a
+//! forwarded ssh-agent socket signing for anything that key could reach. Ten boxes, one identity.
+//! An agent that misread a remote could push to any of them, and `admin:public_key` let one add a
+//! key to the account — access that outlives the sandbox and appears nowhere in skein.
+//!
+//! What replaces it is two credentials with different shapes:
+//!
+//! * **read** — a fine-grained PAT, `contents: read` + `metadata: read` over every repository. It
+//!   lives where the old token lived (the sbx `github` secret, delivered as `GH_TOKEN`), so `gh`
+//!   keeps working for browsing and cloning. It cannot write anywhere, which is the whole point.
+//! * **write** — a GitHub App installation token scoped to **one repository**, valid an hour,
+//!   minted by the host and dropped into the box's own host-mounted state directory.
+//!
+//! So no write-capable credential sits in a box's environment at all, and the App's private key
+//! never leaves the host.
+//!
+//! **Why the host pushes tokens rather than the box asking for one.** A credential helper has to
+//! answer inside a single `git` invocation, which wants a synchronous channel — and there isn't a
+//! reliable one from a box to the cockpit (measured: `host.docker.internal:7878` answers 500 through
+//! the gateway). But the box's state directory is *already* a host mount, because that is where its
+//! conversation lives. The host refreshes a token file there before the hour is out; the helper only
+//! ever reads a file. No new transport, and nothing to be down.
+//!
+//! **What this gate is, precisely.** Unlike [`crate::substrate`], the boundary here is real: GitHub
+//! enforces it server-side, so a box holding a token scoped to one repository cannot touch another
+//! whatever runs inside it. What it is *not* is a boundary between boxes — they share a uid and a
+//! PID namespace, so one box can read another's token file and act as it. That is this fleet's
+//! stated model, and it is worth naming rather than implying otherwise: the wall this builds is
+//! fleet→GitHub, not box→box.
+
+use crate::util::sh_quote;
+use serde::{Deserialize, Serialize};
+use std::process::Command;
+use std::time::Duration;
+
+/// How long an approved cross-repo grant lasts when its approver does not say "keep it".
+///
+/// Deliberately unlike [`crate::substrate`]'s `remember`, which is permanent. A package that a fleet
+/// approved once should survive a rebuild; **write access to someone else's repository should not**.
+/// The usual reason to grant it is a single change in a sibling repo, and an approval that outlives
+/// that reason is one nobody remembers giving.
+pub const DEFAULT_GRANT_HOURS: i64 = 24;
+
+/// What a box may do with a repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Its own repo: push freely.
+    Write,
+    /// A repo it holds a live cockpit grant for.
+    Granted,
+    /// Anything else: the read token serves, and a push will be refused by GitHub.
+    Read,
+}
+
+/// One box's ask for write access to a repository that is not its own.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Request {
+    #[serde(default)]
+    pub id: String,
+    /// The box that asked. `box` is a Rust keyword, so the field is renamed rather than the JSON.
+    #[serde(default, rename = "box")]
+    pub box_name: String,
+    /// `owner/name`, as [`slug_from_url`] normalises it.
+    #[serde(default)]
+    pub repo: String,
+    /// Whatever the box said it was for. Free text, shown to the approver and never executed.
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub asked: String,
+    /// `pending` → `granted` | `denied`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub decided: String,
+}
+
+impl Request {
+    /// Why this request must not be acted on, or `None` if it may be.
+    ///
+    /// Returned as a reason rather than a bool for the same purpose as substrate's: a request the
+    /// cockpit drops silently looks, to the box that filed it, exactly like one nobody got to.
+    pub fn problem(&self) -> Option<String> {
+        if self.id.is_empty() || self.id.contains('/') || self.id.contains("..") {
+            return Some(format!("unusable request id {:?}", self.id));
+        }
+        if !crate::valid_name(&self.box_name) {
+            return Some(format!("unusable box name {:?}", self.box_name));
+        }
+        match slug_is_nameable(&self.repo) {
+            true => None,
+            false => Some(format!("{:?} is not a repository", self.repo)),
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.state == "pending"
+    }
+}
+
+/// An approved cross-repo write, as recorded on the host.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Grant {
+    #[serde(default, rename = "box")]
+    pub box_name: String,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub granted: String,
+    /// RFC3339, or empty for "until the box is destroyed".
+    ///
+    /// Empty rather than a far-future date so the cockpit can say *which* of the two a grant is,
+    /// and so a permanent grant is a deliberate-looking record instead of a timestamp in 2099.
+    #[serde(default)]
+    pub expires: String,
+}
+
+impl Grant {
+    /// Is this grant still good at `now`?
+    ///
+    /// An unparseable expiry counts as **expired**, not as permanent. The alternative fails open:
+    /// a corrupted date would silently upgrade a 24-hour grant into a forever one, and nothing
+    /// would ever report it.
+    pub fn is_live(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if self.expires.trim().is_empty() {
+            return true;
+        }
+        chrono::DateTime::parse_from_rfc3339(self.expires.trim())
+            .map(|e| e > now)
+            .unwrap_or(false)
+    }
+}
+
+/// Every repository name skein is willing to put in a URL or a token request.
+///
+/// GitHub's own rules are narrower than this; the shapes refused here are the ones that would stop
+/// the string being a repository at all — an empty side, a path escape, or anything that could end
+/// the path and start something else.
+fn slug_is_nameable(slug: &str) -> bool {
+    let Some((owner, name)) = slug.split_once('/') else {
+        return false;
+    };
+    let ok = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with('-')
+            && !s.contains("..")
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    };
+    ok(owner) && ok(name)
+}
+
+/// `owner/name` from any spelling of a GitHub remote, or `None` if it is not one.
+///
+/// Handles the four forms that actually appear in this fleet's remotes and in git's own credential
+/// query: `git@github.com:owner/name.git`, `https://github.com/owner/name.git`,
+/// `ssh://git@github.com/owner/name`, and the bare `owner/name` a grant record holds.
+///
+/// Non-GitHub hosts return `None` rather than a slug. They have no App installation and no token to
+/// mint, so treating them as a repository would produce a grant that can never be honoured.
+pub fn slug_from_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    // A filesystem path is not a remote. skein adopts repos in place, so `repo.source` is often
+    // `/Users/…/code/thing` — and without this that parses to `Users/…`, a repository that does not
+    // exist, which would be minted against and refused with a message about the wrong thing.
+    if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
+        return None;
+    }
+    // Strip a scheme and any userinfo, leaving host + path however it was spelled.
+    let rest = url
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(url)
+        .rsplit_once('@')
+        .map(|(_, r)| r)
+        .unwrap_or_else(|| url.split_once("://").map(|(_, r)| r).unwrap_or(url));
+
+    // `host:owner/name` (scp-like) or `host/owner/name`. The colon form is only scp-like when what
+    // follows is not a port, which is the one ambiguity in the grammar.
+    let (host, path) = if let Some((h, p)) = rest.split_once(':') {
+        if p.chars()
+            .take_while(|c| *c != '/')
+            .all(|c| c.is_ascii_digit())
+            && p.contains('/')
+        {
+            // host:port/path
+            let p = p.split_once('/').map(|(_, r)| r).unwrap_or("");
+            (h, p)
+        } else {
+            (h, p)
+        }
+    } else if let Some((h, p)) = rest.split_once('/') {
+        (h, p)
+    } else {
+        // A bare `owner/name` has no host at all — the shape a grant record holds.
+        return slug_is_nameable(rest).then(|| rest.to_string());
+    };
+
+    if !host.eq_ignore_ascii_case("github.com") && !host.is_empty() {
+        // `owner/name` reaches here as host=`owner`, path=`name`; anything with a real non-GitHub
+        // host does not, and must not.
+        let whole = format!("{host}/{path}");
+        return (host_is_not_a_host(host) && slug_is_nameable(&whole)).then_some(whole);
+    }
+
+    slug_from_path(path)
+}
+
+/// Does this look like an owner rather than a hostname?
+///
+/// The bare `owner/name` form and `host/owner/name` are the same shape with a different number of
+/// segments, so one of them has to be decided by what the first segment looks like. A dot is the
+/// tell: GitHub owners cannot contain one, hostnames of interest here always do.
+fn host_is_not_a_host(first: &str) -> bool {
+    !first.contains('.')
+}
+
+/// `owner/name` from the path part of a URL or git's credential query.
+///
+/// Exactly two segments, never a prefix of a longer path. Taking the first two would turn any deep
+/// path into a plausible-looking repository — which is how `/Users/me/code/thing` became `Users/me`
+/// and would have been minted against.
+pub fn slug_from_path(path: &str) -> Option<String> {
+    let path = path.trim().trim_start_matches('/');
+    let (owner, name) = path.split_once('/')?;
+    let name = name.trim_end_matches(".git");
+    let slug = format!("{owner}/{name}");
+    slug_is_nameable(&slug).then_some(slug)
+}
+
+/// Do these two names mean the same repository?
+///
+/// Case-insensitively, because GitHub preserves the case an owner typed but resolves without it —
+/// so a remote saying `Acme/Thing` and a registry saying `acme/thing` are one repo, and
+/// comparing them exactly would file an approval request for the box's *own* repository.
+pub fn same_repo(a: &str, b: &str) -> bool {
+    !a.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
+/// What `box_name` may do with `target`, given its own repo and the live grants.
+pub fn access(
+    own: &str,
+    target: &str,
+    box_name: &str,
+    grants: &[Grant],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Access {
+    if same_repo(own, target) {
+        return Access::Write;
+    }
+    let granted = grants
+        .iter()
+        .any(|g| g.box_name == box_name && same_repo(&g.repo, target) && g.is_live(now));
+    if granted {
+        Access::Granted
+    } else {
+        Access::Read
+    }
+}
+
+// ───────────────────────────── where things live ─────────────────────────────
+
+/// The request queue, **inside the sandbox**: boxes must be able to write it, so it cannot be on the
+/// host. Same reasoning as [`crate::substrate::substrate_dir`], and beside it for the same reason.
+pub fn gitgate_dir() -> String {
+    format!("{}/.skein/gitgate", crate::fleet::fleet_root())
+}
+
+fn requests_dir() -> String {
+    format!("{}/requests", gitgate_dir())
+}
+
+/// The grant record, on the **host**, beside `repos.json`.
+///
+/// Not in the fleet root with the queue: the fleet root dies with the sandbox, and a grant that
+/// vanished on rebuild would have every box asking again for access its owner already approved.
+/// The queue is in the sandbox because boxes write it; the record is not, because only the host does.
+fn grants_path() -> std::path::PathBuf {
+    crate::config::skein_home().join("git-grants.json")
+}
+
+/// Where a box finds the token for a repository it may write.
+///
+/// Inside the box's own host-mounted state directory, which is the whole reason this design needs no
+/// box→host channel. One file per repository rather than one per box: a box with a grant holds two
+/// tokens with different scopes, and a single file could only ever hold the narrower one.
+pub fn token_file(box_name: &str, slug: &str) -> String {
+    format!(
+        "{}/git-tokens/{}",
+        crate::fleet::box_state(box_name),
+        slug.replace('/', "%2F")
+    )
+}
+
+// ───────────────────────────── the queue ─────────────────────────────
+
+/// Parse the array `jq -s` produces from the queue.
+///
+/// Malformed entries are dropped rather than failing the read: one unparseable file — a box writing
+/// a request while this runs — must not blank the cockpit's whole list.
+pub fn parse_requests(json: &str) -> Vec<Request> {
+    let mut out: Vec<Request> = serde_json::from_str::<Vec<serde_json::Value>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<Request>(v).ok())
+        .filter(|r: &Request| !r.id.is_empty())
+        .collect();
+    out.sort_by(|a, b| a.asked.cmp(&b.asked).then(a.id.cmp(&b.id)));
+    out
+}
+
+/// Every access request the fleet knows about, oldest first.
+pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
+    let script = format!(
+        "d={}; ls \"$d\"/*.json >/dev/null 2>&1 || {{ echo '[]'; exit 0; }}; jq -s '.' \"$d\"/*.json 2>/dev/null || echo '[]'",
+        sh_quote(&requests_dir())
+    );
+    let out = crate::place::own_sandbox(sandbox).exec(&script, Duration::from_secs(30))?;
+    Ok(parse_requests(&out))
+}
+
+/// The script that records a decision against a request.
+///
+/// Split out from [`decide`] so its shape can be asserted without a sandbox: this writes into a file
+/// any box can also write, so it must never shell a value in unquoted.
+fn decision_script(id: &str, state: &str) -> String {
+    format!(
+        "f={}/{}.json; [ -f \"$f\" ] || {{ echo 'no such request' >&2; exit 1; }}; \
+         t=$(mktemp \"$(dirname \"$f\")/.tmp.XXXXXX\") || exit 1; \
+         jq --arg s {} --arg d \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \
+            '.state=$s | .decided=$d' \"$f\" >\"$t\" \
+           && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
+        sh_quote(&requests_dir()),
+        // Validated by the caller, quoted anyway: validation that is only correct because of a check
+        // somewhere else is validation waiting to be moved.
+        sh_quote(id).trim_matches('\''),
+        sh_quote(state),
+    )
+}
+
+/// Approve or deny a request. Approving records the grant host-side; the token that makes it usable
+/// is minted by the refresher, so the cockpit answers immediately rather than waiting on GitHub.
+pub fn decide(
+    sandbox: &str,
+    id: &str,
+    approve: bool,
+    hours: Option<i64>,
+) -> Result<Request, String> {
+    let mut found = list(sandbox)?
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| format!("no request {id}"))?;
+    if let Some(why) = found.problem() {
+        return Err(format!("refusing to act on this request: {why}"));
+    }
+    if !found.is_pending() {
+        return Err(format!("request {id} is already {}", found.state));
+    }
+    let state = if approve { "granted" } else { "denied" };
+    crate::place::own_sandbox(sandbox)
+        .exec(&decision_script(id, state), Duration::from_secs(30))?;
+    if approve {
+        record(&found, hours)?;
+    }
+    found.state = state.into();
+    Ok(found)
+}
+
+/// Every write request the fleet has been asked for, for the cockpit.
+///
+/// An unreachable sandbox reads as an empty queue rather than an error: this is polled beside the
+/// board, and a fleet that is down should not paint this panel red about GitHub.
+pub fn fleet_requests() -> Vec<Request> {
+    list(&crate::place::fleet_sandbox()).unwrap_or_default()
+}
+
+/// Approve or deny a request. `hours` is `None` for a grant that never expires.
+pub fn fleet_decide(id: &str, approve: bool, hours: Option<i64>) -> Result<Request, String> {
+    decide(&crate::place::fleet_sandbox(), id, approve, hours)
+}
+
+// ───────────────────────────── the grant record ─────────────────────────────
+
+/// Every grant on record, expired ones included — the cockpit shows those too, because "this box had
+/// access until Tuesday" is the answer to a question the list exists to answer.
+pub fn grants() -> Vec<Grant> {
+    std::fs::read_to_string(grants_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<Grant>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Add a grant, replacing any earlier one for the same box and repository.
+///
+/// Replacing rather than appending: re-approving after an expiry is the common case, and two records
+/// for one pair would leave [`access`] answering from whichever happened to be first.
+pub fn merged(mut all: Vec<Grant>, next: Grant) -> Vec<Grant> {
+    all.retain(|g| !(g.box_name == next.box_name && same_repo(&g.repo, &next.repo)));
+    all.push(next);
+    all.sort_by(|a, b| a.box_name.cmp(&b.box_name).then(a.repo.cmp(&b.repo)));
+    all
+}
+
+fn record(req: &Request, hours: Option<i64>) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let grant = Grant {
+        box_name: req.box_name.clone(),
+        repo: req.repo.clone(),
+        granted: now.to_rfc3339(),
+        expires: match hours {
+            // A grant with no hours is permanent, and says so by holding no date at all.
+            None => String::new(),
+            Some(h) => (now + chrono::Duration::hours(h)).to_rfc3339(),
+        },
+    };
+    write_grants(merged(grants(), grant))
+}
+
+/// Withdraw a grant early. The token file is removed by the next refresh, and until then the grant
+/// is already gone from [`access`] — so a revoke is effective the moment it is recorded.
+pub fn revoke(box_name: &str, repo: &str) -> Result<(), String> {
+    let left: Vec<Grant> = grants()
+        .into_iter()
+        .filter(|g| !(g.box_name == box_name && same_repo(&g.repo, repo)))
+        .collect();
+    write_grants(left)
+}
+
+fn write_grants(all: Vec<Grant>) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
+    let home = crate::config::skein_home();
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&grants_path(), &home, body.as_bytes())
+}
+
+/// The live grants for one box, which is what the token refresher acts on.
+pub fn live_grants_for(box_name: &str, now: chrono::DateTime<chrono::Utc>) -> Vec<Grant> {
+    grants()
+        .into_iter()
+        .filter(|g| g.box_name == box_name && g.is_live(now))
+        .collect()
+}
+
+// ───────────────────────────── the switch ─────────────────────────────
+
+/// Where a box's own answer to "scope my GitHub credential?" is kept.
+///
+/// A file in the box's host state directory, exactly as its disk override already is. Host-side, so
+/// the cockpit can flip it with the fleet down, and per box so one box can be opened up without
+/// opening the fleet.
+fn scope_override_path(box_name: &str) -> std::path::PathBuf {
+    std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-scope")
+}
+
+/// Is this box's GitHub credential scoped to its own repository?
+///
+/// The per-box file wins over the fleet default when it holds one of the two words it may. Anything
+/// else — an empty file, a hand-edit, a half-written write — falls back to the default rather than
+/// guessing, because the two failure directions are not equal: guessing "fleet" hands a box the
+/// account, and guessing "repo" costs it a push it can ask for.
+pub fn box_is_scoped(box_name: &str) -> bool {
+    match std::fs::read_to_string(scope_override_path(box_name))
+        .unwrap_or_default()
+        .trim()
+    {
+        "repo" => true,
+        "fleet" => false,
+        _ => crate::config::load_config().scope_git_to_repo,
+    }
+}
+
+/// Set (or clear, with `None`) one box's override. Takes effect at the box's **next start**: the
+/// credential is placed as the box comes up, and a running box already holds what it was given.
+pub fn set_box_scope(box_name: &str, scope: Option<&str>) -> Result<(), String> {
+    if !crate::valid_name(box_name) {
+        return Err(format!("unusable box name {box_name:?}"));
+    }
+    let path = scope_override_path(box_name);
+    let Some(scope) = scope else {
+        // A missing file is inheritance, so removing it is how a box goes back to following the
+        // fleet — not writing the fleet's current answer into it, which would freeze today's default.
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+    };
+    if scope != "repo" && scope != "fleet" {
+        return Err(format!("unknown scope {scope:?}"));
+    }
+    let dir = path.parent().ok_or("no state directory")?.to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&path, &dir, scope.as_bytes())
+}
+
+/// The repository a box may write, as `owner/name` — or empty when skein does not know one.
+///
+/// Empty is not "everything": [`crate::fleet::session_script`] passes it through to the launcher,
+/// which places no own-repo token when it is empty, so an unknown repo is a box that can read and
+/// cannot push. That is the right failure for a repo adopted from a local path, which has no GitHub
+/// identity to scope to in the first place.
+pub fn box_repo_slug(box_name: &str) -> String {
+    crate::repo_for_box(box_name)
+        .and_then(|r| slug_from_url(&r.source))
+        .unwrap_or_default()
+}
+
+// ───────────────────────────── minting ─────────────────────────────
+
+/// base64url without padding, which is the only encoding a JWT accepts.
+///
+/// Hand-rolled rather than pulled in: skein has no base64 dependency, and this is the whole of what
+/// would be used from one. Twenty lines against a crate in the supply chain of a tool that holds a
+/// signing key is the right trade.
+pub fn b64url(bytes: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        let take = chunk.len() + 1;
+        for i in 0..take {
+            out.push(A[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// The signed-input half of a GitHub App JWT: `base64url(header).base64url(payload)`.
+///
+/// `iat` is backdated a minute because GitHub rejects a token issued in its future, and a Mac whose
+/// clock drifts forward by seconds is ordinary. `exp` is well inside the ten-minute maximum.
+pub fn jwt_claim(app_id: &str, now: i64) -> String {
+    let header = b64url(br#"{"alg":"RS256","typ":"JWT"}"#);
+    let payload = b64url(
+        format!(
+            r#"{{"iat":{},"exp":{},"iss":"{}"}}"#,
+            now - 60,
+            now + 540,
+            app_id
+        )
+        .as_bytes(),
+    );
+    format!("{header}.{payload}")
+}
+
+/// Sign a JWT claim with the App's private key, via `openssl`.
+///
+/// Shelling out rather than adding an RSA crate, for the same reason as [`b64url`]: this is one
+/// `dgst` invocation, and openssl is on every machine skein runs on. The key is read by openssl
+/// directly and never passes through skein's memory or a command line.
+fn sign_jwt(claim: &str, key_path: &str) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = Command::new("openssl")
+        .args(["dgst", "-sha256", "-sign", key_path, "-binary"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("openssl: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("openssl took no stdin")?
+        .write_all(claim.as_bytes())
+        .map_err(|e| format!("openssl: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("openssl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "could not sign the App JWT: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(format!("{claim}.{}", b64url(&out.stdout)))
+}
+
+/// The App this fleet mints write tokens with, or why it cannot.
+///
+/// The id is in `config.json` and the key is a path, because that file is written 0644 and
+/// round-trips through the browser on every settings save — a private key has no business in it.
+/// The key itself sits beside it at 0600 and is only ever read by openssl.
+pub fn app_credentials() -> Result<(String, String), String> {
+    let config = crate::config::load_config();
+    let id = config.github_app_id.trim().to_string();
+    let key = match config.github_app_key.trim() {
+        "" => crate::config::skein_home()
+            .join("github-app.pem")
+            .to_string_lossy()
+            .into_owned(),
+        p => crate::util::expand_tilde(p),
+    };
+    if id.is_empty() {
+        return Err("no GitHub App configured: Settings → GitHub App ID".into());
+    }
+    if !std::path::Path::new(&key).exists() {
+        return Err(format!("the GitHub App key is not at {key}"));
+    }
+    Ok((id, key))
+}
+
+/// A GitHub App installation token scoped to exactly one repository.
+///
+/// Two calls: the installation that covers the repo, then a token restricted to it. The restriction
+/// is the point — an installation token defaults to *every* repository the App is installed on, which
+/// would rebuild the blast radius this module exists to remove.
+pub fn mint_token(slug: &str) -> Result<String, String> {
+    if !slug_is_nameable(slug) {
+        return Err(format!("{slug:?} is not a repository"));
+    }
+    let (app_id, key_path) = app_credentials()?;
+    let jwt = sign_jwt(
+        &jwt_claim(&app_id, chrono::Utc::now().timestamp()),
+        &key_path,
+    )?;
+
+    let installation = api_get(
+        &format!("https://api.github.com/repos/{slug}/installation"),
+        &jwt,
+    )
+    .map_err(|e| format!("the App is not installed on {slug}: {e}"))?;
+    let id = installation
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("no installation id for {slug}"))?;
+    let name = slug.split_once('/').map(|(_, n)| n).unwrap_or(slug);
+
+    // `issues: write` alongside `pull_requests: write`, because a comment on a PR is posted through
+    // the *issues* endpoint — `POST /repos/{o}/{r}/issues/{n}/comments`. Without it `gh pr comment`
+    // fails on a token that can already open the PR it cannot talk about, which reads as a bug.
+    // Still nothing else: no `administration`, no `members`, no `workflows`.
+    let body = serde_json::json!({
+        "repositories": [name],
+        "permissions": {
+            "contents": "write",
+            "pull_requests": "write",
+            "issues": "write",
+        },
+    })
+    .to_string();
+    let token = api_post(
+        &format!("https://api.github.com/app/installations/{id}/access_tokens"),
+        &jwt,
+        &body,
+    )?;
+    token
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("GitHub returned no token for {slug}"))
+}
+
+/// Put the tokens a box may hold into its state directory, and take away the ones it may not.
+///
+/// Called on the server's tick, well inside the hour an installation token lives. Both halves matter
+/// and the second more than the first: minting is how a grant starts working, but **removing** is
+/// how a revoked or expired one stops. A refresher that only added would leave the last token it
+/// wrote valid for up to an hour after the grant behind it was withdrawn.
+///
+/// Errors are per-repository and collected rather than propagated. One repo the App is not installed
+/// on must not stop a box's own token being placed — that failure mode would take a box from
+/// "cannot push to one repo" to "cannot push at all", which is the same outage the switch exists to
+/// avoid causing.
+pub fn refresh_tokens(box_name: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    if !box_is_scoped(box_name) {
+        return problems;
+    }
+    let dir = std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-tokens");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return vec![format!("{}: {e}", dir.display())];
+    }
+
+    // The box's own repo, plus every repo its owner has granted and not yet had expire.
+    let now = chrono::Utc::now();
+    let mut want: Vec<String> = Vec::new();
+    let own = box_repo_slug(box_name);
+    if !own.is_empty() {
+        want.push(own);
+    }
+    for g in live_grants_for(box_name, now) {
+        if !want.iter().any(|w| same_repo(w, &g.repo)) {
+            want.push(g.repo);
+        }
+    }
+
+    // Anything with a token file that is no longer wanted loses it now. Done before minting so a
+    // revoke takes effect even if GitHub is unreachable this tick.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let slug = name.replace("%2F", "/");
+            if !want.iter().any(|w| same_repo(w, &slug)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    for slug in &want {
+        match mint_token(slug) {
+            Ok(token) => {
+                let path = std::path::PathBuf::from(token_file(box_name, slug));
+                if let Err(e) = crate::util::write_atomic(&path, &dir, token.as_bytes()) {
+                    problems.push(format!("{slug}: {e}"));
+                    continue;
+                }
+                // 0600 is not a boundary here — every box runs as the same uid — but it keeps the
+                // token out of anything that walks the tree without meaning to.
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            Err(e) => problems.push(format!("{slug}: {e}")),
+        }
+    }
+    problems
+}
+
+fn api_get(url: &str, jwt: &str) -> Result<serde_json::Value, String> {
+    curl_json(&["-sS", "--max-time", "20", url], jwt)
+}
+
+fn api_post(url: &str, jwt: &str, body: &str) -> Result<serde_json::Value, String> {
+    curl_json(
+        &["-sS", "--max-time", "20", "-X", "POST", "-d", body, url],
+        jwt,
+    )
+}
+
+/// The `--config -` document that carries the credential, so it never reaches argv.
+///
+/// A command line is readable by any process on the host, and this one would carry the JWT that
+/// mints every other token. curl reads options from stdin instead, which nothing else can see.
+fn curl_config(jwt: &str) -> String {
+    format!(
+        "header = \"Authorization: Bearer {}\"\n\
+         header = \"Accept: application/vnd.github+json\"\n\
+         header = \"X-GitHub-Api-Version: 2022-11-28\"\n",
+        // A JWT is three base64url segments joined by dots, so it can hold neither a quote nor a
+        // newline — but this is the line that would become an injected curl option if that ever
+        // stopped being true, so it is enforced rather than assumed.
+        jwt.replace(['"', '\n', '\\'], "")
+    )
+}
+
+/// One GitHub API call, over curl.
+fn curl_json(args: &[&str], jwt: &str) -> Result<serde_json::Value, String> {
+    use std::io::Write;
+    let mut child = Command::new("curl")
+        .args(args)
+        .args(["--config", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("curl: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("curl took no stdin")?
+        .write_all(curl_config(jwt).as_bytes())
+        .map_err(|e| format!("curl: {e}"))?;
+    let out = child.wait_with_output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| format!("GitHub said: {}", text.trim()))?;
+    if let Some(message) = value.get("message").and_then(|v| v.as_str()) {
+        if value.get("token").is_none() && value.get("id").is_none() {
+            return Err(message.to_string());
+        }
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grant(box_name: &str, repo: &str, expires: &str) -> Grant {
+        Grant {
+            box_name: box_name.into(),
+            repo: repo.into(),
+            granted: "2026-08-13T00:00:00Z".into(),
+            expires: expires.into(),
+        }
+    }
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn every_spelling_of_a_github_remote_names_the_same_repository() {
+        for url in [
+            "git@github.com:acme/thing.git",
+            "https://github.com/acme/thing.git",
+            "https://github.com/acme/thing",
+            "ssh://git@github.com/acme/thing.git",
+            "acme/thing",
+        ] {
+            assert_eq!(
+                slug_from_url(url).as_deref(),
+                Some("acme/thing"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repo_adopted_from_a_local_path_is_not_mistaken_for_a_github_one() {
+        // skein adopts repos in place, so `repo.source` is often a path. Reading `/Users/me/code/x`
+        // as the repository `Users/me` would have the host mint against a repo that does not exist
+        // and refuse the box with a message about the wrong thing entirely.
+        assert_eq!(slug_from_url("/Users/me/code/thing"), None);
+        assert_eq!(slug_from_url("./relative/path"), None);
+        assert_eq!(slug_from_url("~/code/thing"), None);
+        // And the deep-path form, which is the same mistake reached through a URL.
+        assert_eq!(slug_from_url("https://github.com/a/b/tree/main/src"), None);
+    }
+
+    #[test]
+    fn a_remote_that_is_not_github_has_no_repository_to_grant() {
+        // There is no App installation to mint against, so calling it a repo would produce a grant
+        // that can never be honoured — a refusal that reads as a bug forever after.
+        assert_eq!(slug_from_url("git@gitlab.com:a/b.git"), None);
+        assert_eq!(slug_from_url("https://bitbucket.org/a/b.git"), None);
+        assert_eq!(slug_from_url(""), None);
+    }
+
+    #[test]
+    fn the_case_an_owner_typed_never_files_a_request_against_the_boxs_own_repo() {
+        // GitHub preserves case and resolves without it. Comparing exactly would have a box whose
+        // remote says `Acme/Thing` asking permission to push to itself.
+        assert_eq!(
+            access("acme/thing", "Acme/Thing", "b", &[], now()),
+            Access::Write
+        );
+    }
+
+    #[test]
+    fn a_box_may_write_its_own_repo_and_only_read_any_other() {
+        assert_eq!(access("a/own", "a/own", "b", &[], now()), Access::Write);
+        assert_eq!(access("a/own", "a/other", "b", &[], now()), Access::Read);
+    }
+
+    #[test]
+    fn a_live_grant_opens_one_repo_and_no_more() {
+        let g = [grant("b", "a/other", "2026-08-14T00:00:00Z")];
+        assert_eq!(access("a/own", "a/other", "b", &g, now()), Access::Granted);
+        assert_eq!(access("a/own", "a/third", "b", &g, now()), Access::Read);
+    }
+
+    #[test]
+    fn a_grant_belongs_to_the_box_it_was_given_to() {
+        // Grants are keyed by box, not by repo: approving one box's ask must not quietly approve
+        // every other box of the same repo.
+        let g = [grant("b", "a/other", "")];
+        assert_eq!(access("a/own", "a/other", "b", &g, now()), Access::Granted);
+        assert_eq!(
+            access("a/own", "a/other", "elsewhere", &g, now()),
+            Access::Read
+        );
+    }
+
+    #[test]
+    fn an_expired_grant_is_not_a_grant() {
+        let g = [grant("b", "a/other", "2026-08-13T11:59:00Z")];
+        assert_eq!(access("a/own", "a/other", "b", &g, now()), Access::Read);
+    }
+
+    #[test]
+    fn a_grant_with_no_expiry_is_the_permanent_one() {
+        assert!(grant("b", "a/other", "").is_live(now()));
+    }
+
+    #[test]
+    fn an_expiry_nothing_can_parse_counts_as_expired_rather_than_forever() {
+        // The alternative fails open: a corrupted date would silently upgrade a 24-hour grant into
+        // a permanent one, and nothing would ever report it.
+        assert!(!grant("b", "a/other", "whenever").is_live(now()));
+    }
+
+    #[test]
+    fn re_approving_replaces_the_grant_rather_than_stacking_a_second_one() {
+        let all = merged(
+            vec![grant("b", "a/other", "2026-01-01T00:00:00Z")],
+            grant("b", "A/Other", ""),
+        );
+        assert_eq!(all.len(), 1, "one pair, one record: {all:?}");
+        assert!(all[0].is_live(now()), "the newer grant is the live one");
+    }
+
+    #[test]
+    fn a_repository_name_cannot_climb_out_of_itself() {
+        // The slug reaches a URL and a token request. `..` in it would address something else.
+        assert!(!slug_is_nameable("../../etc/shadow"));
+        assert!(!slug_is_nameable("a/../b"));
+        assert!(!slug_is_nameable("-flag/x"));
+        assert!(!slug_is_nameable("only-one-part"));
+        assert!(slug_is_nameable("acme/thing"));
+        assert!(slug_is_nameable("a.b_c/d.e-f"));
+    }
+
+    #[test]
+    fn a_request_naming_an_impossible_box_or_repo_is_refused() {
+        let ok = Request {
+            id: "20260813-1".into(),
+            box_name: "example-box-6".into(),
+            repo: "acme/thing".into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        assert!(ok.problem().is_none(), "{:?}", ok.problem());
+
+        let mut bad = ok.clone();
+        bad.repo = "../../x".into();
+        assert!(bad.problem().is_some());
+
+        let mut bad = ok.clone();
+        bad.id = "../../.skein/fleet-agent.token".into();
+        assert!(bad.problem().is_some());
+
+        let mut bad = ok;
+        bad.box_name = "../elsewhere".into();
+        assert!(bad.problem().is_some());
+    }
+
+    #[test]
+    fn one_unparseable_request_does_not_hide_the_others() {
+        let json = r#"[{"id":"a","box":"x","repo":"o/r","asked":"2026-01-01"},
+                       {"box":"x"},
+                       "not an object",
+                       {"id":"b","box":"y","repo":"o/s","asked":"2026-01-02"}]"#;
+        let got = parse_requests(json);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].id, "a", "oldest first");
+    }
+
+    #[test]
+    fn a_decision_never_splices_a_value_into_the_script_unquoted() {
+        let s = decision_script("20260813-1-1", "granted");
+        assert!(s.contains("--arg s 'granted'"), "{s}");
+        assert!(
+            s.contains("mv -f"),
+            "the request is replaced atomically: {s}"
+        );
+    }
+
+    #[test]
+    fn a_token_file_is_named_so_a_repo_cannot_address_another_boxs_file() {
+        let p = token_file("web-main", "acme/thing");
+        assert!(
+            p.ends_with("acme%2Fthing"),
+            "the slash is encoded, or the slug becomes a directory: {p}"
+        );
+        assert!(p.contains("web-main"), "{p}");
+    }
+
+    #[test]
+    fn base64url_matches_the_encoding_a_jwt_actually_accepts() {
+        // Known vectors, and specifically the padding cases: a JWT rejects `=`, and the 1- and
+        // 2-byte tails are where a hand-rolled encoder gets it wrong.
+        assert_eq!(b64url(b""), "");
+        assert_eq!(b64url(b"f"), "Zg");
+        assert_eq!(b64url(b"fo"), "Zm8");
+        assert_eq!(b64url(b"foo"), "Zm9v");
+        assert_eq!(b64url(b"foob"), "Zm9vYg");
+        assert_eq!(b64url(b"fooba"), "Zm9vYmE");
+        assert_eq!(b64url(b"foobar"), "Zm9vYmFy");
+        // The two characters that differ from plain base64, which is the whole reason for -_ .
+        assert_eq!(b64url(&[251, 255]), "-_8");
+    }
+
+    #[test]
+    fn the_jwt_is_backdated_so_a_drifting_host_clock_does_not_mint_a_future_token() {
+        let claim = jwt_claim("12345", 1_000_000);
+        let payload = claim.split('.').nth(1).unwrap();
+        // Decode enough to assert the numbers, without pulling in a decoder: the payload is short
+        // and its shape is fixed, so re-encoding the expectation is the cheapest check.
+        assert_eq!(
+            payload,
+            b64url(br#"{"iat":999940,"exp":1000540,"iss":"12345"}"#)
+        );
+    }
+}

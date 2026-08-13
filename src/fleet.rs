@@ -34,6 +34,7 @@ use std::time::Duration;
 /// The fleet sandbox hosts boxes from *many* repos, so it cannot be served out of any one repo's
 /// store — and shipping it through a store would put runtime tooling in shared data besides.
 const BOX_SESSION_SH: &str = include_str!("box-session.sh");
+const GIT_CREDENTIAL_SH: &str = include_str!("git-credential-skein.sh");
 /// The in-sandbox agent, shipped in the binary for the same reason the launcher is: an installer
 /// that fetched it would need the network working at exactly the moment things are going wrong.
 const FLEET_AGENT_PY: &str = include_str!("fleet-agent.py");
@@ -63,6 +64,12 @@ pub fn box_session_path() -> String {
 /// root outlives the sandbox's `/tmp` and belongs to skein rather than to any one box.
 pub fn fleet_agent_path() -> String {
     format!("{}/.skein/fleet-agent.py", fleet_root())
+}
+
+/// Where git's credential helper is installed. Beside the launcher, because every box's gitconfig
+/// names this path and a box that cannot find it falls back to having no credential at all.
+pub fn git_credential_helper_path() -> String {
+    format!("{}/.skein/git-credential-skein", fleet_root())
 }
 
 /// Where the agent's token lives **inside** the sandbox.
@@ -1470,6 +1477,7 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
     for (path, body) in [
         (box_session_path(), BOX_SESSION_SH),
         (box_provision_path(), KIT_STARTUP_SH),
+        (git_credential_helper_path(), GIT_CREDENTIAL_SH),
     ] {
         let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
         let script = format!(
@@ -2166,9 +2174,19 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // the launcher already installed in a running sandbox does not know about them: a new
         // argument would be read as part of the command, and every box restart would fail until
         // something reinstalled the script. An old launcher ignores an environment variable.
-        "SKEIN_FLEET_LIMITS={fleet_q} \
+        // `SKEIN_GIT_SCOPE` and `SKEIN_BOX_REPO` ride in the environment for the same reason as the
+        // ceilings above, and it is not a stylistic one: a launcher already installed in a running
+        // sandbox would read an eighth positional as part of the command, and every box restart
+        // would fail until something reinstalled the script. An old launcher ignores an env var.
+        "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
+        scope_q = sh_quote(if crate::gitgate::box_is_scoped(name) {
+            "repo"
+        } else {
+            "fleet"
+        }),
+        repo_q = sh_quote(&crate::gitgate::box_repo_slug(name)),
         name_q = sh_quote(name),
         root_q = sh_quote(&box_root(name)),
         pid_q = sh_quote(&box_pidfile(name)),

@@ -149,6 +149,13 @@ async fn main() {
         .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
+        .route("/api/fleet/git-grants", get(api_git_grants))
+        .route("/api/fleet/git-grants/:id", post(api_git_grant_decide))
+        .route(
+            "/api/fleet/git-grants/:name/:repo",
+            axum::routing::delete(api_git_grant_revoke),
+        )
+        .route("/api/boxes/:name/git-scope", post(api_set_box_git_scope))
         .route("/api/sync", get(api_sync_status))
         .route("/api/sync/connections", post(api_save_connection))
         .route(
@@ -880,6 +887,105 @@ async fn api_fleet_limits() -> Response {
 /// above, because that one asks the sandbox and 204s when the sandbox will not answer — and "the
 /// sandbox is unreachable" is exactly when you want to know which transport was being used.
 /// What boxes have asked the fleet to install.
+/// What boxes have asked to write, and what has already been granted.
+///
+/// Both in one response, because the question the panel answers is "who can write where" and a
+/// pending ask and a live grant are two states of one answer. Reading the queue execs into the
+/// sandbox; the grants are a host file, so they survive a fleet that is down.
+async fn api_git_grants() -> Json<serde_json::Value> {
+    let requests = tokio::task::spawn_blocking(skein::gitgate::fleet_requests)
+        .await
+        .unwrap_or_default();
+    let grants = skein::gitgate::grants();
+    let now = chrono::Utc::now();
+    Json(serde_json::json!({
+        "requests": requests,
+        // `live` is computed here rather than in the page: an expiry is a comparison against the
+        // host's clock, and a browser in another timezone with a skewed clock would draw a grant as
+        // live that the host has already stopped honouring.
+        "grants": grants.iter().map(|g| serde_json::json!({
+            "box": g.box_name,
+            "repo": g.repo,
+            "granted": g.granted,
+            "expires": g.expires,
+            "live": g.is_live(now),
+        })).collect::<Vec<_>>(),
+        "app_ready": skein::gitgate::app_credentials().is_ok(),
+        "app_problem": skein::gitgate::app_credentials().err().unwrap_or_default(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct GrantReq {
+    approve: bool,
+    /// How long the grant lasts. Absent ⇒ the 24-hour default; `0` ⇒ never expires.
+    ///
+    /// Unlike a package approval, which is permanent by design, write access to someone else's
+    /// repository is usually wanted for one change — so the default expires and "keep it" is the
+    /// deliberate choice rather than the accidental one.
+    #[serde(default)]
+    hours: Option<i64>,
+}
+
+/// Approve or deny one write request.
+async fn api_git_grant_decide(Path(id): Path<String>, Json(r): Json<GrantReq>) -> Response {
+    let hours = match r.hours {
+        None => Some(skein::gitgate::DEFAULT_GRANT_HOURS),
+        Some(0) => None,
+        Some(h) if h > 0 => Some(h),
+        Some(h) => {
+            return (StatusCode::BAD_REQUEST, format!("{h} is not a duration")).into_response()
+        }
+    };
+    let decided = {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || skein::gitgate::fleet_decide(&id, r.approve, hours))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
+    };
+    match decided {
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Ok(req) => {
+            // The grant is recorded; the token that makes it usable is minted off the request
+            // thread, because it is two round trips to GitHub and the answer should not wait on
+            // them. The box picks it up the moment it lands.
+            if r.approve {
+                let box_name = req.box_name.clone();
+                tokio::task::spawn_blocking(move || skein::gitgate::refresh_tokens(&box_name));
+            }
+            Json(req).into_response()
+        }
+    }
+}
+
+/// Withdraw a grant. Effective immediately for the decision, and within a tick for the token.
+async fn api_git_grant_revoke(Path((name, repo)): Path<(String, String)>) -> Response {
+    // The repo arrives percent-encoded (`owner%2Fname`) because it is one path segment holding a
+    // slash. axum decodes it before it reaches here.
+    match skein::gitgate::revoke(&name, &repo) {
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Ok(()) => {
+            tokio::task::spawn_blocking(move || skein::gitgate::refresh_tokens(&name));
+            StatusCode::NO_CONTENT.into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ScopeReq {
+    /// `"repo"`, `"fleet"`, or absent to go back to following the fleet default.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// Flip one box's GitHub scope. Takes effect at the box's next start.
+async fn api_set_box_git_scope(Path(name): Path<String>, Json(r): Json<ScopeReq>) -> Response {
+    match skein::gitgate::set_box_scope(&name, r.scope.as_deref()) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
 async fn api_substrate() -> Json<Vec<skein::substrate::Request>> {
     // Blocking: it execs into the sandbox to read the queue.
     Json(

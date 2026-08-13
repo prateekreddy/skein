@@ -276,6 +276,98 @@ if [ "${1-}" = "--request-package" ]; then
   exit $?
 fi
 
+# Where a box asks for write access to a repository that is not its own.
+#
+# Beside the package queue and in the fleet root for the same reason: the decision is the fleet
+# owner's, the box must be able to write the ask, and the shared `.claude` store is per-repo — which
+# is precisely the wrong scope for a question *about* another repo.
+gitgate_dir() {
+  printf '%s/.skein/gitgate' "${SKEIN_FLEET_ROOT:-/boxes}"
+}
+
+# Is this `owner/name`, and nothing else?
+#
+# The slug reaches a URL and a token request on the host, so a `..` or a slash too many must never
+# reach the queue. Mirrors `gitgate::slug_is_nameable`, and is checked again on that side — the queue
+# is a directory any box can write to, so what arrived here proves nothing about what wrote it.
+valid_slug() {
+  case "$1" in
+    */*/*) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  local owner="${1%%/*}" name="${1#*/}"
+  case "$owner" in '' | -* | *[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$name" in '' | -* | *[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
+}
+
+# `--request-write <box> <owner/name> [reason…]`: ask for write access to another repository.
+#
+# Filing is all this does. Nothing here grants anything, and nothing here needs to: the box holds a
+# token scoped to its own repo and a read-only one for everything else, so a push elsewhere is
+# refused by GitHub whatever this queue says. The request exists so the refusal has somewhere to go.
+request_write() {
+  # Defaulted rather than indexed directly: `set -u` is on, and an agent that types this with an
+  # argument missing would abort the shell it ran in rather than be told what it forgot.
+  local box="${1-}" repo="${2-}"
+  if [ -z "$box" ] || [ -z "$repo" ]; then
+    echo "usage: box-session.sh --request-write <box> <owner/name> [reason…]" >&2
+    return 4
+  fi
+  shift 2
+  local reason="$*"
+
+  if ! valid_slug "$repo"; then
+    echo "skein: '$repo' is not a repository name (expected owner/name)" >&2
+    return 3
+  fi
+  command -v jq >/dev/null 2>&1 || return 4
+
+  local dir
+  dir="$(gitgate_dir)/requests"
+  mkdir -p "$dir" 2>/dev/null || return 4
+
+  # One pending ask per box and repo. A stuck agent retrying a push must not grow the queue by one
+  # decision per attempt — it is the same decision every time.
+  local f state existing
+  for f in "$dir"/*.json; do
+    [ -f "$f" ] || continue
+    state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
+    case "$state" in pending | granted) ;; *) continue ;; esac
+    existing="$(jq -r '(.box // "") + " " + (.repo // "")' "$f" 2>/dev/null)" || continue
+    if [ "$existing" = "$box $repo" ]; then
+      printf 'skein: already asked to write %s — request %s is %s.\n' \
+        "$repo" "$(jq -r '.id // "?"' "$f")" "$state"
+      return 0
+    fi
+  done
+
+  local id tmp
+  id="$(date -u +%Y%m%d-%H%M%S)-$$"
+  tmp="$(mktemp "$dir/.tmp.XXXXXX")" || return 4
+  if ! jq -n --arg id "$id" --arg box "$box" --arg repo "$repo" --arg reason "$reason" \
+       --arg asked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+       '{id:$id, box:$box, repo:$repo, reason:$reason,
+         asked:$asked, state:"pending", decided:""}' >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 4
+  fi
+  # Named only once complete: the host polls this directory, and a half-written file is a parse
+  # error on its side rather than a request that turns up a moment later.
+  mv -f "$tmp" "$dir/$id.json" 2>/dev/null || { rm -f "$tmp"; return 4; }
+  chmod 644 "$dir/$id.json" 2>/dev/null || true
+
+  printf 'skein: asked to write %s. Request %s is pending approval in the cockpit.\n' "$repo" "$id"
+  return 0
+}
+
+if [ "${1-}" = "--request-write" ]; then
+  shift
+  request_write "$@"
+  exit $?
+fi
+
 # `--ceilings`: apply the shared ceilings and stop, starting nothing. A cgroup limit is live, so
 # changing Fleet memory in the cockpit takes effect without restarting a box — and this is the whole
 # of what "apply now" means. skein calls back into this file for it rather than carrying a second
@@ -816,6 +908,76 @@ fi
 # no login, no unset, and the proxy path works exactly as before.
 [ -s "$home/.claude/.credentials.json" ] && unset ANTHROPIC_API_KEY
 [ -s "$home/.codex/auth.json" ] && unset OPENAI_API_KEY
+
+# --- GitHub: one repo to write, everything else to read ------------------------------------------
+#
+# What this replaces, measured rather than assumed: every box held the same `GH_TOKEN` — a user token
+# with `repo`, `admin:public_key`, `gist` and `read:org`, reaching 460 repositories read and write —
+# plus a forwarded ssh-agent socket signing for anything that key could reach. Ten boxes, one
+# identity, and `admin:public_key` meant a box could add a key to the account: access that outlives
+# the sandbox and shows up nowhere in skein.
+#
+# Now the sandbox-wide `GH_TOKEN` is a read-only PAT, and write is a per-repository App token the
+# host mints and drops in this box's state directory. `git-credential-skein` picks between them by
+# the repository git is asking about. See `src/gitgate.rs`.
+#
+# Opt-out, not opt-in: $SKEIN_GIT_SCOPE is set to `fleet` by the host when this box's owner has
+# turned the switch off, and anything else — including an old host that never sets it — is scoped.
+# Wrong in the safe direction: the failure is a box that reads everything and cannot push outside
+# its own repo, which is recoverable by flipping one switch — not a box holding the account.
+if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
+  # The read-only PAT arrives as GH_TOKEN (the sbx `github` secret) and is handed to the helper under
+  # its own name, so `gh` can keep the one that matches what this box may actually do.
+  export SKEIN_GH_READ="${GH_TOKEN-}"
+  export SKEIN_GIT_TOKENS="$state/git-tokens"
+  mkdir -p "$SKEIN_GIT_TOKENS" 2>/dev/null || true
+  chmod 700 "$SKEIN_GIT_TOKENS" 2>/dev/null || true
+
+  # `gh` gets the write token for this box's own repo when the host has placed one, so `gh pr
+  # create` and `gh pr comment` work where they should. Reads of other repos keep working through
+  # git (the helper answers with the read PAT); for the `gh` API against another repo, $SKEIN_GH_READ
+  # is the token to use, and the agent guide says so.
+  if [ -n "${SKEIN_BOX_REPO-}" ]; then
+    own_token="$SKEIN_GIT_TOKENS/$(printf '%s' "$SKEIN_BOX_REPO" | sed 's#/#%2F#')"
+    if [ -r "$own_token" ]; then
+      GH_TOKEN="$(cat "$own_token" 2>/dev/null)"
+      export GH_TOKEN
+    fi
+    unset own_token
+  fi
+
+  # The forwarded agent is account-wide, so leaving it reachable would undo all of the above: any
+  # box could sign for any repository the host's key reaches. Unsetting the variable is not enough —
+  # the socket path is well known, and anything can export it again — so a regular file goes over it
+  # and `connect()` fails on a thing that is not a socket.
+  : >"$root/no-ssh-agent" 2>/dev/null || true
+  if [ -n "${SSH_AUTH_SOCK-}" ] && [ -S "$SSH_AUTH_SOCK" ] && [ -f "$root/no-ssh-agent" ]; then
+    binds+=(--ro-bind "$root/no-ssh-agent" "$SSH_AUTH_SOCK")
+  fi
+  unset SSH_AUTH_SOCK
+
+  # Wire the helper into the box's own gitconfig. `useHttpPath` is what makes a per-repository answer
+  # possible at all: without it git sends only the host, and every GitHub URL looks identical to the
+  # helper. `insteadOf` rewrites the SSH remotes this fleet already has — every box's origin is
+  # `git@github.com:…` — onto HTTPS, so nothing has to be re-pointed by hand and a clone made before
+  # today keeps working.
+  helper="${SKEIN_FLEET_ROOT:-/boxes}/.skein/git-credential-skein"
+  if [ -x "$helper" ] && command -v git >/dev/null 2>&1; then
+    git config --file "$home/.gitconfig" credential.useHttpPath true 2>/dev/null || true
+    git config --file "$home/.gitconfig" credential.helper "$helper" 2>/dev/null || true
+    # Cleared then re-added, because `insteadOf` is multi-valued: a plain `git config` sets the
+    # first value, so the second call would replace the first rather than join it, and `--add` on
+    # every box start would instead grow a duplicate a run. Unset-then-add is the only idempotent
+    # spelling of "these two, exactly".
+    git config --file "$home/.gitconfig" \
+      --unset-all url."https://github.com/".insteadOf 2>/dev/null || true
+    git config --file "$home/.gitconfig" \
+      --add url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
+    git config --file "$home/.gitconfig" \
+      --add url."https://github.com/".insteadOf "ssh://git@github.com/" 2>/dev/null || true
+  fi
+  unset helper
+fi
 
 # Who this box is, for everything that runs inside it.
 #

@@ -57,6 +57,26 @@ pub struct Config {
     /// `$SKEIN_SSH_KEY` overrides. The key never enters a box — only the agent socket is forwarded.
     #[serde(default)]
     pub ssh_key: String,
+    /// Scope every box's GitHub credential to the repository it works on: write there, read
+    /// everywhere, and a cockpit prompt for anything else. See [`crate::gitgate`].
+    ///
+    /// On by default, because the alternative is what this fleet had — one user token with `repo`,
+    /// `admin:public_key` and `gist` reaching 460 repositories, held identically by every box. The
+    /// per-box switch in box settings is the escape from this, not the other way round.
+    ///
+    /// Takes effect at a box's **next start**: the credential is placed as the box comes up.
+    #[serde(default = "default_true")]
+    pub scope_git_to_repo: bool,
+    /// The GitHub App that mints per-repository write tokens, by id. Not a credential — the id is
+    /// public, and the key it pairs with is a path (below) precisely so this file stays free of one.
+    #[serde(default)]
+    pub github_app_id: String,
+    /// Path to the App's private key on the **host**. Empty ⇒ `~/.skein/github-app.pem`.
+    ///
+    /// A path rather than the key: `config.json` is written 0644 and round-trips through the browser
+    /// on every settings save. The key is read by `openssl` and never enters skein's memory.
+    #[serde(default)]
+    pub github_app_key: String,
     /// Superseded by named [`SyncConnection`]s, which pair a gateway with the token that mints at
     /// it. Read once by the migration and then cleared; kept so a pre-connections `config.json`
     /// still parses. A credential was never here and never will be — this file is written 0644 and
@@ -335,6 +355,9 @@ impl Default for Config {
             base_branch: String::new(),
             confirm_destroy: true,
             ssh_key: String::new(),
+            scope_git_to_repo: true,
+            github_app_id: String::new(),
+            github_app_key: String::new(),
             ai_enrichment: false,
             fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
