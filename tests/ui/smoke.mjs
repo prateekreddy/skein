@@ -295,7 +295,7 @@ await check("the terminal pane is on screen", async () => {
   await mustSee("#termarea", "the terminal area");
 });
 await check("settings opens, and its panes switch to fields you can see", async () => {
-  await page.click('header .kbtn[title^="Settings"]');
+  await page.click('header .kbtn[aria-label^="Settings"]');
   await settle();
   await mustSee("#settings.open", "the settings dialog");
   await mustSee('.set-pane[data-pane="repos"].on', "the repos pane it opens on");
@@ -312,7 +312,7 @@ await check("nothing offers to spend a token before one is configured", async ()
     throw new Error("Track work is offered with no connection configured — it can only fail");
 });
 await check("an unconfigured host says what a connection is, not just that it's missing", async () => {
-  await page.click('header .kbtn[title^="Settings"]');
+  await page.click('header .kbtn[aria-label^="Settings"]');
   await settle();
   await page.click('.set-navi[data-pane="tracking"]');
   await settle(300);
@@ -360,7 +360,7 @@ await check("editing the URL doesn't quietly forget the token", async () => {
 
 console.log("\nsettings");
 await check("a repo is a card that says what it's configured to do", async () => {
-  await page.click('header .kbtn[title^="Settings"]');
+  await page.click('header .kbtn[aria-label^="Settings"]');
   await settle();
   await mustSee("#settings.open", "the settings dialog");
   const card = await mustSee('.rcard[data-card="smoke"]', "the repo card");
@@ -408,7 +408,7 @@ await check("a per-box ceiling is settable, and says what happens without one", 
   // The fleet fields configure a POOL; these two configure what one box may take out of it. Without
   // the second pair there is no ceiling at all, and a runaway build kills other boxes' agents — so
   // the pane has to make the per-box cap findable and say what it is protecting against.
-  await page.click('.set-navi[data-pane="workflow"]');
+  await page.click('.set-navi[data-pane="fleet"]');
   await settle(300);
   await mustSee("#set-boxmax", "the per-box hard cap");
   await mustSee("#set-boxhigh", "the per-box throttle");
@@ -430,7 +430,7 @@ await check("AI enrichment is a visible setting, not folklore in an env var", as
   // It existed for months as $SKEIN_AI only, so nobody knew it was there. The toggle has to be
   // findable, and it has to say what would actually happen — "on" with no `claude` on PATH is a
   // state a checkbox alone can never show.
-  await page.click('.set-navi[data-pane="workflow"]');
+  await page.click('.set-navi[data-pane="boxes"]');
   await settle(300);
   const box = await mustSee("#set-ai", "the AI enrichment toggle");
   if (await box.isChecked()) throw new Error("it must default to off — the calls share the fleet's rate limit");
@@ -448,7 +448,7 @@ await check("AI enrichment is a visible setting, not folklore in an env var", as
   if (!/^on/.test(h.ai.detail)) throw new Error(`doctor should now say it's on, got "${h.ai.detail}"`);
   if (h.ai.ok !== true) throw new Error("opt-in-and-off is not a fault, so this must never report unhealthy");
   // Save closed the dialog — put the pane back where the following checks expect it.
-  await page.click('header .kbtn[title^="Settings"]');
+  await page.click('header .kbtn[aria-label^="Settings"]');
   await settle();
   await page.click('.set-navi[data-pane="repos"]');
   await settle(300);
@@ -458,9 +458,9 @@ await check("the pane doesn't pretend Save applies to repo cards", async () => {
   if (shown) throw new Error("Save is offered on a pane whose fields already saved themselves");
   if (!/saves as you leave a field/.test(await text("#set-hint"))) throw new Error("nothing says when these save");
   // and it comes back on a pane that IS a form
-  await page.click('.set-navi[data-pane="workflow"]');
+  await page.click('.set-navi[data-pane="boxes"]');
   await settle(250);
-  await mustSee("#settings .set-foot .primary", "Save on the Workflow pane");
+  await mustSee("#settings .set-foot .primary", "Save on a pane that is a form");
   await page.click('.set-navi[data-pane="repos"]');
   await settle(250);
 });
@@ -502,9 +502,9 @@ await check("Track work appears once THIS box's repo has a usable connection", a
 await check("settings is usable while a box is open (the docked layout hides nothing of it)", async () => {
   // `body.docked footer {display:none}` — written for the fleet's key hints — also matched the
   // settings dialog's own <footer>, so Save and Cancel vanished whenever any box tab was open.
-  await page.click('header .kbtn[title^="Settings"]');   // the previous check closed it
+  await page.click('header .kbtn[aria-label^="Settings"]');   // the previous check closed it
   await settle();
-  await page.click('.set-navi[data-pane="workflow"]');
+  await page.click('.set-navi[data-pane="boxes"]');
   await settle(250);
   for (const [sel, what] of [["#settings .set-foot .primary", "Save"], ["#settings .set-navi", "the pane rail"],
                              ["#settings .set-scroll", "the pane body"], ["#settings .set-x", "the close button"]])

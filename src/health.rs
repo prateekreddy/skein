@@ -105,7 +105,7 @@ pub fn health_report() -> HealthReport {
     let ai = HealthCheck {
         ok: true,
         detail: if !crate::ai_enabled() {
-            "off — Settings → Workflow turns it on: a one-line summary for boxes with no \
+            "off — Settings → Boxes turns it on: a one-line summary for boxes with no \
              journal, and a second opinion before Continue N resumes anything"
                 .into()
         } else if !program_on_path("claude") {

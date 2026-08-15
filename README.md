@@ -111,7 +111,7 @@ More attention helpers, all free unless noted:
   the box was actually working on.
 - **Away digest** — step away and come back and skein shows "while you were away": who now needs you, who
   finished, who made progress.
-- **AI enrichment (opt-in — Settings → Workflow)** — skein runs inside an `sbx run` box where `claude`
+- **AI enrichment (opt-in — Settings → Boxes)** — skein runs inside an `sbx run` box where `claude`
   is logged in, so it can spend *rationed* Haiku calls on the subscription with no API key: a one-line
   summary for a box with no journal (marked ✨ and labelled as model-written, never mixed in with what
   the box actually said), and a conservative safety gate on **Continue N** — a box the heuristic reads as

@@ -23,7 +23,7 @@ use std::time::Duration;
 pub fn ai_enabled() -> bool {
     // `$SKEIN_AI` wins when set — same precedence as every other skein setting, and it is what
     // lets the tests stub this without touching the user's config. Otherwise the toggle in
-    // Settings → Workflow decides, so the feature is discoverable rather than folklore.
+    // Settings → Boxes decides, so the feature is discoverable rather than folklore.
     match env::var("SKEIN_AI").ok().as_deref() {
         Some("on" | "1" | "true" | "yes") => true,
         Some("off" | "0" | "false" | "no") => false,
