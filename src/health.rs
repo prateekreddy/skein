@@ -40,6 +40,10 @@ pub struct HealthReport {
     /// and the server printed them to a detached process's stderr, so the first place anyone
     /// learned of one was a 403 inside a box some minutes later.
     pub gitgate: HealthCheck,
+    /// Which agent runtimes have a login every new box will inherit. Empty means `skein login` has
+    /// not been run — the single most common way a first run goes quiet, since each box then comes
+    /// up sitting at a sign-in prompt doing nothing.
+    pub logins: Vec<String>,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
@@ -334,6 +338,7 @@ pub fn health_report() -> HealthReport {
         ai,
         memory,
         gitgate,
+        logins: crate::signed_in_runtimes(),
         dark_boxes,
         stale_boxes,
         runtimes: supported_runtimes(),

@@ -113,6 +113,18 @@
   .desc summary { cursor:pointer; color:var(--dim); width:fit-content; }
   .desc summary:hover { color:var(--text-2); }
   .desc details[open] summary { margin-bottom:3px; }
+  /* first run: the three things that stop a fleet starting, each ticked once it is true */
+  .fr { max-width:560px; margin:6vh auto 0; text-align:left; }
+  .fr-head { font-size:15px; font-weight:600; color:var(--text); margin-bottom:14px; }
+  .fr-steps { list-style:none; margin:0 0 16px; padding:0; display:flex; flex-direction:column; gap:11px; }
+  .fr-step { display:flex; gap:10px; align-items:flex-start; }
+  .fr-tick { flex:none; width:18px; height:18px; border-radius:50%; display:grid; place-items:center;
+             font-size:11px; color:var(--dim); border:1px solid var(--border-2); }
+  .fr-step.done .fr-tick { color:var(--done); border-color:var(--done); }
+  .fr-step.done .fr-txt b { color:var(--dim); font-weight:500; }
+  .fr-txt { display:flex; flex-direction:column; gap:3px; font-size:13px; color:var(--text); }
+  .fr-hint { font-size:12px; color:var(--faint); line-height:1.5; }
+  .fr-foot { margin-top:18px; font-size:12px; color:var(--faint); }
   .kbtn { display:inline-flex; align-items:center; gap:6px; flex:none; white-space:nowrap; line-height:1;
           font-family:var(--mono); font-size:11px;
           color:var(--dim); cursor:pointer; background:var(--panel);
@@ -812,6 +824,13 @@
   .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
   .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
   .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
+  /* Touch only. A finger needs ~44px; a pointer does not, and inflating these on a desktop would
+     cost the header the density the rest of the board is built around. */
+  @media (pointer: coarse) {
+    .kbtn { height:40px; padding:5px 13px; }
+    header .kbtn { min-width:40px; justify-content:center; }
+    .set-navi { min-height:40px; }
+  }
 </style>
 </head>
 <body>
@@ -1290,10 +1309,10 @@ function render(snapshot) {
   ca.title = `Resume ${proceedN} box${proceedN === 1 ? "" : "es"} paused on a trivial "proceed?" (one gesture, not silent)`;
 
   fleet.querySelector(".empty")?.remove();
-  if (!boxes.length && !repos.length) {
+  if (!boxes.length) {
     for (const [, s] of sectionEls) s.section.style.display = "none";
     const e = document.createElement("div"); e.className = "empty";
-    e.innerHTML = `the skein is empty — <a href="#" onclick="addRepoPrompt();return false">add a repository</a> then launch a box`;
+    e.innerHTML = firstRunHtml();
     fleet.append(e); order = [];
     renderTabs(); notify([]);   // clear stale title/favicon/tabs when the fleet drains
     return;
@@ -3969,6 +3988,43 @@ function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clear
 // and produce `box-my-feature`: a dock tab with a full toolbar over a black terminal, while the
 // board beside it said "0 boxes" and "the skein is empty". Three contradictory claims on one
 // screen, one click from first run. Refuse, and point at the thing that fixes it.
+// The first screen of a product nobody has used before.
+//
+// It said `the skein is empty — add a repository then launch a box`, once, in the middle of 900px
+// of nothing. It named neither of the two things that actually stop a first run — sbx missing, and
+// `skein login` never run — and it only rendered when there were zero repos AND zero boxes, so it
+// vanished the moment you added a repo, exactly when "now launch a box" was the thing to say.
+//
+// The steps that can be checked are checked. A tick is worth more than a sentence here: it turns
+// "did that work?" — the question every one of these steps leaves you with — into something the
+// page answers before you ask.
+function firstRunHtml() {
+  const h = lastHealth || {};
+  const steps = [
+    { done: h.sbx?.ok,
+      label: "sbx is installed and answering",
+      hint: `it runs the fleet — <a href="https://docs.docker.com/ai/sandboxes/" target="_blank" rel="noreferrer">install it</a>, and make sure Docker is running` },
+    { done: (h.logins || []).length > 0,
+      label: (h.logins || []).length ? `an agent is signed in (${h.logins.join(", ")})` : "sign an agent in",
+      hint: `run <code>skein login claude</code> once — every box inherits it, and without it each one comes up at a sign-in prompt and does nothing` },
+    { done: repos.length > 0,
+      label: repos.length ? `${repos.length} ${repos.length === 1 ? "repository" : "repositories"} registered` : "add a repository",
+      hint: `<a href="#" onclick="addRepoPrompt();return false">add one</a> — a box is a branch of a repo, so there is nothing to launch without it` },
+  ];
+  const rows = steps.map(s => `
+    <li class="fr-step ${s.done ? "done" : ""}">
+      <span class="fr-tick">${s.done ? "✓" : "○"}</span>
+      <span class="fr-txt"><b>${s.label}</b>${s.done ? "" : `<span class="fr-hint">${s.hint}</span>`}</span>
+    </li>`).join("");
+  const ready = steps.every(s => s.done);
+  return `<div class="fr">
+    <div class="fr-head">${ready ? "ready — launch your first box" : "three things and you are running"}</div>
+    <ol class="fr-steps">${rows}</ol>
+    ${ready ? `<button type="button" class="kbtn primary" onclick="openNewBox()">Launch a box</button>` : ""}
+    <div class="fr-foot">not sure what this looks like with a fleet? <a href="?demo">see the demo</a></div>
+  </div>`;
+}
+
 function gateLaunch() {
   const go = document.getElementById("nb-go");
   const hint = document.querySelector("#newbox .nb-foot .hint");
@@ -4711,9 +4767,17 @@ function connect() {
   es.onerror = () => { document.getElementById("live").classList.remove("on"); document.getElementById("livetext").textContent = "reconnecting…"; };
 }
 
+// The last health report, for anything that needs to say what is wrong rather than only that
+// something is. Module-level because `firstRunHtml` reads it during a board render.
+let lastHealth = null;
 function loadHealth() {
   if (DEMO) return;
   fetch("/api/health").then(r => r.json()).then(health => {
+    const hadNoReport = !lastHealth;
+    lastHealth = health;
+    // The first-run checklist ticks off this report, so it has to redraw when the report lands —
+    // otherwise the steps sit unticked until the next box event, which on an empty fleet never comes.
+    if (hadNoReport || !boxes.length) render(boxes || []);
     let banner = document.getElementById("healthban");
     if (health.ok) { banner?.remove(); return; }
     if (!banner) {

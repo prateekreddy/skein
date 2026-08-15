@@ -3544,6 +3544,28 @@ fn carries_login(bytes: &[u8]) -> bool {
 /// saved login and the fleet lost the copy it keeps precisely so a rebuild can restore it. Same bug,
 /// one layer up. [`carries_login`] is the same test the launcher applies, kept in step by
 /// `the_host_and_the_launcher_agree_on_what_a_login_is`.
+/// Which runtimes have a login the fleet can hand to a new box.
+///
+/// Read from the host's own copy under `fleet-home`, not from the sandbox: this answers the first
+/// question a new user has ("did `skein login` work?") and it must answer it with the fleet down,
+/// during setup, before any box exists. `carries_login` rather than "the file is there", because a
+/// logged-out agent leaves the file in place with its tokens blanked.
+pub fn signed_in_runtimes() -> Vec<String> {
+    let dir = fleet_home_dir();
+    LOGIN_FILES
+        .iter()
+        .filter(|rel| {
+            std::fs::read(dir.join(rel))
+                .map(|b| carries_login(&b))
+                .unwrap_or(false)
+        })
+        .map(|rel| match rel.starts_with(".codex") {
+            true => "codex".to_string(),
+            false => "claude".to_string(),
+        })
+        .collect()
+}
+
 pub fn sync_fleet_login(sandbox: &str) {
     let fleet = own_sandbox(sandbox);
     let dir = fleet_home_dir();
