@@ -824,6 +824,16 @@
   .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
   .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
   .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
+  .ffilter { flex:none; width:150px; height:24px; padding:0 8px; font-family:var(--mono); font-size:11px;
+             color:var(--text-2); background:var(--inset); border:1px solid var(--border-2);
+             border-radius:6px; outline:none; transition:border-color var(--dur-fast), width var(--dur-fast); }
+  .ffilter::placeholder { color:var(--faint); }
+  .ffilter:focus { border-color:var(--border-3); width:210px; color:var(--text); }
+  .counts .seg.filt { color:var(--waiting); }
+  .pinmore { display:block; width:100%; margin:2px 0 0; padding:7px 16px; text-align:left;
+             font-family:var(--ui); font-size:12px; color:var(--dim); cursor:pointer;
+             background:transparent; border:0; border-top:1px solid var(--line); }
+  .pinmore:hover { color:var(--text); background:var(--panel); }
   /* Touch only. A finger needs ~44px; a pointer does not, and inflating these on a desktop would
      cost the header the density the rest of the board is built around. */
   @media (pointer: coarse) {
@@ -840,6 +850,7 @@
         <header>
           <div class="word"><b>skein</b></div>
           <div class="counts" id="counts"></div>
+          <input id="ffilter" class="ffilter" type="search" placeholder="filter  /" aria-label="Filter boxes" autocomplete="off" spellcheck="false" />
           <div class="right">
             <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
             <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
@@ -1123,6 +1134,19 @@ const DEMO = new URLSearchParams(location.search).has("demo");
 // which repos exist), so they're reconciled by id alongside the keyed rows.
 const fleet = document.getElementById("fleet");
 const rowEls = new Map(), sectionEls = new Map();
+// A fleet is sold as many boxes and the board was tuned for about seven. Two things follow at
+// twenty: you cannot find one by eye, and the pinned zone stops pinning — measured at 20 boxes it
+// held 11 of them, ~1100px, so you scrolled *through* the pin.
+let boardFilter = "";
+const PIN_CAP = 5;
+let pinExpanded = false;
+// Name, branch, repo and the headline — the four things you would actually be looking for. Not
+// state: `/error` should find a box called error, and the group headers already sort by state.
+function matchesFilter(b, q) {
+  if (!q) return true;
+  const hay = `${b.name} ${b.branch || ""} ${b.repo || ""} ${b.headline || ""}`.toLowerCase();
+  return q.split(/\s+/).filter(Boolean).every(t => hay.includes(t));
+}
 const NEEDS_TIER = 1;   // tier <= 1 (needs-input, waiting) → the pinned "needs you" section
 // Collapse state per section id, persisted so it survives reloads.
 let collapsed = new Set();
@@ -1297,6 +1321,7 @@ function render(snapshot) {
   const need = (counts.error?.length||0) + (counts.attn?.length||0) + (counts.waiting?.length||0), working = counts.working?.length||0, done = counts.done?.length||0;
   document.getElementById("counts").innerHTML =
     `<span class="seg"><span class="n">${boxes.length}</span> boxes</span>`
+    + (boardFilter.trim() ? `<span class="seg filt">filtered</span>` : "")
     + (need ? `<span class="seg"><span class="pip" style="background:var(--attn)"></span><span class="n">${need}</span> need you</span>` : "")
     + (working ? `<span class="seg"><span class="pip" style="background:var(--working)"></span><span class="n">${working}</span> working</span>` : "")
     + (done ? `<span class="seg"><span class="pip" style="background:var(--done)"></span><span class="n">${done}</span> done</span>` : "");
@@ -1321,8 +1346,17 @@ function render(snapshot) {
   // Build the desired sections: pinned "needs you" (tier ≤ 1, across repos), then one per repo
   // (its remaining boxes), then "other" for boxes matching no managed repo. Empty managed repos are
   // still shown so you can launch into them.
-  const needy = boxes.filter(b => (b.tier ?? 9) <= NEEDS_TIER);
-  const rest  = boxes.filter(b => (b.tier ?? 9) >  NEEDS_TIER);
+  // The filter narrows what is DRAWN and nothing else: counts, the tab title, the voice and the
+  // away digest all still speak for the whole fleet. A filter that also silenced the announcements
+  // would be a way to hide a box that needs you and never hear about it.
+  const q = boardFilter.trim().toLowerCase();
+  const shown = q ? boxes.filter(b => matchesFilter(b, q)) : boxes;
+  const needyAll = shown.filter(b => (b.tier ?? 9) <= NEEDS_TIER);
+  const rest  = shown.filter(b => (b.tier ?? 9) >  NEEDS_TIER);
+  // A pin holding more than a handful has stopped being a pin. The rest are one click away, and the
+  // header still counts all of them, so nothing is hidden — only deferred.
+  const pinHidden = pinExpanded ? 0 : Math.max(0, needyAll.length - PIN_CAP);
+  const needy = pinHidden ? needyAll.slice(0, PIN_CAP) : needyAll;
   const byRepo = new Map();
   for (const b of rest) { const k = b.repo || "other"; (byRepo.get(k) || byRepo.set(k, []).get(k)).push(b); }
   const repoIds = new Set([...repos.map(r => r.id), ...byRepo.keys()].filter(k => k !== "other"));
@@ -1345,6 +1379,19 @@ function render(snapshot) {
     s.count.textContent = d.boxes.length || "";
     s.rows.style.display = col ? "none" : "";
     s.section.style.display = "";
+    // "+N more" for the pinned zone, kept as the section's last child so it cannot be mistaken for
+    // a box and cannot fall out of order with them.
+    let more = s.rows.querySelector(".pinmore");
+    if (d.id === "needs" && pinHidden) {
+      if (!more) {
+        more = document.createElement("button");
+        more.type = "button";
+        more.className = "pinmore";
+        more.onclick = () => { pinExpanded = true; render(boxes); };
+        s.rows.append(more);
+      }
+      more.textContent = `+${pinHidden} more need you`;
+    } else if (more) more.remove();
     let pos = 0;
     for (const b of d.boxes) {
       let el = rowEls.get(b.name); if (!el) { el = makeRow(b.name); rowEls.set(b.name, el); }
@@ -1360,10 +1407,13 @@ function render(snapshot) {
     }
   }
   for (const [name, el] of rowEls) if (!seen.has(name)) { el.remove(); rowEls.delete(name); }
-  // prune side-state for boxes that left the registry (live terminal sessions are kept on purpose)
-  for (const m of [shipState, comments]) for (const k of [...m.keys()]) if (!seen.has(k)) m.delete(k);
-  for (const k in prevState) if (!seen.has(k)) delete prevState[k];
-  if (sel && !seen.has(sel)) sel = null;
+  // Pruned against the FLEET, not against what is drawn. `seen` now means "on screen", and a box
+  // hidden by the filter is still very much alive — keying this on `seen` would throw away its
+  // unsent review comments the moment you typed a letter that did not match its name.
+  const known = new Set(boxes.map(b => b.name));
+  for (const m of [shipState, comments]) for (const k of [...m.keys()]) if (!known.has(k)) m.delete(k);
+  for (const k in prevState) if (!known.has(k)) delete prevState[k];
+  if (sel && !known.has(sel)) sel = null;
   renderTabs();          // tab status follows registry status
   notify(boxes);
   refreshDock();         // the dockbar tracks the viewed box's live state, not just view changes
@@ -1372,6 +1422,15 @@ function render(snapshot) {
   if (!restored) restoreSessions(); else openPending();
 }
 function refreshRow(name) { const el = rowEls.get(name), b = boxes.find(x => x.name === name); if (el && b) updateRow(el, b, el.dataset.showRepo === "1"); }
+
+// The filter is live: a fleet you are scanning is a fleet you are scanning now, and a search you
+// have to submit is one more key between you and the box you are looking for.
+const filterEl = document.getElementById("ffilter");
+filterEl?.addEventListener("input", () => { boardFilter = filterEl.value; pinExpanded = false; render(boxes); });
+filterEl?.addEventListener("keydown", e => {
+  e.stopPropagation();                       // the board's own j/k must not fire while typing here
+  if (e.key === "Escape") { filterEl.value = ""; boardFilter = ""; render(boxes); filterEl.blur(); }
+});
 
 // ---------- selection / keyboard ----------
 function select(name, soft) {
@@ -3545,6 +3604,7 @@ const KEYMAP = [
     [["d"], "open its diff"],
     [["]"], "jump to the next box that needs you"],
     [["l"], "load by box — which one is using the CPU"],
+    [["/"], "filter the board by name, branch, repo or headline"],
   ]},
   { sec:"Tabs", items:[
     [["⌥1","…","⌥9"], "switch to the nth open tab (⌥9 is always the last)"],
@@ -4482,6 +4542,9 @@ document.addEventListener("keydown", e => {
     case "Enter": case "o": if (sel) { e.preventDefault(); openTerminal(sel); } break;
     case "d": if (sel) { e.preventDefault(); openDiff(sel); } break;
     case "?": e.preventDefault(); openSettings("keys"); break;
+    // `/` is the one binding a fleet product cannot do without past a dozen boxes, and it was the
+    // last thing on the previous audit's still-unfixed list.
+    case "/": e.preventDefault(); document.getElementById("ffilter")?.focus(); break;
     case "]": e.preventDefault(); nextNeedsYou(); break;
     case "L": case "l": e.preventDefault(); showLoad(); break;
     case "[": e.preventDefault(); cycleSession(-1); break;
