@@ -517,8 +517,25 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
 /// Built once and shared by [`ask`] and [`draft_comment`] because the two differ only in what they
 /// are asked to produce. Both get the *summary* as well as the diff — a question asked after
 /// reading the brief is usually a question about the brief.
-fn context(slug: &str, pr: &Pr, repo_id: &str) -> String {
+fn context(slug: &str, pr: &Pr, repo: &Repo) -> String {
+    let repo_id = &repo.id;
     let (diff, cut) = pr_diff(slug, pr.number, STAGE2_BYTES).unwrap_or_default();
+    // Standing notes on the parts this change lands in — the thing a diff structurally cannot show,
+    // and the reason [`crate::moduledocs`] exists. Only fresh ones, and only ones already written:
+    // a question typed into a box is not the moment to spend a minute writing four of them.
+    let notes = crate::moduledocs::fresh_notes(repo, &changed_paths(slug, pr.number));
+    let notes = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n--- standing notes on the parts this touches ---\n{}\n",
+            notes
+                .iter()
+                .map(|d| format!("## {}\n{}", d.path, d.text))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        )
+    };
     let prior = cached(repo_id, pr.number, &pr.head_sha)
         .filter(|s| s.depth != Depth::Unread)
         .map(|s| {
@@ -533,12 +550,13 @@ fn context(slug: &str, pr: &Pr, repo_id: &str) -> String {
         })
         .unwrap_or_default();
     format!(
-        "PR #{n}: {title}\nBranch {head} into {base}.{prior}{cut_note}\n\n--- diff ---\n{diff}",
+        "PR #{n}: {title}\nBranch {head} into {base}.{prior}{notes}{cut_note}\n\n--- diff ---\n{diff}",
         n = pr.number,
         title = pr.title,
         head = pr.head_ref,
         base = pr.base_ref,
         prior = prior,
+        notes = notes,
         cut_note = if cut {
             "\nNOTE: the diff below was truncated."
         } else {
@@ -573,7 +591,7 @@ Their question: {question}
 
 {context}"#,
         question = question,
-        context = context(slug, pr, &repo.id),
+        context = context(slug, pr, repo),
     );
     claude_oneshot_with(&prompt, Some("claude-sonnet-5"), Duration::from_secs(180))
         .ok_or_else(|| "no answer came back — the model call failed or timed out.".into())
@@ -605,7 +623,7 @@ Their notes: {intent}
 
 {context}"#,
         intent = intent,
-        context = context(slug, pr, &repo.id),
+        context = context(slug, pr, repo),
     );
     claude_oneshot_with(&prompt, Some("claude-sonnet-5"), Duration::from_secs(180))
         .ok_or_else(|| "no draft came back — the model call failed or timed out.".into())

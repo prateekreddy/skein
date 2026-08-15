@@ -487,6 +487,18 @@
   .revbrief p { margin:0 0 9px; }
   .revbrief code { font:12px var(--mono); background:var(--elevated); border-radius:4px; padding:1px 5px; }
   .revempty { color:var(--faint); font-size:13px; padding:10px 2px; }
+  .revmods { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel);
+             padding:10px 12px; margin-bottom:16px; }
+  .revmodsnote { margin:0 0 9px; font-size:12px; line-height:1.55; color:var(--dim); }
+  .revmod { display:flex; align-items:center; gap:9px; padding:4px 0; font:11.5px var(--mono); }
+  .revmod code { color:var(--text-2); }
+  .revmod .dim { color:var(--faint); }
+  /* Three states, one dot: written and current, written and overtaken, never written. Stale is the
+     interesting one — it is amber rather than red because it is not an error, it is a note doing
+     exactly what it was designed to do, which is admit it is out of date. */
+  .revmodstate { width:7px; height:7px; border-radius:50%; flex:none; background:var(--stale); }
+  .revmodstate.fresh { background:var(--done); }
+  .revmodstate.stale { background:var(--waiting); }
   .revacts { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:11px; }
   .revacts .revspacer { flex:1; }
   .revchip.go { border-color:var(--accent); color:var(--accent-2); }
@@ -2057,7 +2069,7 @@ function openReview(repoId) {
   try { localStorage.setItem("skein.reviewRepo", id); } catch {}
   // Switching repos must not carry the previous repo's expansions: PR numbers collide across repos,
   // so #12 of one would silently open #12 of the other.
-  if (view.repo !== id) { revQueue = null; revOpen = new Set(); revSums = new Map(); }
+  if (view.repo !== id) { revQueue = null; revOpen = new Set(); revSums = new Map(); revMods = null; }
   view = { box: null, mode: "review", kind: "agent", repo: id };
   applyView();
   loadReview();
@@ -2156,11 +2168,69 @@ function renderReview() {
   }
   revpane.innerHTML = `<div class="revwrap"><div class="revhead">${picker}<div class="revchips">${chips}</div>
       <span class="revspacer"></span>
+      <button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>
       <button type="button" class="revchip" onclick="loadReview(true)">${revLoading ? "refreshing…" : "refresh"}</button>
-    </div>${body}</div>`;
+    </div>${revModsHtml()}${body}</div>`;
 }
 
 function setRevFilter(k) { revFilter = k; renderReview(); }
+
+// ---------- standing notes on the repo's modules ----------
+//
+// These answer *questions*, not summaries: a diff carries its own before-state, but a question is
+// usually about the thing the diff landed in, which the diff cannot show. Each note records the
+// commit its module was at when it was written, so "out of date" is a fact here rather than a
+// worry — and a stale note is never used to answer anything.
+let revMods = null;        // [{path, owners, state, written}]
+let revModsOpen = false;
+let revWriting = "";       // the module being written right now
+
+function loadModules() {
+  fetch(`/api/repos/${encodeURIComponent(view.repo)}/modules`).then(r => r.json())
+    .then(ms => { revMods = ms || []; renderReview(); }).catch(() => {});
+}
+function toggleMods() {
+  revModsOpen = !revModsOpen;
+  if (revModsOpen && !revMods) loadModules();
+  renderReview();
+}
+function writeModule(path) {
+  if (revWriting) { toast("one at a time — each note takes a minute"); return; }
+  revWriting = path; renderReview();
+  fetch(`/api/repos/${encodeURIComponent(view.repo)}/modules/write`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path }),
+  }).then(r => r.json()).then(d => {
+    revWriting = "";
+    if (!d.ok) { toast(d.error || "could not write that note"); renderReview(); return; }
+    toast(`note written for ${path}`);
+    loadModules();
+  }).catch(e => { revWriting = ""; toast(String(e.message || e).split("\n")[0]); renderReview(); });
+}
+// The chip's own label carries the state, so opening the panel is a choice rather than the only way
+// to find out whether there is anything to do in it.
+function revModsCount() {
+  if (!revMods) return "notes";
+  const fresh = revMods.filter(m => m.state === "fresh").length;
+  return `notes ${fresh}/${revMods.length}`;
+}
+function revModsHtml() {
+  if (!revModsOpen) return "";
+  if (!revMods) return `<div class="revmods"><div class="revempty">looking at the repo…</div></div>`;
+  if (!revMods.length) return `<div class="revmods"><div class="revempty">skein could not find modules in this repo's working clone.</div></div>`;
+  return `<div class="revmods">
+    <p class="revmodsnote">What each part of the repo is, written once and re-written when that part
+      changes. Used to answer your questions about a PR — never to write its summary, and a note
+      whose module has moved since is skipped rather than trusted.</p>
+    ${revMods.map(m => `<div class="revmod">
+      <span class="revmodstate ${esc(m.state)}" title="${m.state === "fresh" ? "current" : m.state === "stale" ? "the module has changed since this was written" : "no note yet"}"></span>
+      <code>${esc(m.path)}</code>
+      ${(m.owners || []).length ? `<span class="dim">${esc((m.owners || []).join(" "))}</span>` : ""}
+      <span class="revspacer"></span>
+      <button type="button" class="revchip" onclick="writeModule('${esc(m.path)}')"${revWriting ? " disabled" : ""}>${
+        revWriting === m.path ? "writing…" : m.state === "absent" ? "write" : "re-write"}</button>
+    </div>`).join("")}
+  </div>`;
+}
 
 // Summaries are fetched for the lane you are working — Needs you — and nowhere else. A PR you have
 // already decided on does not need explaining, and one you set aside explicitly does not either.

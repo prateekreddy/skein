@@ -168,6 +168,8 @@ async fn main() {
         .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
         .route("/api/review/counts", get(api_review_counts))
+        .route("/api/repos/:id/modules", get(api_modules))
+        .route("/api/repos/:id/modules/write", post(api_write_module))
         .route("/api/repos/:id/review", get(api_review_queue))
         .route(
             "/api/repos/:id/review/:number/archive",
@@ -424,6 +426,42 @@ async fn api_set_repo_settings(
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
+}
+
+/// A repo's modules and whether skein holds a current note on each.
+async fn api_modules(Path(id): Path<String>) -> Response {
+    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    match tokio::task::spawn_blocking(move || skein::moduledocs::status(&repo)).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct WriteModuleReq {
+    path: String,
+}
+
+/// Write (or rewrite) the standing note for one module.
+///
+/// One module per request, never "write them all": each is a minute of model time, and a single
+/// request that took twenty of them would look like a hang and could not report progress. The
+/// cockpit walks the list itself, so it can show which one is being written and stop partway.
+async fn api_write_module(
+    Path(id): Path<String>,
+    Json(req): Json<WriteModuleReq>,
+) -> Json<serde_json::Value> {
+    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    };
+    let out = tokio::task::spawn_blocking(move || skein::moduledocs::write(&repo, &req.path)).await;
+    Json(match out {
+        Ok(Ok(doc)) => serde_json::json!({ "ok": true, "path": doc.path, "written": doc.written }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
 }
 
 /// How many PRs need you, per repo — for the badge on the review button.

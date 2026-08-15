@@ -61,13 +61,20 @@ function makeFixture() {
   fs.writeFileSync(path.join(root, "search-review-requested.json"), `[${requested}]`);
   fs.writeFileSync(path.join(root, "search-author.json"), `[${mine}]`);
 
-  // A `gh` that answers from those files. `user/teams` fails on purpose: that is the common real
-  // shape (a login without read:org) and it must surface as a stated blind spot, not silence.
   // A working clone with a CODEOWNERS, so stage 0 (ownership) runs for real rather than being
-  // skipped by an absent file — the path that decides how deep a summary goes.
+  // skipped by an absent file — the path that decides how deep a summary goes, and the same file
+  // the module list is derived from.
   fs.mkdirSync(path.join(root, "work", ".github"), { recursive: true });
   fs.writeFileSync(path.join(root, "work", ".github", "CODEOWNERS"), "src/ @me\nweb/ @someone-else\n");
+  // Real directories, so the module list is not empty: a CODEOWNERS pattern that names no directory
+  // is deliberately not a module.
+  fs.mkdirSync(path.join(root, "work", "src"), { recursive: true });
+  fs.mkdirSync(path.join(root, "work", "web"), { recursive: true });
+  fs.writeFileSync(path.join(root, "work", "src", "parser.rs"), "const TIMEOUT: u64 = 5;\n");
+  fs.writeFileSync(path.join(root, "work", "web", "app.js"), "export const app = 1;\n");
 
+  // A `gh` that answers from fixture files. `user/teams` fails on purpose: that is the common real
+  // shape (a login without read:org) and it must surface as a stated blind spot, not silence.
   const gh = path.join(bin, "gh");
   fs.writeFileSync(gh, `#!/bin/sh
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf 'me\\n'; exit 0; fi
@@ -387,6 +394,38 @@ await check("posting is a separate press from drafting", async () => {
   await settle(900);
   const open = await page.$("#revpane .revcompose");
   if (open) throw new Error("the composer stayed open, so it is unclear whether it sent");
+});
+
+console.log("\nstanding notes");
+await check("the pane says how much of the repo it has notes on", async () => {
+  const chip = await mustSee("#revpane .revchip:has-text('notes')", "the notes chip");
+  if (!/notes/.test(await chip.textContent())) throw new Error("no notes chip");
+});
+await check("opening it lists the repo's modules, and admits it has none written", async () => {
+  await page.click("#revpane .revchip:has-text('notes')");
+  await page.waitForSelector("#revpane .revmods .revmod", { timeout: 8000 });
+  const mods = await page.$$eval("#revpane .revmod", els => els.map(e => ({
+    path: e.querySelector("code")?.textContent.trim(),
+    state: [...e.querySelector(".revmodstate").classList].filter(c => c !== "revmodstate")[0] || "absent",
+    action: e.querySelector("button")?.textContent.trim(),
+  })));
+  if (!mods.some(m => m.path === "src")) throw new Error(`modules not found: ${JSON.stringify(mods)}`);
+  if (!mods.every(m => m.state === "absent")) throw new Error(`a note appeared from nowhere: ${JSON.stringify(mods)}`);
+  if (!mods.every(m => m.action === "write")) throw new Error("no way to write one");
+});
+// The whole design rests on this: a note carries the commit its module was at, so out-of-date is a
+// fact rather than a worry. The fixture's clone is not a git repo, so freshness cannot be
+// established — and that must read as stale, never as fresh.
+await check("a note whose freshness cannot be proven is not treated as current", async () => {
+  const wrote = await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules/write`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path: "src" }),
+  }).then(r => r.json());
+  if (!wrote.ok) throw new Error(`writing was refused: ${wrote.error}`);
+  const mods = await (await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules`)).json();
+  const src = mods.find(m => m.path === "src");
+  if (src.state !== "stale")
+    throw new Error(`a note git cannot vouch for reported "${src.state}" — it must never read fresh`);
 });
 
 console.log("\nsetting aside");

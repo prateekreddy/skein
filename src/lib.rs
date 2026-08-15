@@ -15,6 +15,7 @@ mod fleet;
 pub mod gitgate;
 mod health;
 mod mailbox;
+pub mod moduledocs;
 mod place;
 pub mod prq;
 mod repos;
