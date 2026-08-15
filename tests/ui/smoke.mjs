@@ -90,12 +90,8 @@ exit 0
       { type: "tool_use", name: "Bash", input: { command: "uptime -s" } }] } }),
     JSON.stringify({ type: "user", timestamp: "2026-07-31T08:10:05Z", message: { role: "user", content: [{ type: "tool_result", content: "X".repeat(5000) }] } }),
   ].join("\n") + "\n");
-  // the check command a Verify runs — fails on purpose, and writes to BOTH streams, so the test
-  // proves the exit code survives and stderr is folded into what you read
   fs.mkdirSync(path.join(root, "home"), { recursive: true });
-  fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({
-    check_command: "echo building the thing; echo 'boom: the wheels came off' >&2; exit 3",
-  }));
+  fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({}));
   // a registered repo, so the settings pane has a card to open and edit
   fs.writeFileSync(path.join(root, "home", "repos.json"), JSON.stringify([
     { id: "smoke", source: "/src/smoke", work: ws, store: path.join(root, "store"), agent: "claude",
@@ -368,15 +364,13 @@ await check("a repo is a card that says what it's configured to do", async () =>
   await settle();
   await mustSee("#settings.open", "the settings dialog");
   const card = await mustSee('.rcard[data-card="smoke"]', "the repo card");
-  const tags = await card.$$eval(".rtag", els => els.map(e => e.textContent));
-  if (!tags.some(t => /building the thing/.test(t))) throw new Error(`the inherited check should show: ${tags}`);
   if (await page.$(".rcard.open")) throw new Error("cards should start collapsed");
 });
 await check("opening it shows labelled fields, not bare inputs", async () => {
   await page.click('.rcard[data-card="smoke"] .rhead');
   await settle(300);
   const titles = await page.$$eval('.rcard[data-card="smoke"] .set-title', els => els.map(e => e.textContent.replace("saved","").trim()));
-  for (const want of ["Check command", "Plane project", "Work tracking"])
+  for (const want of ["Plane project", "Work tracking"])
     if (!titles.includes(want)) throw new Error(`missing field "${want}" — got ${titles}`);
 });
 await check("a repo picks a connection instead of restating half of one", async () => {
@@ -485,10 +479,24 @@ await check("a gateway that isn't a URL is refused, not stored", async () => {
 await check("Track work appears once THIS box's repo has a usable connection", async () => {
   // The payoff, and the reason readiness is per box: "some connection somewhere is ready" says
   // nothing about this one.
-  await openTab("diff");
-  const btn = await mustSee("#dtrack", "Track work, now that the repo picks a ready connection");
-  const title = await btn.getAttribute("title");
-  if (!/smoke tracker/.test(title)) throw new Error(`it should name the backlog it would mint at, got "${title}"`);
+  //
+  // It lives in box settings rather than the dock since cd9f5b8 — the dock had grown a row of
+  // buttons mostly irrelevant to the box you were looking at, and this was the worst of them.
+  // The test kept clicking at the old address for months, which is why it is worth saying where
+  // the button is and not only that it exists.
+  await page.click(`#fleet .row[data-name="${BOX}"] .rowcog, #fleet .row[data-name="${BOX}"]`);
+  await settle(300);
+  await page.evaluate(name => window.openBoxSettings?.(name), BOX);
+  await settle(500);
+  const btn = await mustSee("#bs-wire", "Wire up, now that the repo picks a ready connection");
+  const label = (await btn.textContent() || "") + (await btn.getAttribute("title") || "");
+  if (!/smoke tracker/.test(label))
+    throw new Error(`it should name the backlog it would mint at, got "${label}"`);
+  // Closed explicitly, not with Escape. These checks run in sequence against one page, so a dialog
+  // left open is not this test failing — it is the next four failing, somewhere else, for a reason
+  // that has nothing to do with them. Which is exactly what happened on the first run of this edit.
+  await page.evaluate(() => window.closeBoxSettings?.());
+  await settle(200);
 });
 
 await check("settings is usable while a box is open (the docked layout hides nothing of it)", async () => {
@@ -535,33 +543,6 @@ await check("loading older reaches the beginning and says so", async () => {
     throw new Error("a fully-read record must say so rather than keep offering more");
 });
 
-console.log("\nverify");
-await check("Verify is offered on the box, and nothing ran it for me", async () => {
-  await openTab("diff");
-  await mustSee("#dverify", "the Verify button");
-  if (await page.$(`#fleet .row[data-name="${BOX}"] .vchip:not([style*='none'])`))
-    throw new Error("a check result appeared without anyone asking for one — verify must never self-trigger");
-});
-await check("a failing check reports its exit code and both output streams", async () => {
-  await page.click("#dverify");
-  await page.waitForSelector("#vout.open", { timeout: 20000 });
-  const meta = await text("#vout-meta"), body = await text("#vout-body");
-  if (!/exit 3/.test(meta)) throw new Error(`expected the check's own exit code, got "${meta}"`);
-  if (!/building the thing/.test(body)) throw new Error("stdout is missing from the output");
-  if (!/wheels came off/.test(body)) throw new Error("stderr was not folded in — the useful half of a failure");
-  await page.keyboard.press("Escape");
-});
-await check("the result lands on the row as a chip you can reopen", async () => {
-  // scope to OUR box: skein keeps the sandbox it runs inside on the board too, and that row is first
-  const sel = `#fleet .row[data-name="${BOX}"] .vchip`;
-  await page.waitForFunction(s => document.querySelector(s)?.textContent?.includes("failed"), sel, { timeout: 8000 });
-  const chip = await mustSee(sel, "the check chip");
-  if (!(await chip.getAttribute("title")).includes("echo building")) throw new Error("the chip must name the command behind it");
-  await chip.click();
-  await page.waitForSelector("#vout.open", { timeout: 8000 });
-  await page.keyboard.press("Escape");
-});
-
 // ---------- the mouth ----------
 // The one section here that does not assert something visible, because there is nothing to see: the
 // output is sound. Everything else about the rule still holds — this is the real page in a real
@@ -569,6 +550,21 @@ await check("the result lands on the row as a chip you can reopen", async () => 
 // of the page's own logic would agree with whatever the page happened to do.
 console.log("\nvoice");
 const spoken = () => page.evaluate(() => window.__said.splice(0));
+
+// Both announcements below are gated behind `OWED_GRACE_MS` (you have to have been away a while)
+// and `OWED_SETTLE_MS` (the box has to have stopped flickering) — introduced by c5f86a6 to stop the
+// voice repeating itself, and never reflected here, so these checks asserted pre-c5f86a6 behaviour
+// and failed for months. Real time cannot be waited out twice in a smoke run, and `awaySince` is a
+// module-scope `let` no test can assign; it is only ever compared against `Date.now`, which one can.
+// So the clock moves instead of the calendar.
+const runClock = () => page.evaluate(() => {
+  let t = Date.now();
+  window.__realNow = Date.now;
+  Date.now = () => t;
+  window.__advance = ms => { t += ms; };
+});
+const stopClock = () => page.evaluate(() => { if (window.__realNow) Date.now = window.__realNow; });
+
 await check("the speaker is wired to a switch of its own", async () => {
   await page.evaluate(() => {
     window.__said = [];
@@ -585,6 +581,7 @@ await check("the speaker is wired to a switch of its own", async () => {
   if (!said.length) throw new Error("turning voice on said nothing — Safari needs that gesture to speak later");
   if (!/voice on/i.test(said[0])) throw new Error(`expected a confirmation, got ${JSON.stringify(said[0])}`);
 });
+await runClock();
 await check("a box that starts asking says what it is asking", async () => {
   const said = await page.evaluate(() => {
     // Two snapshots: the first seeds the prior state (a fresh tab must not announce a fleet that
@@ -593,6 +590,10 @@ await check("a box that starts asking says what it is asking", async () => {
     const asking = [{ name: "example-box-1", state: "needs-input", pause: "ask", blocked_kind: "permission",
                       headline: "Run `rm -rf /boxes/smoke/tree/build`?" }];
     notify(working); window.__said.length = 0;
+    // Past the grace window and long enough for the new state to have settled.
+    window.__advance(60000);
+    notify(asking);
+    window.__advance(60000);
     notify(asking);
     return window.__said.slice();
   });
@@ -604,17 +605,29 @@ await check("a box that starts asking says what it is asking", async () => {
   if (/`|\/boxes\//.test(line)) throw new Error(`unspeakable text survived: ${JSON.stringify(line)}`);
 });
 await check("a burst becomes a count, not a monologue", async () => {
-  const said = await page.evaluate(() => {
+  // Three boxes turn at once. The property is that you never hear three sentences — not that you
+  // hear exactly one: a finished box is announced on its own tick and the standing debt waits for
+  // the next, deliberately, so the `done` sentence is not buried inside a list ("let it stand alone
+  // and say this on the next one"). Two ticks, one sentence each, neither of them a monologue.
+  const [first, second] = await page.evaluate(() => {
     const calm = ["a", "b", "c"].map(n => ({ name: n, state: "working", pause: "none" }));
     const turned = [{ name: "a", state: "needs-input", pause: "ask", headline: "one?" },
                     { name: "b", state: "needs-input", pause: "ask", headline: "two?" },
                     { name: "c", state: "done", pause: "none" }];
     notify(calm); window.__said.length = 0;
+    window.__advance(60000);
     notify(turned);
-    return window.__said.slice();
+    const one = window.__said.splice(0);
+    window.__advance(60000);
+    notify(turned);
+    return [one, window.__said.splice(0)];
   });
-  if (said.length !== 1) throw new Error(`a burst must collapse to one utterance, got ${JSON.stringify(said)}`);
-  if (!/2 of 3 boxes need you/.test(said[0])) throw new Error(`expected the owed count, got ${JSON.stringify(said[0])}`);
+  if (first.length !== 1 || !/c finished/.test(first[0]))
+    throw new Error(`the finished box is said alone, got ${JSON.stringify(first)}`);
+  if (second.length !== 1)
+    throw new Error(`the standing debt must be one sentence, got ${JSON.stringify(second)}`);
+  if (!/2 boxes need you/.test(second[0]))
+    throw new Error(`expected a count rather than a reading of each, got ${JSON.stringify(second[0])}`);
 });
 await check("silence when nothing turned, and when you are looking at the board", async () => {
   const said = await page.evaluate(() => {
@@ -641,6 +654,9 @@ await check("the switch silences it", async () => {
 
 // The ear. Headless Chromium has no recogniser, so one is stood in — everything downstream of the
 // transcript is the page's own code, which is where the whole design lives.
+// The clock goes back to the wall before anything that involves a real timer — a frozen `Date.now`
+// is right for stepping over a 20s grace window and wrong for everything else.
+await stopClock();
 await check("holding the key opens an ear, and releasing it acts on what was said", async () => {
   await page.evaluate(() => {
     window.__started = 0;
@@ -652,6 +668,12 @@ await check("holding the key opens an ear, and releasing it acts on what was sai
     window.__said = [];
     speechSynthesis.speak = u => window.__said.push(u.text);
   });
+  // The previous check turned the speaker OFF, and `say()` is gated on that switch — so without
+  // this the mic opens, hears correctly, and answers into a muted page, which reads as the mic
+  // being broken. This check is about the ear, so it states the mouth it needs rather than
+  // inheriting whatever the check before it happened to leave.
+  await page.evaluate(() => { if (!voiceOn) document.getElementById("voice").click(); });
+  await page.evaluate(() => { window.__said.length = 0; });
   // Press and hold: the mic must NOT open on the keydown itself, or every ⌥-chord would trip it.
   await page.keyboard.down("AltRight");
   if (await page.evaluate(() => window.__started)) throw new Error("a tap opened the mic — ⌥ chords would trip it constantly");

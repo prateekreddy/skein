@@ -2574,6 +2574,11 @@ function stopListening() {
 // also happens to be how push-to-talk should feel.
 let pttTimer = null;
 const PTT_HOLD = 260;
+// Capture, not bubble, and that is load-bearing rather than stylistic. The tab chords below (⌥[,
+// ⌥], ⌥1-9) are bound on the capture phase and call `stopPropagation`, so a bubble listener here
+// never saw the second key of exactly the chords this is meant to stand aside for — the mic opened
+// 260ms into every ⌥[ tab switch, whenever any box tab was open. The comment above said a chord
+// cancels the timer; it did not, and a browser test caught it after months of failing unnoticed.
 document.addEventListener("keydown", e => {
   if (e.code !== "AltRight" || e.repeat) {
     // Any other key while Alt is down means a chord, not a held mic.
@@ -2582,7 +2587,7 @@ document.addEventListener("keydown", e => {
   }
   if (pttTimer || hearing) return;
   pttTimer = setTimeout(() => { pttTimer = null; listen(); }, PTT_HOLD);
-});
+}, true);
 document.addEventListener("keyup", e => {
   if (e.code !== "AltRight") return;
   if (pttTimer) { clearTimeout(pttTimer); pttTimer = null; }
