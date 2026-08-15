@@ -472,6 +472,17 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
         "has_tracking_override": skein::box_tracking(&name).is_some(),
         "own_git_name": own_identity.clone().map(|(n, _)| n).unwrap_or_default(),
         "own_git_email": own_identity.map(|(_, e)| e).unwrap_or_default(),
+        // The box's own answer, "" when it inherits — same grammar as tracking above. `effective`
+        // is what it will actually come up with, which is not derivable in the page: it depends on
+        // the fleet default *and* on whether a write token can be issued at all.
+        "git_scope": std::fs::read_to_string(
+            std::path::Path::new(&skein::box_state(&name)).join("git-scope"),
+        )
+        .unwrap_or_default()
+        .trim()
+        .to_string(),
+        "effective_git_scope": if skein::gitgate::box_is_scoped(&name) { "repo" } else { "fleet" },
+        "git_scope_available": skein::gitgate::can_issue_write_tokens(),
         "own_disk": std::fs::read_to_string(
             std::path::Path::new(&skein::box_state(&name)).join("disk"),
         )

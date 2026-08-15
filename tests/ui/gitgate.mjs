@@ -16,8 +16,8 @@
 import { grab, harness } from "./lift.mjs";
 
 const source = [
-  "gitqAnnounced", "gitqPrimed", "decideGitq", "pollGitq", "paintGitqBadge", "gitqCard",
-  "gitqGrantRow", "revokeGitq",
+  "gitqAnnounced", "gitqCreds", "gitqPrimed", "decideGitq", "pollGitq", "paintGitqBadge", "gitqCard",
+  "gitqGrantRow", "revokeGitq", "gitqCredRow", "editGitCred", "addGitCred", "removeGitCred",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -26,6 +26,7 @@ const scope = new Function(`
   let keep = { checked: false };
   let hours = { value: "24" };
   let panelOpen = false;
+  let fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {} } };
   let payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
   const esc = s => String(s);
   const toast = m => notes.push("toast:" + m);
@@ -36,6 +37,8 @@ const scope = new Function(`
       if (id === "gitq") return { classList: { contains: () => panelOpen } };
       if (id.startsWith("gq-keep-")) return keep;
       if (id.startsWith("gq-h-")) return hours;
+      if (id === "gq-c-repo") return fields.repo;
+      if (id === "gq-c-token") return fields.token;
       if (id === "gitqbtn") return {
         querySelector: () => (badge.n === null ? null : { remove: () => { badge.n = null; } }),
         appendChild: el => { badge.n = el.textContent; },
@@ -61,6 +64,9 @@ const scope = new Function(`
   ${source}
   return {
     decideGitq, pollGitq, gitqCard, gitqGrantRow, revokeGitq,
+    gitqCredRow, editGitCred, addGitCred, removeGitCred,
+    fields: () => fields,
+    setCreds: c => { gitqCreds = c; },
     sent: () => sent,
     notes: () => notes,
     badge: () => badge,
@@ -72,6 +78,8 @@ const scope = new Function(`
       payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
       gitqAnnounced.clear(); gitqPrimed = false;
       keep = { checked: false }; hours = { value: "24" }; alertsOn = true;
+      fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {} } };
+      gitqCreds = [];
     },
   };
 `);
@@ -169,5 +177,65 @@ check("an expired one is shown", dead.includes("expired"), true);
 check("but cannot be revoked twice", dead.includes("Revoke"), false);
 const forever = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "", live: true });
 check("a permanent grant says so rather than showing a blank date", forever.includes("no expiry"), true);
+
+// --- stored repository tokens -------------------------------------------------------------------
+T.reset();
+T.fields().repo.value = "acme/thing";
+T.fields().token.value = "github_pat_11ABC";
+await T.addGitCred();
+check("storing a token names exactly one repository", T.sent()[0].body.repos, ["acme/thing"]);
+check("and carries the token", T.sent()[0].body.token, "github_pat_11ABC");
+check(
+  "the id is derived from the repo, so re-storing it replaces rather than duplicates",
+  T.sent()[0].body.id,
+  "acme-thing",
+);
+check("the token field is cleared after storing", T.fields().token.value, "");
+
+// Half a form is not a credential — storing a repo with no token would report the fleet as ready
+// to scope while every box comes up unable to push.
+T.reset();
+T.fields().repo.value = "a/b";
+T.fields().token.value = "";
+await T.addGitCred();
+check("a repo with no token is refused before it is sent", T.sent().length, 0);
+T.reset();
+T.fields().repo.value = "";
+T.fields().token.value = "github_pat_x";
+await T.addGitCred();
+check("and a token with no repo likewise", T.sent().length, 0);
+
+// --- rotating one ------------------------------------------------------------------------------
+T.reset();
+T.setCreds([{ id: "acme-thing", repo: "acme/thing", label: "", has_token: true }]);
+T.editGitCred("acme-thing");
+check("replacing prefills the repo so a typo cannot store a second credential",
+  T.fields().repo.value, "acme/thing");
+check("and never prefills the old token", T.fields().token.value, "");
+check("saying plainly that the old one goes",
+  T.fields().token.placeholder.includes("replaced"), true);
+
+T.fields().token.value = "github_pat_NEW";
+await T.addGitCred();
+check("the rotation reuses the same id", T.sent()[0].body.id, "acme-thing");
+check("with the new token", T.sent()[0].body.token, "github_pat_NEW");
+
+// --- what a credential row shows ----------------------------------------------------------------
+const ready = T.gitqCredRow({ id: "a-b", repo: "a/b", label: "", has_token: true, problem: "" });
+check("a usable token reads as ready", ready.includes("ready"), true);
+check("and offers to be replaced", ready.includes("Replace token"), true);
+
+const incomplete = T.gitqCredRow({ id: "a-b", repo: "a/b", label: "", has_token: false, problem: "" });
+check("one with no token says so", incomplete.includes("incomplete"), true);
+check("and offers to add one", incomplete.includes("Add token"), true);
+
+// A hand-edited multi-repo entry is listed and refused — the host will not use it, and a row that
+// silently vanished would leave someone staring at a repo whose token "is configured".
+const wide = T.gitqCredRow({
+  id: "wide", repo: "", repos: ["a/one", "a/two"], label: "", has_token: true,
+  problem: "names 2 repositories; a stored token must cover exactly one",
+});
+check("a refused credential is shown, not hidden", wide.includes("refused"), true);
+check("and says why", wide.includes("exactly one"), true);
 
 done();

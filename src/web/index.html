@@ -915,6 +915,8 @@
         <input id="nb-gitname" placeholder="name" autocomplete="off" spellcheck="false" />
         <input id="nb-gitemail" placeholder="email" autocomplete="off" spellcheck="false" />
       </div>
+      <label class="nb-lbl">github access</label>
+      <select id="nb-gitscope"></select>
       <div class="nb-foot"><span class="hint">creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock</span><button class="primary" id="nb-go">Launch →</button></div>
     </div>
   </div>
@@ -934,6 +936,9 @@
       <label class="nb-lbl">disk allowance</label>
       <input id="bs-disk" autocomplete="off" spellcheck="false" />
       <div class="ar-derived" id="bs-note"></div>
+      <label class="nb-lbl">github access</label>
+      <select id="bs-gitscope"></select>
+      <div class="ar-derived" id="bs-gitscope-note"></div>
       <!-- One-shot actions, not settings: each spends a real round trip, so they are buttons you
            press rather than fields that save. They live here because the dock had grown a row of
            them that were mostly irrelevant to the box you were looking at. -->
@@ -3274,6 +3279,8 @@ function pollSubq() {
 // a push anywhere else is refused by GitHub whether or not anyone ever opens this. What the panel
 // decides is whether that stops being true for one box and one repo, for a while.
 const gitqAnnounced = new Set();
+// The last credential list the panel drew, so "Replace token" can prefill without a second fetch.
+let gitqCreds = [];
 let gitqPrimed = false;
 function openGitq() { const o = document.getElementById("gitq"); o.classList.add("open"); o.setAttribute("aria-hidden","false"); loadGitq(); }
 function closeGitq() { const o = document.getElementById("gitq"); o.classList.remove("open"); o.setAttribute("aria-hidden","true"); }
@@ -3323,15 +3330,30 @@ function gitqCredRow(c) {
       ${c.problem ? `<div class="sq-log">unusable — ${esc(c.problem)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${c.problem ? "refused" : (c.has_token ? "ready" : "incomplete")}</span>
+        <button class="kbtn ghost" onclick="editGitCred('${esc(c.id)}')">${c.has_token ? "Replace token" : "Add token"}</button>
         <button class="kbtn ghost" onclick="removeGitCred('${esc(c.id)}')">Forget</button>
       </div>
     </div>`;
+}
+
+// Rotating a token is the common edit — they expire, and a compromised one has to be replaced in a
+// hurry. Retyping the repository to do it invites a typo that stores a *second* credential rather
+// than replacing the first, which then quietly keeps working.
+function editGitCred(id) {
+  const c = (gitqCreds || []).find(x => x.id === id);
+  if (!c) return;
+  document.getElementById("gq-c-repo").value = c.repo || (c.repos || [])[0] || "";
+  const t = document.getElementById("gq-c-token");
+  t.value = "";
+  t.placeholder = c.has_token ? "paste the new token — the old one is replaced" : "github_pat_…";
+  t.focus();
 }
 
 function loadGitq() {
   const list = document.getElementById("gitq-list");
   return fetch("/api/fleet/git-grants").then(r => r.json()).then(d => {
     const reqs = d.requests || [], grants = d.grants || [], creds = d.credentials || [];
+    gitqCreds = creds;
     let html = "";
     // Said first and plainly: with no way to issue a write token nothing is scoped, so a reader
     // seeing an empty panel knows whether that means "nobody asked" or "not switched on yet".
@@ -3364,12 +3386,14 @@ function loadGitq() {
 function addGitCred() {
   const repo = (document.getElementById("gq-c-repo").value || "").trim();
   const token = (document.getElementById("gq-c-token").value || "").trim();
-  if (!repo || !token) { toast("a repository and a token are both needed"); return; }
+  if (!repo || !token) { toast("a repository and a token are both needed"); return Promise.resolve(); }
   // The id is derived from the repo rather than asked for: it is only a filename, and one token per
   // repo means the repo already identifies it. Re-storing the same repo replaces its token, which
   // is what rotating one should do.
   const id = repo.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
-  fetch("/api/fleet/git-credentials", {
+  // Returns its promise, so a caller — the test, or anything wanting to store then act — can wait
+  // for the round trip instead of guessing how many ticks the clear took.
+  return fetch("/api/fleet/git-credentials", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ id, label: repo, repos: [repo], token }),
   }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); });
@@ -3380,7 +3404,7 @@ function addGitCred() {
 }
 
 function removeGitCred(id) {
-  fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
+  return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
     .then(r => { if (!r.ok) throw 0; loadGitq(); })
     .catch(() => toast("could not forget that token"));
 }
@@ -3916,7 +3940,7 @@ function currentRepoId() {
   if (repos.length) return repos[0].id;
   return "box";
 }
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync()]).then(() => { fillRepoSelect(); fillSyncSelect(); }); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); }); nbBranch.focus(); }
 
 // Blank on every open, because these are a per-box exception: carrying the last box's identity
 // forward is how the wrong name ends up on a commit nobody checked.
@@ -4037,6 +4061,22 @@ function openBoxSettings(name) {
       const d = document.getElementById("bs-disk");
       d.value = cur.own_disk || "";
       d.placeholder = cur.effective_disk_mb ? fmtGb(cur.effective_disk_mb) : "unlimited";
+      // Three states, and the empty one is inheritance rather than a value — same grammar as work
+      // tracking above. The default option names what inheriting currently *means*, because "fleet
+      // default" alone does not tell you which way this box will come up.
+      const gs = document.getElementById("bs-gitscope");
+      const eff = cur.effective_git_scope === "repo" ? "its own repo only" : "the whole fleet credential";
+      gs.innerHTML = [
+        `<option value="">fleet default — ${esc(eff)}</option>`,
+        `<option value="repo">its own repo — read others, ask to write them</option>`,
+        `<option value="fleet">unscoped — the fleet-wide credential</option>`,
+      ].join("");
+      gs.value = cur.git_scope || "";
+      // A mount namespace and a credential are both fixed as the box comes up, so unlike the fields
+      // above this one is not live. Saying so here is cheaper than it reading as broken.
+      document.getElementById("bs-gitscope-note").textContent = cur.git_scope_available
+        ? "applies at this box's next start — a running box keeps the credential it was given"
+        : "nothing to scope with yet: configure a GitHub App or a repository token under Repo write access";
       // Work tracking: the button says what pressing it would DO, which depends on whether the box
       // already holds a token. Nothing host-side records that, so the panel asked the box.
       const wire = document.getElementById("bs-wire");
@@ -4074,6 +4114,7 @@ function saveBoxSettings() {
   const gitName = document.getElementById("bs-gitname").value.trim();
   const gitEmail = document.getElementById("bs-gitemail").value.trim();
   const disk = document.getElementById("bs-disk").value.trim();
+  const gitScope = document.getElementById("bs-gitscope").value;
   const post = (path, body) => fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); });
@@ -4082,11 +4123,27 @@ function saveBoxSettings() {
     post("tracking", { connection: sync === "" ? null : (sync === "none" ? "" : sync) }),
     post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {}),
     post("disk", { limit: disk || null }),
+    post("git-scope", { scope: gitScope || null }),
   ])
     .then(() => { toast(`${name}: settings saved`); closeBoxSettings(); refresh(); })
     .catch(e => toast(`settings: ${e.message}`));
 }
 function askDiskLimit(name) { openBoxSettings(name); }
+// The launch dialog's copy of the box-settings control. Empty is inheritance, and the label says
+// what inheriting currently means — a bare "fleet default" would not tell you which way this box
+// comes up, which is the only thing the person launching it wants to know.
+function fillGitScopeSelect() {
+  const el = document.getElementById("nb-gitscope");
+  if (!el) return;
+  const on = !!settings.scope_git_to_repo;
+  el.innerHTML = [
+    `<option value="">fleet default — ${on ? "its own repo only" : "the whole fleet credential"}</option>`,
+    `<option value="repo">its own repo — read others, ask to write them</option>`,
+    `<option value="fleet">unscoped — the fleet-wide credential</option>`,
+  ].join("");
+  el.value = "";
+}
+
 function fillSyncSelect() {
   const el = document.getElementById("nb-sync");
   const repo = (repos || []).find(r => r.id === currentRepoId());
@@ -4104,7 +4161,7 @@ function openNewBoxFor(repoId) {
   newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields();
   Promise.all([loadRepos(), loadSync()]).then(() => {
     if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId;
-    fillSyncSelect(); nbBranch.focus();
+    fillSyncSelect(); fillGitScopeSelect(); nbBranch.focus();
   });
 }
 function closeNewBox() { newbox.classList.remove("open"); }
@@ -4172,6 +4229,7 @@ function launchBox(branch) {
   const sync = document.getElementById("nb-sync").value;
   const gitName = document.getElementById("nb-gitname").value.trim();
   const gitEmail = document.getElementById("nb-gitemail").value.trim();
+  const gitScope = document.getElementById("nb-gitscope").value;
   closeNewBox();
   select(name);
   view = { box: name, mode: "term", kind: "agent" };
@@ -4184,6 +4242,10 @@ function launchBox(branch) {
   const chosen = Promise.all([
     sync === "" ? null : post("tracking", { connection: sync === "none" ? "" : sync }, "work tracking"),
     (gitName || gitEmail) ? post("identity", { name: gitName, email: gitEmail }, "the committer") : null,
+    // Same reason as the two above, and more sharply: the launcher reads this as the box comes up to
+    // decide which credential to place. Set afterwards it would apply at the *next* start, so the
+    // box's first turn — the one most likely to push — would run under the choice not made.
+    gitScope === "" ? null : post("git-scope", { scope: gitScope }, "github access"),
   ].filter(Boolean));
   chosen.then(() => { if (!sessions.has(name)) createSession(name, "agent", branch, agent); });
   applyView();
