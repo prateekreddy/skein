@@ -804,6 +804,63 @@ pub fn remove_write_credential(id: &str) -> Result<(), String> {
     crate::util::write_atomic(&credentials_path(), &home, body.as_bytes())
 }
 
+/// One repository's answer to "could a box actually push here?"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeResult {
+    pub repo: String,
+    pub ok: bool,
+    /// Where the credential came from — `app` or a stored token's id — or why there is none.
+    pub detail: String,
+}
+
+/// Actually mint a token for every managed repo, and say what happened.
+///
+/// [`scope_status`] is deliberately offline, which means it can only report that a credential is
+/// *configured*: an App ID that GitHub rejects, a key belonging to a different App, or an App
+/// installed on none of these repositories all read as ready. That gap is the whole reason a user
+/// cannot tell a working setup from a broken one, and it cannot be closed without spending a round
+/// trip — so this is the explicit act that spends it, rather than a background check that would
+/// make a slow morning look like a broken fleet.
+///
+/// The tokens minted here are thrown away. Nothing is placed in a box; this only asks GitHub
+/// whether it *would* issue one.
+pub fn probe_credentials() -> Vec<ProbeResult> {
+    let mut out = Vec::new();
+    for repo in crate::load_repos() {
+        let Some(slug) = slug_from_url(&repo.source) else {
+            out.push(ProbeResult {
+                repo: repo.id,
+                ok: true,
+                detail: "not a GitHub remote — nothing to scope".into(),
+            });
+            continue;
+        };
+        let source = match credential_for(&slug) {
+            Some((c, _)) => {
+                let named = match c.label.trim().is_empty() {
+                    true => c.id,
+                    false => c.label,
+                };
+                format!("stored token “{named}”")
+            }
+            None => "the GitHub App".into(),
+        };
+        out.push(match mint_token(&slug) {
+            Ok(_) => ProbeResult {
+                repo: slug,
+                ok: true,
+                detail: format!("a write token was issued by {source}"),
+            },
+            Err(e) => ProbeResult {
+                repo: slug,
+                ok: false,
+                detail: e,
+            },
+        });
+    }
+    out
+}
+
 /// What scoping is actually doing, as this module understands it.
 ///
 /// A value rather than a rendered string, because three callers want the same answer in different

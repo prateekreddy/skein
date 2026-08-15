@@ -254,6 +254,11 @@
   .vmtag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--waiting);
            background:color-mix(in srgb,var(--waiting) 12%,transparent); border-radius:4px; padding:0 4px;
            border:1px solid color-mix(in srgb,var(--waiting) 35%,transparent); }
+  /* the scope tag, quieter than `legacy`: it marks a box that is merely wider than the fleet's
+     default, not one holding a whole VM hostage */
+  .scopetag { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10px; color:var(--dim);
+              background:var(--inset); border-radius:4px; padding:0 4px;
+              border:1px solid var(--border-2); }
   .dir { font-family:var(--mono); color:var(--faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* inbox headline: the gist of what the box last said / is asking — one truncated line */
   .headline { display:none; color:var(--dim); font-size:12px; margin-top:3px; overflow:hidden;
@@ -824,6 +829,21 @@
   .away-row.k-attn .ad { background:var(--attn); } .away-row.k-waiting .ad { background:var(--waiting); }
   .away-row.k-done .ad { background:var(--done); } .away-row.k-working .ad { background:var(--working); }
   .away-row.k-new .ad, .away-row.k-prog .ad { background:var(--accent); } .away-row.k-gone .ad { background:var(--faint); }
+  .ar-adv { margin-top:4px; }
+  .ar-adv summary { cursor:pointer; font-size:12px; color:var(--dim); width:fit-content; }
+  .ar-adv summary:hover { color:var(--text-2); }
+  .ar-advbody { padding-top:8px; display:flex; flex-direction:column; gap:8px; }
+  .set-note { margin:6px 0 0; font-size:11.5px; line-height:1.55; color:var(--faint); }
+  .set-note.ready { color:var(--done); }
+  .set-note.gap { color:var(--waiting); }
+  .set-diag { display:flex; flex-direction:column; gap:1px; }
+  .dg-row { display:grid; grid-template-columns:18px 108px 1fr; gap:10px; align-items:baseline;
+            padding:8px 2px; border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
+  .dg-mark { font-weight:700; color:var(--done); }
+  .dg-row.bad .dg-mark { color:var(--attn); }
+  .dg-name { font-family:var(--mono); font-size:11px; color:var(--text-2); }
+  .dg-detail { font-size:12.5px; color:var(--text); line-height:1.55; user-select:text; }
+  .dg-foot { margin-top:14px; font-size:12px; color:var(--faint); }
   .ffilter { flex:none; width:150px; height:24px; padding:0 8px; font-family:var(--mono); font-size:11px;
              color:var(--text-2); background:var(--inset); border:1px solid var(--border-2);
              border-radius:6px; outline:none; transition:border-color var(--dur-fast), width var(--dur-fast); }
@@ -1002,11 +1022,16 @@
       <div class="ar-derived" id="ar-derived"></div>
       <label class="nb-lbl">default agent</label>
       <select id="ar-agent"></select>
-      <label class="nb-lbl">shared data folder <span style="opacity:.6">(optional)</span></label>
-      <div class="path-row">
-        <input id="ar-store" placeholder="(skein manages one under ~/.skein/repos)" autocomplete="off" spellcheck="false" />
-        <button type="button" class="kbtn" id="ar-store-browse" title="Pick the shared data folder"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button>
-      </div>
+      <details class="ar-adv">
+        <summary>Advanced — shared data folder</summary>
+        <div class="ar-advbody">
+          <div class="ar-derived">the folder this repo's boxes share: their memory, mailbox and status. skein makes one under <code>~/.skein/repos</code> and you never have to think about it. Point this somewhere else only to adopt a store you already have.</div>
+          <div class="path-row">
+            <input id="ar-store" placeholder="(skein manages one under ~/.skein/repos)" autocomplete="off" spellcheck="false" />
+            <button type="button" class="kbtn" id="ar-store-browse" title="Pick the shared data folder"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button>
+          </div>
+        </div>
+      </details>
       <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds it; leave blank to auto-manage.</div>
       <div class="ar-msg" id="ar-msg" style="display:none"></div>
       <div class="nb-foot"><span class="hint">clones a URL into <code>~/.skein/repos</code> · adopts a local path in place</span><button class="primary" id="ar-go">Add →</button></div>
@@ -1025,6 +1050,7 @@
         <button type="button" class="set-navi" data-pane="fleet"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="11" width="20" height="6" rx="1"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="14" x2="6.01" y2="14"/></svg>Fleet</button>
         <button type="button" class="set-navi" data-pane="boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Boxes</button>
         <button type="button" class="set-navi" data-pane="tracking"><svg class="ic" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 3h6v3H9z"/><path d="M8 12l2.5 2.5L16 9"/></svg>Work tracking<span class="pill" id="set-syncn"></span></button>
+        <button type="button" class="set-navi" data-pane="diag"><svg class="ic" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Diagnostics<span class="pill" id="set-diagn"></span></button>
         <button type="button" class="set-navi" data-pane="keys"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="10" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="14" y2="10"/><line x1="18" y1="10" x2="18" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>Shortcuts</button>
         <div class="set-navfoot"><code>~/.skein/config.json</code></div>
       </nav>
@@ -1050,14 +1076,14 @@
             <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet disk</span><span class="desc">one filesystem shared by every box, <b>20G</b> by default. Memory stopped summing when boxes started sharing a sandbox; disk did not. Fixed when the sandbox is created, so changing it rebuilds.</span><input id="set-fleetdisk" placeholder="20g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Docker shares the fleet disk</span><span class="desc">On, dockerd keeps its data beside the boxes and <b>Fleet disk</b> sizes everything — one number instead of two. Takes effect at the next sandbox. <details><summary>what you give up</summary>a sandbox carries <b>two</b> disks — the one boxes live on, and a second at <code>/var/lib/docker</code> — each fixed at creation with its own ceiling, so the split has to be guessed in advance and guessing wrong means another rebuild. On, dockerd keeps its data beside the boxes and <b>Fleet disk</b> sizes everything: one generous number instead of two exact ones. Off, the two disks are also two firewalls — a runaway <code>docker build</code> fills Docker's and cannot touch the boxes. Takes effect at dockerd's next start, in practice the next sandbox; images and volumes on the old disk stay there untouched and simply stop being visible.</details></span></span><input type="checkbox" id="set-onedisk" class="switch"></label>
-            <label class="set-field narrow"><span class="set-title">Per-box hard cap</span><span class="desc">the most memory <b>one</b> box may use (cgroup <code>memory.max</code>). This is what stops a runaway build taking the fleet down with it: without a cap the kernel kills whichever process it likes, which is another box's agent as readily as the guilty one. Blank ⇒ 70% of fleet memory — high enough for a big build, low enough that two boxes can't exhaust the VM.</span><input id="set-boxmax" placeholder="(70% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
-            <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Per-box hard cap</span><span class="desc">The hard ceiling for one box (cgroup <code>memory.max</code>). Blank means 70% of fleet memory. <details><summary>what it protects against</summary>the most memory <b>one</b> box may use (cgroup <code>memory.max</code>). This is what stops a runaway build taking the fleet down with it: without a cap the kernel kills whichever process it likes, which is another box's agent as readily as the guilty one. Blank ⇒ 70% of fleet memory — high enough for a big build, low enough that two boxes can't exhaust the VM.</details></span><input id="set-boxmax" placeholder="(70% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Per-box throttle</span><span class="desc">Where the kernel throttles a box instead of killing it (cgroup <code>memory.high</code>). Blank means 55%. <details><summary>why it must sit below the cap</summary>where the kernel starts reclaiming instead of killing (cgroup <code>memory.high</code>). Keep it <b>below</b> the hard cap: the gap is the difference between a build that gets slower and a turn that is lost. Blank ⇒ 55% of fleet memory. CPU is deliberately never capped — boxes fair-share it, and a lone box still gets every core.</details></span><input id="set-boxhigh" placeholder="(55% of fleet memory)" autocomplete="off" spellcheck="false" /></label>
             <div class="set-field"><span class="set-title">Apply ceilings to running boxes</span><span class="desc">Unlike fleet memory, a per-box ceiling is <b>live</b> — it changes on a running box straight away, with nothing to save or restart. Use this after editing the two fields above; no rebuild, no interruption to any box mid-turn.</span><button id="set-applylimits" class="btn" type="button">Apply to running boxes</button></div>
-            <div class="set-field"><span class="set-title">Apply to the running fleet</span><span class="desc">Saving these numbers only changes what the <b>next</b> sandbox is created with — sbx fixes memory and CPUs at creation. Applying them now rebuilds the fleet sandbox: every box's unpushed work and conversation is saved to the host first, and nothing is destroyed unless all of it saved. Boxes come back on their own branches; any that don't can be retried individually.</span><button id="set-resize" class="btn" type="button">Rebuild the fleet at these limits</button></div>
+            <div class="set-field"><span class="set-title">Apply to the running fleet</span><span class="desc">Rebuilds the fleet at the numbers above — sbx fixes memory and CPUs at creation, so saving alone does not. <details><summary>what happens to the boxes</summary>Saving these numbers only changes what the <b>next</b> sandbox is created with — sbx fixes memory and CPUs at creation. Applying them now rebuilds the fleet sandbox: every box's unpushed work and conversation is saved to the host first, and nothing is destroyed unless all of it saved. Boxes come back on their own branches; any that don't can be retried individually.</details></span><button id="set-resize" class="btn" type="button">Rebuild the fleet at these limits</button></div>
           </section>
           <section class="set-pane" data-pane="boxes">
             <label class="set-field narrow"><span class="set-title">Default agent</span><span class="desc">the runtime a new box starts with</span><select id="set-agent"></select></label>
-            <label class="set-field narrow"><span class="set-title">Per-box disk</span><span class="desc">how much of the fleet's one shared filesystem each box may use. <b>Measured, not enforced</b> — nothing in the kernel stops a box, so this is what tells you who took the space before another box's build dies with no room left. A single box can be given its own allowance from its row.</span><input id="set-boxdisk" placeholder="10g" autocomplete="off" spellcheck="false" /></label>
+            <label class="set-field narrow"><span class="set-title">Per-box disk</span><span class="desc">The share of the fleet's one filesystem a box may take. Blank means unlimited. <details><summary>how it is measured and enforced</summary>how much of the fleet's one shared filesystem each box may use. <b>Measured, not enforced</b> — nothing in the kernel stops a box, so this is what tells you who took the space before another box's build dies with no room left. A single box can be given its own allowance from its row.</details></span><input id="set-boxdisk" placeholder="10g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Git name</span><span class="desc">who boxes commit as. Blank reads it from the repo's host clone, which is usually already right — a box has a private HOME, so it inherits no gitconfig of its own.</span><input id="set-gitname" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Git email</span><span class="desc">the address on those commits</span><input id="set-gitemail" placeholder="(from the host clone)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
@@ -1070,6 +1096,7 @@
             <div id="set-conns" class="set-conns"></div>
             <button type="button" class="kbtn" id="set-conn-add"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add a connection</button>
           </section>
+          <section class="set-pane" data-pane="diag"><div id="set-diag" class="set-diag"></div></section>
           <section class="set-pane" data-pane="keys"><div id="set-keys" class="set-keys"></div></section>
         </div>
         <footer class="set-foot">
@@ -1185,7 +1212,7 @@ function ensureSection(id, repoId) {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="scopetag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -1245,6 +1272,16 @@ function updateRow(el, b, showRepo) {
   vt.style.display = b.legacy ? "" : "none";
   vt.title = b.legacy
     ? "this box has a sandbox to itself, which reserves its full memory whether it is working or idle — `skein migrate " + b.name + "` moves it into the shared one"
+    : "";
+  // Scope tag, and it badges the EXCEPTION for the same reason `legacy` does. `scoped` is absent
+  // entirely when the fleet cannot scope anything, so a host with no GitHub App stays unlabelled
+  // rather than having every row call itself unscoped.
+  const st = el.querySelector(".scopetag");
+  const open = b.scoped === false;
+  st.textContent = open ? "open" : "";
+  st.style.display = open ? "" : "none";
+  st.title = open
+    ? "this box holds the fleet-wide GitHub credential, not one scoped to its own repo — box settings → github access"
     : "";
   diskChip(el.querySelector(".dchip"), b);
   el.querySelector(".branch").textContent = b.branch || "—";
@@ -3465,6 +3502,13 @@ function loadGitq() {
     if (grants.length) {
       html += `<div class="mbx-head" style="margin-top:10px"><b>Grants</b></div>` + grants.map(gitqGrantRow).join("");
     }
+    // The one question the panel could not answer: not "is a credential configured" but "would
+    // GitHub actually issue one". Behind a click because it costs a round trip per repo.
+    html += `<div class="mbx-head" style="margin-top:10px"><b>Does it work?</b><span class="sub">asks GitHub for a token for each repo, then throws it away</span></div>
+      <div class="msg"><div class="sq-row">
+        <button class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button>
+        <span class="sq-meta" id="gq-probe-out"></span>
+      </div><div id="gq-probe-rows"></div></div>`;
     html += `<div class="mbx-head" style="margin-top:10px"><b>Repository tokens</b><span class="sub">instead of the App, one fine-grained PAT per repo</span></div>`;
     html += creds.length ? creds.map(gitqCredRow).join("")
       : `<div class="note">none stored — the GitHub App mints per-repo tokens on its own. Add one here only for a repo the App cannot reach.</div>`;
@@ -3479,6 +3523,27 @@ function loadGitq() {
       </div>`;
     list.innerHTML = html;
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
+}
+
+// Spends a real round trip per repo, so it is a button and never a poll. Reports per repo, because
+// "it works" is not a fleet-wide fact — an App installed on three of your four repos is the single
+// most likely half-configured state, and the one a fleet-wide yes/no would hide.
+function probeGit() {
+  const btn = document.getElementById("gq-probe");
+  const out = document.getElementById("gq-probe-out");
+  const rows = document.getElementById("gq-probe-rows");
+  btn.disabled = true; out.textContent = "asking GitHub…"; rows.innerHTML = "";
+  return fetch("/api/fleet/git-probe", { method: "POST" }).then(r => r.json()).then(list => {
+    const bad = list.filter(r => !r.ok).length;
+    out.textContent = bad ? `${bad} of ${list.length} cannot be written` : `all ${list.length} can be written`;
+    rows.innerHTML = list.map(r => `
+      <div class="sq-row">
+        <span class="sq-state ${r.ok ? "approved" : ""}">${r.ok ? "ok" : "failed"}</span>
+        <span class="sq-pkgs">${esc(r.repo)}</span>
+        <span class="sq-meta">${esc(r.detail)}</span>
+      </div>`).join("");
+  }).catch(() => { out.textContent = "could not run the test"; })
+    .finally(() => { btn.disabled = false; });
 }
 
 function addGitCred() {
@@ -3594,6 +3659,44 @@ function loadRuntimes() {
 function loadSettings() {
   return fetch("/api/settings").then(r => r.json()).then(s => { settings = s || settings; }).catch(() => {});
 }
+// The health report, rendered where it can be read.
+//
+// Every detail in it used to live in the banner's `title` attribute: uncopyable, invisible on a
+// phone (which this product ships a layout for), gone on scroll. Meanwhile `skein doctor` prints
+// the same facts beautifully — and is CLI-only, in a product whose stated goal is that the cockpit
+// is the only surface you touch. Same report, same ✓/✗/! vocabulary, now reachable from the banner
+// that reports the fault.
+function renderDiagnostics() {
+  const el = document.getElementById("set-diag");
+  if (!el) return;
+  const h = lastHealth;
+  if (!h) { el.innerHTML = `<div class="note">no report yet</div>`; return; }
+  const CHECKS = [
+    ["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "gh"],
+    ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
+    ["gitgate", "github scope"], ["ai", "ai enrichment"],
+  ];
+  const rows = CHECKS.filter(([k]) => h[k]).map(([k, label]) => `
+    <div class="dg-row ${h[k].ok ? "ok" : "bad"}">
+      <span class="dg-mark">${h[k].ok ? "✓" : "✗"}</span>
+      <span class="dg-name">${label}</span>
+      <span class="dg-detail">${esc(h[k].detail || "")}</span>
+    </div>`).join("");
+  const list = (names, what) => names?.length
+    ? `<div class="dg-row bad"><span class="dg-mark">!</span><span class="dg-name">${what}</span>
+       <span class="dg-detail">${esc(names.join(", "))}</span></div>` : "";
+  el.innerHTML = rows
+    + list(h.dark_boxes, "no signals")
+    + list(h.stale_boxes, "stale sessions")
+    + `<div class="dg-foot">the same report <code>skein doctor</code> prints, which also probes
+       bwrap, tmux and the fleet's mounts from inside the sandbox.</div>`;
+  const pill = document.getElementById("set-diagn");
+  if (pill) {
+    const bad = CHECKS.filter(([k]) => h[k] && !h[k].ok).length;
+    pill.textContent = bad || "";
+  }
+}
+
 const settingsModal = () => document.getElementById("settings");
 // The one place keys are documented. Rendered into Settings → Shortcuts (and reachable with `?`), so
 // what the UI claims and what the app binds are the same list.
@@ -3643,6 +3746,7 @@ const SET_PANES = {
   fleet:    "the one VM every box shares — its memory, cores and disk",
   boxes:    "defaults a new box inherits",
   tracking: "the shared backlog boxes claim work from",
+  diag:     "what skein can see of its own environment",
   keys:     "every shortcut the cockpit binds",
 };
 function setPane(pane) {
@@ -3658,10 +3762,11 @@ function setPane(pane) {
     : pane === "tracking"
       ? "each connection saves as you leave a field — a credential never rides along with the config form"
       : "<code>$SKEIN_*</code> env vars override these";
+  if (pane === "diag") renderDiagnostics();
   settingsModal().querySelector(".set-scroll").scrollTop = 0;
   // Shortcuts is a reference, not a form; repos and connections save themselves. A Save button that
   // covers none of what's on screen is worse than no Save button.
-  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking"].includes(pane));
+  settingsModal().querySelector(".set-foot").classList.toggle("readonly", ["keys", "repos", "tracking", "diag"].includes(pane));
 }
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
@@ -4867,13 +4972,14 @@ function loadHealth() {
     // The first-run checklist ticks off this report, so it has to redraw when the report lands —
     // otherwise the steps sit unticked until the next box event, which on an empty fleet never comes.
     if (hadNoReport || !boxes.length) render(boxes || []);
+    renderDiagnostics();
     let banner = document.getElementById("healthban");
     if (health.ok) { banner?.remove(); return; }
     if (!banner) {
       banner = document.createElement("button"); banner.id = "healthban";
       banner.style.cssText = "position:fixed;top:0;right:18px;z-index:61;border:0;cursor:pointer;"
         + "background:#f0b429;color:#08090b;font:600 12px/1 sans-serif;padding:7px 13px;border-radius:0 0 8px 8px";
-      banner.onclick = openSettings; document.body.append(banner);
+      banner.onclick = () => openSettings("diag"); document.body.append(banner);
     }
     // "memory" among them because a fleet with no ceiling has no symptom until the sandbox stops
     // answering — and by then the banner is not what you are looking at.

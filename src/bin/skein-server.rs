@@ -182,6 +182,7 @@ async fn main() {
             axum::routing::delete(api_git_grant_revoke),
         )
         .route("/api/boxes/:name/git-scope", post(api_set_box_git_scope))
+        .route("/api/fleet/git-probe", post(api_git_probe))
         .route("/api/fleet/git-credentials", post(api_git_credential))
         .route(
             "/api/fleet/git-credentials/:id",
@@ -1069,6 +1070,18 @@ async fn api_git_grant_decide(Path(id): Path<String>, Json(r): Json<GrantReq>) -
             Json(req).into_response()
         }
     }
+}
+
+/// Ask GitHub whether a token could actually be issued for each managed repo.
+///
+/// Its own route rather than a field on the panel's GET, because it spends real round trips — one
+/// per repo — and the panel is polled. This only ever runs on a click.
+async fn api_git_probe() -> Json<Vec<skein::gitgate::ProbeResult>> {
+    Json(
+        tokio::task::spawn_blocking(skein::gitgate::probe_credentials)
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 /// Withdraw a grant. Effective immediately for the decision, and within a tick for the token.

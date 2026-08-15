@@ -129,6 +129,16 @@ pub struct BoxView {
     /// host that has not adopted the fleet would label the normal case as the odd one.
     #[serde(default)]
     pub legacy: bool,
+    /// Whether this box's GitHub credential is scoped to its own repository — `None` when the fleet
+    /// cannot scope at all, so there is no distinction to draw.
+    ///
+    /// On the row because it is otherwise invisible: a scoped box and an unscoped one look
+    /// identical everywhere in the cockpit, so "did the switch take" had no answer short of trying
+    /// a push inside the box and reading the 403. Three-valued for the same reason `legacy` is
+    /// suppressed on an unadopted host — badging every row before the distinction exists would
+    /// label the normal case as the odd one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped: Option<bool>,
     /// MiB this box occupies on the fleet's shared disk, and what it is allowed. Absent for a box
     /// with a sandbox of its own, whose disk is nobody else's problem.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +328,9 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         names.remove(&fleet);
         names.extend(placed_boxes(&fleet).into_iter().map(|(name, _)| name));
     }
+    // Hoisted: this reads the config and the stored-credential list, and `load_views` runs on every
+    // 2s tick for every box. Asked once per pass rather than once per box per pass.
+    let scopable = crate::gitgate::can_issue_write_tokens();
 
     // One measurement for the whole board, not one per row: it is a single `du` in the sandbox, and
     // asking per box would be one round trip each for a number they all read from the same walk.
@@ -508,6 +521,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 // test: it is what makes a box a fleet box, and its absence is what leaves one
                 // holding a VM of its own.
                 legacy: !fleet.is_empty() && shared_record(&name).is_none(),
+                scoped: scopable.then(|| crate::gitgate::box_is_scoped(&name)),
                 disk_mb: usage.get(&name).copied(),
                 disk_limit_mb: usage.get(&name).and(box_disk_limit(&name)),
             }
