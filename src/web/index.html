@@ -471,6 +471,13 @@
   .revgist.dim { color:var(--faint); font-style:italic; }
   .revgist.unread { color:var(--waiting); }
   .revtag.flag { color:var(--accent-2); border-color:var(--accent); }
+  .revsignals { border:1px solid var(--border-2); border-left:2px solid var(--accent);
+                border-radius:var(--radius-sm); padding:8px 11px; margin-bottom:11px;
+                font:11.5px var(--mono); color:var(--text-2); }
+  .revsignals b { display:block; font-weight:600; color:var(--faint); text-transform:uppercase;
+                  letter-spacing:.06em; font-size:10px; margin-bottom:5px; }
+  .revsignals > div { margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .revsignals .dim { color:var(--faint); }
   .revowned { font:11px var(--mono); color:var(--dim); margin-bottom:9px; }
   .revowned code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
   .revbrief { font-size:13.5px; line-height:1.6; color:var(--text); }
@@ -2222,10 +2229,17 @@ function revDetail(pr) {
     ? `<div class="revowned">yours: ${(s.yours || []).map(p => `<code>${esc(p)}</code>`).join(" ")}${
         s.others ? ` <span class="dim">· and ${s.others} path${s.others === 1 ? "" : "s"} you do not own</span>` : ""}</div>`
     : "";
+  // Kept visually apart from the brief on purpose: "the diff says so" and "a model thinks so" are
+  // different kinds of claim, and collapsing them into one paragraph would make the weaker one
+  // borrow the authority of the stronger.
+  const signals = (s.signals || []).length
+    ? `<div class="revsignals"><b>found in the diff</b>${(s.signals || []).map(g =>
+        `<div><span class="revtag flag">${esc(g.kind)}</span> ${esc(g.what)} <span class="dim">${esc(g.file)}</span></div>`).join("")}</div>`
+    : "";
   const detail = s.detail
     ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
     : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
-  return owned + detail;
+  return owned + signals + detail;
 }
 
 // The composer: one box for the three things that need words. `ask` stays private; the other two

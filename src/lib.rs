@@ -8,6 +8,7 @@ mod ai;
 mod answer;
 pub mod codeowners;
 mod config;
+pub mod contracts;
 mod diff;
 mod files;
 mod fleet;

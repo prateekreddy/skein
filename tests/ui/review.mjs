@@ -74,7 +74,13 @@ if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf 'me\\n'; exit 0; fi
 if [ "$1" = "api" ] && [ "$2" = "user/teams" ]; then exit 1; fi
 if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
   for a in "$@"; do if [ "$a" = "--name-only" ]; then printf 'src/parser.rs\\nweb/app.js\\n'; exit 0; fi; done
-  printf -- '--- a/src/parser.rs\\n+++ b/src/parser.rs\\n@@\\n-const TIMEOUT: u64 = 30;\\n+const TIMEOUT: u64 = 5;\\n'
+  # Per PR, because the scanner reads the real diff: serving one diff for every number would put a
+  # moved constant inside the "bug fix" too, and it would be correct to escalate it.
+  if [ "$3" = "3" ]; then
+    printf -- 'diff --git a/src/parser.rs b/src/parser.rs\\n--- a/src/parser.rs\\n+++ b/src/parser.rs\\n@@\\n-const TIMEOUT: u64 = 30;\\n+const TIMEOUT: u64 = 5;\\n'
+  else
+    printf -- 'diff --git a/src/parser.rs b/src/parser.rs\\n--- a/src/parser.rs\\n+++ b/src/parser.rs\\n@@\\n-    let head = input.chars().next().unwrap();\\n+    let Some(head) = input.chars().next() else { return Ok(()) };\\n'
+  fi
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
@@ -297,6 +303,15 @@ await check("a flagged PR opens to a brief, not to a diff", async () => {
   const brief = (await page.$eval("#revpane .revrow.open .revbrief", e => e.textContent)).toLowerCase();
   if (!brief.includes("what changes in how it works"))
     throw new Error(`the brief is missing the section that matters: ${brief.slice(0, 120)}`);
+});
+// The scanner runs with no model at all and can only escalate. The stub `gh` serves a diff whose
+// only change is a moved constant, so a signal must appear — and it must be visually separate from
+// the model's prose, because "the diff says so" is a stronger claim than "a model thinks so".
+await check("mechanical evidence is shown, and shown apart from the prose", async () => {
+  const sig = await page.$eval("#revpane .revrow.open .revsignals", e => e.textContent).catch(() => "");
+  if (!/found in the diff/i.test(sig)) throw new Error("the evidence block is missing");
+  if (!/TIMEOUT/.test(sig)) throw new Error(`the moved constant was not found: ${sig}`);
+  if (!/default/.test(sig)) throw new Error(`it was not classified as a default: ${sig}`);
 });
 // Stage 0 runs without any model, and it is what scopes the rest. If CODEOWNERS said `src/ @me`
 // and the PR touched src/ and web/, the pane must say which half is yours.

@@ -84,6 +84,11 @@ pub struct Summary {
     pub yours: Vec<String>,
     /// How many changed paths you do not own, so the summary can say what it left out.
     pub others: usize,
+    /// Mechanical evidence from [`crate::contracts`] — what moved, found in the diff rather than
+    /// reasoned about. Shown beside the brief because "the model thinks so" and "the diff says so"
+    /// are different kinds of claim and you should be able to tell them apart.
+    #[serde(default)]
+    pub signals: Vec<crate::contracts::Signal>,
     /// Why there is no summary. Only set for [`Depth::Unread`], and written to be shown verbatim.
     pub unread_because: String,
 }
@@ -98,6 +103,7 @@ impl Summary {
             line: String::new(),
             detail: String::new(),
             flags: Vec::new(),
+            signals: Vec::new(),
             yours: Vec::new(),
             others: 0,
             unread_because: because.to_string(),
@@ -312,13 +318,20 @@ fn parse_stage1(text: &str) -> Option<Verdict> {
     })
 }
 
-fn stage2_prompt(pr: &Pr, verdict: &Verdict, yours: &[String], diff: &str, cut: bool) -> String {
+fn stage2_prompt(
+    pr: &Pr,
+    verdict: &Verdict,
+    yours: &[String],
+    signals: &[crate::contracts::Signal],
+    diff: &str,
+    cut: bool,
+) -> String {
     format!(
         r#"Explain this pull request to a senior engineer who is reviewing it to understand the system, not to check the code. They will decide whether to approve from what you write, and they will not open the diff. Write at mechanism, product, architecture and user level. Do not describe functions, variables or line-level edits.
 
 Triage already found: {line}
 Tripwires: {flags}
-{scope}
+{evidence}{scope}
 {cut_note}
 
 Write plain prose under exactly these headings, omitting any that has nothing true to say:
@@ -339,6 +352,16 @@ PR #{number}: {title}
 --- diff ---
 {diff}"#,
         line = verdict.line,
+        evidence = if signals.is_empty() {
+            String::new()
+        } else {
+            // Named as found-in-the-diff rather than as opinion, so the model treats it as fact to
+            // explain rather than a suggestion it may politely disagree with.
+            format!(
+                "Scanning the diff mechanically found these moved, which is not in dispute — explain what each means for someone using this:\n{}\n",
+                signals.iter().map(|s| format!("- {} ({})", s.what, s.file)).collect::<Vec<_>>().join("\n")
+            )
+        },
         flags = if verdict.flags.is_empty() {
             "none named".to_string()
         } else {
@@ -392,7 +415,10 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
     let paths = changed_paths(slug, pr.number);
     let (yours, others) = ownership(repo, identities, &paths);
 
-    let (diff, cut) = match pr_diff(slug, pr.number, STAGE1_BYTES) {
+    // One fetch, three readers. The scanner wants as much of the diff as it can get — a contract
+    // change in the tail is still a contract change — while stage 1 only needs enough to classify.
+    // Fetching twice would cost a second round trip to tell us something we already had.
+    let (full, deep_cut) = match pr_diff(slug, pr.number, STAGE2_BYTES) {
         Ok(d) => d,
         Err(e) => {
             return Summary::unread(
@@ -402,13 +428,15 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
             )
         }
     };
-    if diff.trim().is_empty() {
+    if full.trim().is_empty() {
         return Summary::unread(
             pr.number,
             &pr.head_sha,
             "GitHub returned an empty diff for this PR.",
         );
     }
+    let signals = crate::contracts::scan(&full);
+    let (diff, cut) = truncate(&full, STAGE1_BYTES);
 
     let Some(raw) = claude_oneshot_with(
         &stage1_prompt(pr, &yours, others, &diff, cut),
@@ -425,29 +453,37 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
         return Summary::unread(pr.number, &pr.head_sha, "skein read it but could not make sense of its own answer, so it is not vouching for one.");
     };
 
+    // The scanner escalates and never clears. A model that read a moved default as routine is
+    // overruled by the diff itself; a model that flagged something the scanner has no rule for
+    // keeps its flag. There is no path here where mechanical evidence *lowers* the depth, which is
+    // what makes shipping imperfect rules safe — see [`crate::contracts`].
+    let mut flags = verdict.flags.clone();
+    for s in &signals {
+        if !flags.contains(&s.kind) {
+            flags.push(s.kind.clone());
+        }
+    }
+    let expand = verdict.expand || !signals.is_empty();
+
     let mut summary = Summary {
         number: pr.number,
         head_sha: pr.head_sha.clone(),
-        depth: if verdict.expand {
-            Depth::Expanded
-        } else {
-            Depth::Line
-        },
+        depth: if expand { Depth::Expanded } else { Depth::Line },
         line: verdict.line.clone(),
         detail: String::new(),
-        flags: verdict.flags.clone(),
+        flags,
+        signals: signals.clone(),
         yours,
         others,
         unread_because: String::new(),
     };
 
-    if verdict.expand {
-        // A larger slice of the diff and a longer budget, because this is the pass whose output you
-        // will actually decide from. The stronger model is named here rather than in the env so a
-        // pinned `$SKEIN_AI_MODEL` still overrides both stages together.
-        let (deep, deep_cut) = pr_diff(slug, pr.number, STAGE2_BYTES).unwrap_or((diff, cut));
+    if expand {
+        // The whole diff and a longer budget, because this is the pass whose output you will
+        // actually decide from. The stronger model is named here rather than in the env so a pinned
+        // `$SKEIN_AI_MODEL` still overrides both stages together.
         match claude_oneshot_with(
-            &stage2_prompt(pr, &verdict, &summary.yours, &deep, deep_cut),
+            &stage2_prompt(pr, &verdict, &summary.yours, &signals, &full, deep_cut),
             Some("claude-sonnet-5"),
             Duration::from_secs(180),
         ) {
