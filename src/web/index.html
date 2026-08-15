@@ -1310,7 +1310,7 @@ const KTIP = {
   permission: "a tool is waiting for your approval",
   question:   "it asked you something and is waiting",
   trust:      "it can't start until you trust this folder",
-  auth:       "signed out or out of quota — nothing will run until that's fixed",
+  auth:       "signed out or out of quota — run `skein login claude` on the host; every box inherits it",
 };
 // Full-board re-render, fired on each 2s SSE "boxes" tick.
 function render(snapshot) {
@@ -5029,7 +5029,7 @@ function loadResources() {
 // ---------- demo seed (only used under ?demo) ----------
 const DEMO_REPOS = [
   { id:"thing", source:"https://github.com/acme/gadget-demo.git", work:"~/.skein/repos/thing/work", store:"~/.skein/repos/thing/store/.claude", agent:"claude" },
-  { id:"skein",  source:"/Users/you/work/slate/legalAI/dev/thing/skein", work:"/Users/you/work/slate/legalAI/dev/thing/skein", store:"~/.skein/repos/skein/store/.claude", agent:"claude" },
+  { id:"skein",  source:"~/code/skein", work:"~/code/skein", store:"~/.skein/repos/skein/store/.claude", agent:"claude" },
 ];
 const DEMO_BOXES = [
   { name:"thing-feat-auth", repo:"thing", branch:"feat/auth", state:"needs-input", tier:0, age:"2m",
