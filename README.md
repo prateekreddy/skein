@@ -458,7 +458,22 @@ private repos then need an optional read-only PAT, which nothing prompts for.
 
 #### Asking to write another repo
 
-A push elsewhere is refused by GitHub. To ask for it, from inside a box:
+A push elsewhere is refused by GitHub, and the push itself files the ask:
+
+```
+$ git push origin HEAD
+skein: asked to write someone-else/private. Request 20260815-101122-4711 is pending approval in the cockpit.
+skein: this box holds a GitHub token for its own repository only, so the push below will be
+refused by GitHub. That is deliberate, not a misconfiguration — re-authenticating, switching to
+SSH or editing the remote will not change it.
+error: failed to push some refs to 'github.com:someone-else/private.git'
+```
+
+That comes from a `git` shim, and it is **the message, not the boundary**: it never blocks, it files
+the ask and then runs the real git, so the push fails exactly as it would have with GitHub's own
+answer. An agent calling the real binary directly gets the same 403. Everything that is not a push
+execs the real git on the shim's first line, and any surprise on the push path execs it too — the
+token is what isolates, so the shim can afford to be timid. It can also be asked directly:
 
 ```
 $ /boxes/.skein/box-session.sh --request-write "$SKEIN_BOX" acme/thing "fix the shared type"

@@ -981,6 +981,132 @@ if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
       --add url."https://github.com/".insteadOf "ssh://git@github.com/" 2>/dev/null || true
   fi
   unset helper
+
+  # A push to a repo this box cannot write comes back from GitHub as a bare 403, and an agent that
+  # reads one does not conclude "I should ask" — it retries, re-authenticates, tries SSH, edits the
+  # remote, and burns a turn on a thing that was never going to work. This turns that dead end into
+  # the request it should have been.
+  #
+  # **The shim is the message, not the boundary.** It never blocks: it files the ask and then runs
+  # the real git anyway, so the push still fails exactly as it would have, with GitHub's own answer.
+  # Nothing here is load-bearing for isolation — the token is, and an agent calling the real binary
+  # directly gets the same 403. That is why every check below falls through rather than refusing.
+  #
+  # Unlike `sudo`, git is on every code path in every box, so the shape matters more than the logic:
+  # anything that is not a push execs the real binary on the first line, and any surprise on the push
+  # path execs it too.
+  # `skein_launcher` is resolved inside the sudo shim above, and that block is skipped entirely when
+  # a box has no sudo to shim. Under `set -u` an unset one would abort the launch — so it is worked
+  # out again here rather than assumed, by the same two steps and for the same reason: `$0` is right
+  # only when this was started as the launcher, and falls back to where it is actually installed.
+  if [ -z "${skein_launcher-}" ]; then
+    skein_launcher="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+    [ -f "$skein_launcher" ] || skein_launcher="${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh"
+  fi
+  git_real=$(command -v git 2>/dev/null || true)
+  [ -n "$git_real" ] && git_real=$(readlink -e "$git_real" 2>/dev/null || true)
+  if [ -n "$git_real" ] && [ -f "$git_real" ]; then
+    mkdir -p "$root/bin" || exit 1
+    # Binding the shim over git shadows the very binary the shim has to exec, so the real one is
+    # bound to a second path FIRST. bwrap resolves every source against the ORIGINAL filesystem, so
+    # both land correctly however they overlap — the same property `--bind "$home" "$HOME"` relies on
+    # above. The destination has to be somewhere this box can write: `/run/git.real` was tried and
+    # bwrap refused with "Can't create file", exactly as it does for a new file in /usr/bin.
+    : >"$root/bin/git.real" 2>/dev/null || true
+    {
+      printf '#!/bin/sh\n'
+      printf 'skein_box=%q\n' "$box"
+      printf 'skein_launcher=%q\n' "$skein_launcher"
+      printf 'skein_git=%q\n' "$root/bin/git.real"
+      cat <<'GITSHIM'
+# Not a push, or nothing scoped: be git, immediately and with no further thought.
+[ -n "${SKEIN_GIT_TOKENS-}" ] || exec "$skein_git" "$@"
+
+# Find the verb. It is not always $1 — `git -C dir push` and `git -c k=v push` are ordinary, and
+# both of those options take a separate argument that must not be mistaken for the verb.
+verb=''
+skip=0
+for arg in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$arg" in
+    -C | -c) skip=1 ;;
+    -*) ;;
+    *) verb="$arg"; break ;;
+  esac
+done
+[ "$verb" = push ] || exec "$skein_git" "$@"
+
+# The remote is the first bare word after the verb; absent, whatever this branch pushes to, and
+# `origin` if even that is unset. Every one of these resolutions runs the REAL git.
+remote=''
+seen_verb=0
+skip=0
+for arg in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$arg" in
+    -C | -c | --repo) skip=1 ;;
+    -*) ;;
+    *)
+      if [ "$seen_verb" = 1 ]; then remote="$arg"; break; fi
+      seen_verb=1
+      ;;
+  esac
+done
+if [ -z "$remote" ]; then
+  branch="$("$skein_git" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  remote="$("$skein_git" config --get "branch.$branch.remote" 2>/dev/null || true)"
+  [ -n "$remote" ] || remote=origin
+fi
+
+# A name becomes a URL; a URL is already one. `get-url` also applies the insteadOf rewrite, so an
+# `git@github.com:` remote arrives here in the same shape as an HTTPS one.
+case "$remote" in
+  *://* | *@*:* | *:*/*) url="$remote" ;;
+  *) url="$("$skein_git" remote get-url "$remote" 2>/dev/null || true)" ;;
+esac
+[ -n "$url" ] || exec "$skein_git" "$@"
+
+# owner/name, and only for github.com — anything else is not ours to have an opinion about.
+rest="${url#*://}"
+rest="${rest##*@}"
+case "$rest" in
+  github.com[:/]*) ;;
+  *) exec "$skein_git" "$@" ;;
+esac
+path="${rest#github.com}"
+path="${path#:}"
+path="${path#/}"
+owner="${path%%/*}"
+name="${path#*/}"
+name="${name%%/*}"
+name="${name%.git}"
+case "$owner" in '' | *[!A-Za-z0-9._-]* | -*) exec "$skein_git" "$@" ;; esac
+case "$name" in '' | *[!A-Za-z0-9._-]* | -*) exec "$skein_git" "$@" ;; esac
+
+# A token for it means this box may write it: nothing to say, get out of the way.
+[ -r "$SKEIN_GIT_TOKENS/${owner}%2F${name}" ] && exec "$skein_git" "$@"
+
+# No token. File the ask — `--request-write` collapses repeats, so a retrying agent does not grow
+# the queue — then run the push anyway so GitHub gives its own answer alongside this one.
+if [ -x "$skein_launcher" ]; then
+  branch="$("$skein_git" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  out=$("$skein_launcher" --request-write "$skein_box" "$owner/$name" "pushing $branch" 2>&1) || true
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
+fi
+cat >&2 <<WHY
+skein: this box holds a GitHub token for its own repository only, so the push below will be
+refused by GitHub. That is deliberate, not a misconfiguration — re-authenticating, switching to
+SSH or editing the remote will not change it.
+Approve the request above in the cockpit and the access appears within a minute.
+WHY
+exec "$skein_git" "$@"
+GITSHIM
+    } > "$root/bin/git" || exit 1
+    chmod 755 "$root/bin/git" || exit 1
+    binds+=(--ro-bind "$git_real" "$root/bin/git.real")
+    binds+=(--ro-bind "$root/bin/git" "$git_real")
+  fi
+  unset git_real
 fi
 
 # Who this box is, for everything that runs inside it.

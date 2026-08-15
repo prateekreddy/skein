@@ -2,16 +2,17 @@
 //!
 //! Every box in this fleet used to hold one user token — `repo`, `admin:public_key`, `gist` — that
 //! reached 460 repositories read and write, plus a forwarded ssh-agent signing for any of them. What
-//! replaces it is a read-only PAT for everything and a per-repository App token for the one repo a
-//! box owns, chosen between by `git-credential-skein`.
+//! replaces it is a per-repository write token, a read-only one for the repos the App is installed
+//! on, and nothing at all for anything else — chosen between by `git-credential-skein`.
 //!
-//! That helper is the load-bearing piece: it runs on every git operation in every box, it decides
-//! which credential is handed over, and it is a shell script that git talks to over a pipe. So it is
-//! driven here exactly as git drives it — the real file, the real protocol on stdin — rather than a
-//! Rust re-implementation of what it is believed to do.
+//! Two shell scripts carry that, and both sit on paths every box takes constantly, so both are
+//! driven here as the real thing drives them rather than as a Rust re-implementation of what they
+//! are believed to do: the helper over git's own protocol on stdin, and the `git` shim generated
+//! from the launcher and executed.
 //!
-//! The cases that matter most are the refusals. A helper that hands the write token to the wrong
-//! repository has quietly rebuilt the blast radius all of this exists to remove.
+//! The cases that matter most are the refusals and the pass-throughs. A helper handing the write
+//! token to the wrong repository has quietly rebuilt the blast radius all of this exists to remove;
+//! a shim that changes what `git` does for anything but a push has broken every box in the fleet.
 
 use std::fs;
 use std::path::PathBuf;
@@ -257,6 +258,273 @@ fn a_repository_name_that_could_address_something_else_never_reaches_the_queue()
         assert_eq!(code, 3, "{bad:?} was not refused: {out}");
     }
     assert!(b.queued().is_empty(), "{:?}", b.queued());
+}
+
+/// Build the `git` shim exactly as a box start builds it, and return its path.
+///
+/// Lifted from the launcher rather than reimplemented, for the same reason the sudo shim's test
+/// does it: a shim generated into a box's private namespace has nowhere else to be tested from, and
+/// this one sits on the path every git command in every box takes.
+fn build_git_shim(fleet: &std::path::Path, box_root: &std::path::Path, real_git: &str) -> PathBuf {
+    let launcher = script("box-session.sh");
+    let src = fs::read_to_string(&launcher).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let from = lines
+        .iter()
+        .position(|l| l.starts_with("  git_real=$(command -v git"))
+        .expect("the git shim block moved");
+    let to = lines
+        .iter()
+        .position(|l| l.contains(r#"binds+=(--ro-bind "$root/bin/git" "$git_real")"#))
+        .expect("the bind line moved");
+    // `to` is the last line of the block, so the slice stops just short of it — and short of the
+    // `fi` that closes the whole thing. Both are restored, exactly as the sudo shim's test does.
+    let block = format!(
+        "{}\n{}\nfi",
+        lines[from..to].join("\n"),
+        r#"    binds+=(--ro-bind "$root/bin/git" "$git_real")"#
+    );
+
+    let installed = fleet.join(".skein/box-session.sh");
+    fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    fs::copy(&launcher, &installed).unwrap();
+    fs::create_dir_all(box_root).unwrap();
+
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -uo pipefail; binds=(); root={}; box=web-main; skein_launcher={}; {block}",
+            box_root.display(),
+            installed.display(),
+        ))
+        .env("SKEIN_FLEET_ROOT", fleet)
+        .output()
+        .expect("bash to run the git shim block");
+    assert!(
+        out.status.success(),
+        "the shim block failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The bind is what puts the real git behind the shim; outside bwrap the file is placed by hand.
+    fs::copy(real_git, box_root.join("bin/git.real")).unwrap();
+    let mut perms = fs::metadata(box_root.join("bin/git.real"))
+        .unwrap()
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    fs::set_permissions(box_root.join("bin/git.real"), perms).unwrap();
+    box_root.join("bin/git")
+}
+
+fn real_git() -> Option<String> {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("command -v git")
+        .output()
+        .ok()?;
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+#[test]
+fn the_git_shim_is_git_for_everything_that_is_not_a_push() {
+    // The property that makes shimming git tolerable at all. `git` runs on every path in every box,
+    // so anything but a push has to reach the real binary unchanged — same output, same exit code,
+    // nothing extra on stdout for a script to trip over.
+    let Some(git) = real_git() else { return };
+    let b = Box_::new("shim-passthrough");
+    let shim = build_git_shim(&b.fleet, &b.fleet.join("boxroot"), &git);
+
+    for args in [
+        vec!["--version"],
+        vec!["rev-parse", "--is-inside-work-tree"],
+    ] {
+        let via_shim = Command::new(&shim)
+            .args(&args)
+            .env("SKEIN_GIT_TOKENS", &b.tokens)
+            .env("SKEIN_FLEET_ROOT", &b.fleet)
+            .output()
+            .unwrap();
+        let direct = Command::new(&git).args(&args).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&via_shim.stdout),
+            String::from_utf8_lossy(&direct.stdout),
+            "the shim changed what `git {}` prints",
+            args.join(" ")
+        );
+        assert_eq!(
+            via_shim.status.code(),
+            direct.status.code(),
+            "the shim changed the exit code of `git {}`",
+            args.join(" ")
+        );
+    }
+}
+
+#[test]
+fn a_push_to_a_repo_this_box_cannot_write_files_the_ask_and_still_runs() {
+    if !have("jq") {
+        eprintln!("skipping: jq is not installed");
+        return;
+    }
+    let Some(git) = real_git() else { return };
+    let b = Box_::new("shim-push");
+    let root = b.fleet.join("boxroot");
+    let shim = build_git_shim(&b.fleet, &root, &git);
+
+    // A real repo with a GitHub remote it holds no token for.
+    let work = b.fleet.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:someone-else/private.git",
+        ],
+    ] {
+        Command::new(&git)
+            .args(&args)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+    }
+
+    let out = Command::new(&shim)
+        .args(["push", "origin", "HEAD"])
+        .current_dir(&work)
+        .env("SKEIN_GIT_TOKENS", &b.tokens)
+        .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    let queued = b.queued();
+    assert_eq!(queued.len(), 1, "the push filed no request: {said}");
+    assert_eq!(queued[0]["repo"], "someone-else/private");
+    assert_eq!(queued[0]["box"], "web-main");
+    assert!(
+        said.contains("pending approval"),
+        "the agent was not told where the ask went: {said}"
+    );
+    assert!(
+        said.contains("will not change it"),
+        "the agent was not told retrying is pointless, which is the whole point: {said}"
+    );
+    // And it still ran the real git — the shim adds a message, it never blocks.
+    assert!(
+        !out.status.success(),
+        "the push must still be attempted and still fail, not be swallowed by the shim"
+    );
+}
+
+#[test]
+fn a_push_to_the_repo_this_box_owns_says_nothing_at_all() {
+    if !have("jq") {
+        eprintln!("skipping: jq is not installed");
+        return;
+    }
+    let Some(git) = real_git() else { return };
+    let b = Box_::new("shim-own");
+    let root = b.fleet.join("boxroot");
+    let shim = build_git_shim(&b.fleet, &root, &git);
+    b.place_token("acme/thing", "WRITE-THING");
+
+    let work = b.fleet.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/thing.git",
+        ],
+    ] {
+        Command::new(&git)
+            .args(&args)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+    }
+
+    let out = Command::new(&shim)
+        .args(["push", "origin", "HEAD"])
+        .current_dir(&work)
+        .env("SKEIN_GIT_TOKENS", &b.tokens)
+        .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !said.contains("pending approval") && !said.contains("skein:"),
+        "a box pushing its own repo must hear nothing from the shim: {said}"
+    );
+    assert!(b.queued().is_empty(), "it filed a request for its own repo");
+}
+
+#[test]
+fn a_push_to_a_remote_that_is_not_github_is_left_alone() {
+    if !have("jq") {
+        eprintln!("skipping: jq is not installed");
+        return;
+    }
+    let Some(git) = real_git() else { return };
+    let b = Box_::new("shim-other-host");
+    let root = b.fleet.join("boxroot");
+    let shim = build_git_shim(&b.fleet, &root, &git);
+
+    let work = b.fleet.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["remote", "add", "origin", "git@gitlab.com:a/b.git"],
+    ] {
+        Command::new(&git)
+            .args(&args)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+    }
+
+    let out = Command::new(&shim)
+        .args(["push", "origin", "HEAD"])
+        .current_dir(&work)
+        .env("SKEIN_GIT_TOKENS", &b.tokens)
+        .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .output()
+        .unwrap();
+    assert!(
+        b.queued().is_empty(),
+        "a non-GitHub remote is not this gate's business: {:?}",
+        b.queued()
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("skein:"));
+}
+
+#[test]
+fn an_unscoped_box_gets_a_shim_that_does_nothing() {
+    // With no token directory the box is unscoped, and the shim must be indistinguishable from git —
+    // including for a push, which is the one verb it has an opinion about.
+    let Some(git) = real_git() else { return };
+    let b = Box_::new("shim-unscoped");
+    let shim = build_git_shim(&b.fleet, &b.fleet.join("boxroot"), &git);
+
+    let out = Command::new(&shim)
+        .args(["push", "origin", "HEAD"])
+        .env_remove("SKEIN_GIT_TOKENS")
+        .env("SKEIN_FLEET_ROOT", &b.fleet)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("skein:"),
+        "an unscoped box heard from the gate"
+    );
+    assert!(b.queued().is_empty());
 }
 
 #[test]
