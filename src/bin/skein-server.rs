@@ -172,6 +172,11 @@ async fn main() {
             "/api/repos/:id/review/:number/archive",
             post(api_review_archive),
         )
+        .route(
+            "/api/repos/:id/review/:number/summary",
+            get(api_review_summary),
+        )
+        .route("/api/repos/:id/review/:number/act", post(api_review_act))
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/fleet/resize", post(api_fleet_resize))
         .route("/api/fleet/limits", post(api_fleet_limits))
@@ -460,6 +465,110 @@ async fn api_review_archive(
     .await;
     Json(match res {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// What one PR means, at the depth it earns. `?force=1` re-reads instead of using the cached one.
+///
+/// The PR is taken from the queue rather than from the request, so the summary is always keyed to
+/// the head commit GitHub reports right now — a client that remembered a stale SHA cannot make
+/// skein write a summary against it.
+///
+/// This never fails: a PR that could not be read comes back as an `unread` summary carrying the
+/// reason, because the only sane response to a failure here is to show you the PR anyway.
+async fn api_review_summary(
+    Path((id, number)): Path<(String, u64)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
+    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        let queue = skein::prq::queue(&repo, false)?;
+        let pr = queue
+            .prs
+            .iter()
+            .find(|p| p.number == number)
+            .ok_or("that PR is not in your queue")?;
+        let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
+        Ok::<_, String>(skein::review::summarise(
+            &repo,
+            &queue.slug,
+            pr,
+            &identities,
+            force,
+        ))
+    })
+    .await;
+    match out {
+        Ok(Ok(summary)) => Json(summary).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Everything you can do to a PR from its row, behind one route.
+///
+/// One route rather than five because they share the whole of their setup — find the repo, fetch the
+/// queue, locate the PR — and they differ only in the last line. Splitting them would be four more
+/// copies of the same lookup, and four more places for the "is this PR actually yours" check to be
+/// forgotten.
+///
+/// The `kind` values split along a line worth keeping visible: `ask` and `draft` produce text for
+/// you and reach GitHub not at all, while `approve`, `request-changes`, `comment` and `merge` act
+/// under your name. Drafting and posting are deliberately two calls.
+#[derive(Deserialize)]
+struct ActReq {
+    /// approve | request-changes | comment | merge | ask | draft
+    kind: String,
+    /// The review body, the question, or the rough notes — depending on `kind`.
+    #[serde(default)]
+    body: String,
+}
+
+async fn api_review_act(
+    Path((id, number)): Path<(String, u64)>,
+    Json(req): Json<ActReq>,
+) -> Json<serde_json::Value> {
+    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        let queue = skein::prq::queue(&repo, false)?;
+        let pr = queue
+            .prs
+            .iter()
+            .find(|p| p.number == number)
+            .ok_or("that PR is not in your queue")?;
+        let verdict = match req.kind.as_str() {
+            "approve" => Some(skein::prq::Verdict::Approve),
+            "request-changes" => Some(skein::prq::Verdict::RequestChanges),
+            "comment" => Some(skein::prq::Verdict::Comment),
+            _ => None,
+        };
+        let text = match (verdict, req.kind.as_str()) {
+            (Some(v), _) => skein::prq::submit_review(&queue.slug, number, v, &req.body)?,
+            (None, "merge") => skein::prq::merge(&queue.slug, number)?,
+            (None, "ask") => skein::review::ask(&repo, &queue.slug, pr, &req.body)?,
+            (None, "draft") => skein::review::draft_comment(&repo, &queue.slug, pr, &req.body)?,
+            (None, other) => return Err(format!("unknown action: {other}")),
+        };
+        // Anything that touched GitHub changed the lane this PR belongs in, and the queue is cached
+        // for 60s — without this the row would sit in Needs you until the cache aged out.
+        if matches!(
+            req.kind.as_str(),
+            "approve" | "request-changes" | "comment" | "merge"
+        ) {
+            skein::prq::invalidate(&id);
+        }
+        Ok::<_, String>(text)
+    })
+    .await;
+    Json(match out {
+        Ok(Ok(text)) => serde_json::json!({ "ok": true, "text": text }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })

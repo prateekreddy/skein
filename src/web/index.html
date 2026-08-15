@@ -465,7 +465,34 @@
      PR it could not summarise stays at full attention and says so plainly. */
   .revnosum { border:1px dashed var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
               color:var(--text-2); font-size:12.5px; }
+  /* The gist: one line under the title, in the collapsed row. Indented to the title's column so a
+     scan down the page reads as title/gist pairs rather than as two competing columns. */
+  .revgist { padding:0 11px 8px 47px; font-size:12.5px; color:var(--text-2); }
+  .revgist.dim { color:var(--faint); font-style:italic; }
+  .revgist.unread { color:var(--waiting); }
+  .revtag.flag { color:var(--accent-2); border-color:var(--accent); }
+  .revowned { font:11px var(--mono); color:var(--dim); margin-bottom:9px; }
+  .revowned code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
+  .revbrief { font-size:13.5px; line-height:1.6; color:var(--text); }
+  .revbrief h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);
+                 margin:14px 0 5px; font-weight:600; }
+  .revbrief > :first-child { margin-top:0; }
+  .revbrief p { margin:0 0 9px; }
+  .revbrief code { font:12px var(--mono); background:var(--elevated); border-radius:4px; padding:1px 5px; }
   .revempty { color:var(--faint); font-size:13px; padding:10px 2px; }
+  .revacts { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:11px; }
+  .revacts .revspacer { flex:1; }
+  .revchip.go { border-color:var(--accent); color:var(--accent-2); }
+  .revchip[disabled] { opacity:.5; cursor:default; }
+  .revcompose { margin-top:11px; border:1px solid var(--border-2); border-radius:var(--radius-sm);
+                background:var(--inset); padding:10px 11px; }
+  .revcl { font:11px var(--mono); color:var(--faint); margin-bottom:7px; }
+  .revcompose textarea { width:100%; background:var(--panel); color:var(--text); resize:vertical;
+                         border:1px solid var(--border-2); border-radius:var(--radius-sm);
+                         padding:8px 10px; font:13px var(--ui); line-height:1.5; }
+  .revanswer { margin-top:10px; padding:9px 11px; background:var(--panel); border-radius:var(--radius-sm);
+               border-left:2px solid var(--accent); font-size:13px; line-height:1.6; }
+  .revanswer > :first-child { margin-top:0; } .revanswer > :last-child { margin-bottom:0; }
   .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
   .txhead { display:flex; align-items:center; gap:10px; position:sticky; top:-14px; z-index:1; margin:-14px -18px 10px;
             padding:10px 18px; background:var(--inset); border-bottom:1px solid var(--line);
@@ -1970,6 +1997,12 @@ let revQueue = null;          // last fetched queue for view.repo
 let revFilter = "all";        // all | author | reviewer | mentioned
 let revOpen = new Set();      // PR numbers expanded in place
 let revLoading = false;
+let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
+// Three at a time. Each summary is a `gh pr diff` plus one or two model calls on the SAME
+// subscription the fleet is working on, so this is a deliberate throttle rather than a UI nicety —
+// thirty at once would take the rate-limit window away from the boxes doing the real work.
+const REV_SUM_PARALLEL = 3;
+let revSumBusy = 0;
 
 function openReview(repoId) {
   const id = repoId || view.repo || localStorage.getItem("skein.reviewRepo") || (repos[0] && repos[0].id);
@@ -1978,7 +2011,7 @@ function openReview(repoId) {
   try { localStorage.setItem("skein.reviewRepo", id); } catch {}
   // Switching repos must not carry the previous repo's expansions: PR numbers collide across repos,
   // so #12 of one would silently open #12 of the other.
-  if (view.repo !== id) { revQueue = null; revOpen = new Set(); }
+  if (view.repo !== id) { revQueue = null; revOpen = new Set(); revSums = new Map(); }
   view = { box: null, mode: "review", kind: "agent", repo: id };
   applyView();
   loadReview();
@@ -1995,7 +2028,13 @@ function loadReview(force) {
   }).then(q => {
     revLoading = false;
     if (view.repo !== id) return;   // you switched repos while this was in flight
-    revQueue = q; renderReview();
+    // A summary is keyed to a head commit; when the branch moves, the old one describes code that
+    // is no longer there. Dropping it here is what makes a re-review actually get re-read.
+    for (const pr of q.prs || []) {
+      const held = revSums.get(pr.number);
+      if (held && held !== "…" && held.head_sha !== pr.head_sha) revSums.delete(pr.number);
+    }
+    revQueue = q; renderReview(); revPumpSummaries();
   }).catch(e => {
     revLoading = false;
     if (view.repo !== id) return;
@@ -2071,19 +2110,68 @@ function renderReview() {
 
 function setRevFilter(k) { revFilter = k; renderReview(); }
 
+// Summaries are fetched for the lane you are working — Needs you — and nowhere else. A PR you have
+// already decided on does not need explaining, and one you set aside explicitly does not either.
+// Nothing is fetched at all when AI is off: the answer would be the same "unread" thirty times over,
+// and the pane says it once instead.
+function revPumpSummaries() {
+  if (!revQueue || !revQueue.ai) return;
+  const want = (revQueue.prs || [])
+    .filter(p => p.lane === "needs-you" && !revSums.has(p.number))
+    .map(p => p.number);
+  while (revSumBusy < REV_SUM_PARALLEL && want.length) revFetchSummary(want.shift());
+}
+
+function revFetchSummary(number, force) {
+  const id = view.repo;
+  revSumBusy++;
+  revSums.set(number, "…");
+  renderReview();
+  fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/summary${force ? "?force=1" : ""}`)
+    .then(async r => {
+      const text = await r.text();
+      if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
+      return JSON.parse(text);
+    })
+    .then(s => { if (view.repo === id) revSums.set(number, s); })
+    .catch(e => {
+      // A failed request is not "nothing to see here". It becomes an unread summary carrying the
+      // reason, exactly as the server's own failures do — the page must not be a place where a
+      // network error looks like a clear PR.
+      if (view.repo === id) revSums.set(number, {
+        number, depth: "unread", line: "", detail: "", flags: [], yours: [], others: 0,
+        unread_because: "skein could not reach its own summary for this PR: " + String(e.message || e).split("\n")[0],
+      });
+    })
+    .finally(() => { revSumBusy--; renderReview(); revPumpSummaries(); });
+}
+
 function revRow(pr) {
   const open = revOpen.has(pr.number);
   const reasons = revReasonLabels(pr).map(r => `<span class="revtag">${esc(r)}</span>`).join("");
+  const s = revSums.get(pr.number);
+  // The tripwire marks ride on the collapsed line, because they are the reason to stop scrolling.
+  const flags = (s && s !== "…" ? (s.flags || []) : [])
+    .map(f => `<span class="revtag flag">${esc(f)}</span>`).join("");
   const line = `<div class="revline" onclick="toggleRevRow(${pr.number})">
       <span class="revdot ${esc(pr.checks || "none")}" title="checks: ${esc(pr.checks || "none")}"></span>
       <span class="revnum">#${pr.number}</span>
       <span class="revtitle">${esc(pr.title || "")}</span>
       ${pr.draft ? `<span class="revtag draft">draft</span>` : ""}
       ${revMoved(pr) ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""}
-      ${reasons}
+      ${flags}${reasons}
       <span class="revwho">${esc(pr.author || "")}</span>
-    </div>`;
+    </div>${revGist(s)}`;
   return `<div class="revrow${open ? " open" : ""}">${line}${open ? revBody(pr) : ""}</div>`;
+}
+
+// The one line under the title — what this PR is, in the collapsed state. This is the row you
+// actually read at thirty a day, so it says something or it says nothing; it never guesses.
+function revGist(s) {
+  if (!s) return "";
+  if (s === "…") return `<div class="revgist dim">reading it…</div>`;
+  if (s.depth === "unread") return `<div class="revgist unread">not summarised — ${esc(s.unread_because || "")}</div>`;
+  return `<div class="revgist">${esc(s.line || "")}</div>`;
 }
 
 function revBody(pr) {
@@ -2100,12 +2188,122 @@ function revBody(pr) {
       <span>${mine}</span>
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">open on GitHub ↗</a>
     </div>
-    <div class="revnosum">Not summarised — read this one yourself. skein only lowers the depth of a
-      PR when it has actually read it; when it has not, the PR stays at full attention.</div>
-    <div class="revmeta" style="margin:10px 0 0">
+    ${revDetail(pr)}
+    <div class="revacts">
+      <button type="button" class="revchip go" onclick="revAct(${pr.number}, 'approve')">approve</button>
+      <button type="button" class="revchip" onclick="revCompose(${pr.number}, 'comment')">comment…</button>
+      <button type="button" class="revchip" onclick="revCompose(${pr.number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip" onclick="revCompose(${pr.number}, 'ask')">ask…</button>
+      <span class="revspacer"></span>
+      <button type="button" class="revchip" onclick="openNewBoxFor('${esc(view.repo)}', ${JSON.stringify(pr.head_ref || "")})">box on this branch</button>
+      <button type="button" class="revchip" onclick="revAct(${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>
       <button type="button" class="revchip" onclick="archivePr(${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
+      <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">re-read</button>
+    </div>
+    ${revComposeHtml(pr)}
+  </div>`;
+}
+
+// The expanded half: the brief when there is one, and an unmissable statement when there is not.
+//
+// A PR skein has not read must never render as an empty, calm space — that reads as "nothing here",
+// which is the one thing it must not mean. So the absence is drawn as loudly as the presence.
+function revDetail(pr) {
+  const s = revSums.get(pr.number);
+  if (!s) {
+    return `<div class="revnosum">Not read yet.${revQueue && !revQueue.ai
+      ? " Summaries are off — turn on AI enrichment in Settings → Boxes. Until then every PR stays at full attention."
+      : ` <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">read it</button>`}</div>`;
+  }
+  if (s === "…") return `<div class="revnosum">reading it…</div>`;
+  if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")} Read this one yourself.</div>`;
+  const owned = (s.yours || []).length
+    ? `<div class="revowned">yours: ${(s.yours || []).map(p => `<code>${esc(p)}</code>`).join(" ")}${
+        s.others ? ` <span class="dim">· and ${s.others} path${s.others === 1 ? "" : "s"} you do not own</span>` : ""}</div>`
+    : "";
+  const detail = s.detail
+    ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
+    : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
+  return owned + detail;
+}
+
+// The composer: one box for the three things that need words. `ask` stays private; the other two
+// post under your name, which is why the button that sends them says so.
+let revComposing = null;   // { number, kind, text, answer, busy }
+
+function revCompose(number, kind) {
+  revComposing = { number, kind, text: "", answer: "", busy: false };
+  renderReview();
+  setTimeout(() => document.getElementById("rev-compose")?.focus(), 30);
+}
+function revComposeClose() { revComposing = null; renderReview(); }
+
+function revComposeHtml(pr) {
+  const c = revComposing;
+  if (!c || c.number !== pr.number) return "";
+  const asking = c.kind === "ask";
+  const label = asking ? "Ask about this PR — the answer stays between you and skein."
+    : c.kind === "comment" ? "Comment — posted to GitHub under your name."
+    : "Request changes — posted to GitHub under your name, and moves this out of your lane.";
+  return `<div class="revcompose">
+    <div class="revcl">${esc(label)}</div>
+    <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
+      oninput="revComposing.text = this.value">${esc(c.text)}</textarea>
+    ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
+    <div class="revacts">
+      ${asking
+        ? `<button type="button" class="revchip go" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "thinking…" : "ask"}</button>`
+        : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
+           <button type="button" class="revchip go" onclick="revAct(${pr.number}, '${c.kind}')"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
+      <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
     </div>
   </div>`;
+}
+
+/// Ask, privately. The answer replaces nothing and is posted nowhere.
+function revAsk(number) {
+  const c = revComposing;
+  if (!c || !c.text.trim()) { toast("ask something first"); return; }
+  c.busy = true; renderReview();
+  revPost(number, "ask", c.text).then(d => {
+    c.busy = false;
+    if (d.ok) c.answer = d.text; else toast(d.error || "no answer");
+    renderReview();
+  });
+}
+
+/// Draft into the box you are about to send. It replaces the notes rather than appending, because
+/// the notes were the input to it — and you can still edit every word before it goes.
+function revDraft(number) {
+  const c = revComposing;
+  if (!c || !c.text.trim()) { toast("say roughly what you want to tell them"); return; }
+  c.busy = true; renderReview();
+  revPost(number, "draft", c.text).then(d => {
+    c.busy = false;
+    if (d.ok) c.text = d.text; else toast(d.error || "could not draft");
+    renderReview();
+  });
+}
+
+function revPost(number, kind, body) {
+  return fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/act`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ kind, body: body || "" }),
+  }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }));
+}
+
+/// The acts that reach GitHub under your name. Merge asks first — it is the one thing here that
+/// cannot be undone from this pane, and an approval you did not mean is a sentence to your
+/// colleague where a merge you did not mean is a commit on the base branch.
+function revAct(number, kind) {
+  if (kind === "merge" && !confirm(`Merge #${number}?\n\nThis lands it on the base branch. Approving is separate and has already happened if you did it.`)) return;
+  const body = revComposing && revComposing.number === number ? revComposing.text : "";
+  revPost(number, kind, body).then(d => {
+    if (!d.ok) { toast(d.error || "that did not go through"); return; }
+    toast(`#${number} ${d.text}`);
+    revComposing = null;
+    loadReview(true);
+  });
 }
 
 function toggleRevRow(n) {
@@ -4663,11 +4861,19 @@ function fillSyncSelect() {
   el.innerHTML = opts.join("");
 }
 // Open the new-box dialog with a specific repo preselected (the per-repo ＋ in the sidebar).
-function openNewBoxFor(repoId) {
-  newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields();
+// Open the New box dialog already pointed at a repo, and optionally at a branch that exists.
+//
+// The branch argument is what the review pane uses to put hands on a PR. It deliberately goes
+// through this dialog rather than launching directly: agent, work tracking, committer and git scope
+// are all decisions the launcher reads *as the box comes up*, and a second launch path would be a
+// second place for those to be forgotten.
+function openNewBoxFor(repoId, branch) {
+  newbox.classList.add("open"); nbBranch.value = branch || ""; clearIdentityFields();
   Promise.all([loadRepos(), loadSync()]).then(() => {
     if ([...nbRepo.options].some(o => o.value === repoId)) nbRepo.value = repoId;
-    fillSyncSelect(); fillGitScopeSelect(); nbBranch.focus();
+    fillSyncSelect(); fillGitScopeSelect();
+    if (typeof gateLaunch === "function") gateLaunch();
+    nbBranch.focus(); nbBranch.select();
   });
 }
 function closeNewBox() { newbox.classList.remove("open"); }

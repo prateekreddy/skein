@@ -63,10 +63,20 @@ function makeFixture() {
 
   // A `gh` that answers from those files. `user/teams` fails on purpose: that is the common real
   // shape (a login without read:org) and it must surface as a stated blind spot, not silence.
+  // A working clone with a CODEOWNERS, so stage 0 (ownership) runs for real rather than being
+  // skipped by an absent file — the path that decides how deep a summary goes.
+  fs.mkdirSync(path.join(root, "work", ".github"), { recursive: true });
+  fs.writeFileSync(path.join(root, "work", ".github", "CODEOWNERS"), "src/ @me\nweb/ @someone-else\n");
+
   const gh = path.join(bin, "gh");
   fs.writeFileSync(gh, `#!/bin/sh
 if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf 'me\\n'; exit 0; fi
 if [ "$1" = "api" ] && [ "$2" = "user/teams" ]; then exit 1; fi
+if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
+  for a in "$@"; do if [ "$a" = "--name-only" ]; then printf 'src/parser.rs\\nweb/app.js\\n'; exit 0; fi; done
+  printf -- '--- a/src/parser.rs\\n+++ b/src/parser.rs\\n@@\\n-const TIMEOUT: u64 = 30;\\n+const TIMEOUT: u64 = 5;\\n'
+  exit 0
+fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   term=""
   while [ $# -gt 0 ]; do
@@ -89,7 +99,28 @@ exit 0
   const sbx = path.join(bin, "sbx");
   fs.writeFileSync(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
   fs.chmodSync(sbx, 0o755);
-  return { root, bin, home, gh, sbx };
+
+  // A `claude` that answers both stages. Stage 1 is recognised by its required output format and
+  // stage 2 by everything else — the same split the real prompts make, so a change to either prompt
+  // that broke the contract would show up here.
+  const claude = path.join(bin, "claude");
+  fs.writeFileSync(claude, `#!/bin/sh
+p="$4"
+case "$p" in
+  *"Answer in EXACTLY this format"*)
+    case "$p" in
+      *"default timeout"*)
+        printf 'KIND: feature\\nLINE: the request timeout default drops from 30s to 5s.\\nEXPAND: yes\\nFLAGS: default, behaviour\\n' ;;
+      *)
+        printf 'KIND: fix\\nLINE: stops the parser crashing on empty input.\\nEXPAND: no\\nFLAGS: none\\n' ;;
+    esac ;;
+  *)
+    printf '## What it does\\n\\nShortens how long a request waits before giving up.\\n\\n## What changes in how it works\\n\\nCallers that relied on the old 30s ceiling now fail after 5s.\\n' ;;
+esac
+exit 0
+`);
+  fs.chmodSync(claude, 0o755);
+  return { root, bin, home, gh, sbx, claude };
 }
 
 const freePort = () => new Promise(res => {
@@ -110,6 +141,8 @@ async function startServer(fx, port) {
       SKEIN_LS_CMD: `${fx.sbx} ls --json`,
       SKEIN_HOME: fx.home,
       SKEIN_GH_BIN: fx.gh,
+      SKEIN_AI: "on",                 // summaries are off by default; this suite is about them
+      SKEIN_CLAUDE_BIN: fx.claude,
       SKEIN_NO_GH_SECRET: "1",
       PATH: `${fx.bin}:${process.env.PATH}`,
     },
@@ -229,23 +262,97 @@ await check("'all' brings everything back", async () => {
   if (shown.length < 4) throw new Error(`expected all four PRs, saw ${shown.length}`);
 });
 
-console.log("\nexpanding");
-await check("a row opens in place", async () => {
-  await page.click("#revpane .revrow .revline");
-  await settle();
-  await mustSee("#revpane .revrow.open .revbody", "the expanded body");
+console.log("\nsummaries");
+// The gist is the product at thirty a day: the collapsed row has to say what the PR *is*, so that
+// most of the queue never needs opening at all.
+await check("a bug fix states itself on the collapsed row", async () => {
+  await page.waitForFunction(
+    () => [...document.querySelectorAll("#revpane .revgist")].some(e => /parser/.test(e.textContent)),
+    null, { timeout: 15000 });
+  const gists = await page.$$eval("#revpane .revgist", els => els.map(e => e.textContent.trim()));
+  if (!gists.some(g => g.includes("crashing on empty input")))
+    throw new Error(`no one-line summary on the row: ${JSON.stringify(gists)}`);
 });
-// skein's standing rule: AI may only add scrutiny, never remove it. A PR with no summary must read
-// as full attention, in words, rather than as an empty space that looks like nothing to do.
-await check("an unsummarised PR says so rather than looking clear", async () => {
-  const t = (await page.$eval("#revpane .revrow.open .revnosum", e => e.textContent)).toLowerCase();
-  if (!t.includes("not summarised")) throw new Error(`the fallback does not state itself: ${t}`);
+// The tripwire marks belong on the collapsed line, because they are the reason to stop scrolling.
+await check("a contract change is flagged where you can see it without opening", async () => {
+  const rows = await page.$$eval("#revpane .revrow", els => els.map(e => ({
+    text: e.querySelector(".revtitle")?.textContent.trim() || "",
+    flags: [...e.querySelectorAll(".revtag.flag")].map(f => f.textContent.trim()),
+  })));
+  const timeout = rows.find(r => r.text.includes("default timeout"));
+  const fix = rows.find(r => r.text.includes("null deref"));
+  if (!timeout?.flags.includes("default")) throw new Error(`a changed default is not flagged: ${JSON.stringify(timeout)}`);
+  if (fix?.flags.length) throw new Error(`a bug fix was flagged as a contract change: ${JSON.stringify(fix)}`);
+});
+
+console.log("\nexpanding");
+await check("a flagged PR opens to a brief, not to a diff", async () => {
+  const rows = await page.$$("#revpane .revrow");
+  for (const row of rows) {
+    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
+    if (t.includes("default timeout")) { await row.click(); break; }
+  }
+  await settle(800);
+  const brief = (await page.$eval("#revpane .revrow.open .revbrief", e => e.textContent)).toLowerCase();
+  if (!brief.includes("what changes in how it works"))
+    throw new Error(`the brief is missing the section that matters: ${brief.slice(0, 120)}`);
+});
+// Stage 0 runs without any model, and it is what scopes the rest. If CODEOWNERS said `src/ @me`
+// and the PR touched src/ and web/, the pane must say which half is yours.
+await check("the brief says which of it you own", async () => {
+  const owned = await page.$eval("#revpane .revrow.open .revowned", e => e.textContent).catch(() => "");
+  if (!owned.includes("src/parser.rs")) throw new Error(`ownership was not applied: ${owned}`);
+  if (!owned.includes("do not own")) throw new Error(`what it left out is not stated: ${owned}`);
+});
+
+console.log("\nacts");
+// Private by construction: an answer that might be published is a different, more careful, less
+// useful answer — so asking must never look like a step on the way to posting.
+await check("asking a question keeps the answer off GitHub", async () => {
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
+  await settle();
+  const label = await page.$eval("#revpane .revcl", e => e.textContent);
+  if (!/stays between you and skein/i.test(label))
+    throw new Error(`the composer does not promise privacy: ${label}`);
+  await page.fill("#rev-compose", "why 5 seconds?");
+  await page.click("#revpane .revcompose .revchip:has-text('ask')");
+  await page.waitForSelector("#revpane .revanswer", { timeout: 15000 });
+  await mustSee("#revpane .revanswer", "the private answer");
+  // …and it must not have offered to publish it.
+  const posts = await page.$$("#revpane .revcompose .revchip:has-text('post to GitHub')");
+  if (posts.length) throw new Error("an ask offered to post its answer");
+});
+await check("a comment is drafted into the box you edit, not sent", async () => {
+  await page.click("#revpane .revcompose .revchip:has-text('cancel')");
+  await settle();
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('comment')");
+  await settle();
+  await page.fill("#rev-compose", "ask them what happens to slow callers");
+  await page.click("#revpane .revcompose .revchip:has-text('draft with skein')");
+  await page.waitForFunction(
+    () => /shortens/i.test(document.getElementById("rev-compose")?.value || ""),
+    null, { timeout: 15000 });
+  const posted = await page.$("#revpane .revcompose .revchip:has-text('post to GitHub')");
+  if (!posted) throw new Error("a draft with no way to send it");
+  await mustSee("#revpane .revcompose .revchip:has-text('post to GitHub')", "the post button");
+});
+await check("posting is a separate press from drafting", async () => {
+  await page.click("#revpane .revcompose .revchip:has-text('post to GitHub')");
+  await settle(900);
+  const open = await page.$("#revpane .revcompose");
+  if (open) throw new Error("the composer stayed open, so it is unclear whether it sent");
 });
 
 console.log("\nsetting aside");
 await check("set aside moves a PR to the archived lane", async () => {
+  const rows = await page.$$("#revpane .revrow");
+  for (const row of rows) {
+    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
+    if (t.includes("default timeout") && !(await row.$(".revbody"))) { await row.click(); break; }
+  }
+  await settle();
   const before = await laneTitles("needs you");
-  await page.click("#revpane .revrow.open .revbody .revchip");
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
   await settle(900);
   const archived = await laneTitles("archived");
   if (!archived?.length) throw new Error("nothing reached the archived lane");

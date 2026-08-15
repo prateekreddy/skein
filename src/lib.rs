@@ -17,6 +17,7 @@ mod mailbox;
 mod place;
 pub mod prq;
 mod repos;
+pub mod review;
 mod runtime;
 mod sandbox;
 mod ship;

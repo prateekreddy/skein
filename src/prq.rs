@@ -93,6 +93,9 @@ pub struct Queue {
     pub repo_id: String,
     pub slug: String,
     pub viewer: String,
+    /// Is AI enrichment on? Without it every summary is [`crate::review::Depth::Unread`], so the
+    /// page says so once instead of asking the server thirty times to be told the same thing.
+    pub ai: bool,
     pub prs: Vec<Pr>,
     /// What this queue could **not** see, in plain words.
     ///
@@ -320,6 +323,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
         repo_id: repo.id.clone(),
         slug,
         viewer: login,
+        ai: crate::ai_enabled(),
         prs,
         blind_spots,
     };
@@ -473,6 +477,92 @@ fn rollup(item: &serde_json::Value) -> String {
         "passing"
     }
     .into()
+}
+
+// ───────────────────────────── acting on a PR ─────────────────────────────
+
+/// The three things a review can say, in GitHub's own vocabulary.
+///
+/// One function with three verbs rather than three functions, because they differ only in a flag
+/// and they must stay consistent: `request-changes` exists precisely so that "not yet" moves the PR
+/// out of your lane. Offering only approve and a plain comment would leave a PR you had answered
+/// sitting in Needs you forever, with the ball visibly in the wrong court.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl Verdict {
+    fn flag(self) -> &'static str {
+        match self {
+            Verdict::Approve => "--approve",
+            Verdict::RequestChanges => "--request-changes",
+            Verdict::Comment => "--comment",
+        }
+    }
+}
+
+/// Submit a review as **you**, via the host's own `gh` login.
+///
+/// GitHub refuses an empty body on `--request-changes` and `--comment`, so this refuses first with a
+/// sentence you can act on rather than passing the rejection through.
+pub fn submit_review(
+    slug: &str,
+    number: u64,
+    verdict: Verdict,
+    body: &str,
+) -> Result<String, String> {
+    let body = body.trim();
+    if body.is_empty() && verdict != Verdict::Approve {
+        return Err(
+            "GitHub needs a body for anything but a bare approval — say what you want changed."
+                .into(),
+        );
+    }
+    let n = number.to_string();
+    let mut args = vec!["pr", "review", &n, "--repo", slug, verdict.flag()];
+    if !body.is_empty() {
+        args.push("--body");
+        args.push(body);
+    }
+    let (out, err, code) = run_capture(&gh_bin(), &args)?;
+    if code != 0 {
+        let msg = if err.trim().is_empty() { out } else { err };
+        return Err(msg.trim().to_string());
+    }
+    Ok(match verdict {
+        Verdict::Approve => "approved",
+        Verdict::RequestChanges => "changes requested",
+        Verdict::Comment => "commented",
+    }
+    .into())
+}
+
+/// Merge a PR by number. Separate from approving on purpose: with a protected base branch your
+/// approval is one of several, and merging is a different decision that is often not yours to make.
+///
+/// `$SKEIN_MERGE_METHOD` (default `--squash`) matches [`crate::ship::merge_pr`], so the two paths
+/// cannot drift into merging the same repo two different ways.
+pub fn merge(slug: &str, number: u64) -> Result<String, String> {
+    let method = std::env::var("SKEIN_MERGE_METHOD")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "--squash".into());
+    let n = number.to_string();
+    let (out, err, code) = run_capture(&gh_bin(), &["pr", "merge", &n, "--repo", slug, &method])?;
+    if code != 0 {
+        let msg = if err.trim().is_empty() { out } else { err };
+        return Err(msg.trim().to_string());
+    }
+    let msg = out.trim();
+    Ok(if msg.is_empty() {
+        "merged".into()
+    } else {
+        msg.to_string()
+    })
 }
 
 /// A `Deserialize` twin of [`Lane`], so a route can accept a lane name as input.

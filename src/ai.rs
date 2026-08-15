@@ -36,6 +36,23 @@ pub fn ai_enabled() -> bool {
 /// caller treats None as "fall back to the free deterministic path". `$SKEIN_CLAUDE_BIN` and
 /// `$SKEIN_AI_MODEL` override the binary and model (and let tests stub the call).
 pub(crate) fn claude_oneshot(prompt: &str) -> Option<String> {
+    claude_oneshot_with(prompt, None, Duration::from_secs(30))
+}
+
+/// [`claude_oneshot`] with the model and time budget named at the call site.
+///
+/// Two tiers exist because two jobs do. Classifying a diff is cheap work a small model does well;
+/// explaining what a change means at product level is not, and giving both the same 30s is how the
+/// expensive one silently starts failing — which, under the rule that AI may only add scrutiny,
+/// degrades to "read it yourself" rather than to a wrong answer, but degrades all the same.
+///
+/// `None` on every failure path, exactly as [`claude_oneshot`]: disabled, absent binary, non-zero
+/// exit, timeout, or empty output. Callers must treat `None` as "fall back", never as an answer.
+pub(crate) fn claude_oneshot_with(
+    prompt: &str,
+    model: Option<&str>,
+    timeout: Duration,
+) -> Option<String> {
     if !ai_enabled() {
         return None;
     }
@@ -43,13 +60,15 @@ pub(crate) fn claude_oneshot(prompt: &str) -> Option<String> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "claude".into());
+    // `$SKEIN_AI_MODEL` still wins over the call site: it is the escape hatch that lets one env var
+    // pin every AI call in a run, which is what the tests and a cost-conscious operator both need.
     let model = env::var("SKEIN_AI_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "claude-haiku-4-5".into());
+        .unwrap_or_else(|| model.unwrap_or("claude-haiku-4-5").to_string());
     let mut command = Command::new(&bin);
     command.args(["-p", "--model", &model, prompt]);
-    let out = bounded_output(&mut command, "AI enrichment", Duration::from_secs(30)).ok()?;
+    let out = bounded_output(&mut command, "AI enrichment", timeout).ok()?;
     if !out.status.success() {
         return None;
     }
