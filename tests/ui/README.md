@@ -19,6 +19,18 @@ cd tests/ui && npm run setup     # npm install + playwright's chromium (~150MB, 
 
 ```sh
 node tests/ui/smoke.mjs          # from the repo root; builds skein-server itself
+
+Runnable **inside a box** now: chromium's system libraries used to need a working `sudo`, which a
+box does not have. Ask the fleet for them once — `sudo apt-get install libnspr4 libnss3
+libasound2t64 libgbm1 libx11-6 libxext6 libcairo2 libpango-1.0-0 libxcomposite1 libxdamage1
+libxfixes3 libxrandr2 libatspi2.0-0t64 libatk1.0-0t64 libxkbcommon0` files a request the cockpit
+approves — then `npx playwright install chromium`. Playwright's own suggested list is **incomplete**:
+it omits `libatk1.0-0t64` and `libxkbcommon0`, and the only way to find that out is `ldd` on
+`~/.cache/ms-playwright/*/chrome-linux/headless_shell`.
+
+It had been failing 10 of 52 for months while nobody could run it here. A suite that cannot run
+where the work happens does not merely go stale — it goes *wrong*, and it hid a real bug (⌥[ opening
+the microphone) behind nine tests describing features that no longer existed.
 ```
 
 It launches the real binary against a throwaway workspace in `$TMPDIR` (a README, a `docs/` folder
