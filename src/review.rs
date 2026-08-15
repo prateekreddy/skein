@@ -36,6 +36,23 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Is skein allowed to read pull requests? **On unless you turn it off.**
+///
+/// Deliberately not [`crate::ai_enabled`], which stays off by default. The two spend on opposite
+/// terms: enrichment sweetens a board that already works and runs unasked, while a summary happens
+/// only for a PR already in your queue, at most once per head commit — and without it the queue
+/// does not do the job it exists for. `$SKEIN_REVIEW_AI` wins, so one env var can pin a run.
+///
+/// Off is a supported state, not a broken one: every PR reads "not summarised" and keeps your full
+/// attention, which is the direction every failure in this module runs.
+pub fn summaries_enabled() -> bool {
+    match std::env::var("SKEIN_REVIEW_AI").ok().as_deref() {
+        Some("on" | "1" | "true" | "yes") => true,
+        Some("off" | "0" | "false" | "no") => false,
+        _ => crate::load_config().review_summaries,
+    }
+}
+
 /// How much of a PR skein is prepared to vouch for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -356,11 +373,11 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
             return hit;
         }
     }
-    if !crate::ai_enabled() {
+    if !summaries_enabled() {
         return Summary::unread(
             pr.number,
             &pr.head_sha,
-            "summaries are off — turn on AI enrichment in Settings → Boxes. Until then every PR stays at full attention.",
+            "summaries are switched off — turn \"Read pull requests\" back on in Settings → Boxes. Until then every PR stays at full attention.",
         );
     }
     if pr.head_sha.is_empty() {
@@ -438,14 +455,16 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
             // Stage 1 said this one deserves explaining and stage 2 could not. Falling back to the
             // one-liner would be the exact inversion of this module's rule: it would present a PR
             // flagged as needing your judgement as though it had been summarised.
-            None => return Summary::unread(
-                pr.number,
-                &pr.head_sha,
-                &format!(
+            None => {
+                return Summary::unread(
+                    pr.number,
+                    &pr.head_sha,
+                    &format!(
                     "this one needs explaining ({}) and skein could not do it — read it yourself.",
                     verdict.line
                 ),
-            ),
+                )
+            }
         }
     }
     let _ = store(&repo.id, &summary);
@@ -497,9 +516,10 @@ fn context(slug: &str, pr: &Pr, repo_id: &str) -> String {
 /// understanding, and an answer that might be published is a different, more careful, less useful
 /// answer. Posting is a second, deliberate act.
 pub fn ask(repo: &Repo, slug: &str, pr: &Pr, question: &str) -> Result<String, String> {
-    if !crate::ai_enabled() {
+    if !summaries_enabled() {
         return Err(
-            "summaries and questions are off — turn on AI enrichment in Settings → Boxes.".into(),
+            "reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes."
+                .into(),
         );
     }
     let question = question.trim();
@@ -526,8 +546,8 @@ Their question: {question}
 /// The posting is a separate call for the reason you gave: the agent drafts, you correct it, then it
 /// goes. A draft that could post itself would be a different feature with a different risk.
 pub fn draft_comment(repo: &Repo, slug: &str, pr: &Pr, intent: &str) -> Result<String, String> {
-    if !crate::ai_enabled() {
-        return Err("drafting is off — turn on AI enrichment in Settings → Boxes.".into());
+    if !summaries_enabled() {
+        return Err("reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes.".into());
     }
     let intent = intent.trim();
     if intent.is_empty() {
@@ -556,6 +576,48 @@ Their notes: {intent}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default that makes the queue worth opening. A fresh install, and an existing
+    /// `config.json` written before this field existed, must both read as on — `#[serde(default)]`
+    /// on a bool would silently make every upgraded user's queue unread.
+    #[test]
+    fn reading_prs_is_on_unless_you_turn_it_off() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::remove_var("SKEIN_REVIEW_AI");
+        assert!(summaries_enabled(), "a fresh install must read PRs");
+
+        // An older config.json, from before the field was added.
+        std::fs::write(
+            crate::skein_home().join("config.json"),
+            br#"{"ai_enrichment":false}"#,
+        )
+        .unwrap();
+        assert!(
+            summaries_enabled(),
+            "an upgraded config must not silently switch reading off"
+        );
+
+        std::env::set_var("SKEIN_REVIEW_AI", "off");
+        assert!(!summaries_enabled(), "the env override must still win");
+        std::env::remove_var("SKEIN_REVIEW_AI");
+    }
+
+    /// The two budgets are separate on purpose: enrichment runs unasked, reading a PR does not.
+    #[test]
+    fn reading_prs_does_not_depend_on_the_background_enrichment_switch() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::remove_var("SKEIN_REVIEW_AI");
+        std::env::set_var("SKEIN_AI", "off");
+        assert!(
+            summaries_enabled(),
+            "turning off board enrichment must not stop the review queue reading PRs"
+        );
+        std::env::remove_var("SKEIN_AI");
+    }
 
     #[test]
     fn a_well_formed_verdict_parses() {

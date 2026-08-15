@@ -89,6 +89,19 @@ pub struct Config {
     /// turn-end when on — never a per-tick sweep. See [`crate::ai`].
     #[serde(default)]
     pub ai_enrichment: bool,
+    /// Read pull requests in the review queue, and answer questions about them.
+    ///
+    /// **On by default**, unlike [`Config::ai_enrichment`], because the two spend on opposite terms.
+    /// Enrichment is a background sweetener over a board that already tells you what you need, and
+    /// it runs whether or not you asked — so it defaults off. A summary is only ever produced for a
+    /// PR that is already in your queue, at most once per head commit, and without it the review
+    /// queue does not do the job it exists for: reading thirty PRs a day yourself is the thing being
+    /// replaced.
+    ///
+    /// `$SKEIN_REVIEW_AI=on|off` overrides. Off is not a broken state — every PR simply reads
+    /// "not summarised" and stays at full attention. See [`crate::review`].
+    #[serde(default = "default_true")]
+    pub review_summaries: bool,
     /// The one sbx sandbox that hosts every box, when several boxes share one.
     ///
     /// The fleet is the default. Empty ⇒ skein's original model: one sandbox per box, each its own
@@ -359,6 +372,7 @@ impl Default for Config {
             github_app_id: String::new(),
             github_app_key: String::new(),
             ai_enrichment: false,
+            review_summaries: true,
             fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),

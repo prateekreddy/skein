@@ -93,8 +93,8 @@ pub struct Queue {
     pub repo_id: String,
     pub slug: String,
     pub viewer: String,
-    /// Is AI enrichment on? Without it every summary is [`crate::review::Depth::Unread`], so the
-    /// page says so once instead of asking the server thirty times to be told the same thing.
+    /// Is skein allowed to read PRs? Without it every summary is [`crate::review::Depth::Unread`],
+    /// so the page says so once instead of asking the server thirty times to be told the same thing.
     pub ai: bool,
     pub prs: Vec<Pr>,
     /// What this queue could **not** see, in plain words.
@@ -323,7 +323,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
         repo_id: repo.id.clone(),
         slug,
         viewer: login,
-        ai: crate::ai_enabled(),
+        ai: crate::review::summaries_enabled(),
         prs,
         blind_spots,
     };

@@ -141,7 +141,8 @@ async function startServer(fx, port) {
       SKEIN_LS_CMD: `${fx.sbx} ls --json`,
       SKEIN_HOME: fx.home,
       SKEIN_GH_BIN: fx.gh,
-      SKEIN_AI: "on",                 // summaries are off by default; this suite is about them
+      // Deliberately NO SKEIN_REVIEW_AI: reading PRs is on by default, and the whole summary half
+      // of this suite passing without an override is the proof of it.
       SKEIN_CLAUDE_BIN: fx.claude,
       SKEIN_NO_GH_SECRET: "1",
       PATH: `${fx.bin}:${process.env.PATH}`,

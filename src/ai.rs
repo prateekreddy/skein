@@ -36,6 +36,9 @@ pub fn ai_enabled() -> bool {
 /// caller treats None as "fall back to the free deterministic path". `$SKEIN_CLAUDE_BIN` and
 /// `$SKEIN_AI_MODEL` override the binary and model (and let tests stub the call).
 pub(crate) fn claude_oneshot(prompt: &str) -> Option<String> {
+    if !ai_enabled() {
+        return None;
+    }
     claude_oneshot_with(prompt, None, Duration::from_secs(30))
 }
 
@@ -46,16 +49,19 @@ pub(crate) fn claude_oneshot(prompt: &str) -> Option<String> {
 /// expensive one silently starts failing — which, under the rule that AI may only add scrutiny,
 /// degrades to "read it yourself" rather than to a wrong answer, but degrades all the same.
 ///
-/// `None` on every failure path, exactly as [`claude_oneshot`]: disabled, absent binary, non-zero
-/// exit, timeout, or empty output. Callers must treat `None` as "fall back", never as an answer.
+/// **This function does not check whether AI is switched on — its caller must.** There are two
+/// budgets now and they default opposite ways: [`ai_enabled`] gates the background enrichment that
+/// runs whether or not you asked for it, while [`crate::review::summaries_enabled`] gates reading a
+/// PR you have already opened a queue to look at. A single gate in here would force one policy on
+/// both, and the wrong one on whichever it wasn't written for.
+///
+/// `None` on every failure path: absent binary, non-zero exit, timeout, or empty output. Callers
+/// must treat `None` as "fall back", never as an answer.
 pub(crate) fn claude_oneshot_with(
     prompt: &str,
     model: Option<&str>,
     timeout: Duration,
 ) -> Option<String> {
-    if !ai_enabled() {
-        return None;
-    }
     let bin = env::var("SKEIN_CLAUDE_BIN")
         .ok()
         .filter(|s| !s.is_empty())
