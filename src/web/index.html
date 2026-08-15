@@ -812,17 +812,17 @@
           <div class="word"><b>skein</b></div>
           <div class="counts" id="counts"></div>
           <div class="right">
-            <span class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></span>
-            <span class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</span>
+            <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
+            <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
             <span class="hdiv"></span>
-            <span class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository"><svg class="ic" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg></span>
-            <span class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></span>
-            <span class="kbtn ghost" id="gitqbtn" onclick="openGitq()" title="Repo write access"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
-            <span class="kbtn ghost" id="subqbtn" onclick="openSubq()" title="Package requests from boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></span>
-            <span class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span>
-            <span class="kbtn ghost" id="voice" title="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></span>
-            <span class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
-            <span class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)">⌘K</span>
+            <button type="button" class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository" aria-label="Add a repository"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>repo</button>
+            <button type="button" class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast" aria-label="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></button>
+            <button type="button" class="kbtn ghost" id="gitqbtn" onclick="openGitq()" title="Repo write access" aria-label="Repo write access"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
+            <button type="button" class="kbtn ghost" id="subqbtn" onclick="openSubq()" title="Package requests from boxes" aria-label="Package requests from boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></button>
+            <button type="button" class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you" aria-label="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
+            <button type="button" class="kbtn ghost" id="voice" title="Say out loud when a box needs you" aria-label="Say out loud when a box needs you"><svg class="ic" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></button>
+            <button type="button" class="kbtn ghost" onclick="openSettings()" title="Settings &amp; repos" aria-label="Settings &amp; repos"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+            <button type="button" class="kbtn ghost" onclick="openPalette()" title="Command palette (⌘K)" aria-label="Command palette (⌘K)">⌘K</button>
             <span class="live" id="live" title="live connection"><span class="pip"></span><span id="livetext">connecting…</span></span>
           </div>
         </header>
@@ -1019,7 +1019,7 @@
             <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b> and <b>Issues: write</b> (the last is what lets a box comment on a PR), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Base branch for PRs</span><span class="desc">left blank, each repo's own default branch is used</span><input id="set-base" placeholder="(repo default)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
-            <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill">✨</span></span><span class="desc">spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked ✨ in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</span></span><input type="checkbox" id="set-ai" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill"></span></span><span class="desc">spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</span></span><input type="checkbox" id="set-ai" class="switch"></label>
             <p class="set-note" id="set-ainote"></p>
           </section>
           <section class="set-pane" data-pane="tracking">
@@ -1743,7 +1743,7 @@ function renderDockbar() {
         ? `<button class="kbtn primary" id="dsend" title="paste the review into the agent prompt">Send ${hasReview}</button>` : "")
     + shipHtml(view.box, hasReview)
     + `<span class="hdiv"></span>`
-    + `<button class="kbtn ghost danger" id="ddestroy" title="destroy — sbx rm: kills & removes the sandbox and its resources (unpushed commits lost)"><svg class="ic" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
+    + `<button class="kbtn ghost danger" id="ddestroy" title="destroy — removes this box and reclaims its disk (unpushed commits lost)"><svg class="ic" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
     + `<button class="kbtn ghost" id="dclose" title="close"><svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
     + `</div>`;
   dockbar.querySelector('[data-m=term]').onclick = () => openTerminal(view.box, runtime);
@@ -1784,7 +1784,7 @@ function shipHtml(box, demote) {
       h += `<button class="${pcls}" id="dmerge" title="gh pr merge — finish the loop">Merge</button>`;
   }
   h += `<button class="kbtn" id="drestart" title="restart the active agent process and resume its native session inside tmux">Restart</button>`;
-  h += `<button class="kbtn" id="dstop" title="stop — halt the sandbox to free compute; resume later via attach">Stop</button>`;
+  h += `<button class="kbtn" id="dstop" title="stop — halt this box to free its compute; resume later via attach">Stop</button>`;
   return h;
 }
 function loadShip(name, force) {
@@ -1798,7 +1798,7 @@ function loadShip(name, force) {
   }).catch(() => {});
 }
 function stopBox(name) {
-  if (!confirm(`Stop ${name}? This halts the sandbox to free its compute. Nothing is lost — resume it later via attach.`)) return;
+  if (!confirm(`Stop ${name}? This halts the box to free its compute. Nothing is lost — resume it later via attach.\n\nOther boxes keep running.`)) return;
   toast(`stopping ${name}…`);
   fetch(`/api/boxes/${encodeURIComponent(name)}/stop`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name); toast(`stopped ${name}`); refreshRow(name); }
@@ -1807,7 +1807,7 @@ function stopBox(name) {
 }
 function destroyBox(name) {
   if (settings.confirm_destroy !== false
-      && !confirm(`Destroy ${name}?\n\nThis runs the teardown command (sbx rm) — it KILLS and REMOVES the sandbox and reclaims its resources. In clone mode any commits in the box that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
+      && !confirm(`Destroy ${name}?\n\nThis removes THIS BOX and reclaims its disk. Other boxes are untouched. In clone mode any commits in it that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
   toast(`destroying ${name}…`);
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
     if (d.ok) { closeBoxSessions(name); shipState.delete(name);
@@ -2000,7 +2000,7 @@ function loadNarration(name) {
     const sess = sesspane.querySelector(".sess"); if (!sess) return;
     sess.querySelector("#ai-sum")?.remove();   // rapid tab toggling can land two responses — keep one
     const blk = document.createElement("div"); blk.className = "blk"; blk.id = "ai-sum";
-    blk.innerHTML = `<h4>✨ summary <span class="prov">written by Haiku from the box's last message, not by the box</span></h4>`
+    blk.innerHTML = `<h4>summary <span class="prov">written by Haiku from the box's last message, not by the box</span></h4>`
       + `<div class="msg ai">${esc(d.summary)}</div>`;
     sess.prepend(blk);
   }).catch(() => {});
@@ -3083,6 +3083,8 @@ function commands() {
     { sec:"Actions", label:"Settings…", run:() => openSettings("repos") },
     { sec:"Actions", label:"Keyboard shortcuts…", run:() => openSettings("keys"), meta:"?" },
     { sec:"Actions", label:"Open mailbox", run:openMailbox },
+    { sec:"Actions", label:"Repo write access — approve a box's push", run:openGitq },
+    { sec:"Actions", label:"Package requests from boxes", run:openSubq },
     { sec:"Actions", label:"Broadcast to all boxes…", run:()=>{ openMailbox(); setTimeout(()=>{ document.getElementById("mbx-to").value="broadcast"; document.getElementById("mbx-body").focus(); },50); } },
     { sec:"Actions", label:"Jump to next box that needs you", run:nextNeedsYou, meta:"]" },
     { sec:"Actions", label:(alertsOn?"Disable":"Enable")+" desktop alerts", run:()=>document.getElementById("alerts").click() },
