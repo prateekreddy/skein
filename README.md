@@ -410,6 +410,70 @@ package changing the toolchain under every box does not get installed because on
 Package names are validated on both sides of the wire, because a name approved here ends up on a
 command line running as root.
 
+### One repo to write, the rest to read
+
+Every box used to hold the same GitHub credential. Measured on a live fleet, that was a user token
+carrying `repo`, `admin:public_key`, `gist` and `read:org` — **460 repositories, read and write** —
+plus a forwarded ssh-agent signing for anything the host's key could reach. Ten boxes, one identity.
+An agent that misread a remote could push to any of them, and `admin:public_key` let a box add a key
+to the account: access that outlives the sandbox and appears nowhere in skein.
+
+With **Settings → Scope each box's GitHub access to its own repo**, a box instead gets:
+
+* a **write** token scoped to its own repository — `contents`, `pull_requests` and `issues` write,
+  valid an hour, minted by the host and placed in the box's own state directory;
+* a **read-only** token covering the repos the App is installed on, also hourly;
+* nothing at all for anything else, so git falls through to anonymous access — every public repo
+  still clones and fetches.
+
+`gh` holds the write token, so `gh pr create` and `gh pr comment` work against the box's own repo.
+Remotes are rewritten to HTTPS with `insteadOf`, so existing `git@github.com:…` remotes keep working
+untouched, and the forwarded ssh-agent socket is bound over rather than merely unset.
+
+Unlike the package gate above, **this boundary is real**: GitHub enforces it server-side, so a box
+holding a token for one repository cannot touch another whatever runs inside it. It is still not a
+boundary *between* boxes — they share a uid and a PID namespace, so one box can read another's token
+file. The wall is fleet→GitHub.
+
+#### Setting it up
+
+Create a GitHub App — no domain, no webhook, no hosting; it is a credential-minting primitive, and
+the traffic is outbound only. Untick **Webhook → Active**, leave the callback blank, set permissions
+to **Contents: write**, **Pull requests: write** and **Issues: write**, choose *Only on this
+account*, generate a private key to `~/.skein/github-app.pem`, and install it on the repos you want
+reachable. Put the App ID in Settings.
+
+The installation list is then the only control: a repo the App is installed on is readable, and one
+it is not is not. Adding one takes effect at the next refresh with nothing to re-mint.
+
+Until an App (or a stored token, below) exists, **nothing is scoped** — the setting has no effect
+and every box keeps the credential it already had. That is deliberate: scoping with no way to issue
+a write token would not narrow a box's reach, it would take pushing away from every box at once.
+
+Prefer not to run an App? Store a fine-grained PAT per repository under **Repo write access** in the
+cockpit. One repository per token, enforced when stored *and* when used — a token covering three
+repos is write access to three repos for whichever box receives it, because the credential helper
+runs inside the box as the agent's own uid and can route but never contain. Cross-repo reads of
+private repos then need an optional read-only PAT, which nothing prompts for.
+
+#### Asking to write another repo
+
+A push elsewhere is refused by GitHub. To ask for it, from inside a box:
+
+```
+$ /boxes/.skein/box-session.sh --request-write "$SKEIN_BOX" acme/thing "fix the shared type"
+skein: asked to write acme/thing. Request 20260815-101122-4711 is pending approval in the cockpit.
+```
+
+The ask lands in `$SKEIN_FLEET_ROOT/.skein/gitgate/requests`, the cockpit's **Repo write access**
+panel badges it, and approving mints a token for that repo within a tick. Grants expire after 24
+hours unless the approver ticks *keep indefinitely* — unlike an approved package, which should
+survive a rebuild, write access to someone else's repository usually wants to lapse. Grants are
+listed with their expiry and can be revoked, which takes effect on the next refresh.
+
+Per-box, the switch lives in **box settings**; per-launch, in the launch dialog. Both take effect at
+the box's **next start**, because a credential is placed as the box comes up.
+
 ## Shared working files
 
 Every managed Claude and Codex box exposes the repo's durable working-data directory at
@@ -449,7 +513,7 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | `SKEIN_HOME` | skein's own dir (`repos.json`, embedded `kit/`, cloned repos) | `~/.skein` |
 | `SKEIN_NO_GH_SECRET` | set to skip seeding the host `gh` token into sbx (`sbx secret set -g github`) | — |
 | `SKEIN_FORCE_GH_SECRET` | set to overwrite an existing sbx `github` secret with the current token (refresh on rotation) | — |
-| `SKEIN_SSH_KEY` | path to a private SSH key skein `ssh-add`s into the host agent (sbx forwards it into boxes for SSH git push; the key never enters a box) | — |
+| `SKEIN_SSH_KEY` | path to a private SSH key skein `ssh-add`s into the host agent (sbx forwards it into boxes for SSH git push; the key never enters a box). Ignored by boxes with scoped GitHub access — the agent socket is bound over there, since it signs for every repo the key reaches | — |
 | `SKEIN_REGISTRY` | full path to `sandboxes.json` | (see resolution above) |
 | `SKEIN_SHARED` | shared store dir (`/sandboxes.json` appended) | — |
 | `SKEIN_ADDR` | server bind address | `127.0.0.1:7878` |
