@@ -4368,10 +4368,24 @@ function submitAddRepo() {
   const store = document.getElementById("ar-store").value.trim();
   const agent = document.getElementById("ar-agent").value;
   const go = document.getElementById("ar-go");
-  go.textContent = "Adding…"; arSetMsg("");
+  // `add_repo` clones inline with a 300s bound, so this can sit here for minutes on a large repo.
+  // A static "Adding…" for four of them is indistinguishable from a hang, and the honest reading of
+  // a frozen button is that you should press it again — which is the one thing that must not happen.
+  // Streaming git's own progress is the better answer and a bigger change; until then, say that it
+  // is working, how long it has been, and that minutes are normal.
+  go.textContent = "Adding…"; go.disabled = true; arSetMsg("");
+  const began = performance.now();
+  const tick = setInterval(() => {
+    const secs = Math.round((performance.now() - began) / 1000);
+    go.textContent = `Cloning… ${secs}s`;
+    if (secs === 8) arSetMsg("cloning — a large repo can take a few minutes. Leave this open.", "warn");
+    if (secs === 240) arSetMsg("still cloning — this gives up at 5 minutes.", "warn");
+  }, 1000);
+  const settle = () => { clearInterval(tick); go.disabled = false; };
   fetch("/api/repos", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ source: src, store, agent }) })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
+      settle();
       const repo = res.repo || res;
       loadRepos();
       if (res.warning) {            // e.g. SSH origin — keep the modal up so the note is readable
@@ -4381,7 +4395,19 @@ function submitAddRepo() {
         closeAddRepo(); toast(`added ${repo.id}`);
       }
     })
-    .catch(e => { arSetMsg(`Couldn't add it: ${e.message}`, "err"); go.textContent = "Add →"; });
+    .catch(e => {
+      settle();
+      // A timeout leaves a half-made repo directory behind, and "it failed" without that is how the
+      // next attempt fails too, for a reason nobody can see.
+      const timedOut = /timed out|deadline|timeout/i.test(e.message || "");
+      arSetMsg(
+        timedOut
+          ? `${e.message} — the clone was still running when skein gave up. Check ~/.skein/repos for a partial copy before retrying.`
+          : `Couldn't add it: ${e.message}`,
+        "err",
+      );
+      go.textContent = "Add →";
+    });
 }
 // kept name for existing callers (header ＋repo, per-section ＋, settings, palette) → opens the modal
 function addRepoPrompt() { openAddRepo(); }
