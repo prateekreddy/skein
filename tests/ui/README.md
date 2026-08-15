@@ -64,6 +64,26 @@ and a denial records nothing whatever the checkbox shows. It also pins the annou
 request sits pending until a person answers it — precisely the shape that produced the endless
 re-announcing fixed once already. Announced once, then quiet, however long it waits.
 
+## `overlays.mjs` — an overlay that is not styled is not an overlay
+
+```sh
+node tests/ui/overlays.mjs        # no setup, no chromium, runs inside a box
+```
+
+This exists because one wasn't. The Repo write access panel shipped with markup, a button, a
+poller, a badge, decision handlers and sixteen passing tests — and no CSS. It was missing from the
+two rules that make an overlay an overlay, so it rendered as a static div in normal flow, below the
+fold, and clicking its button added `.open` to something nothing styled. A complete UI that could
+not be reached, found by a person opening the page rather than by any test here.
+
+Nothing caught it because every other suite lifts functions out of the page and runs them against a
+stubbed DOM — the right way to test decision logic, and structurally blind to whether the thing
+those decisions render into is visible at all. This checks the invariant textually instead: an
+overlay is declared as `<div id=X aria-hidden="true">`, and the stylesheet must style both `#X` and
+`#X.open`. Deliberately weaker than "is in the shared rule", since `#pal` carries its own copy of
+the same declarations — requiring one particular rule would encode today's grouping rather than the
+property that matters.
+
 ## `voice.mjs` — what the mouth says, without a browser
 
 ```sh
