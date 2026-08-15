@@ -204,6 +204,36 @@ page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${
 await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
 await settle(800);
 
+console.log("\nthe badge");
+// The queue is only useful if you learn a PR is waiting without going looking. Polled slowly, so
+// this waits for the first tick rather than assuming it has already happened.
+await check("the count reaches the button without opening the pane", async () => {
+  await page.waitForFunction(() => document.querySelector("#revbtn .revbadge"), null, { timeout: 15000 });
+  const badge = await mustSee("#revbtn .revbadge", "the review badge");
+  const n = (await badge.textContent()).trim();
+  if (n !== "3") throw new Error(`expected the three needs-you PRs, got ${JSON.stringify(n)}`);
+});
+await check("and its tooltip names the repo the count came from", async () => {
+  const title = await page.$eval("#revbtn", e => e.title);
+  if (!/acme: 3/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
+});
+// Turning a repo off must stop skein asking GitHub about it at all — which is visible as the badge
+// going away, since it is the only repo in this fixture.
+await check("switching a repo's queue off silences it", async () => {
+  const off = await fetch(`http://127.0.0.1:${port}/api/repos/acme/settings`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ review_queue: false }),
+  });
+  if (!off.ok) throw new Error(`the setting was refused: ${await off.text()}`);
+  const counts = await (await fetch(`http://127.0.0.1:${port}/api/review/counts`)).json();
+  if (counts.length) throw new Error(`a switched-off repo was still polled: ${JSON.stringify(counts)}`);
+  // …and back on, because every check below this one needs the queue.
+  await fetch(`http://127.0.0.1:${port}/api/repos/acme/settings`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ review_queue: true }),
+  });
+});
+
 console.log("\nopening");
 await check("the header carries a way in", () => mustSee("#revbtn", "the review button"));
 await check("clicking it opens a pane you can actually see", async () => {

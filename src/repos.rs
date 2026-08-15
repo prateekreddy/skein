@@ -42,6 +42,16 @@ pub struct Repo {
     /// products in different Plane instances cannot share a claim namespace.
     #[serde(default)]
     pub sync_connection: String,
+    /// Does this repo have a review queue, and may the badge poll it?
+    ///
+    /// **On by default**, and separate from whether summaries are allowed: this is about *this*
+    /// repo, not about AI. A repo you have registered only to run boxes in — a fork, a scratch
+    /// clone, somebody else's project you read — has pull requests that are none of your business,
+    /// and polling it every few minutes to say so would spend `gh` calls to produce a zero.
+    ///
+    /// A repo with no GitHub remote is skipped whether or not this is set: it cannot have a queue.
+    #[serde(default = "crate::config::default_true")]
+    pub review_queue: bool,
     /// Superseded by [`Repo::sync_connection`]; read once by the migration, then cleared. Kept so
     /// a `repos.json` written before connections existed still parses.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -97,6 +107,7 @@ pub fn set_repo_settings(
     id: &str,
     plane_project: Option<&str>,
     sync_connection: Option<&str>,
+    review_queue: Option<bool>,
 ) -> Result<Repo, String> {
     if let Some(project) = plane_project.map(str::trim) {
         if !project.is_empty() && plane_project_id(project).is_none() {
@@ -123,6 +134,9 @@ pub fn set_repo_settings(
     if let Some(v) = sync_connection {
         repo.sync_connection = v.trim().to_string();
         repo.sync_gateway_url.clear(); // the selection is now the whole answer
+    }
+    if let Some(v) = review_queue {
+        repo.review_queue = v;
     }
     let updated = repo.clone();
     save_repos(&repos)?;
@@ -376,6 +390,7 @@ pub fn add_repo(
             [only] => only.id.clone(),
             _ => String::new(),
         },
+        review_queue: true,
         sync_gateway_url: String::new(),
     };
     let mut repos = load_repos();

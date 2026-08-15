@@ -6326,6 +6326,7 @@ b idle 5000000 1048576 4
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -6374,6 +6375,7 @@ b idle 5000000 1048576 4
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
 
@@ -6871,6 +6873,7 @@ b idle 5000000 1048576 4
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
         let write = |rel: &str, body: &str| fs::write(store.join(rel), body).unwrap();
@@ -6949,6 +6952,7 @@ b idle 5000000 1048576 4
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
 

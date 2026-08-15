@@ -1,8 +1,8 @@
 //! The review queue: every open PR in a repo that is *yours*, and which lane it sits in.
 //!
-//! skein's PR surface used to hang off a box — `box → branch → gh pr view` in [`crate::ship`] — which
-//! makes a PR nobody in the fleet authored invisible. That is fatal for review, where most of the
-//! queue is other people's work. So the spine here is inverted: the **repo** owns the list, a **PR**
+//! skein's PR surface used to hang off a box — `box → branch → gh pr view`, in a `ship` module
+//! since retired — which makes a PR nobody in the fleet authored invisible. That is fatal for
+//! review, where most of the queue is other people's work. So the spine here is inverted: the **repo** owns the list, a **PR**
 //! is the object, and a box is something you summon onto a branch when one turns out to need hands.
 //!
 //! Three rules decide membership, and all three are GitHub's answer, not skein's: you were asked to
@@ -23,6 +23,7 @@ use crate::gitgate::slug_from_url;
 use crate::repos::{remote_origin_url, Repo};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -74,7 +75,7 @@ pub struct Pr {
     pub base_ref: String,
     pub draft: bool,
     pub updated_at: String,
-    /// "passing" | "pending" | "failing" | "none" — the vocabulary [`crate::ship`] already uses.
+    /// "passing" | "pending" | "failing" | "none".
     pub checks: String,
     /// "approved" | "changes-requested" | "commented" | "none" — *your* last review.
     pub my_review: String,
@@ -215,15 +216,23 @@ fn write_archive(repo_id: &str, list: &[u64]) -> Result<(), String> {
 /// from "you approved something three commits ago".
 const PR_FIELDS: &str = "number,title,author,url,headRefName,headRefOid,baseRefName,isDraft,updatedAt,reviewDecision,latestReviews,statusCheckRollup";
 
-/// 60s micro-cache per repo, for the same reason [`crate::repos::REPOS_CACHE`] exists: the cockpit
-/// re-renders far more often than GitHub changes, and each fetch is three network round trips.
-static QUEUE_CACHE: Mutex<Option<(Instant, String, Queue)>> = Mutex::new(None);
+/// 60s micro-cache **per repo**, for the same reason [`crate::repos::REPOS_CACHE`] exists: the
+/// cockpit re-renders far more often than GitHub changes, and each fetch is three network round
+/// trips.
+///
+/// Keyed by repo rather than holding one entry, because the badge poller walks every repo that has
+/// the queue switched on. A single slot would let each repo evict the last one and turn a cache
+/// into a guaranteed miss — the exact opposite of what it is for.
+static QUEUE_CACHE: Mutex<Option<HashMap<String, (Instant, Queue)>>> = Mutex::new(None);
 
-/// Drop the cache — after an act that changes a PR's state, so the next read shows it.
+/// Drop one repo's cached queue — after an act that changes a PR's state, so the next read shows it.
 pub fn invalidate(repo_id: &str) {
-    let mut cache = QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.as_ref().is_some_and(|(_, id, _)| id == repo_id) {
-        *cache = None;
+    if let Some(map) = QUEUE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        map.remove(repo_id);
     }
 }
 
@@ -231,8 +240,8 @@ pub fn invalidate(repo_id: &str) {
 pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
     if !force && !cfg!(test) {
         let cache = QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, id, q)) = cache.as_ref() {
-            if *id == repo.id && at.elapsed() < Duration::from_secs(60) {
+        if let Some((at, q)) = cache.as_ref().and_then(|m| m.get(&repo.id)) {
+            if at.elapsed() < Duration::from_secs(60) {
                 return Ok(q.clone());
             }
         }
@@ -328,8 +337,11 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
         blind_spots,
     };
     if !cfg!(test) {
-        *QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((Instant::now(), repo.id.clone(), q.clone()));
+        QUEUE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert(repo.id.clone(), (Instant::now(), q.clone()));
     }
     Ok(q)
 }
@@ -436,7 +448,7 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
     (state.into(), current)
 }
 
-/// Reduce `statusCheckRollup` to the four-word vocabulary [`crate::ship`] already uses.
+/// Reduce `statusCheckRollup` to four words.
 ///
 /// Any failure anywhere is failing; otherwise any incomplete run is pending. Failing wins over
 /// pending because a red check is information you act on now, and a queue that showed "pending"
@@ -477,6 +489,41 @@ fn rollup(item: &serde_json::Value) -> String {
         "passing"
     }
     .into()
+}
+
+/// How many PRs are waiting on you, per repo — the badge's whole content.
+#[derive(Debug, Clone, Serialize)]
+pub struct Count {
+    pub repo_id: String,
+    pub needs_you: usize,
+    /// Set when this repo's count could not be taken. Rendered rather than swallowed: a badge that
+    /// silently shows nothing because `gh` is broken is indistinguishable from an empty queue, and
+    /// that is the one thing this whole feature must never be.
+    pub error: String,
+}
+
+/// Take the count for every repo that has a review queue switched on.
+///
+/// Skips repos with no GitHub remote before touching the network — they cannot have PRs, so asking
+/// would be a guaranteed error rather than a real one. Goes through the same 60s per-repo cache as
+/// the pane, so opening the queue right after a poll costs nothing.
+pub fn counts() -> Vec<Count> {
+    crate::load_repos()
+        .into_iter()
+        .filter(|r| r.review_queue && repo_slug(r).is_some())
+        .map(|repo| match queue(&repo, false) {
+            Ok(q) => Count {
+                repo_id: repo.id,
+                needs_you: q.prs.iter().filter(|p| p.lane == Lane::NeedsYou).count(),
+                error: String::new(),
+            },
+            Err(e) => Count {
+                repo_id: repo.id,
+                needs_you: 0,
+                error: e,
+            },
+        })
+        .collect()
 }
 
 // ───────────────────────────── acting on a PR ─────────────────────────────
@@ -544,8 +591,8 @@ pub fn submit_review(
 /// Merge a PR by number. Separate from approving on purpose: with a protected base branch your
 /// approval is one of several, and merging is a different decision that is often not yours to make.
 ///
-/// `$SKEIN_MERGE_METHOD` (default `--squash`) matches [`crate::ship::merge_pr`], so the two paths
-/// cannot drift into merging the same repo two different ways.
+/// `$SKEIN_MERGE_METHOD` (default `--squash`) picks the method — the same variable the retired
+/// box-level merge honoured, so an existing setting keeps working.
 pub fn merge(slug: &str, number: u64) -> Result<String, String> {
     let method = std::env::var("SKEIN_MERGE_METHOD")
         .ok()

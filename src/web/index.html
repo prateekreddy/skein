@@ -653,6 +653,15 @@
   #subqbtn { position:relative; }
   #subqbtn .badge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
     border-radius:7px; background:var(--attn); color:#fff; font-size:9px; line-height:14px; text-align:center; font-family:var(--mono); }
+  /* Same shape as the package-request badge above, deliberately: both mean "something is waiting on
+     you", and a second visual language for the same idea is a second thing to learn. Periwinkle
+     rather than red because a PR waiting is normal work, not an alarm — red is reserved for a count
+     that could not be taken at all. */
+  #revbtn { position:relative; }
+  #revbtn .revbadge { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+    border-radius:7px; background:var(--accent); color:#fff; font-size:9px; line-height:14px;
+    text-align:center; font-family:var(--mono); }
+  #revbtn .revbadge.bad { background:var(--attn); }
   /* add-repo modal: derived-id preview + inline result/warning (replaces the native prompt/alert) */
   .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
   .bs-actions { display:flex; gap:8px; flex-wrap:wrap; }
@@ -1538,7 +1547,7 @@ function render(snapshot) {
   // hidden by the filter is still very much alive — keying this on `seen` would throw away its
   // unsent review comments the moment you typed a letter that did not match its name.
   const known = new Set(boxes.map(b => b.name));
-  for (const m of [shipState, comments]) for (const k of [...m.keys()]) if (!known.has(k)) m.delete(k);
+  for (const k of [...comments.keys()]) if (!known.has(k)) comments.delete(k);
   for (const k in prevState) if (!known.has(k)) delete prevState[k];
   if (sel && !known.has(sel)) sel = null;
   renderTabs();          // tab status follows registry status
@@ -1635,7 +1644,6 @@ function showBox(name, mode, kind = "agent", runtime, handoff = false) {
   if (mode === "session") loadSession(name);
   if (mode === "files") loadFiles(name);
   if (mode === "tx") loadTranscript(name);
-  loadShip(name);
 }
 function applyView() {
   persistView();   // remember open tabs + active view so a page reload restores them
@@ -1905,7 +1913,7 @@ function reconnectSession(box, kind) {
   view = { box, mode: "term", kind };
   applyView();
 }
-// Keep the dockbar in step with the 2s tick: it shows the *viewed* box's dot/branch/diff/PR state,
+// Keep the dockbar in step with the 2s tick: it shows the *viewed* box's dot/branch/diff state,
 // which used to render only on explicit view changes — so the box you were actually staring at froze
 // while every fleet row updated. Rebuild only when the underlying data changed, so button hover and
 // focus aren't nuked every tick.
@@ -1913,11 +1921,9 @@ let dockSig = "";
 function refreshDock() {
   if (!view.box) { dockSig = ""; return; }
   const b = boxes.find(x => x.name === view.box);
-  const s = shipState.get(view.box);
   const sig = [view.box, view.mode, view.kind, b?.state, b?.branch, JSON.stringify(b?.diff || 0),
-    s?.pr_state, s?.checks, (comments.get(view.box) || []).length].join("|");
+    (comments.get(view.box) || []).length].join("|");
   if (sig !== dockSig) { dockSig = sig; renderDockbar(); }
-  loadShip(view.box);   // TTL-gated below — a no-op unless the cached ship status went stale
 }
 // Turn state has two halves (hook edges + the box's own screen). When the screen half isn't
 // contributing the board silently falls back to edges alone and looks completely normal — which is
@@ -1967,7 +1973,7 @@ function renderDockbar() {
     + (b.docs_update ? `<button class="kbtn ghost" id="drefreshdocs"${refreshingDocs.has(view.box) ? " disabled" : ""} title="the work-tracking rules in the store are newer than the ones this box installed — re-apply them. Only documents the box has not edited are rewritten; shift-click to also take ones installed before skein recorded what it wrote">${refreshingDocs.has(view.box) ? "applying…" : "⟳ Update rules"}</button>` : "")
     + (hasReview
         ? `<button class="kbtn primary" id="dsend" title="paste the review into the agent prompt">Send ${hasReview}</button>` : "")
-    + shipHtml(view.box, hasReview)
+    + boxRunHtml()
     + `<span class="hdiv"></span>`
     + `<button class="kbtn ghost danger" id="ddestroy" title="destroy — removes this box and reclaims its disk (unpushed commits lost)"><svg class="ic" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>`
     + `<button class="kbtn ghost" id="dclose" title="close"><svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`
@@ -1987,7 +1993,6 @@ function renderDockbar() {
   const restart = dockbar.querySelector("#drestart"); if (restart) restart.onclick = () => restartAgent(view.box);
   const ar = dockbar.querySelector("#dstop"); if (ar) ar.onclick = () => stopBox(view.box);
   const ds = dockbar.querySelector("#ddestroy"); if (ds) ds.onclick = () => destroyBox(view.box);
-  const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
   const bk = dockbar.querySelector("#dback"); if (bk) bk.onclick = () => document.body.classList.add("show-fleet");
   dockbar.querySelector("#dclose").onclick = () => { const id = activeSid(); if (id && sessions.has(id)) closeSession(id); else { view = {box:null,mode:"term",kind:"agent"}; applyView(); } };
 }
@@ -2011,6 +2016,39 @@ let revSums = new Map();      // PR number -> summary, or "…" while one is in 
 // thirty at once would take the rate-limit window away from the boxes doing the real work.
 const REV_SUM_PARALLEL = 3;
 let revSumBusy = 0;
+
+// The badge on the review button. Polled slowly and never as part of the 2s fleet tick: each count
+// is three `gh` round trips per repo, and this is a number you act on within minutes, not seconds.
+//
+// Only repos with the queue switched on are asked, and the server skips any with no GitHub remote —
+// so a fleet of scratch clones costs nothing at all.
+let revCounts = [];
+const REV_POLL_MS = 3 * 60 * 1000;
+function pollReviewCounts() {
+  fetch("/api/review/counts").then(r => r.json()).then(cs => {
+    revCounts = cs || [];
+    renderRevBadge();
+  }).catch(() => {});
+}
+function renderRevBadge() {
+  const btn = document.getElementById("revbtn");
+  if (!btn) return;
+  const total = revCounts.reduce((n, c) => n + (c.needs_you || 0), 0);
+  const broken = revCounts.filter(c => c.error);
+  let badge = btn.querySelector(".revbadge");
+  if (!total && !broken.length) { if (badge) badge.remove(); btn.removeAttribute("data-count"); return; }
+  if (!badge) { badge = document.createElement("span"); badge.className = "revbadge"; btn.append(badge); }
+  // A repo whose count failed shows as "!" rather than as nothing: a badge that quietly reads zero
+  // because `gh` is broken is indistinguishable from an empty queue, which is the one thing this
+  // must never be.
+  badge.textContent = broken.length && !total ? "!" : String(total);
+  badge.classList.toggle("bad", broken.length > 0);
+  btn.title = [
+    total ? `${total} pull request${total === 1 ? "" : "s"} need you` : "Review a repo's pull requests",
+    ...revCounts.filter(c => c.needs_you).map(c => `  ${c.repo_id}: ${c.needs_you}`),
+    ...broken.map(c => `  ${c.repo_id}: ${c.error}`),
+  ].join("\n");
+}
 
 function openReview(repoId) {
   const id = repoId || view.repo || localStorage.getItem("skein.reviewRepo") || (repos[0] && repos[0].id);
@@ -2043,6 +2081,12 @@ function loadReview(force) {
       if (held && held !== "…" && held.head_sha !== pr.head_sha) revSums.delete(pr.number);
     }
     revQueue = q; renderReview(); revPumpSummaries();
+    // The pane just fetched this repo for real; fold that into the badge rather than waiting up to
+    // three minutes for the poller to rediscover a number we already have.
+    const n = (q.prs || []).filter(p => p.lane === "needs-you").length;
+    const row = revCounts.find(c => c.repo_id === id);
+    if (row) { row.needs_you = n; row.error = ""; } else revCounts.push({ repo_id: id, needs_you: n, error: "" });
+    renderRevBadge();
   }).catch(e => {
     revLoading = false;
     if (view.repo !== id) return;
@@ -2337,35 +2381,14 @@ function archivePr(n, on) {
 }
 
 // ---------- ship: PR · checks · stop · destroy (host-side via gh/sbx) ----------
-const shipState = new Map();   // box -> ShipStatus
-// Constructive ship actions (PR status · checks · merge · restart · stop). Destroy lives in
-// renderDockbar, fenced off.
-// `demote` drops the accent when a review is staged — then "Send" is the one highlighted action.
-function shipHtml(box, demote) {
-  const s = shipState.get(box);
-  const pcls = demote ? "kbtn" : "kbtn primary";
-  let h = "";
-  if (s && s.pr_url) {
-    const ck = s.checks==="passing"?`<span class="ck ok">✓ checks</span>`
-             : s.checks==="failing"?`<span class="ck bad">✗ checks</span>`
-             : s.checks==="pending"?`<span class="ck pend">… checks</span>` : "";
-    h += `<a class="prlink" href="${esc(s.pr_url)}" target="_blank" title="${esc(s.pr_state||"")} — open on GitHub">PR ${esc((s.pr_state||"").toLowerCase())}</a>${ck}`;
-    if ((s.pr_state||"").toUpperCase() === "OPEN")
-      h += `<button class="${pcls}" id="dmerge" title="gh pr merge — finish the loop">Merge</button>`;
-  }
-  h += `<button class="kbtn" id="drestart" title="restart the active agent process and resume its native session inside tmux">Restart</button>`;
-  h += `<button class="kbtn" id="dstop" title="stop — halt this box to free its compute; resume later via attach">Stop</button>`;
-  return h;
-}
-function loadShip(name, force) {
-  // Re-fetch when the cache is stale (45s): PR checks flip pending→passing/failing while you watch;
-  // the old fetched-once-forever cache left "… checks" on screen for the rest of the day.
-  const cur = shipState.get(name);
-  if (!force && cur && Date.now() - (cur._at || 0) < 45000) return;
-  shipState.set(name, Object.assign(cur || {}, { _at: Date.now() }));   // claim: no duplicate fetches in flight
-  fetch(`/api/boxes/${encodeURIComponent(name)}/ship`).then(r => r.json()).then(s => {
-    shipState.set(name, Object.assign(s || {}, { _at: Date.now() })); if (view.box === name) renderDockbar();
-  }).catch(() => {});
+// A box's own lifecycle buttons. PR state used to live here too — a link, its checks and a Merge —
+// back when a PR was a property of the box that opened it. Reviewing happens in the review pane
+// now, where the repo owns the list and a PR nobody in the fleet authored is still visible, so a
+// second PR vocabulary on this toolbar would only be a second place to look and a second place to
+// get it wrong.
+function boxRunHtml() {
+  return `<button class="kbtn" id="drestart" title="restart the active agent process and resume its native session inside tmux">Restart</button>`
+       + `<button class="kbtn" id="dstop" title="stop — halt this box to free its compute; resume later via attach">Stop</button>`;
 }
 function stopBox(name) {
   if (!confirm(`Stop ${name}? This halts the box to free its compute. Nothing is lost — resume it later via attach.\n\nOther boxes keep running.`)) return;
@@ -2380,18 +2403,10 @@ function destroyBox(name) {
       && !confirm(`Destroy ${name}?\n\nThis removes THIS BOX and reclaims its disk. Other boxes are untouched. In clone mode any commits in it that were never pushed or fetched are LOST.\n\nThis cannot be undone.`)) return;
   toast(`destroying ${name}…`);
   fetch(`/api/boxes/${encodeURIComponent(name)}/destroy`, { method:"POST" }).then(r => r.json()).then(d => {
-    if (d.ok) { closeBoxSessions(name); shipState.delete(name);
+    if (d.ok) { closeBoxSessions(name);
       if (view.box === name) { view = {box:null,mode:"term",kind:"agent"}; applyView(); } toast(`destroyed ${name}`); }
     else toast("destroy failed: " + (d.error||"").split("\n")[0]);
   }).catch(() => toast("destroy failed"));
-}
-function mergePr(name) {
-  if (!confirm(`Merge ${name}'s PR? This squash-merges the branch.`)) return;
-  toast("merging…");
-  fetch(`/api/boxes/${encodeURIComponent(name)}/merge`, { method:"POST" }).then(r => r.json()).then(d => {
-    if (d.ok) { toast("merged ✓ — stop or destroy when ready"); shipState.delete(name); loadShip(name, true); }
-    else toast("merge failed: " + (d.error||"").split("\n")[0]);
-  }).catch(() => toast("merge failed"));
 }
 function batchResume() {
   const ps = boxes.filter(b => b.pause === "proceed");
@@ -4400,10 +4415,13 @@ function repoField(r, key, title, desc, placeholder) {
 // token that mints at it — and only Work tracking knows which pairs exist. Typing a URL here could
 // only ever name half of one.
 function repoSelect(r, key, title, desc, options) {
+  // A boolean field arrives as true/false and its <option> values are strings; without this the
+  // select falls back to its first option and silently misreports the stored setting.
+  const cur = typeof r[key] === "boolean" ? String(r[key]) : (r[key] || "");
   return `<label class="set-field"><span class="set-title">${esc(title)}<span class="rsaved" data-saved="${esc(r.id)}-${key}">saved</span></span>`
     + `<span class="desc">${desc}</span>`
     + `<select data-id="${esc(r.id)}" data-key="${key}">`
-    + options.map(([value, label]) => `<option value="${esc(value)}"${(r[key] || "") === value ? " selected" : ""}>${esc(label)}</option>`).join("")
+    + options.map(([value, label]) => `<option value="${esc(value)}"${cur === value ? " selected" : ""}>${esc(label)}</option>`).join("")
     + `</select></label>`;
 }
 function renderRepoList() {
@@ -4430,6 +4448,9 @@ function renderRepoList() {
             ? `which backlog this repo's boxes claim work from — set up under <b>Work tracking</b>${conn && !conn.ready ? `. <b>${esc(conn.label)}</b> isn't usable yet: it needs both a gateway URL and a token` : ""}`
             : "no connections configured yet — add one under <b>Work tracking</b> and it'll appear here",
           [["", "Not tracked"], ...conns.map(c => [c.id, c.ready ? c.label : `${c.label} (not usable yet)`])])
+      + repoSelect(r, "review_queue", "Review queue",
+          "list this repo's pull requests, and count the ones waiting on you. Turn it off for a repo whose PRs are none of your business — a fork, a scratch clone — and skein stops asking GitHub about it entirely",
+          [["true", "On"], ["false", "Off"]])
       + `<div class="rfoot"><button type="button" class="kbtn ghost danger" data-remove="${esc(r.id)}" title="skein forgets this repo; the clone and store stay on disk">Unregister</button></div>`
       + `</div></div>`;
   }).join("");
@@ -4444,8 +4465,12 @@ function renderRepoList() {
 }
 function saveRepoField(input) {
   const { id, key } = input.dataset;
+  // `review_queue` is a bool on the wire. Sending the string "false" would deserialize-fail and the
+  // field would report saved while nothing changed — the worst shape a settings bug can take.
+  const raw = input.value.trim();
+  const value = key === "review_queue" ? raw === "true" : raw;
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
-    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: input.value.trim() }),
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(() => {
@@ -5667,6 +5692,11 @@ if (DEMO) {
   // into the sandbox. Offset from the package poll so the two do not exec on the same tick.
   pollGitq();
   setInterval(pollGitq, 23000);
+  // Slower again by an order of magnitude. The two above wait on a person inside the fleet; this one
+  // waits on other people on GitHub, and each tick is three `gh` round trips per enabled repo. A PR
+  // that arrives three minutes before you hear about it has cost you nothing.
+  pollReviewCounts();
+  setInterval(pollReviewCounts, REV_POLL_MS);
 }
 </script>
 </body>

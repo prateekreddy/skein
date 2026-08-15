@@ -566,10 +566,8 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein` |
 | `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein-shell` |
 | `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | `sbx ls --json` |
-| `SKEIN_PR_CMD` | open-PR template — `{branch}`/`{name}` substituted | `gh pr create --head <branch> --fill` |
 | `SKEIN_STOP_CMD` | **Stop** — `{name}` substituted; halts the sandbox to free compute (resume via attach). Non-destructive | `sbx stop {name}` |
 | `SKEIN_DESTROY_CMD` | **Destroy** — `{name}` substituted; kills & removes the sandbox (clone mode: unpushed commits lost) | `sbx rm -f {name}` |
-| `SKEIN_MERGE_CMD` | **Merge** — override the whole merge command (`{name}` substituted) | `gh pr merge <branch>` |
 | `SKEIN_MERGE_METHOD` | merge strategy flag passed to `gh pr merge` | `--squash` |
 | `SKEIN_RESUME_CMD` | one-click "continue" template — `{name}`/`{prompt}`/`{runtime}` substituted | runtime adapter's native headless resume |
 | `SKEIN_AI` | opt into rationed Haiku enrichment (narrator + Continue safety gate) | off |

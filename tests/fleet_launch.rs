@@ -617,6 +617,7 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         agent: "claude".into(),
         plane_project: String::new(),
         sync_connection: String::new(),
+        review_queue: true,
         sync_gateway_url: String::new(),
     };
     save_repos(std::slice::from_ref(&repo)).expect("register the repo");

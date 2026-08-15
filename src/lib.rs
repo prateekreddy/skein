@@ -21,7 +21,6 @@ mod repos;
 pub mod review;
 mod runtime;
 mod sandbox;
-mod ship;
 mod signals;
 pub mod substrate;
 #[cfg(test)]
@@ -42,7 +41,6 @@ pub use place::*;
 pub use repos::*;
 pub use runtime::*;
 pub use sandbox::*;
-pub use ship::*;
 pub use signals::*;
 pub use tracking::*;
 pub use transcript::*;
@@ -2588,6 +2586,7 @@ mod tests {
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
@@ -2673,6 +2672,7 @@ mod tests {
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -3022,6 +3022,7 @@ mod tests {
                 agent: "claude".into(),
                 plane_project: String::new(),
                 sync_connection: String::new(),
+                review_queue: true,
                 sync_gateway_url: String::new(),
             },
             Repo {
@@ -3032,6 +3033,7 @@ mod tests {
                 agent: "claude".into(),
                 plane_project: String::new(),
                 sync_connection: String::new(),
+                review_queue: true,
                 sync_gateway_url: String::new(),
             },
         ];
@@ -3062,6 +3064,7 @@ mod tests {
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }];
         save_repos(&repos).unwrap();
@@ -3104,6 +3107,7 @@ mod tests {
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
@@ -3145,6 +3149,7 @@ mod tests {
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
@@ -3627,6 +3632,7 @@ mod tests {
             agent: "codex".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -4122,6 +4128,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
         record_place(
@@ -4310,6 +4317,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -4403,6 +4411,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
@@ -4493,6 +4502,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: "team".into(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -4555,6 +4565,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: "shared".into(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -4563,7 +4574,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // token a box carries is only valid at the gateway that minted it — so switching backlogs
         // switches the credential too, which is exactly what picking a whole connection buys.
         upsert_connection(Some("own"), "own", "https://own.example/", Some("pat_own")).unwrap();
-        set_repo_settings("web", None, Some("own")).unwrap();
+        set_repo_settings("web", None, Some("own"), None).unwrap();
         assert_eq!(
             sync_gateway_for_box("web-main"),
             "https://own.example",
@@ -4579,13 +4590,13 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             "https://own.example/mcp"
         );
         // Clearing means not tracked — an explicit setting, not a gap to be filled by a default.
-        set_repo_settings("web", None, Some("")).unwrap();
+        set_repo_settings("web", None, Some(""), None).unwrap();
         assert!(connection_for_box("web-main").is_none());
         assert_eq!(sync_gateway_for_box("web-main"), "");
         // A selection naming nothing would read as "tracked" and behave as "not tracked".
-        assert!(set_repo_settings("web", None, Some("nope")).is_err());
+        assert!(set_repo_settings("web", None, Some("nope"), None).is_err());
         // One call can carry every field, and the fields don't disturb each other.
-        set_repo_settings("web", None, Some("own")).unwrap();
+        set_repo_settings("web", None, Some("own"), None).unwrap();
         let saved = load_repos().into_iter().find(|r| r.id == "web").unwrap();
         assert_eq!(saved.sync_connection, "own");
         assert_eq!(saved.plane_project, "", "a field left None is left alone");
@@ -4626,6 +4637,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
@@ -4662,6 +4674,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: gw.into(),
         };
         save_repos(&[
@@ -4746,13 +4759,14 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: "shared".into(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
         let e = remove_connection("shared").unwrap_err();
         assert!(e.contains("web"), "say which repo would lose tracking: {e}");
         assert!(remove_connection("ghost").is_err());
-        set_repo_settings("web", None, Some("")).unwrap();
+        set_repo_settings("web", None, Some(""), None).unwrap();
         remove_connection("shared").unwrap();
         assert!(load_connections().is_empty());
         assert!(
@@ -4826,10 +4840,11 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: String::new(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         }])
         .unwrap();
-        assert!(set_repo_settings("web", Some("the backlog one"), None).is_err());
+        assert!(set_repo_settings("web", Some("the backlog one"), None, None).is_err());
         assert_eq!(
             load_repos()[0].plane_project,
             "",
@@ -4838,9 +4853,9 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         // The URL is kept verbatim — the uuid is derived, so a board link stays possible.
         let url =
             "https://plane.example.net/acme/projects/1e2a3b4c-5d6e-4f70-8912-abcdefabcdef/issues";
-        set_repo_settings("web", Some(url), None).unwrap();
+        set_repo_settings("web", Some(url), None, None).unwrap();
         assert_eq!(load_repos()[0].plane_project, url);
-        set_repo_settings("web", Some(""), None).unwrap();
+        set_repo_settings("web", Some(""), None, None).unwrap();
         assert_eq!(load_repos()[0].plane_project, "", "empty clears it");
         env::remove_var("SKEIN_HOME");
     }
@@ -5709,6 +5724,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             agent: "claude".into(),
             plane_project: String::new(),
             sync_connection: "c1".into(),
+            review_queue: true,
             sync_gateway_url: String::new(),
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();

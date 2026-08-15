@@ -167,6 +167,7 @@ async fn main() {
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
+        .route("/api/review/counts", get(api_review_counts))
         .route("/api/repos/:id/review", get(api_review_queue))
         .route(
             "/api/repos/:id/review/:number/archive",
@@ -219,9 +220,6 @@ async fn main() {
         .route("/api/boxes/:name/session", get(api_session))
         .route("/api/boxes/:name/statusline", get(api_statusline))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
-        .route("/api/boxes/:name/ship", get(api_ship))
-        .route("/api/boxes/:name/pr", post(api_pr))
-        .route("/api/boxes/:name/merge", post(api_merge))
         .route("/api/boxes/:name/transcript", get(api_transcript))
         .route("/api/boxes/:name/repin", post(api_repin))
         .route("/api/boxes/:name/resume", post(api_resume))
@@ -409,6 +407,8 @@ struct RepoSettingsReq {
     plane_project: Option<String>,
     /// which work-tracking connection this repo claims through, by id; empty = not tracked
     sync_connection: Option<String>,
+    /// whether this repo has a review queue the badge may poll
+    review_queue: Option<bool>,
 }
 
 async fn api_set_repo_settings(
@@ -419,9 +419,22 @@ async fn api_set_repo_settings(
         &id,
         req.plane_project.as_deref(),
         req.sync_connection.as_deref(),
+        req.review_queue,
     ) {
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
+    }
+}
+
+/// How many PRs need you, per repo — for the badge on the review button.
+///
+/// Polled on a slow timer, so it deliberately does NOT force a refresh: it rides the same 60s
+/// per-repo cache as the pane. Repos with the queue switched off, and repos with no GitHub remote,
+/// are never asked.
+async fn api_review_counts() -> Response {
+    match tokio::task::spawn_blocking(skein::prq::counts).await {
+        Ok(counts) => Json(counts).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
@@ -1402,30 +1415,6 @@ async fn api_mailbox_send(Json(r): Json<SendReq>) -> Response {
     }
 }
 
-/// Merge-readiness for a box (PR state + CI checks), host-side via `gh`.
-async fn api_ship(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
-        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
-    }
-    let s = tokio::task::spawn_blocking(move || skein::ship_status(&name))
-        .await
-        .unwrap_or_default();
-    Json(s).into_response()
-}
-
-/// Open a PR for the box's branch (host-side). Returns {ok, url|error}.
-async fn api_pr(Path(name): Path<String>) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
-        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
-    }
-    let r = tokio::task::spawn_blocking(move || skein::create_pr(&name)).await;
-    Json(match r {
-        Ok(Ok(url)) => serde_json::json!({ "ok": true, "url": url }),
-        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    })
-}
-
 #[derive(Deserialize, Default)]
 struct PickPathReq {
     kind: String, // "file" → file picker; anything else → folder picker
@@ -1462,19 +1451,6 @@ async fn api_repin(Path(name): Path<String>, Json(r): Json<RepinReq>) -> Json<se
     let res = tokio::task::spawn_blocking(move || skein::repin_branch(&name, &branch)).await;
     Json(match res {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
-        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    })
-}
-
-/// Merge the box's PR (host-side via `gh`). Returns {ok, msg|error}.
-async fn api_merge(Path(name): Path<String>) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
-        return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
-    }
-    let r = tokio::task::spawn_blocking(move || skein::merge_pr(&name)).await;
-    Json(match r {
-        Ok(Ok(msg)) => serde_json::json!({ "ok": true, "msg": msg }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })
