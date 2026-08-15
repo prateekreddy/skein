@@ -941,6 +941,9 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     // revoke takes effect even if GitHub is unreachable this tick.
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
+            if entry.file_name() == "read" {
+                continue; // pruned against its own list below
+            }
             let name = entry.file_name().to_string_lossy().into_owned();
             let slug = name.replace("%2F", "/");
             if !want.iter().any(|w| same_repo(w, &slug)) {
@@ -949,23 +952,170 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
         }
     }
 
+    let write = |path: &std::path::Path, token: &str| -> Result<(), String> {
+        let parent = path.parent().unwrap_or(&dir).to_path_buf();
+        std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+        crate::util::write_atomic(path, &parent, token.as_bytes())?;
+        // 0600 is not a boundary here — every box runs as the same uid — but it keeps the token out
+        // of anything that walks the tree without meaning to.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    };
+
     for slug in &want {
         match mint_token(slug) {
             Ok(token) => {
-                let path = std::path::PathBuf::from(token_file(box_name, slug));
-                if let Err(e) = crate::util::write_atomic(&path, &dir, token.as_bytes()) {
+                if let Err(e) = write(
+                    &std::path::PathBuf::from(token_file(box_name, slug)),
+                    &token,
+                ) {
                     problems.push(format!("{slug}: {e}"));
-                    continue;
                 }
-                // 0600 is not a boundary here — every box runs as the same uid — but it keeps the
-                // token out of anything that walks the tree without meaning to.
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
             Err(e) => problems.push(format!("{slug}: {e}")),
         }
     }
+
+    // Reads: one token per installation, keyed by the owner it belongs to, plus the optional PAT.
+    //
+    // Failing to mint a read token is reported and never fatal. Reads degrade to anonymous, which
+    // still covers every public repository — a box that cannot read a private sibling is working
+    // with less, not broken, and must not lose the write token it already has over it.
+    let read_dir = dir.join("read");
+    let mut want_read: Vec<String> = Vec::new();
+    if app_credentials().is_ok() {
+        match installations() {
+            Ok(found) => {
+                for (id, owner) in found {
+                    // The owner becomes a filename, so a login that could climb out of the directory
+                    // is skipped rather than trusted because GitHub is unlikely to send one.
+                    if owner.is_empty() || owner.contains('/') || owner.contains("..") {
+                        continue;
+                    }
+                    match mint_read_token(id) {
+                        Ok(token) => match write(&read_dir.join(&owner), &token) {
+                            Ok(()) => want_read.push(owner),
+                            Err(e) => problems.push(format!("read {owner}: {e}")),
+                        },
+                        Err(e) => problems.push(format!("read {owner}: {e}")),
+                    }
+                }
+            }
+            Err(e) => problems.push(format!("listing installations: {e}")),
+        }
+    }
+    if let Some(pat) = read_pat() {
+        match write(&read_dir.join("_any"), &pat) {
+            Ok(()) => want_read.push("_any".into()),
+            Err(e) => problems.push(format!("read token: {e}")),
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&read_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !want_read.contains(&name) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
     problems
+}
+
+/// Every account or org this App is installed on, as `(installation id, owner login)`.
+///
+/// One installation per account, so an App on your personal account and on an org is two of them —
+/// and an installation token belongs to exactly one. That is why reads are keyed by owner rather
+/// than held as a single token: there is no such thing as one token spanning both.
+pub fn installations() -> Result<Vec<(i64, String)>, String> {
+    let (app_id, key_path) = app_credentials()?;
+    let jwt = sign_jwt(
+        &jwt_claim(&app_id, chrono::Utc::now().timestamp()),
+        &key_path,
+    )?;
+    let list = api_get("https://api.github.com/app/installations", &jwt)?;
+    Ok(list
+        .as_array()
+        .map(|v| v.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| {
+            let id = i.get("id")?.as_i64()?;
+            let login = i.get("account")?.get("login")?.as_str()?.to_string();
+            Some((id, login))
+        })
+        .collect())
+}
+
+/// A read-only token covering everything one installation reaches.
+///
+/// The difference from [`mint_token`] is a single field: no `repositories`, so the token is not
+/// restricted to one repo. That is the whole of "read any repo you installed the App on" — the
+/// installation list *is* the control, maintained in one place and live, so adding a repo there
+/// makes it readable with nothing to re-mint and no second credential to keep in step.
+///
+/// Read-only by construction, not by convention: `contents: read` is the strongest thing in it.
+pub fn mint_read_token(installation: i64) -> Result<String, String> {
+    let (app_id, key_path) = app_credentials()?;
+    let jwt = sign_jwt(
+        &jwt_claim(&app_id, chrono::Utc::now().timestamp()),
+        &key_path,
+    )?;
+    let body = serde_json::json!({
+        "permissions": { "contents": "read", "metadata": "read" },
+    })
+    .to_string();
+    let token = api_post(
+        &format!("https://api.github.com/app/installations/{installation}/access_tokens"),
+        &jwt,
+        &body,
+    )?;
+    token
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("GitHub returned no read token for installation {installation}"))
+}
+
+/// An optional read-only PAT covering everything its owner chose.
+///
+/// **Optional, and deliberately so.** Configuring skein should ask for *one* kind of credential, not
+/// two: with an App, reads already come from the installation, and on the PAT path a per-repo write
+/// token plus anonymous access to public repos covers the ordinary case. This exists for someone who
+/// specifically wants cross-repo reads of private repos without running an App — never as a step the
+/// setup asks for.
+pub fn read_pat() -> Option<String> {
+    std::fs::read_to_string(crate::config::skein_home().join("github-read-token"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Store (or, empty, forget) the optional read-only PAT. 0600 before the rename, as ever.
+pub fn set_read_pat(token: &str) -> Result<(), String> {
+    let home = crate::config::skein_home();
+    let path = home.join("github-read-token");
+    let token = token.trim();
+    if token.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    let tmp = home.join(format!(".read-token.{}", std::process::id()));
+    std::fs::write(&tmp, token).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 fn api_get(url: &str, jwt: &str) -> Result<serde_json::Value, String> {

@@ -926,20 +926,24 @@ fi
 # Wrong in the safe direction: the failure is a box that reads everything and cannot push outside
 # its own repo, which is recoverable by flipping one switch — not a box holding the account.
 if [ "${SKEIN_GIT_SCOPE-repo}" != "fleet" ]; then
-  # The read-only PAT arrives as GH_TOKEN (the sbx `github` secret) and is handed to the helper under
-  # its own name, so `gh` can keep the one that matches what this box may actually do.
-  export SKEIN_GH_READ="${GH_TOKEN-}"
   export SKEIN_GIT_TOKENS="$state/git-tokens"
   mkdir -p "$SKEIN_GIT_TOKENS" 2>/dev/null || true
   chmod 700 "$SKEIN_GIT_TOKENS" 2>/dev/null || true
 
-  # `gh` gets the write token for this box's own repo when the host has placed one, so `gh pr
-  # create` and `gh pr comment` work where they should. Reads of other repos keep working through
-  # git (the helper answers with the read PAT); for the `gh` API against another repo, $SKEIN_GH_READ
-  # is the token to use, and the agent guide says so.
+  # The sandbox-wide GH_TOKEN is dropped FIRST, and this is the line the whole boundary rests on.
+  #
+  # It holds whatever the sbx `github` secret was set to — for this fleet, a user token reaching 460
+  # repositories read and write. Leaving it in place while scoping everything else would mean the
+  # isolation held only if its owner had also remembered to swap that secret by hand, and a boundary
+  # that depends on a manual step nobody is reminded of is not a boundary. Replaced below by this
+  # box's own-repo token when the host has placed one; otherwise `gh` simply has no credential,
+  # which is the honest state rather than a borrowed one.
+  unset GH_TOKEN
   if [ -n "${SKEIN_BOX_REPO-}" ]; then
     own_token="$SKEIN_GIT_TOKENS/$(printf '%s' "$SKEIN_BOX_REPO" | sed 's#/#%2F#')"
     if [ -r "$own_token" ]; then
+      # `gh pr create` and `gh pr comment` against this box's own repo work with this; against any
+      # other repo `gh` is unauthenticated, while git keeps reading through the helper.
       GH_TOKEN="$(cat "$own_token" 2>/dev/null)"
       export GH_TOKEN
     fi

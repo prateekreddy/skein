@@ -55,13 +55,19 @@ impl Box_ {
         fs::write(self.tokens.join(slug.replace('/', "%2F")), token).unwrap();
     }
 
+    /// Place the read-only token the host mints for one App installation owner.
+    fn place_read(&self, owner: &str, token: &str) {
+        let dir = self.tokens.join("read");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(owner), token).unwrap();
+    }
+
     /// Ask the helper for a credential exactly as git does.
     fn credential(&self, host: &str, path: &str) -> String {
         use std::io::Write;
         let mut child = Command::new("sh")
             .arg(script("git-credential-skein.sh"))
             .arg("get")
-            .env("SKEIN_GH_READ", "READ-ONLY-PAT")
             .env("SKEIN_GIT_TOKENS", &self.tokens)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -120,23 +126,63 @@ fn the_write_token_reaches_exactly_the_repository_it_was_minted_for() {
     // 460-repo reach one token at a time.
     let other = b.credential("github.com", "someone-else/private.git");
     assert!(
-        other.contains("password=READ-ONLY-PAT"),
-        "another repo must fall back to the read-only credential: {other}"
-    );
-    assert!(
         !other.contains("APP-TOKEN-FOR-THING"),
         "the write token escaped to a repo it was not minted for: {other}"
     );
 }
 
 #[test]
-fn reading_any_repository_still_works_with_no_token_placed_at_all() {
-    // The read path must never depend on the write path. A box whose token has not been minted yet
-    // — every box, for the first seconds of its life — still has to be able to clone and fetch.
+fn a_repo_with_no_token_gets_nothing_rather_than_a_token_that_cannot_work() {
+    // Silence is the correct answer, and it is load-bearing. Answering with some other repo's token
+    // would turn a clone that would have succeeded ANONYMOUSLY — every public repo on GitHub — into
+    // a 403. With no answer, git falls through to unauthenticated access: public works, private and
+    // not-yours does not, which is exactly the intended shape.
     let b = Box_::new("readonly");
-    let got = b.credential("github.com", "any/repo.git");
-    assert!(got.contains("password=READ-ONLY-PAT"), "{got}");
-    assert!(got.contains("username=x-access-token"), "{got}");
+    b.place_token("acme/thing", "APP-TOKEN-FOR-THING");
+    assert_eq!(
+        b.credential("github.com", "some/public-repo.git"),
+        "",
+        "a repo with no token must get no credential at all"
+    );
+}
+
+#[test]
+fn a_read_token_covers_its_owner_and_stops_there() {
+    // The App's installation list is the control: one read token per owner, so an org the App is
+    // not installed on is not readable through this box, and nothing forges a link between them.
+    let b = Box_::new("readowner");
+    b.place_read("acme", "READ-ACME");
+
+    let mine = b.credential("github.com", "acme/anything.git");
+    assert!(mine.contains("password=READ-ACME"), "{mine}");
+    assert_eq!(
+        b.credential("github.com", "other-org/thing.git"),
+        "",
+        "an owner with no installation must not borrow another owner's read token"
+    );
+}
+
+#[test]
+fn write_beats_read_for_the_one_repo_a_box_owns() {
+    // Both files exist for a box whose own repo is under an installed owner. Handing over the
+    // read-only one would make every push fail with a credential that looked perfectly valid.
+    let b = Box_::new("precedence");
+    b.place_read("acme", "READ-ACME");
+    b.place_token("acme/thing", "WRITE-THING");
+
+    let own = b.credential("github.com", "acme/thing.git");
+    assert!(own.contains("password=WRITE-THING"), "{own}");
+    // And a sibling repo of the same owner still gets read, not the write token.
+    let sibling = b.credential("github.com", "acme/other.git");
+    assert!(sibling.contains("password=READ-ACME"), "{sibling}");
+}
+
+#[test]
+fn nothing_is_answered_when_the_host_has_placed_nothing() {
+    // A box in its first seconds, before the refresher has run. It must read anonymously rather
+    // than be handed anything the sandbox happens to be holding.
+    let b = Box_::new("empty");
+    assert_eq!(b.credential("github.com", "any/repo.git"), "");
 }
 
 #[test]

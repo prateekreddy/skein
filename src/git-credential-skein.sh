@@ -54,17 +54,35 @@ name="${name%.git}"
 case "$owner" in '' | *[!A-Za-z0-9._-]* | -*) exit 0 ;; esac
 case "$name" in '' | *[!A-Za-z0-9._-]* | -*) exit 0 ;; esac
 
+[ -n "${SKEIN_GIT_TOKENS-}" ] || exit 0
+
+# Narrowest first. Each of these is a file the HOST placed; none is minted here, and there is no
+# credential in the environment to fall back on.
+#
+#   <owner>%2F<name>  write, this repository alone. Matches `gitgate::token_file` — the slash is
+#                     encoded so a repository name can never become a directory, nor address a file
+#                     outside the box's own token directory.
+#   read/<owner>      read-only across everything the App is installed on for that owner. One file
+#                     per owner because an installation token belongs to exactly one installation,
+#                     so a personal account and an org are two tokens, not one.
+#   read/_any         the optional read-only PAT, for someone who wanted cross-repo reads without
+#                     running an App. Absent in the ordinary setup.
 token=''
-# Must match `gitgate::token_file`: the slash is encoded so a repository name can never become a
-# directory, nor address a file outside the box's own token directory.
-file="${SKEIN_GIT_TOKENS-}/${owner}%2F${name}"
-if [ -n "${SKEIN_GIT_TOKENS-}" ] && [ -r "$file" ]; then
-  token="$(cat "$file" 2>/dev/null)"
-fi
-# Anything without a token of its own gets the read-only one, so cloning and fetching any repository
-# keeps working exactly as before. A push with it comes back 403 from GitHub, which is the intended
-# answer and the one `git`'s shim explains.
-[ -n "$token" ] || token="${SKEIN_GH_READ-}"
+for candidate in \
+  "${SKEIN_GIT_TOKENS}/${owner}%2F${name}" \
+  "${SKEIN_GIT_TOKENS}/read/${owner}" \
+  "${SKEIN_GIT_TOKENS}/read/_any"
+do
+  if [ -r "$candidate" ]; then
+    token="$(cat "$candidate" 2>/dev/null)"
+    [ -n "$token" ] && break
+  fi
+done
+
+# Nothing, rather than something that will not work. A repository with no token here is one this box
+# has no credential for, and answering with a token scoped elsewhere would turn a clone that would
+# have succeeded ANONYMOUSLY — every public repo — into a 403. Silence lets git fall through to
+# unauthenticated access, which is exactly right: public works, private-and-not-yours does not.
 [ -n "$token" ] || exit 0
 
 printf 'username=x-access-token\n'
