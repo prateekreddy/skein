@@ -17,10 +17,12 @@
 //!
 //! # Three stages, so the expensive one runs rarely
 //!
-//! 0. **Free.** Changed paths, and which of them you own per [`crate::codeowners`]. No network, no
-//!    model, always available — and it is what scopes the prompts that follow.
+//! 0. **Free.** Which changed paths you own per [`crate::codeowners`], and what
+//!    [`crate::contracts`] can prove moved by reading the diff. No model, always available — one
+//!    scopes the prompts that follow, the other can overrule their verdict.
 //! 1. **Cheap.** One small-model pass: a line, and a verdict on whether this needs expanding.
-//! 2. **Earned.** The fuller brief, only when stage 1 asks for it.
+//! 2. **Earned.** The fuller brief, when stage 1 asks for it *or* stage 0 found evidence. The
+//!    scanner escalates and never clears, so the two stages cannot talk each other down.
 //!
 //! Everything is cached against `(number, head_sha)`. That key is not an optimisation: it is the
 //! same fact that decides whether your review still counts in [`crate::prq`], so a PR that gains a
