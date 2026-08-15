@@ -6,6 +6,7 @@
 
 mod ai;
 mod answer;
+pub mod codeowners;
 mod config;
 mod diff;
 mod files;
@@ -14,6 +15,7 @@ pub mod gitgate;
 mod health;
 mod mailbox;
 mod place;
+pub mod prq;
 mod repos;
 mod runtime;
 mod sandbox;

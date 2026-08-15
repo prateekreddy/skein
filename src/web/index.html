@@ -405,7 +405,7 @@
   @keyframes vpulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
 
   .dockbody { position:relative; flex:1; min-height:0; }
-  .termarea, .diffpane, .sesspane, .filespane, .txpane { position:absolute; inset:0; display:none; }
+  .termarea, .diffpane, .sesspane, .filespane, .txpane, .revpane { position:absolute; inset:0; display:none; }
   .termarea.on { display:block; }
   .diffpane.on, .sesspane.on { display:block; overflow:auto; background:var(--inset); }
   /* Files: tree/list on the left, rendered content on the right — the "never leave skein to read
@@ -413,6 +413,59 @@
   .filespane.on { display:flex; background:var(--inset); }
   /* transcript: a conversation, not a terminal — readable width, newest at the bottom */
   .txpane.on { display:block; background:var(--inset); }
+  /* Review: a repo's PR queue. A place you sit in and work down, not an overlay you dismiss —
+     which is why it lives in the dock beside diff/session rather than in the modal stack. */
+  .revpane.on { display:block; background:var(--inset); overflow-y:auto; }
+  .revwrap { max-width:1000px; margin:0 auto; padding:14px 18px 40px; }
+  .revhead { display:flex; align-items:center; gap:10px; position:sticky; top:0; z-index:2;
+             margin:-14px -18px 12px; padding:11px 18px; background:var(--inset);
+             border-bottom:1px solid var(--line); font:11.5px var(--mono); color:var(--dim); }
+  .revhead select { background:var(--panel); color:var(--text); border:1px solid var(--border-2);
+                    border-radius:var(--radius-sm); padding:4px 7px; font:11.5px var(--mono); }
+  .revhead .revspacer { flex:1; }
+  /* Filter chips: author / reviewer / mentioned — the split you work the queue by. */
+  .revchips { display:flex; gap:5px; }
+  .revchip { background:var(--panel); border:1px solid var(--border-2); color:var(--dim);
+             border-radius:999px; padding:3px 10px; font:11px var(--mono); cursor:pointer; }
+  .revchip.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-2); }
+  /* Blind spots are stated, never swallowed: a queue that silently under-reports is worse than no
+     queue, so this sits above the lanes and is styled as a warning rather than a footnote. */
+  .revblind { border:1px solid var(--error); border-left-width:3px; border-radius:var(--radius-sm);
+              background:rgba(240,136,62,.08); padding:9px 12px; margin-bottom:14px;
+              font:12px var(--mono); color:var(--text-2); }
+  .revblind b { color:var(--error); font-weight:600; display:block; margin-bottom:4px; }
+  .revblind div + div { margin-top:5px; }
+  .revlane { margin-bottom:20px; }
+  .revlane > h4 { margin:0 0 7px; font:11px var(--mono); text-transform:uppercase; letter-spacing:.07em;
+                  color:var(--faint); display:flex; align-items:center; gap:7px; cursor:pointer; }
+  .revlane > h4 .revn { color:var(--dim); }
+  .revrow { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel);
+            margin-bottom:6px; overflow:hidden; }
+  .revrow.open { border-color:var(--border-3); }
+  /* The collapsed line is the product: at 30 a day this is what you actually read, so it holds
+     number, title, author and state on ONE line and nothing else competes with the title. */
+  .revline { display:flex; align-items:center; gap:9px; padding:8px 11px; cursor:pointer; }
+  .revline:hover { background:var(--elevated); }
+  .revnum { font:11.5px var(--mono); color:var(--faint); flex:none; }
+  .revtitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+              font-size:13px; color:var(--text); }
+  .revwho { font:11px var(--mono); color:var(--dim); flex:none; }
+  .revdot { width:7px; height:7px; border-radius:50%; flex:none; background:var(--idle); }
+  .revdot.passing { background:var(--done); } .revdot.pending { background:var(--waiting); }
+  .revdot.failing { background:var(--attn); } .revdot.none { background:var(--stale); }
+  .revtag { font:10px var(--mono); color:var(--faint); border:1px solid var(--border-2);
+            border-radius:999px; padding:1px 7px; flex:none; }
+  .revtag.draft { color:var(--waiting); border-color:var(--waiting); }
+  .revtag.moved { color:var(--working); border-color:var(--working); }
+  .revbody { border-top:1px solid var(--line); padding:11px 13px; font-size:13px; }
+  .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
+             display:flex; flex-wrap:wrap; gap:4px 14px; }
+  .revmeta a { color:var(--accent-2); }
+  /* No summary is a *state*, not an absence: skein's rule is that AI may only add scrutiny, so a
+     PR it could not summarise stays at full attention and says so plainly. */
+  .revnosum { border:1px dashed var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
+              color:var(--text-2); font-size:12.5px; }
+  .revempty { color:var(--faint); font-size:13px; padding:10px 2px; }
   .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
   .txhead { display:flex; align-items:center; gap:10px; position:sticky; top:-14px; z-index:1; margin:-14px -18px 10px;
             padding:10px 18px; background:var(--inset); border-bottom:1px solid var(--line);
@@ -877,6 +930,7 @@
             <span class="hdiv"></span>
             <button type="button" class="kbtn ghost" onclick="addRepoPrompt()" title="Add a repository" aria-label="Add a repository"><svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>repo</button>
             <button type="button" class="kbtn ghost" id="mbxbtn" onclick="openMailbox()" title="Mailbox &amp; broadcast" aria-label="Mailbox &amp; broadcast"><svg class="ic" viewBox="0 0 24 24"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></button>
+            <button type="button" class="kbtn ghost" id="revbtn" onclick="openReview()" title="Review a repo's pull requests" aria-label="Review a repo's pull requests"><svg class="ic" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" y1="9" x2="6" y2="21"/></svg></button>
             <button type="button" class="kbtn ghost" id="gitqbtn" onclick="openGitq()" title="Repo write access" aria-label="Repo write access"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
             <button type="button" class="kbtn ghost" id="subqbtn" onclick="openSubq()" title="Package requests from boxes" aria-label="Package requests from boxes"><svg class="ic" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27,6.96 12,12.01 20.73,6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></button>
             <button type="button" class="kbtn ghost" id="alerts" title="Desktop alerts when a box needs you" aria-label="Desktop alerts when a box needs you"><svg class="ic" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></button>
@@ -901,6 +955,7 @@
         <div class="sesspane" id="sesspane"></div>
         <div class="filespane" id="filespane"></div>
         <div class="txpane" id="txpane"></div>
+        <div class="revpane" id="revpane"></div>
       </div>
       <div class="keybar" id="keybar">
         <button data-k="esc">esc</button>
@@ -1499,7 +1554,7 @@ const boxAnyStreaming = (box) => ["agent","shell"].some(k => sessions.get(sidOf(
 function closeBoxSessions(box) { for (const k of ["agent","shell"]) { const id = sidOf(box,k); if (sessions.has(id)) closeSession(id); } }
 const termarea = document.getElementById("termarea"), diffpane = document.getElementById("diffpane"),
       sesspane = document.getElementById("sesspane"), filespane = document.getElementById("filespane"),
-      txpane = document.getElementById("txpane"),
+      txpane = document.getElementById("txpane"), revpane = document.getElementById("revpane"),
       tabsEl = document.getElementById("tabs"), dockbar = document.getElementById("dockbar");
 
 function openTerminal(name, runtime) { showBox(name, "term", "agent", runtime || agentOf(name)); }
@@ -1549,7 +1604,9 @@ function showBox(name, mode, kind = "agent", runtime, handoff = false) {
 }
 function applyView() {
   persistView();   // remember open tabs + active view so a page reload restores them
-  const docked = sessions.size > 0 || !!view.box;
+  // Review is repo-scoped, so it is the one view that docks without a box. Leaving `view.repo` out
+  // of this test is what would make the pane render into a dock that is still collapsed.
+  const docked = sessions.size > 0 || !!view.box || !!view.repo;
   document.body.classList.toggle("docked", docked);
   if (!docked) return;
   const termMode = view.mode === "term";
@@ -1559,6 +1616,7 @@ function applyView() {
   sesspane.classList.toggle("on", view.mode === "session");
   filespane.classList.toggle("on", view.mode === "files");
   txpane.classList.toggle("on", view.mode === "tx");
+  revpane.classList.toggle("on", view.mode === "review");
   const aid = activeSid();
   for (const [id, s] of sessions) s.host.classList.toggle("on", termMode && id === aid);
   if (termMode && aid && sessions.has(aid)) {
@@ -1725,9 +1783,11 @@ function persistView() {
     }
     // Same for the active view: until it is restored, the saved one is still the truth about where
     // you were, and `view` is merely where the page starts.
-    const active = view.box ? view : (pendingView || view);
+    // `view.repo` counts as "somewhere you are": review is the one view with no box, and testing
+    // only `view.box` would let a reload drop you back to whatever box was open before it.
+    const active = (view.box || view.repo) ? view : (pendingView || view);
     localStorage.setItem("skein.view", JSON.stringify({
-      open, box: active.box, mode: active.mode, kind: active.kind }));
+      open, box: active.box, mode: active.mode, kind: active.kind, repo: active.repo }));
   } catch {}
 }
 // On the first fleet snapshot, reopen whatever was open before the reload (filtered to boxes that
@@ -1749,6 +1809,9 @@ function restoreSessions() {
       : { box: o.box, kind: o.kind === "shell" ? "shell" : "agent", runtime: o.runtime || null }
   )).filter(o => o.box);
   pendingView = saved.box ? { box: saved.box, mode: saved.mode, kind: saved.kind } : null;
+  // Review restores immediately rather than through `openPending`: that gate waits for a box to
+  // exist in the fleet, and a repo's PR queue does not depend on any box being alive.
+  if (!pendingView && saved.mode === "review" && saved.repo) openReview(saved.repo);
   openPending();
 }
 // Reopen what the fleet can account for, and run on EVERY snapshot rather than only the first.
@@ -1892,6 +1955,172 @@ function renderDockbar() {
   const mg = dockbar.querySelector("#dmerge"); if (mg) mg.onclick = () => mergePr(view.box);
   const bk = dockbar.querySelector("#dback"); if (bk) bk.onclick = () => document.body.classList.add("show-fleet");
   dockbar.querySelector("#dclose").onclick = () => { const id = activeSid(); if (id && sessions.has(id)) closeSession(id); else { view = {box:null,mode:"term",kind:"agent"}; applyView(); } };
+}
+
+// ---------- review: a repo's PR queue ----------
+//
+// The inversion that makes this a review surface rather than a shipping one: the repo owns the
+// list, a PR is the object, and a box is something you summon onto a branch when one turns out to
+// need hands. Everything else in the dock is keyed by box; this is keyed by repo, which is why it
+// carries `view.repo` and why `applyView` docks on it.
+//
+// Nothing here polls. The queue costs three `gh` round trips, so it loads when you open it and when
+// you ask — never on the fleet's 2s tick.
+let revQueue = null;          // last fetched queue for view.repo
+let revFilter = "all";        // all | author | reviewer | mentioned
+let revOpen = new Set();      // PR numbers expanded in place
+let revLoading = false;
+
+function openReview(repoId) {
+  const id = repoId || view.repo || localStorage.getItem("skein.reviewRepo") || (repos[0] && repos[0].id);
+  if (!id) { toast("add a repo first — review lists the PRs of a repo skein manages"); return; }
+  document.body.classList.remove("show-fleet");
+  try { localStorage.setItem("skein.reviewRepo", id); } catch {}
+  // Switching repos must not carry the previous repo's expansions: PR numbers collide across repos,
+  // so #12 of one would silently open #12 of the other.
+  if (view.repo !== id) { revQueue = null; revOpen = new Set(); }
+  view = { box: null, mode: "review", kind: "agent", repo: id };
+  applyView();
+  loadReview();
+}
+
+function loadReview(force) {
+  const id = view.repo;
+  if (!id) return;
+  revLoading = true; renderReview();
+  fetch(`/api/repos/${encodeURIComponent(id)}/review${force ? "?force=1" : ""}`).then(async r => {
+    const text = await r.text();
+    if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
+    return JSON.parse(text);
+  }).then(q => {
+    revLoading = false;
+    if (view.repo !== id) return;   // you switched repos while this was in flight
+    revQueue = q; renderReview();
+  }).catch(e => {
+    revLoading = false;
+    if (view.repo !== id) return;
+    revQueue = { error: String(e.message || e).split("\n")[0], prs: [], blind_spots: [] };
+    renderReview();
+  });
+}
+
+const REV_LANES = [
+  ["needs-you", "needs you"],
+  ["waiting",   "waiting"],
+  ["archived",  "archived"],
+];
+// Why a PR is in your queue, in the words the filter uses.
+function revReasonLabels(pr) {
+  return (pr.reasons || []).map(r => typeof r === "string" ? r : (r.team ? `team ${r.team}` : "team"));
+}
+// A PR you already decided on, brought back because the branch moved under you. On the collapsed
+// line this is the difference between "you have never seen this" and "you have, and it changed" —
+// and without it the two are indistinguishable at exactly the row you would skip.
+function revMoved(pr) {
+  return pr.my_review && pr.my_review !== "none" && !pr.review_is_current;
+}
+function revMatchesFilter(pr) {
+  if (revFilter === "all") return true;
+  const rs = (pr.reasons || []).map(r => typeof r === "string" ? r : "team");
+  // A team review request IS a review request — filtering to "reviewer" and hiding the PRs a team
+  // of yours was asked to review would drop exactly the rows the team query was added to find.
+  if (revFilter === "reviewer") return rs.includes("reviewer") || rs.includes("team");
+  return rs.includes(revFilter);
+}
+
+function renderReview() {
+  if (!revpane) return;
+  const id = view.repo;
+  const picker = repos.length > 1
+    ? `<select aria-label="Repository" onchange="openReview(this.value)">${
+        repos.map(r => `<option value="${esc(r.id)}"${r.id === id ? " selected" : ""}>${esc(r.id)}</option>`).join("")
+      }</select>`
+    : `<span>${esc(id || "")}</span>`;
+  const chips = [["all","all"],["author","mine"],["reviewer","to review"],["mentioned","mentioned"]]
+    .map(([k, label]) => `<button type="button" class="revchip${revFilter === k ? " on" : ""}" onclick="setRevFilter('${k}')">${esc(label)}</button>`)
+    .join("");
+  let body = "";
+  if (revLoading && !revQueue) {
+    body = `<div class="revempty">asking GitHub…</div>`;
+  } else if (revQueue && revQueue.error) {
+    body = `<div class="revblind"><b>the queue could not be built</b><div>${esc(revQueue.error)}</div></div>`;
+  } else if (revQueue) {
+    const shown = (revQueue.prs || []).filter(revMatchesFilter);
+    // Blind spots first and unmissable. A queue that under-reports silently is worse than no queue,
+    // so what it could not see outranks what it could.
+    if ((revQueue.blind_spots || []).length) {
+      body += `<div class="revblind"><b>this queue is incomplete</b>${
+        revQueue.blind_spots.map(b => `<div>${esc(b)}</div>`).join("")}</div>`;
+    }
+    for (const [lane, label] of REV_LANES) {
+      const rows = shown.filter(p => p.lane === lane);
+      // Needs-you always shows its heading, even at zero — "nothing needs you" is an answer you
+      // came here for, and a missing section reads as a page that failed to load.
+      if (!rows.length && lane !== "needs-you") continue;
+      body += `<div class="revlane"><h4>${esc(label)} <span class="revn">${rows.length}</span></h4>${
+        rows.length ? rows.map(revRow).join("")
+                    : `<div class="revempty">nothing here${revFilter !== "all" ? " under this filter" : ""}.</div>`
+      }</div>`;
+    }
+  }
+  revpane.innerHTML = `<div class="revwrap"><div class="revhead">${picker}<div class="revchips">${chips}</div>
+      <span class="revspacer"></span>
+      <button type="button" class="revchip" onclick="loadReview(true)">${revLoading ? "refreshing…" : "refresh"}</button>
+    </div>${body}</div>`;
+}
+
+function setRevFilter(k) { revFilter = k; renderReview(); }
+
+function revRow(pr) {
+  const open = revOpen.has(pr.number);
+  const reasons = revReasonLabels(pr).map(r => `<span class="revtag">${esc(r)}</span>`).join("");
+  const line = `<div class="revline" onclick="toggleRevRow(${pr.number})">
+      <span class="revdot ${esc(pr.checks || "none")}" title="checks: ${esc(pr.checks || "none")}"></span>
+      <span class="revnum">#${pr.number}</span>
+      <span class="revtitle">${esc(pr.title || "")}</span>
+      ${pr.draft ? `<span class="revtag draft">draft</span>` : ""}
+      ${revMoved(pr) ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""}
+      ${reasons}
+      <span class="revwho">${esc(pr.author || "")}</span>
+    </div>`;
+  return `<div class="revrow${open ? " open" : ""}">${line}${open ? revBody(pr) : ""}</div>`;
+}
+
+function revBody(pr) {
+  const archived = pr.lane === "archived";
+  // Your review state is worth spelling out rather than badging: "approved, but three commits have
+  // landed since" is the single most useful sentence on a PR you already looked at.
+  const mine = pr.my_review && pr.my_review !== "none"
+    ? `you ${esc(pr.my_review.replace("-", " "))}${pr.review_is_current ? "" : " — and new commits have landed since"}`
+    : "you have not reviewed this";
+  return `<div class="revbody">
+    <div class="revmeta">
+      <span>${esc(pr.head_ref || "")} → ${esc(pr.base_ref || "")}</span>
+      <span>checks ${esc(pr.checks || "none")}</span>
+      <span>${mine}</span>
+      <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">open on GitHub ↗</a>
+    </div>
+    <div class="revnosum">Not summarised — read this one yourself. skein only lowers the depth of a
+      PR when it has actually read it; when it has not, the PR stays at full attention.</div>
+    <div class="revmeta" style="margin:10px 0 0">
+      <button type="button" class="revchip" onclick="archivePr(${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
+    </div>
+  </div>`;
+}
+
+function toggleRevRow(n) {
+  if (revOpen.has(n)) revOpen.delete(n); else revOpen.add(n);
+  renderReview();
+}
+
+function archivePr(n, on) {
+  const id = view.repo;
+  fetch(`/api/repos/${encodeURIComponent(id)}/review/${n}/archive`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ on })
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) { toast("could not update: " + (d.error || "unknown")); return; }
+    loadReview(true);
+  }).catch(e => toast("could not update: " + String(e.message || e).split("\n")[0]));
 }
 
 // ---------- ship: PR · checks · stop · destroy (host-side via gh/sbx) ----------
@@ -3211,6 +3440,7 @@ function commands() {
     { sec:"Actions", label:"Settings…", run:() => openSettings("repos") },
     { sec:"Actions", label:"Keyboard shortcuts…", run:() => openSettings("keys"), meta:"?" },
     { sec:"Actions", label:"Open mailbox", run:openMailbox },
+    { sec:"Actions", label:"Review pull requests…", run:() => openReview() },
     { sec:"Actions", label:"Repo write access — approve a box's push", run:openGitq },
     { sec:"Actions", label:"Package requests from boxes", run:openSubq },
     { sec:"Actions", label:"Broadcast to all boxes…", run:()=>{ openMailbox(); setTimeout(()=>{ document.getElementById("mbx-to").value="broadcast"; document.getElementById("mbx-body").focus(); },50); } },
@@ -4124,6 +4354,9 @@ function loadRepos() {
   return fetch("/api/repos").then(r => r.json()).then(rs => {
     repos = rs || [];
     fillRepoSelect();
+    // The review pane's repo picker is built from this list, and on a reload the pane can render
+    // before the list arrives — without this it keeps the single-repo spelling forever.
+    if (view.mode === "review") renderReview();
     render(boxes);   // empty managed repos get their own section so you can launch into them
   }).catch(() => {});
 }

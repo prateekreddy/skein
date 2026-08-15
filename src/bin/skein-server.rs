@@ -167,6 +167,11 @@ async fn main() {
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
+        .route("/api/repos/:id/review", get(api_review_queue))
+        .route(
+            "/api/repos/:id/review/:number/archive",
+            post(api_review_archive),
+        )
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/fleet/resize", post(api_fleet_resize))
         .route("/api/fleet/limits", post(api_fleet_limits))
@@ -413,6 +418,51 @@ async fn api_set_repo_settings(
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
+}
+
+/// A repo's review queue: every open PR that is yours, and which lane it sits in.
+///
+/// `?force=1` skips the 60s micro-cache — for the refresh button and for the moment after an act
+/// that changed a PR's state. Blocking work (three `gh` round trips) goes to a blocking thread so a
+/// slow GitHub cannot stall the cockpit's SSE tick.
+async fn api_review_queue(
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
+    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    match tokio::task::spawn_blocking(move || skein::prq::queue(&repo, force)).await {
+        Ok(Ok(queue)) => Json(queue).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ArchiveReq {
+    /// true = set aside, false = bring back. Explicit rather than a toggle so a double-tap or a
+    /// retried request cannot flip a PR back into a lane you already moved it out of.
+    on: bool,
+}
+
+/// Set aside (or restore) one PR in a repo's queue.
+async fn api_review_archive(
+    Path((id, number)): Path<(String, u64)>,
+    Json(req): Json<ArchiveReq>,
+) -> Json<serde_json::Value> {
+    let res = tokio::task::spawn_blocking(move || {
+        let r = skein::prq::set_archived(&id, number, req.on);
+        skein::prq::invalidate(&id);
+        r
+    })
+    .await;
+    Json(match res {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
 }
 
 /// The configured work-tracking connections. Never carries a Plane token — only whether one is
