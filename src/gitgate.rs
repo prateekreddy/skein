@@ -804,6 +804,68 @@ pub fn remove_write_credential(id: &str) -> Result<(), String> {
     crate::util::write_atomic(&credentials_path(), &home, body.as_bytes())
 }
 
+/// What scoping is actually doing, as this module understands it.
+///
+/// A value rather than a rendered string, because three callers want the same answer in different
+/// shapes: the health report as a check, `skein doctor` as a line, and the cockpit as a panel state.
+/// Deriving it in each of them meant every caller reaching into `app_credentials`,
+/// `write_credentials`, `credential_has_token` and the config to re-infer what this module already
+/// knows — and drifting apart the first time a state was added. Adding one now is a variant here
+/// and a match arm there.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScopeStatus {
+    /// Not asked for. A correct state, not a fault.
+    Off,
+    /// Asked for, and nothing set up to serve it. Every fresh install, since the setting defaults
+    /// on *because* it is inert until a credential exists — so this is "not yet", never "broken".
+    NotConfigured,
+    /// Asked for, something was configured, and it cannot issue a token. The only failure state.
+    Unusable { why: String, refused: Vec<String> },
+    /// In force. `app` is empty when only stored per-repo tokens are in use.
+    Active { app: String, tokens: usize },
+}
+
+/// Diagnose scoping without calling GitHub.
+///
+/// Deliberately offline: this is polled by the health path, and a network round trip per poll would
+/// make a slow morning look like a broken fleet. Proving a credential really mints is an explicit
+/// act, not a background one.
+pub fn scope_status() -> ScopeStatus {
+    let config = crate::config::load_config();
+    if !config.scope_git_to_repo {
+        return ScopeStatus::Off;
+    }
+    let stored = write_credentials();
+    let usable = stored
+        .iter()
+        .filter(|c| c.problem().is_none() && credential_has_token(&c.id))
+        .count();
+    let refused: Vec<String> = stored
+        .iter()
+        .filter_map(|c| c.problem().map(|w| format!("{}: {w}", c.id)))
+        .collect();
+    let app = app_credentials();
+
+    if app.is_ok() || usable > 0 {
+        return ScopeStatus::Active {
+            app: match app.is_ok() {
+                true => config.github_app_id.trim().to_string(),
+                false => String::new(),
+            },
+            tokens: usable,
+        };
+    }
+    // Nothing usable. Whether that is "not set up" or "broken" turns on whether anyone tried.
+    let attempted = !config.github_app_id.trim().is_empty() || !stored.is_empty();
+    match attempted {
+        false => ScopeStatus::NotConfigured,
+        true => ScopeStatus::Unusable {
+            why: app.err().unwrap_or_else(|| "no usable credential".into()),
+            refused,
+        },
+    }
+}
+
 /// Can this fleet produce a write token at all — by App, or by a stored PAT?
 ///
 /// What [`box_is_scoped`] gates on. Scoping with no way to issue one would not narrow a box's reach;
@@ -1495,6 +1557,61 @@ mod tests {
         assert!(write_credentials().is_empty());
         assert!(!credential_has_token("gone"), "the token file outlived it");
         assert!(credential_for("a/one").is_none());
+    }
+
+    #[test]
+    fn a_fresh_install_reads_as_not_set_up_rather_than_broken() {
+        // The distinction the whole enum exists for. `scope_git_to_repo` defaults ON, so without
+        // it every new user's first screen carries a red banner about a feature they have never
+        // heard of — which is exactly the permanent-failure bug the registry check was just fixed
+        // for. Red is earned by *trying*, not by defaulting.
+        let (_lock, _home) = fresh_home();
+        assert!(crate::config::load_config().scope_git_to_repo);
+        assert_eq!(scope_status(), ScopeStatus::NotConfigured);
+    }
+
+    #[test]
+    fn a_credential_that_was_configured_and_cannot_work_is_a_failure() {
+        let (_lock, _home) = fresh_home();
+        // Stored, named a repo, and never given a token: someone tried and stopped half way.
+        set_write_credential("half", "", &["a/one".into()]).unwrap();
+        match scope_status() {
+            ScopeStatus::Unusable { refused, .. } => {
+                assert!(
+                    refused.is_empty(),
+                    "a half-finished credential is not a refused one"
+                )
+            }
+            other => panic!("a configured-but-unusable fleet must report a failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stored_token_alone_is_enough_to_be_active_with_no_app_at_all() {
+        let (_lock, _home) = fresh_home();
+        set_write_credential("solo", "", &["a/one".into()]).unwrap();
+        set_credential_token("solo", "t").unwrap();
+        assert_eq!(
+            scope_status(),
+            ScopeStatus::Active {
+                app: String::new(),
+                tokens: 1
+            },
+            "someone using only their own tokens is configured, not half-configured"
+        );
+    }
+
+    #[test]
+    fn scoping_switched_off_is_never_a_fault() {
+        let (_lock, home) = fresh_home();
+        let mut config = crate::config::load_config();
+        config.scope_git_to_repo = false;
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scope_status(), ScopeStatus::Off);
     }
 
     #[test]

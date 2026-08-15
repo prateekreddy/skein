@@ -405,6 +405,17 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    // Which GitHub credential a box actually gets. Worth a line of its own because when this is
+    // wrong there is no symptom until a push comes back 403 inside a box, minutes later — and the
+    // reason it is wrong (an App ID GitHub rejects, a key for a different App, an App installed on
+    // none of these repos) is known here and was previously only ever printed to a detached
+    // server's stderr.
+    {
+        let g = skein::health_report_gitgate();
+        let mark = if g.ok { OK } else { BAD };
+        println!("{mark} git scope     {}", g.detail);
+    }
+
     // skein-managed repos + its own kit (the repo-agnostic path).
     let repos = skein::load_repos();
     println!(

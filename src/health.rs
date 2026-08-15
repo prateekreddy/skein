@@ -31,9 +31,72 @@ pub struct HealthReport {
     /// the reserve that keeps the sandbox itself answering. Worth a line of its own because when
     /// this is wrong the symptom is not a message — it is a sandbox that stops responding.
     pub memory: HealthCheck,
+    /// Whether a box's GitHub credential is actually scoped, and why not when it isn't.
+    ///
+    /// Never `ok: false` for being switched off — scoping is opt-in and "off" is a correct state.
+    /// It reports `false` only when the fleet is *trying* to scope and cannot: an App ID that
+    /// GitHub rejects, a key for a different App, an App installed on none of the repos in use.
+    /// Those failures were previously invisible — `refresh_tokens` produced exact, useful errors
+    /// and the server printed them to a detached process's stderr, so the first place anyone
+    /// learned of one was a 403 inside a box some minutes later.
+    pub gitgate: HealthCheck,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
+}
+
+/// Render [`crate::gitgate::ScopeStatus`] as a health line.
+///
+/// Presentation only — the states themselves belong to `gitgate`, which is the module that knows
+/// what they mean. This file used to derive them by reaching into five of its internals, which is
+/// how two callers of the same question end up disagreeing.
+fn git_scope_health() -> HealthCheck {
+    use crate::gitgate::ScopeStatus::*;
+    match crate::gitgate::scope_status() {
+        Off => HealthCheck {
+            ok: true,
+            detail: "off — every box holds the fleet-wide GitHub credential. \
+                     Settings → scope each box's access to its own repo"
+                .into(),
+        },
+        NotConfigured => HealthCheck {
+            ok: true,
+            detail: "not set up — boxes hold the fleet-wide GitHub credential. \
+                     Repo write access → add a GitHub App or a per-repo token to scope them"
+                .into(),
+        },
+        Unusable { why, refused } => HealthCheck {
+            ok: false,
+            detail: format!(
+                "ON but nothing is scoped, so every box still holds the fleet-wide credential: \
+                 {why}.{} Add a GitHub App or a per-repo token under Repo write access.",
+                match refused.is_empty() {
+                    true => String::new(),
+                    false => format!(" Stored tokens refused — {}.", refused.join("; ")),
+                }
+            ),
+        },
+        Active { app, tokens } => HealthCheck {
+            ok: true,
+            detail: format!(
+                "on — boxes write only their own repo.{}{}",
+                match app.is_empty() {
+                    true => String::new(),
+                    false => format!(" App {app}"),
+                },
+                match tokens {
+                    0 => String::new(),
+                    n => format!(" {n} stored repo token(s)"),
+                }
+            ),
+        },
+    }
+}
+
+/// The git-scope check alone, so `skein doctor` can print the one line without building the whole
+/// report — which probes the sandbox and takes seconds.
+pub fn health_report_gitgate() -> HealthCheck {
+    git_scope_health()
 }
 
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
@@ -42,7 +105,8 @@ pub fn health_report() -> HealthReport {
     let ai = HealthCheck {
         ok: true,
         detail: if !crate::ai_enabled() {
-            "off — Settings → Workflow turns it on: a one-line summary for boxes with no journal,              and a second opinion before Continue N resumes anything"
+            "off — Settings → Workflow turns it on: a one-line summary for boxes with no \
+             journal, and a second opinion before Continue N resumes anything"
                 .into()
         } else if !program_on_path("claude") {
             "on, but `claude` is not on PATH — every call falls back to the free signals".into()
@@ -78,14 +142,45 @@ pub fn health_report() -> HealthReport {
                 .into(),
         },
     };
+    // The legacy single-repo registry. Managed repos are the supported path and the board does not
+    // read this at all — it aggregates per-repo stores via `all_stores` — so a fleet with repos
+    // registered is healthy whether or not a `sandboxes.json` exists anywhere.
+    //
+    // It used to be a hard failure, and on a clean install it failed *by construction*: with no
+    // `$SKEIN_REGISTRY`, `locate_registry` falls back to a sibling `skein-shared/` directory named
+    // after a different project, which no new user has. So the first thing anyone saw was the
+    // product declaring itself broken, permanently, over a file it no longer needs — and every real
+    // fault afterwards was noise in a banner that never cleared.
+    let repos_registered = !crate::load_repos().is_empty();
+    // An unset registry is not a broken registry. It is a fault only when someone has *named* one —
+    // `$SKEIN_REGISTRY` or `$SKEIN_SHARED` — and it cannot be read. With neither set and no repos
+    // yet, the honest report is "nothing here yet"; the empty state already says to add a repo, and
+    // a red banner repeating it is noise on the one screen that should be welcoming.
+    let registry_named = std::env::var_os("SKEIN_REGISTRY")
+        .or_else(|| std::env::var_os("SKEIN_SHARED"))
+        .is_some_and(|v| !v.is_empty());
     let registry = match load_registry() {
         Ok((boxes, path)) => HealthCheck {
             ok: true,
             detail: format!("{} ({} boxes)", path.display(), boxes.len()),
         },
+        Err(error) if repos_registered => HealthCheck {
+            ok: true,
+            detail: format!(
+                "not in use — {} repos are managed directly ({error})",
+                crate::load_repos().len()
+            ),
+        },
+        Err(error) if !registry_named => HealthCheck {
+            ok: true,
+            detail: format!("not in use — add a repository with `skein add <url>` ({error})"),
+        },
         Err(error) => HealthCheck {
             ok: false,
-            detail: error,
+            detail: format!(
+                "{error}. It is named by $SKEIN_REGISTRY or $SKEIN_SHARED — unset it, or point \
+                 it at a readable file."
+            ),
         },
     };
     let fleet = fleet_boxes();
@@ -220,7 +315,14 @@ pub fn health_report() -> HealthReport {
     // Deliberately NOT reported here: a box on hook-only turn state (see `screen_health`) is not
     // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment
     // banner would be crying wolf; the caveat belongs on the row and tab it applies to.
-    let ok = registry.ok && sbx.ok && git.ok && probes.ok && mailbox.ok && stale_boxes.is_empty();
+    let gitgate = git_scope_health();
+    let ok = registry.ok
+        && sbx.ok
+        && git.ok
+        && probes.ok
+        && mailbox.ok
+        && gitgate.ok
+        && stale_boxes.is_empty();
     HealthReport {
         ok,
         registry,
@@ -231,6 +333,7 @@ pub fn health_report() -> HealthReport {
         mailbox,
         ai,
         memory,
+        gitgate,
         dark_boxes,
         stale_boxes,
         runtimes: supported_runtimes(),

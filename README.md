@@ -11,6 +11,27 @@ per-box terminal** (click a box → talk to that agent in the browser) + a CLI. 
 is the web UI as the *single pane of glass*; web actions (launch/diff/merge/stop/destroy) and
 a ⌘K palette are next (ARCHITECTURE.md § Roadmap).
 
+## Getting started
+
+**You need:** [`sbx`](https://docs.docker.com/ai/sandboxes/) (Docker Sandboxes) on your `PATH` with
+Docker running, `git`, and [`gh`](https://cli.github.com) authenticated (`gh auth login`). macOS or
+Linux. `jq` inside the sandbox is installed for you.
+
+```sh
+cargo build --release                    # → target/release/{skein, skein-server}
+./target/release/skein login claude      # sign in ONCE — every box inherits it
+./target/release/skein add git@github.com:you/your-repo.git
+./target/release/skein-server            # → http://127.0.0.1:7878
+```
+
+Open the URL, press **+ box**, name a branch, and an agent starts working on it. `skein doctor`
+diagnoses the environment if anything looks wrong.
+
+**Don't skip `skein login`.** It authenticates the agent runtime once inside the shared sandbox, and
+every box inherits that session. Without it each box comes up sitting at a login prompt, does
+nothing, and shows `sign in` on the board — the single most common way a first run goes quiet. Use
+`skein login codex` for Codex boxes; both can be signed in.
+
 ## Build
 
 ```sh
@@ -31,9 +52,11 @@ other check. One-time setup in `tests/ui/README.md`.
 ## Web cockpit (the primary surface)
 
 ```sh
-SKEIN_REGISTRY=<…>/skein-shared/.claude/sandboxes.json \
-  ./target/release/skein-server          # → http://127.0.0.1:7878
+./target/release/skein-server          # → http://127.0.0.1:7878
 ```
+
+*(`SKEIN_REGISTRY=…` is the pre-`skein add` single-repo path; see [Registry
+resolution](#registry-resolution-first-match-wins). Managed repos need none of it.)*
 
 A self-contained dark page (no build step) that live-updates over SSE. The fleet is an **attention
 inbox**: boxes sort "who needs you first" (a decision-blocked box, then a turn that ended on a

@@ -795,6 +795,13 @@ async fn api_health() -> Json<skein::HealthReport> {
                     ok: true,
                     detail: "health task failed".into(),
                 },
+                // `ok: true` like the other opt-in checks: the health task falling over says
+                // nothing about whether scoping is configured, and a red line here would blame
+                // GitHub for a panic somewhere else entirely.
+                gitgate: skein::HealthCheck {
+                    ok: true,
+                    detail: "health task failed".into(),
+                },
                 dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
                 runtimes: skein::supported_runtimes(),

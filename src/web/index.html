@@ -13,7 +13,7 @@
     /* hairlines & borders: subtle → strong */
     --line:#1f252d; --border:#1a1f26; --border-2:#2a313a; --border-3:#3b434d;
     /* text: brightest → faintest */
-    --text:#e8edf3; --fg:#e8edf3; --text-2:#b4bec9; --dim:#828d99; --faint:#586169;
+    --text:#e8edf3; --fg:#e8edf3; --text-2:#b4bec9; --dim:#828d99; --faint:#7b8590;
     /* accent (periwinkle — the one chromatic identity, used with restraint) */
     --accent:#7d80f2; --accent-2:#9fa2f8; --accent-bg:rgba(125,128,242,.12);
     /* state — functional colour only; shared by dot, pill, tab, chip */
@@ -337,11 +337,11 @@
   .hdot { display:inline-block; width:.62em; height:.62em; border-radius:50%; border:1px solid currentColor;
           background:linear-gradient(90deg, currentColor 50%, transparent 50%); vertical-align:baseline;
           margin-left:.4em; opacity:.9; }
-  .dockbar .scrw { font-size:11px; font-weight:600; color:var(--stale); background:var(--inset);
+  .dockbar .scrw { font-size:11px; font-weight:600; color:var(--dim); background:var(--inset);
                    border:1px solid var(--border); border-radius:5px; padding:2px 7px; white-space:nowrap;
                    cursor:help; flex:none; }
   .dockbar .scrw .hdot { margin:0 .45em 0 0; }
-  .tab .thalf { color:var(--stale); }
+  .tab .thalf { color:var(--dim); }
   .dstat .pos { color:var(--done); } .dstat .neg { color:var(--attn); }
   /* the focal control — a calm, centred segmented toggle */
   .seg-toggle { margin:0 auto; display:flex; gap:2px; background:var(--inset); border:1px solid var(--border);
@@ -3940,7 +3940,25 @@ function currentRepoId() {
   if (repos.length) return repos[0].id;
   return "box";
 }
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); }); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
+
+// A box belongs to a repo. With none registered there is nothing to clone, nothing to name it
+// after, and nothing for the agent to open — `currentRepoId` falls back to the literal string
+// "box", which its own comment calls a case the launch cannot satisfy. It used to launch anyway
+// and produce `box-my-feature`: a dock tab with a full toolbar over a black terminal, while the
+// board beside it said "0 boxes" and "the skein is empty". Three contradictory claims on one
+// screen, one click from first run. Refuse, and point at the thing that fixes it.
+function gateLaunch() {
+  const go = document.getElementById("nb-go");
+  const hint = document.querySelector("#newbox .nb-foot .hint");
+  const none = !repos.length;
+  go.disabled = none;
+  if (hint) {
+    hint.innerHTML = none
+      ? `add a repository first — a box is a branch of one`
+      : `creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock`;
+  }
+}
 
 // Blank on every open, because these are a per-box exception: carrying the last box's identity
 // forward is how the wrong name ends up on a commit nobody checked.
@@ -4135,13 +4153,26 @@ function askDiskLimit(name) { openBoxSettings(name); }
 function fillGitScopeSelect() {
   const el = document.getElementById("nb-gitscope");
   if (!el) return;
-  const on = !!settings.scope_git_to_repo;
+  // `scope_git_to_repo` is what the fleet *asks for*; whether it takes effect also depends on there
+  // being a way to issue a write token at all. Reading the setting alone told a user their box
+  // would be scoped when it would not — the one dialog where that claim is load-bearing, since it
+  // is where the choice is made. `/api/fleet/git-grants` carries the effective answer.
+  const on = !!settings.scope_git_to_repo && gitScopeEffective !== false;
   el.innerHTML = [
     `<option value="">fleet default — ${on ? "its own repo only" : "the whole fleet credential"}</option>`,
     `<option value="repo">its own repo — read others, ask to write them</option>`,
     `<option value="fleet">unscoped — the fleet-wide credential</option>`,
   ].join("");
   el.value = "";
+}
+
+// Whether anything can issue a write token — undefined until asked, so a slow answer never flips
+// the label to the wrong one on the way past.
+let gitScopeEffective;
+function loadGitScopeEffective() {
+  return fetch("/api/fleet/git-grants").then(r => r.json())
+    .then(d => { gitScopeEffective = !!d.ready; })
+    .catch(() => {});
 }
 
 function fillSyncSelect() {
@@ -4672,9 +4703,17 @@ function loadHealth() {
     }
     // "memory" among them because a fleet with no ceiling has no symptom until the sandbox stops
     // answering — and by then the banner is not what you are looking at.
-    const failed = ["registry","sbx","git","probes","mailbox","memory"].filter(key => !health[key]?.ok);
+    const failed = ["registry","sbx","git","probes","mailbox","memory","gitgate"].filter(key => !health[key]?.ok);
     const stale = health.stale_boxes?.length || 0, dark = health.dark_boxes?.length || 0;
-    banner.textContent = `environment: ${failed.join(", ") || "probe updates"}${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}`;
+    // The banner used to read `environment: registry, sbx` — two nouns, no verb, no consequence,
+    // with every actual detail hidden in a `title` tooltip that cannot be copied, read on a phone,
+    // or survive a scroll. The first failure's own sentence says what is wrong and usually what to
+    // do; the rest stay in the tooltip until there is a diagnostics pane to put them in.
+    const first = failed.length ? (health[failed[0]]?.detail || "").split(".")[0] : "";
+    const extra = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
+    banner.textContent = failed.length
+      ? `${failed[0]}: ${first}${extra}`
+      : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}`;
     banner.title = [
       ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}`),
       ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
