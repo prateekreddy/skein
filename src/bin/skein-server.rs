@@ -197,6 +197,7 @@ async fn main() {
         .route("/api/boxes/:name/git-scope", post(api_set_box_git_scope))
         .route("/api/fleet/git-probe", post(api_git_probe))
         .route("/api/fleet/git-credentials", post(api_git_credential))
+        .route("/api/fleet/git-read-token", post(api_git_read_token))
         .route(
             "/api/fleet/git-credentials/:id",
             axum::routing::delete(api_git_credential_remove),
@@ -1172,11 +1173,17 @@ async fn api_git_grants() -> Json<serde_json::Value> {
             "live": g.is_live(now),
         })).collect::<Vec<_>>(),
         "app_ready": skein::gitgate::app_credentials().is_ok(),
+        // Not a credential — the id is public, and the settings screen names it so "scoped" can say
+        // *what by*. The key it pairs with is a path that never leaves the host.
+        "app_id": skein::load_config().github_app_id,
         "app_problem": skein::gitgate::app_credentials().err().unwrap_or_default(),
         // Whether a write token can be issued *at all* — by App or by a stored PAT. This is what
         // scoping is gated on, so it is the honest "is this switched on" answer; `app_ready` alone
         // would read as off for someone using nothing but their own tokens.
         "ready": skein::gitgate::can_issue_write_tokens(),
+        // Whether, never what. The optional read PAT is write-only like every token here, so the
+        // settings screen can offer "replace" instead of "add" without the token crossing the wire.
+        "read_pat_set": skein::gitgate::read_pat().is_some(),
         // Descriptions only. The tokens themselves live in 0600 files and are never served — the
         // cockpit learns whether one is set, never what it is.
         "credentials": skein::gitgate::write_credentials().iter().map(|c| serde_json::json!({
@@ -1216,6 +1223,34 @@ async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response {
         }
     }
     // Boxes whose repo this now covers can be given it without waiting for the next tick.
+    tokio::task::spawn_blocking(|| {
+        for view in load_views().unwrap_or_default() {
+            let _ = skein::gitgate::refresh_tokens(&view.name);
+        }
+    });
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ReadTokenReq {
+    /// The PAT itself. An empty string forgets the stored one — the only way to clear it, since
+    /// nothing reads it back to compare against.
+    #[serde(default)]
+    token: String,
+}
+
+/// Store (or forget) the optional read-only PAT.
+///
+/// Its own route rather than a field on the settings form, and for the same reason the write tokens
+/// have one: `config.json` round-trips through the browser on every save, so a token in it would be
+/// handed to every tab that opens Settings. This one is write-only — no route serves it back, and
+/// the page only ever learns whether one is set.
+async fn api_git_read_token(Json(r): Json<ReadTokenReq>) -> Response {
+    if let Err(e) = skein::gitgate::set_read_pat(&r.token) {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    // Reads are placed by the same sweep that places writes, so a token stored now reaches the
+    // boxes without waiting for the next tick.
     tokio::task::spawn_blocking(|| {
         for view in load_views().unwrap_or_default() {
             let _ = skein::gitgate::refresh_tokens(&view.name);

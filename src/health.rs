@@ -66,14 +66,14 @@ fn git_scope_health() -> HealthCheck {
         NotConfigured => HealthCheck {
             ok: true,
             detail: "not set up — boxes hold the fleet-wide GitHub credential. \
-                     Repo write access → add a GitHub App or a per-repo token to scope them"
+                     Settings → GitHub & keys → add a GitHub App or a per-repo token to scope them"
                 .into(),
         },
         Unusable { why, refused } => HealthCheck {
             ok: false,
             detail: format!(
                 "ON but nothing is scoped, so every box still holds the fleet-wide credential: \
-                 {why}.{} Add a GitHub App or a per-repo token under Repo write access.",
+                 {why}.{} Add a GitHub App or a per-repo token under Settings → GitHub & keys.",
                 match refused.is_empty() {
                     true => String::new(),
                     false => format!(" Stored tokens refused — {}.", refused.join("; ")),

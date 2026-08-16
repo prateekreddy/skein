@@ -747,6 +747,30 @@
   .set-field input, .set-field select { width:100%; }
   .set-field input { font-family:var(--mono); font-size:12.5px; }
   .set-field.narrow input, .set-field.narrow select { max-width:300px; }
+  /* A pane long enough to need signposts gets them: a heading breaks it into the steps you take,
+     rather than a single column of rows you have to read in full to find one. */
+  .set-head { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; margin:20px 0 2px;
+              font-size:12px; font-weight:600; letter-spacing:.02em; color:var(--text); }
+  .set-head .sub { font-weight:400; font-size:11px; color:var(--faint); }
+  .set-desc { font-size:11.5px; line-height:1.5; color:var(--faint); padding:6px 0 2px; }
+  /* The pane's own answer to "is this actually on?", which no individual control can give: the
+     switch above can be on while nothing is scoped, and that is the state worth naming. */
+  .set-state { margin:6px 0 2px; padding:9px 11px; border-radius:8px; font-size:11.5px; line-height:1.45;
+               background:var(--panel); border:1px solid var(--line); color:var(--dim); }
+  .set-state.on { border-color:color-mix(in srgb,var(--done) 45%,var(--line)); color:var(--text); }
+  .set-state.warn { border-color:color-mix(in srgb,var(--error) 50%,var(--line)); color:var(--text); }
+  .set-opt { font-size:10.5px; color:var(--faint); border:1px solid var(--line); border-radius:999px;
+             padding:1px 6px; margin-left:6px; vertical-align:1px; }
+  .set-creds { display:flex; flex-direction:column; gap:7px; margin:8px 0 4px; }
+  .set-cred { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 11px;
+              background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  .set-cred .cslug { font-family:var(--mono); font-size:12px; color:var(--text); }
+  .set-cred .cwhy { flex:1; min-width:120px; font-size:11px; color:var(--faint); }
+  .set-credadd { display:flex; flex-direction:column; gap:7px; padding:11px; margin:4px 0 2px;
+                 background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  .set-credadd input { width:100%; font-family:var(--mono); font-size:12.5px; }
+  .set-credrow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:6px 0; }
+  .set-credrow .desc { flex:1; min-width:140px; font-size:11px; color:var(--faint); line-height:1.45; }
   /* repositories: a real list — the id reads as an identifier, the path stays subordinate, and the
      unregister control only appears on the row you are pointing at */
   .set-repos { display:flex; flex-direction:column; gap:8px; margin:12px 0 14px; }
@@ -1092,7 +1116,7 @@
 
   <div id="gitq" aria-hidden="true">
     <div class="mbx-card">
-      <div class="mbx-head"><b>Repo write access</b><span class="sub">a box writes its own repo and reads the rest</span><span class="x" onclick="closeGitq()">✕</span></div>
+      <div class="mbx-head"><b>Repo write access</b><span class="sub">boxes asking to write a repo that is not their own</span><span class="x" onclick="closeGitq()">✕</span></div>
       <div class="mbx-list" id="gitq-list"></div>
     </div>
   </div>
@@ -1171,6 +1195,22 @@
         </div>
       </details>
       <div class="ar-derived">the repo's <code>.claude</code> store — memory + mailbox shared live across this repo's boxes. skein scaffolds it; leave blank to auto-manage.</div>
+
+      <!-- Everything else a repo carries, set here rather than found later on its card. Each of
+           these is applied *after* the clone lands, because they all key on the repo's id and there
+           is no id until the server has picked one. A failure to apply one is reported and never
+           unmakes the repo — the clone is the expensive part and it succeeded. -->
+      <div class="ar-sec">this repository</div>
+      <label class="nb-lbl">write token <span class="ar-opt">optional</span></label>
+      <input id="ar-token" type="password" placeholder="github_pat_… — leave blank if a GitHub App covers it" autocomplete="off" />
+      <div class="ar-derived" id="ar-tokhint">a fine-grained PAT covering only this repo, which its boxes push with. On the App path you need none.</div>
+      <label class="nb-lbl">work tracking</label>
+      <select id="ar-conn"></select>
+      <label class="nb-lbl">Plane project <span class="ar-opt">optional</span></label>
+      <input id="ar-plane" placeholder="https://plane…/projects/&lt;uuid&gt;/issues" autocomplete="off" spellcheck="false" />
+      <label class="nb-lbl">review queue</label>
+      <select id="ar-review"><option value="true">On — list this repo's pull requests</option><option value="false">Off — skein never asks GitHub about it</option></select>
+
       <div class="ar-msg" id="ar-msg" style="display:none"></div>
       <div class="nb-foot"><span class="hint">clones a URL into <code>~/.skein/repos</code> · adopts a local path in place</span><button class="primary" id="ar-go">Add →</button></div>
     </div>
@@ -1202,12 +1242,37 @@
             <div id="set-repos" class="set-repos"></div>
             <button type="button" class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add a repository</button>
           </section>
+          <!-- Every credential a box could hold is configured here, in the order you set one up:
+               what the boundary is, then the two ways to issue a token, then a way to check, then
+               the fleet-wide fallback that predates all of it. Requests from boxes are deliberately
+               *not* here — those arrive unbidden and want one click, so they stay on the padlock
+               (Repo write access). Setup is a place you go; an approval is a thing that finds you. -->
           <section class="set-pane" data-pane="github">
-            <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">so boxes can fetch, push, and open PRs</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">refresh the sbx secret after a rotation</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
-            <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Scope each box's GitHub access to its own repo</span><span class="desc">On, a box can push only to <b>its own repo</b> and asks in the cockpit for any other. Needs the GitHub App below; until one exists this changes nothing. <details><summary>what every box holds without it</summary>every box shares one credential unless this is on — measured on this fleet, that was a user token with <code>repo</code>, <code>admin:public_key</code> and <code>gist</code> reaching <b>460 repositories</b> read and write, plus a forwarded ssh-agent signing for any of them. On, a box gets a GitHub App token scoped to <b>its own repository</b> for writing and a read-only one for the repos the App is installed on, so a push anywhere else is refused by GitHub — and a box can ask for an exception, which appears under <b>Repo write access</b>. Needs the App below: until one is configured this changes nothing at all. Takes effect at a box's next start; one box can opt out in its own settings.</details></span></span><input type="checkbox" id="set-gitscope" class="switch"></label>
+            <div class="set-state" id="set-gitstate">checking…</div>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Scope each box's GitHub access to its own repo</span><span class="desc">On, a box can push only to <b>its own repo</b> and asks in the cockpit for any other. Needs an App or a repository token below; until one exists this changes nothing. <details><summary>what every box holds without it</summary>every box shares one credential unless this is on — measured on this fleet, that was a user token with <code>repo</code>, <code>admin:public_key</code> and <code>gist</code> reaching <b>460 repositories</b> read and write, plus a forwarded ssh-agent signing for any of them. On, a box gets a token scoped to <b>its own repository</b> for writing and a read-only one for the rest, so a push anywhere else is refused by GitHub — and a box can ask for an exception, which appears under <b>Repo write access</b>. Until an App or a repository token exists this changes nothing at all, because scoping with no way to issue a token would take pushing away from every box at once rather than narrowing anything. Takes effect at a box's next start; one box can opt out in its own settings.</details></span></span><input type="checkbox" id="set-gitscope" class="switch"></label>
+
+            <div class="set-head">Issuing tokens<span class="sub">an App covers every repo you install it on · a stored token covers exactly one</span></div>
             <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">Mints a write token for a box's own repo and a read-only one for the repos you install it on. Key at <code>~/.skein/github-app.pem</code>. <details><summary>how to create one</summary>the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b> and <b>Issues: write</b> (the last is what lets a box comment on a PR), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</details></span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
+
+            <div class="set-head">Repository tokens<span class="sub">instead of the App, one fine-grained PAT per repo</span></div>
+            <div class="set-desc">Each covers <b>exactly one</b> repository, and that is the whole security argument: a token covering three would hand all three to whichever box receives it, because the helper that chooses between them runs inside the box as the agent's own uid. A helper routes; it cannot contain. A repo's token can also be set on its own card under <b>Repositories</b>.</div>
+            <div id="set-gitcreds" class="set-creds"></div>
+            <div class="set-credadd">
+              <input id="set-c-repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
+              <input id="set-c-token" type="password" placeholder="github_pat_… (write to that one repo)" autocomplete="off" />
+              <div class="set-credrow"><button type="button" class="kbtn primary" onclick="addGitCred()">Store token</button><span class="desc">storing the same repo again replaces its token — that is how you rotate one</span></div>
+            </div>
+
+            <label class="set-field"><span class="set-title">Read-only token <span class="set-opt">optional</span></span><span class="desc">A fine-grained PAT with <b>contents: read</b>, for reading <b>private</b> repos across the fleet without running an App. Not needed on the App path — reads already come from the installation — and not needed for public repos, which boxes reach anonymously. Write-only here: skein stores it 0600 and never serves it back. <details><summary>why this is separate from the write tokens</summary>a read credential may safely be broad, because the worst a box can do with it is read a repo you own. That is exactly the property a write token must not have, so the two are stored and placed separately rather than one credential doing both jobs at different strengths.</details></span><div class="path-row"><input id="set-readpat" type="password" placeholder="github_pat_… (read)" autocomplete="off" /><button type="button" class="kbtn" onclick="saveReadPat()">Store</button><button type="button" class="kbtn ghost" onclick="clearReadPat()">Forget</button></div></label>
+
+            <div class="set-head">Does it work?<span class="sub">asks GitHub for a real token per repo, then throws it away</span></div>
+            <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
+            <div id="gq-probe-rows"></div>
+
+            <div class="set-head">Fleet-wide credential<span class="sub">what boxes hold when nothing above is configured</span></div>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">copies <code>gh auth token</code> — <b>your whole account</b> — into the sandbox-wide secret, so any box can fetch, push and open PRs anywhere it reaches. Scoped boxes drop it at startup and use the tokens above instead; turn this off once scoping is live, and rotate the token you seeded</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">refresh the sbx secret after a rotation</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
+            <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box. A scoped box has this socket blanked, since a forwarded agent signs for anything the key reaches and would undo the scoping above</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
           </section>
           <section class="set-pane" data-pane="fleet">
             <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
@@ -3768,6 +3833,10 @@ function commands() {
     { sec:"Actions", label:"Open mailbox", run:openMailbox },
     { sec:"Actions", label:"Review pull requests…", run:() => openReview() },
     { sec:"Actions", label:"Repo write access — approve a box's push", run:openGitq },
+    // Named for the credential, not the pane, because that is the word someone arrives with. The
+    // panel above answers "a box is asking"; this answers "where do I put my token", and looking
+    // for the second in the first is exactly the trip that sent this work here.
+    { sec:"Actions", label:"GitHub tokens & the App — set up how boxes authenticate", run:() => openSettings("github") },
     { sec:"Actions", label:"Package requests from boxes", run:openSubq },
     { sec:"Actions", label:"Broadcast to all boxes…", run:()=>{ openMailbox(); setTimeout(()=>{ document.getElementById("mbx-to").value="broadcast"; document.getElementById("mbx-body").focus(); },50); } },
     { sec:"Actions", label:"Jump to next box that needs you", run:nextNeedsYou, meta:"]" },
@@ -4013,18 +4082,86 @@ function gitqGrantRow(g) {
 // A stored token covers exactly one repository, and the row says so rather than leaving it to be
 // discovered: a token covering three would hand all three to any box that receives it, because the
 // helper that chooses runs inside the box as the agent's own uid.
-function gitqCredRow(c) {
+function gitCredRow(c) {
+  const state = c.problem ? "refused" : (c.has_token ? "ready" : "incomplete");
   return `
-    <div class="msg">
-      <div class="sq-pkgs">${esc(c.repo || (c.repos || []).join(", ") || "?")}</div>
-      <div class="sq-meta">${esc(c.label || c.id)}${c.has_token ? "" : " · no token stored"}</div>
-      ${c.problem ? `<div class="sq-log">unusable — ${esc(c.problem)}</div>` : ""}
-      <div class="sq-row">
-        <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${c.problem ? "refused" : (c.has_token ? "ready" : "incomplete")}</span>
-        <button class="kbtn ghost" onclick="editGitCred('${esc(c.id)}')">${c.has_token ? "Replace token" : "Add token"}</button>
-        <button class="kbtn ghost" onclick="removeGitCred('${esc(c.id)}')">Forget</button>
-      </div>
+    <div class="set-cred" data-cred="${esc(c.id)}">
+      <span class="sq-state ${c.problem || !c.has_token ? "" : "approved"}">${state}</span>
+      <span class="cslug">${esc(c.repo || (c.repos || []).join(", ") || "?")}</span>
+      <span class="cwhy">${c.problem ? `unusable — ${esc(c.problem)}` : (c.has_token ? "" : "no token stored")}</span>
+      <button type="button" class="kbtn ghost" onclick="editGitCred('${esc(c.id)}')">${c.has_token ? "Replace token" : "Add token"}</button>
+      <button type="button" class="kbtn ghost" onclick="removeGitCred('${esc(c.id)}')">Forget</button>
     </div>`;
+}
+
+// The pane's own status line. No single control can give this answer: the scope switch can be on
+// while nothing is scoped, which is precisely the state worth naming — and the one a switch drawn
+// "on" would otherwise misreport.
+function renderGitState(d) {
+  const el = document.getElementById("set-gitstate");
+  if (!el) return;
+  const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
+  const how = [d.app_ready ? `App ${d.app_id || ""}`.trim() : "", n ? `${n} repository token${n === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  if (!d.ready) {
+    el.className = "set-state warn";
+    // The App's problem is worth naming only when there *is* an App — "no App configured" would be
+    // repeating the sentence above it, whereas "the key is not at <path>" is the whole answer to a
+    // half-configured fleet, and the state someone is most likely to be stuck in.
+    const half = d.app_id && d.app_problem ? ` <b>${esc(d.app_problem)}</b>` : "";
+    el.innerHTML = `<b>Not scoped.</b> Every box holds the fleet-wide credential — whatever <code>gh auth token</code> reaches. `
+      + `Add a GitHub App or a repository token below to change that.${half}`;
+    return;
+  }
+  const on = document.getElementById("set-gitscope");
+  if (on && !on.checked) {
+    el.className = "set-state warn";
+    el.innerHTML = `<b>Ready, but switched off.</b> ${esc(how)} can issue tokens; until the switch below is on, boxes keep the fleet-wide credential.`;
+    return;
+  }
+  el.className = "set-state on";
+  el.innerHTML = `<b>Scoped.</b> A box writes only its own repo and asks for any other. ${esc(how)}. Takes effect at each box's next start.`;
+}
+
+// One fetch answers both sections and the repo cards, so it is done once and shared rather than
+// three times from three renderers.
+let gitReadPatSet = false;
+// The last payload, kept so the status line can repaint when the switch moves without spending a
+// round trip to learn what has not changed.
+let gitLast = { credentials: [], ready: false };
+function loadGitCreds() {
+  return fetch("/api/fleet/git-grants").then(r => r.json()).then(d => {
+    gitLast = d;
+    gitqCreds = d.credentials || [];
+    gitReadPatSet = !!d.read_pat_set;
+    const el = document.getElementById("set-gitcreds");
+    if (el) {
+      el.innerHTML = gitqCreds.length ? gitqCreds.map(gitCredRow).join("")
+        : `<div class="set-desc">None stored. On the App path you need none — it mints a per-repo token on its own. Add one here for a repo the App cannot reach, or if you would rather not run an App at all.</div>`;
+    }
+    const rp = document.getElementById("set-readpat");
+    if (rp) rp.placeholder = gitReadPatSet ? "a token is stored — paste to replace it" : "github_pat_… (read)";
+    renderGitState(d);
+    // The repo cards show each repo's own token, so they follow whatever just changed here.
+    renderRepoList();
+    return d;
+  }).catch(() => {});
+}
+
+function saveReadPat() {
+  const el = document.getElementById("set-readpat");
+  const token = (el.value || "").trim();
+  if (!token) { toast("paste a token first — Forget is how you clear one"); return Promise.resolve(); }
+  return putReadPat(token).then(() => { el.value = ""; toast("stored the read token"); });
+}
+function clearReadPat() {
+  if (gitReadPatSet && !confirm("Forget the read-only token? Private repos this fleet does not have an App on stop being readable.")) return Promise.resolve();
+  return putReadPat("").then(() => { document.getElementById("set-readpat").value = ""; toast("forgot the read token"); });
+}
+function putReadPat(token) {
+  return fetch("/api/fleet/git-read-token", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }),
+  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); })
+    .catch(e => toast(String(e.message || "could not store that token")));
 }
 
 // Rotating a token is the common edit — they expire, and a compromised one has to be replaced in a
@@ -4033,11 +4170,12 @@ function gitqCredRow(c) {
 function editGitCred(id) {
   const c = (gitqCreds || []).find(x => x.id === id);
   if (!c) return;
-  document.getElementById("gq-c-repo").value = c.repo || (c.repos || [])[0] || "";
-  const t = document.getElementById("gq-c-token");
+  document.getElementById("set-c-repo").value = c.repo || (c.repos || [])[0] || "";
+  const t = document.getElementById("set-c-token");
   t.value = "";
   t.placeholder = c.has_token ? "paste the new token — the old one is replaced" : "github_pat_…";
   t.focus();
+  t.scrollIntoView({ block: "nearest" });
 }
 
 function loadGitq() {
@@ -4050,7 +4188,9 @@ function loadGitq() {
     // seeing an empty panel knows whether that means "nobody asked" or "not switched on yet".
     // Keyed on `ready` rather than the App alone — someone using only their own tokens is set up.
     if (!d.ready) {
-      html += `<div class="note">nothing is scoped yet — every box keeps the credential it already had. Configure a GitHub App in Settings, or add a repository token below. ${esc(d.app_problem || "")}</div>`;
+      html += `<div class="note">nothing is scoped yet — every box keeps the credential it already had. `
+        + `<a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a> is where an App or a repository token goes.`
+        + `${d.app_id && d.app_problem ? ` <b>${esc(d.app_problem)}</b>` : ""}</div>`;
     }
     html += reqs.length
       ? reqs.slice().reverse().map(gitqCard).join("")
@@ -4058,25 +4198,15 @@ function loadGitq() {
     if (grants.length) {
       html += `<div class="mbx-head" style="margin-top:10px"><b>Grants</b></div>` + grants.map(gitqGrantRow).join("");
     }
-    // The one question the panel could not answer: not "is a credential configured" but "would
-    // GitHub actually issue one". Behind a click because it costs a round trip per repo.
-    html += `<div class="mbx-head" style="margin-top:10px"><b>Does it work?</b><span class="sub">asks GitHub for a token for each repo, then throws it away</span></div>
-      <div class="msg"><div class="sq-row">
-        <button class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button>
-        <span class="sq-meta" id="gq-probe-out"></span>
-      </div><div id="gq-probe-rows"></div></div>`;
-    html += `<div class="mbx-head" style="margin-top:10px"><b>Repository tokens</b><span class="sub">instead of the App, one fine-grained PAT per repo</span></div>`;
-    html += creds.length ? creds.map(gitqCredRow).join("")
-      : `<div class="note">none stored — the GitHub App mints per-repo tokens on its own. Add one here only for a repo the App cannot reach.</div>`;
-    html += `
-      <div class="msg">
-        <input id="gq-c-repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
-        <input id="gq-c-token" type="password" placeholder="github_pat_… (write to that one repo)" autocomplete="off" />
-        <div class="sq-row">
-          <button class="kbtn primary" onclick="addGitCred()">Store token</button>
-          <span class="sq-meta">one repository per token — a broader one would hand every repo it covers to whichever box gets it</span>
-        </div>
-      </div>`;
+    // Credentials are not configured here. This panel is an inbox — it carries a badge, it opens
+    // because a box asked for something, and one click answers. Setting up a token is the opposite
+    // kind of act: deliberate, done once, and looked for in Settings, which is where it now lives.
+    // The link is here because this is the panel that tells you nothing is scoped yet.
+    if (d.ready) {
+      html += `<div class="note" style="margin-top:10px">Tokens, the GitHub App and the scope switch live in
+        <a href="#" onclick="closeGitq();openSettings('github');return false">Settings → GitHub &amp; keys</a>${
+          creds.length ? ` — ${creds.length} repository token${creds.length === 1 ? "" : "s"} stored` : ""}.</div>`;
+    }
     list.innerHTML = html;
   }).catch(() => { list.innerHTML = `<div class="note">could not load write requests</div>`; });
 }
@@ -4102,29 +4232,37 @@ function probeGit() {
     .finally(() => { btn.disabled = false; });
 }
 
-function addGitCred() {
-  const repo = (document.getElementById("gq-c-repo").value || "").trim();
-  const token = (document.getElementById("gq-c-token").value || "").trim();
-  if (!repo || !token) { toast("a repository and a token are both needed"); return Promise.resolve(); }
-  // The id is derived from the repo rather than asked for: it is only a filename, and one token per
-  // repo means the repo already identifies it. Re-storing the same repo replaces its token, which
-  // is what rotating one should do.
-  const id = repo.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
-  // Returns its promise, so a caller — the test, or anything wanting to store then act — can wait
-  // for the round trip instead of guessing how many ticks the clear took.
+// The id is derived from the repo rather than asked for: it is only a filename, and one token per
+// repo means the repo already identifies it. Re-storing the same repo therefore *replaces* its
+// token, which is what rotating one should do — and is why nothing anywhere asks for an id.
+const credId = repo => repo.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+// Which stored credential covers `owner/name`, if any. Case-insensitive, because GitHub is.
+const credFor = slug => (gitqCreds || []).find(c => (c.repo || "").toLowerCase() === (slug || "").toLowerCase());
+
+// The network call alone, with no form attached — three places store a token now (this pane, a
+// repo's own card, and the add-repo dialog) and only one of them has the inputs below.
+function storeGitCred(repo, token) {
   return fetch("/api/fleet/git-credentials", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id, label: repo, repos: [repo], token }),
-  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); });
-    document.getElementById("gq-c-token").value = "";
-    document.getElementById("gq-c-repo").value = "";
-    loadGitq();
+    body: JSON.stringify({ id: credId(repo), label: repo, repos: [repo], token }),
+  }).then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t); }); return loadGitCreds(); });
+}
+
+// Returns its promise, so a caller — the test, or anything wanting to store then act — can wait
+// for the round trip instead of guessing how many ticks the clear took.
+function addGitCred() {
+  const repo = (document.getElementById("set-c-repo").value || "").trim();
+  const token = (document.getElementById("set-c-token").value || "").trim();
+  if (!repo || !token) { toast("a repository and a token are both needed"); return Promise.resolve(); }
+  return storeGitCred(repo, token).then(() => {
+    document.getElementById("set-c-token").value = "";
+    document.getElementById("set-c-repo").value = "";
   }).catch(e => toast(String(e.message || "could not store that token")));
 }
 
 function removeGitCred(id) {
   return fetch("/api/fleet/git-credentials/" + encodeURIComponent(id), { method: "DELETE" })
-    .then(r => { if (!r.ok) throw 0; loadGitq(); })
+    .then(r => { if (!r.ok) throw 0; return loadGitCreds(); })
     .catch(() => toast("could not forget that token"));
 }
 
@@ -4158,7 +4296,9 @@ function paintGitqBadge(n) {
     b.textContent = String(n);
     btn.appendChild(b);
   }
-  btn.title = n > 0 ? `${n} write request${n === 1 ? "" : "s"} waiting on you` : "Repo write access";
+  // Says what the panel is *for*, since it is now only that: boxes asking. Credentials moved to
+  // Settings, and a tooltip still implying they live here would keep sending people to the badge.
+  btn.title = n > 0 ? `${n} write request${n === 1 ? "" : "s"} waiting on you` : "Repo write access — requests from boxes";
 }
 
 // Returns its promise, so a caller can wait for the round trip rather than guess at ticks.
@@ -4357,6 +4497,10 @@ function openSettings(pane = "repos") {
       note.textContent = h.ai.detail;
       note.className = "set-note" + (/^on —/.test(h.ai.detail) ? " ready" : /^on,/.test(h.ai.detail) ? " gap" : "");
     }).catch(() => {});
+    // Credentials come from their own endpoint, never from the settings payload — a token has no
+    // business in a document the page reads back. This also paints the repo cards' token rows, so
+    // it runs before the render below rather than racing it.
+    loadGitCreds();
     renderSync(); renderRepoList(); renderKeys(); markDirty(false); setPane(pane);
     settingsModal().classList.add("open");
     // Focus the dialog itself so esc/⏎ reach its handler; focusing the nav button instead would
@@ -4522,6 +4666,80 @@ function repoSelect(r, key, title, desc, options) {
     + options.map(([value, label]) => `<option value="${esc(value)}"${cur === value ? " selected" : ""}>${esc(label)}</option>`).join("")
     + `</select></label>`;
 }
+// `owner/name` from whatever a repo's source is spelled as, or "" when it is not a GitHub remote.
+//
+// Mirror of `gitgate::slug_from_url` — keep them in sync. Faithful rather than approximate, because
+// the two disagreeing is worse than either being wrong alone: this decides which field the page
+// offers, and the host decides which token it mints, so a divergence is a form that accepts a token
+// for a repository the host will never issue one for.
+//
+// A filesystem path is not a remote. skein adopts repos in place, so a source is often
+// `/Users/…/code/thing` — which parses to `Users/…`, a repository that does not exist.
+const nameable = slug => {
+  const i = slug.indexOf("/");
+  if (i < 0) return false;
+  const ok = s => !!s && !s.startsWith("-") && !s.includes("..") && /^[A-Za-z0-9._-]+$/.test(s);
+  return ok(slug.slice(0, i)) && ok(slug.slice(i + 1));
+};
+// Two segments exactly, never a prefix of a longer path: taking the first two would turn any deep
+// path into a plausible-looking repository.
+const slugFromPath = path => {
+  const p = path.trim().replace(/^\/+/, "");
+  const i = p.indexOf("/");
+  if (i < 0) return "";
+  const slug = p.slice(0, i) + "/" + p.slice(i + 1).replace(/\.git$/, "");
+  return nameable(slug) ? slug : "";
+};
+function repoSlug(source) {
+  const url = (source || "").trim();
+  if (!url || /^[/.~]/.test(url)) return "";
+  const afterScheme = url.includes("://") ? url.slice(url.indexOf("://") + 3) : url;
+  const at = afterScheme.lastIndexOf("@");
+  const rest = at >= 0 ? afterScheme.slice(at + 1) : afterScheme;
+  let host, path;
+  const colon = rest.indexOf(":");
+  if (colon >= 0) {
+    host = rest.slice(0, colon);
+    const p = rest.slice(colon + 1);
+    // `host:port/path` only when everything before the first slash is digits — the one ambiguity
+    // in the grammar, since `git@host:owner/name` and `host:22/owner/name` are the same shape.
+    const head = p.split("/")[0];
+    path = (/^\d+$/.test(head) && head !== "" && p.includes("/")) ? p.slice(p.indexOf("/") + 1) : p;
+  } else if (rest.includes("/")) {
+    host = rest.slice(0, rest.indexOf("/"));
+    path = rest.slice(rest.indexOf("/") + 1);
+  } else {
+    return nameable(rest) ? rest : "";   // a bare `owner/name` has no host at all
+  }
+  if (host && host.toLowerCase() !== "github.com") {
+    // `owner/name` reaches here as host=`owner`, path=`name`. A dot is the tell: GitHub owners
+    // cannot contain one, and hostnames of interest always do.
+    const whole = `${host}/${path}`;
+    return (!host.includes(".") && nameable(whole)) ? whole : "";
+  }
+  return slugFromPath(path);
+}
+// A repo's write token, on the repo's own card — because "which token does *this* repo push with"
+// is a question about the repo, and answering it three panes away is how it went unfound.
+function repoTokenRow(r) {
+  const slug = repoSlug(r.source);
+  if (!slug) {
+    return `<label class="set-field"><span class="set-title">Write token</span>`
+      + `<span class="desc">not a GitHub remote, so there is nothing to scope — this repo's boxes read and write it through whatever credential the host clone already uses</span></label>`;
+  }
+  const c = credFor(slug);
+  const state = c && !c.problem && c.has_token
+    ? `<span class="sq-state approved">token stored</span><span class="cwhy">this repo's boxes push with it; storing another replaces it</span>`
+      + `<button type="button" class="kbtn ghost" onclick="removeGitCred('${esc(c.id)}')">Forget</button>`
+    : `<span class="sq-state">${c && c.problem ? "refused" : "from the App"}</span><span class="cwhy">${
+        c && c.problem ? esc(c.problem)
+        : "no token of its own — the GitHub App mints one per push if it is installed here. Paste a token below only if it is not"}</span>`;
+  return `<label class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
+    + `<span class="desc">a fine-grained PAT covering <b>${esc(slug)}</b> and nothing else — what this repo's boxes push with. Stored 0600 on the host and never served back</span>`
+    + `<div class="set-cred">${state}</div>`
+    + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
+    + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div></label>`;
+}
 function renderRepoList() {
   const el = document.getElementById("set-repos");
   const n = document.getElementById("set-repon");
@@ -4549,6 +4767,7 @@ function renderRepoList() {
       + repoSelect(r, "review_queue", "Review queue",
           "list this repo's pull requests, and count the ones waiting on you. Turn it off for a repo whose PRs are none of your business — a fork, a scratch clone — and skein stops asking GitHub about it entirely",
           [["true", "On"], ["false", "Off"]])
+      + repoTokenRow(r)
       + `<div class="rfoot"><button type="button" class="kbtn ghost danger" data-remove="${esc(r.id)}" title="skein forgets this repo; the clone and store stay on disk">Unregister</button></div>`
       + `</div></div>`;
   }).join("");
@@ -4559,7 +4778,24 @@ function renderRepoList() {
     h.setAttribute("aria-expanded", openRepos.has(id));
   }));
   el.querySelectorAll("[data-remove]").forEach(b => b.addEventListener("click", () => removeRepo(b.dataset.remove)));
-  el.querySelectorAll(".rbody input, .rbody select").forEach(i => i.addEventListener("change", () => saveRepoField(i)));
+  // The token input is excluded by name, not by luck: it carries a `data-id` like its neighbours but
+  // no `data-key`, so leaving it in would POST `{undefined: "<the token>"}` to the repo settings
+  // route — a token in the wrong store, on blur, silently.
+  el.querySelectorAll(".rbody input:not([data-repotoken]), .rbody select")
+    .forEach(i => i.addEventListener("change", () => saveRepoField(i)));
+  el.querySelectorAll("[data-storetoken]").forEach(b => b.addEventListener("click", () => {
+    const slug = b.dataset.storetoken;
+    const input = el.querySelector(`[data-repotoken="${CSS.escape(slug)}"]`);
+    const token = (input.value || "").trim();
+    if (!token) { toast("paste a token first"); input.focus(); return; }
+    // The card is re-rendered by loadGitCreds, so the field clears itself — but clear it here too,
+    // because a failed store must not leave the token sitting in a visible input either.
+    input.value = "";
+    storeGitCred(slug, token).then(() => {
+      const flag = document.querySelector(`[data-saved="${CSS.escape(b.dataset.id + "-token")}"]`);
+      if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
+    }).catch(e => toast(String(e.message || "could not store that token")));
+  }));
 }
 function saveRepoField(input) {
   const { id, key } = input.dataset;
@@ -5035,17 +5271,48 @@ function arSetMsg(text, kind) {        // kind: "" | "err" | "warn" | "ok"
 }
 function openAddRepo() {
   const src = document.getElementById("ar-src");
-  src.value = ""; document.getElementById("ar-store").value = ""; arSetMsg(""); arUpdateDerived();
+  src.value = ""; document.getElementById("ar-store").value = ""; arSetMsg("");
+  document.getElementById("ar-token").value = "";
+  document.getElementById("ar-plane").value = "";
+  document.getElementById("ar-review").value = "true";
+  // The connection list is whatever Work tracking currently knows about — fetched here rather than
+  // read from whatever the last Settings visit left behind, because this dialog opens from the
+  // header too, and offering "Not tracked" as the only choice would be a lie about the fleet.
+  arRenderConns();
+  loadSync().then(arRenderConns);
+  arUpdateDerived();
   if (runtimes.some(runtime => runtime.id === settings.default_agent)) document.getElementById("ar-agent").value = settings.default_agent;
   document.getElementById("ar-go").textContent = "Add →";
   arModal().classList.add("open");
   setTimeout(() => src.focus(), 0);
 }
 function closeAddRepo() { arModal().classList.remove("open"); }
+// Re-drawn rather than patched, so the late fetch can replace an empty list without disturbing a
+// choice already made: whatever was selected is restored if it still exists.
+function arRenderConns() {
+  const el = document.getElementById("ar-conn");
+  if (!el) return;
+  const was = el.value;
+  el.innerHTML = [`<option value="">Not tracked</option>`].concat((syncStatus.connections || []).map(c =>
+    `<option value="${esc(c.id)}">${esc(c.ready ? c.label : c.label + " (not usable yet)")}</option>`)).join("");
+  if (was && [...el.options].some(o => o.value === was)) el.value = was;
+}
 function arUpdateDerived() {
-  const id = deriveRepoId(document.getElementById("ar-src").value);
+  const source = document.getElementById("ar-src").value;
+  const id = deriveRepoId(source);
   const d = document.getElementById("ar-derived");
   d.innerHTML = id ? `box names will be <b>${esc(id)}</b>-&lt;branch&gt;` : "";
+  // A token field offered for a local path would be a field that cannot work: there is no GitHub
+  // repository to scope one to. Say which case this is instead of accepting a token and dropping it.
+  const slug = repoSlug(source);
+  const tok = document.getElementById("ar-token");
+  const hint = document.getElementById("ar-tokhint");
+  const local = !!source.trim() && !slug;
+  tok.disabled = local;
+  tok.placeholder = local ? "not a GitHub remote — nothing to scope" : "github_pat_… — leave blank if a GitHub App covers it";
+  hint.innerHTML = local
+    ? "a local path has no GitHub identity, so its boxes use whatever credential the host clone does"
+    : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with. On the App path you need none.`;
 }
 function submitAddRepo() {
   const src = document.getElementById("ar-src").value.trim();
@@ -5073,13 +5340,20 @@ function submitAddRepo() {
     .then(res => {
       settle();
       const repo = res.repo || res;
-      loadRepos();
-      if (res.warning) {            // e.g. SSH origin — keep the modal up so the note is readable
-        arSetMsg(res.warning, "warn");
-        go.textContent = "Done"; go.onclick = closeAddRepo;
-      } else {
-        closeAddRepo(); toast(`added ${repo.id}`);
-      }
+      // Applied here rather than sent with the clone: every one of these keys on the repo's id, and
+      // the server picks that id — deriving it in the page would be a second implementation of a
+      // rule that already exists, wrong exactly when they disagree.
+      go.textContent = "Setting up…";
+      return arApplySettings(repo).then(problems => {
+        loadRepos();
+        const notes = [res.warning, ...problems].filter(Boolean);
+        if (notes.length) {         // e.g. SSH origin — keep the modal up so the note is readable
+          arSetMsg(notes.join(" · "), "warn");
+          go.textContent = "Done"; go.onclick = closeAddRepo;
+        } else {
+          closeAddRepo(); toast(`added ${repo.id}`);
+        }
+      });
     })
     .catch(e => {
       settle();
@@ -5094,6 +5368,34 @@ function submitAddRepo() {
       );
       go.textContent = "Add →";
     });
+}
+// The repo-specific settings, applied to a repo that now exists. Resolves to a list of things that
+// did not take — never rejects, and never unmakes the repo. The clone is the expensive, irreversible
+// part and it succeeded; a tracker field that failed to save is a thing you fix on the card in ten
+// seconds, and failing the whole add over one would throw away the minutes that actually cost.
+function arApplySettings(repo) {
+  const problems = [];
+  const plane = (document.getElementById("ar-plane").value || "").trim();
+  const conn = document.getElementById("ar-conn").value;
+  const review = document.getElementById("ar-review").value === "true";
+  const token = (document.getElementById("ar-token").value || "").trim();
+  const body = {};
+  if (plane) body.plane_project = plane;
+  if (conn) body.sync_connection = conn;
+  if (!review) body.review_queue = false;   // on is the default; only a deliberate off needs sending
+  const jobs = [];
+  if (Object.keys(body).length) {
+    jobs.push(fetch(`/api/repos/${encodeURIComponent(repo.id)}/settings`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }).then(async r => { if (!r.ok) problems.push(`settings not saved: ${(await r.text()) || r.statusText}`); })
+      .catch(e => problems.push(`settings not saved: ${e.message}`)));
+  }
+  if (token) {
+    const slug = repoSlug(repo.source);
+    if (!slug) problems.push("no write token stored — this is not a GitHub remote");
+    else jobs.push(storeGitCred(slug, token).catch(e => problems.push(`token not stored: ${e.message}`)));
+  }
+  return Promise.all(jobs).then(() => problems);
 }
 // kept name for existing callers (header ＋repo, per-section ＋, settings, palette) → opens the modal
 function addRepoPrompt() { openAddRepo(); }
@@ -5133,15 +5435,38 @@ function launchBox(branch) {
 document.getElementById("set-go").addEventListener("click", saveSettings);
 document.getElementById("set-resize").addEventListener("click", resizeFleet);
 document.getElementById("set-applylimits").addEventListener("click", applyBoxLimits);
+// Fields that are not part of the settings form even though they sit in it: a credential is stored
+// by its own button, through its own write-only route, and never round-trips through `config.json`.
+// So Enter in one must store *that* — not save the form and drop what was typed — and typing in one
+// must not raise an unsaved-changes flag that its Save button has nothing to do with.
+const OWN_SAVE = "#set-c-repo, #set-c-token, #set-readpat, [data-repotoken]";
+function ownSaveAction(el) {
+  if (el.matches("#set-c-repo, #set-c-token")) return addGitCred;
+  if (el.matches("#set-readpat")) return saveReadPat;
+  if (el.matches("[data-repotoken]")) {
+    const btn = document.querySelector(`[data-storetoken="${CSS.escape(el.dataset.repotoken)}"]`);
+    return btn ? () => btn.click() : null;
+  }
+  return null;
+}
 settingsModal().addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.target.closest(".set-navi")) { e.preventDefault(); saveSettings(); }
-  else if (e.key === "Escape") { e.preventDefault(); closeSettings(); }
+  if (e.key === "Enter" && !e.target.closest(".set-navi")) {
+    e.preventDefault();
+    const own = e.target.matches?.(OWN_SAVE) ? ownSaveAction(e.target) : null;
+    (own || saveSettings)();
+  } else if (e.key === "Escape") { e.preventDefault(); closeSettings(); }
   e.stopPropagation();
 });
 // Section nav, and any edit flips the footer's unsaved-changes flag.
 for (const b of settingsModal().querySelectorAll(".set-navi")) b.addEventListener("click", () => setPane(b.dataset.pane));
-settingsModal().addEventListener("input", e => { if (e.target.closest(".set-pane")) markDirty(true); });
-settingsModal().addEventListener("change", e => { if (e.target.closest(".set-pane")) markDirty(true); });
+const formEdit = e => e.target.closest(".set-pane") && !e.target.matches?.(OWN_SAVE);
+settingsModal().addEventListener("input", e => { if (formEdit(e)) markDirty(true); });
+settingsModal().addEventListener("change", e => {
+  if (formEdit(e)) markDirty(true);
+  // The status line answers "is this actually on?", and the switch is half that answer — so it
+  // repaints as the switch moves, rather than only after a save and reopen.
+  if (e.target.id === "set-gitscope") renderGitState(gitLast);
+});
 // Click the backdrop (not the dialog) to dismiss — expected of a modal, and it was missing.
 settingsModal().addEventListener("mousedown", e => { if (e.target === settingsModal()) closeSettings(); });
 document.getElementById("nb-repo").addEventListener("change", fillSyncSelect);

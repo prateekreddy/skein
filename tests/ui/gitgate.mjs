@@ -1,7 +1,7 @@
 // Granting write access hands a box a real credential for someone else's repository, so what the
 // button sends has to be exactly what its owner chose — and it has to say so only once.
 //
-// Three things are worth testing and none needs a browser:
+// Five things are worth testing and none needs a browser:
 //
 //   1. **What the grant carries.** The default expires; "keep indefinitely" is the deliberate act.
 //      The two controls must not be able to disagree — a ticked keep with `12` still in the hours
@@ -11,13 +11,22 @@
 //      exact shape that produced endless re-announcing once already.
 //   3. **What an unconfigured fleet says.** With no GitHub App, nothing is scoped and no box has
 //      lost anything — an empty panel must say which of those it is showing.
+//   4. **Which repository the page thinks a source names.** `repoSlug` decides which field the
+//      settings screen offers; `gitgate::slug_from_url` decides which token the host mints. Two
+//      implementations of one rule, so the divergence is the thing under test — a form that accepts
+//      a token for a repository the host will never issue one for is the failure.
+//   5. **That a repo survives its own setup.** The add dialog now applies tracker settings and a
+//      token after the clone. The clone is the expensive, irreversible part: a settings call that
+//      fails must be reported, never allowed to unmake the repository.
 //
 //   node tests/ui/gitgate.mjs
 import { grab, harness } from "./lift.mjs";
 
 const source = [
   "gitqAnnounced", "gitqCreds", "gitqPrimed", "decideGitq", "pollGitq", "paintGitqBadge", "gitqCard",
-  "gitqGrantRow", "revokeGitq", "gitqCredRow", "editGitCred", "addGitCred", "removeGitCred",
+  "gitqGrantRow", "revokeGitq", "gitCredRow", "editGitCred", "credId", "credFor", "storeGitCred",
+  "addGitCred", "removeGitCred", "renderGitState", "nameable", "slugFromPath", "repoSlug",
+  "repoTokenRow", "arApplySettings",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -26,8 +35,12 @@ const scope = new Function(`
   let keep = { checked: false };
   let hours = { value: "24" };
   let panelOpen = false;
-  let fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {} } };
+  let fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {}, scrollIntoView: () => {} } };
+  let form = { plane: { value: "" }, conn: { value: "" }, review: { value: "true" }, token: { value: "" } };
+  let state = { className: "", innerHTML: "" };
+  let scoped = { checked: true };
   let payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
+  let failing = null;
   const esc = s => String(s);
   const toast = m => notes.push("toast:" + m);
   const pushNote = (body, tag) => notes.push({ body, tag });
@@ -37,8 +50,14 @@ const scope = new Function(`
       if (id === "gitq") return { classList: { contains: () => panelOpen } };
       if (id.startsWith("gq-keep-")) return keep;
       if (id.startsWith("gq-h-")) return hours;
-      if (id === "gq-c-repo") return fields.repo;
-      if (id === "gq-c-token") return fields.token;
+      if (id === "set-c-repo") return fields.repo;
+      if (id === "set-c-token") return fields.token;
+      if (id === "set-gitstate") return state;
+      if (id === "set-gitscope") return scoped;
+      if (id === "ar-plane") return form.plane;
+      if (id === "ar-conn") return form.conn;
+      if (id === "ar-review") return form.review;
+      if (id === "ar-token") return form.token;
       if (id === "gitqbtn") return {
         querySelector: () => (badge.n === null ? null : { remove: () => { badge.n = null; } }),
         appendChild: el => { badge.n = el.textContent; },
@@ -51,7 +70,10 @@ const scope = new Function(`
   };
   const fetch = (url, opts) => {
     if (opts && opts.method === "POST") {
-      sent.push({ id: decodeURIComponent(url.split("/").pop()), body: JSON.parse(opts.body) });
+      sent.push({ url, id: decodeURIComponent(url.split("/").pop()), body: JSON.parse(opts.body) });
+      if (failing && url.includes(failing)) {
+        return Promise.resolve({ ok: false, statusText: "boom", text: () => Promise.resolve("boom") });
+      }
       return Promise.resolve({ ok: true });
     }
     if (opts && opts.method === "DELETE") {
@@ -60,13 +82,18 @@ const scope = new Function(`
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) });
   };
-  const loadGitq = () => { notes.push("reloaded"); };
+  const loadGitCreds = () => { notes.push("reloaded"); return Promise.resolve(payload); };
+  const loadRepos = () => Promise.resolve();
   ${source}
   return {
-    decideGitq, pollGitq, gitqCard, gitqGrantRow, revokeGitq,
-    gitqCredRow, editGitCred, addGitCred, removeGitCred,
+    decideGitq, pollGitq, gitqCard, gitqGrantRow, revokeGitq, gitCredRow, editGitCred,
+    addGitCred, removeGitCred, renderGitState, repoSlug, repoTokenRow, arApplySettings, credFor,
     fields: () => fields,
+    form: () => form,
+    state: () => state,
     setCreds: c => { gitqCreds = c; },
+    setScoped: v => { scoped.checked = v; },
+    failOn: u => { failing = u; },
     sent: () => sent,
     notes: () => notes,
     badge: () => badge,
@@ -74,11 +101,14 @@ const scope = new Function(`
     setKeep: v => { keep.checked = v; },
     setHours: v => { hours.value = v; },
     reset: () => {
-      sent.length = 0; notes.length = 0;
+      sent.length = 0; notes.length = 0; failing = null;
       payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
       gitqAnnounced.clear(); gitqPrimed = false;
       keep = { checked: false }; hours = { value: "24" }; alertsOn = true;
-      fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {} } };
+      fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {}, scrollIntoView: () => {} } };
+      form = { plane: { value: "" }, conn: { value: "" }, review: { value: "true" }, token: { value: "" } };
+      state = { className: "", innerHTML: "" };
+      scoped = { checked: true };
       gitqCreds = [];
     },
   };
@@ -221,21 +251,130 @@ check("the rotation reuses the same id", T.sent()[0].body.id, "acme-thing");
 check("with the new token", T.sent()[0].body.token, "github_pat_NEW");
 
 // --- what a credential row shows ----------------------------------------------------------------
-const ready = T.gitqCredRow({ id: "a-b", repo: "a/b", label: "", has_token: true, problem: "" });
+const ready = T.gitCredRow({ id: "a-b", repo: "a/b", label: "", has_token: true, problem: "" });
 check("a usable token reads as ready", ready.includes("ready"), true);
 check("and offers to be replaced", ready.includes("Replace token"), true);
 
-const incomplete = T.gitqCredRow({ id: "a-b", repo: "a/b", label: "", has_token: false, problem: "" });
+const incomplete = T.gitCredRow({ id: "a-b", repo: "a/b", label: "", has_token: false, problem: "" });
 check("one with no token says so", incomplete.includes("incomplete"), true);
 check("and offers to add one", incomplete.includes("Add token"), true);
 
 // A hand-edited multi-repo entry is listed and refused — the host will not use it, and a row that
 // silently vanished would leave someone staring at a repo whose token "is configured".
-const wide = T.gitqCredRow({
+const wide = T.gitCredRow({
   id: "wide", repo: "", repos: ["a/one", "a/two"], label: "", has_token: true,
   problem: "names 2 repositories; a stored token must cover exactly one",
 });
 check("a refused credential is shown, not hidden", wide.includes("refused"), true);
 check("and says why", wide.includes("exactly one"), true);
+
+// --- what the pane says is actually on ------------------------------------------------------------
+// The switch and the truth are different facts, and the gap between them is the whole reason this
+// line exists: `scope_git_to_repo` defaults ON, so a fleet with no issuer draws a switch that is on
+// while every box holds the account. A status line that echoed the switch would be worse than none.
+T.reset();
+T.setScoped(true);
+T.renderGitState({ ready: false, app_ready: false, app_problem: "no App configured", credentials: [] });
+check("a switch that is on but cannot issue says NOT scoped", T.state().innerHTML.includes("Not scoped"), true);
+check("and names what boxes hold instead", T.state().innerHTML.includes("fleet-wide"), true);
+check("drawn as a problem, not as success", T.state().className.includes("warn"), true);
+
+T.renderGitState({ ready: true, app_ready: true, app_id: "12345", credentials: [] });
+check("with an issuer and the switch on, it reads as scoped", T.state().innerHTML.includes("Scoped"), true);
+check("naming what does the issuing", T.state().innerHTML.includes("12345"), true);
+check("and drawn as good", T.state().className.includes("on"), true);
+
+// Configured but switched off is its own state — "ready" would overclaim and "not scoped" would
+// hide that the hard part is already done.
+T.setScoped(false);
+T.renderGitState({ ready: true, app_ready: true, app_id: "12345", credentials: [] });
+check("configured but switched off says so", T.state().innerHTML.includes("switched off"), true);
+
+// A credential that is stored but unusable must not be counted as an issuer in the summary.
+T.setScoped(true);
+T.renderGitState({ ready: true, app_ready: false, credentials: [
+  { id: "a", repo: "a/b", has_token: true, problem: "" },
+  { id: "c", repo: "", has_token: true, problem: "names 2 repositories" },
+] });
+check("only usable tokens are counted", T.state().innerHTML.includes("1 repository token"), true);
+
+// --- which repository a source names --------------------------------------------------------------
+// Every row here is a case `gitgate::slug_from_url` handles; the two must not disagree.
+for (const [source, want] of [
+  ["git@github.com:acme/thing.git", "acme/thing"],
+  ["https://github.com/acme/thing.git", "acme/thing"],
+  ["https://github.com/acme/thing", "acme/thing"],
+  ["ssh://git@github.com/acme/thing", "acme/thing"],
+  ["acme/thing", "acme/thing"],
+  // A local path is the case that matters most: skein adopts repos in place, and without the
+  // guard `/Users/me/code/thing` parses to `Users/me` — a repo that does not exist, offered a
+  // token field that could never work.
+  ["/Users/me/code/thing", ""],
+  ["~/code/thing", ""],
+  ["./thing", ""],
+  // Deep paths are not repositories, and taking the first two segments is how they became ones.
+  ["https://github.com/acme/thing/tree/main", ""],
+  // Another forge has no App installation and no token to mint.
+  ["git@gitlab.com:acme/thing.git", ""],
+  ["https://git.example.com/a/b", ""],
+  ["", ""],
+]) check(`repoSlug(${JSON.stringify(source)})`, T.repoSlug(source), want);
+
+// --- a repo's own token row -----------------------------------------------------------------------
+T.reset();
+T.setCreds([{ id: "acme-thing", repo: "acme/thing", has_token: true, problem: "" }]);
+const owned = T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git" });
+check("a repo with a stored token says so on its own card", owned.includes("token stored"), true);
+check("and offers to forget it", owned.includes("Forget"), true);
+
+const fromApp = T.repoTokenRow({ id: "other", source: "git@github.com:acme/other.git" });
+check("one without falls back to the App rather than reading as broken", fromApp.includes("from the App"), true);
+
+// A local path has no GitHub identity, so offering a token field would be offering one that cannot
+// work — say which case it is instead.
+const local = T.repoTokenRow({ id: "scratch", source: "/Users/me/code/scratch" });
+check("a local path is told there is nothing to scope", local.includes("nothing to scope"), true);
+check("and gets no token field at all", local.includes("data-repotoken"), false);
+
+// --- the add dialog's follow-up work ---------------------------------------------------------------
+// Everything here keys on the repo's id, which the *server* picks — so it runs after the clone.
+T.reset();
+T.form().plane.value = "https://plane.example/projects/abc/issues";
+T.form().conn.value = "backlog-1";
+T.form().review.value = "false";
+T.form().token.value = "github_pat_11ABC";
+let problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git" });
+check("the whole form applied cleanly", problems, []);
+const settings = T.sent().find(s => s.url.includes("/settings"));
+check("the tracker fields are sent together, in one call", settings.body.plane_project, "https://plane.example/projects/abc/issues");
+check("with the connection", settings.body.sync_connection, "backlog-1");
+check("and a deliberate off for the review queue", settings.body.review_queue, false);
+const cred = T.sent().find(s => s.url.includes("git-credentials"));
+check("the token is stored against the repo it names", cred.body.repos, ["acme/thing"]);
+
+// On is the default, so sending it would write a field the user never touched.
+T.reset();
+T.form().review.value = "true";
+await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git" });
+check("an untouched form sends nothing at all", T.sent().length, 0);
+
+// The clone is the expensive, irreversible part and it already succeeded. A tracker field that
+// failed to save is a ten-second fix on the card; throwing the repo away over one is not.
+T.reset();
+T.failOn("/settings");
+T.form().plane.value = "p";
+T.form().token.value = "github_pat_x";
+problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git" });
+check("a failed settings call is reported", problems.length, 1);
+check("naming what did not happen", problems[0].includes("settings not saved"), true);
+check("and never stops the token being stored", T.sent().some(s => s.url.includes("git-credentials")), true);
+
+// A token typed for a repo with no GitHub identity must be refused loudly, not dropped quietly.
+T.reset();
+T.form().token.value = "github_pat_x";
+problems = await T.arApplySettings({ id: "scratch", source: "/Users/me/code/scratch" });
+check("a token for a non-GitHub source is refused, not silently dropped", problems.length, 1);
+check("saying why", problems[0].includes("not a GitHub remote"), true);
+check("and nothing is sent", T.sent().length, 0);
 
 done();

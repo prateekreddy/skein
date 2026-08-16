@@ -979,7 +979,7 @@ pub fn mint_token(slug: &str) -> Result<String, String> {
         return Ok(token);
     }
     let (app_id, key_path) = app_credentials().map_err(|e| {
-        format!("{e}, and no stored token covers {slug} — add one under Repo write access")
+        format!("{e}, and no stored token covers {slug} — add one under Settings → GitHub & keys")
     })?;
     let jwt = sign_jwt(
         &jwt_claim(&app_id, chrono::Utc::now().timestamp()),
@@ -1517,7 +1517,7 @@ mod tests {
         let why = mint_token("b/other").unwrap_err();
         assert!(why.contains("b/other"), "{why}");
         assert!(
-            why.contains("Repo write access"),
+            why.contains("GitHub & keys"),
             "the error must say where to add a token: {why}"
         );
     }
