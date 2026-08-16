@@ -30,6 +30,12 @@
   html, body { margin:0; height:100%; }
   body { background:radial-gradient(1200px 600px at 70% -10%, #11151b 0%, var(--bg) 60%);
          color:var(--text); font-family:var(--ui); font-size:14px; line-height:1.4; -webkit-font-smoothing:antialiased; }
+  /* A link, anywhere. This existed only as four scoped rules (#toast, .revmeta, .fcrumb, .fmd), so
+     a link in any other context rendered as browser-default blue-and-underlined on a dark page —
+     the most conspicuous unstyled thing there is. Those four still win where they apply. */
+  a { color:var(--accent-2); text-decoration:none;
+      border-bottom:1px solid color-mix(in srgb,var(--accent-2) 30%,transparent); }
+  a:hover { color:var(--accent); border-bottom-color:var(--accent); }
 
   #app { display:flex; height:100vh; overflow:hidden; }
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
@@ -678,6 +684,12 @@
   .ar-derived { font-family:var(--mono); font-size:11px; color:var(--faint); min-height:14px; }
   .bs-actions { display:flex; gap:8px; flex-wrap:wrap; }
   .ar-derived b { color:var(--accent); font-weight:600; }
+  /* The dialog grew past "paste a URL", so it needs a seam: everything above is how the repo is
+     fetched, everything below is what it carries once it exists. */
+  .ar-sec { margin-top:8px; padding-top:11px; border-top:1px solid var(--line); font-size:11px;
+            color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .ar-opt { text-transform:none; letter-spacing:0; color:var(--faint); border:1px solid var(--line);
+            border-radius:999px; padding:0 6px; margin-left:5px; font-size:10px; }
   .ar-msg { font-size:12px; line-height:1.5; border-radius:8px; padding:9px 11px; border:1px solid var(--line); }
   .ar-msg.err  { color:#ffb4ae; background:color-mix(in srgb,var(--attn) 12%,transparent); border-color:color-mix(in srgb,var(--attn) 35%,transparent); }
   .ar-msg.warn { color:#f0d28a; background:color-mix(in srgb,var(--waiting) 11%,transparent); border-color:color-mix(in srgb,var(--waiting) 32%,transparent); }
@@ -858,11 +870,22 @@
   .mbx-compose { border-top:1px solid var(--border); padding:10px 12px; display:flex; flex-direction:column; gap:8px; background:var(--panel); }
   .mbx-compose .row1 { display:flex; gap:8px; } .mbx-compose .row2 { display:flex; align-items:center; gap:10px; }
   .mbx-compose .hint { color:var(--faint); font-size:11px; flex:1; }
-  select, .nb-card input, #settings input:not([type=checkbox]), .mbx-compose textarea { background:var(--inset); color:var(--text); border:1px solid var(--border-2);
+  /* Every text control, styled by what it *is* — not by which overlay it happens to sit in.
+     This was three ancestor-scoped selectors (`.nb-card input`, `#settings input`, `.mbx-compose
+     textarea`), so a control in any overlay added afterwards — the padlock panel, add-a-repo, box
+     settings — silently fell back to browser defaults. Same failure as enumerating containments
+     instead of escapes: the list is the bug, because nothing updates it. Exclusions are now named
+     one by one, which is a thing a reader can check.
+     `.xterm textarea` is the terminal's hidden input helper: it is positioned by xterm and must keep
+     its own geometry, and it is never seen. */
+  input:not([type=checkbox]):not([type=radio]), select, textarea:not(.xterm textarea) {
+    background:var(--inset); color:var(--text); border:1px solid var(--border-2);
     border-radius:7px; padding:7px 9px; font:inherit; font-size:13px; outline:none;
     transition:border-color var(--dur-fast), box-shadow var(--dur-fast); }
-  select:focus, .nb-card input:focus, #settings input:not([type=checkbox]):focus, .mbx-compose textarea:focus {
+  input:not([type=checkbox]):not([type=radio]):focus, select:focus, textarea:not(.xterm textarea):focus {
     border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-bg); }
+  input::placeholder, textarea::placeholder { color:var(--faint); }
+  input:disabled, select:disabled, textarea:disabled { opacity:.5; cursor:not-allowed; }
   /* the native dropdown arrow is the one control that reads as "unstyled browser widget" */
   select { appearance:none; -webkit-appearance:none; padding-right:30px;
     background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23828d99' stroke-width='2' stroke-linecap='round'><polyline points='6 9 12 15 18 9'/></svg>");
@@ -876,9 +899,14 @@
   .nb-lbl { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
   .nb-foot { display:flex; align-items:center; gap:10px; } .nb-foot .hint { flex:1; color:var(--faint); font-size:11px; }
   .nb-foot code { font-family:var(--mono); color:var(--text-2); }
-  #mbx button.primary, #newbox button.primary { background:var(--accent); border:1px solid var(--accent); color:#0b0d10; font-weight:600;
-    border-radius:7px; padding:7px 16px; font:inherit; font-size:13px; cursor:pointer; }
-  #mbx button.primary:hover, #newbox button.primary:hover { background:var(--accent-2); }
+  /* The primary action, wherever it is. Was enumerated per overlay (#settings, #mbx, #newbox), so
+     Add-a-repository's own "Add →" — the one button in that dialog — rendered as a browser default.
+     `.kbtn.primary` keeps its quieter outline treatment for the toolbars, and says so by name. */
+  button.primary:not(.kbtn) { background:var(--accent); border:1px solid var(--accent); color:#0b0d10; font-weight:600;
+    border-radius:7px; padding:7px 16px; font:inherit; font-size:13px; cursor:pointer;
+    transition:background var(--dur-fast); }
+  button.primary:not(.kbtn):hover { background:var(--accent-2); }
+  button.primary:not(.kbtn):disabled { opacity:.55; cursor:default; background:var(--accent); }
 
   /* on-screen key bar for touch / mobile terminals (the keys a soft keyboard lacks) */
   .keybar { display:none; gap:6px; padding:7px 8px; background:var(--panel); border-top:1px solid var(--border);
