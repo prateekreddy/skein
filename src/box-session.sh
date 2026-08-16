@@ -909,6 +909,30 @@ fi
 [ -s "$home/.claude/.credentials.json" ] && unset ANTHROPIC_API_KEY
 [ -s "$home/.codex/auth.json" ] && unset OPENAI_API_KEY
 
+# --- The fleet agent's token is not a box's to hold ----------------------------------------------
+#
+# The agent is the HOST's channel into this sandbox: it takes a script on `/exec` and runs it at
+# fleet scope, outside any box's namespace, where `sudo` works (see `substrate.rs` — that is how a
+# package gets installed for the whole fleet). Nothing inside a box calls it; only the host does.
+#
+# But its token sat at a fixed path in the fleet root, mode 0600 and owned by uid 1000 — which every
+# box also is. Measured from a box: readable. So the shortest path out of a box was not an exploit
+# at all, it was `cat`: read the token, POST a script, and be root in the sandbox. That reaches every
+# other box's git tokens, its conversation history, and the credential helper itself.
+#
+# Same instrument as the ssh-agent socket below, and for the same reason: the path is well known and
+# unsetting a variable stops nobody, so an empty file goes over it. The host's own copy is untouched
+# and the agent — which starts at fleet scope, before any box exists — keeps reading the real one.
+#
+# Unconditional, unlike the git scoping below. That switch trades a box's reach against its owner's
+# convenience; this one has no such trade, because no box ever needed this file.
+: >"$root/no-fleet-token" 2>/dev/null || true
+fleet_token="${SKEIN_FLEET_ROOT:-/boxes}/.skein/fleet-agent.token"
+if [ -f "$fleet_token" ] && [ -f "$root/no-fleet-token" ]; then
+  binds+=(--ro-bind "$root/no-fleet-token" "$fleet_token")
+fi
+unset fleet_token
+
 # --- GitHub: one repo to write, everything else to read ------------------------------------------
 #
 # What this replaces, measured rather than assumed: every box held the same `GH_TOKEN` — a user token

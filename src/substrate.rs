@@ -9,12 +9,21 @@
 //! This is that place. A box files a request, its owner approves it in the cockpit, and the install
 //! runs once for every box in the sandbox.
 //!
-//! **What this gate is, precisely.** It is a chokepoint and an audit trail, not a security boundary.
-//! Any box can already read the agent token out of the fleet root and run what it likes at fleet
-//! scope, and this fleet's owner has deliberately put no wall between boxes. Calling this a
-//! containment would be a lie that someone later relies on. What it *does* buy is real and is the
-//! thing that was actually wanted: a package that changes the toolchain under ten boxes across four
-//! repos does not get installed because one agent decided to, and there is a record of who asked.
+//! **What this gate is, precisely.** It is a chokepoint and an audit trail. It is not a wall between
+//! boxes, and this fleet's owner has deliberately not asked for one: boxes share a uid, so any box
+//! can read another's files whatever this module does. Calling that containment would be a lie
+//! someone later relies on.
+//!
+//! It *used* to be weaker still. This paragraph read "any box can already read the agent token out
+//! of the fleet root and run what it likes at fleet scope" — true when written, and the reason the
+//! gate could only ever be an audit trail: a box that wanted a package did not have to ask, it could
+//! `cat` the token and run `sudo apt-get` itself. `box-session.sh` now binds an empty file over that
+//! token inside every box, so the ask is the only way in and the record is complete.
+//!
+//! What remains, and is worth naming rather than implying otherwise: the queue is a directory any
+//! box can write, so a request proves *that* it was filed, never *by whom*. A box can file one
+//! naming a different box. The approval is a person reading it, which is why the name on a request
+//! is context for that person and never an input to a decision made here.
 //!
 //! **Where the queue lives, and why not the shared store.** The `.claude` store is per-repo; one
 //! sandbox holds boxes from several repos. Scoping a fleet-wide decision to whichever repo asked
