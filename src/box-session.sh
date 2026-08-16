@@ -909,6 +909,52 @@ fi
 [ -s "$home/.claude/.credentials.json" ] && unset ANTHROPIC_API_KEY
 [ -s "$home/.codex/auth.json" ] && unset OPENAI_API_KEY
 
+# --- One box cannot see another's files ----------------------------------------------------------
+#
+# Measured on this fleet, from inside a box, before any of this existed:
+#
+#   ls /Users/you/.skein/boxes/example-box-7/claude-projects/   → readable
+#
+# Another box's conversation history, its checkout, and — once git scoping is on — its write tokens.
+# Every box is uid 1000 and `--dev-bind / /` shows it the whole sandbox, so the files were simply
+# there for the reading.
+#
+# **Why a mount and not a uid per box.** Separate uids were the obvious answer and are the wrong one
+# here, measured rather than assumed. What one box can already reach of another through `/proc` is:
+#
+#   root/  cwd  environ  maps   → denied   (each box is its own user namespace)
+#   cmdline  fd/           → readable (paths, no contents)
+#
+# So the process boundary already holds; only the filesystem was open. A mount namespace closes
+# exactly that gap, needs no root at box start, no ownership migration, and no change to how skein
+# attaches — the tmux socket is 0700 uid 1000, and a box running as its own uid would leave the
+# cockpit unable to attach to any box in the fleet. A uid split would have cost all of that to close
+# a hole a bind closes for free.
+#
+# **How.** `--tmpfs` over the two directories that hold every box, then bind back this box's own and
+# the fleet root. It reads oddly and it is the reliable spelling: bwrap resolves every source against
+# the ORIGINAL filesystem, so the binds below still name the real directories even though their
+# parents are now empty — the same property `--bind "$home" "$HOME"` already relies on. Covering the
+# parents rather than listing siblings also covers boxes created *after* this one starts, which an
+# enumeration could not.
+#
+# A box keeps: its own root, its own host state, and the fleet root's scripts (read-only — the
+# launcher, the credential helper and the substrate queue all live there).
+if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
+  fleet_root_dir="${SKEIN_FLEET_ROOT:-/boxes}"
+  state_parent="$(dirname "$state")"
+  binds+=(--tmpfs "$fleet_root_dir")
+  [ -d "$fleet_root_dir/.skein" ] && binds+=(--ro-bind "$fleet_root_dir/.skein" "$fleet_root_dir/.skein")
+  binds+=(--bind "$root" "$root")
+  # The state parent is a separate mount (the host's `~/.skein/boxes`), so it needs its own cover.
+  # Guarded on the two being different directories: if a fleet ever put box state inside the fleet
+  # root, a tmpfs over it here would erase the bind just made above.
+  if [ -d "$state_parent" ] && [ "$state_parent" != "$fleet_root_dir" ]; then
+    binds+=(--tmpfs "$state_parent" --bind "$state" "$state")
+  fi
+  unset fleet_root_dir state_parent
+fi
+
 # --- The fleet agent's token is not a box's to hold ----------------------------------------------
 #
 # The agent is the HOST's channel into this sandbox: it takes a script on `/exec` and runs it at
@@ -924,14 +970,23 @@ fi
 # unsetting a variable stops nobody, so an empty file goes over it. The host's own copy is untouched
 # and the agent — which starts at fleet scope, before any box exists — keeps reading the real one.
 #
-# Unconditional, unlike the git scoping below. That switch trades a box's reach against its owner's
-# convenience; this one has no such trade, because no box ever needed this file.
+# Covered for every box except a deliberately privileged one — the workshop box, which exists to
+# debug and extend skein itself and is useless without fleet reach. That is a per-box decision its
+# owner makes in the cockpit, never a default and never inferred.
 : >"$root/no-fleet-token" 2>/dev/null || true
 fleet_token="${SKEIN_FLEET_ROOT:-/boxes}/.skein/fleet-agent.token"
-if [ -f "$fleet_token" ] && [ -f "$root/no-fleet-token" ]; then
+if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ] && [ -f "$fleet_token" ] && [ -f "$root/no-fleet-token" ]; then
   binds+=(--ro-bind "$root/no-fleet-token" "$fleet_token")
 fi
 unset fleet_token
+
+# A privileged box says so on its own terminal, every start.
+#
+# The whole risk of this switch is forgetting which box carries it: a box that can read every other
+# box's credentials must never be one you have to check a settings pane to identify.
+if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then
+  echo "skein: $box is the WORKSHOP box — it sees every box's files and can act at fleet scope. Settings → Boxes turns this off." >&2
+fi
 
 # --- GitHub: one repo to write, everything else to read ------------------------------------------
 #

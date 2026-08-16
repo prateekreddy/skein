@@ -444,6 +444,54 @@ pub fn box_state_root() -> String {
     skein_home().join("boxes").to_string_lossy().into_owned()
 }
 
+/// Where one box's "this is the workshop box" answer is kept.
+///
+/// A file in the box's host state directory, exactly as its disk and git-scope overrides already
+/// are. Host-side so the cockpit can set it with the fleet down, and per box because the whole
+/// point is that it is true of one box and false of the rest.
+fn privileged_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(&box_state(name)).join("privileged")
+}
+
+/// Is this the workshop box — the one that may see every box's files and act at fleet scope?
+///
+/// Ordinary boxes get a mount namespace that hides the other boxes' directories, and an empty file
+/// over the fleet agent's token. That is right for a box doing a repo's work and wrong for the box
+/// used to debug and extend skein itself, which needs to read the fleet to be any use at all.
+///
+/// **Off unless the file says exactly `1`.** Anything else — absent, empty, half-written, corrupted
+/// — is off, because the two failure directions are nothing like each other: guessing "privileged"
+/// hands one box every other box's credentials, and guessing "ordinary" costs a restart.
+pub fn box_is_privileged(name: &str) -> bool {
+    std::fs::read_to_string(privileged_path(name))
+        .unwrap_or_default()
+        .trim()
+        == "1"
+}
+
+/// Make `name` the workshop box, or return it to being ordinary. Takes effect at its **next start**:
+/// a namespace is built when a box comes up, and a running box already has the one it was given.
+///
+/// Deliberately not exclusive — skein does not clear the flag on other boxes when one is set. Two
+/// privileged boxes is a thing someone may want and the cockpit shows plainly; silently un-privileging
+/// a box someone is working in, because they ticked a box elsewhere, is not.
+pub fn set_box_privileged(name: &str, on: bool) -> Result<(), String> {
+    if !crate::valid_name(name) {
+        return Err(format!("unusable box name {name:?}"));
+    }
+    let path = privileged_path(name);
+    if !on {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    let dir = path.parent().ok_or("no state directory")?.to_path_buf();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&path, &dir, b"1")
+}
+
 /// One box's durable host-side state directory.
 pub fn box_state(name: &str) -> String {
     format!("{}/{name}", box_state_root())
@@ -2179,8 +2227,13 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // sandbox would read an eighth positional as part of the command, and every box restart
         // would fail until something reinstalled the script. An old launcher ignores an env var.
         "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
+         SKEIN_BOX_PRIVILEGED={priv_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
+        // Off unless the file says otherwise, and an unreadable answer is off. The two directions
+        // are not equal: guessing "privileged" hands one box every other box's credentials, and
+        // guessing "not" costs the workshop box a restart after someone flips the switch.
+        priv_q = sh_quote(if box_is_privileged(name) { "1" } else { "0" }),
         scope_q = sh_quote(if crate::gitgate::box_is_scoped(name) {
             "repo"
         } else {

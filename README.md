@@ -151,6 +151,22 @@ with no CDN — important in the firewalled sbx network.
 > For remote/mobile you can either `tailscale serve` (below, keeps the loopback bind) or bind
 > off-loopback and hit the box's tailnet address directly.
 
+### What one box can see of another
+
+Each box gets a mount namespace holding its own directories and the fleet root's scripts, and
+nothing else — the directories that hold every box are covered, so a box created later is hidden
+too. Process-level isolation was already there: `/proc/<pid>/{root,cwd,environ,maps}` of another
+box is denied, because each box is its own user namespace. What leaked was the filesystem, and that
+is what this closes.
+
+Existing boxes migrate by restarting. Nothing moves on disk and no ownership changes — a running box
+keeps the namespace it was given, and gets the new one at its next start.
+
+**The workshop box.** One box can opt out, under *box settings → workshop box*: it sees every box's
+files and keeps the fleet agent's token, which is what makes it usable for debugging and extending
+skein itself. Off by default, per box, and it announces itself on its own terminal at every start —
+a box that can read every other box's credentials should never be one you have to look up.
+
 ### Opening the cockpit
 
 The API needs the fleet's token. On startup the server prints the URL that carries it:

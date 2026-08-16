@@ -611,3 +611,129 @@ fn a_box_cannot_read_the_fleet_agents_token() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Build the isolation block from the launcher and return the bind list it produces.
+fn isolation_binds(
+    fleet: &std::path::Path,
+    state_parent: &std::path::Path,
+    privileged: bool,
+) -> String {
+    let src = fs::read_to_string(script("box-session.sh")).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let from = lines
+        .iter()
+        .position(|l| l.starts_with(r#"if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then"#))
+        .expect("the isolation block moved");
+    let to = lines[from..]
+        .iter()
+        .position(|l| *l == "fi")
+        .map(|i| from + i)
+        .expect("the isolation block has no end");
+    let block = lines[from..=to].join("\n");
+
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -uo pipefail; binds=(); root={}; state={}; export SKEIN_FLEET_ROOT={} SKEIN_BOX_PRIVILEGED={}; \
+             {block}; printf '%s\\n' \"${{binds[@]-}}\"",
+            fleet.join("web-main").display(),
+            state_parent.join("web-main").display(),
+            fleet.display(),
+            if privileged { "1" } else { "0" },
+        ))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the block failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// One box cannot see another's files.
+///
+/// Measured before this existed, from inside a box on this fleet: another box's `claude-projects`
+/// was readable, because every box is uid 1000 and `--dev-bind / /` shows it the whole sandbox.
+///
+/// A tmpfs over the two directories that hold every box, and this box's own bound back through it —
+/// which works only because bwrap resolves sources against the original filesystem, the same
+/// property `--bind "$home" "$HOME"` already relies on. Covering the *parents* rather than listing
+/// siblings is what also covers boxes created after this one starts.
+#[test]
+fn a_box_sees_its_own_directories_and_no_other_boxs() {
+    let dir = std::env::temp_dir().join(format!("skein-iso-{}", std::process::id()));
+    let fleet = dir.join("boxes");
+    let states = dir.join("state");
+    for p in [
+        fleet.join(".skein"),
+        fleet.join("web-main"),
+        fleet.join("other-box"),
+        states.join("web-main"),
+        states.join("other-box"),
+    ] {
+        fs::create_dir_all(&p).unwrap();
+    }
+
+    let binds = isolation_binds(&fleet, &states, false);
+    let has = |a: &str, b: &str| {
+        binds
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w[0] == a && w[1] == b)
+    };
+
+    assert!(
+        has("--tmpfs", fleet.to_string_lossy().as_ref()),
+        "the directory holding every box must be covered: {binds}"
+    );
+    assert!(
+        has("--tmpfs", states.to_string_lossy().as_ref()),
+        "and so must the one holding every box's host state: {binds}"
+    );
+    assert!(
+        has("--bind", fleet.join("web-main").to_string_lossy().as_ref()),
+        "the box must get its own root back: {binds}"
+    );
+    assert!(
+        has("--bind", states.join("web-main").to_string_lossy().as_ref()),
+        "and its own state: {binds}"
+    );
+    assert!(
+        has("--ro-bind", fleet.join(".skein").to_string_lossy().as_ref()),
+        "the fleet root holds the launcher and the credential helper: {binds}"
+    );
+    // The whole point. Naming a sibling anywhere in the list would mean it survived the tmpfs.
+    assert!(
+        !binds.contains("other-box"),
+        "a sibling box was named in the bind list: {binds}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The workshop box opts out of both — it exists to debug skein, which means reading the fleet.
+#[test]
+fn the_workshop_box_keeps_the_fleet_in_view() {
+    let dir = std::env::temp_dir().join(format!("skein-iso-priv-{}", std::process::id()));
+    let fleet = dir.join("boxes");
+    let states = dir.join("state");
+    for p in [
+        fleet.join(".skein"),
+        fleet.join("web-main"),
+        states.join("web-main"),
+    ] {
+        fs::create_dir_all(&p).unwrap();
+    }
+
+    let binds = isolation_binds(&fleet, &states, true);
+    assert!(
+        binds.trim().is_empty(),
+        "a privileged box must get no isolation binds at all: {binds}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

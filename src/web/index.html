@@ -1161,6 +1161,12 @@
       <label class="nb-lbl">github access</label>
       <select id="bs-gitscope"></select>
       <div class="ar-derived" id="bs-gitscope-note"></div>
+      <label class="nb-lbl">workshop box</label>
+      <select id="bs-priv">
+        <option value="0">No — sees only its own files</option>
+        <option value="1">Yes — sees every box, and can act at fleet scope</option>
+      </select>
+      <div class="ar-derived" id="bs-priv-note"></div>
       <!-- One-shot actions, not settings: each spends a real round trip, so they are buttons you
            press rather than fields that save. They live here because the dock had grown a row of
            them that were mostly irrelevant to the box you were looking at. -->
@@ -5146,6 +5152,14 @@ function openBoxSettings(name) {
       document.getElementById("bs-gitscope-note").textContent = cur.git_scope_available
         ? "applies at this box's next start — a running box keeps the credential it was given"
         : "nothing to scope with yet: configure a GitHub App or a repository token under Repo write access";
+      // The workshop box. Ordinary boxes get a mount namespace that hides every other box's
+      // directory and an empty file over the fleet agent's token; this is the box that opts out of
+      // both, because debugging skein itself means reading the fleet.
+      const pv = document.getElementById("bs-priv");
+      pv.value = cur.privileged ? "1" : "0";
+      document.getElementById("bs-priv-note").textContent = cur.privileged
+        ? "this box can read every other box's credentials and conversations — keep it to the one you develop skein in"
+        : "applies at this box's next start — a namespace is built when a box comes up";
       // Work tracking: the button says what pressing it would DO, which depends on whether the box
       // already holds a token. Nothing host-side records that, so the panel asked the box.
       const wire = document.getElementById("bs-wire");
@@ -5184,6 +5198,7 @@ function saveBoxSettings() {
   const gitEmail = document.getElementById("bs-gitemail").value.trim();
   const disk = document.getElementById("bs-disk").value.trim();
   const gitScope = document.getElementById("bs-gitscope").value;
+  const privileged = document.getElementById("bs-priv").value === "1";
   const post = (path, body) => fetch(`/api/boxes/${encodeURIComponent(name)}/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   }).then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); });
@@ -5193,6 +5208,7 @@ function saveBoxSettings() {
     post("identity", (gitName || gitEmail) ? { name: gitName, email: gitEmail } : {}),
     post("disk", { limit: disk || null }),
     post("git-scope", { scope: gitScope || null }),
+    post("privileged", { on: privileged }),
   ])
     .then(() => { toast(`${name}: settings saved`); closeBoxSettings(); refresh(); })
     .catch(e => toast(`settings: ${e.message}`));

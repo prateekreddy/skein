@@ -195,6 +195,7 @@ async fn main() {
             axum::routing::delete(api_git_grant_revoke),
         )
         .route("/api/boxes/:name/git-scope", post(api_set_box_git_scope))
+        .route("/api/boxes/:name/privileged", post(api_set_box_privileged))
         .route("/api/fleet/git-probe", post(api_git_probe))
         .route("/api/fleet/git-credentials", post(api_git_credential))
         .route("/api/fleet/git-read-token", post(api_git_read_token))
@@ -774,6 +775,9 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
         .to_string(),
         "effective_git_scope": if skein::gitgate::box_is_scoped(&name) { "repo" } else { "fleet" },
         "git_scope_available": skein::gitgate::can_issue_write_tokens(),
+        // The workshop box sees every box's files and can act at fleet scope. Reported per box so
+        // the cockpit can say which one carries it without anyone opening a settings pane to check.
+        "privileged": skein::box_is_privileged(&name),
         "own_disk": std::fs::read_to_string(
             std::path::Path::new(&skein::box_state(&name)).join("disk"),
         )
@@ -1431,6 +1435,22 @@ struct ScopeReq {
 /// Flip one box's GitHub scope. Takes effect at the box's next start.
 async fn api_set_box_git_scope(Path(name): Path<String>, Json(r): Json<ScopeReq>) -> Response {
     match skein::gitgate::set_box_scope(&name, r.scope.as_deref()) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PrivilegedReq {
+    on: bool,
+}
+
+/// Make one box the workshop box, or return it to being ordinary. Next start.
+async fn api_set_box_privileged(
+    Path(name): Path<String>,
+    Json(r): Json<PrivilegedReq>,
+) -> Response {
+    match skein::set_box_privileged(&name, r.on) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
