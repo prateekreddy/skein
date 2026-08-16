@@ -824,6 +824,13 @@ pub struct ProbeResult {
 ///
 /// The tokens minted here are thrown away. Nothing is placed in a box; this only asks GitHub
 /// whether it *would* issue one.
+///
+/// **A stored PAT is checked against GitHub too, and that is not a detail.** [`mint_token`] returns a
+/// stored token verbatim without a round trip — correctly, since minting it is not skein's job — so
+/// asking it alone answered "is a token on disk", not "does this token work". An expired or revoked
+/// PAT reported **ok**. That is exactly the wrong way round: the App path renews itself hourly and
+/// cannot quietly rot, while a PAT carries an expiry its owner chose months ago and fails silently.
+/// The credential most in need of checking was the one the check could not see.
 pub fn probe_credentials() -> Vec<ProbeResult> {
     let mut out = Vec::new();
     for repo in crate::load_repos() {
@@ -835,21 +842,48 @@ pub fn probe_credentials() -> Vec<ProbeResult> {
             });
             continue;
         };
-        let source = match credential_for(&slug) {
+        let stored = credential_for(&slug);
+        let source = match &stored {
             Some((c, _)) => {
                 let named = match c.label.trim().is_empty() {
-                    true => c.id,
-                    false => c.label,
+                    true => c.id.clone(),
+                    false => c.label.clone(),
                 };
                 format!("stored token “{named}”")
             }
             None => "the GitHub App".into(),
         };
         out.push(match mint_token(&slug) {
-            Ok(_) => ProbeResult {
-                repo: slug,
-                ok: true,
-                detail: format!("a write token was issued by {source}"),
+            Ok(token) => match &stored {
+                // Minted by the App: GitHub answered a moment ago, and the token is good for an
+                // hour. Nothing further to ask.
+                None => ProbeResult {
+                    repo: slug,
+                    ok: true,
+                    detail: format!("a write token was issued by {source}"),
+                },
+                Some(_) => match check_token(&token, &slug) {
+                    Ok(true) => ProbeResult {
+                        repo: slug,
+                        ok: true,
+                        detail: format!("{source} works, and GitHub says it may push"),
+                    },
+                    // Reachable and refused. Named separately from "cannot reach GitHub" because
+                    // one is a credential to replace and the other is a network to wait out.
+                    Ok(false) => ProbeResult {
+                        repo: slug.clone(),
+                        ok: false,
+                        detail: format!(
+                            "{source} cannot write {slug} — expired, revoked, or scoped to another \
+                             repository. Store a new one under Settings → GitHub & keys"
+                        ),
+                    },
+                    Err(e) => ProbeResult {
+                        repo: slug,
+                        ok: false,
+                        detail: format!("{source} could not be checked: {e}"),
+                    },
+                },
             },
             Err(e) => ProbeResult {
                 repo: slug,
@@ -859,6 +893,31 @@ pub fn probe_credentials() -> Vec<ProbeResult> {
         });
     }
     out
+}
+
+/// Does `token` actually carry push rights for `slug` right now?
+///
+/// `GET /repos/{slug}` returns a `permissions` object for an authenticated caller, so one request
+/// answers both halves — the token is still valid, *and* it reaches this repository with write. A
+/// 401/404 is the answer for an expired token and for one scoped somewhere else alike, which is why
+/// the message above names both rather than guessing between them.
+///
+/// The token goes in a `--config` document, never argv: a command line is readable by every process
+/// on the host, and this is a live push credential.
+fn check_token(token: &str, slug: &str) -> Result<bool, String> {
+    let url = format!("https://api.github.com/repos/{slug}");
+    match curl_json(&["-sS", "--max-time", "20", &url], token) {
+        Ok(v) => Ok(v
+            .get("permissions")
+            .and_then(|p| p.get("push"))
+            .and_then(|p| p.as_bool())
+            .unwrap_or(false)),
+        // GitHub answering "Bad credentials" is a *successful* check with a negative answer, not a
+        // failure to check. Told apart here so an expired PAT reads as a credential to replace
+        // rather than as a network problem to retry.
+        Err(e) if e.contains("Bad credentials") || e.contains("Not Found") => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// What scoping is actually doing, as this module understands it.
@@ -956,6 +1015,16 @@ pub fn app_credentials() -> Result<(String, String), String> {
     if id.is_empty() {
         return Err("no GitHub App configured: Settings → GitHub App ID".into());
     }
+    // An App id is a number, and [`jwt_claim`] interpolates it straight into a JSON claim. Checked
+    // rather than trusted: `config.json` is an ordinary file that can be hand-edited, and an `id`
+    // holding a quote would rewrite the claim around it rather than merely being a wrong id. The
+    // resulting JWT is signed, so GitHub would refuse it either way — this turns an obscure refusal
+    // into a message that names the actual problem, and closes the injection on its own terms.
+    if !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub App ID"
+        ));
+    }
     if !std::path::Path::new(&key).exists() {
         return Err(format!("the GitHub App key is not at {key}"));
     }
@@ -1022,6 +1091,61 @@ pub fn mint_token(slug: &str) -> Result<String, String> {
         .ok_or_else(|| format!("GitHub returned no token for {slug}"))
 }
 
+/// Write a token to `path`, never readable by anyone but its owner — not even for an instant.
+///
+/// The mode goes on the temp file **before** the rename. The general [`crate::util::write_atomic`]
+/// creates its temp with `fs::write`, which takes the umask — so a chmod afterwards leaves a window
+/// where the token is 0644 on disk. [`set_credential_token`] already knew this and did it correctly;
+/// the tokens actually handed to boxes took the weaker path, which is the wrong way round for the
+/// two to differ. One helper now, so there is nowhere for the rule to be applied inconsistently.
+///
+/// 0600 is not a boundary *between boxes* — they share a uid — and this does not pretend otherwise.
+/// It keeps the token out of anything that walks the tree without meaning to, and out of the reach
+/// of anything on the host running as another user.
+fn write_secret(path: &std::path::Path, dir: &std::path::Path, token: &str) -> Result<(), String> {
+    let tmp = dir.join(format!(".skein.tok.{}", std::process::id()));
+    std::fs::write(&tmp, token.as_bytes()).map_err(|e| format!("writing temp: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("securing temp: {e}"));
+        }
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("renaming into place: {e}")
+    })
+}
+
+/// Take every token out of a box's token directory.
+///
+/// The files, not the directory: the box's launcher creates it either way, and removing it under a
+/// running box would leave the helper reading through a path that no longer exists.
+fn discard_tokens(dir: &std::path::Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    };
+    let mut failed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let outcome = match path.is_dir() {
+            true => std::fs::remove_dir_all(&path), // `read/`, one token per installation owner
+            false => std::fs::remove_file(&path),
+        };
+        if let Err(e) = outcome {
+            failed.push(format!("{}: {e}", path.display()));
+        }
+    }
+    match failed.is_empty() {
+        true => Ok(()),
+        false => Err(format!("could not withdraw {}", failed.join("; "))),
+    }
+}
+
 /// Put the tokens a box may hold into its state directory, and take away the ones it may not.
 ///
 /// Called on the server's tick, well inside the hour an installation token lives. Both halves matter
@@ -1035,10 +1159,19 @@ pub fn mint_token(slug: &str) -> Result<String, String> {
 /// avoid causing.
 pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     let mut problems = Vec::new();
+    let dir = std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-tokens");
+
+    // A box that is no longer scoped keeps nothing. This ran *before* the pruning below and returned,
+    // so un-scoping a box left every token it had been given sitting in its state directory. For an
+    // App token that self-heals within the hour; a stored PAT is returned verbatim by [`mint_token`]
+    // and expires when its owner said it would, which may be next year. "Stop scoping this box" has
+    // to mean the credentials go, not that they stop being refreshed.
     if !box_is_scoped(box_name) {
+        if let Err(e) = discard_tokens(&dir) {
+            problems.push(e);
+        }
         return problems;
     }
-    let dir = std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-tokens");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return vec![format!("{}: {e}", dir.display())];
     }
@@ -1074,28 +1207,39 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     let write = |path: &std::path::Path, token: &str| -> Result<(), String> {
         let parent = path.parent().unwrap_or(&dir).to_path_buf();
         std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-        crate::util::write_atomic(path, &parent, token.as_bytes())?;
-        // 0600 is not a boundary here — every box runs as the same uid — but it keeps the token out
-        // of anything that walks the tree without meaning to.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
+        write_secret(path, &parent, token)
     };
 
     for slug in &want {
+        let path = std::path::PathBuf::from(token_file(box_name, slug));
         match mint_token(slug) {
             Ok(token) => {
-                if let Err(e) = write(
-                    &std::path::PathBuf::from(token_file(box_name, slug)),
-                    &token,
-                ) {
+                if let Err(e) = write(&path, &token) {
                     problems.push(format!("{slug}: {e}"));
                 }
             }
-            Err(e) => problems.push(format!("{slug}: {e}")),
+            // The old token goes when a new one cannot be had, and this is the whole of revocation
+            // for a stored PAT. Forgetting a credential leaves the repo still *wanted* — it is the
+            // box's own — so the prune above does not touch it, and leaving the file because the
+            // mint failed meant "Forget" reported success while every box kept pushing with the
+            // token its owner had just withdrawn. A stored PAT does not expire on its own, so
+            // nothing else would ever have taken it away.
+            //
+            // Failing closed is the right direction here: the cost is a box that cannot push until
+            // its credential is fixed, and it can ask. The cost the other way is a live credential
+            // its owner believes is gone.
+            Err(e) => {
+                problems.push(format!("{slug}: {e}"));
+                match std::fs::remove_file(&path) {
+                    Ok(()) => problems.push(format!(
+                        "{slug}: the token this box was holding has been withdrawn"
+                    )),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        problems.push(format!("{slug}: could not withdraw the old token: {e}"))
+                    }
+                }
+            }
         }
     }
 
@@ -1257,9 +1401,11 @@ fn curl_config(jwt: &str) -> String {
         "header = \"Authorization: Bearer {}\"\n\
          header = \"Accept: application/vnd.github+json\"\n\
          header = \"X-GitHub-Api-Version: 2022-11-28\"\n",
-        // A JWT is three base64url segments joined by dots, so it can hold neither a quote nor a
-        // newline — but this is the line that would become an injected curl option if that ever
-        // stopped being true, so it is enforced rather than assumed.
+        // A JWT is three base64url segments joined by dots and a GitHub PAT is alphanumeric, so
+        // neither can hold a quote or a newline — but this is the line that would become an
+        // injected curl option if that ever stopped being true, so it is enforced rather than
+        // assumed. It carries stored PATs as well as JWTs now, which is one more reason not to
+        // reason from the shape of the credential.
         jwt.replace(['"', '\n', '\\'], "")
     )
 }
@@ -1491,6 +1637,124 @@ mod tests {
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         (lock, home)
+    }
+
+    /// Register `slug` as a box's own repo and place a token for it, as a live fleet would.
+    fn box_holding(name: &str, slug: &str) -> std::path::PathBuf {
+        crate::save_repos(&[crate::Repo {
+            id: name.into(),
+            source: format!("https://github.com/{slug}.git"),
+            work: String::new(),
+            store: String::new(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+        let problems = refresh_tokens(name);
+        let path = std::path::PathBuf::from(token_file(name, slug));
+        assert!(
+            path.exists(),
+            "the fixture never placed a token ({problems:?})"
+        );
+        path
+    }
+
+    /// The revocation gap. Forgetting a stored PAT left every box still holding it.
+    ///
+    /// The repo is the box's *own*, so it stays "wanted" and the prune never touches it — and the
+    /// mint, having nothing left to mint from, used to fail and leave the previous file exactly
+    /// where it was. A stored PAT does not expire on its own, so nothing would ever have removed it:
+    /// "Forget" reported success and revoked nothing.
+    #[test]
+    fn forgetting_a_stored_token_takes_it_away_from_the_boxes_holding_it() {
+        let (_lock, _home) = fresh_home();
+        set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
+        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        // A second, unrelated credential, so the fleet can still issue *something* after the first
+        // is forgotten. Without it `can_issue_write_tokens` goes false, the box stops being scoped,
+        // and the token is taken by the un-scoping path instead — which is a different fix, tested
+        // below. This one has to fail to mint while the box is still very much scoped.
+        set_write_credential("other", "elsewhere", &["b/two".into()]).unwrap();
+        set_credential_token("other", "github_pat_OTHER").unwrap();
+
+        let path = box_holding("worker", "a/one");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "github_pat_XYZ");
+
+        remove_write_credential("mine").unwrap();
+        assert!(box_is_scoped("worker"), "the box must still be scoped here");
+        let problems = refresh_tokens("worker");
+
+        assert!(
+            !path.exists(),
+            "the box is still holding a credential its owner withdrew"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("withdrawn")),
+            "a withdrawal has to be reported, not done silently: {problems:?}"
+        );
+    }
+
+    /// Un-scoping a box takes its tokens, rather than merely stopping their refresh.
+    ///
+    /// This returned before the pruning, so every token a box had been given stayed in its state
+    /// directory. An App token would expire within the hour; a stored PAT is handed over verbatim
+    /// and expires whenever its owner said — possibly never.
+    #[test]
+    fn un_scoping_a_box_withdraws_what_it_was_already_holding() {
+        let (_lock, _home) = fresh_home();
+        set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
+        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        let path = box_holding("worker", "a/one");
+
+        set_box_scope("worker", Some("fleet")).unwrap();
+        let problems = refresh_tokens("worker");
+
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(
+            !path.exists(),
+            "'stop scoping this box' has to mean the credentials go"
+        );
+    }
+
+    /// A token is never world-readable, not even for the instant between write and chmod.
+    ///
+    /// `write_atomic` creates its temp with the umask and would be chmodded afterwards, which is the
+    /// window this closes. Not a boundary between boxes — they share a uid — but it is the rule the
+    /// rest of this module already follows, and the tokens handed to boxes were the ones not
+    /// following it.
+    #[cfg(unix)]
+    #[test]
+    fn a_placed_token_is_never_readable_by_anyone_else() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_lock, home) = fresh_home();
+        set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
+        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        let path = box_holding("worker", "a/one");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a placed token was {mode:o}");
+
+        // And the same rule for the credential store the host keeps.
+        let stored = crate::config::skein_home().join("github-pats").join("mine");
+        let mode = std::fs::metadata(&stored).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the stored token was {mode:o}");
+        drop(home);
+    }
+
+    /// An App id is interpolated straight into a signed JSON claim, so it is checked like input.
+    #[test]
+    fn an_app_id_that_is_not_a_number_is_refused_before_it_reaches_the_claim() {
+        let (_lock, _home) = fresh_home();
+        let mut cfg = crate::load_config();
+        cfg.github_app_id = "12\",\"iss\":\"999".into();
+        crate::save_config(&cfg).unwrap();
+        let why = app_credentials().unwrap_err();
+        assert!(
+            why.contains("numeric"),
+            "the id must be refused by name, not left to produce a puzzling 401: {why}"
+        );
     }
 
     #[test]

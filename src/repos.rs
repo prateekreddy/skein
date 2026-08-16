@@ -451,10 +451,32 @@ pub fn pull_repo(id: &str) -> Result<String, String> {
 /// Idempotent: sbx refuses to overwrite an existing secret without `-f`, so an already-seeded token
 /// is treated as success (the boxes can already push) — not an error. Set $SKEIN_FORCE_GH_SECRET to
 /// pass `-f` and refresh the token (e.g. after `gh auth refresh` / rotation).
+///
+/// **Note on the token's route.** It is passed to `sbx` as a command-line argument, so it is visible
+/// in the host's process table for as long as that call runs. [`crate::gitgate::curl_config`] exists
+/// precisely to keep the App JWT off a command line, and this is the same class of secret taking the
+/// path that one was built to avoid. It is left as-is only because `sbx`'s interface is not skein's
+/// to change and no stdin form of `secret set` is documented; the mitigation is below — once tokens
+/// can be scoped, this credential stops being seeded at all.
 pub fn ensure_gh_secret() -> Result<(), String> {
     let cfg = load_config();
     // env wins over the UI setting (headless/CI); either can disable seeding.
     if env::var_os("SKEIN_NO_GH_SECRET").is_some() || !cfg.seed_gh_secret {
+        return Ok(());
+    }
+    // A fleet that can scope does not get the account token.
+    //
+    // These were two switches that had to be kept in step by hand: configuring an App scoped every
+    // box, and the fleet-wide credential stayed seeded until someone remembered to turn this off
+    // separately. Nothing reminded them. A box drops `GH_TOKEN` at startup, so the secret was
+    // usually unused — but "usually unused" is not "gone", and it remained in sbx's store, reachable
+    // by anything in the sandbox that does not come up through `box-session.sh`.
+    //
+    // Gated on the same question [`crate::gitgate::box_is_scoped`] asks, so the two cannot disagree:
+    // the moment an App or a stored token exists, this stops. Forcing still works, for the fleet
+    // that deliberately wants both.
+    let force = env::var_os("SKEIN_FORCE_GH_SECRET").is_some() || cfg.force_gh_secret;
+    if !force && crate::gitgate::can_issue_write_tokens() {
         return Ok(());
     }
     let mut token_command = Command::new("gh");
@@ -467,7 +489,6 @@ pub fn ensure_gh_secret() -> Result<(), String> {
     if token.is_empty() {
         return Err("gh auth token was empty".into());
     }
-    let force = env::var_os("SKEIN_FORCE_GH_SECRET").is_some() || cfg.force_gh_secret;
     let mut args = vec!["secret", "set", "-g", "github", "-t", &token];
     if force {
         args.push("-f");
@@ -576,4 +597,68 @@ pub fn agent_for_box(name: &str) -> String {
             .unwrap_or_else(default_agent);
     }
     default_agent()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The account token stops being seeded the moment the fleet can scope.
+    ///
+    /// These were two switches nobody kept in step: configuring an App scoped every box, and this
+    /// went on copying a `repo`-scoped user token into the sandbox-wide secret until someone
+    /// separately remembered to turn it off. Nothing reminded them, and the credential stayed in
+    /// sbx's store — unused by a box that comes up through `box-session.sh`, and perfectly usable by
+    /// anything that does not.
+    ///
+    /// Proven with a `gh` that always fails: with an issuer configured this must return `Ok` having
+    /// run nothing at all, and without one it must try, and say why it could not.
+    ///
+    /// The stub is *prepended* to `$PATH` rather than replacing it. Cargo runs these as threads in
+    /// one process, so `$PATH` is shared with every test running alongside — and blanking it broke
+    /// an unrelated one that shells out to `sh`. `env_lock` serialises the tests that take it, which
+    /// is no help at all to the ones that do not.
+    #[test]
+    fn a_fleet_that_can_scope_does_not_seed_the_account_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let root = home.as_ref() as &std::path::Path;
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("gh"), "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let previous_path = env::var_os("PATH");
+        env::set_var("SKEIN_HOME", root);
+        env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                previous_path.clone().unwrap_or_default().to_string_lossy()
+            ),
+        );
+        env::remove_var("SKEIN_NO_GH_SECRET");
+        env::remove_var("SKEIN_FORCE_GH_SECRET");
+
+        // No issuer: it tries, and fails on the missing `gh` rather than skipping.
+        assert!(
+            ensure_gh_secret().is_err(),
+            "with nothing to scope with, the fleet-wide credential is all a box has — seeding it \
+             must still be attempted"
+        );
+
+        crate::gitgate::set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
+        crate::gitgate::set_credential_token("mine", "github_pat_XYZ").unwrap();
+        assert!(
+            ensure_gh_secret().is_ok(),
+            "a fleet that can issue scoped tokens must not copy the account token into the sandbox"
+        );
+
+        match previous_path {
+            Some(p) => env::set_var("PATH", p),
+            None => env::remove_var("PATH"),
+        }
+    }
 }

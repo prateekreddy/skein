@@ -242,10 +242,34 @@ async fn main() {
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
+    // Everything above is routed; this decides who may drive it.
+    //
+    // A layer over the whole router rather than a check per handler, because the failure mode of
+    // per-handler auth is a route added later that nobody remembers to guard — and this API grows a
+    // route most weeks. What it lets through is named in one place, in `open_to_all`, which is a
+    // list a reader can check against the router above.
+    let app = app.layer(axum::middleware::from_fn(gate));
+
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("skein-server: cannot bind {addr}: {e}"));
-    println!("skein-server → http://{addr}");
+    match skein::apiauth::disabled() {
+        true => println!(
+            "skein-server → http://{addr}\n  \
+             API AUTH OFF ($SKEIN_NO_API_AUTH) — anything that can reach this port drives the \
+             fleet, boxes included"
+        ),
+        // The token is printed, not just stored: this URL is how a browser gets a session, and a
+        // secret nobody is shown is a secret nobody can use.
+        false => match skein::apiauth::token() {
+            Ok(t) => println!("skein-server → http://{addr}/?t={t}"),
+            Err(e) => println!(
+                "skein-server → http://{addr}\n  \
+                 no API token could be created ({e}) — every API call will be refused until \
+                 ~/.skein is writable"
+            ),
+        },
+    }
     // Flag an off-loopback bind so it's never a surprise that the port is reachable from the network.
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
     if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
@@ -282,17 +306,72 @@ async fn main() {
     }
 }
 
-async fn index() -> Response {
-    // The UI is embedded in and version-coupled to this binary. Reusing an older document after a
-    // server restart mixes stale JS/CSS with new API behaviour, so the browser must revalidate it.
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (axum::http::header::CACHE_CONTROL, "no-store"),
-        ],
-        INDEX,
-    )
-        .into_response()
+/// Paths served without the fleet's token.
+///
+/// Deliberately short, and deliberately a list of *escapes* rather than a list of what is guarded:
+/// a new route is protected the moment it is added, and opening one up has to be written down here
+/// where it can be read and argued with.
+///
+/// Each of these is a static asset compiled into this binary — the same bytes for every fleet, no
+/// state read, nothing mutated. `/` is here so an unauthenticated visitor gets a page that can
+/// explain itself instead of a bare 401, and so `?t=` has somewhere to land.
+fn open_to_all(path: &str) -> bool {
+    path == "/" || path.starts_with("/vendor/")
+}
+
+/// Refuse anything that does not carry the fleet's token.
+///
+/// This is the answer to a box reaching `host.docker.internal:7878` — see [`skein::apiauth`] for
+/// what that allowed and why a secret rather than a peer-address rule.
+async fn gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if open_to_all(request.uri().path()) || skein::apiauth::authorised(request.headers()) {
+        return next.run(request).await;
+    }
+    skein::apiauth::refusal().into_response()
+}
+
+/// The cockpit page, and the one place the fleet's API token becomes a browser session.
+///
+/// `?t=<token>` is exchanged for an `HttpOnly` cookie and then **redirected away**, so the secret
+/// does not stay in the address bar, in history, or in the `Referer` of anything the page later
+/// links to. Every `fetch` in the document and the terminal WebSocket then carry it automatically,
+/// which is why authenticating the API changed no calling code.
+///
+/// The document itself is served to anyone who asks. It holds no secrets — it is the same HTML
+/// compiled into this binary — and gating it would only mean an unauthenticated visitor got a blank
+/// page instead of one that can say what is wrong.
+async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
+    let headers = [
+        (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+        // The UI is embedded in and version-coupled to this binary. Reusing an older document after
+        // a server restart mixes stale JS/CSS with new API behaviour, so the browser must revalidate.
+        (axum::http::header::CACHE_CONTROL, "no-store"),
+    ];
+    let offered = q.get("t").map(String::as_str).unwrap_or_default();
+    if !offered.is_empty() && skein::apiauth::token().is_ok_and(|want| want == offered) {
+        {
+            // `SameSite=Strict` is what closes cross-site POSTs to this API. `Path=/` covers the
+            // WebSocket as well as `/api`. No `Secure`, because the ordinary case is plain http on
+            // loopback and a Secure cookie would simply never be stored there.
+            return (
+                StatusCode::SEE_OTHER,
+                [
+                    (axum::http::header::LOCATION, "/".to_string()),
+                    (
+                        axum::http::header::SET_COOKIE,
+                        format!(
+                            "{}={offered}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000",
+                            skein::apiauth::COOKIE
+                        ),
+                    ),
+                ],
+                "",
+            )
+                .into_response();
+        }
+        // A wrong token gets the page and no cookie, rather than a hint that it was wrong.
+    }
+    (headers, INDEX).into_response()
 }
 
 async fn vendor_xterm_js() -> Response {

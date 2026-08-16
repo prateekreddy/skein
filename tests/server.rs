@@ -15,11 +15,31 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// The token every fixture writes into its `$SKEIN_HOME`, and that every request below carries.
+///
+/// Fixed rather than read back after startup: the server mints one on first use, and a test racing
+/// that would fail for a reason unrelated to what it tests. The refusal path has its own coverage in
+/// `tests/ui/smoke.mjs`, against the running server.
+const API_TOKEN: &str = "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt";
+
+/// A `$SKEIN_HOME` holding nothing but the API token, so a spawned server authenticates the requests
+/// below and never touches the developer's real `~/.skein`.
+fn token_home(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("skein-it-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
+    dir
+}
+
 /// One request over a fresh `Connection: close` socket → (status, full raw response incl. headers).
 fn http_get(addr: &str, path: &str) -> (u16, String) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.write_all(
-        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\
+             Connection: close\r\n\r\n"
+        )
+        .as_bytes(),
     )
     .unwrap();
     let mut buf = Vec::new();
@@ -39,7 +59,8 @@ fn http_post(addr: &str, path: &str, headers: &str, body: &[u8]) -> (u16, String
     let mut s = TcpStream::connect(addr).unwrap();
     s.write_all(
         format!(
-            "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n",
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\
+             Connection: close\r\nContent-Length: {}\r\n{headers}\r\n",
             body.len()
         )
         .as_bytes(),
@@ -82,6 +103,7 @@ fn server_serves_ui_vendor_and_guards_routes() {
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_REGISTRY", &reg)
+        .env("SKEIN_HOME", token_home("routes"))
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -144,7 +166,11 @@ fn server_serves_ui_vendor_and_guards_routes() {
     let mut s = TcpStream::connect(&addr).unwrap();
     s.write_all(
         format!(
+            // The token matters here and not only for consistency: without it this answers 401,
+            // which satisfies "not 413" and leaves the assertion below passing while testing
+            // nothing at all.
             "POST /api/boxes/thing-a/upload HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+             Authorization: Bearer {API_TOKEN}\r\n\
              Content-Type: application/octet-stream\r\nX-Skein-Name: big.bin\r\n\
              Content-Length: {}\r\n\r\n",
             3 * 1024 * 1024
@@ -184,6 +210,7 @@ fn slow_fleet_snapshot_does_not_starve_concurrent_requests() {
         .env("SKEIN_ADDR", &addr)
         .env("TOKIO_WORKER_THREADS", "1") // one async worker → starvation is deterministic
         .env("SKEIN_LS_CMD", "sleep 2; echo '[]'") // every load_views() now takes ~2s
+        .env("SKEIN_HOME", token_home("starve"))
         .env_remove("SKEIN_REGISTRY")
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
@@ -232,6 +259,7 @@ fn saving_settings_leaves_untouched_fields_alone() {
         r#"{"fleet_sandbox":"skein-fleet","fleet_memory":"26g","base_branch":"trunk"}"#,
     )
     .unwrap();
+    std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
 
     let addr = format!("127.0.0.1:{}", free_port());
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))

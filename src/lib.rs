@@ -6,6 +6,7 @@
 
 mod ai;
 mod answer;
+pub mod apiauth;
 pub mod codeowners;
 mod config;
 pub mod contracts;

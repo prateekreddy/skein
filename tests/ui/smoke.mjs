@@ -92,6 +92,7 @@ exit 0
   ].join("\n") + "\n");
   fs.mkdirSync(path.join(root, "home"), { recursive: true });
   fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({}));
+  fs.writeFileSync(path.join(root, "home", "api-token"), API_TOKEN, { mode: 0o600 });
   // a registered repo, so the settings pane has a card to open and edit
   fs.writeFileSync(path.join(root, "home", "repos.json"), JSON.stringify([
     { id: "smoke", source: "/src/smoke", work: ws, store: path.join(root, "store"), agent: "claude",
@@ -99,6 +100,14 @@ exit 0
   ]));
   return { root, ws, sbx, bin };
 }
+
+// The fleet's API token. Written by the fixture rather than read back after startup: the server
+// mints one on first use, and a test that raced that would be flaky for a reason having nothing to
+// do with what it is testing. The auth path itself is still exercised end to end — the browser gets
+// its cookie from `?t=`, exactly as a person does, and every direct fetch carries the bearer.
+const API_TOKEN = "t".repeat(64);
+const apiToken = () => API_TOKEN;
+const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
 
 const freePort = () => new Promise(res => {
   const s = createServer();
@@ -125,7 +134,7 @@ async function startServer(fx, port) {
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });
   for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`)).ok) return srv; } catch {}
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) return srv; } catch {}
     await new Promise(r => setTimeout(r, 100));
   }
   srv.kill();
@@ -170,7 +179,7 @@ page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error" && !EXPECTED_404.test(m.location()?.url || "")) noise.push(`[console] ${m.text()}`); });
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
 
-await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
+await page.goto(`http://127.0.0.1:${port}/?t=${apiToken()}`, { waitUntil: "domcontentloaded" });
 await page.evaluate(b => { window.BOXNAME = b; }, BOX);
 await page.waitForSelector("#fleet [data-name]", { timeout: 10000 });
 await settle();
@@ -386,7 +395,7 @@ await check("a repo picks a connection instead of restating half of one", async 
   await page.selectOption(sel, "smoke-example");
   await page.waitForFunction(() => [...document.querySelectorAll('.rcard[data-card="smoke"] .rtag')].some(t => /smoke tracker/.test(t.textContent)), null, { timeout: 5000 });
   await mustSee('.rcard[data-card="smoke"].open', "the card stays open after saving");
-  const saved = await fetch(`http://127.0.0.1:${port}/api/repos`).then(r => r.json());
+  const saved = await fetch(`http://127.0.0.1:${port}/api/repos`, { headers: authHeader() }).then(r => r.json());
   if (saved.find(r => r.id === "smoke").sync_connection !== "smoke-example")
     throw new Error("the picked connection should be what's stored");
 });
@@ -471,7 +480,7 @@ await check("a gateway that isn't a URL is refused, not stored", async () => {
   await page.fill(field, "mcp.example.net");
   await page.press(field, "Tab");
   await settle(900);
-  const sync = await fetch(`http://127.0.0.1:${port}/api/sync`).then(r => r.json());
+  const sync = await fetch(`http://127.0.0.1:${port}/api/sync`, { headers: authHeader() }).then(r => r.json());
   if (sync.connections[0].gateway_url !== "https://mcp.smoke.example/mcp")
     throw new Error(`a rejected value must not overwrite the stored one, got ${sync.connections[0].gateway_url}`);
   await page.keyboard.press("Escape");
@@ -707,6 +716,58 @@ await check("the board says which transport is carrying calls", async () => {
   // An indicator that says something is wrong without saying what to do is just another red light.
   const hint = await row.getAttribute("title");
   if (!/fleet_agent/.test(hint)) throw new Error("the tooltip never names the setting that changes it");
+});
+
+// ---------- the gate ----------
+//
+// A box on this fleet reached `host.docker.internal:7878` and got a 200, which made every route
+// below an unauthenticated way to undo gitgate — file a write request, approve it, receive a token.
+// So the thing worth testing is not that the cockpit still works (everything above covers that) but
+// that an unauthenticated caller is *refused*, and that the refusal is total rather than per-route.
+console.log("\nthe API gate");
+const bare = p => fetch(`http://127.0.0.1:${port}${p}`);
+await check("an unauthenticated read is refused", async () => {
+  const r = await bare("/api/boxes");
+  if (r.status !== 401) throw new Error(`expected 401, got ${r.status}`);
+});
+await check("and so is an unauthenticated write", async () => {
+  // The exact call in the escalation: approve a write request nobody's owner approved.
+  const r = await fetch(`http://127.0.0.1:${port}/api/fleet/git-grants/anything`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ approve: true, hours: 0 }),
+  });
+  if (r.status !== 401) throw new Error(`expected 401, got ${r.status}`);
+});
+await check("un-scoping a box needs the token too", async () => {
+  const r = await fetch(`http://127.0.0.1:${port}/api/boxes/${BOX}/git-scope`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ scope: "fleet" }),
+  });
+  if (r.status !== 401) throw new Error(`expected 401, got ${r.status}`);
+});
+await check("a wrong token is no better than none", async () => {
+  const r = await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: { Authorization: `Bearer ${"x".repeat(64)}` } });
+  if (r.status !== 401) throw new Error(`expected 401, got ${r.status}`);
+});
+// Every new route is guarded by default — the layer covers the router, so the only way to be open
+// is to be named in `open_to_all`. This asserts that list is what it says it is.
+await check("the page and its vendored assets stay open, so a visitor sees something", async () => {
+  for (const p of ["/", "/vendor/xterm.js", "/vendor/marked.js"]) {
+    const r = await bare(p);
+    if (!r.ok) throw new Error(`${p} should be served without a token, got ${r.status}`);
+  }
+});
+await check("the token in a URL is exchanged for a cookie and then dropped from it", async () => {
+  const r = await fetch(`http://127.0.0.1:${port}/?t=${apiToken()}`, { redirect: "manual" });
+  if (r.status !== 303) throw new Error(`expected a redirect, got ${r.status}`);
+  if (r.headers.get("location") !== "/") throw new Error("the token must not survive in the URL");
+  const cookie = r.headers.get("set-cookie") || "";
+  if (!cookie.includes("HttpOnly")) throw new Error("page script must not be able to read it back");
+  if (!cookie.includes("SameSite=Strict")) throw new Error("SameSite=Strict is what closes cross-site POSTs");
+});
+await check("a wrong token in the URL sets no cookie", async () => {
+  const r = await fetch(`http://127.0.0.1:${port}/?t=${"z".repeat(64)}`, { redirect: "manual" });
+  if (r.headers.get("set-cookie")) throw new Error("a guess must not be handed a session");
 });
 
 console.log("\nquiet");

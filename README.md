@@ -151,11 +151,29 @@ with no CDN — important in the firewalled sbx network.
 > For remote/mobile you can either `tailscale serve` (below, keeps the loopback bind) or bind
 > off-loopback and hit the box's tailnet address directly.
 
+### Opening the cockpit
+
+The API needs the fleet's token. On startup the server prints the URL that carries it:
+
+```
+skein-server → http://127.0.0.1:7878/?t=<token>
+```
+
+Open that once and the browser keeps a `HttpOnly` cookie; after that plain `http://127.0.0.1:7878`
+works. The token lives at `~/.skein/api-token` (0600, generated on first run), so a script can use
+`Authorization: Bearer $(cat ~/.skein/api-token)`.
+
+**Why it exists.** Loopback is not the boundary it looks like. A box in the fleet reaches the host
+at `host.docker.internal:7878` — measured, not assumed — so before this, any agent could approve its
+own write-access request, or un-scope its own box, and collect a real GitHub token for a repo it was
+never meant to touch. Static assets and the page itself are still served to anyone; everything that
+reads or changes state is not. `SKEIN_NO_API_AUTH=1` turns it off if you have another boundary.
+
 ### Remote access (Tailscale)
 
-Keep skein bound to loopback and let Tailscale carry the tailnet → loopback hop. The tailnet
-is the auth boundary: only your WireGuard-authenticated devices can reach it, with no public
-surface — so no app-level token is needed.
+Keep skein bound to loopback and let Tailscale carry the tailnet → loopback hop. The tailnet is a
+second boundary on top of the token: only your WireGuard-authenticated devices can reach it, with no
+public surface.
 
 ```sh
 # on the host running skein-server:

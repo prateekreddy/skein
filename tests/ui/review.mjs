@@ -37,6 +37,7 @@ function makeFixture() {
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(root, "sandboxes.json"), JSON.stringify({}));
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({}));
+  fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
   // A repo whose source IS a GitHub URL — the only kind that has a queue.
   fs.writeFileSync(path.join(home, "repos.json"), JSON.stringify([
     { id: "acme", source: "https://github.com/acme/thing.git", work: path.join(root, "work"),
@@ -136,6 +137,14 @@ exit 0
   return { root, bin, home, gh, sbx, claude };
 }
 
+// The fleet's API token. Written by the fixture rather than read back after startup: the server
+// mints one on first use, and a test that raced that would be flaky for a reason having nothing to
+// do with what it is testing. The auth path itself is still exercised end to end — the browser gets
+// its cookie from `?t=`, exactly as a person does, and every direct fetch carries the bearer.
+const API_TOKEN = "t".repeat(64);
+const apiToken = () => API_TOKEN;
+const authHeader = () => ({ Authorization: `Bearer ${API_TOKEN}` });
+
 const freePort = () => new Promise(res => {
   const s = createServer();
   s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => res(port)); });
@@ -165,7 +174,7 @@ async function startServer(fx, port) {
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });
   for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`)).ok) return srv; } catch {}
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) return srv; } catch {}
     await new Promise(r => setTimeout(r, 100));
   }
   srv.kill();
@@ -208,7 +217,7 @@ page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("console", m => { if (m.type() === "error") noise.push(`[console] ${m.text()}`); });
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
 
-await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
+await page.goto(`http://127.0.0.1:${port}/?t=${apiToken()}`, { waitUntil: "domcontentloaded" });
 await settle(800);
 
 console.log("\nthe badge");
@@ -228,15 +237,15 @@ await check("and its tooltip names the repo the count came from", async () => {
 // going away, since it is the only repo in this fixture.
 await check("switching a repo's queue off silences it", async () => {
   const off = await fetch(`http://127.0.0.1:${port}/api/repos/acme/settings`, {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json", ...authHeader() },
     body: JSON.stringify({ review_queue: false }),
   });
   if (!off.ok) throw new Error(`the setting was refused: ${await off.text()}`);
-  const counts = await (await fetch(`http://127.0.0.1:${port}/api/review/counts`)).json();
+  const counts = await (await fetch(`http://127.0.0.1:${port}/api/review/counts`, { headers: authHeader() })).json();
   if (counts.length) throw new Error(`a switched-off repo was still polled: ${JSON.stringify(counts)}`);
   // …and back on, because every check below this one needs the queue.
   await fetch(`http://127.0.0.1:${port}/api/repos/acme/settings`, {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json", ...authHeader() },
     body: JSON.stringify({ review_queue: true }),
   });
 });
@@ -418,11 +427,11 @@ await check("opening it lists the repo's modules, and admits it has none written
 // established — and that must read as stale, never as fresh.
 await check("a note whose freshness cannot be proven is not treated as current", async () => {
   const wrote = await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules/write`, {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json", ...authHeader() },
     body: JSON.stringify({ path: "src" }),
   }).then(r => r.json());
   if (!wrote.ok) throw new Error(`writing was refused: ${wrote.error}`);
-  const mods = await (await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules`)).json();
+  const mods = await (await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules`, { headers: authHeader() })).json();
   const src = mods.find(m => m.path === "src");
   if (src.state !== "stale")
     throw new Error(`a note git cannot vouch for reported "${src.state}" — it must never read fresh`);
