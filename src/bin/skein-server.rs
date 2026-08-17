@@ -1041,9 +1041,26 @@ struct SendReq {
     kind: String,
 }
 
-/// List the repos skein manages.
-async fn api_repos() -> Json<Vec<skein::Repo>> {
-    Json(skein::load_repos())
+/// List the repos skein manages, each with the GitHub repository it maps to as `slug`.
+///
+/// `slug` is resolved here rather than in the browser because for a repo adopted from a local path
+/// the answer lives in the clone's `origin` — a `git` call only the host can make. The browser parsed
+/// `source` on its own and therefore called every adopted-in-place repo "not a GitHub remote",
+/// disagreeing with the host about the same repo. Empty string ⇒ no GitHub remote anywhere.
+async fn api_repos() -> Json<Vec<serde_json::Value>> {
+    Json(
+        skein::load_repos()
+            .into_iter()
+            .map(|r| {
+                let slug = skein::gitgate::repo_slug(&r).unwrap_or_default();
+                let mut value = serde_json::to_value(&r).unwrap_or_else(|_| serde_json::json!({}));
+                if let Some(fields) = value.as_object_mut() {
+                    fields.insert("slug".into(), serde_json::Value::String(slug));
+                }
+                value
+            })
+            .collect(),
+    )
 }
 
 /// Runtime choices come from the core adapter registry so every client stays in sync when a new
@@ -1139,7 +1156,12 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
         Ok(Ok(repo)) => {
             // Warn up-front if the push path is shaky (no origin, or SSH without a loaded key).
             let warning = skein::remote_warning(&repo.work);
-            Json(serde_json::json!({ "repo": repo, "warning": warning })).into_response()
+            // The repository this maps to, now that there is a clone to ask. The dialog cannot know
+            // it while you are still typing a *path* — only adopting it reveals the origin — so this
+            // is what lets a write token offered in the dialog be stored against the right repo.
+            let slug = skein::gitgate::repo_slug(&repo).unwrap_or_default();
+            Json(serde_json::json!({ "repo": repo, "warning": warning, "slug": slug }))
+                .into_response()
         }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),

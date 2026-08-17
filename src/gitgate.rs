@@ -38,10 +38,15 @@
 //!
 //! **What this gate is, precisely.** Unlike [`crate::substrate`], the boundary here is real: GitHub
 //! enforces it server-side, so a box holding a token scoped to one repository cannot touch another
-//! whatever runs inside it. What it is *not* is a boundary between boxes — they share a uid and a
-//! PID namespace, so one box can read another's token file and act as it. That is this fleet's
-//! stated model, and it is worth naming rather than implying otherwise: the wall this builds is
-//! fleet→GitHub, not box→box.
+//! whatever runs inside it.
+//!
+//! It is also no longer only a fleet→GitHub wall. A box's token file used to be readable by every
+//! other box — same uid, and every box's state directory in view — so scoping one box was worth
+//! whatever the *least* careful box in the fleet did. [`crate::fleet::session_script`] now gives each
+//! box a mount namespace in which no other box's directory exists, which is what makes a per-box
+//! token mean per-box. Two exceptions, both deliberate and both named: the workshop box opts out
+//! (see [`crate::fleet::box_is_privileged`]), and the credential helper still cannot contain
+//! anything *within* a box — hence one repository per token, below.
 
 use crate::util::sh_quote;
 use serde::{Deserialize, Serialize};
@@ -520,15 +525,35 @@ pub fn set_box_scope(box_name: &str, scope: Option<&str>) -> Result<(), String> 
     crate::util::write_atomic(&path, &dir, scope.as_bytes())
 }
 
+/// The GitHub repository a managed repo maps to, as `owner/name` — the one answer to that question.
+///
+/// `repo.source` settles it for a URL-added repo. A repo **adopted from a local path** has a
+/// filesystem path there, which [`slug_from_url`] rejects on purpose — so the clone's own `origin` is
+/// the fallback, and that is not a nicety. Being added by path says nothing about whether a repo has
+/// a GitHub remote: skein's own repo is adopted in place and its origin is
+/// `git@github.com:owner/name`. Reading only `source` therefore called a perfectly ordinary GitHub
+/// repo "not GitHub" — and since the launcher unsets the account `GH_TOKEN` and covers the ssh-agent
+/// for *every* scoped box, a repo that got no token of its own was left with no way to push at all.
+///
+/// `None` only for a repo with no GitHub identity anywhere — no URL, no origin — which genuinely has
+/// nowhere to push.
+pub fn repo_slug(repo: &crate::repos::Repo) -> Option<String> {
+    slug_from_url(&repo.source).or_else(|| {
+        crate::repos::remote_origin_url(&repo.work)
+            .as_deref()
+            .and_then(slug_from_url)
+    })
+}
+
 /// The repository a box may write, as `owner/name` — or empty when skein does not know one.
 ///
 /// Empty is not "everything": [`crate::fleet::session_script`] passes it through to the launcher,
 /// which places no own-repo token when it is empty, so an unknown repo is a box that can read and
-/// cannot push. That is the right failure for a repo adopted from a local path, which has no GitHub
-/// identity to scope to in the first place.
+/// cannot push. That is the right failure for a repo with no GitHub remote — see [`repo_slug`] for
+/// why "added from a local path" is not the same thing.
 pub fn box_repo_slug(box_name: &str) -> String {
     crate::repo_for_box(box_name)
-        .and_then(|r| slug_from_url(&r.source))
+        .and_then(|r| repo_slug(&r))
         .unwrap_or_default()
 }
 
@@ -834,11 +859,11 @@ pub struct ProbeResult {
 pub fn probe_credentials() -> Vec<ProbeResult> {
     let mut out = Vec::new();
     for repo in crate::load_repos() {
-        let Some(slug) = slug_from_url(&repo.source) else {
+        let Some(slug) = repo_slug(&repo) else {
             out.push(ProbeResult {
                 repo: repo.id,
                 ok: true,
-                detail: "not a GitHub remote — nothing to scope".into(),
+                detail: "no GitHub remote — nothing to scope, and nowhere to push".into(),
             });
             continue;
         };
@@ -1491,6 +1516,78 @@ mod tests {
         assert_eq!(slug_from_url("~/code/thing"), None);
         // And the deep-path form, which is the same mistake reached through a URL.
         assert_eq!(slug_from_url("https://github.com/a/b/tree/main/src"), None);
+    }
+
+    /// A git repo at `dir` whose `origin` is `remote` (or none, when empty).
+    fn clone_with_origin(dir: &std::path::Path, remote: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        if !remote.is_empty() {
+            git(&["remote", "add", "origin", remote]);
+        }
+    }
+
+    /// A `Repo` through serde, so the fields this test does not care about keep their real defaults
+    /// rather than a second set maintained here.
+    fn repo_at(id: &str, source: &str, work: &std::path::Path) -> crate::repos::Repo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "source": source,
+            "work": work.to_string_lossy(),
+            "store": "",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_repo_adopted_from_a_local_path_still_pushes_to_the_repository_its_origin_names() {
+        // The bug this pins: reading only `repo.source` called an adopted-in-place repo "not GitHub",
+        // so the launcher placed no token — while it *also* unsets the account `GH_TOKEN` and covers
+        // the ssh-agent for every scoped box. The repo was left with nothing to push with at all.
+        // skein's own repo is this case: added by path, `origin` is git@github.com:owner/name.
+        let home = crate::testutil::tempdir();
+        let work = (home.as_ref() as &std::path::Path).join("code/skein");
+        clone_with_origin(&work, "git@github.com:acme/skein.git");
+        let repo = repo_at("skein", &work.to_string_lossy(), &work);
+        assert_eq!(repo_slug(&repo).as_deref(), Some("acme/skein"));
+    }
+
+    #[test]
+    fn a_repo_with_no_remote_anywhere_has_nowhere_to_push() {
+        // The one case the old behaviour got right, and it must stay right: no URL and no origin is
+        // genuinely no GitHub identity, so no token is the honest answer rather than a missing one.
+        let home = crate::testutil::tempdir();
+        let work = (home.as_ref() as &std::path::Path).join("code/scratch");
+        clone_with_origin(&work, "");
+        assert_eq!(
+            repo_slug(&repo_at("scratch", &work.to_string_lossy(), &work)),
+            None
+        );
+        // Nor does a non-GitHub origin invent one — there is no App installation to mint against.
+        let other = (home.as_ref() as &std::path::Path).join("code/elsewhere");
+        clone_with_origin(&other, "git@gitlab.com:a/b.git");
+        assert_eq!(
+            repo_slug(&repo_at("elsewhere", &other.to_string_lossy(), &other)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_url_added_repo_never_consults_the_clone() {
+        // `source` wins, so a clone whose origin was re-pointed by hand cannot quietly move which
+        // repository the fleet mints tokens for.
+        let home = crate::testutil::tempdir();
+        let work = (home.as_ref() as &std::path::Path).join("code/thing");
+        clone_with_origin(&work, "git@github.com:someone-else/elsewhere.git");
+        let repo = repo_at("thing", "git@github.com:acme/thing.git", &work);
+        assert_eq!(repo_slug(&repo).as_deref(), Some("acme/thing"));
     }
 
     #[test]

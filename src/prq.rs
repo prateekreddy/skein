@@ -19,8 +19,7 @@
 //! product; summaries in [`crate::review`] only decide how much reading each row saves you.
 
 use crate::config::skein_home;
-use crate::gitgate::slug_from_url;
-use crate::repos::{remote_origin_url, Repo};
+use crate::repos::Repo;
 use crate::util::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -116,15 +115,12 @@ pub(crate) fn gh_bin() -> String {
 
 /// The GitHub repository a managed repo maps to, as `owner/name`.
 ///
-/// `repo.source` answers this for a URL-added repo. A repo adopted from a local path has a
-/// filesystem path there — deliberately rejected by [`slug_from_url`] — so the clone's own `origin`
-/// is the fallback. A repo with neither has no GitHub identity and therefore no queue.
+/// One resolver, in [`crate::gitgate`], because the queue and the write token must agree on what repo
+/// this is. They did not: this module fell back to the clone's `origin` while the token path read
+/// only `repo.source`, so an adopted-in-place repo had a review queue *and* no way to push to the
+/// repository that queue was listing.
 pub fn repo_slug(repo: &Repo) -> Option<String> {
-    slug_from_url(&repo.source).or_else(|| {
-        remote_origin_url(&repo.work)
-            .as_deref()
-            .and_then(slug_from_url)
-    })
+    crate::gitgate::repo_slug(repo)
 }
 
 // ───────────────────────────── viewer identity ─────────────────────────────

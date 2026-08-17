@@ -753,6 +753,16 @@
               font-size:12px; font-weight:600; letter-spacing:.02em; color:var(--text); }
   .set-head .sub { font-weight:400; font-size:11px; color:var(--faint); }
   .set-desc { font-size:11.5px; line-height:1.5; color:var(--faint); padding:6px 0 2px; }
+  /* A second way to do something the pane has already shown you the first way to do. Folded, because
+     four credential fields at one level read as four credentials to obtain — when the App path asks
+     for one and the rest exist for fleets that cannot install it. */
+  .set-alt { margin:18px 0 2px; border:1px solid var(--line); border-radius:8px; background:var(--panel-2, transparent); }
+  .set-alt > summary { cursor:pointer; padding:9px 11px; font-size:12px; font-weight:600; color:var(--text-2); }
+  .set-alt > summary:hover { color:var(--text); }
+  .set-alt > summary .sub { font-weight:400; font-size:11px; color:var(--faint); margin-left:8px; }
+  .set-alt[open] > summary { border-bottom:1px solid var(--line); }
+  .set-alt > .set-altbody { padding:2px 11px 12px; }
+  .set-alt > .set-altbody > .set-head:first-child { margin-top:12px; }
   /* The pane's own answer to "is this actually on?", which no individual control can give: the
      switch above can be on while nothing is scoped, and that is the state worth naming. */
   .set-state { margin:6px 0 2px; padding:9px 11px; border-radius:8px; font-size:11.5px; line-height:1.45;
@@ -1248,32 +1258,40 @@
             <div id="set-repos" class="set-repos"></div>
             <button type="button" class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add a repository</button>
           </section>
-          <!-- Every credential a box could hold is configured here, in the order you set one up:
-               what the boundary is, then the two ways to issue a token, then a way to check, then
-               the fleet-wide fallback that predates all of it. Requests from boxes are deliberately
-               *not* here — those arrive unbidden and want one click, so they stay on the padlock
-               (Repo write access). Setup is a place you go; an approval is a thing that finds you. -->
+          <!-- Every credential a box could hold is configured here, and the shape of the pane is the
+               claim that setting skein up asks for ONE credential: the boundary, the App, a way to
+               check it. Everything else is folded away, because a flat list of four token fields
+               reads as four tokens to go and obtain — which is the opposite of what the App path
+               does, and it made a one-credential design look like a chore. What is folded is not
+               hidden: it is the path for a fleet that cannot install an App, and it says so.
+               Requests from boxes are deliberately *not* here — those arrive unbidden and want one
+               click, so they stay on the padlock (Repo write access). Setup is a place you go; an
+               approval is a thing that finds you. -->
           <section class="set-pane" data-pane="github">
             <div class="set-state" id="set-gitstate">checking…</div>
             <label class="set-row"><span class="set-txt"><span class="set-title">Scope each box's GitHub access to its own repo</span><span class="desc">On, a box can push only to <b>its own repo</b> and asks in the cockpit for any other. Needs an App or a repository token below; until one exists this changes nothing. <details><summary>what every box holds without it</summary>every box shares one credential unless this is on — measured on this fleet, that was a user token with <code>repo</code>, <code>admin:public_key</code> and <code>gist</code> reaching <b>460 repositories</b> read and write, plus a forwarded ssh-agent signing for any of them. On, a box gets a token scoped to <b>its own repository</b> for writing and a read-only one for the rest, so a push anywhere else is refused by GitHub — and a box can ask for an exception, which appears under <b>Repo write access</b>. Until an App or a repository token exists this changes nothing at all, because scoping with no way to issue a token would take pushing away from every box at once rather than narrowing anything. Takes effect at a box's next start; one box can opt out in its own settings.</details></span></span><input type="checkbox" id="set-gitscope" class="switch"></label>
 
-            <div class="set-head">Issuing tokens<span class="sub">an App covers every repo you install it on · a stored token covers exactly one</span></div>
+            <div class="set-head">Set it up once<span class="sub">a GitHub App is the whole of it — every token a box gets is minted from this one key</span></div>
+            <div class="set-desc">One credential, and skein derives the rest: a write token scoped to a box's own repository, and a read-only one covering everything you installed the App on — both minted per box, valid an hour, renewed while the box runs. Nothing below is needed on this path.</div>
             <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">Mints a write token for a box's own repo and a read-only one for the repos you install it on. Key at <code>~/.skein/github-app.pem</code>. <details><summary>how to create one</summary>the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b> and <b>Issues: write</b> (the last is what lets a box comment on a PR), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</details></span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
-
-            <div class="set-head">Repository tokens<span class="sub">instead of the App, one fine-grained PAT per repo</span></div>
-            <div class="set-desc">Each covers <b>exactly one</b> repository, and that is the whole security argument: a token covering three would hand all three to whichever box receives it, because the helper that chooses between them runs inside the box as the agent's own uid. A helper routes; it cannot contain. A repo's token can also be set on its own card under <b>Repositories</b>.</div>
-            <div id="set-gitcreds" class="set-creds"></div>
-            <div class="set-credadd">
-              <input id="set-c-repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
-              <input id="set-c-token" type="password" placeholder="github_pat_… (write to that one repo)" autocomplete="off" />
-              <div class="set-credrow"><button type="button" class="kbtn primary" onclick="addGitCred()">Store token</button><span class="desc">storing the same repo again replaces its token — that is how you rotate one</span></div>
-            </div>
-
-            <label class="set-field"><span class="set-title">Read-only token <span class="set-opt">optional</span></span><span class="desc">A fine-grained PAT with <b>contents: read</b>, for reading <b>private</b> repos across the fleet without running an App. Not needed on the App path — reads already come from the installation — and not needed for public repos, which boxes reach anonymously. Write-only here: skein stores it 0600 and never serves it back. <details><summary>why this is separate from the write tokens</summary>a read credential may safely be broad, because the worst a box can do with it is read a repo you own. That is exactly the property a write token must not have, so the two are stored and placed separately rather than one credential doing both jobs at different strengths.</details></span><div class="path-row"><input id="set-readpat" type="password" placeholder="github_pat_… (read)" autocomplete="off" /><button type="button" class="kbtn" onclick="saveReadPat()">Store</button><button type="button" class="kbtn ghost" onclick="clearReadPat()">Forget</button></div></label>
-
-            <div class="set-head">Does it work?<span class="sub">asks GitHub for a real token per repo, then throws it away</span></div>
             <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
             <div id="gq-probe-rows"></div>
+
+            <details class="set-alt" id="set-gitalt">
+              <summary>Without a GitHub App<span class="sub">store tokens yourself — this is the path that asks for more than one</span></summary>
+              <div class="set-altbody">
+                <div class="set-desc">For a fleet where installing an App is not an option. It costs what the App path avoids: <b>one token per repository</b> you want boxes to push to, kept in step by hand as they expire. Reads then come from public access, or from a second token below.</div>
+                <div class="set-head">Repository tokens<span class="sub">one fine-grained PAT per repo, and one repo per PAT</span></div>
+                <div class="set-desc">Each covers <b>exactly one</b> repository, and that is the whole security argument: a token covering three would hand all three to whichever box receives it, because the helper that chooses between them runs inside the box as the agent's own uid. A helper routes; it cannot contain. A repo's token can also be set on its own card under <b>Repositories</b>.</div>
+                <div id="set-gitcreds" class="set-creds"></div>
+                <div class="set-credadd">
+                  <input id="set-c-repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
+                  <input id="set-c-token" type="password" placeholder="github_pat_… (write to that one repo)" autocomplete="off" />
+                  <div class="set-credrow"><button type="button" class="kbtn primary" onclick="addGitCred()">Store token</button><span class="desc">storing the same repo again replaces its token — that is how you rotate one</span></div>
+                </div>
+                <label class="set-field"><span class="set-title">Read-only token <span class="set-opt">optional</span></span><span class="desc">A fine-grained PAT with <b>contents: read</b>, for reading <b>private</b> repos across the fleet — without running an App, or for repos you would rather not install one on. Not needed on the App path — reads already come from the installation — and not needed for public repos, which boxes reach anonymously. Write-only here: skein stores it 0600 and never serves it back. <details><summary>why this is separate from the write tokens</summary>a read credential may safely be broad, because the worst a box can do with it is read a repo you own. That is exactly the property a write token must not have, so the two are stored and placed separately rather than one credential doing both jobs at different strengths.</details></span><div class="path-row"><input id="set-readpat" type="password" placeholder="github_pat_… (read)" autocomplete="off" /><button type="button" class="kbtn" onclick="saveReadPat()">Store</button><button type="button" class="kbtn ghost" onclick="clearReadPat()">Forget</button></div></label>
+              </div>
+            </details>
 
             <div class="set-head">Fleet-wide credential<span class="sub">what boxes hold when nothing above is configured</span></div>
             <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">copies <code>gh auth token</code> — <b>your whole account</b> — into the sandbox-wide secret, so any box can fetch, push and open PRs anywhere it reaches. Scoped boxes drop it at startup and use the tokens above instead; turn this off once scoping is live, and rotate the token you seeded</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
@@ -4146,6 +4164,11 @@ function loadGitCreds() {
     }
     const rp = document.getElementById("set-readpat");
     if (rp) rp.placeholder = gitReadPatSet ? "a token is stored — paste to replace it" : "github_pat_… (read)";
+    // Folded because it is the second path, not because it is unimportant — so a fleet that is
+    // *running* on stored tokens must find them open. Folding away the credentials in use would
+    // hide the thing the status line is talking about.
+    const alt = document.getElementById("set-gitalt");
+    if (alt && (gitqCreds.length || gitReadPatSet)) alt.open = true;
     renderGitState(d);
     // The repo cards show each repo's own token, so they follow whatever just changed here.
     renderRepoList();
@@ -4672,7 +4695,12 @@ function repoSelect(r, key, title, desc, options) {
     + options.map(([value, label]) => `<option value="${esc(value)}"${cur === value ? " selected" : ""}>${esc(label)}</option>`).join("")
     + `</select></label>`;
 }
-// `owner/name` from whatever a repo's source is spelled as, or "" when it is not a GitHub remote.
+// `owner/name` from whatever a repo's source is spelled as, or "" when that spelling isn't a GitHub
+// remote.
+//
+// For a repo skein already manages, use its `slug` — the host resolved it, and can consult the
+// clone's `origin` where this cannot. This is for the one moment there is no clone to ask: a source
+// still being typed into the add dialog.
 //
 // Mirror of `gitgate::slug_from_url` — keep them in sync. Faithful rather than approximate, because
 // the two disagreeing is worse than either being wrong alone: this decides which field the page
@@ -4728,10 +4756,13 @@ function repoSlug(source) {
 // A repo's write token, on the repo's own card — because "which token does *this* repo push with"
 // is a question about the repo, and answering it three panes away is how it went unfound.
 function repoTokenRow(r) {
-  const slug = repoSlug(r.source);
+  // `r.slug` comes from the host, which resolved it from `source` *or* the clone's `origin`. Parsing
+  // `source` here instead was wrong for every repo adopted in place: a path says nothing about
+  // whether the clone has a GitHub remote, and skein's own repo is exactly that case.
+  const slug = r.slug || "";
   if (!slug) {
     return `<label class="set-field"><span class="set-title">Write token</span>`
-      + `<span class="desc">not a GitHub remote, so there is nothing to scope — this repo's boxes read and write it through whatever credential the host clone already uses</span></label>`;
+      + `<span class="desc">no GitHub remote — nothing to scope, and nowhere for a box to push. Give the host clone an <code>origin</code> and this becomes a token field</span></label>`;
   }
   const c = credFor(slug);
   const state = c && !c.problem && c.has_token
@@ -5151,7 +5182,7 @@ function openBoxSettings(name) {
       // above this one is not live. Saying so here is cheaper than it reading as broken.
       document.getElementById("bs-gitscope-note").textContent = cur.git_scope_available
         ? "applies at this box's next start — a running box keeps the credential it was given"
-        : "nothing to scope with yet: configure a GitHub App or a repository token under Repo write access";
+        : "nothing to scope with yet: set up a GitHub App under Settings → GitHub & keys";
       // The workshop box. Ordinary boxes get a mount namespace that hides every other box's
       // directory and an empty file over the fleet agent's token; this is the box that opts out of
       // both, because debugging skein itself means reading the fleet.
@@ -5318,16 +5349,17 @@ function arUpdateDerived() {
   const id = deriveRepoId(source);
   const d = document.getElementById("ar-derived");
   d.innerHTML = id ? `box names will be <b>${esc(id)}</b>-&lt;branch&gt;` : "";
-  // A token field offered for a local path would be a field that cannot work: there is no GitHub
-  // repository to scope one to. Say which case this is instead of accepting a token and dropping it.
+  // A local path may well be a GitHub repo — its `origin` decides, and only adopting it reveals
+  // that. So the field stays usable and the host tells us which repository the token was stored
+  // against once the repo exists. Disabling it here is what left an adopted repo unable to push.
   const slug = repoSlug(source);
   const tok = document.getElementById("ar-token");
   const hint = document.getElementById("ar-tokhint");
-  const local = !!source.trim() && !slug;
-  tok.disabled = local;
-  tok.placeholder = local ? "not a GitHub remote — nothing to scope" : "github_pat_… — leave blank if a GitHub App covers it";
-  hint.innerHTML = local
-    ? "a local path has no GitHub identity, so its boxes use whatever credential the host clone does"
+  const path = !!source.trim() && !slug;
+  tok.disabled = false;
+  tok.placeholder = "github_pat_… — leave blank if a GitHub App covers it";
+  hint.innerHTML = path
+    ? "a fine-grained PAT for this repo, which its boxes push with. Which repository that is comes from the clone's <code>origin</code>, read when it's adopted — if it has none, the token is not stored and skein says so."
     : `a fine-grained PAT covering only <b>${slug ? esc(slug) : "this repo"}</b>, which its boxes push with. On the App path you need none.`;
 }
 function submitAddRepo() {
@@ -5355,7 +5387,10 @@ function submitAddRepo() {
     .then(async r => { if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); })
     .then(res => {
       settle();
-      const repo = res.repo || res;
+      // The host resolved which GitHub repository this is (from the URL, or the adopted clone's
+      // `origin`) — carried on the repo so the token below is stored against the same repository the
+      // box will be handed a token for.
+      const repo = Object.assign({}, res.repo || res, { slug: res.slug || "" });
       // Applied here rather than sent with the clone: every one of these keys on the repo's id, and
       // the server picks that id — deriving it in the page would be a second implementation of a
       // rule that already exists, wrong exactly when they disagree.
@@ -5407,8 +5442,8 @@ function arApplySettings(repo) {
       .catch(e => problems.push(`settings not saved: ${e.message}`)));
   }
   if (token) {
-    const slug = repoSlug(repo.source);
-    if (!slug) problems.push("no write token stored — this is not a GitHub remote");
+    const slug = repo.slug || "";
+    if (!slug) problems.push("no write token stored — this repo has no GitHub remote to scope one to");
     else jobs.push(storeGitCred(slug, token).catch(e => problems.push(`token not stored: ${e.message}`)));
   }
   return Promise.all(jobs).then(() => problems);

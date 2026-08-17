@@ -323,17 +323,24 @@ for (const [source, want] of [
 // --- a repo's own token row -----------------------------------------------------------------------
 T.reset();
 T.setCreds([{ id: "acme-thing", repo: "acme/thing", has_token: true, problem: "" }]);
-const owned = T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git" });
+const owned = T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
 check("a repo with a stored token says so on its own card", owned.includes("token stored"), true);
 check("and offers to forget it", owned.includes("Forget"), true);
 
-const fromApp = T.repoTokenRow({ id: "other", source: "git@github.com:acme/other.git" });
+const fromApp = T.repoTokenRow({ id: "other", source: "git@github.com:acme/other.git", slug: "acme/other" });
 check("one without falls back to the App rather than reading as broken", fromApp.includes("from the App"), true);
 
-// A local path has no GitHub identity, so offering a token field would be offering one that cannot
-// work — say which case it is instead.
-const local = T.repoTokenRow({ id: "scratch", source: "/Users/me/code/scratch" });
-check("a local path is told there is nothing to scope", local.includes("nothing to scope"), true);
+// The regression this row was getting wrong: a repo adopted from a local path whose clone has a
+// GitHub `origin`. The host resolves that and sends the slug; parsing `source` here called it "not
+// GitHub" and offered no token field, on a repo whose boxes need one to push at all.
+const adopted = T.repoTokenRow({ id: "skein", source: "/Users/me/code/skein", slug: "acme/skein" });
+check("an adopted repo with a GitHub origin gets a token field", adopted.includes(`data-repotoken="acme/skein"`), true);
+check("named for the repository the host will mint against", adopted.includes("<b>acme/skein</b>"), true);
+
+// Only a repo with no GitHub remote anywhere has nothing to offer — and it is the absent remote that
+// is worth saying, since that is what a box cannot push without.
+const local = T.repoTokenRow({ id: "scratch", source: "/Users/me/code/scratch", slug: "" });
+check("a repo with no remote is told so", local.includes("no GitHub remote"), true);
 check("and gets no token field at all", local.includes("data-repotoken"), false);
 
 // --- the add dialog's follow-up work ---------------------------------------------------------------
@@ -343,7 +350,7 @@ T.form().plane.value = "https://plane.example/projects/abc/issues";
 T.form().conn.value = "backlog-1";
 T.form().review.value = "false";
 T.form().token.value = "github_pat_11ABC";
-let problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git" });
+let problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
 check("the whole form applied cleanly", problems, []);
 const settings = T.sent().find(s => s.url.includes("/settings"));
 check("the tracker fields are sent together, in one call", settings.body.plane_project, "https://plane.example/projects/abc/issues");
@@ -355,7 +362,7 @@ check("the token is stored against the repo it names", cred.body.repos, ["acme/t
 // On is the default, so sending it would write a field the user never touched.
 T.reset();
 T.form().review.value = "true";
-await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git" });
+await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
 check("an untouched form sends nothing at all", T.sent().length, 0);
 
 // The clone is the expensive, irreversible part and it already succeeded. A tracker field that
@@ -364,7 +371,7 @@ T.reset();
 T.failOn("/settings");
 T.form().plane.value = "p";
 T.form().token.value = "github_pat_x";
-problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git" });
+problems = await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
 check("a failed settings call is reported", problems.length, 1);
 check("naming what did not happen", problems[0].includes("settings not saved"), true);
 check("and never stops the token being stored", T.sent().some(s => s.url.includes("git-credentials")), true);
@@ -372,9 +379,18 @@ check("and never stops the token being stored", T.sent().some(s => s.url.include
 // A token typed for a repo with no GitHub identity must be refused loudly, not dropped quietly.
 T.reset();
 T.form().token.value = "github_pat_x";
-problems = await T.arApplySettings({ id: "scratch", source: "/Users/me/code/scratch" });
-check("a token for a non-GitHub source is refused, not silently dropped", problems.length, 1);
-check("saying why", problems[0].includes("not a GitHub remote"), true);
+problems = await T.arApplySettings({ id: "scratch", source: "/Users/me/code/scratch", slug: "" });
+check("a token for a repo with no remote is refused, not silently dropped", problems.length, 1);
+check("saying why", problems[0].includes("no GitHub remote"), true);
 check("and nothing is sent", T.sent().length, 0);
+
+// The same form against a repo adopted in place: the host answered with a slug, so the token belongs
+// to that repository. Refusing it here was the dialog's half of the same bug.
+T.reset();
+T.form().token.value = "github_pat_adopted";
+problems = await T.arApplySettings({ id: "skein", source: "/Users/me/code/skein", slug: "acme/skein" });
+check("a token typed for an adopted repo is stored, not refused", problems, []);
+check("against the repository its origin names",
+  T.sent().find(s => s.url.includes("git-credentials")).body.repos, ["acme/skein"]);
 
 done();

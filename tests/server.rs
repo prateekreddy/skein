@@ -304,3 +304,97 @@ fn saving_settings_leaves_untouched_fields_alone() {
     assert_eq!(saved["base_branch"], "trunk", "and so must every other one");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The repo list must name the GitHub repository the host will mint a token for — including for a
+/// repo adopted from a local path, where the answer is in the clone's `origin` and the browser has no
+/// way to look. Parsing `source` in the page instead left every adopted repo reading "not a GitHub
+/// remote" while its boxes needed a token to push at all.
+#[test]
+fn the_repo_list_names_the_repository_the_host_will_mint_for() {
+    let dir = std::env::temp_dir().join(format!("skein-repos-it-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("api-token"), API_TOKEN).unwrap();
+
+    // Adopted in place: `source` is a path, and only the clone knows it is a GitHub repo. This is
+    // skein's own shape, not an exotic one.
+    let adopted = dir.join("code/adopted");
+    let plain = dir.join("code/plain");
+    for (work, origin) in [
+        (&adopted, "git@github.com:acme/adopted.git"),
+        (&plain, ""),
+    ] {
+        std::fs::create_dir_all(work).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(work)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        if !origin.is_empty() {
+            git(&["remote", "add", "origin", origin]);
+        }
+    }
+    std::fs::write(
+        dir.join("repos.json"),
+        serde_json::json!([
+            { "id": "adopted", "source": adopted.to_string_lossy(), "work": adopted.to_string_lossy(), "store": "" },
+            { "id": "plain", "source": plain.to_string_lossy(), "work": plain.to_string_lossy(), "store": "" },
+            { "id": "cloned", "source": "https://github.com/acme/cloned.git", "work": "", "store": "" },
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &dir)
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (_, body) = http_get(&addr, "/api/repos");
+    let repos: Vec<serde_json::Value> =
+        serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap_or("[]"))
+            .expect("repos are JSON");
+    let slug_of = |id: &str| -> String {
+        repos
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is in the list"))["slug"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(
+        slug_of("adopted"),
+        "acme/adopted",
+        "an adopted clone's origin is what names it"
+    );
+    assert_eq!(
+        slug_of("cloned"),
+        "acme/cloned",
+        "and a URL-added repo is named by the URL"
+    );
+    assert_eq!(
+        slug_of("plain"),
+        "",
+        "a repo with no remote anywhere has nothing to name — and no token field to offer"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

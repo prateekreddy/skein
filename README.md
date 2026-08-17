@@ -488,9 +488,16 @@ Remotes are rewritten to HTTPS with `insteadOf`, so existing `git@github.com:…
 untouched, and the forwarded ssh-agent socket is bound over rather than merely unset.
 
 Unlike the package gate above, **this boundary is real**: GitHub enforces it server-side, so a box
-holding a token for one repository cannot touch another whatever runs inside it. It is still not a
-boundary *between* boxes — they share a uid and a PID namespace, so one box can read another's token
-file. The wall is fleet→GitHub.
+holding a token for one repository cannot touch another whatever runs inside it. Nor can it read the
+token another box holds — each box's mount namespace hides every other box's directories ([what one
+box can see of another](#what-one-box-can-see-of-another)); the exception is the workshop box, which
+opts out of that on purpose.
+
+**Which repository "its own" means.** The GitHub repo the host clone's `origin` points at, or the URL
+the repo was added by. Being added *by local path* does not make a repo unscopable — skein's own repo
+is adopted in place — so an adopted clone with a GitHub origin gets a token for it like any other. A
+repo with no origin at all is the one case with nowhere to push: no token is placed, and its card says
+so rather than offering a field that could not work.
 
 #### Setting it up
 
@@ -507,8 +514,10 @@ Until an App (or a stored token, below) exists, **nothing is scoped** — the se
 and every box keeps the credential it already had. That is deliberate: scoping with no way to issue
 a write token would not narrow a box's reach, it would take pushing away from every box at once.
 
-Prefer not to run an App? Store a fine-grained PAT per repository under **Repo write access** in the
-cockpit. One repository per token, enforced when stored *and* when used — a token covering three
+Prefer not to run an App? Store a fine-grained PAT per repository under **Settings → GitHub & keys →
+Without a GitHub App** (or on a repo's own card under **Repositories**). It is folded away because it
+is the path that asks for more than one credential — the App asks for one key and derives every token
+from it. One repository per token, enforced when stored *and* when used — a token covering three
 repos is write access to three repos for whichever box receives it, because the credential helper
 runs inside the box as the agent's own uid and can route but never contain. Cross-repo reads of
 private repos then need an optional read-only PAT, which nothing prompts for.
