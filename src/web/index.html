@@ -1271,12 +1271,16 @@
             <div id="set-repos" class="set-repos"></div>
             <button type="button" class="set-add" onclick="addRepoPrompt()"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add a repository</button>
           </section>
-          <!-- Every credential a box could hold is configured here, and the shape of the pane is the
-               claim that setting skein up asks for ONE credential: the boundary, the App, a way to
-               check it. Everything else is folded away, because a flat list of four token fields
-               reads as four tokens to go and obtain — which is the opposite of what the App path
-               does, and it made a one-credential design look like a chore. What is folded is not
-               hidden: it is the path for a fleet that cannot install an App, and it says so.
+          <!-- Every credential a box could hold is configured here, as THREE ANSWERS TO ONE QUESTION —
+               how do boxes get GitHub credentials — and the pane's shape is that claim. An App, a
+               per-repo PAT, or this account's `gh` token: peers, each picked on purpose.
+               They were not peers. The first two had to be configured; the third was simply *on*, so
+               the broadest credential of the three was the one nobody chose, and on a keyring-backed
+               `gh` it announced itself by unlocking the user's keyring at every start before they had
+               said which path they wanted. It is now off until chosen, like the other two.
+               The App is still first and still recommended — one key, every token derived from it —
+               and the other two fold away, because a flat list of token fields reads as a list of
+               tokens to go and obtain. What is folded is not hidden, and it says what it is for.
                Requests from boxes are deliberately *not* here — those arrive unbidden and want one
                click, so they stay on the padlock (Repo write access). Setup is a place you go; an
                approval is a thing that finds you. -->
@@ -1306,9 +1310,16 @@
               </div>
             </details>
 
-            <div class="set-head">Fleet-wide credential<span class="sub">what boxes hold when nothing above is configured</span></div>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">copies <code>gh auth token</code> — <b>your whole account</b> — into the sandbox-wide secret, so any box can fetch, push and open PRs anywhere it reaches. Scoped boxes drop it at startup and use the tokens above instead; turn this off once scoping is live, and rotate the token you seeded</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">refresh the sbx secret after a rotation</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
+            <details class="set-alt" id="set-ghalt">
+              <summary>Use this account's <code>gh</code> token<span class="sub">the third path — no App, no per-repo tokens, and no narrowing either</span></summary>
+              <div class="set-altbody">
+                <div class="set-desc">The one credential that is <b>not</b> scoped to anything: whatever <code>gh auth token</code> returns, which is <b>your whole GitHub account</b>, copied into the sandbox-wide secret and reachable by every box. It exists because it needs no setup — nothing to create, install or rotate per repo — and that is the entire trade. Prefer it only for a fleet whose repos you would hand any box wholesale.<br><br>Off until you pick it. It used to be on by default, which made the broadest of the three the one nobody chose — and on Linux <code>gh</code> keeps its token in the login keyring, so startup asked to unlock it every time.</div>
+                <label class="set-row"><span class="set-txt"><span class="set-title">Seed gh token into sbx</span><span class="desc">copies <code>gh auth token</code> into the sandbox-wide secret, so any box can fetch, push and open PRs anywhere it reaches. A scoped box drops it at startup and uses its own token instead, so this is the credential for boxes that are <i>not</i> scoped. Seeded once and remembered — later starts do not re-read your keyring</span></span><input type="checkbox" id="set-seedgh" class="switch"></label>
+                <label class="set-row"><span class="set-txt"><span class="set-title">Overwrite token on startup</span><span class="desc">re-read <code>gh auth token</code> and replace the seeded secret — how you rotate it, and how you recover if the secret was removed in sbx by hand. Costs one keyring unlock per start while it is on, so turn it back off afterwards</span></span><input type="checkbox" id="set-forcegh" class="switch"></label>
+              </div>
+            </details>
+
+            <div class="set-head">Host SSH key<span class="sub">not a box credential — the host agent sbx forwards</span></div>
             <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box. A scoped box has this socket blanked, since a forwarded agent signs for anything the key reaches and would undo the scoping above</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
           </section>
           <section class="set-pane" data-pane="fleet">
@@ -4183,8 +4194,16 @@ function renderGitState(d) {
     // repeating the sentence above it, whereas "the key is not at <path>" is the whole answer to a
     // half-configured fleet, and the state someone is most likely to be stuck in.
     const half = d.app_id && d.app_problem ? ` <b>${esc(d.app_problem)}</b>` : "";
-    el.innerHTML = `<b>Not scoped.</b> Every box holds the fleet-wide credential — whatever <code>gh auth token</code> reaches. `
-      + `Add a GitHub App or a repository token below to change that.${half}`;
+    // Two different fleets used to read as one sentence. With the account token seeded by default,
+    // "not scoped" always meant "every box holds your whole account" — so that is what this said.
+    // Now that the account token is chosen rather than assumed, an unconfigured fleet has *no* way to
+    // push, and telling someone their boxes hold a credential they never picked would be worse than
+    // saying nothing: they would go looking for the wrong problem when a push fails.
+    el.innerHTML = d.account_token
+      ? `<b>Not scoped.</b> Every box holds this account's <code>gh</code> token — whatever it reaches, read and write. `
+        + `Add a GitHub App or a repository token below to narrow that.${half}`
+      : `<b>No credential chosen.</b> Boxes read public repos anonymously and <b>cannot push anywhere</b>. `
+        + `Pick one of the three below — an App is the one that needs no per-repo upkeep.${half}`;
     return;
   }
   const on = document.getElementById("set-gitscope");
@@ -4548,8 +4567,14 @@ function setPane(pane) {
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
 function openSettings(pane = "repos") {
   Promise.all([loadRuntimes(), loadSettings(), loadRepos(), loadSync()]).then(() => {
-    document.getElementById("set-seedgh").checked = settings.seed_gh_secret !== false;
+    // `!== false` would read an absent field as chosen, which is exactly the default this stopped
+    // being. Unset means nobody picked the account token, so the switch is off.
+    document.getElementById("set-seedgh").checked = settings.seed_gh_secret === true;
     document.getElementById("set-forcegh").checked = !!settings.force_gh_secret;
+    // A fleet actually running on the account token must not have that folded out of sight — same
+    // rule as the stored-token fold: hide a second path, never a path in use.
+    const ghalt = document.getElementById("set-ghalt");
+    if (ghalt && (settings.seed_gh_secret === true || settings.force_gh_secret)) ghalt.open = true;
     document.getElementById("set-confirmdestroy").checked = settings.confirm_destroy !== false;
     document.getElementById("set-agent").value = settings.default_agent || "";
     document.getElementById("set-base").value = settings.base_branch || "";
@@ -5072,6 +5097,13 @@ function firstRunHtml() {
     { done: repos.length > 0,
       label: repos.length ? `${repos.length} ${repos.length === 1 ? "repository" : "repositories"} registered` : "add a repository",
       hint: `<a href="#" onclick="addRepoPrompt();return false">add one</a> — a box is a branch of a repo, so there is nothing to launch without it` },
+    // Asked, because it is no longer answered behind your back. The account token used to be seeded
+    // by default, so a box could always push and this step would have been noise; making the broadest
+    // credential a deliberate choice means an unconfigured fleet cannot push at all, and a first run
+    // that discovers that from a failed push an hour later is the outcome this step exists to prevent.
+    { done: !!h.git_credential,
+      label: h.git_credential ? `boxes can push (${h.git_credential})` : "choose how boxes push",
+      hint: `<a href="#" onclick="openSettings('github');return false">pick a credential</a> — a GitHub App (one key, a token per repo), a per-repo token, or this account's <code>gh</code> token. Until then boxes read public repos and cannot push` },
   ];
   const rows = steps.map(s => `
     <li class="fr-step ${s.done ? "done" : ""}">
@@ -5079,8 +5111,14 @@ function firstRunHtml() {
       <span class="fr-txt"><b>${s.label}</b>${s.done ? "" : `<span class="fr-hint">${s.hint}</span>`}</span>
     </li>`).join("");
   const ready = steps.every(s => s.done);
+  // Counted, not spelled out. It said "three things" while listing four the moment credentials became
+  // a step — the kind of wrong that makes a first run feel unmaintained before it has done anything.
+  const left = steps.filter(s => !s.done).length;
+  const head = ready
+    ? "ready — launch your first box"
+    : `${["", "one thing", "two things", "three things", "four things", "five things"][left] || `${left} things`} and you are running`;
   return `<div class="fr">
-    <div class="fr-head">${ready ? "ready — launch your first box" : "three things and you are running"}</div>
+    <div class="fr-head">${head}</div>
     <ol class="fr-steps">${rows}</ol>
     ${ready ? `<button type="button" class="kbtn primary" onclick="openNewBox()">Launch a box</button>` : ""}
     <div class="fr-foot">not sure what this looks like with a fleet? <a href="?demo">see the demo</a></div>

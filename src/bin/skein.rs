@@ -462,6 +462,33 @@ fn cmd_doctor() -> Result<(), String> {
         on_off(cfg.seed_gh_secret),
         if cfg.ssh_key.is_empty() { "—" } else { "set" },
     );
+    // Which of the three credential paths this fleet is on. First, because "can a box push" is the
+    // question every other GitHub line here is a detail of — and because all three are opt-in, so
+    // "none" is a state a fresh fleet really sits in rather than a fault to hunt.
+    match skein::gitgate::box_credential() {
+        skein::gitgate::BoxCredential::None => {
+            println!(
+                "{WARN} boxes push    nothing chosen — boxes read public repos and cannot push"
+            );
+            println!("              {DIM}Settings → GitHub & keys: a GitHub App, a per-repo token, or this account's gh token{RESET}");
+        }
+        other => println!("{OK} boxes push    with {}", other.label()),
+    }
+    // Whether startup will reach for `gh auth token` — which on a keyring-backed `gh` is a password
+    // dialog. Reported because the fix for that dialog is to *skip* the call, and a silent skip is
+    // indistinguishable from a broken seed until a box fails to push.
+    if cfg.seed_gh_secret {
+        match skein::gh_secret_seeded() {
+            Some(when) => println!(
+                "{OK} gh secret     seeded {when} {DIM}— startup skips `gh auth token`, so no \
+                 keyring is unlocked. Settings → Overwrite token on startup re-seeds{RESET}"
+            ),
+            None => println!(
+                "{DIM}·{RESET} gh secret     not seeded yet {DIM}— the next server start runs `gh \
+                 auth token`, which asks to unlock your keyring if `gh` stores its token there{RESET}"
+            ),
+        }
+    }
     if have("ssh-add") {
         let loaded = Command::new("ssh-add")
             .arg("-l")

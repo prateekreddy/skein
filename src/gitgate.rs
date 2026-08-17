@@ -966,6 +966,72 @@ pub enum ScopeStatus {
     Active { app: String, tokens: usize },
 }
 
+/// Which credential a box actually receives — the answer to "can boxes push at all".
+///
+/// Distinct from [`ScopeStatus`], which answers "is scoping in force". The two part company in the
+/// state that matters most on a first run: scoping asked for, nothing configured to serve it, so
+/// [`box_is_scoped`] fails open and a box keeps the fleet-wide credential — `NotConfigured` there,
+/// `Account` or `None` here depending on whether anyone chose to seed one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoxCredential {
+    /// Nobody has chosen. Reads are anonymous, which covers every public repo, and no push can
+    /// succeed anywhere. A real state since all three paths became opt-in.
+    None,
+    /// This account's `gh` token, seeded fleet-wide: every box, everything it reaches, read and write.
+    Account,
+    /// Per-box scoped tokens. `app` is empty when only stored per-repo tokens are in use.
+    Scoped { app: String, tokens: usize },
+}
+
+impl BoxCredential {
+    /// One phrase naming the credential, for a checklist row or a doctor line. Empty for `None`, so
+    /// a caller can treat "" as "nothing chosen" without matching.
+    pub fn label(&self) -> String {
+        match self {
+            BoxCredential::None => String::new(),
+            BoxCredential::Account => "this account's gh token".into(),
+            BoxCredential::Scoped { app, tokens } => {
+                let mut parts = Vec::new();
+                if !app.is_empty() {
+                    parts.push(format!("App {app}"));
+                }
+                match tokens {
+                    0 => {}
+                    1 => parts.push("1 repository token".into()),
+                    n => parts.push(format!("{n} repository tokens")),
+                }
+                // An App whose id is blank is still an App — `app_credentials()` succeeded, so
+                // something must be said rather than an empty string that reads as "nothing chosen".
+                match parts.is_empty() {
+                    true => "a GitHub App".into(),
+                    false => parts.join(" · "),
+                }
+            }
+        }
+    }
+}
+
+/// What a box gets, without calling GitHub.
+///
+/// Answered through [`scope_status`] rather than from the config directly, because *every* state in
+/// which scoping is not in force — switched off, nothing configured, configured and refused — leaves
+/// a box holding the fleet-wide credential. `box_is_scoped` fails open, so there is exactly one
+/// question worth asking ("is scoping actually serving this box") and one answer for every way it can
+/// be no. Reading `scope_git_to_repo` here as well only looked more careful: `scope_status` returns
+/// `Off` for it already, so the extra branch could not change an answer — checked by removing it and
+/// watching nothing fail.
+pub fn box_credential() -> BoxCredential {
+    match scope_status() {
+        ScopeStatus::Active { app, tokens } => BoxCredential::Scoped { app, tokens },
+        // Not scoping, for whatever reason. The box holds whatever the fleet-wide answer is — which is
+        // now a choice, and so can be nothing at all.
+        _ => match crate::config::load_config().seed_gh_secret {
+            true => BoxCredential::Account,
+            false => BoxCredential::None,
+        },
+    }
+}
+
 /// Diagnose scoping without calling GitHub.
 ///
 /// Deliberately offline: this is polled by the health path, and a network round trip per poll would
@@ -1588,6 +1654,64 @@ mod tests {
         clone_with_origin(&work, "git@github.com:someone-else/elsewhere.git");
         let repo = repo_at("thing", "git@github.com:acme/thing.git", &work);
         assert_eq!(repo_slug(&repo).as_deref(), Some("acme/thing"));
+    }
+
+    /// What a box actually holds, across the states a first run passes through.
+    #[test]
+    fn a_box_holds_what_was_chosen_and_nothing_when_nothing_was() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        // SAFETY: guarded by the crate-wide env lock, as every $SKEIN_HOME test is.
+        unsafe { std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path) };
+
+        // A fresh fleet: scoping on (its default) and nothing to serve it. Boxes read anonymously and
+        // cannot push — the state that used to be invisible, because the account token was seeded by
+        // default and so this always answered "the account token".
+        let mut config = crate::config::load_config();
+        config.scope_git_to_repo = true;
+        config.seed_gh_secret = false;
+        crate::config::save_config(&config).unwrap();
+        assert_eq!(box_credential(), BoxCredential::None);
+        assert_eq!(
+            box_credential().label(),
+            "",
+            "nothing chosen has nothing to name"
+        );
+
+        // Choosing the account token is a choice like any other.
+        config.seed_gh_secret = true;
+        crate::config::save_config(&config).unwrap();
+        assert_eq!(box_credential(), BoxCredential::Account);
+
+        // A stored token now serves scoping, so that is what a box gets — not the account token, which
+        // `box-session.sh` drops at startup for a scoped box.
+        set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
+        set_credential_token("mine", "github_pat_XYZ").unwrap();
+        assert_eq!(
+            box_credential(),
+            BoxCredential::Scoped {
+                app: String::new(),
+                tokens: 1
+            }
+        );
+        assert_eq!(box_credential().label(), "1 repository token");
+
+        // Scoping switched off means the launcher keeps the account token whatever else is set up.
+        // Reporting the stored token here would name a credential no box receives — the mutation that
+        // proves this line: answer `Scoped` for every non-active state and it is this assertion that
+        // catches it.
+        config.scope_git_to_repo = false;
+        crate::config::save_config(&config).unwrap();
+        assert_eq!(
+            box_credential(),
+            BoxCredential::Account,
+            "an unscoped box holds the fleet-wide credential however many tokens exist"
+        );
+
+        // …and with nothing seeded either, an unscoped fleet has simply nothing.
+        config.seed_gh_secret = false;
+        crate::config::save_config(&config).unwrap();
+        assert_eq!(box_credential(), BoxCredential::None);
     }
 
     #[test]

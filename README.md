@@ -516,9 +516,29 @@ reachable. Put the App ID in Settings.
 The installation list is then the only control: a repo the App is installed on is readable, and one
 it is not is not. Adding one takes effect at the next refresh with nothing to re-mint.
 
-Until an App (or a stored token, below) exists, **nothing is scoped** — the setting has no effect
-and every box keeps the credential it already had. That is deliberate: scoping with no way to issue
-a write token would not narrow a box's reach, it would take pushing away from every box at once.
+Until an App (or a stored token, below) exists, **nothing is scoped** — the setting has no effect and
+every box keeps whatever fleet-wide credential you chose. That is deliberate: scoping with no way to
+issue a write token would not narrow a box's reach, it would take pushing away from every box at once.
+
+#### The three paths, all opt-in
+
+There are exactly three ways a box gets GitHub credentials, and **none of them is a default**:
+
+| Path | What a box holds | What it costs you |
+|---|---|---|
+| **GitHub App** | a write token for its own repo, an hour at a time, plus read over your installs | one App, installed where you want it readable |
+| **Per-repo PAT** | a write token for that one repo | one token per repo, rotated by hand |
+| **This account's `gh` token** | your whole account, in every box | nothing to set up — and no narrowing either |
+
+The third used to be on by default, which made the broadest of the three the one nobody chose. It also
+announced itself: `gh` keeps its token in the system keyring on a modern Linux, so startup asked to
+unlock your keyring — every launch — before you had said which path you wanted. It is now off until
+picked, seeded once and remembered, and the first-run checklist asks for a choice rather than making
+one. Turning it off changes nothing for a fleet already running on it: the secret lives in sbx's own
+store, so it stays seeded and boxes keep pushing.
+
+`skein doctor` names which path you are on, and says so plainly when you are on none — boxes then read
+public repos anonymously and cannot push anywhere.
 
 Prefer not to run an App? Store a fine-grained PAT per repository under **Settings → GitHub & keys →
 Without a GitHub App** (or on a repo's own card under **Repositories**). It is folded away because it

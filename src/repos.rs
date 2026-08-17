@@ -479,16 +479,51 @@ pub fn ensure_gh_secret() -> Result<(), String> {
     if !force && crate::gitgate::can_issue_write_tokens() {
         return Ok(());
     }
-    let mut token_command = Command::new("gh");
-    token_command.args(["auth", "token"]);
-    let token = bounded_output(&mut token_command, "gh auth token", Duration::from_secs(15))?;
-    if !token.status.success() {
-        return Err("gh auth token failed (run `gh auth login` on the host)".into());
+    // Already seeded ⇒ nothing to do, and *nothing to ask*. This is the line that stops a password
+    // dialog at every launch.
+    //
+    // `gh` keeps its token in the system keyring on a modern Linux, so `gh auth token` is a libsecret
+    // call — and a locked login keyring answers it with "unlock your login keyring", which on Ubuntu
+    // arrived once per `skein-server` start, for ever. What made it indefensible is that after the
+    // first seed the answer was *discarded*: the token was fetched, handed to sbx, refused with
+    // "already exists", and thrown away. The dialog bought nothing.
+    //
+    // So the fact is remembered rather than re-proven. Not a heuristic standing in for the truth —
+    // sbx told us, and this is its answer written down. The secret is global to sbx rather than to a
+    // sandbox, so rebuilding the fleet does not remove it and cannot invalidate this.
+    //
+    // What *can*: deleting the secret in sbx by hand, or reinstalling sbx. Both are recovered by the
+    // same control that has always meant "seed it again" — **Overwrite token on startup**, or
+    // `$SKEIN_FORCE_GH_SECRET` — which skips this check and rewrites the marker.
+    let seeded = crate::config::skein_home().join("gh-secret-seeded");
+    if !force && seeded.exists() {
+        return Ok(());
     }
-    let token = String::from_utf8_lossy(&token.stdout).trim().to_string();
-    if token.is_empty() {
-        return Err("gh auth token was empty".into());
-    }
+    // The environment first, because it costs nothing. A token already exported here is the same
+    // credential `gh` would hand back, and asking `gh` for it would unlock a keyring to learn what
+    // this process was already told. Headless and CI setups live here.
+    let from_env = ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .filter_map(|k| env::var(k).ok())
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty());
+    let token = match from_env {
+        Some(t) => t,
+        None => {
+            let mut token_command = Command::new("gh");
+            token_command.args(["auth", "token"]);
+            let token =
+                bounded_output(&mut token_command, "gh auth token", Duration::from_secs(15))?;
+            if !token.status.success() {
+                return Err("gh auth token failed (run `gh auth login` on the host)".into());
+            }
+            let token = String::from_utf8_lossy(&token.stdout).trim().to_string();
+            if token.is_empty() {
+                return Err("gh auth token was empty".into());
+            }
+            token
+        }
+    };
     let mut args = vec!["secret", "set", "-g", "github", "-t", &token];
     if force {
         args.push("-f");
@@ -501,14 +536,38 @@ pub fn ensure_gh_secret() -> Result<(), String> {
         Duration::from_secs(30),
     )?;
     if out.status.success() {
+        remember_gh_secret(&seeded);
         return Ok(());
     }
     // Not forcing + the secret is already there → boxes can already push; that's success, not failure.
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !force && stderr.contains("already exists") {
+        remember_gh_secret(&seeded);
         return Ok(());
     }
     Err(format!("sbx secret set failed: {}", stderr.trim()))
+}
+
+/// Write down that the sbx secret is in place, so the next start does not unlock a keyring to
+/// rediscover it.
+///
+/// Deliberately best-effort and silent: failing to record this costs one dialog at the next launch,
+/// while an error here would turn a fleet that is working perfectly into a startup complaint. It
+/// holds no secret — only a timestamp, so `skein doctor` can say *when* rather than merely *that*.
+fn remember_gh_secret(path: &Path) {
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(path, format!("{}\n", chrono::Utc::now().to_rfc3339()));
+}
+
+/// Has the sbx secret been seeded, as far as skein knows? For `skein doctor`, which reports this
+/// rather than making the user infer it from a dialog that stopped appearing.
+pub fn gh_secret_seeded() -> Option<String> {
+    fs::read_to_string(crate::config::skein_home().join("gh-secret-seeded"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 // ───────────────────────────── kit / store provisioning ─────────────────────────────
@@ -642,11 +701,21 @@ mod tests {
         env::remove_var("SKEIN_NO_GH_SECRET");
         env::remove_var("SKEIN_FORCE_GH_SECRET");
 
-        // No issuer: it tries, and fails on the missing `gh` rather than skipping.
+        // Nobody has chosen the account token, so nothing reaches for it. This is the property that
+        // stops startup unlocking a keyring before the user has said which credential path they want.
+        assert!(
+            ensure_gh_secret().is_ok(),
+            "unchosen must mean untouched: with seeding off, `gh` is never invoked"
+        );
+
+        // Chosen, and no issuer: now it tries, and fails on the missing `gh` rather than skipping —
+        // because with nothing to scope with, the account token is all a box would have.
+        let mut chose_it = crate::config::load_config();
+        chose_it.seed_gh_secret = true;
+        crate::config::save_config(&chose_it).unwrap();
         assert!(
             ensure_gh_secret().is_err(),
-            "with nothing to scope with, the fleet-wide credential is all a box has — seeding it \
-             must still be attempted"
+            "having picked the fleet-wide credential, seeding it must be attempted"
         );
 
         crate::gitgate::set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();

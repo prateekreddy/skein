@@ -35,7 +35,18 @@ pub(crate) fn repos_json() -> PathBuf {
 pub struct Config {
     /// Seed the host `gh` token into sbx (global) at startup so boxes can fetch/push/open PRs.
     /// Off is the UI equivalent of `$SKEIN_NO_GH_SECRET`.
-    #[serde(default = "default_true")]
+    ///
+    /// **Off by default, and that is the correction of an old asymmetry.** There are three ways a box
+    /// can get GitHub credentials — a GitHub App, a per-repo PAT, or this account-wide token — and the
+    /// first two have always had to be configured on purpose. This one was simply *on*, so the
+    /// broadest credential of the three was the one nobody chose. It also made itself felt: `gh`
+    /// keeps its token in the system keyring on a modern Linux, so being on by default meant startup
+    /// unlocked the user's keyring before they had said which path they wanted.
+    ///
+    /// Turning it off changes nothing for a fleet already running on it: the secret lives in sbx's
+    /// own store, so it stays seeded and boxes keep pushing. It changes what a *new* fleet does —
+    /// nothing, until someone picks a path — which is why the first-run checklist asks.
+    #[serde(default)]
     pub seed_gh_secret: bool,
     /// Overwrite an already-set sbx `github` secret with the current token (refresh on rotation).
     /// On is the UI equivalent of `$SKEIN_FORCE_GH_SECRET`.
@@ -362,7 +373,7 @@ fn default_fleet_memory() -> String {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            seed_gh_secret: true,
+            seed_gh_secret: false,
             force_gh_secret: false,
             default_agent: default_agent(),
             base_branch: String::new(),

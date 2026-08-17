@@ -274,10 +274,22 @@ check("and says why", wide.includes("exactly one"), true);
 // while every box holds the account. A status line that echoed the switch would be worse than none.
 T.reset();
 T.setScoped(true);
-T.renderGitState({ ready: false, app_ready: false, app_problem: "no App configured", credentials: [] });
+T.renderGitState({ ready: false, app_ready: false, app_problem: "no App configured", credentials: [], account_token: true });
 check("a switch that is on but cannot issue says NOT scoped", T.state().innerHTML.includes("Not scoped"), true);
-check("and names what boxes hold instead", T.state().innerHTML.includes("fleet-wide"), true);
+check("and names what boxes hold instead", T.state().innerHTML.includes("account"), true);
 check("drawn as a problem, not as success", T.state().className.includes("warn"), true);
+
+// The other unscoped fleet, and it must not be described as the one above. All three credential paths
+// are opt-in now, so "nothing configured" no longer implies "every box holds your account" — it means
+// boxes cannot push at all, and a line claiming they hold a credential nobody chose would send someone
+// hunting the wrong problem the first time a push fails.
+T.reset();
+T.setScoped(true);
+T.renderGitState({ ready: false, app_ready: false, app_problem: "no App configured", credentials: [], account_token: false });
+check("a fleet with nothing chosen says so", T.state().innerHTML.includes("No credential chosen"), true);
+check("and that boxes cannot push", T.state().innerHTML.includes("cannot push"), true);
+check("without claiming they hold the account token", T.state().innerHTML.includes("account&#39;s") || T.state().innerHTML.includes("account's"), false);
+check("still drawn as a problem", T.state().className.includes("warn"), true);
 
 T.renderGitState({ ready: true, app_ready: true, app_id: "12345", credentials: [] });
 check("with an issuer and the switch on, it reads as scoped", T.state().innerHTML.includes("Scoped"), true);

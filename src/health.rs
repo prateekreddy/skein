@@ -47,6 +47,13 @@ pub struct HealthReport {
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
+    /// How boxes get GitHub credentials, named — or empty when nobody has chosen.
+    ///
+    /// Empty is a real state now, not a theoretical one. All three paths are opt-in, so a fresh fleet
+    /// has no way to push until someone picks one, and the first-run checklist asks on the strength of
+    /// this field. It used to be unaskable: the account token was seeded by default, so the answer was
+    /// always "the account token" and the question would have been noise.
+    pub git_credential: String,
 }
 
 /// Render [`crate::gitgate::ScopeStatus`] as a health line.
@@ -56,23 +63,35 @@ pub struct HealthReport {
 /// how two callers of the same question end up disagreeing.
 fn git_scope_health() -> HealthCheck {
     use crate::gitgate::ScopeStatus::*;
+    // What a box holds when scoping is *not* in force is no longer a fixed sentence. It used to be —
+    // the account token was seeded by default, so "not scoped" always meant "every box holds your
+    // whole account". Now that all three credential paths are chosen, an unscoped box may hold nothing
+    // at all, and telling someone their boxes carry a credential they never picked sends them hunting
+    // the wrong problem the first time a push fails.
+    let unscoped_holds = match crate::gitgate::box_credential() {
+        crate::gitgate::BoxCredential::None => {
+            "boxes have no GitHub credential at all and cannot push".to_string()
+        }
+        other => format!("every box holds {}", other.label()),
+    };
     match crate::gitgate::scope_status() {
         Off => HealthCheck {
             ok: true,
-            detail: "off — every box holds the fleet-wide GitHub credential. \
-                     Settings → scope each box's access to its own repo"
-                .into(),
+            detail: format!(
+                "off — {unscoped_holds}. Settings → scope each box's access to its own repo"
+            ),
         },
         NotConfigured => HealthCheck {
             ok: true,
-            detail: "not set up — boxes hold the fleet-wide GitHub credential. \
-                     Settings → GitHub & keys → add a GitHub App or a per-repo token to scope them"
-                .into(),
+            detail: format!(
+                "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App or a \
+                 per-repo token to scope them"
+            ),
         },
         Unusable { why, refused } => HealthCheck {
             ok: false,
             detail: format!(
-                "ON but nothing is scoped, so every box still holds the fleet-wide credential: \
+                "ON but nothing is scoped, so {unscoped_holds}: \
                  {why}.{} Add a GitHub App or a per-repo token under Settings → GitHub & keys.",
                 match refused.is_empty() {
                     true => String::new(),
@@ -342,6 +361,7 @@ pub fn health_report() -> HealthReport {
         dark_boxes,
         stale_boxes,
         runtimes: supported_runtimes(),
+        git_credential: crate::gitgate::box_credential().label(),
     }
 }
 
