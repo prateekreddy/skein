@@ -380,6 +380,23 @@ fn cmd_doctor() -> Result<(), String> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "127.0.0.1:7878".into());
     println!("{DIM}·{RESET} bind          http://{addr}  {DIM}($SKEIN_ADDR){RESET}");
+    // The *openable* URL, not just the address it binds. The address alone is the one thing that
+    // does not work: the API needs the fleet's token, so a bare `http://127.0.0.1:7878` loads a page
+    // whose every request is refused. A diagnostic that prints the address and stops is handing over
+    // the broken half of the answer.
+    match skein::apiauth::disabled() {
+        true => println!(
+            "{DIM}·{RESET} cockpit       http://{addr}  {DIM}(auth off — \
+             $SKEIN_NO_API_AUTH){RESET}"
+        ),
+        false => match skein::apiauth::stored() {
+            Some(t) => println!("{OK} cockpit       http://{addr}/?t={t}"),
+            None => println!(
+                "{DIM}·{RESET} cockpit       http://{addr}/?t=…  {DIM}(the token is minted at the \
+                 server's first start){RESET}"
+            ),
+        },
+    }
 
     for (prog, why) in [
         ("sbx", "attach + launch boxes"),

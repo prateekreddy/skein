@@ -58,6 +58,18 @@ pub fn disabled() -> bool {
     )
 }
 
+/// The token already on disk, or `None` — never minting one.
+///
+/// For anything that wants to *report* on auth rather than perform it: `skein doctor` prints the URL
+/// that opens the cockpit, and a diagnostic that created the fleet's credential as a side effect of
+/// being run would be a surprising thing for a command whose whole job is to look.
+pub fn stored() -> Option<String> {
+    std::fs::read_to_string(token_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// The fleet's API token, minting one on first use.
 ///
 /// Generated from the OS's randomness via `/dev/urandom` rather than a crate: skein has no rand
@@ -202,6 +214,12 @@ mod tests {
     fn nothing_at_all_is_refused() {
         // Point $SKEIN_HOME somewhere writable so `token()` mints rather than failing for its own
         // reasons, and make sure the auth switch is not what is doing the work.
+        //
+        // The lock is not optional. cargo runs these as threads in one process, so $SKEIN_HOME is
+        // shared: without it this test moved the home out from under any other test mid-run — and
+        // then deleted the directory. It passed alone and took a neighbour down whenever a second
+        // $SKEIN_HOME test existed in this module, which is the shape of a flake nobody can place.
+        let _lock = crate::testutil::env_lock();
         let dir = std::env::temp_dir().join(format!("skein-apiauth-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: single-threaded test process for this variable; the suite sets it the same way.
@@ -225,6 +243,32 @@ mod tests {
             axum::http::header::COOKIE,
             &format!("{COOKIE}={}", "0".repeat(64)),
         )])));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `skein doctor` prints the cockpit URL, so it reads the token — and reading must not create it.
+    /// A fleet whose credential was minted by running a diagnostic has one nobody chose to make.
+    #[test]
+    fn looking_at_the_token_does_not_create_one() {
+        let _lock = crate::testutil::env_lock();
+        let dir = std::env::temp_dir().join(format!("skein-apiauth-peek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: guarded by the crate-wide env lock, as every $SKEIN_HOME test is.
+        unsafe { std::env::set_var("SKEIN_HOME", &dir) };
+
+        assert_eq!(stored(), None, "nothing on disk is nothing to report");
+        assert!(
+            !dir.join("api-token").exists(),
+            "looking must not have written one"
+        );
+
+        let minted = token().unwrap();
+        assert_eq!(
+            stored().as_deref(),
+            Some(minted.as_str()),
+            "and once one exists, it is what doctor prints"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

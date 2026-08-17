@@ -607,6 +607,19 @@
   .disco:hover .disco-card { border-color:var(--accent); }
   .disco-t { font-size:13px; font-weight:600; color:var(--text); }
   .disco-b { font-size:12px; color:var(--accent); margin-top:4px; }
+  /* The one screen a visitor with no token ever sees, so it carries the whole instruction rather
+     than a status. Covers everything: the board behind it is empty for a reason that is not "no
+     boxes", and letting that show through is what made the failure unreadable. */
+  #noauth { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
+            background:rgba(8,9,11,.92); padding:24px; overflow:auto; }
+  .noauth-card { max-width:620px; padding:22px 24px; border:1px solid var(--border-2); border-radius:10px;
+                 background:var(--panel); }
+  .noauth-t { font-size:15px; font-weight:600; color:var(--text); }
+  .noauth-b { font-size:12.5px; line-height:1.6; color:var(--dim); margin-top:8px; }
+  .noauth-h { font-size:12.5px; line-height:1.6; color:var(--text-2); margin-top:14px; }
+  .noauth-c { font-family:var(--mono); font-size:12px; color:var(--text); background:var(--bg);
+              border:1px solid var(--line); border-radius:6px; padding:9px 11px; margin-top:6px;
+              overflow-x:auto; white-space:pre; }
   .diff { font-family:var(--mono); font-size:12.5px; line-height:1.5; padding:8px 0; }
   .diff .ln { display:block; padding:0 14px; white-space:pre-wrap; word-break:break-word; }
   .diff .add  { color:#7ee787; background:color-mix(in srgb,var(--done) 10%,transparent); }
@@ -1382,6 +1395,44 @@ const agentOf = name => boxes.find(b => b.name === name)?.agent
 // Demo mode (?demo): seed realistic data and short-circuit the network so the cockpit can be opened
 // and design-reviewed with no server / no sbx. Purely a preview switch — no effect on the real app.
 const DEMO = new URLSearchParams(location.search).has("demo");
+
+// Every API call carries the fleet's token, so a page opened WITHOUT one gets a 401 from all of them
+// — and left alone that is a board stuck on "reconnecting…" for ever. Measured on a real first run:
+// the visitor sees an empty fleet, four 401s in a console they will never open, and nothing anywhere
+// saying a token exists. That is exactly the state a teammate lands in when they are handed the bare
+// URL or bookmark `127.0.0.1:7878`, so it is the first impression the whole cockpit gets to make.
+//
+// Caught once here rather than at each of the ~80 call sites: a refusal is a property of the page's
+// credentials, not of whichever request happened to notice first, and every caller's own error path
+// stays exactly as it was.
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (...args) => nativeFetch(...args).then(res => {
+  if (res.status === 401) sayUnauthorised();
+  return res;
+});
+// Deliberately a wall, not a toast: nothing on the board is real without a token, and a dismissible
+// note over a fleet that reads as empty is worse than no note — it says "something is wrong" while
+// the page keeps insisting you have no boxes.
+let saidUnauthorised = false;
+function sayUnauthorised() {
+  if (saidUnauthorised) return;
+  saidUnauthorised = true;
+  const el = document.createElement("div");
+  el.id = "noauth";
+  el.innerHTML = `<div class="noauth-card">`
+    + `<div class="noauth-t">This cockpit needs the fleet's token</div>`
+    + `<div class="noauth-b">Not a login — one shared secret that keeps the fleet off the network`
+    + ` it is reachable on. The page loads without it; nothing behind it does.</div>`
+    + `<div class="noauth-h">Open the URL <b>skein-server printed on startup</b> — it carries the`
+    + ` token, and your browser keeps it in a cookie afterwards, so this is a one-time step:</div>`
+    + `<pre class="noauth-c">skein-server → http://127.0.0.1:7878/?t=&lt;token&gt;</pre>`
+    + `<div class="noauth-h">Lost that line? On the host it is in the file itself:</div>`
+    + `<pre class="noauth-c">open "http://127.0.0.1:7878/?t=$(cat ~/.skein/api-token)"</pre>`
+    + `<div class="noauth-b">Sharing a fleet with someone else means sharing that token — it is the`
+    + ` whole of the access. <a href="?demo">Or look around in demo mode</a>, which needs none.</div>`
+    + `</div>`;
+  document.body.append(el);
+}
 
 // ---------- fleet render (keyed reconcile) ----------
 // Hybrid layout: a pinned "needs you" section across ALL repos (the attention inbox), then a

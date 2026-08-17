@@ -757,6 +757,21 @@ await check("the page and its vendored assets stay open, so a visitor sees somet
     if (!r.ok) throw new Error(`${p} should be served without a token, got ${r.status}`);
   }
 });
+// The page being open is only half of "a visitor sees something". Measured on a real first run, the
+// other half was a board stuck on "reconnecting…" with four 401s in a console nobody opens and no
+// mention anywhere that a token exists — which is precisely what a teammate handed the bare URL got.
+await check("a visitor with no token is told what they need, not left on an empty board", async () => {
+  const fresh = await browser.newContext();          // no cookie: the state a bookmark lands in
+  const visitor = await fresh.newPage();
+  await visitor.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded" });
+  await visitor.waitForSelector("#noauth", { state: "visible", timeout: 8000 });
+  const said = await visitor.locator("#noauth").innerText();
+  // The instruction has to be actionable on its own: what is missing, and the command that fixes it.
+  for (const want of ["token", "?t=", "api-token"]) {
+    if (!said.includes(want)) throw new Error(`the refusal never mentions ${want}: ${said}`);
+  }
+  await fresh.close();
+});
 await check("the token in a URL is exchanged for a cookie and then dropped from it", async () => {
   const r = await fetch(`http://127.0.0.1:${port}/?t=${apiToken()}`, { redirect: "manual" });
   if (r.status !== 303) throw new Error(`expected a redirect, got ${r.status}`);

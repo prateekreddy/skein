@@ -21,10 +21,16 @@ Linux. `jq` inside the sandbox is installed for you.
 cargo build --release                    # → target/release/{skein, skein-server}
 ./target/release/skein login claude      # sign in ONCE — every box inherits it
 ./target/release/skein add git@github.com:you/your-repo.git
-./target/release/skein-server            # → http://127.0.0.1:7878
+./target/release/skein-server            # → prints the URL to open, token and all
 ```
 
-Open the URL, press **+ box**, name a branch, and an agent starts working on it. `skein doctor`
+**Open the URL it prints**, not `127.0.0.1:7878` on its own — it carries the fleet's token
+(`http://127.0.0.1:7878/?t=…`) and your browser keeps it in a cookie, so it is a one-time step. A
+page opened without it says so and tells you where the token lives; see [Opening the
+cockpit](#opening-the-cockpit).
+
+Then press **+ box**, name a branch, and an agent starts working on it. The board's own first-run
+checklist tracks what is left (sbx answering, an agent signed in, a repo added), and `skein doctor`
 diagnoses the environment if anything looks wrong.
 
 **Don't skip `skein login`.** It authenticates the agent runtime once inside the shared sandbox, and
