@@ -1053,7 +1053,7 @@
         <header>
           <div class="word"><b>skein</b></div>
           <div class="counts" id="counts"></div>
-          <input id="ffilter" class="ffilter" type="search" placeholder="filter  /" aria-label="Filter boxes" autocomplete="off" spellcheck="false" />
+          <input id="ffilter" class="ffilter" type="search" placeholder="filter  /" aria-label="Filter boxes" title="Filter by name, branch, repo or headline. Type `foreign:` to see sandboxes skein did not create — hidden by default, since they are on the list only because `sbx ls` reports every sandbox on the machine." autocomplete="off" spellcheck="false" />
           <div class="right">
             <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
             <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
@@ -1464,6 +1464,37 @@ function matchesFilter(b, q) {
   const hay = `${b.name} ${b.branch || ""} ${b.repo || ""} ${b.headline || ""}`.toLowerCase();
   return q.split(/\s+/).filter(Boolean).every(t => hay.includes(t));
 }
+// `foreign:` — the one filter term that changes WHICH boxes are eligible rather than narrowing them.
+//
+// A sandbox skein did not place is on the board only because `sbx ls` is authoritative for what
+// exists and cannot say which sandboxes are skein's. Left visible, a machine with a couple of
+// unrelated `sbx` boxes looked like a fleet full of broken ones: no branch, no signals, no attach.
+// So they are out of the way by default and typing `foreign:` shows exactly them — nothing is
+// hidden without a way back to it, and the way back costs no permanent chrome.
+const FOREIGN_TERM = "foreign:";
+const wantsForeign = q => q.includes(FOREIGN_TERM);
+const withoutForeignTerm = q => q.split(FOREIGN_TERM).join(" ").trim();
+// Which rows the board draws, for a fleet and a filter string. Its own function so the rule has one
+// home: `render` used to do this inline, which meant the only way to test it was to write the same
+// two lines again in the test — and a re-implementation agrees with the code right up until one of
+// them changes.
+//
+// Eligibility first, then the text match over what is left, because `foreign:` answers "which boxes"
+// and the rest answers "which of those".
+function boardRows(all, rawFilter) {
+  const q = (rawFilter || "").trim().toLowerCase();
+  const eligible = all.filter(b => wantsForeign(q) ? b.foreign : !b.foreign);
+  const text = withoutForeignTerm(q);
+  return text ? eligible.filter(b => matchesFilter(b, text)) : eligible;
+}
+// Set the board filter from a link, keeping the input and the state in step — typing it by hand and
+// clicking "show them" have to mean the same thing, and the input is what a person edits next.
+function setFilter(q) {
+  boardFilter = q;
+  const el = document.getElementById("ffilter");
+  if (el) el.value = q;
+  render(boxes);
+}
 const NEEDS_TIER = 1;   // tier <= 1 (needs-input, waiting) → the pinned "needs you" section
 // Collapse state per section id, persisted so it survives reloads.
 let collapsed = new Set();
@@ -1555,13 +1586,14 @@ function updateRow(el, b, showRepo) {
   const tag = (showRepo && b.repo) ? b.repo : "";
   rt.textContent = tag;
   rt.style.display = tag ? "" : "none";
-  // legacy tag: the box still has a sandbox of its own. The backend only sets this once a fleet
-  // sandbox exists, so an unadopted host stays unlabelled and a migrated box simply loses its tag.
+  // The foreign tag. These rows are hidden unless `foreign:` is filtered for, so this labels them
+  // once they are deliberately on screen — and says why nothing here works, since a sandbox skein did
+  // not build has no checkout, store or tmux contract for the cockpit to attach through.
   const vt = el.querySelector(".vmtag");
-  vt.textContent = b.legacy ? "legacy" : "";
-  vt.style.display = b.legacy ? "" : "none";
-  vt.title = b.legacy
-    ? "this box has a sandbox to itself, which reserves its full memory whether it is working or idle — `skein migrate " + b.name + "` moves it into the shared one"
+  vt.textContent = b.foreign ? "not skein's" : "";
+  vt.style.display = b.foreign ? "" : "none";
+  vt.title = b.foreign
+    ? "skein did not create this sandbox, so it cannot attach to it, read its work, or manage it. Reach it directly with `sbx exec -it " + b.name + " bash -l`, or register its repo with `skein add` and create the box from here."
     : "";
   // Scope tag, and it badges the EXCEPTION for the same reason `legacy` does. `scoped` is absent
   // entirely when the fleet cannot scope anything, so a host with no GitHub App stays unlabelled
@@ -1642,29 +1674,35 @@ const KTIP = {
 // Full-board re-render, fired on each 2s SSE "boxes" tick.
 function render(snapshot) {
   boxes = snapshot.slice().sort((a,b) => (a.tier ?? 9) - (b.tier ?? 9) || a.name.localeCompare(b.name));
+  // `boxes` is every sandbox `sbx ls` knows; `mine` is the ones skein placed. Everything a person
+  // reads as "the fleet" — the counts, the empty state, the ▸ Continue batch — is about `mine`.
+  const mine = boxes.filter(b => !b.foreign);
+  const foreignN = boxes.length - mine.length;
   const counts = {};
-  for (const b of boxes) (counts[groupOf(b.state)] ??= []).push(b);
+  for (const b of mine) (counts[groupOf(b.state)] ??= []).push(b);
   // "need you" includes error: a box that broke is the thing you most need to know about
   const need = (counts.error?.length||0) + (counts.attn?.length||0) + (counts.waiting?.length||0), working = counts.working?.length||0, done = counts.done?.length||0;
   document.getElementById("counts").innerHTML =
-    `<span class="seg"><span class="n">${boxes.length}</span> boxes</span>`
+    `<span class="seg"><span class="n">${mine.length}</span> boxes</span>`
     + (boardFilter.trim() ? `<span class="seg filt">filtered</span>` : "")
     + (need ? `<span class="seg"><span class="pip" style="background:var(--attn)"></span><span class="n">${need}</span> need you</span>` : "")
     + (working ? `<span class="seg"><span class="pip" style="background:var(--working)"></span><span class="n">${working}</span> working</span>` : "")
     + (done ? `<span class="seg"><span class="pip" style="background:var(--done)"></span><span class="n">${done}</span> done</span>` : "");
 
   // batch-resolve button: count the boxes paused on a trivial "proceed?" (the fork-detector's verdict)
-  const proceedN = boxes.filter(b => b.pause === "proceed").length;
+  const proceedN = mine.filter(b => b.pause === "proceed").length;
   const ca = document.getElementById("contall");
   ca.style.display = proceedN ? "" : "none";
   ca.textContent = `▸ Continue ${proceedN}`;
   ca.title = `Resume ${proceedN} box${proceedN === 1 ? "" : "es"} paused on a trivial "proceed?" (one gesture, not silent)`;
 
   fleet.querySelector(".empty")?.remove();
-  if (!boxes.length) {
+  // No boxes of skein's ⇒ the first run, even on a machine with other sandboxes running. Those used
+  // to fill the board instead, so the one screen that says what to do next never appeared.
+  if (!mine.length && !wantsForeign(boardFilter.trim().toLowerCase())) {
     for (const [, s] of sectionEls) s.section.style.display = "none";
     const e = document.createElement("div"); e.className = "empty";
-    e.innerHTML = firstRunHtml();
+    e.innerHTML = firstRunHtml(foreignN);
     fleet.append(e); order = [];
     renderTabs(); notify([]);   // clear stale title/favicon/tabs when the fleet drains
     return;
@@ -1677,7 +1715,7 @@ function render(snapshot) {
   // away digest all still speak for the whole fleet. A filter that also silenced the announcements
   // would be a way to hide a box that needs you and never hear about it.
   const q = boardFilter.trim().toLowerCase();
-  const shown = q ? boxes.filter(b => matchesFilter(b, q)) : boxes;
+  const shown = boardRows(boxes, boardFilter);
   const needyAll = shown.filter(b => (b.tier ?? 9) <= NEEDS_TIER);
   const rest  = shown.filter(b => (b.tier ?? 9) >  NEEDS_TIER);
   // A pin holding more than a handful has stopped being a pin. The rest are one click away, and the
@@ -1692,7 +1730,12 @@ function render(snapshot) {
   for (const id of [...repoIds].sort((a,b) => a.localeCompare(b)))
     desired.push({ id:`repo:${id}`, label:id, repoId:id, showRepo:false, boxes:byRepo.get(id) || [] });
   if (byRepo.has("other"))
-    desired.push({ id:"other", label: repos.length ? "unassigned" : "fleet", repoId:null, showRepo:true, boxes:byRepo.get("other") });
+    desired.push({
+      id: "other",
+      // "unassigned" would be wrong for a sandbox that was never skein's to assign.
+      label: wantsForeign(q) ? "not skein's" : repos.length ? "unassigned" : "fleet",
+      repoId: null, showRepo: true, boxes: byRepo.get("other"),
+    });
 
   order = []; const seen = new Set();
   const want = new Set(desired.map(d => d.id));
@@ -5085,7 +5128,7 @@ function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clear
 // The steps that can be checked are checked. A tick is worth more than a sentence here: it turns
 // "did that work?" — the question every one of these steps leaves you with — into something the
 // page answers before you ask.
-function firstRunHtml() {
+function firstRunHtml(foreignN = 0) {
   const h = lastHealth || {};
   const steps = [
     { done: h.sbx?.ok,
@@ -5121,7 +5164,9 @@ function firstRunHtml() {
     <div class="fr-head">${head}</div>
     <ol class="fr-steps">${rows}</ol>
     ${ready ? `<button type="button" class="kbtn primary" onclick="openNewBox()">Launch a box</button>` : ""}
-    <div class="fr-foot">not sure what this looks like with a fleet? <a href="?demo">see the demo</a></div>
+    <div class="fr-foot">not sure what this looks like with a fleet? <a href="?demo">see the demo</a>${
+      foreignN ? ` · this machine has ${foreignN} sandbox${foreignN === 1 ? "" : "es"} skein did not create — <a href="#" onclick="setFilter('foreign:');return false">show them</a>` : ""
+    }</div>
   </div>`;
 }
 

@@ -121,18 +121,18 @@ pub struct BoxView {
     /// worth waking one on every snapshot to find out. See [`sync_docs_available`].
     #[serde(default)]
     pub docs_update: bool,
-    /// this box still has a sandbox of its own, rather than living in the shared one.
+    /// This sandbox is not a box skein placed — so skein can see it, and can do nothing with it.
     ///
-    /// It is the memory question made visible: a per-VM box holds a full *reservation* whenever it
-    /// exists, working or idle, and those reservations are what the fleet exists to stop summing.
-    /// Nothing else on the row says so — a legacy box and a fleet box behave identically until the
-    /// host starts refusing work.
+    /// Two kinds land here and they need no telling apart: a sandbox someone created with `sbx`
+    /// directly, and a box from a skein old enough to give every box its own microVM. Neither has a
+    /// placement record, a store skein provisioned, or the tmux contract the cockpit attaches through.
     ///
-    /// False for a box in the fleet, and false for *every* box until a fleet sandbox is configured:
-    /// the shared sandbox is the default now, so this marks the exception. Badging every row on a
-    /// host that has not adopted the fleet would label the normal case as the odd one.
+    /// The board *hides* these by default and reveals them on the `foreign:` filter, because they are
+    /// on the list only as an artefact of how the list is built: `sbx ls` is authoritative for which
+    /// sandboxes exist, and it does not know which of them are skein's. Showing them made a first run
+    /// on a machine with other sandboxes look like a fleet full of broken boxes.
     #[serde(default)]
-    pub legacy: bool,
+    pub foreign: bool,
     /// Whether this box's GitHub credential is scoped to its own repository — `None` when the fleet
     /// cannot scope at all, so there is no distinction to draw.
     ///
@@ -521,10 +521,11 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 docs_update: repo
                     .as_ref()
                     .is_some_and(|rp| sync_docs_available(Path::new(&rp.store))),
-                // Only once there is a fleet to be outside of. The placement record is the whole
-                // test: it is what makes a box a fleet box, and its absence is what leaves one
-                // holding a VM of its own.
-                legacy: !fleet.is_empty() && shared_record(&name).is_none(),
+                // The placement record is the whole test: writing one is what makes a sandbox a box
+                // skein owns. This used to be conditional on a fleet being configured, because an
+                // unconfigured host gave every box its own VM and labelling all of them would have
+                // marked the normal case as the odd one. There is no such host now.
+                foreign: shared_record(&name).is_none(),
                 scoped: scopable.then(|| crate::gitgate::box_is_scoped(&name)),
                 disk_mb: usage.get(&name).copied(),
                 disk_limit_mb: usage.get(&name).and(box_disk_limit(&name)),
@@ -1662,49 +1663,30 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         .ok_or_else(|| format!("repo {} is no longer registered", replacement.repo))?;
     let runtime = runtime_adapter(&replacement.target_runtime)
         .ok_or_else(|| "target runtime adapter disappeared".to_string())?;
-    let kit = ensure_kit()?;
-    let kit_path = kit.to_string_lossy().into_owned();
+    ensure_kit()?;
     let _ = ensure_gh_secret();
-    // A takeover builds a whole new box, so it has to build one the same way everything else does.
-    // Left as `sbx create` it handed the replacement its own microVM — the reservation the fleet
-    // exists to stop — and the box came up with no placement record, so skein would then address it
-    // as a sandbox named after itself.
-    if !fleet_sandbox().is_empty() {
-        fleet::start_box(
-            &replacement.target,
-            &repo,
-            &replacement.branch,
-            "exec bash -l",
-        )?;
-    } else {
-        let mut create = Command::new("sbx");
-        create.args([
-            "create",
-            "--clone",
-            "--kit",
-            &kit_path,
-            "--name",
-            &replacement.target,
-            &replacement.target_runtime,
-            &repo.work,
-            &repo.store,
-        ]);
-        let out = bounded_output(
-            &mut create,
-            "sbx create replacement",
-            Duration::from_secs(600),
-        )?;
-        if !out.status.success() {
-            return Err(format!(
-                "sbx create failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-    }
-    // Every `tmux` here is the BOX's server, which in a shared sandbox means socket-qualified. Bare,
+    // A takeover builds a whole new box, so it builds one the same way everything else does. It used
+    // to have a second path — `sbx create`, when no fleet sandbox was named — which handed the
+    // replacement its own microVM and left it with no placement record, so skein then addressed it as
+    // a sandbox named after itself.
+    fleet::start_box(
+        &replacement.target,
+        &repo,
+        &replacement.branch,
+        "exec bash -l",
+    )?;
+    // Every `tmux` here is the BOX's server, socket-qualified because the sandbox is shared. Bare,
     // two boxes would both find a live `skein-agent` on the sandbox's one server and the takeover
     // would attach its new runtime to another box's session. Same rule as `agent_attach_argv`.
-    let place = place_of(&replacement.target).unwrap_or_else(|| own_sandbox(&replacement.target));
+    // The takeover has just created this box in the fleet, so it has a placement record. Erroring
+    // rather than falling back to a sandbox named after it: if that record is missing something went
+    // wrong a step earlier, and addressing a guess would report it as a tmux failure three lines down.
+    let place = place_of(&replacement.target).ok_or_else(|| {
+        format!(
+            "{} was created but has no placement record, so skein cannot reach it",
+            replacement.target
+        )
+    })?;
     let tmux = place.tmux();
     let shell = format!(
         "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {}; {tmux} new-session -d -s skein-agent {:?}; {configure}{tmux} set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
@@ -2519,6 +2501,27 @@ mod tests {
     use crate::testutil::*;
     use std::process::Stdio;
 
+    /// Give `name` a placement record, which is what makes it a box skein can address.
+    ///
+    /// Needed by every test that builds an argv or execs into a box. It used to be needed by none of
+    /// them: an unplaced name resolved to "a sandbox called `name`", skein's per-VM model, so a test
+    /// could ask for a box's argv without there being a box. That fallback was a guess in production
+    /// too — any name at all, including a sandbox skein never made — so it is gone, and a fixture now
+    /// has to say the box exists.
+    fn placed(name: &str) {
+        record_place(
+            name,
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: std::process::id(), // alive, so the record is followed
+                home: format!("/boxes/{name}/home"),
+                tree: format!("/boxes/{name}/tree"),
+                sock: format!("/boxes/{name}/session.sock"),
+            },
+        )
+        .unwrap();
+    }
+
     // The provisioning script is one file with two callers — the kit hook and the fleet path — and
     // the kit's copy is spliced into a YAML block scalar, where indentation IS the syntax. A line
     // that lands at the wrong depth ends the block early, and the failure is not a parse error: sbx
@@ -2636,6 +2639,8 @@ mod tests {
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
+        // The source box has to be reachable to be asked, which now means it has to be placed.
+        placed("web-main");
         env::set_var("SKEIN_LS_CMD", "false");
         *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
@@ -2682,12 +2687,18 @@ mod tests {
         let _ = prepare_replacement("web-main", "codex");
 
         let asked = fs::read_to_string(&log).unwrap_or_default();
+        // Addressed through the placement — `exec skein-fleet nsenter … ` — because a box is not a
+        // sandbox. `exec web-main` was right only while every box had a VM of its own.
         assert!(
-            asked.contains("exec web-main bash -lc git rev-parse --abbrev-ref HEAD"),
+            asked.contains("exec skein-fleet") && asked.contains("nsenter"),
+            "the box is reached through its placement: {asked}"
+        );
+        assert!(
+            asked.contains("git rev-parse --abbrev-ref HEAD"),
             "the branch must come from the BOX, not the host clone — it is a different checkout: {asked}"
         );
         assert!(
-            asked.contains("exec web-main bash -lc git rev-parse HEAD"),
+            asked.contains("git rev-parse HEAD"),
             "and so must the commit it snapshots: {asked}"
         );
 
@@ -3114,14 +3125,19 @@ mod tests {
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
         let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None);
-        assert!(cmd.contains("sbx create --clone --kit"));
-        assert!(cmd.contains("kit'") || cmd.contains("/kit"));
-        assert!(cmd.contains("--name 'thing-feat-auth'"));
-        assert!(cmd.contains("'claude'")); // registered sbx agent name as the positional
-        assert!(cmd.contains("'/work/thing'"));
-        assert!(cmd.contains("&& sbx 'exec' '-it' 'thing-feat-auth'"));
-        assert!(cmd.contains("tmux new-session -d -s skein-agent"));
-        assert!(cmd.contains("timeout 120 claude update"));
+        // `skein start`, not `sbx create`: a box is assembled inside the shared sandbox by a sequence
+        // of round-trips, which no single shell line can express. The attach happens after the box
+        // exists, because its argv names a placement that does not exist yet when this string is built.
+        assert!(
+            cmd.contains(
+                " start 'thing-feat-auth' --branch 'feat/auth' --agent 'claude' --attach"
+            ),
+            "the launcher carries the real branch and the runtime: {cmd}"
+        );
+        assert!(
+            !cmd.contains("sbx create"),
+            "there is no sandbox to create for a box: {cmd}"
+        );
         // the launch spec carries the real branch (feat/auth) for the kit to check out — not the slug
         let spec = store
             .join("skein")
@@ -3154,12 +3170,26 @@ mod tests {
             review_queue: true,
             sync_gateway_url: String::new(),
         };
+        // The launcher carries the runtime choice; what that runtime then *does* on attach — the
+        // update, the hook-trust bypass, no `resume --last` on a first start — is
+        // `initial_attach_argv_as`'s business and is asserted there. This string used to contain both,
+        // because `sbx create … && sbx exec …` was one line; it is now `skein start --attach`.
         let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
-        assert!(cmd.contains("'codex'"));
-        assert!(cmd.contains("tmux new-session -d -s skein-agent"));
-        assert!(cmd.contains("timeout 120 codex update"));
-        assert!(cmd.contains("codex --no-alt-screen --dangerously-bypass-hook-trust"));
-        assert!(!cmd.contains("codex resume --last"));
+        assert!(
+            cmd.contains("--agent 'codex'"),
+            "the runtime override has to reach the launcher: {cmd}"
+        );
+        placed("skein-codex");
+        let attach = initial_attach_argv_as("skein-codex", "codex");
+        let shell = attach.last().unwrap();
+        assert!(shell.contains("new-session -d -s skein-agent"), "{shell}");
+        assert!(shell.contains("timeout 120 codex update"), "{shell}");
+        assert!(
+            shell.contains("codex --no-alt-screen --dangerously-bypass-hook-trust"),
+            "{shell}"
+        );
+        assert!(!shell.contains("codex resume --last"), "{shell}");
+        // What the box will be recorded as, which is what a later attach reads back.
         assert_eq!(
             launch_spec_agent(&repo, "skein-codex").as_deref(),
             Some("codex")
@@ -3645,13 +3675,14 @@ mod tests {
         let sbx = bin.join("sbx");
         fs::write(
             &sbx,
+            // `sbx exec <sandbox> nsenter … bash -lc <shell>`: the shell is the LAST argument whatever
+            // the prefix, and it already carries its own `cd` and `export HOME` from `Place::wrap`.
+            // `nsenter` itself is dropped — there is no namespace to enter in a test.
             r#"#!/usr/bin/env bash
 set -e
 [ "$1" = exec ]
-box="$2"
-shell="$5"
-cd "$FAKE_BOX_WORK"
-HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
+shell="${@: -1}"
+SANDBOX_VM_ID=demo-old-claude bash -c "$shell"
 "#,
         )
         .unwrap();
@@ -3660,6 +3691,21 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         env::set_var("PATH", format!("{}:{old_path}", bin.display()));
         env::set_var("FAKE_BOX_HOME", &box_home);
         env::set_var("FAKE_BOX_WORK", &work);
+        // A real placement pointing at the fixture's own directories. That is what makes this exercise
+        // `Place::wrap` rather than work around it: the wrapper cds into `tree` and exports `home`, so
+        // naming the fixture there means the script under test runs where it expects to, and the fake
+        // sbx below only has to be a transport.
+        record_place(
+            "demo-old-claude",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: std::process::id(),
+                home: box_home.to_string_lossy().into_owned(),
+                tree: work.to_string_lossy().into_owned(),
+                sock: "/boxes/demo-old-claude/session.sock".into(),
+            },
+        )
+        .unwrap();
 
         let inventory = shared_home_inventory("demo-old-claude").unwrap();
         let candidate = |name: &str| inventory.iter().find(|item| item.name == name).unwrap();
@@ -4268,42 +4314,42 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         );
     }
 
+    // A box belongs to a registered repo, and there is no other way to make one. The env-var mode
+    // ($SKEIN_KIT/$SKEIN_STORE/$SKEIN_AGENT with a `sandboxes.json`) built a box as its own microVM
+    // via `sbx create`; both went at once, because a box in the shared sandbox is assembled from a
+    // repo to clone and a store to mount, and that mode supplied neither per box.
+    //
+    // What matters is that the refusal is *legible*: this string is run by `sh -c` in a terminal, so
+    // an unregistered name has to explain itself there rather than fail somewhere in sbx.
     #[test]
-    fn native_launch_command_builds_create_then_persistent_attach() {
+    fn a_box_outside_a_registered_repo_is_refused_with_the_fix_in_the_message() {
         let _g = env_lock();
+        env::set_var("SKEIN_HOME", tempdir());
         env::remove_var("SKEIN_LAUNCH_CMD");
-        env::set_var("SKEIN_KIT", "/abs/kit");
-        env::set_var("SKEIN_AGENT", "claude");
-        env::set_var("SKEIN_STORE", "/abs/store");
-        let cmd = launch_command("thing-feat-x", "feat-x");
-        assert!(cmd.starts_with(
-            "sbx create --clone --kit '/abs/kit' --name 'thing-feat-x' 'claude' . '/abs/store'"
-        ));
-        assert!(cmd.contains("&& sbx 'exec' '-it' 'thing-feat-x'"));
-        assert!(cmd.contains("tmux new-session -d -s skein-agent"));
-        // agent override is the per-runtime seam.
-        env::set_var("SKEIN_AGENT", "codex");
-        assert!(launch_command("thing-x", "x").contains(" 'codex' . "));
-        // explicit SKEIN_LAUNCH_CMD still wins, with {branch}/{name} substituted + shell-quoted.
+        let cmd = launch_command("nobody-x", "x");
+        assert!(
+            cmd.contains("belongs to no registered repo") && cmd.contains("skein add"),
+            "the terminal must be told what to do about it: {cmd}"
+        );
+        assert!(
+            cmd.contains("exit 1") && !cmd.contains("sbx create"),
+            "and nothing may be created: {cmd}"
+        );
+
+        // $SKEIN_LAUNCH_CMD still wins outright, with {branch}/{name} substituted + shell-quoted.
+        // It is the seam for anyone driving box creation themselves, and it never consulted repos.
         env::set_var("SKEIN_LAUNCH_CMD", "setup.sh {branch} {name}");
         assert_eq!(launch_command("thing-x", "x"), "setup.sh 'x' 'thing-x'");
-        for v in [
-            "SKEIN_LAUNCH_CMD",
-            "SKEIN_KIT",
-            "SKEIN_AGENT",
-            "SKEIN_STORE",
-        ] {
-            env::remove_var(v);
-        }
+        env::remove_var("SKEIN_LAUNCH_CMD");
+        env::remove_var("SKEIN_HOME");
     }
 
-    // The switch. One config value decides whether a NEW box gets its own microVM or a namespace in
-    // the shared sandbox — and it must decide only that: the attach half is identical either way, so
-    // that everything downstream of launch (the tmux session, the runtime setup, the reconnect) has
-    // exactly one shape to know about. Boxes already running keep their own model regardless; this
-    // is the creation path, not a reinterpretation of an existing box.
+    // Every box is brought up by `skein start` inside the shared sandbox. This used to be one of two
+    // shapes, chosen by whether `fleet_sandbox` was named; clearing it gave each box its own microVM.
+    // That model is gone — reservations sum, and eight of them do not fit on one machine — so the
+    // remaining job of this test is that the launcher skein hands to `sh -c` is actually runnable.
     #[test]
-    fn the_fleet_flag_changes_how_a_box_is_created_and_nothing_else() {
+    fn a_box_is_brought_up_by_skein_rather_than_by_sbx_create() {
         let _g = env_lock();
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
@@ -4324,38 +4370,18 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         }])
         .unwrap();
 
-        // The fleet is the default now: reservations sum and eight of them do not fit on one Mac.
         let fleet = launch_command("web-feat-x", "feat/x");
         assert!(
             fleet.contains(" start 'web-feat-x' --branch 'feat/x' --agent 'claude'"),
-            "a box goes into the shared sandbox unless someone asks otherwise: {fleet}"
+            "a box is brought up by skein, not by `sbx create`: {fleet}"
         );
-
-        // A sandbox per box stays fully supported — it is opted into by clearing the name.
-        save_config(&Config {
-            fleet_sandbox: String::new(),
-            ..load_config()
-        })
-        .unwrap();
-        let own = launch_command("web-feat-x", "feat/x");
         assert!(
-            own.starts_with("sbx create --clone --kit "),
-            "clearing the fleet must still give a box its own microVM: {own}"
-        );
-
-        save_config(&Config {
-            fleet_sandbox: "skein-fleet".into(),
-            ..load_config()
-        })
-        .unwrap();
-        let fleet = launch_command("web-feat-x", "feat/x");
-        assert!(
-            fleet.contains(" start 'web-feat-x' --branch 'feat/x' --agent 'claude'"),
-            "a box in the fleet is brought up by skein, not by `sbx create`: {fleet}"
+            !fleet.contains("sbx create"),
+            "there is no sandbox to create for a box: {fleet}"
         );
         // Runnable, not merely correct. The cockpit is normally run straight out of a build, where
-        // nothing called `skein` is on $PATH — creating a box died on `sh: skein: command not
-        // found` and then reconnected forever onto a sandbox that was never made.
+        // nothing called `skein` is on $PATH — creating a box died on `sh: skein: command not found`
+        // and then reconnected forever onto a sandbox that was never made.
         let launcher = fleet.split_whitespace().next().unwrap();
         assert!(
             launcher.ends_with("skein") || launcher.ends_with("skein'"),
@@ -4367,28 +4393,6 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 "an absolute launcher must exist, or `sh -c` cannot run it: {launcher}"
             );
         }
-        assert!(
-            !fleet.contains("sbx create"),
-            "there is no sandbox to create for this box: {fleet}"
-        );
-        // The attach is DEFERRED, not precomputed. It names the box's placement, and this string is
-        // built before `skein start` has made one — baked in, it addressed a sandbox named after the
-        // box and the create terminal died on `no sandbox named …` the instant the box came up fine.
-        assert!(
-            fleet.trim_end().ends_with("--attach"),
-            "the fleet attach must resolve after the box exists: {fleet}"
-        );
-        assert!(
-            !fleet.contains("&& sbx"),
-            "nothing about the box can be addressed before it is placed: {fleet}"
-        );
-        // And it is still the SAME attach: `--attach` runs `initial_attach_argv_as`, the one the
-        // non-fleet path bakes in here, so there is no second way to start an agent.
-        assert!(
-            own.contains("&& sbx "),
-            "unchanged for a box of its own: {own}"
-        );
-
         env::remove_var("SKEIN_HOME");
     }
 
@@ -4402,6 +4406,7 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
         env::remove_var("SKEIN_LAUNCH_CMD");
+        placed("web-feat-x");
         let repo = Repo {
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
@@ -6278,35 +6283,30 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             load_views()
                 .unwrap()
                 .into_iter()
-                .map(|v| (v.name, v.legacy))
+                .map(|v| (v.name, v.foreign))
                 .collect()
         };
         let rows = tagged();
         assert!(
             rows.contains(&("old-box".into(), true)),
-            "a box with a sandbox to itself still holds a whole reservation: {rows:?}"
+            "a sandbox skein did not place is not one of its boxes: {rows:?}"
         );
         assert!(
             rows.contains(&("demo-task".into(), false)),
-            "a box in the fleet is the ordinary case and carries no tag: {rows:?}"
+            "a box skein placed is the ordinary case and carries no tag: {rows:?}"
         );
 
-        // No fleet configured: nothing has been migrated because there is nowhere to migrate to, and
-        // tagging every row would label the normal case as the odd one.
-        let mut config = load_config();
-        config.fleet_sandbox = String::new();
-        save_config(&config).unwrap();
+        // The flag is only half the feature: a row that carries it and a cockpit that ignores it look
+        // identical from here, and that is how a tag silently stops appearing. The cockpit both hides
+        // these rows by default and reveals them on `foreign:`, so it has to read the flag twice.
+        let page = include_str!("web/index.html");
         assert!(
-            tagged().iter().all(|(_, legacy)| !legacy),
-            "without a fleet there is no exception to mark: {:?}",
-            tagged()
+            page.contains("b.foreign"),
+            "the cockpit no longer reads the flag, so foreign boxes would show as ordinary ones"
         );
-
-        // The flag is only half the feature: a row that carries it and a cockpit that ignores it
-        // look identical from here, and that is how a tag silently stops appearing.
         assert!(
-            include_str!("web/index.html").contains("b.legacy"),
-            "the cockpit no longer reads legacy, so the tag can never appear"
+            page.contains("foreign:"),
+            "without the filter keyword there is no way to see them at all"
         );
 
         forget_place("demo-task");
@@ -6758,30 +6758,30 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let _g = env_lock();
         // empty home ⇒ repo_for_box finds nothing ⇒ the default agent (claude) → `--continue`.
         env::set_var("SKEIN_HOME", tempdir());
+        // Placed, because an unplaced box has no argv: it is addressed through the record, and there
+        // is no longer a fallback that treats the name as a sandbox.
+        placed("thing-x");
         // attach opens the agent inside a persistent `skein-agent` tmux session so the live process
         // survives a disconnect; `claude --continue` is the (re)create command.
         let a = attach_argv("thing-x", "/d");
-        assert_eq!(&a[..3], ["exec", "-it", "thing-x"]);
-        assert!(a
-            .last()
-            .unwrap()
-            .contains("tmux new-session -d -s skein-agent"));
+        assert_eq!(&a[..3], ["exec", "-it", "skein-fleet"]);
+        assert!(a.last().unwrap().contains("new-session -d -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --name"));
         assert!(a.last().unwrap().contains("--continue"));
         assert!(a.last().unwrap().contains("timeout 120 claude update"));
         assert!(
-            a.last().unwrap().find("tmux has-session").unwrap()
+            a.last().unwrap().find("has-session").unwrap()
                 < a.last().unwrap().find("timeout 120 claude update").unwrap(),
             "the updater must run only inside the missing-session branch"
         );
         assert!(a.last().unwrap().contains("tmux is required"));
-        assert!(a.last().unwrap().contains("tmux -u attach-session"));
+        assert!(a.last().unwrap().contains("-u attach-session"));
         assert!(!a.last().unwrap().contains("else exec bash"));
         let first = initial_attach_argv_as("thing-x", "claude");
         assert!(first
             .last()
             .unwrap()
-            .contains("tmux new-session -d -s skein-agent"));
+            .contains("new-session -d -s skein-agent"));
         // A fresh start, guarded — and carrying THIS box's name, resolved on the host. A leftover
         // `{box}` or a `$SKEIN_BOX` for the attach shell to expand would both name every box in the
         // sandbox the same thing, which is the failure `for_box` exists to prevent.
@@ -6828,24 +6828,21 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
                 .unwrap()
                 .find("install-codex-hooks.sh")
                 .unwrap()
-                < codex.last().unwrap().find("tmux new-session").unwrap(),
+                < codex.last().unwrap().find("new-session").unwrap(),
             "Codex hooks must be installed before the resumed process starts"
         );
         assert!(codex.last().unwrap().contains("agent-guide.sh"));
         assert!(
             codex.last().unwrap().find("agent-guide.sh").unwrap()
-                < codex.last().unwrap().find("tmux new-session").unwrap(),
+                < codex.last().unwrap().find("new-session").unwrap(),
             "durable instructions must be installed before Codex starts"
         );
         // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
-        assert_eq!(&sh[..3], ["exec", "-it", "thing-x"]);
-        assert!(sh
-            .last()
-            .unwrap()
-            .contains("tmux new-session -d -s skein-shell"));
+        assert_eq!(&sh[..3], ["exec", "-it", "skein-fleet"]);
+        assert!(sh.last().unwrap().contains("new-session -d -s skein-shell"));
         assert!(sh.last().unwrap().contains("tmux is required"));
-        assert!(sh.last().unwrap().contains("tmux -u attach-session"));
+        assert!(sh.last().unwrap().contains("-u attach-session"));
         assert!(!sh.last().unwrap().contains("exec bash -li"));
         env::remove_var("SKEIN_HOME");
     }
@@ -6913,23 +6910,18 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
         let home = tempdir();
         env::set_var("SKEIN_HOME", &home);
 
-        // A box with a sandbox of its own: the sandbox IS the box, and the argv says so.
-        let argv = box_write_argv(
-            "thing-x",
-            "/tmp/skein-drop-b1",
-            "/tmp/skein-drop-b1/a b.pdf",
-        )
-        .unwrap();
-        assert_eq!(&argv[..4], ["sbx", "exec", "-i", "thing-x"]);
-        assert!(
-            argv.last().unwrap()
-                == "mkdir -p '/tmp/skein-drop-b1' && cat > '/tmp/skein-drop-b1/a b.pdf'"
-        );
         assert!(box_write_argv("../escape", "/tmp/x", "/tmp/x/y").is_err());
+        // An unplaced name is refused rather than addressed. It used to build `sbx exec -i thing-x`,
+        // which is a sandbox name — true only under the per-VM model, and a guess for anything else.
+        assert!(
+            box_write_argv("thing-x", "/tmp/x", "/tmp/x/y").is_err(),
+            "a box skein has not placed has nowhere for a write to land"
+        );
 
-        // A box in the fleet is NOT a sandbox. `sbx exec -i <box>` names nothing, and every paste,
-        // drop and file pick into a fleet box failed with "no sandbox named …" — surfaced in the
-        // browser as "attach failed", which points at the terminal rather than at the upload.
+        // A box is NOT a sandbox: it lives inside the shared one, so the write has to enter its
+        // namespace. Addressing `sbx exec -i <box>` made every paste, drop and file pick fail with
+        // "no sandbox named …" — surfaced in the browser as "attach failed", which points at the
+        // terminal rather than at the upload.
         record_place(
             "thing-x",
             &PlaceRecord {
@@ -6941,16 +6933,24 @@ HOME="$FAKE_BOX_HOME" SANDBOX_VM_ID="$box" bash -c "$shell"
             },
         )
         .unwrap();
-        let placed = box_write_argv("thing-x", "/tmp/d", "/tmp/d/f.png").unwrap();
-        assert_eq!(&placed[..4], ["sbx", "exec", "-i", "skein-fleet"]);
+        let argv = box_write_argv(
+            "thing-x",
+            "/tmp/skein-drop-b1",
+            "/tmp/skein-drop-b1/a b.pdf",
+        )
+        .unwrap();
+        assert_eq!(&argv[..4], ["sbx", "exec", "-i", "skein-fleet"]);
         assert!(
-            placed.iter().any(|a| a.contains("nsenter")),
-            "the write has to land in the box's namespace, not the sandbox's: {placed:?}"
+            argv.iter().any(|a| a.contains("nsenter")),
+            "the write has to land in the box's namespace, not the sandbox's: {argv:?}"
         );
         assert!(
-            placed.last().unwrap().contains("cat > '/tmp/d/f.png'"),
-            "{placed:?}"
+            argv.last()
+                .unwrap()
+                .contains("mkdir -p '/tmp/skein-drop-b1' && cat > '/tmp/skein-drop-b1/a b.pdf'"),
+            "a space in the name must survive quoting: {argv:?}"
         );
+        forget_place("thing-x");
         env::remove_var("SKEIN_HOME");
     }
 

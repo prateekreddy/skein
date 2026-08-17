@@ -157,6 +157,21 @@ with no CDN — important in the firewalled sbx network.
 > For remote/mobile you can either `tailscale serve` (below, keeps the loopback bind) or bind
 > off-loopback and hit the box's tailnet address directly.
 
+### Sandboxes skein did not create
+
+The board's list of boxes comes from `sbx ls`, which reports every sandbox on the machine and cannot
+say which of them are skein's. So an `sbx` box you made yourself — or a box from a skein old enough to
+give each one its own microVM — appears with no branch, no signals and nothing that works.
+
+Those are **hidden by default** and shown by typing `foreign:` in the board filter. skein cannot
+attach to one, read its work, or manage it: there is no placement record, no store it provisioned, and
+no tmux session it owns. Reach one directly with `sbx exec -it <name> bash -l`, or hand it to skein by
+registering its repo with `skein add` and creating the box from the cockpit.
+
+The per-VM model itself is gone (see `docs/TODO.md` → *Retire the per-VM box model*): every box lives
+in one shared sandbox, because a microVM reserves its memory whether the box is working or idle and
+those reservations sum.
+
 ### What one box can see of another
 
 Each box gets a mount namespace holding its own directories and the fleet root's scripts, and
@@ -629,9 +644,7 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 | `SKEIN_REPO` | dir to run `git`/`gh` in (PRs, checks, host-side diffs) **and to launch/attach from** — so relative `*_CMD` paths resolve here | cwd |
 | `SKEIN_BASE` | base branch for `gh pr create` / merge | repo default |
 | `SKEIN_LAUNCH_CMD` | launch-a-box template — `{branch}`/`{name}` substituted; relative to `$SKEIN_REPO`. **Optional**: unset, skein builds the launch itself (below), so the repo needs no launch script | _(native builder)_ |
-| `SKEIN_KIT` | _(legacy single-repo fallback)_ sbx kit for the native launch when the box isn't in `repos.json`; managed repos use skein's own embedded kit | — |
 | `SKEIN_AGENT` | sbx runtime override; must match a registered Skein runtime adapter | repo/default runtime |
-| `SKEIN_STORE` | _(legacy single-repo fallback)_ store to mount when the box isn't in `repos.json` | `$SKEIN_REGISTRY`'s dir |
 | `SKEIN_ATTACH_CMD` | agent-terminal attach — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein` |
 | `SKEIN_SHELL_CMD` | shell-terminal command (the **Shell** tab) — `{name}`/`{dir}` substituted | `sbx exec -it {name} tmux new-session -A -s skein-shell` |
 | `SKEIN_LS_CMD` | fleet-liveness probe (run via `sh -c`); must emit the `sbx ls --json` shape. A running box shows `live` regardless of `lastSeen`; on any failure skein falls back to `lastSeen` | `sbx ls --json` |

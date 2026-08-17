@@ -113,19 +113,17 @@ pub struct Config {
     /// "not summarised" and stays at full attention. See [`crate::review`].
     #[serde(default = "default_true")]
     pub review_summaries: bool,
-    /// The one sbx sandbox that hosts every box, when several boxes share one.
+    /// The one sbx sandbox that hosts every box. **Naming it is the only supported shape.**
     ///
-    /// The fleet is the default. Empty ⇒ skein's original model: one sandbox per box, each its own
-    /// microVM, still fully supported for anyone who wants a VM boundary between boxes.
+    /// Empty used to mean skein's original model — one microVM per box — and that is gone. It does not
+    /// scale on one machine: a microVM's memory is a *reservation* whether the box is working or idle,
+    /// and reservations sum. Eight boxes at ~18.6 GB each do not fit in 36 GB; eight sharing one
+    /// ceiling do.
     ///
-    /// It became the default because the alternative does not scale on one machine: a microVM's
-    /// memory is a *reservation* whether the box is working or idle, and reservations sum. Eight
-    /// boxes at ~18.6 GB each do not fit in 36 GB; eight boxes sharing one ceiling do.
-    ///
-    /// Defaulted rather than left empty for a second reason, learned the hard way: an empty value
-    /// means "legacy" and every field here has a serde default, so one partial config write silently
-    /// unmade the whole fleet. A default that names the usual sandbox degrades to a working fleet
-    /// instead of to a different architecture.
+    /// Empty is now simply a fleet with no name, which nothing can start a box in — reported by
+    /// `skein doctor` rather than quietly switching architectures. It is defaulted for exactly that
+    /// reason, learned the hard way: every field here has a serde default, so one partial config write
+    /// used to unmake the whole fleet by clearing this.
     #[serde(default = "default_fleet_sandbox")]
     pub fleet_sandbox: String,
     /// Memory for the fleet sandbox (`sbx -m`), e.g. "26g".

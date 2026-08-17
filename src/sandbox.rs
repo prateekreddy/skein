@@ -5,15 +5,14 @@
 //! it is the one place that knows a box is a sandbox, so changing what backs a box is a change to
 //! this module rather than to every feature that touches one.
 
-use crate::config::*;
 use crate::fleet::box_root;
-use crate::place::{fleet_sandbox, forget_place, own_sandbox, place_of, shared_record};
+use crate::place::{forget_place, own_sandbox, place_of, shared_record};
 use crate::runtime::*;
 use crate::util::*;
 use crate::{
     agent_for_box, ai_says_hold, box_liveness, branch_from_box, ensure_kit, ensure_store,
-    launch_spec, locate_registry, parse_registry, record_repo_mirror, repo_for_box, store_dir,
-    store_for_box, sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness, Repo,
+    launch_spec, locate_registry, parse_registry, record_repo_mirror, repo_for_box, store_for_box,
+    sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness, Repo,
 };
 use chrono::Utc;
 use std::env;
@@ -43,55 +42,31 @@ pub fn launch_command_with_agent(name: &str, branch: &str, agent: Option<&str>) 
     native_launch_command(name, branch, agent)
 }
 
-/// skein's own launch command, used when `$SKEIN_LAUNCH_CMD` is unset — so a box can be created
-/// without the repo shipping a `setup-sandbox.sh`. It creates without attaching, then opens the
-/// runtime in Skein's persistent tmux session:
-///   `sbx create --clone [--kit <kit>] --name <name> <agent> . <store> && sbx exec … tmux …`
-/// The box's bootstrap derives the branch from the name (`thing-<branch>` → `<branch>`) and checks
-/// it out, so no branch arg is needed. `agent` (`$SKEIN_AGENT`, default `claude`) is the per-runtime
-/// seam; `kit` (`$SKEIN_KIT`, resolved under `$SKEIN_REPO`) wires the shared store into the clone and
-/// runs the bootstrap; `store` (`$SKEIN_STORE`, else the store skein already reads) is mounted so the
-/// kit can link it. Runs with cwd `$SKEIN_REPO`, so `.` is the repo workspace.
+/// skein's own launch command, used when `$SKEIN_LAUNCH_CMD` is unset.
+///
+/// A box belongs to a **registered repo** — that is the only shape there is. It used to be possible to
+/// create one outside repos.json, from `$SKEIN_REPO`/`$SKEIN_KIT` and a `sandboxes.json`, and that
+/// path created the box as its own microVM: `sbx create --clone …`. Both went together, because a box
+/// in the shared sandbox is built by a sequence of steps that needs a repo to clone from and a store to
+/// mount, and the env-var mode supplied neither in a form skein could resolve per box.
+///
+/// So an unregistered name is refused here, in the command itself, where the message reaches the
+/// terminal that asked. `skein add` is the whole of the fix.
 pub(crate) fn native_launch_command(
     name: &str,
     branch: &str,
     agent_override: Option<&str>,
 ) -> String {
-    // Repo-managed path: if the box belongs to a registered repo, build entirely from `repos.json`
-    // + skein's own kit — no `SKEIN_REPO`/`SKEIN_KIT` env, no repo-side script.
-    if let Some(repo) = repo_for_box(name) {
-        return repo_launch_command_as(name, &repo, branch, agent_override);
+    match repo_for_box(name) {
+        Some(repo) => repo_launch_command_as(name, &repo, branch, agent_override),
+        None => format!(
+            "echo 'skein: {} belongs to no registered repo, so there is nothing to create it from. \
+             Register one with: skein add <git-url|path>' >&2; exit 1",
+            name
+        ),
     }
-    let agent = agent_override
-        .map(str::to_string)
-        .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "claude".into());
-    let mut parts: Vec<String> = vec!["sbx".into(), "create".into(), "--clone".into()];
-    if let Some(kit) = env::var("SKEIN_KIT").ok().filter(|s| !s.is_empty()) {
-        parts.push("--kit".into());
-        parts.push(sh_quote(&resolve_under_repo(&kit)));
-    }
-    parts.push("--name".into());
-    parts.push(sh_quote(name));
-    parts.push(sh_quote(&agent)); // sbx agent positional
-    parts.push(".".into()); // the repo workspace (cwd is $SKEIN_REPO)
-    if let Some(store) = launch_store() {
-        parts.push(sh_quote(&store));
-    }
-    persistent_launch_command(parts, name, &agent)
 }
 
-/// Launch line for a registered repo, built from `repos.json` + skein's embedded kit:
-///   `sbx create --clone --kit <home>/kit --name <id>-<branch> <agent> <work> <store>`
-/// The agent positional is a registered sbx agent **name** (`sbx create` only accepts the built-in set:
-/// claude, codex, …; each has its own image, so it can't be a path or a wrapper command). It's the
-/// repo's `agent` (`$SKEIN_AGENT` overrides). `<work>` is the host clone; `<store>` is mounted at its
-/// host path so the kit links it in. The kit checks out the branch (from the launch spec) before the
-/// agent starts. `sbx create` provisions the image without starting its entrypoint; Skein then uses
-/// `sbx exec` to start the agent in the same `skein-agent` tmux session used by every later attach.
-/// Closing or reloading the creation terminal therefore cannot kill or fork an in-progress turn.
-/// Side effect: writes the launch spec + ensures kit/store (best-effort; a failure only logs, the
-/// command still builds).
 pub(crate) fn repo_launch_command_as(
     name: &str,
     repo: &Repo,
@@ -112,7 +87,6 @@ pub(crate) fn repo_launch_command_as(
         eprintln!("skein: ensure_store: {e}");
     }
     record_repo_mirror(repo);
-    let kit = skein_home().join("kit");
     let agent = agent_override
         .map(str::to_string)
         .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))
@@ -121,39 +95,22 @@ pub(crate) fn repo_launch_command_as(
     if let Err(e) = write_launch_spec_for_agent(name, &branch, repo, &agent) {
         eprintln!("skein: write_launch_spec: {e}");
     }
-    // The fleet: one sandbox hosting many boxes, so there is no `sbx create` for this box at all.
-    // Bringing it up is a sequence of round-trips into that sandbox, each consuming the last one's
-    // side effects (see `fleet::start_box`), which is not something a single shell line can express
-    // and not something worth open-coding into one. The launcher runs `skein start`, and the second
-    // half stays exactly as it is — `skein attach` still does the full agent setup, in the same tmux
-    // server the box is anchored to, so nothing downstream of here learns a new shape.
-    if !fleet_sandbox().is_empty() {
-        // `--attach` rather than `&& sbx <argv>`: the attach argv names the box's PLACEMENT, and
-        // this string is built before `skein start` has created one. Precomputed, it fell back to
-        // addressing a sandbox named after the box — `ERROR: no sandbox named …` the moment the box
-        // came up perfectly. `skein start --attach` resolves it after the box exists, through the
-        // same `initial_attach_argv_as` the non-fleet path uses.
-        return format!(
-            "{} start {} --branch {} --agent {} --attach",
-            skein_exe(),
-            sh_quote(name),
-            sh_quote(&branch),
-            sh_quote(&agent),
-        );
-    }
-    let parts = vec![
-        "sbx".to_string(),
-        "create".into(),
-        "--clone".into(),
-        "--kit".into(),
-        sh_quote(&kit.to_string_lossy()),
-        "--name".into(),
+    // One sandbox hosts every box, so there is no `sbx create` for a box at all. Bringing one up is a
+    // sequence of round-trips into that sandbox, each consuming the last one's side effects (see
+    // `fleet::start_box`) — not something a single shell line can express, and not worth open-coding
+    // into one. The launcher runs `skein start`; `skein attach` then does the full agent setup in the
+    // same tmux server the box is anchored to.
+    //
+    // `--attach` rather than `&& sbx <argv>`: the attach argv names the box's PLACEMENT, and this
+    // string is built before `skein start` has created one. Precomputed, it addressed a sandbox named
+    // after the box — `ERROR: no sandbox named …` the moment the box came up perfectly.
+    format!(
+        "{} start {} --branch {} --agent {} --attach",
+        skein_exe(),
         sh_quote(name),
-        sh_quote(&agent), // registered sbx agent name (claude | codex | …)
-        sh_quote(&repo.work),
-        sh_quote(&repo.store),
-    ];
-    persistent_launch_command(parts, name, &agent)
+        sh_quote(&branch),
+        sh_quote(&agent),
+    )
 }
 
 /// How to spell `skein` in a command the server hands to `sh -c`.
@@ -174,38 +131,6 @@ pub(crate) fn skein_exe() -> String {
         .filter(|p| p.is_file())
         .map(|p| sh_quote(&p.to_string_lossy()))
         .unwrap_or_else(|| "skein".into())
-}
-
-/// Join a completed `sbx create` argv with the first tmux-backed agent attach. Each argument is
-/// shell-quoted because the terminal launch path executes this compound command via `sh -c`.
-pub(crate) fn persistent_launch_command(create: Vec<String>, name: &str, agent: &str) -> String {
-    let attach = initial_attach_argv_as(name, agent)
-        .into_iter()
-        .map(|arg| sh_quote(&arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{} && sbx {attach}", create.join(" "))
-}
-
-/// Resolve a possibly-relative path against `$SKEIN_REPO` (the dir launches run in), so a relative
-/// `$SKEIN_KIT` behaves like a relative `$SKEIN_LAUNCH_CMD`.
-pub(crate) fn resolve_under_repo(p: &str) -> String {
-    if Path::new(p).is_absolute() {
-        return p.to_string();
-    }
-    match env::var("SKEIN_REPO").ok().filter(|s| !s.is_empty()) {
-        Some(repo) => Path::new(&repo).join(p).to_string_lossy().into_owned(),
-        None => p.to_string(),
-    }
-}
-
-/// The shared store to mount into a launched box: `$SKEIN_STORE`, else the store skein already reads
-/// (parent of `sandboxes.json`). `None` ⇒ omit the mount.
-pub(crate) fn launch_store() -> Option<String> {
-    if let Some(s) = env::var("SKEIN_STORE").ok().filter(|s| !s.is_empty()) {
-        return Some(s);
-    }
-    store_dir().map(|p| p.to_string_lossy().into_owned())
 }
 
 /// A fresh drop-batch id: millis-since-epoch + a process-local counter (no collisions within a run).
@@ -360,7 +285,7 @@ pub fn resume_box(name: &str, prompt: &str) -> Result<(), String> {
             // Through the box's placement, never `sbx exec <box>`: that names a sandbox, and for a
             // fleet box there is none — or worse, an unrelated one wearing the same name.
             place_of(name)
-                .ok_or("invalid box name")?
+                .ok_or_else(|| no_place(name))?
                 .exec_argv(&guest)
                 .iter()
                 .map(|arg| sh_quote(arg))
@@ -621,9 +546,25 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Why `place_of` said no, phrased for whoever is reading the failure.
+///
+/// It answers two questions in one `Option`: the name is unusable, or the name is fine and skein has
+/// not placed a box by it. Both used to read "invalid box name", which was true of the first and
+/// misleading for the second — it sent people checking their typing when the answer was that the box
+/// does not exist or its start failed.
+fn no_place(name: &str) -> String {
+    match crate::valid_name(name) {
+        false => format!("unusable box name {name:?}"),
+        true => format!(
+            "skein has not placed a box called {name}, so it does not know where it runs \
+             (its start may have failed, or it may be a sandbox skein did not create)"
+        ),
+    }
+}
+
 pub fn sbx_guest_output(name: &str, shell: &str, timeout: Duration) -> Result<String, String> {
     place_of(name)
-        .ok_or("invalid box name")?
+        .ok_or_else(|| no_place(name))?
         .exec(shell, timeout)
 }
 
@@ -654,7 +595,7 @@ pub(crate) fn guest_write(
     timeout: Duration,
 ) -> Result<(), String> {
     place_of(name)
-        .ok_or("invalid box name")?
+        .ok_or_else(|| no_place(name))?
         .write(shell, stdin.as_bytes(), timeout)
 }
 
@@ -751,10 +692,12 @@ pub(crate) fn agent_attach_argv(
     let instruction = agent_instruction_setup(runtime);
     let command = crate::runtime::for_box(command, name);
     let command = guarded_agent_command(agent, &command);
-    let place = place_of(name).unwrap_or_else(|| own_sandbox(name));
-    // Every `tmux` below is this box's server: bare under the original model, socket-qualified when
-    // the sandbox is shared. Session names are identical either way, so without the socket two boxes
-    // would both find a live `skein-agent` on the sandbox's one server and attach to each other's.
+    let Some(place) = place_of(name) else {
+        return refusal_argv(name);
+    };
+    // Every `tmux` below is this box's server, socket-qualified because the sandbox is shared: session
+    // names are identical across boxes, so without the socket two boxes would both find a live
+    // `skein-agent` on the sandbox's one server and attach to each other's.
     let tmux = place.tmux();
     let observer = pane_observer_start(tmux_name, place.tmux_sock());
     let configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} "));
@@ -789,7 +732,7 @@ pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), St
         return Err(format!("box {name:?} is not running"));
     }
     let session = agent_session_name(name, runtime);
-    let place = place_of(name).ok_or("invalid box name")?;
+    let place = place_of(name).ok_or_else(|| no_place(name))?;
     // `session` is built from a validated box name and a validated runtime, so it is safe to spell
     // into a shell string here — and going through the place is what aims kill-session at this
     // box's own server rather than whichever one answers on the sandbox's default socket.
@@ -818,13 +761,36 @@ pub(crate) fn agent_resume_cmd(agent: &str) -> String {
         .unwrap_or_else(|| agent.to_string())
 }
 
+/// What to run instead of an attach when the box has no placement record.
+///
+/// A terminal has to be handed *something*, and every alternative is worse: an empty argv leaves a
+/// blank pane, and addressing `sbx exec <name>` states as fact that skein owns a sandbox it may never
+/// have made. This prints one line and exits, so the pane carries the reason.
+fn refusal_argv(name: &str) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        format!(
+            "echo 'skein: {name} has no placement record, so skein does not know where it runs. \
+             If its start failed, run: skein start {name} --branch <branch>. If it is a sandbox you \
+             made yourself, reach it with: sbx exec -it {name} bash -l' >&2; exit 1"
+        ),
+    ]
+}
+
 /// `sbx` argv for an interactive *shell* in the box — a plain terminal to run commands in, separate
 /// from the agent session. Uses a persistent `skein-shell` tmux session when tmux is present (so this
 /// terminal survives reconnects). tmux is part of the managed-box contract; refusing to open a
 /// direct shell avoids presenting a terminal whose process dies on reload. Override the whole
 /// command with $SKEIN_SHELL_CMD (`sh -c`).
 pub fn shell_argv(name: &str) -> Vec<String> {
-    let place = place_of(name).unwrap_or_else(|| own_sandbox(name));
+    // No placement ⇒ not a box skein made. Refusing in-band rather than addressing a sandbox named
+    // after the box: that guess is what turned "your start failed" into sbx's `no sandbox named …`,
+    // arriving from the wrong layer. `absent_box_reason` says the same thing earlier and better; this
+    // is the backstop for any path that reaches here without asking it.
+    let Some(place) = place_of(name) else {
+        return refusal_argv(name);
+    };
     let tmux = place.tmux();
     let configure = TMUX_CONFIGURE.replace("tmux ", &format!("{tmux} "));
     place.interactive_argv(&format!(

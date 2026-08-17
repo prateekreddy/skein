@@ -2472,10 +2472,7 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
             "$HOME".to_string(),
         ),
     };
-    let build = format!(
-        "{enter}{}",
-        snapshot_script(&snapshot, name, placed.is_none(), &home)
-    );
+    let build = format!("{enter}{}", snapshot_script(&snapshot, name, &home));
     boxed.exec(&build, Duration::from_secs(600))?;
 
     // What the sweep refused to carry, said out loud. A snapshot that quietly leaves things behind
@@ -2497,93 +2494,6 @@ pub fn snapshot_box(name: &str, store: &str, run: &str) -> Result<String, String
 /// Where the snapshot records the ignored paths it decided not to carry.
 const SKIPPED_FILE: &str = "skipped-ignored.txt";
 
-/// Fetch the ignored files a box left behind in the sandbox it was migrated out of.
-///
-/// For boxes migrated before the snapshot swept ignored files at all: `.env`, local dev config and
-/// the box's own `.skein/journal.md` stayed in the old VM, and the box has been running without them
-/// ever since. This exists because the old sandbox is *stopped rather than destroyed* — that
-/// decision was made so a migration could be undone, and it turns out to be what makes this
-/// recoverable too.
-///
-/// Deliberately additive: it refuses to overwrite anything the new box already has. The box has been
-/// working since it moved, and a file it wrote itself is newer and more correct than the copy in the
-/// VM it left. Recovering work must never be a way to lose some.
-///
-/// Leaves the old sandbox stopped again, whatever happens — it holds a full memory reservation while
-/// it runs, which is the thing the migration existed to reclaim.
-pub fn recover_ignored(name: &str) -> Result<String, String> {
-    if !valid_name(name) {
-        return Err(format!("invalid box name {name:?}"));
-    }
-    let record = shared_record(name).ok_or_else(|| {
-        format!("{name} is not in the fleet, so it has no old sandbox to recover from")
-    })?;
-    let repo =
-        repo_for_box(name).ok_or_else(|| format!("box {name} belongs to no registered repo"))?;
-
-    // The old sandbox, addressed as a sandbox — `place_of` would hand back the box's fleet placement,
-    // which is exactly the copy that is missing the files.
-    //
-    // No explicit start, because sbx has no such verb: `stop` halts a sandbox and exec'ing into one
-    // wakes it again. Asking for `sbx start` failed with `unknown command: "start"` — advice skein
-    // had also been printing after every migration, in a message about how to undo one.
-    let old = own_sandbox(name);
-
-    let carried = (|| -> Result<String, String> {
-        let staging = format!("{}/skein/handoff-snapshots/{name}", repo.store);
-        let archive = format!("{staging}/ignored-rescue.tgz");
-        let script = format!(
-            "set -e; cd \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; mkdir -p {stage}; \
-             {sweep} {pack} \
-             tar -tzf {archive} | wc -l",
-            stage = sh_quote(&staging),
-            archive = sh_quote(&archive),
-            sweep = ignored_sweep(&staging, "list", &format!("{staging}/{SKIPPED_FILE}")),
-            pack = pack_carried(
-                &staging,
-                "list",
-                "ignored-rescue.tgz",
-                &format!("{staging}/{SKIPPED_FILE}")
-            ),
-        );
-        let count = old
-            .exec(&script, Duration::from_secs(600))
-            .map_err(|e| {
-                format!(
-                    "could not read {name}'s old sandbox ({e}) — if it has already been removed, \
-                     its ignored files are gone and there is nothing left to recover"
-                )
-            })?
-            .trim()
-            .to_string();
-        // `-k` is the whole safety property: extract only what is not already there.
-        //
-        // Except a broken symlink, which is not a file the box is maintaining — it is the wreckage
-        // of an earlier move. `/run/sandbox/source` is a `--clone` sandbox's bind of the host repo,
-        // and a `.env` symlinked into it arrives in the fleet pointing at a mount that is not there.
-        // Left in place it would also *win* against `-k` and block the very content that fixes it.
-        // Only links into that mount, and only ones that already resolve to nothing: narrow enough
-        // that nothing else can be caught by it.
-        let restore = format!(
-            "cd {tree}; \
-             find . -xtype l -lname '/run/sandbox/*' -print -delete 2>/dev/null || true; \
-             tar -xzkf {archive} 2>/dev/null || true; rm -f {archive}",
-            tree = sh_quote(&format!("{}/tree", box_root(name))),
-            archive = sh_quote(&archive),
-        );
-        own_sandbox(&record.sandbox).exec(&restore, Duration::from_secs(300))?;
-        Ok(count)
-    })();
-
-    // Stopped again either way. A rescue that leaves a second VM running has undone the migration.
-    if let Err(e) = run_capture_for("sbx", &["stop", name], Duration::from_secs(300)) {
-        eprintln!("skein: {name}'s old sandbox could not be stopped again ({e}) — `sbx stop {name}` frees its reservation");
-    }
-    carried
-}
-
-/// List the ignored paths worth carrying, into `<dir>/<list>` — shared by the snapshot and the
-/// rescue so the two can never disagree about what counts as work.
 fn ignored_sweep(dir: &str, list: &str, skipped: &str) -> String {
     const FILE_KB: u64 = 10 * 1024;
     const DIR_KB: u64 = 20 * 1024;
@@ -2661,7 +2571,7 @@ fn ignored_sweep(dir: &str, list: &str, skipped: &str) -> String {
 /// fallback carries the tip commit alone, its parent recorded as a prerequisite. That is a ref the
 /// restore can find, and still nothing like the full history. `--all` remains the last resort, for a
 /// repository too young to have a parent commit.
-fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, home: &str) -> String {
+fn snapshot_script(snapshot: &str, name: &str, home: &str) -> String {
     let s = sh_quote(snapshot);
     let skipped = format!("{snapshot}/{SKIPPED_FILE}");
     let sweep_ignored = ignored_sweep(snapshot, "untracked.list", &skipped);
@@ -2685,7 +2595,7 @@ fn snapshot_script(snapshot: &str, name: &str, transcript_is_vm_local: bool, hom
         n = sh_quote(name),
         pack = pack_carried(snapshot, "untracked.list", "untracked.tgz", &skipped),
         // A box already in the fleet host-binds its transcript; one being migrated in does not.
-        agent_state = agent_state_tar(snapshot, transcript_is_vm_local, home),
+        agent_state = agent_state_tar(snapshot, home),
     )
 }
 
@@ -2743,27 +2653,21 @@ fn pack_carried(dir: &str, list: &str, archive: &str, skipped: &str) -> String {
 /// `.credentials.json` is therefore not here, and does not need to be: `box-session.sh` seeds the
 /// box's `~/.claude` from the sandbox's on first start, so the rebuilt box is already logged in.
 ///
-/// Whether the **transcript** is carried depends on where the box keeps it, which is the one thing
-/// that differs between the two callers:
+/// The **transcript is deliberately not here.** A box host-binds `~/.claude/projects`, so the
+/// conversation is already durable and already exactly where the rebuilt box will look — tarring it
+/// would copy a virtiofs directory out to the store and straight back, twice over the slow path, to
+/// arrive at the file that never left.
 ///
-/// * A **fleet box** host-binds `~/.claude/projects`, so the conversation is already durable and
-///   already exactly where the rebuilt box will look. Tarring it would copy a virtiofs directory out
-///   to the store and straight back — twice over the slow path — to arrive at the file that never
-///   left.
-/// * A **box being migrated in** from its own sandbox has it on VM-local disk, and the VM is about
-///   to stop. Leaving it out there is not an optimisation, it is losing the conversation; this is
-///   precisely the case where the box has years of context and no host copy of any of it.
-fn agent_state_tar(snapshot: &str, transcript_is_vm_local: bool, home: &str) -> String {
-    let mut carried: Vec<&str> = vec![
+/// This used to be conditional, because a box migrating in from its own VM kept the transcript on
+/// VM-local disk and would have lost it. There is no such box any more: every box lives in the shared
+/// sandbox with a host-bound home, so the condition had exactly one reachable value.
+fn agent_state_tar(snapshot: &str, home: &str) -> String {
+    let carried: Vec<&str> = vec![
         ".claude/history.jsonl", // the prompt history
         ".claude/todos",         // in-flight task list
         ".claude.json",          // per-box MCP registration + project state
         ".codex/history.jsonl",
     ];
-    if transcript_is_vm_local {
-        carried.push(".claude/projects"); // the record --continue reads
-        carried.push(".codex/sessions");
-    }
     let list = carried
         .iter()
         .map(|p| sh_quote(p))
@@ -2781,180 +2685,6 @@ fn agent_state_tar(snapshot: &str, transcript_is_vm_local: bool, home: &str) -> 
         s = sh_quote(snapshot),
     )
 }
-
-/// Move a box that has its own sandbox into the shared one, keeping its work and its conversation.
-///
-/// The reason to want this is the reason the fleet exists: every per-VM box holds a memory
-/// *reservation* whether or not it is doing anything, and those are what the shared sandbox stops
-/// summing. A fleet nobody can move their existing boxes into only helps the boxes they have not
-/// created yet.
-///
-/// The old sandbox is **stopped, never destroyed**. Its checkout, its history and its snapshot all
-/// still exist, so a migration that goes wrong costs one `sbx exec` to wake rather than a day's work — the
-/// same rule the cross-runtime takeover follows, and worth more here because this path cannot be
-/// rehearsed against a fake. Removing it is left to the user, once they are satisfied.
-///
-/// One asymmetry with a resize, and it is the whole reason this is a separate function: a per-VM box
-/// keeps its transcript on VM-local disk, so the snapshot has to carry it (see [`agent_state_tar`]).
-/// For a box already in the fleet that would be redundant; for this one, skipping it loses the
-/// conversation — which for a long-lived box is most of its value.
-pub fn migrate_box(name: &str) -> Result<String, String> {
-    if !valid_name(name) {
-        return Err(format!("invalid box name {name:?}"));
-    }
-    let sandbox = fleet_sandbox();
-    if sandbox.is_empty() {
-        return Err("no fleet sandbox configured; set one before migrating into it".into());
-    }
-    if shared_record(name).is_some() {
-        return Err(format!("{name} is already in the fleet"));
-    }
-    let repo = repo_for_box(name).ok_or_else(|| {
-        format!("box {name} belongs to no registered repo, so it cannot be moved")
-    })?;
-
-    // Its own branch, asked of the box itself rather than of the registry: it may have moved (a
-    // branch-per-slice box does), and restoring it onto the branch skein last recorded would quietly
-    // put the agent's work somewhere it does not expect to find it.
-    let branch = place_of(name)
-        .ok_or_else(|| format!("box {name} is not reachable"))?
-        .exec("git rev-parse --abbrev-ref HEAD", Duration::from_secs(30))?
-        .trim()
-        .to_string();
-    if branch.is_empty() || branch == "HEAD" {
-        return Err(format!(
-            "{name} has no attached branch to restore onto — check it out in the box first"
-        ));
-    }
-
-    ensure_fleet(&sandbox, &fleet_mounts())?;
-    let run = format!("migrate-{}", Utc::now().format("%Y%m%dT%H%M%SZ"));
-    let dir = snapshot_box(name, &repo.store, &run).map_err(|e| {
-        format!("could not save {name}'s work ({e}) — nothing was changed, the box is untouched")
-    })?;
-    // The spec is written into the repo's store, which the OLD box reads too — and it tells whoever
-    // reads it to restore this snapshot. That is right for the fleet box being built and wrong for
-    // the box the snapshot came from, whose tree already holds every byte of it. It matters on the
-    // failure path, which is the only path that starts the old box again: a migration that stopped
-    // the sandbox and then could not clone left waking the old sandbox as the way back, and the restore would
-    // have met patches already applied and failed the box's startup outright.
-    //
-    // So the source is marked as already-restored before it is stopped, in the file the kit checks.
-    // Best-effort: the mark prevents a bad recovery, and failing to write it must not fail a
-    // migration that has otherwise succeeded.
-    if let Some(place) = place_of(name) {
-        // Asked of git rather than built from a recorded path, so it lands in the right place for a
-        // box in either shape — every script skein sends already starts at the box's repo root.
-        let _ = place.exec(
-            "root=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\"; \
-             touch \"$root/.git/skein-handoff-restored\" 2>/dev/null || true",
-            Duration::from_secs(30),
-        );
-    }
-    write_restore_launch_spec(&BoxSnapshot {
-        name: name.to_string(),
-        repo: repo.clone(),
-        branch: branch.clone(),
-        agent: agent_for_box(name),
-        dir: dir.clone(),
-    })?;
-
-    // Stop the old sandbox before starting the new box, not after: the reservation is the entire
-    // point, and for a moment otherwise the fleet box and the VM it replaces would both hold one.
-    // `sbx stop` rather than `rm` — see above.
-    let (out, err, code) = run_capture("sbx", &["stop", name])?;
-    if code != 0 {
-        let detail = if err.trim().is_empty() { out } else { err };
-        return Err(format!(
-            "could not stop the old sandbox for {name}: {} — its work is saved under {dir} in the \
-             repo store, so nothing is lost; resolve this and retry",
-            detail.trim()
-        ));
-    }
-
-    start_box(name, &repo, &branch, "exec bash -l").map_err(|e| {
-        format!(
-            "{name} was snapshotted and its old sandbox stopped, but the fleet box did not start \
-             ({e}). Nothing is lost: `sbx exec -it {name} bash -l` wakes the original exactly as it was, \
-             and the snapshot remains at {dir} in the repo store."
-        )
-    })?;
-    // The checkout moved, so the conversation has to be told where it lives now — otherwise the box
-    // starts up with a transcript on disk that its agent will never look at.
-    match realign_transcript(name) {
-        Ok(0) => {}
-        Ok(n) => {
-            eprintln!("skein: carried {n} transcript file(s) onto {name}'s new working directory")
-        }
-        Err(e) => eprintln!(
-            "skein: {name} migrated, but its conversation could not be pointed at the new checkout \
-             ({e}); the files are in {}/claude-projects and `claude --continue` will start fresh",
-            box_state(name)
-        ),
-    }
-    remint_tracker_token(name);
-    Ok(dir)
-}
-
-/// Re-issue a migrated box's work-tracker credential, if it had one.
-///
-/// The snapshot carries `~/.config/sync/env` across with the rest of the box's home, and a bearer
-/// token is the one thing here that a faithful copy does not preserve: it is bound to a box's
-/// lifetime at the gateway, not to the bytes on disk. Destroying a box revokes it (`destroy_box`),
-/// so a box that is destroyed and migrated again — the ordinary way to retry a migration — comes
-/// back holding a token the gateway has already retired.
-///
-/// It fails in the worst available shape. The MCP server registers fine, the agent is *told* by its
-/// own CLAUDE.md to claim work before starting, and the 401 arrives mid-turn on the first `capture`
-/// — while `sync-install.sh`'s once-per-box stamp guarantees no restart will ever re-register it.
-/// Measured on the first migrated box, which sat with a dead `sync` server through three `/mcp`
-/// attempts before anyone worked out why.
-///
-/// Minting unconditionally rather than probing first: a fresh mint of the same agent name keeps the
-/// project binding and invalidates only its own predecessor, which belonged to this same box. One
-/// round trip, and no "is it still good?" answer to get wrong.
-///
-/// **Only for a box that already had one.** This never wires up a box the user never wired up — a
-/// migration is not consent to mint a credential, and provisioning stays an explicit act everywhere
-/// else (see the note above `guest_write`). And it is fail-soft: the migration itself has already
-/// succeeded by the time this runs, and a tracker that cannot be reached must not turn a moved box
-/// into a failed one.
-fn remint_tracker_token(name: &str) {
-    let carried = place_of(name).and_then(|p| {
-        p.exec(
-            "[ -s \"$HOME/.config/sync/env\" ] && echo yes",
-            Duration::from_secs(30),
-        )
-        .ok()
-    });
-    if !carried.unwrap_or_default().contains("yes") {
-        return;
-    }
-    match crate::sync_provision_box(name) {
-        Ok(note) => eprintln!("skein: re-issued {name}'s tracker token — {note}"),
-        Err(e) => eprintln!(
-            "skein: {name} moved, but its work-tracker token could not be re-issued ({e}). The one \
-             it carried over was revoked when its old box went, so `sync` will fail to connect \
-             until you provision it again from the cockpit."
-        ),
-    }
-}
-
-/// What one box needs in order to be rebuilt after the sandbox is destroyed.
-#[derive(Debug, Clone)]
-pub struct BoxSnapshot {
-    pub name: String,
-    pub repo: Repo,
-    pub branch: String,
-    pub agent: String,
-    /// The snapshot path *relative to the repo store* — the form the launch spec carries.
-    pub dir: String,
-}
-
-/// Where a box's resize archive lands: beside that box's other durable host-side state.
-///
-/// It has to be a host path, because the whole point is surviving the VM that holds everything else.
-/// [`box_state`] is already mounted into the sandbox for exactly that reason, and already per box.
 fn box_archive(name: &str, run: &str) -> String {
     format!("{}/{run}.tar", box_state(name))
 }
@@ -3413,25 +3143,6 @@ struct Carried {
     live: bool,
 }
 
-/// Point a box's launch spec at the snapshot it must restore from on its next start.
-///
-/// The same `handoff.dir` channel a cross-runtime takeover uses, because it is the same problem:
-/// a new checkout that has to become an old box. The provisioning script validates the path against
-/// the `skein/handoff-snapshots/` prefix and restores once, guarded by a marker in `.git`.
-fn write_restore_launch_spec(snap: &BoxSnapshot) -> Result<(), String> {
-    let dir = std::path::Path::new(&snap.repo.store)
-        .join("skein")
-        .join("launch");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    let body = serde_json::json!({
-        "branch": snap.branch,
-        "agent": snap.agent,
-        "handoff": { "source": snap.name, "dir": snap.dir },
-    });
-    let bytes = serde_json::to_vec_pretty(&body).map_err(|e| e.to_string())?;
-    write_atomic(&dir.join(format!("{}.json", snap.name)), &dir, &bytes)
-}
-
 /// What a box clones from. The registered source when it is a URL — a box should start from the
 /// same base the diff is taken against, not from whatever is stale or half-committed in the host's
 /// clone. For a repo adopted in place there is no URL, so the host clone is it; that is mounted
@@ -3706,33 +3417,42 @@ fn login_move(in_sandbox: &[u8], on_host: Option<&[u8]>) -> LoginMove {
 /// about a sandbox that was never meant to exist. Worse, sbx's advice there is `sbx create AGENT
 /// WORKSPACE`, which builds exactly the per-box VM the fleet exists to replace.
 pub fn absent_box_reason(name: &str) -> Option<String> {
-    if shared_record(name).is_some() || fleet_sandbox().is_empty() {
+    if shared_record(name).is_some() {
         return None;
     }
-    // Only claim a box is missing when sbx has answered at least once. `None` is "cannot tell",
-    // and refusing a terminal on that would be worse than letting sbx speak for itself.
+    // Only speak when sbx has answered at least once. `None` is "cannot tell", and refusing a
+    // terminal on that would be worse than letting sbx speak for itself.
     //
-    // Note what this does *not* guarantee: [`crate::Gate`] serves the last good snapshot while sbx
-    // is failing, so this can be reading a stale list. That is safe in the direction that matters —
-    // a box created since the snapshot has a placement record, which is checked first, and a
-    // *legacy* sandbox created in that window is the one case this could misjudge. The alternative,
-    // trusting nothing but a fresh answer, would put the loop back every time sbx is unwell.
+    // Note what this does *not* guarantee: [`crate::Gate`] serves the last good snapshot while sbx is
+    // failing, so this can be reading a stale list. Safe in the direction that matters — a box created
+    // since the snapshot has a placement record, which is checked first.
     let boxes = crate::fleet_boxes()?;
+    // A sandbox that exists and skein did not place: someone's own `sbx` box, or one made by a skein
+    // old enough to give every box its own VM. Both are read-only as far as skein is concerned. It
+    // used to attach to these, which worked by accident for the per-VM ones and was always a guess for
+    // the rest — skein has no checkout, no store and no tmux contract in a sandbox it did not build.
     if boxes.iter().any(|b| b.name == name) {
-        return None; // a genuine legacy box: its sandbox is right there
+        return Some(format!(
+            "{name} is a sandbox skein did not create, so there is nothing here to attach to.\r\n\
+             skein runs boxes inside one shared sandbox and knows a box by the placement record it \
+             wrote; this one has none.\r\n\
+             Reach it directly with `sbx exec -it {name} bash -l`, or let skein own it: register its \
+             repo with `skein add`, then create the box from the cockpit.\r\n"
+        ));
     }
     Some(format!(
-        "box {name} does not exist: no placement in the fleet, and no sandbox of its own.\r\n\
+        "box {name} does not exist: skein has no placement for it, and sbx has no sandbox by that \
+         name.\r\n\
          Its last start failed, and the error came from that run rather than from this terminal.\r\n\
          Run `skein start {name} --branch <branch>` on the host to see it.\r\n\
-         Do not run `sbx create` — this fleet shares one sandbox, and a per-box one reserves a \
-         whole VM's memory whether or not the box is working.\r\n"
+         Do not run `sbx create` — sbx suggests it, and it would build the per-VM box skein no longer \
+         supports, reserving a whole VM's memory whether or not the box is working.\r\n"
     ))
 }
 
 pub fn ensure_box_session(name: &str) -> Result<(), String> {
     let Some(record) = shared_record(name) else {
-        return Ok(()); // legacy box, or one never created — see `absent_box_reason`
+        return Ok(()); // not skein's to start — see `absent_box_reason`
     };
     if fleet_liveness().get(name).copied().unwrap_or(false) {
         return Ok(());
@@ -4900,11 +4620,25 @@ b idle 5000000 1048576 4
         let why = absent_box_reason("example-box-1").expect("an absent box to be named as absent");
         assert!(why.contains("does not exist"), "{why}");
         assert!(why.contains("skein start example-box-1"), "no way forward: {why}");
-        // The advice sbx gives here would cost a whole VM's reservation, so it is contradicted.
+        // sbx's own advice here is `sbx create`, which would build the per-VM box skein dropped.
         assert!(why.contains("Do not run `sbx create`"), "{why}");
-
-        // Legacy: no placement, but a sandbox of its own. Attaching is correct and must not refuse.
-        assert!(absent_box_reason("old-box").is_none());
+        // A sandbox skein did not create: no placement, but sbx knows the name. It used to attach —
+        // correct by accident when every box was its own VM, a guess for anything else, since skein
+        // has no checkout, no store and no tmux contract in a sandbox it did not build.
+        let foreign =
+            absent_box_reason("old-box").expect("a foreign sandbox to be named as foreign");
+        assert!(
+            foreign.contains("skein did not create"),
+            "it must say whose sandbox this is: {foreign}"
+        );
+        assert!(
+            foreign.contains("sbx exec -it old-box"),
+            "and how to reach it anyway: {foreign}"
+        );
+        assert!(
+            foreign.contains("skein add"),
+            "and how to let skein own it: {foreign}"
+        );
 
         // Placed: a fleet box attaches through its placement.
         record_place(
@@ -5472,6 +5206,9 @@ b idle 5000000 1048576 4
     /// it has to land somewhere that outlives the VM being destroyed.
     #[test]
     fn a_resize_copies_the_whole_box_to_a_place_the_rebuild_cannot_reach() {
+        // `box_state` reads $SKEIN_HOME, which is process-global: without the lock this races any
+        // other test that points it somewhere, and fails for a reason having nothing to do with resize.
+        let _g = env_lock();
         let archive = box_archive("web-main", "resize-x");
 
         // On the host, under the box's own state directory — mounted into the sandbox precisely so
@@ -5614,89 +5351,6 @@ b idle 5000000 1048576 4
         assert_eq!(box_pidfile("web-main"), "/boxes/web-main/anchor.pid");
     }
 
-    // Migration copies a box's home faithfully, and the tracker token is the one thing a faithful
-    // copy does not preserve — the gateway binds it to a box's lifetime, not to the bytes. So a
-    // migrated box that HAD one has to be re-issued one, and a box that never had one must be left
-    // exactly as it is: moving a box is not consent to mint it a credential.
-    #[test]
-    fn a_migrated_box_reissues_only_a_tracker_token_it_actually_carried() {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        let _g = env_lock();
-        let dir = tempdir();
-        std::env::set_var("SKEIN_HOME", &dir);
-        LIVENESS_GATE.invalidate();
-
-        record_place(
-            "web-main",
-            &PlaceRecord {
-                sandbox: "skein-fleet".into(),
-                ns_pid: 4242,
-                home: "/boxes/web-main/home".into(),
-                tree: "/boxes/web-main/tree".into(),
-                sock: "/boxes/web-main/session.sock".into(),
-            },
-        )
-        .unwrap();
-        let mut config = load_config();
-        config.fleet_sandbox = "skein-fleet".into();
-        save_config(&config).unwrap();
-        // Configured far enough that a mint would be ATTEMPTED — otherwise both cases would refuse
-        // for the same unrelated reason and the test would prove nothing about the gate.
-        crate::upsert_connection(Some("shared"), "shared", "http://127.0.0.1:9", None).unwrap();
-        crate::set_connection_token("shared", "plane_api_x").unwrap();
-
-        let log = dir.join("sbx.log");
-        let bin = dir.join("bin");
-        fs::create_dir_all(&bin).unwrap();
-        let sbx = bin.join("sbx");
-        // Answers the credential probe, and nothing else: silence from the liveness sweep reads as
-        // "cannot tell", which stops `sync_provision_box` before it reaches the network.
-        fs::write(
-            &sbx,
-            "#!/bin/sh\necho \"$@\" >> \"$FAKE_SBX_LOG\"\n\
-             case \"$*\" in *.config/sync/env*) [ -n \"$FAKE_BOX_HAS_CRED\" ] && echo yes ;; esac\n\
-             exit 0\n",
-        )
-        .unwrap();
-        fs::set_permissions(&sbx, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
-        std::env::set_var("FAKE_SBX_LOG", &log);
-
-        let calls = || fs::read_to_string(&log).unwrap_or_default().lines().count();
-
-        // No credential: the probe runs, finds nothing, and that is the end of it.
-        std::env::remove_var("FAKE_BOX_HAS_CRED");
-        fs::write(&log, "").unwrap();
-        remint_tracker_token("web-main");
-        assert_eq!(
-            calls(),
-            1,
-            "a box that never had a tracker token must cost one probe and no mint"
-        );
-
-        // Carried one: it goes on to re-issue. It gets no further than the liveness check here, and
-        // that is the point — the assertion is that it TRIED, without a live gateway to try against.
-        std::env::set_var("FAKE_BOX_HAS_CRED", "1");
-        LIVENESS_GATE.invalidate();
-        fs::write(&log, "").unwrap();
-        remint_tracker_token("web-main");
-        assert!(
-            calls() > 1,
-            "a box carrying a tracker credential must be re-issued one, not left holding a dead token"
-        );
-
-        std::env::set_var("PATH", path);
-        std::env::remove_var("FAKE_SBX_LOG");
-        std::env::remove_var("FAKE_BOX_HAS_CRED");
-        forget_place("web-main");
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    // A repo's store is a HOST path, and sbx mounts a workspace at its host absolute path — so the
-    // very same string addresses the store on the host and inside the fleet sandbox. Nothing in
-    // skein translates paths across that boundary, and this is why it never has to.
     #[test]
     fn a_repos_store_is_reachable_at_the_same_path_inside_the_fleet_sandbox() {
         let _g = env_lock();
@@ -6154,29 +5808,20 @@ b idle 5000000 1048576 4
         std::env::remove_var("SKEIN_HOME");
     }
 
-    // The one thing that differs between a resize and a migration, and it decides whether a
-    // long-lived box keeps its conversation.
-    //
-    // A box already in the fleet host-binds ~/.claude/projects, so tarring it copies a virtiofs
-    // directory out to the store and straight back to arrive at the file that never left. A box
-    // being MIGRATED in has it on VM-local disk, and that VM is about to stop — leaving it out is
-    // not an optimisation, it is losing the conversation, which for an old box is most of its value.
-    //
-    // Tested here rather than in the launch harness on purpose: there, `sbx exec` runs locally, so a
-    // "legacy box" would read the developer's own $HOME. The first version of this test did exactly
-    // that and tarred up real transcripts — the harness cannot fake a VM it has to enter.
+    // The transcript must NOT be carried, and the HOME must be named absolutely. Both used to depend
+    // on a `transcript_is_vm_local` flag that only a migration ever set true; with the per-VM model
+    // gone there is one shape left, and this pins it so a rebuild does not start copying a host-bound
+    // directory out to the store and back.
     #[test]
-    fn a_migrating_box_carries_its_conversation_and_a_fleet_box_does_not() {
-        let migrating = agent_state_tar("/snap", true, "$HOME");
+    fn a_rebuilt_box_leaves_its_host_bound_conversation_where_it_is() {
+        let already_in = agent_state_tar("/snap", "/boxes/web-main/home");
         assert!(
-            migrating.contains(".claude/projects") && migrating.contains(".codex/sessions"),
-            "a box moving in from its own sandbox would lose its whole conversation: {migrating}"
-        );
-
-        let already_in = agent_state_tar("/snap", false, "/boxes/web-main/home");
-        assert!(
-            !already_in.contains(".claude/projects"),
+            !already_in.contains(".claude/projects") && !already_in.contains(".codex/sessions"),
             "the transcript is host-bound already; copying it is pure virtiofs waste: {already_in}"
+        );
+        assert!(
+            already_in.contains(".claude/todos") && already_in.contains(".claude.json"),
+            "the state that is NOT host-bound still has to travel: {already_in}"
         );
 
         // A fleet box's HOME is named absolutely, because the tar runs in the SANDBOX rather than
@@ -6186,16 +5831,11 @@ b idle 5000000 1048576 4
             "a dead box's private HOME must still be addressable: {already_in}"
         );
 
-        // The allowlist rule holds on both paths — this is host-side shared data.
-        for spec in [&migrating, &already_in] {
-            assert!(
-                !spec.contains("credentials"),
-                "a credential would be copied into the repo store: {spec}"
-            );
-            // Everything genuinely VM-local travels either way.
-            assert!(spec.contains(".claude.json"), "{spec}");
-            assert!(spec.contains(".claude/todos"), "{spec}");
-        }
+        // The allowlist rule — this lands in host-side shared data, so a credential must never be in it.
+        assert!(
+            !already_in.contains("credentials"),
+            "a credential would be copied into the repo store: {already_in}"
+        );
     }
 
     // A migrated box works in a new directory, and the runtimes key a transcript by that directory.
@@ -6630,7 +6270,6 @@ b idle 5000000 1048576 4
         let script = snapshot_script(
             &snapshot.to_string_lossy(),
             "demo-main",
-            true,
             &home.to_string_lossy(),
         );
         let out = sh(&tree, &script);
@@ -6678,7 +6317,6 @@ b idle 5000000 1048576 4
             &snapshot_script(
                 &snapshot2.to_string_lossy(),
                 "demo-main",
-                true,
                 &home.to_string_lossy(),
             ),
         );
@@ -6711,7 +6349,6 @@ b idle 5000000 1048576 4
             &snapshot_script(
                 &snapshot3.to_string_lossy(),
                 "demo-main",
-                true,
                 &home.to_string_lossy(),
             ),
         );
@@ -6812,7 +6449,6 @@ b idle 5000000 1048576 4
         let script = snapshot_script(
             &snapshot.to_string_lossy(),
             "demo-main",
-            true,
             &home.to_string_lossy(),
         );
         let out = sh(&tree, &script);
@@ -6867,35 +6503,13 @@ b idle 5000000 1048576 4
         assert!(!unpacked.join(".env.dangling").exists());
     }
 
-    // The rescue reads a stopped VM and writes into a live box, so its guards matter more than its
-    // happy path: it must refuse a box that has no old sandbox rather than start something, and it
-    // must never overwrite a file the box has been maintaining since it moved.
+    // What counts as work worth carrying is one rule, used by the snapshot and by the sweep it calls.
+    // Two copies of it would drift, and the drift would be silent — a box would come back missing a
+    // file nobody noticed it had.
     #[test]
-    fn recovering_ignored_files_refuses_a_box_with_nothing_to_recover_from() {
-        let _g = env_lock();
-        let home = tempdir();
-        std::env::set_var("SKEIN_HOME", &home);
-
-        let e = recover_ignored("never-migrated").unwrap_err();
-        assert!(
-            e.contains("not in the fleet"),
-            "a box that still owns its sandbox has nothing to fetch: {e}"
-        );
-        // Reached without spending anything: the old sandbox is never woken, since a box with no
-        // placement record never gets that far.
-        assert!(recover_ignored("../escape")
-            .unwrap_err()
-            .contains("invalid"));
-
-        std::env::remove_var("SKEIN_HOME");
-    }
-
-    // Both the snapshot and the rescue decide what counts as work worth carrying. They must decide
-    // it the same way — two copies of this rule would drift, and the drift would be silent.
-    #[test]
-    fn the_snapshot_and_the_rescue_agree_on_what_is_worth_carrying() {
+    fn the_snapshot_carries_exactly_what_the_sweep_says_is_worth_carrying() {
         let sweep = ignored_sweep("/snap", "list", "/snap/skipped");
-        let snapshot = snapshot_script("/snap", "demo-main", true, "/home/agent");
+        let snapshot = snapshot_script("/snap", "demo-main", "/home/agent");
         assert!(
             snapshot.contains("--others --ignored --exclude-standard --directory"),
             "the snapshot must sweep ignored files at all"

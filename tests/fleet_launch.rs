@@ -539,8 +539,9 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     );
     forget_place(BOX);
     assert!(
-        matches!(place_of(BOX).map(|p| p.sandbox), Some(name) if name == BOX),
-        "a forgotten box falls back to the original model rather than a dead namespace"
+        place_of(BOX).is_none(),
+        "a forgotten box must resolve to nothing, not to a dead namespace — and not to a sandbox \
+         named after it, which was the per-VM model and is gone"
     );
 
     // The cgroup outlives the box's filesystem — rmdir only succeeds once the server is gone, which

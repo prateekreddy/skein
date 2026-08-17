@@ -183,20 +183,37 @@ Revisit only if a streaming download endpoint earns its keep.
 
 ## Migration and cleanup
 
-### Retire the per-VM box model
+### Retire the per-VM box model — **done**
 
-**Blocked on a check only the host can do**, and worth stating because it is not obvious from a box:
-a legacy box is its own sbx sandbox, so it does not appear under `/boxes/` at all. `sbx ls` on the
-host is the only way to know none remains, and removing the fallback while one exists strands it.
+The fallback that carried it was one line: `place_of` answered "a sandbox named after the box" for any
+name with no placement record. That was skein's original model, and it outlived it as a *guess* — any
+name at all resolved to a `Place`, so a box whose start had failed, and a sandbox skein never created,
+were both addressed as though skein owned them. `place_of` now returns `None`, and every caller says
+what it means by an unplaced box.
 
-Scope, measured: `place_of(name).unwrap_or_else(|| own_sandbox(name))` is the shape everywhere, and
-there are **62 legacy references across 7 files** (`config.rs`, `repos.rs`, `sandbox.rs`,
-`tracking.rs`, `mailbox.rs`, `fleet.rs`, `lib.rs`). That is its own session, not a tail-end cleanup.
+Removed with it: `skein migrate` / `skein recover` (migration existed only to move a per-VM box in,
+and `resize_fleet` carries fleet boxes by its own copy-out), the two `sbx create` paths, the
+`$SKEIN_KIT`/`$SKEIN_STORE` single-repo launch mode, `persistent_launch_command`,
+`resolve_under_repo`, `launch_store`, `remint_tracker_token`, `write_restore_launch_spec`, and the
+`transcript_is_vm_local` parameter that only a migration ever set true.
 
-Note the capability difference before doing it: a legacy box had real root, a fleet box cannot (see
-the sudo shim in `box-session.sh`). What a fleet box has instead is a way to *ask* — the shim files
-a package request its owner approves in the cockpit, and the install serves the whole fleet — so the
-gap is narrower than "no root" suggests, but it is not the same capability and never will be.
+**The stranding this was blocked on is now real, and deliberately accepted.** A per-VM box on disk is
+no longer reachable through skein, and there is no `skein migrate` to rescue it. It is not lost — the
+sandbox still exists and `sbx exec -it <name> bash -l` still enters it — and the cockpit says exactly
+that when you try to open one. Copy anything wanted out with `sbx`, then `sbx rm` it.
+
+A note that survives the removal: a legacy box had real root; a fleet box cannot (see the sudo shim in
+`box-session.sh`). What a fleet box has instead is a way to *ask* — the shim files a package request
+its owner approves in the cockpit, and the install serves the whole fleet. Narrower than "no root"
+suggests, but not the same capability and never will be.
+
+### Sandboxes skein did not create
+
+Related, and fixed alongside: `load_views` takes every name from `sbx ls`, which cannot say which
+sandboxes are skein's. Unrelated `sbx` boxes therefore appeared on the board as rows with no branch,
+no signals and nothing that worked — a first run on a machine with a couple of them looked like a
+fleet full of broken boxes. They now carry `foreign: true`, are hidden by default, and are shown by
+the `foreign:` filter term; the empty board offers a link to it when any exist.
 
 ### The docs still describe one sandbox per box
 

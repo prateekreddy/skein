@@ -140,12 +140,11 @@ pub fn health_report() -> HealthReport {
     // Named in GiB rather than MiB: these are numbers a person compares against how much memory the
     // Mac has, and 15975 does not read as "about sixteen gigabytes" at a glance.
     let gib = |mib: u64| format!("{:.1}G", mib as f64 / 1024.0);
-    let memory = match (crate::fleet_sandbox().is_empty(), crate::memory_plan()) {
-        (true, _) => HealthCheck {
-            ok: true,
-            detail: "one sandbox per box — each has its own VM, and nothing to divide".into(),
-        },
-        (false, Some(plan)) => HealthCheck {
+    // Every box shares one sandbox, so there is always a division to report. This used to have a
+    // "one sandbox per box — nothing to divide" arm for a fleet whose name was cleared; that model is
+    // gone, and with it the only way to reach it.
+    let memory = match crate::memory_plan() {
+        Some(plan) => HealthCheck {
             ok: true,
             detail: format!(
                 "{} across all boxes and the containers they start, {} for the sandbox's own \
@@ -158,7 +157,7 @@ pub fn health_report() -> HealthReport {
         // A fleet whose total is unset has no ceiling anywhere: not per box, not on the boxes
         // together, not on Docker. One build can then reach the VM's memory, and with no swap the
         // kernel's global OOM killer picks a victim by badness rather than by blame.
-        (false, None) => HealthCheck {
+        None => HealthCheck {
             ok: false,
             detail: "no memory ceiling anywhere: Settings → Fleet memory names no size, so one \
                      box's build can take the sandbox down with it"

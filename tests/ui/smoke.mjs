@@ -65,16 +65,25 @@ function makeFixture() {
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
   const sbx = path.join(bin, "sbx");
-  fs.writeFileSync(sbx, `#!/bin/sh
+  // `exec` runs the script the way a box would, so the verify path (wrapper script, exit-code marker,
+  // stored record) runs for real without a sandbox. The script is the LAST argument whatever the
+  // prefix — skein addresses a box through its placement, so the real argv is
+  // `sbx exec <sandbox> nsenter … -- bash -lc <script>` and there is no namespace here to enter.
+  // The script already carries its own `cd <tree>` and `export HOME=<home>` from `Place::wrap`, and
+  // the placement record above points both at this fixture, so it lands in the right place by itself.
+  fs.writeFileSync(sbx, `#!/usr/bin/env bash
 case "$1" in
   ls)   echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
-  exec) shift; shift; cd "${ws}" || exit 1; HOME="${root}/boxhome" exec "$@" ;;
+  exec) exec bash -c "\${@: -1}" ;;
 esac
 exit 0
 `);
   fs.chmodSync(sbx, 0o755);
   // the box's own conversation record — what the Transcript tab reads instead of the screen
-  const proj = path.join(root, "boxhome", ".claude", "projects", "-fixture");
+  // Under the box's host state dir, because that is where a placed box's record lives: box-session.sh
+  // binds `~/.claude/projects` in from the host, so skein reads it there rather than shelling into the
+  // box — which is what lets a STOPPED box still show its conversation.
+  const proj = path.join(root, "home", "boxes", BOX, "claude-projects", "-fixture");
   fs.mkdirSync(proj, { recursive: true });
   // 300KB of bookkeeping FIRST, so a 256KB window lands mid-file: that exercises the partial-line
   // drop and the "load older" paging, which a small fixture would silently skip
@@ -92,6 +101,28 @@ exit 0
   ].join("\n") + "\n");
   fs.mkdirSync(path.join(root, "home"), { recursive: true });
   fs.writeFileSync(path.join(root, "home", "config.json"), JSON.stringify({}));
+  // The placement record: what makes a sandbox one of skein's boxes. Without it the box is `foreign`
+  // and the board hides it — which is the point of the flag, and used to be free because an unplaced
+  // name resolved to "a sandbox called that", the per-VM model. The fake sbx below answers `exec` for
+  // whatever it is handed, so the namespace this names is never actually entered.
+  fs.mkdirSync(path.join(root, "home", "places"), { recursive: true });
+  const fleetRoot = path.join(root, "fleet");
+  const sock = path.join(fleetRoot, BOX, "session.sock");
+  fs.mkdirSync(path.join(fleetRoot, BOX), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "home", "places", `${BOX}.json`),
+    JSON.stringify({
+      sandbox: "skein-fleet",
+      ns_pid: process.pid,          // alive, so the record is followed
+      home: path.join(root, "boxhome"),
+      tree: ws,
+      sock,
+    }),
+  );
+  // A real tmux server on that socket. `fleet_liveness` asks tmux whether the box has a session, so
+  // without one the box reads as Stopped and every pane falls back to the host clone — which is what
+  // the Files tab then says, correctly and unhelpfully.
+  spawnSync("tmux", ["-S", sock, "new-session", "-d", "-s", "skein-agent", "sleep 600"], { stdio: "ignore" });
   fs.writeFileSync(path.join(root, "home", "api-token"), API_TOKEN, { mode: 0o600 });
   // a registered repo, so the settings pane has a card to open and edit
   fs.writeFileSync(path.join(root, "home", "repos.json"), JSON.stringify([
@@ -126,6 +157,10 @@ async function startServer(fx, port) {
       SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
       SKEIN_LS_CMD: `${fx.sbx} ls --json`,   // verbatim through `sh -c` — the args matter
       SKEIN_HOME: path.join(fx.root, "home"),   // keep probe/kit installs out of the real store
+      // The fixture's own fleet root. `fleet_liveness` scans `<root>/<box>/session.sock` and asks
+      // tmux, so this is what makes the box read as Running — pointed at the real /boxes it would
+      // answer for whatever boxes this machine happens to be running.
+      SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
       SKEIN_NO_GH_SECRET: "1",
       PATH: `${fx.bin}:${process.env.PATH}`,    // `sbx` resolves to the stub, never the real CLI
     },
@@ -802,6 +837,9 @@ if (failed.length) {
 }
 await browser.close();
 srv.kill();
+// The fixture's tmux server outlives the process that started it, so it has to be killed by name —
+// a stray `sleep 600` per run would otherwise pile up on a developer's machine.
+spawnSync("tmux", ["-S", path.join(fx.root, "fleet", BOX, "session.sock"), "kill-server"], { stdio: "ignore" });
 // SKEIN_KEEP=1 leaves the fixture behind so you can point a server at it and look at the thing
 if (!failed.length && !process.env.SKEIN_KEEP) fs.rmSync(fx.root, { recursive: true, force: true });
 else if (!failed.length) console.log(`fixture kept (SKEIN_KEEP): ${fx.root}`);

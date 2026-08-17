@@ -192,11 +192,17 @@ pub fn place_of(name: &str) -> Option<Place> {
             },
         });
     }
-    Some(Place {
-        name: name.to_string(),
-        sandbox: name.to_string(),
-        at: Where::OwnSandbox,
-    })
+    // No record ⇒ not a box skein placed, and there is nothing truthful to return.
+    //
+    // This used to fall back to a sandbox named after the box — skein's original per-VM model, where
+    // a box *was* a sandbox. That model is gone, and the fallback outlived it as a silent guess: any
+    // name at all resolved to a `Place`, so a plain `sbx` sandbox nobody made with skein, or a box
+    // whose start failed, was addressed as though skein owned it. The failure then arrived from sbx
+    // (`no sandbox named …`) rather than from the code that knew the answer.
+    //
+    // `None` is the honest answer and it is the useful one: callers now have to say what they mean by
+    // an unplaced box, and every one of them wanted to report rather than guess.
+    None
 }
 
 /// Where skein keeps the agent's shared secret.
@@ -661,8 +667,10 @@ pub fn own_sandbox(name: &str) -> Place {
     }
 }
 
-/// The name of the one sandbox that hosts every box, when the shared model is on. Empty ⇒ each box
-/// gets its own sandbox, which is skein's original behaviour and stays the default.
+/// The name of the one sandbox that hosts every box.
+///
+/// Empty is not a second model any more — it is a fleet with no name, which no box can be started in.
+/// See [`crate::config::Config::fleet_sandbox`].
 pub fn fleet_sandbox() -> String {
     load_config().fleet_sandbox.trim().to_string()
 }
@@ -1541,15 +1549,36 @@ mod tests {
     // interpolated into a shell string. The paths that DO build shell strings quote it.
     #[test]
     fn a_name_that_could_be_a_path_has_no_place() {
+        let _g = env_lock();
+        let dir = tempdir();
+        std::env::set_var("SKEIN_HOME", &dir);
         for bad in ["", "../etc", "a/b", "a\\b", "x\0y", &"n".repeat(129)] {
             assert!(place_of(bad).is_none(), "resolved {bad:?}");
         }
+        // A space is not a traversal, so such a name is placeable — checked through a real record now
+        // that an unrecorded name resolves to nothing at all.
+        record_place(
+            "a b",
+            &PlaceRecord {
+                sandbox: "skein-fleet".into(),
+                ns_pid: std::process::id(),
+                home: "/boxes/a b/home".into(),
+                tree: "/boxes/a b/tree".into(),
+                sock: "/boxes/a b/session.sock".into(),
+            },
+        )
+        .unwrap();
         let spaced = place_of("a b").expect("a space is not a traversal");
         assert_eq!(
             spaced.exec_argv("true")[2],
-            "a b",
-            "it stays one argv element, so nothing can split it"
+            "skein-fleet",
+            "the sandbox comes from the record"
         );
+        assert!(
+            spaced.exec_argv("true").iter().any(|a| a.contains("a b")),
+            "the name stays one argv element, so nothing can split it"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // A recorded placement is only good while its namespace is alive. A stale record pointing at a
@@ -1560,10 +1589,12 @@ mod tests {
         let dir = tempdir();
         std::env::set_var("SKEIN_HOME", &dir);
 
-        assert_eq!(
-            place_of("web-main").map(|p| p.at),
-            Some(Where::OwnSandbox),
-            "no record ⇒ the original model"
+        // No record ⇒ nothing to address. It used to mean "a sandbox named after the box", skein's
+        // per-VM model; with that gone, guessing would hand any name at all a Place — including a
+        // sandbox skein never made.
+        assert!(
+            place_of("web-main").is_none(),
+            "an unrecorded name must not resolve to a sandbox"
         );
 
         // A live pid: this test process itself, which is certainly running.
@@ -1606,8 +1637,10 @@ mod tests {
             "liveness is the tmux socket's answer, not a pid lookup in the wrong namespace"
         );
 
+        // Forgetting a placement is how a destroyed box stops being addressable at all — not how it
+        // reverts to being its own sandbox, which is what this asserted while that model existed.
         forget_place("web-main");
-        assert_eq!(place_of("web-main").map(|p| p.at), Some(Where::OwnSandbox));
+        assert!(place_of("web-main").is_none());
         std::env::remove_var("SKEIN_HOME");
     }
 }

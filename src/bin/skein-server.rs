@@ -84,7 +84,7 @@ async fn main() {
     }
     // Install skein's own sbx kit (idempotent) so launching a box needs no repo-side kit.
     if let Err(e) = skein::ensure_kit() {
-        eprintln!("skein: kit not installed ({e}); native launch will fall back to $SKEIN_KIT");
+        eprintln!("skein: kit not installed ({e}); boxes will fail to provision");
     }
     // Bring an existing fleet sandbox into line with this binary: it keeps the launcher and the
     // ceilings it was last given, and an upgrade that changes what skein passes the launcher stops
@@ -134,7 +134,14 @@ async fn main() {
             let _ = tokio::task::spawn_blocking(|| {
                 // The board's own list, so a destroyed box is not minted for and a box skein cannot
                 // currently see is simply skipped this round rather than losing its token.
-                for view in load_views().unwrap_or_default() {
+                // Skein's boxes only. A sandbox skein did not place has none of this mounted, so a
+                // token minted for it is written to a host directory nothing will ever read — and
+                // re-minted every twenty minutes for as long as that sandbox exists.
+                for view in load_views()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|v| !v.foreign)
+                {
                     for problem in skein::gitgate::refresh_tokens(&view.name) {
                         eprintln!("skein: git token for {}: {problem}", view.name);
                     }
@@ -1339,7 +1346,11 @@ async fn api_git_credential(Json(r): Json<CredentialReq>) -> Response {
     }
     // Boxes whose repo this now covers can be given it without waiting for the next tick.
     tokio::task::spawn_blocking(|| {
-        for view in load_views().unwrap_or_default() {
+        for view in load_views()
+            .unwrap_or_default()
+            .iter()
+            .filter(|v| !v.foreign)
+        {
             let _ = skein::gitgate::refresh_tokens(&view.name);
         }
     });
@@ -1367,7 +1378,11 @@ async fn api_git_read_token(Json(r): Json<ReadTokenReq>) -> Response {
     // Reads are placed by the same sweep that places writes, so a token stored now reaches the
     // boxes without waiting for the next tick.
     tokio::task::spawn_blocking(|| {
-        for view in load_views().unwrap_or_default() {
+        for view in load_views()
+            .unwrap_or_default()
+            .iter()
+            .filter(|v| !v.foreign)
+        {
             let _ = skein::gitgate::refresh_tokens(&view.name);
         }
     });
@@ -1380,7 +1395,11 @@ async fn api_git_credential_remove(Path(id): Path<String>) -> Response {
         Ok(()) => {
             // Withdrawn from every box that held it, rather than left live for up to a tick.
             tokio::task::spawn_blocking(|| {
-                for view in load_views().unwrap_or_default() {
+                for view in load_views()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|v| !v.foreign)
+                {
                     let _ = skein::gitgate::refresh_tokens(&view.name);
                 }
             });
