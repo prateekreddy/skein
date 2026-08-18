@@ -659,6 +659,14 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 > The `*_CMD` templates run via `sh -c`; values you substitute are shell-quoted, but only
 > point them at trusted commands.
 
+**How skein reaches the fleet.** By default it installs a small agent inside the fleet sandbox and
+talks to it over one held-open connection, falling back to `sbx exec` for anything the agent cannot
+carry. That is the faster path, and more importantly the one that survives a stalled sbx daemon: a
+stall hangs calls that need a *new* channel into the sandbox while established ones keep flowing, so
+without it the board goes blind while the boxes it watches are fine. The gauge strip says which of
+the two is actually carrying calls, always. To opt out, put `"fleet_agent": false` in
+`~/.skein/config.json` and restart — which removes the agent rather than routing around it.
+
 ## How it fits the sbx setup
 
 skein **reads** the shared store the sandboxes already maintain (`sandboxes.json`,

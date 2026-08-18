@@ -6202,7 +6202,8 @@ function transportRow(t) {
     return gaugeText("off", "sbx exec", "",
       "Every call into the fleet spawns a new `sbx exec`. That works, but it is the call that hangs "
       + "when the daemon stalls — which is when the board goes blind.\n\n"
-      + 'Set "fleet_agent": true in ~/.skein/config.json and restart to use the in-sandbox agent.');
+      + 'The in-sandbox agent is on by default, so this fleet has "fleet_agent": false in '
+      + "~/.skein/config.json. Remove that line and restart to get it back.");
   if (!t.speaks)
     return gaugeText("warn", "sbx exec", at,
       "The agent is switched on but nothing answers on its port, so every call is falling back to "

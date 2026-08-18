@@ -602,8 +602,8 @@ fn cmd_doctor() -> Result<(), String> {
         };
         match t {
             _ if !t.configured => println!(
-                "{DIM}·{RESET} transport     {DIM}`sbx exec` — the in-sandbox agent is off \
-                 (fleet_agent){RESET}"
+                "{DIM}·{RESET} transport     {DIM}`sbx exec` — this fleet switched the in-sandbox \
+                 agent off (\"fleet_agent\": false){RESET}"
             ),
             _ if t.speaks == 0 => println!(
                 "{BAD} transport     agent wanted but nothing answers ({}) — every call falls back \

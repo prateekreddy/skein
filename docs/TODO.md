@@ -17,9 +17,14 @@ agent install runs *immediately before* the launcher install and is non-fatal, s
 agent stale" is the signature of the agent step failing or being skipped.
 
 The leading explanation, now fixed but not yet confirmed as the cause: `load_config` silently
-discarded a `config.json` it could not parse and returned defaults, in which `fleet_agent` is false —
+discarded a `config.json` it could not parse and returned defaults, in which `fleet_agent` was false —
 so `heal_fleet_agent` returned on its first line with no message, while the file said `true` and was
 right.
+
+That default is now **true**, which removes this whole family of causes rather than only reporting
+it: an unreadable config, an absent one, and a partial write all leave the transport wanted. If the
+agent is still not installed after this ships, the cause is downstream of the setting and the
+server's `skein: the in-sandbox agent is not serving (…)` line names it.
 
 **Settle it after the next deploy**: `skein doctor` now prints the parse error above the settings
 line, and the board's transport row shows `settings / unreadable` in place of `off`. If neither

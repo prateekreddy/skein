@@ -274,10 +274,11 @@ const AGENT_SESSION: &str = "skein-fleet-agent";
 /// Returns the token, so the caller can record the same secret host-side — the two must agree, and
 /// generating it in one place and returning it is how they cannot drift.
 ///
-/// **This does not publish the port.** Reaching the agent from the host needs `sbx ports`, and skein
-/// deliberately does not run it: the syntax is sbx's, the mapping is the host's business, and a
-/// skein that guessed wrong would open a port nobody asked for. Publish it by hand, then put the
-/// host-side port in `fleet_agent_port` — see [`crate::config::Config::fleet_agent_port`].
+/// **It publishes the port too**, via [`ensure_fleet_agent_port`], which judges every candidate by
+/// whether the agent answers through it rather than by what `sbx ports` claims. This once said the
+/// opposite — publish by hand, then pin the number in `fleet_agent_port` — and that instruction
+/// outlived the code by long enough to be followed. A pin is still honoured and still useful when
+/// something else needs the number in advance; it is no longer required to have a transport at all.
 pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
     let token = crate::place::ensure_agent_token()?;
     let place = own_sandbox(sandbox);
@@ -347,16 +348,39 @@ fn retire_stale_agent(sandbox: &str) {
         Some(version) if version >= crate::place::AGENT_PROTOCOL => return,
         Some(_) => {}
     }
-    // Killing the session is what retires the agent: the session *is* the `while true` supervisor,
-    // so ending it stops the restart as well as the process. `pkill` is for a python that somehow
-    // outlived its supervisor, and is allowed to find nothing.
+    stop_fleet_agent(sandbox);
+}
+
+/// Take the agent away from a fleet that has switched it off. A no-op when nothing is serving.
+///
+/// The probe first is what keeps this off the hot path: `heal_fleet_agent` runs on every server
+/// start and every box start, and a fleet that has never had an agent would otherwise pay an
+/// `sbx exec` each time to kill a process that was never there. A local connection to a port with
+/// nothing behind it is refused immediately, so the common case costs a syscall.
+fn remove_fleet_agent(sandbox: &str) {
+    let Some(port) = recorded_agent_port() else {
+        return;
+    };
+    if !crate::place::agent_answers(port) {
+        return;
+    }
+    stop_fleet_agent(sandbox);
+}
+
+/// Stop the agent and its supervisor. Silent about failure on purpose — see the callers, each of
+/// which is recoverable by the code that follows it.
+///
+/// Killing the session is what stops the agent: the session *is* the `while true` supervisor, so
+/// ending it stops the restart as well as the process. `pkill` is for a python that somehow outlived
+/// its supervisor, and is allowed to find nothing.
+fn stop_fleet_agent(sandbox: &str) {
     let script = format!(
         "tmux kill-session -t {session} 2>/dev/null; pkill -f {pattern} 2>/dev/null; true",
         session = sh_quote(AGENT_SESSION),
         pattern = sh_quote(&agent_pkill_pattern(&fleet_agent_path())),
     );
     // Over `sbx exec` and never the agent: this kills the process that would be carrying the reply,
-    // so a successful retirement would come back as a transport failure.
+    // so a successful stop would come back as a transport failure.
     let _ = own_sandbox(sandbox).exec_sbx(&script, Duration::from_secs(30));
 }
 
@@ -1177,12 +1201,17 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
 /// the server does. Wiring it only into the first is a bug this had — turning the setting on did
 /// nothing at all until someone happened to start a box, and said nothing about why.
 ///
-/// Only when it is switched on: an agent nobody asked for is a second way into the sandbox that
-/// nobody asked for. Reported rather than fatal, because without it every call takes `sbx exec` —
-/// which is what it did before the agent existed, so the fleet still works and only its resilience
-/// is reduced.
+/// Wanted by default, and switching it off **takes the agent away** rather than ignoring it. That
+/// half used to be missing, and it mattered little while the setting was off by default: an agent
+/// only existed if someone had asked for one. Now that every new fleet gets one, `false` is how a
+/// fleet declines it — and a decline that leaves the process running, merely routing around it,
+/// would be the opposite of what was asked for.
+///
+/// Reported rather than fatal, because without it every call takes `sbx exec` — which is what it did
+/// before the agent existed, so the fleet still works and only its resilience is reduced.
 fn heal_fleet_agent(sandbox: &str) {
     if !load_config().fleet_agent {
+        remove_fleet_agent(sandbox);
         return;
     }
     match ensure_fleet_agent(sandbox) {
@@ -4474,7 +4503,12 @@ b idle 5000000 1048576 4
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         let current = crate::place::AGENT_PROTOCOL;
 
-        // Off: the state the fleet was found in. No port, no probe, no claim.
+        // Off: a fleet that declined it. No port, no probe, no claim.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": false }).to_string(),
+        )
+        .unwrap();
         let off = transport_state();
         assert!(!off.configured && off.speaks == 0, "{off:?}");
         assert_eq!(
@@ -4482,12 +4516,9 @@ b idle 5000000 1048576 4
             "the board must say which version it needs"
         );
 
-        // On, but nothing was ever published — the honest answer is still `sbx exec`.
-        std::fs::write(
-            home.join("config.json"),
-            serde_json::json!({ "fleet_agent": true }).to_string(),
-        )
-        .unwrap();
+        // On because nobody said otherwise — the default — but nothing was ever published, so the
+        // honest answer is still `sbx exec`.
+        std::fs::write(home.join("config.json"), serde_json::json!({}).to_string()).unwrap();
         let unpublished = transport_state();
         assert!(unpublished.configured && unpublished.speaks == 0 && unpublished.port == 0);
 
@@ -4511,7 +4542,11 @@ b idle 5000000 1048576 4
 
         // And the switch wins over the wire: an agent may be sitting there answering, but with the
         // setting off skein is not using it, so the board must not say that it is.
-        std::fs::write(home.join("config.json"), serde_json::json!({}).to_string()).unwrap();
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": false }).to_string(),
+        )
+        .unwrap();
         let ignored = transport_state();
         assert!(
             !ignored.configured && ignored.speaks == 0,
@@ -4714,11 +4749,12 @@ b idle 5000000 1048576 4
         // The launcher still gets healed — the agent is an addition, not a replacement.
         assert!(argv.contains(&box_session_path()), "{argv}");
 
-        // And with the setting off, none of it happens: an agent nobody asked for is a second way
-        // into the sandbox nobody asked for.
+        // And with the setting explicitly off, none of it happens. Explicitly: absence means *on*
+        // now, so a fixture that simply omitted the field would be testing the opposite state while
+        // reading as if it tested this one.
         std::fs::write(
             home.join("config.json"),
-            serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
+            serde_json::json!({ "fleet_agent": false, "fleet_sandbox": "skein-fleet" }).to_string(),
         )
         .unwrap();
         std::fs::write(&log, "").unwrap();
@@ -4731,6 +4767,142 @@ b idle 5000000 1048576 4
         assert!(
             off.contains(&box_session_path()),
             "healing stopped entirely:\n{off}"
+        );
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A fresh install gets the in-sandbox transport without anyone having to find the setting.
+    ///
+    /// The default was `false` for as long as the agent has existed, on the reasoning that a fleet
+    /// which had not been given a second way in should not acquire one by upgrading. True of an
+    /// upgrade, and never true of a first run — so every new install started on `sbx exec`, which is
+    /// the call that hangs when the daemon stalls, and stayed there until someone read a doc comment
+    /// about a field in a file they had no reason to open.
+    ///
+    /// No `config.json` at all here, because that is what a first run actually is. A fixture that
+    /// wrote `{"fleet_agent": true}` would pass on any default.
+    #[test]
+    fn a_new_install_gets_the_faster_transport_without_being_asked() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 if [ \"$1\" = ls ]; then \
+                   echo '{{\"sandboxes\":[{{\"name\":\"skein-fleet\",\"status\":\"running\"}}]}}'; \
+                   exit 0; fi\ncat >/dev/null\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let _ = heal_fleet();
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            argv.contains(&fleet_agent_path()),
+            "a first run was left on `sbx exec`:\n{argv}"
+        );
+        assert!(
+            argv.contains(AGENT_SESSION),
+            "installed but never started:\n{argv}"
+        );
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Switching it off removes the agent instead of routing around it.
+    ///
+    /// This half barely mattered while the default was off: an agent existed only where someone had
+    /// asked for one, and unasking was rare. Now that every fleet gets one, `false` is the *only*
+    /// way to decline — and declining used to mean skein stopped calling the agent while the agent
+    /// kept running, which reads as "off" from the host and is not off inside the sandbox.
+    ///
+    /// The second half is why this is not simply an unconditional kill: `heal_fleet_agent` runs on
+    /// every server start and every box start, so a fleet that has never had an agent must not spend
+    /// an `sbx exec` per call to kill a process that was never there.
+    #[test]
+    fn switching_the_agent_off_takes_it_away_rather_than_ignoring_it() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_agent": false, "fleet_sandbox": "skein-fleet" }).to_string(),
+        )
+        .unwrap();
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 if [ \"$1\" = ls ]; then \
+                   echo '{{\"sandboxes\":[{{\"name\":\"skein-fleet\",\"status\":\"running\"}}]}}'; \
+                   exit 0; fi\ncat >/dev/null\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // An agent that is up and answering, on the port skein last recorded.
+        let live = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let serving = live.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in live.incoming().flatten() {
+                let mut stream = stream;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\nskein-fleet-agent 2");
+            }
+        });
+        record_agent_port(serving);
+
+        let _ = heal_fleet();
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            argv.contains(&format!("kill-session -t '{AGENT_SESSION}'")),
+            "declined, and left running anyway:\n{argv}"
+        );
+        // And not started again in the same pass. The path itself appears in the kill (it is the
+        // `pkill` pattern), so what distinguishes install-and-start from stop is the start's own
+        // `has-session` guard.
+        assert!(
+            !argv.contains("has-session"),
+            "removed and started again in the same pass:\n{argv}"
+        );
+
+        // Nothing answering: no call at all, on the path that runs on every start.
+        let gone = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let silent = gone.local_addr().unwrap().port();
+        drop(gone);
+        record_agent_port(silent);
+        std::fs::write(&log, "").unwrap();
+        let _ = heal_fleet();
+        let quiet = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !quiet.contains("kill-session"),
+            "a fleet with no agent still paid for a kill:\n{quiet}"
         );
 
         std::env::set_var("PATH", path);
