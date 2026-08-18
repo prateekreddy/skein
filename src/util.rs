@@ -44,10 +44,32 @@ pub(crate) fn write_atomic(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), 
 /// failure. Pipes are drained on their own threads so a chatty child can't fill the pipe buffer
 /// and deadlock against the polling loop. Dependency-free; callers are all off the async runtime
 /// (blocking pool / CLI).
+///
+/// Most callers only need "did it work", which is why this stays an `Option`. When the difference
+/// between *not there* and *too slow* is the whole answer, ask [`output_with_timeout_why`].
 pub(crate) fn output_with_timeout(
     cmd: &mut Command,
     timeout: Duration,
 ) -> Option<std::process::Output> {
+    output_with_timeout_why(cmd, timeout).ok()
+}
+
+/// The same run, saying which way it failed.
+///
+/// The two failures this separates are indistinguishable in an `Option` and want opposite responses
+/// from a person: a binary that is not on **this process's** PATH is a launcher problem, and one
+/// that ran out of time is a sick daemon. Collapsing them cost a real debugging session — `sbx ls`
+/// worked in a terminal while the server said the fleet had not answered, and nothing skein printed
+/// could tell those apart, because a server started from a desktop session or a unit file does not
+/// have the PATH the shell that started it by hand does.
+///
+/// So the PATH is *in* the message. It is the fact that settles it, and the one thing the person
+/// reading the message cannot look up afterwards — by the time they check, they are checking their
+/// shell's PATH, which is the one that works.
+pub(crate) fn output_with_timeout_why(
+    cmd: &mut Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
     use std::io::Read as _;
     use std::process::Stdio;
     let mut child = cmd
@@ -55,9 +77,13 @@ pub(crate) fn output_with_timeout(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()
-        .ok()?;
-    let mut out_pipe = child.stdout.take()?;
-    let mut err_pipe = child.stderr.take()?;
+        .map_err(|e| spawn_failure(cmd, &e))?;
+    let (Some(mut out_pipe), Some(mut err_pipe)) = (child.stdout.take(), child.stderr.take())
+    else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("{} started without pipes", program_of(cmd)));
+    };
     let out_h = std::thread::spawn(move || {
         let mut v = Vec::new();
         let _ = out_pipe.read_to_end(&mut v);
@@ -75,21 +101,56 @@ pub(crate) fn output_with_timeout(
             Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(format!(
+                    "{} did not finish within {} and was killed",
+                    program_of(cmd),
+                    budget(timeout)
+                ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => {
+            Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(format!("waiting for {}: {e}", program_of(cmd)));
             }
         }
     };
-    Some(std::process::Output {
+    Ok(std::process::Output {
         status,
         stdout: out_h.join().unwrap_or_default(),
         stderr: err_h.join().unwrap_or_default(),
     })
+}
+
+/// A timeout as a person would say it. Seconds read as "0s" below a second, which is the one case
+/// where the number is the whole point of the sentence.
+fn budget(timeout: Duration) -> String {
+    match timeout.as_secs() {
+        0 => format!("{}ms", timeout.as_millis()),
+        secs => format!("{secs}s"),
+    }
+}
+
+/// How the command names itself in a failure message.
+fn program_of(cmd: &Command) -> String {
+    format!("`{}`", cmd.get_program().to_string_lossy())
+}
+
+/// Why a spawn failed, in terms of the thing the reader can act on.
+///
+/// `NotFound` gets the PATH spelled out, because that is the case where the reader's own shell will
+/// contradict the message and they need to see *which* PATH skein had. Everything else (a permission
+/// bit, a broken interpreter line) is reported as the OS put it.
+fn spawn_failure(cmd: &Command, e: &std::io::Error) -> String {
+    let program = program_of(cmd);
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return format!("{program} could not be started: {e}");
+    }
+    format!(
+        "{program} is not on this process's PATH ({}). A shell you start by hand may well find it — \
+         what matters is the PATH the server was started with.",
+        std::env::var("PATH").unwrap_or_else(|_| "unset".into())
+    )
 }
 
 pub(crate) fn bounded_output(
@@ -629,6 +690,36 @@ pub fn file_ago(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command that could not run says **which** way it could not run.
+    ///
+    /// Both of these arrive as `None` through [`output_with_timeout`], and a caller holding that
+    /// `None` writes the same sentence for either — which is how "sbx did not answer" got printed on
+    /// a machine whose `sbx ls` worked in a terminal. The two need opposite responses: a PATH the
+    /// server was started with, or a daemon that has gone slow.
+    #[test]
+    fn a_command_that_could_not_run_says_which_way_it_failed() {
+        let mut missing = Command::new("skein-no-such-program-1a2b3c");
+        let why = output_with_timeout_why(&mut missing, Duration::from_secs(5))
+            .expect_err("a program that does not exist cannot have run");
+        assert!(why.contains("not on this process's PATH"), "{why}");
+        // The PATH itself, because the reader's own shell will contradict the message and the only
+        // thing that settles it is which PATH skein had. They cannot look it up afterwards.
+        assert!(
+            why.contains(&std::env::var("PATH").unwrap_or_default()),
+            "the message never says which PATH: {why}"
+        );
+
+        let mut slow = Command::new("sleep");
+        slow.arg("30");
+        let why = output_with_timeout_why(&mut slow, Duration::from_millis(200))
+            .expect_err("a 30s sleep cannot finish inside 200ms");
+        assert!(why.contains("did not finish within 200ms"), "{why}");
+        assert!(
+            !why.contains("PATH"),
+            "a slow command was reported as a missing one: {why}"
+        );
+    }
 
     #[test]
     fn ages_read_the_way_the_fleet_says_them() {

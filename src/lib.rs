@@ -587,7 +587,12 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
         FLEET_FRESH
     };
     FLEET_GATE.get(fresh, || {
-        let mut cmd = match env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty()) {
+        let asked = env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty());
+        let label = format!(
+            "`{}`",
+            asked.clone().unwrap_or_else(|| "sbx ls --json".into())
+        );
+        let mut cmd = match asked {
             Some(c) => {
                 let mut sh = Command::new("sh");
                 sh.arg("-c").arg(c);
@@ -602,10 +607,70 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
         // Bounded: a wedged sbx daemon used to hang this .output() forever — and with it every
         // fleet-snapshot task, accumulating stuck blocking threads until the board went permanently
         // blank. A timeout degrades to the registry fallback instead.
-        output_with_timeout(&mut cmd, Duration::from_secs(5))
-            .filter(|o| o.status.success())
-            .and_then(|o| parse_boxes_checked(&String::from_utf8_lossy(&o.stdout)))
+        let got = output_with_timeout_why(&mut cmd, Duration::from_secs(5))
+            .and_then(|o| match o.status.success() {
+                true => Ok(o),
+                false => Err(format!(
+                    "{label} exited {}{}",
+                    o.status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "on a signal".into()),
+                    match String::from_utf8_lossy(&o.stderr).trim() {
+                        "" => String::new(),
+                        said => format!(" — {}", clip(said, 200)),
+                    }
+                )),
+            })
+            .and_then(|o| {
+                let out = String::from_utf8_lossy(&o.stdout);
+                parse_boxes_checked(&out).ok_or_else(|| {
+                    format!(
+                        "{label} answered, but not with a fleet listing skein can read{}",
+                        match out.trim() {
+                            "" => " — it printed nothing at all".to_string(),
+                            said => format!(": {}", clip(said.lines().next().unwrap_or(""), 200)),
+                        }
+                    )
+                })
+            });
+        match got {
+            Ok(boxes) => {
+                remember_fleet_failure(None);
+                Some(boxes)
+            }
+            Err(why) => {
+                remember_fleet_failure(Some(why));
+                None
+            }
+        }
     })
+}
+
+/// Why the last `sbx ls` produced no fleet, or `None` when it produced one.
+///
+/// [`fleet_boxes`] answers with an `Option`, and four unrelated failures arrive as the same `None`:
+/// sbx is not on this process's PATH, the call outlived its budget, it exited non-zero, or it
+/// printed something that is not a listing. Every caller then says a version of "sbx did not
+/// answer" — true of one of those four and misleading about the other three. The one that sent a
+/// user looking in the wrong place was PATH: `sbx ls` worked in their terminal, so the message read
+/// as skein being wrong about a working sbx.
+///
+/// Written by whichever call actually ran, rather than recomputed by asking again, because a second
+/// ask is a different question: a daemon that has recovered would report success while the board is
+/// still showing the failure that is being explained.
+static FLEET_WHY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn remember_fleet_failure(why: Option<String>) {
+    if let Ok(mut slot) = FLEET_WHY.lock() {
+        *slot = why;
+    }
+}
+
+/// The last [`fleet_boxes`] failure in words, for the places that report one: the server's log, the
+/// health banner and `skein doctor`.
+pub fn fleet_failure() -> Option<String> {
+    FLEET_WHY.lock().ok().and_then(|why| why.clone())
 }
 
 /// Whether the fleet snapshot on offer is a remembered one because the last `sbx ls` failed. The
@@ -2633,6 +2698,46 @@ mod tests {
     // The takeover path reaches into the source box for its branch and HEAD, and until now nothing
     // exercised that. The guard is deliberately the *argv*: `Place` is about to change how skein
     // addresses a box, and this is the contract it must not silently alter.
+    /// Four different faults, four different sentences.
+    ///
+    /// `fleet_boxes` answers `Option`, so a caller can only say "no fleet" — and every one of them
+    /// said a version of "sbx did not answer". That is true of one of the four, and it sent a user
+    /// looking at the wrong thing: their `sbx ls` worked in a terminal, so the message read as skein
+    /// being wrong rather than as skein being started without the PATH that finds it.
+    #[test]
+    fn a_fleet_that_could_not_be_listed_says_why_not() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+
+        env::set_var("SKEIN_LS_CMD", "echo 'sbx: daemon not running' >&2; exit 3");
+        assert!(fleet_boxes().is_none());
+        let why = fleet_failure().expect("a failure with no reason is the bug being fixed");
+        assert!(why.contains("exited 3"), "{why}");
+        // What it said on the way out. A non-zero exit with the tool's own complaint discarded is a
+        // diagnosis thrown away at the only moment it was available.
+        assert!(why.contains("daemon not running"), "{why}");
+
+        // Answered, but not with a listing — an older sbx, a `--json` it does not know, a wrapper
+        // printing a banner. Reported as "did not answer" this looks like a dead daemon.
+        env::set_var("SKEIN_LS_CMD", "echo not-json-at-all");
+        assert!(fleet_boxes().is_none());
+        let why = fleet_failure().expect("a reason");
+        assert!(why.contains("not with a fleet listing"), "{why}");
+        assert!(
+            why.contains("not-json-at-all"),
+            "the output it did give: {why}"
+        );
+
+        // And a success clears it, so a stale reason is never reported over a working fleet.
+        env::set_var("SKEIN_LS_CMD", "echo '[]'");
+        assert_eq!(fleet_boxes().map(|b| b.len()), Some(0));
+        assert_eq!(fleet_failure(), None);
+
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_HOME");
+    }
+
     #[test]
     fn preparing_a_takeover_asks_the_source_box_itself() {
         use std::os::unix::fs::PermissionsExt;

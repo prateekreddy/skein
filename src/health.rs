@@ -215,8 +215,11 @@ pub fn health_report() -> HealthReport {
                 boxes.len()
             ),
             Some(boxes) => format!("available ({} boxes)", boxes.len()),
-            None if program_on_path("sbx") => "installed, but `sbx ls` failed or timed out".into(),
-            None => "not found on PATH".into(),
+            // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what
+            // this said, and it is four different faults wearing one coat — the reader's next move
+            // is different for each, and for the PATH one their own shell will contradict it.
+            None => crate::fleet_failure()
+                .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
         },
     };
     let tool = |name: &str, required: bool| HealthCheck {

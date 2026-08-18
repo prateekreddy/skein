@@ -924,9 +924,10 @@ pub fn heal_fleet() -> Result<(), String> {
     // stall the in-sandbox agent exists to survive, deciding whether the agent gets installed.
     let Some(boxes) = crate::fleet_boxes() else {
         eprintln!(
-            "skein: sbx did not answer, so {sandbox} was not brought into line with this build — \
-             its launcher, agent and docker config are whatever the last server left. They are \
-             repaired on the next box start."
+            "skein: {}, so {sandbox} was not brought into line with this build — its launcher, \
+             agent and docker config are whatever the last server left. They are repaired on the \
+             next box start.",
+            crate::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
         );
         return Ok(());
     };
@@ -1170,7 +1171,10 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
             }
         }
         None => {
-            return Err("sbx did not answer; cannot tell whether the fleet sandbox exists".into())
+            return Err(format!(
+                "cannot tell whether the fleet sandbox exists: {}",
+                crate::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
+            ))
         }
     }
     ensure_substrate(sandbox)?;
@@ -1221,6 +1225,86 @@ fn heal_fleet_agent(sandbox: &str) {
              `sbx exec`, which is what it did before the agent existed"
         ),
     }
+}
+
+/// Bring the transport up whenever it *can* be brought up, instead of only at server start.
+///
+/// [`heal_fleet`] runs once, at a moment chosen by when the server happened to start, and every
+/// repair it performs sits behind one `sbx ls` with a five-second budget. A daemon that is cold at
+/// boot — the ordinary case, since the server usually starts with everything else — misses that
+/// window, and then nothing tries again until someone starts a box. A fleet with the setting on can
+/// therefore sit on `sbx exec` for days, which is exactly the report that prompted this: "sbx did
+/// not answer, so skein-fleet was not brought into line with this build", from a machine where
+/// `sbx ls` in a terminal worked perfectly.
+///
+/// It covers the other two ways a fleet ends up below the transport it asked for, because they are
+/// the same question asked later: an agent still speaking v1 after skein was upgraded, and a port
+/// that stopped answering after a resize (sbx keeps reporting the dead mapping). In all three the
+/// answer is `ensure_fleet_agent`, and the only thing missing was another chance to run it.
+///
+/// Returns a line worth printing **when the state changed**, `None` when there is nothing new to
+/// say. A watcher that spoke every tick would be as unreadable as one that never spoke.
+pub fn heal_transport() -> Option<String> {
+    if !load_config().fleet_agent {
+        return None;
+    }
+    let state = transport_state();
+    if state.speaks >= state.wants {
+        return announce(
+            &format!("up:{}:{}", state.speaks, state.port),
+            format!(
+                "the in-sandbox agent is serving on port {} (v{})",
+                state.port, state.speaks
+            ),
+        );
+    }
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return None;
+    }
+    // Only into a sandbox that is up. Creating or waking one is a box start's business — a watcher
+    // that booted a fleet nobody had asked for would be a background task with an opinion.
+    let up = crate::fleet_boxes()?
+        .iter()
+        .any(|b| b.name == sandbox && b.live == Some(crate::Liveness::Running));
+    if !up {
+        return None;
+    }
+    match ensure_fleet_agent(&sandbox) {
+        Ok(_) => {
+            let now = transport_state();
+            announce(
+                &format!("up:{}:{}", now.speaks, now.port),
+                format!(
+                    "the in-sandbox agent is serving on port {} (v{})",
+                    now.port, now.speaks
+                ),
+            )
+        }
+        Err(e) => announce(
+            "down",
+            format!(
+                "the in-sandbox agent is not serving ({e}); every call falls back to `sbx exec`"
+            ),
+        ),
+    }
+}
+
+/// Say it once. The same news on the next tick is not news.
+///
+/// Keyed on the *state* rather than on the sentence, because the sentence carries details that
+/// change while the state does not: a failed publish names the ports it tried, and skein picks
+/// fresh ones each attempt, so a fleet stuck on `sbx exec` would announce itself every minute with
+/// different numbers. The current detail is never lost — the health banner and `skein doctor` read
+/// it live. This is only about which lines are worth a log.
+fn announce(key: &str, message: String) -> Option<String> {
+    static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let mut last = LAST.lock().ok()?;
+    if *last == key {
+        return None;
+    }
+    *last = key.to_string();
+    Some(message)
 }
 
 /// Install the tools a box needs in order to exist at all.
@@ -4903,6 +4987,139 @@ b idle 5000000 1048576 4
         assert!(
             !quiet.contains("kill-session"),
             "a fleet with no agent still paid for a kill:\n{quiet}"
+        );
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The transport gets another chance after the one at startup.
+    ///
+    /// This is the state a real fleet was found in: `fleet_agent` on, and the board still on
+    /// `sbx exec` because the server's single `heal_fleet` had printed "sbx did not answer, so
+    /// skein-fleet was not brought into line with this build" and nothing ever tried again. The
+    /// five-second `sbx ls` that gates every repair in `heal_fleet` is easy to miss at boot, when the
+    /// daemon is cold and the server is starting alongside everything else.
+    ///
+    /// So the watcher is driven directly, with a fleet that answers *now*, and has to install what
+    /// the startup pass did not.
+    #[test]
+    fn a_transport_that_missed_its_chance_at_startup_is_brought_up_later() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // No `fleet_agent` line at all: the default is on, and a fleet in this state has said
+        // nothing about the transport either way.
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
+        )
+        .unwrap();
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 if [ \"$1\" = ls ]; then \
+                   echo '{{\"sandboxes\":[{{\"name\":\"skein-fleet\",\"status\":\"running\"}}]}}'; \
+                   exit 0; fi\ncat >/dev/null\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let said = heal_transport();
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            argv.contains(&fleet_agent_path()),
+            "the fleet stayed on `sbx exec` with nothing trying again:\n{argv}"
+        );
+        assert!(
+            argv.contains(AGENT_SESSION),
+            "installed but not started:\n{argv}"
+        );
+        // Nothing is listening in a test, so the publish half cannot succeed — and the watcher must
+        // say so rather than claiming a transport it does not have.
+        let said = said.expect("a state change is worth one line");
+        assert!(
+            said.contains("sbx exec"),
+            "the fallback must be named: {said}"
+        );
+
+        // The same news next minute is not news: a watcher on a one-minute tick that repeated itself
+        // would bury the line that matters under sixty copies an hour.
+        assert_eq!(heal_transport(), None, "the watcher repeated itself");
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A transport that is already current costs one loopback connection and no `sbx` at all.
+    ///
+    /// The watcher runs every minute for the life of the server, so the healthy case has to be
+    /// nearly free — otherwise a fleet that is working pays forever for a repair aimed at one that
+    /// is not. It is also what stops the watcher reinstalling an agent that is serving, which would
+    /// retire a live one on a timer.
+    #[test]
+    fn a_current_transport_is_left_entirely_alone() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
+        )
+        .unwrap();
+
+        let live = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let serving = live.local_addr().unwrap().port();
+        let body = format!("skein-fleet-agent {}", crate::place::AGENT_PROTOCOL);
+        std::thread::spawn(move || {
+            for stream in live.incoming().flatten() {
+                let mut stream = stream;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        record_agent_port(serving);
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let said = heal_transport().expect("the boring state is still worth saying once");
+        assert!(said.contains(&serving.to_string()), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap_or_default(),
+            "",
+            "a healthy transport was repaired anyway"
         );
 
         std::env::set_var("PATH", path);

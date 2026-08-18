@@ -516,8 +516,11 @@ fn cmd_doctor() -> Result<(), String> {
     // like a healthy box that simply never reports. So they are asked, not assumed.
     let fleet = cfg.fleet_sandbox.trim().to_string();
     if fleet.is_empty() {
+        // Not "off — a sandbox per box": that model is gone, and saying it here would name a
+        // fallback that no longer exists for a fleet that cannot start anything at all.
         println!(
-            "\n{DIM}·{RESET} fleet         {DIM}off — every box gets its own sandbox (skein's original model){RESET}"
+            "\n{BAD} fleet         no sandbox named (fleet_sandbox is empty) — no box can start \
+             until one is set"
         );
     } else {
         println!("\n{BOLD}fleet{RESET} {DIM}({fleet}){RESET}");
@@ -526,7 +529,10 @@ fn cmd_doctor() -> Result<(), String> {
             Some(false) => println!(
                 "{WARN} sandbox       not created yet {DIM}(the next launch creates it){RESET}"
             ),
-            None => println!("{BAD} sandbox       sbx did not answer — cannot tell if it exists"),
+            None => println!(
+                "{BAD} sandbox       cannot tell if it exists — {}",
+                skein::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
+            ),
         }
         let place = skein::own_sandbox(&fleet);
         let probe = |script: &str| {

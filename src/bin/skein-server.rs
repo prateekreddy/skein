@@ -93,6 +93,29 @@ async fn main() {
     if let Err(e) = skein::heal_fleet() {
         eprintln!("skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings");
     }
+    // The transport, watched rather than decided once at startup.
+    //
+    // `heal_fleet` above is the only thing that installs the in-sandbox agent, and it is gated
+    // behind a five-second `sbx ls`. A daemon that is cold at boot misses it — and a server usually
+    // starts when everything else does — after which nothing tries again until someone starts a
+    // box. That is how a fleet with the setting on stays on `sbx exec` for days: reported as "sbx
+    // did not answer, so skein-fleet was not brought into line with this build", on a machine where
+    // `sbx ls` in a terminal answered fine.
+    //
+    // A minute, because this is a repair and not a probe: when the agent is serving the tick costs
+    // one loopback `/health`, and when it is not, the thing being waited for (a daemon coming up, a
+    // sandbox starting) moves on the scale of minutes.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            // Says something only when the answer *changed*, so a healthy fleet is silent and a
+            // recovery is one line rather than a stream of them.
+            if let Ok(Some(said)) = tokio::task::spawn_blocking(skein::heal_transport).await {
+                eprintln!("skein: {said}");
+            }
+        }
+    });
     // Seed the host gh token into sbx (global) so boxes can fetch/push/open PRs. Best-effort and
     // quiet — many setups rely on a proxy injecting credentials instead. Skip with $SKEIN_NO_GH_SECRET.
     if let Err(e) = skein::ensure_gh_secret() {
