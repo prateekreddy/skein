@@ -9,6 +9,41 @@ with the item rather than rediscovered.
 
 ## Broken now
 
+### A second server on :7879 opens no boxes and never gets agent v2 — unexplained
+
+Reported: two `skein-server` instances on one host, 7878 working and 7879 unable to open any box,
+with its transport never reaching agent v2. "Everything seems broken."
+
+**Not yet diagnosed, and the two symptoms probably have one cause.** Box creation does not touch
+GitHub auth at all, so the credential work is unlikely to explain it; what explains both at once is
+the two servers not sharing state or not being the same build.
+
+Three candidates, cheapest first, each with the command that settles it — run for **both** pids:
+
+1. **Different `$SKEIN_HOME`.** Then 7879 has its own empty `repos.json` (so every launch is
+   refused: a box belongs to a registered repo) and its own missing `fleet-agent.port` (so
+   `agent_target()` is `None` and the transport is `sbx exec` whatever the fleet is doing). One
+   divergence, both symptoms.
+   `tr '\0' '\n' < /proc/<pid>/environ | grep -E '^(SKEIN_|HOME=|PWD=)'`
+2. **Different build.** `skein_exe()` resolves the `skein` beside the running `skein-server`, so two
+   checkouts are two binaries. An older one predates `fleet_agent` defaulting to true and would show
+   the transport as *off* rather than *not answering* — which is the difference worth reading on the
+   gauge strip.
+   `ls -l /proc/<pid>/exe` and compare the two paths and mtimes.
+3. **Different user.** `~/.skein` and sbx's own state are both per-user.
+   `ps -o user= -p <pid>`
+
+Then `skein doctor` in each server's environment: the sandbox line, the transport line and the
+github-token line are each one sentence and between them cover all three.
+
+**One real regression to rule out while we are here.** Removing the `gh` dependency also removed
+`gh auth token` as a credential source. A fleet whose *only* GitHub credential was `gh auth login`
+now has none, so its review queue stopped working today — the queue says so rather than showing an
+empty list, but it is still a working setup that this broke. If that is what happened here, the fix
+is a last-resort fallback: use `gh auth token` when it exists and nothing else is configured, which
+keeps `gh` optional without punishing the people who already had it.
+
+
 ### The fleet agent still is not installed — the cause is now testable
 
 `fleet-agent.py` in the sandbox is still the Aug 7 v1 and nothing answers on 8317, across two
