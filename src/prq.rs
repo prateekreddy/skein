@@ -496,6 +496,15 @@ pub struct Count {
     /// silently shows nothing because `gh` is broken is indistinguishable from an empty queue, and
     /// that is the one thing this whole feature must never be.
     pub error: String,
+    /// Set when this repo was **not asked** — the queue is switched off, or it has no GitHub remote.
+    ///
+    /// Not an error, and not nothing either. These repos used to be filtered out before the list was
+    /// built, which made "you have no PRs waiting" and "skein never looked" the same empty badge. That
+    /// is the same failure `error` exists to prevent, arriving one step earlier: a repo whose queue is
+    /// quietly off looks exactly like a repo with a clean queue, and the only way to tell was to open
+    /// the pane and notice the repo was missing from it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub skipped: String,
 }
 
 /// Take the count for every repo that has a review queue switched on.
@@ -506,18 +515,40 @@ pub struct Count {
 pub fn counts() -> Vec<Count> {
     crate::load_repos()
         .into_iter()
-        .filter(|r| r.review_queue && repo_slug(r).is_some())
-        .map(|repo| match queue(&repo, false) {
-            Ok(q) => Count {
-                repo_id: repo.id,
-                needs_you: q.prs.iter().filter(|p| p.lane == Lane::NeedsYou).count(),
-                error: String::new(),
-            },
-            Err(e) => Count {
-                repo_id: repo.id,
-                needs_you: 0,
-                error: e,
-            },
+        .map(|repo| {
+            // Why a repo was not asked, before spending anything on it. Reported rather than filtered
+            // away: a repo skein never looked at is a different answer from a repo with nothing
+            // waiting, and the badge could not tell them apart because only one of them was on the
+            // list at all.
+            let skipped = match (repo.review_queue, repo_slug(&repo)) {
+                (false, _) => "review queue is switched off for this repo".to_string(),
+                (true, None) => {
+                    "no GitHub remote, so there are no pull requests to list".to_string()
+                }
+                (true, Some(_)) => String::new(),
+            };
+            if !skipped.is_empty() {
+                return Count {
+                    repo_id: repo.id,
+                    needs_you: 0,
+                    error: String::new(),
+                    skipped,
+                };
+            }
+            match queue(&repo, false) {
+                Ok(q) => Count {
+                    repo_id: repo.id,
+                    needs_you: q.prs.iter().filter(|p| p.lane == Lane::NeedsYou).count(),
+                    error: String::new(),
+                    skipped: String::new(),
+                },
+                Err(e) => Count {
+                    repo_id: repo.id,
+                    needs_you: 0,
+                    error: e,
+                    skipped: String::new(),
+                },
+            }
         })
         .collect()
 }
@@ -623,6 +654,92 @@ mod tests {
 
     fn item(json: &str) -> serde_json::Value {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// A `Repo` through serde, so fields this test does not care about keep their real defaults.
+    fn repo_at(id: &str, work: &std::path::Path, queue_on: bool) -> Repo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "source": work.to_string_lossy(),
+            "work": work.to_string_lossy(),
+            "store": "",
+            "review_queue": queue_on,
+        }))
+        .unwrap()
+    }
+
+    /// A repo skein did not look at must say so, rather than vanishing from the list.
+    ///
+    /// This is the bug the whole `skipped` field exists for: both states below produced a count list
+    /// that simply did not mention the repo, so the badge showed nothing — identical to a queue with
+    /// nothing waiting in it. Someone whose only repo had its queue switched off, or whose clone had
+    /// no GitHub remote, saw a clean board while PRs piled up on GitHub, with nowhere to find out why.
+    #[test]
+    fn a_repo_that_was_never_asked_says_so_instead_of_disappearing() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let root = home.as_ref() as &std::path::Path;
+        // SAFETY: guarded by the crate-wide env lock, as every $SKEIN_HOME test is.
+        unsafe { std::env::set_var("SKEIN_HOME", root) };
+
+        // A git repo with a GitHub origin, so only the *switch* is what stops it being asked.
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:acme/thing.git",
+        ]);
+
+        // And one with no remote at all, which cannot have pull requests.
+        let bare = root.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&bare)
+            .output()
+            .unwrap();
+
+        crate::save_repos(&[
+            repo_at("queue-off", &work, false),
+            repo_at("no-remote", &bare, true),
+        ])
+        .unwrap();
+
+        let counts = counts();
+        let of = |id: &str| {
+            counts
+                .iter()
+                .find(|c| c.repo_id == id)
+                .unwrap_or_else(|| panic!("{id} is missing from the counts entirely: {counts:?}"))
+        };
+        assert!(
+            of("queue-off").skipped.contains("switched off"),
+            "a repo with the queue off must name that, not read as an empty queue: {:?}",
+            of("queue-off")
+        );
+        assert!(
+            of("no-remote").skipped.contains("no GitHub remote"),
+            "and a repo with nowhere to look must say which: {:?}",
+            of("no-remote")
+        );
+        // Neither is a *fault* — the badge paints `error` red, and being switched off is a choice.
+        for id in ["queue-off", "no-remote"] {
+            assert!(of(id).error.is_empty(), "{id} is not broken");
+            assert_eq!(of(id).needs_you, 0);
+        }
+        // Nothing reached the network: `gh` is never invoked for a repo that was not asked, which is
+        // what makes reporting them free rather than three round trips each.
+        unsafe { std::env::remove_var("SKEIN_HOME") };
     }
 
     #[test]

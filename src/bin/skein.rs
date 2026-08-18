@@ -427,6 +427,23 @@ fn cmd_doctor() -> Result<(), String> {
         if repos.is_empty() { WARN } else { OK },
         repos.len()
     );
+    // The review queue, per repo, and what it is looking at. Its own line because the badge is the
+    // only place this surfaces in the cockpit, and a badge cannot say "I did not look" — a repo whose
+    // queue is off, or that resolves to no GitHub repository, produced exactly the empty badge that a
+    // clean queue produces. Spends `gh` calls, so it is a thing you run rather than a poll.
+    for count in skein::prq::counts() {
+        let id = &count.repo_id;
+        if !count.skipped.is_empty() {
+            println!(
+                "{DIM}·{RESET} review        {id}: not looked at — {}",
+                count.skipped
+            );
+        } else if !count.error.is_empty() {
+            println!("{BAD} review        {id}: {}", count.error);
+        } else {
+            println!("{OK} review        {id}: {} need you", count.needs_you);
+        }
+    }
     let kit = skein::skein_home().join("kit").join("spec.yaml");
     if kit.exists() {
         println!("{OK} kit           {DIM}{}{RESET}", kit.display());

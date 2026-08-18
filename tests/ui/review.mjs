@@ -233,16 +233,24 @@ await check("and its tooltip names the repo the count came from", async () => {
   const title = await page.$eval("#revbtn", e => e.title);
   if (!/acme: 3/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
 });
-// Turning a repo off must stop skein asking GitHub about it at all — which is visible as the badge
-// going away, since it is the only repo in this fixture.
-await check("switching a repo's queue off silences it", async () => {
+// Turning a repo off must stop skein asking GitHub about it — while still saying that is why there is
+// nothing to show. It used to vanish from the counts entirely, which made "nothing needs you" and
+// "skein never looked" the same empty badge; someone whose only repo had its queue off saw a clean
+// board with no way to find out why.
+await check("switching a repo's queue off silences it, and says so", async () => {
   const off = await fetch(`http://127.0.0.1:${port}/api/repos/acme/settings`, {
     method: "POST", headers: { "content-type": "application/json", ...authHeader() },
     body: JSON.stringify({ review_queue: false }),
   });
   if (!off.ok) throw new Error(`the setting was refused: ${await off.text()}`);
   const counts = await (await fetch(`http://127.0.0.1:${port}/api/review/counts`, { headers: authHeader() })).json();
-  if (counts.length) throw new Error(`a switched-off repo was still polled: ${JSON.stringify(counts)}`);
+  const acme = counts.find(c => c.repo_id === "acme");
+  if (!acme) throw new Error(`the repo disappeared instead of reporting: ${JSON.stringify(counts)}`);
+  if (!/switched off/.test(acme.skipped || "")) {
+    throw new Error(`it must name why it was not looked at: ${JSON.stringify(acme)}`);
+  }
+  // Not polled, and not a fault: nothing was asked of GitHub, and a deliberate switch is not an error.
+  if (acme.needs_you !== 0 || acme.error) throw new Error(`unexpected: ${JSON.stringify(acme)}`);
   // …and back on, because every check below this one needs the queue.
   await fetch(`http://127.0.0.1:${port}/api/repos/acme/settings`, {
     method: "POST", headers: { "content-type": "application/json", ...authHeader() },

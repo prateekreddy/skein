@@ -1027,11 +1027,35 @@
   .dg-name { font-family:var(--mono); font-size:11px; color:var(--text-2); }
   .dg-detail { font-size:12.5px; color:var(--text); line-height:1.55; user-select:text; }
   .dg-foot { margin-top:14px; font-size:12px; color:var(--faint); }
-  .ffilter { flex:none; width:150px; height:24px; padding:0 8px; font-family:var(--mono); font-size:11px;
-             color:var(--text-2); background:var(--inset); border:1px solid var(--border-2);
-             border-radius:6px; outline:none; transition:border-color var(--dur-fast), width var(--dur-fast); }
-  .ffilter::placeholder { color:var(--faint); }
-  .ffilter:focus { border-color:var(--border-3); width:210px; color:var(--text); }
+  /* The filter is an icon until it is wanted. A permanently open text box asks a question on every
+     load — "what are you looking for?" — that the answer is almost always "nothing" to, and it took
+     header room from the counts, which are what the header is for. Open on click or `/`, closes again
+     when it is empty and loses focus, and stays open while it holds a filter so what is narrowing the
+     board is never invisible. */
+  .fsearch { flex:none; display:flex; align-items:center; gap:4px; }
+  .fsbtn { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px;
+           padding:0; color:var(--dim); background:transparent; border:1px solid transparent;
+           border-radius:6px; cursor:pointer; transition:color var(--dur-fast), background var(--dur-fast); }
+  .fsbtn:hover { color:var(--text); background:var(--inset); }
+  .fsearch.on .fsbtn, .fsearch.held .fsbtn { color:var(--text-2); }
+  /* Addressed by id, and that is not stylistic. The general control styling further down —
+     `input:not([type=checkbox]):not([type=radio])` — outranks any class here, because each `:not()`
+     contributes its argument's specificity; a `.ffilter` rule lost its padding and width to it and the
+     collapsed box kept ~20px of header, invisible and still pushing the counts along.
+     `appearance:none` and `min-width:0` are load-bearing for the same collapse: a `type=search` has
+     an intrinsic minimum width of its own. */
+  #ffilter { width:0; min-width:0; appearance:none; -webkit-appearance:none;
+             height:24px; padding:0; font-family:var(--mono); font-size:11px;
+             color:var(--text); background:var(--inset); border:1px solid transparent;
+             border-radius:6px; outline:none; opacity:0; pointer-events:none;
+             transition:width var(--dur-fast), opacity var(--dur-fast), border-color var(--dur-fast); }
+  #ffilter::placeholder { color:var(--faint); }
+  /* `held` — closed-but-filtering is a state that must not exist. If a filter is set the box stays
+     open whether or not it has focus, because a board narrowed by something you cannot see reads as
+     a board that lost boxes. */
+  .fsearch.on #ffilter, .fsearch.held #ffilter {
+    width:190px; padding:0 8px; opacity:1; pointer-events:auto; border-color:var(--border-2); }
+  .fsearch.on #ffilter { border-color:var(--border-3); }
   .counts .seg.filt { color:var(--waiting); }
   .pinmore { display:block; width:100%; margin:2px 0 0; padding:7px 16px; text-align:left;
              font-family:var(--ui); font-size:12px; color:var(--dim); cursor:pointer;
@@ -1053,7 +1077,10 @@
         <header>
           <div class="word"><b>skein</b></div>
           <div class="counts" id="counts"></div>
-          <input id="ffilter" class="ffilter" type="search" placeholder="filter  /" aria-label="Filter boxes" title="Filter by name, branch, repo or headline. Type `foreign:` to see sandboxes skein did not create — hidden by default, since they are on the list only because `sbx ls` reports every sandbox on the machine." autocomplete="off" spellcheck="false" />
+          <div class="fsearch" id="fsearch">
+            <button type="button" class="fsbtn" id="fsbtn" onclick="toggleFilter()" title="Filter boxes (/)" aria-label="Filter boxes" aria-expanded="false"><svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg></button>
+            <input id="ffilter" class="ffilter" type="search" placeholder="name, branch, repo…" aria-label="Filter boxes" title="Filter by name, branch, repo or headline. Type `foreign:` to see sandboxes skein did not create — hidden by default, since they are on the list only because `sbx ls` reports every sandbox on the machine." autocomplete="off" spellcheck="false" tabindex="-1" />
+          </div>
           <div class="right">
             <button type="button" class="kbtn go" id="contall" onclick="batchResume()" style="display:none"></button>
             <button type="button" class="kbtn primary" onclick="openNewBox()" title="Launch a new box (⌘N)" aria-label="Launch a new box (⌘N)"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>box</button>
@@ -1493,6 +1520,9 @@ function setFilter(q) {
   boardFilter = q;
   const el = document.getElementById("ffilter");
   if (el) el.value = q;
+  // Opened, not just set: a filter arriving from a link with the box still collapsed would narrow the
+  // board with nothing on screen to say why.
+  openFilter();
   render(boxes);
 }
 const NEEDS_TIER = 1;   // tier <= 1 (needs-input, waiting) → the pinned "needs you" section
@@ -1796,10 +1826,43 @@ function refreshRow(name) { const el = rowEls.get(name), b = boxes.find(x => x.n
 // The filter is live: a fleet you are scanning is a fleet you are scanning now, and a search you
 // have to submit is one more key between you and the box you are looking for.
 const filterEl = document.getElementById("ffilter");
-filterEl?.addEventListener("input", () => { boardFilter = filterEl.value; pinExpanded = false; render(boxes); });
+const fsearchEl = document.getElementById("fsearch");
+// Open ⇒ focused. There is no state where the box is expanded and typing goes somewhere else, which
+// is the whole failure mode of a search that expands on click: it looks ready and swallows nothing.
+function openFilter() {
+  fsearchEl?.classList.add("on");
+  document.getElementById("fsbtn")?.setAttribute("aria-expanded", "true");
+  filterEl?.removeAttribute("tabindex");     // reachable by Tab only once it is open
+  filterEl?.focus();
+  filterEl?.select();
+}
+// Closing clears, because a filter you cannot see is a board that has silently lost rows. The one
+// exception is `held` below: a filter that is *set* keeps the box open instead of being hidden.
+function closeFilter() {
+  fsearchEl?.classList.remove("on");
+  document.getElementById("fsbtn")?.setAttribute("aria-expanded", "false");
+  filterEl?.setAttribute("tabindex", "-1");
+  if (filterEl && filterEl.value) { filterEl.value = ""; boardFilter = ""; render(boxes); }
+  filterEl?.blur();
+  syncFilterChrome();
+}
+function toggleFilter() { fsearchEl?.classList.contains("on") ? closeFilter() : openFilter(); }
+// Keeps "there is a filter set" visible while the box is unfocused. Called after every change to the
+// filter's value rather than only on blur, so the state cannot drift from what is being filtered.
+function syncFilterChrome() {
+  fsearchEl?.classList.toggle("held", !!boardFilter.trim());
+}
+filterEl?.addEventListener("input", () => {
+  boardFilter = filterEl.value; pinExpanded = false; syncFilterChrome(); render(boxes);
+});
 filterEl?.addEventListener("keydown", e => {
   e.stopPropagation();                       // the board's own j/k must not fire while typing here
-  if (e.key === "Escape") { filterEl.value = ""; boardFilter = ""; render(boxes); filterEl.blur(); }
+  if (e.key === "Escape") closeFilter();
+});
+// Blur closes it only when it is empty: clicking onto the board with a filter set must not throw the
+// filter away, and leaving an empty box open would keep the header wide for nothing.
+filterEl?.addEventListener("blur", () => {
+  if (!filterEl.value.trim()) closeFilter();
 });
 
 // ---------- selection / keyboard ----------
@@ -2269,6 +2332,10 @@ function renderRevBadge() {
   if (!btn) return;
   const total = revCounts.reduce((n, c) => n + (c.needs_you || 0), 0);
   const broken = revCounts.filter(c => c.error);
+  // Repos skein did not ask about. Named in the tooltip even though they are not a fault: "no PRs
+  // need you" and "your only repo was never looked at" were the same empty badge, and the second one
+  // is the state someone stares at while their queue fills up on GitHub.
+  const unasked = revCounts.filter(c => c.skipped);
   let badge = btn.querySelector(".revbadge");
   if (!total && !broken.length) { if (badge) badge.remove(); btn.removeAttribute("data-count"); return; }
   if (!badge) { badge = document.createElement("span"); badge.className = "revbadge"; btn.append(badge); }
@@ -2281,6 +2348,8 @@ function renderRevBadge() {
     total ? `${total} pull request${total === 1 ? "" : "s"} need you` : "Review a repo's pull requests",
     ...revCounts.filter(c => c.needs_you).map(c => `  ${c.repo_id}: ${c.needs_you}`),
     ...broken.map(c => `  ${c.repo_id}: ${c.error}`),
+    ...(unasked.length ? ["", "not looked at:"] : []),
+    ...unasked.map(c => `  ${c.repo_id}: ${c.skipped}`),
   ].join("\n");
 }
 
@@ -5766,7 +5835,7 @@ document.addEventListener("keydown", e => {
     case "?": e.preventDefault(); openSettings("keys"); break;
     // `/` is the one binding a fleet product cannot do without past a dozen boxes, and it was the
     // last thing on the previous audit's still-unfixed list.
-    case "/": e.preventDefault(); document.getElementById("ffilter")?.focus(); break;
+    case "/": e.preventDefault(); openFilter(); break;
     case "]": e.preventDefault(); nextNeedsYou(); break;
     case "L": case "l": e.preventDefault(); showLoad(); break;
     case "[": e.preventDefault(); cycleSession(-1); break;
