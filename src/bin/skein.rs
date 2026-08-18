@@ -646,7 +646,14 @@ fn cmd_doctor() -> Result<(), String> {
                 if seen {
                     String::new()
                 } else {
-                    " — not visible in the sandbox; boxes for it would come up with no store".into()
+                    format!(
+                        " — not visible in the sandbox; boxes for it would come up with no store. \
+                         `skein resize {}` rebuilds it with this mount and carries every box across",
+                        match cfg.fleet_memory.trim() {
+                            "" => "26g",
+                            size => size,
+                        }
+                    )
                 }
             );
         }

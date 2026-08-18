@@ -2485,10 +2485,21 @@ fn start_box_inner(
         != Some("ok")
     {
         return Err(format!(
-            "the fleet sandbox cannot see {}, so box {name} would come up with no store. \
-             It is mounted at sandbox creation, so a repo added since then needs \
-             `sbx rm {sandbox}` and a relaunch to pick it up.",
-            repo.store
+            "the fleet sandbox cannot see {store}, so box {name} would come up with no store.\n\
+             Host paths are mounted when the sandbox is created, and this repo was registered after \
+             that — a repo added by URL lands under a path that is already mounted, one adopted from \
+             a local path does not.\n\
+             Rebuild the sandbox with the mounts it needs: `skein resize {memory}` (or Settings → \
+             fleet → resize in the cockpit). It carries every existing box across.\n\
+             Do NOT `sbx rm {sandbox}` for this: it also works, and it destroys every box in the \
+             sandbox along with any work they have not pushed.",
+            store = repo.store,
+            // The size it is already running at, so the line can be typed as it stands. A resize is
+            // the remount; changing the size at the same time is a choice, not a requirement.
+            memory = match load_config().fleet_memory.trim() {
+                "" => "26g".to_string(),
+                size => size.to_string(),
+            }
         ));
     }
 
