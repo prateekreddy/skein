@@ -295,12 +295,11 @@ pub(crate) fn run_capture_for_env(
             c.current_dir(repo);
         }
     }
-    let out = output_with_timeout(&mut c, timeout).ok_or_else(|| {
-        format!(
-            "{prog} failed to start or exceeded the {}s action timeout",
-            timeout.as_secs()
-        )
-    })?;
+    // The classified runner, so "not installed" never reads as "timed out". Every tool skein drives
+    // is one someone has to have — `gh`, `git`, `sbx`, `curl` — and a missing one reported as
+    // "failed to start or exceeded the timeout" sends people looking at a network or a daemon for a
+    // binary that is simply not there.
+    let out = output_with_timeout_why(&mut c, timeout)?;
     Ok((
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),

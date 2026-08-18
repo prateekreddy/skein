@@ -480,13 +480,13 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
 
 /// One `gh pr list --search` call, returning the raw JSON items.
 fn search_prs(slug: &str, search: &str) -> Result<Vec<serde_json::Value>, String> {
-    let (out, err, code) = run_capture(
-        &gh_bin(),
-        &[
-            "pr", "list", "--repo", slug, "--state", "open", "--search", search, "--limit", "100",
-            "--json", PR_FIELDS,
-        ],
-    )?;
+    // Through the wrapper like every other call. This one was not, and it is the one that matters
+    // most: three per repo per poll, against `viewer`'s one — so most of the keyring reads the
+    // previous fix was meant to end were still happening, from the busiest caller in the module.
+    let (out, err, code) = run_gh(&[
+        "pr", "list", "--repo", slug, "--state", "open", "--search", search, "--limit", "100",
+        "--json", PR_FIELDS,
+    ])?;
     if code != 0 {
         let msg = if err.trim().is_empty() { &out } else { &err };
         return Err(msg.trim().to_string());
@@ -902,6 +902,47 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_GH_BIN");
         forget_gh_token();
+    }
+
+    /// Every `gh` in this crate goes through the wrapper.
+    ///
+    /// Asserted against the source, because the mistake it catches is the one already made: the
+    /// keyring fix rewrote three call sites and missed `search_prs`, whose argv is formatted across
+    /// lines — and that one runs three times per repo per poll, against `viewer`'s one. Most of the
+    /// prompts the fix was for kept happening, from the busiest caller in the file, and everything
+    /// still compiled and passed.
+    #[test]
+    fn no_gh_call_goes_round_the_one_that_carries_the_token() {
+        for file in ["src/prq.rs", "src/review.rs"] {
+            let source = std::fs::read_to_string(file).expect(file);
+            // Production code only — this file's own tests name `gh_bin()` in string literals,
+            // including the message below, and a check that fails on itself teaches nothing.
+            //
+            // Cut at the test *module*, not at `#[cfg(test)]`: that attribute also sits on a helper
+            // two hundred lines above it, so cutting there scanned a fifth of the file and passed
+            // over the very call this exists to catch. Verified by putting the bypass back.
+            let source = source
+                .split("\nmod tests {")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            for (n, line) in source.lines().enumerate() {
+                if !line.contains("gh_bin()") {
+                    continue;
+                }
+                // The two places it is legitimate: resolving the token, and the wrapper that hands
+                // it to everything else.
+                let allowed = line.contains("fn gh_bin")
+                    || line.contains("Command::new(gh_bin())")
+                    || line.contains("run_capture_for_env(&gh_bin()");
+                assert!(
+                    allowed,
+                    "{file}:{} runs gh outside `run_gh`, so it reads the keyring itself: {}",
+                    n + 1,
+                    line.trim()
+                );
+            }
+        }
     }
 
     fn item(json: &str) -> serde_json::Value {

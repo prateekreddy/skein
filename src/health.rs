@@ -233,7 +233,23 @@ pub fn health_report() -> HealthReport {
         },
     };
     let git = tool("git", true);
-    let gh = tool("gh", false);
+    // `gh` is optional only when nothing is asking for it. The review queue is on by default, runs
+    // on the host, and is built entirely out of `gh` — so on a fleet with a queue this is a hard
+    // requirement that was reported as an optional nicety, and the queue's failure was the first
+    // anyone heard of it. A dependency nothing announces is one people meet as a bug.
+    let wants_gh = crate::load_repos().iter().any(|r| r.review_queue);
+    let gh = match (program_on_path("gh"), wants_gh) {
+        (true, _) => tool("gh", false),
+        (false, false) => HealthCheck {
+            ok: true,
+            detail: "not installed (optional — nothing here needs it)".into(),
+        },
+        (false, true) => HealthCheck {
+            ok: false,
+            detail: "not installed, and the review queue is built out of it — install it from                      cli.github.com, or switch the queue off per repo in Settings → repositories"
+                .into(),
+        },
+    };
 
     let repos = load_repos();
     let fleet_names = fleet.as_ref().map(|boxes| {

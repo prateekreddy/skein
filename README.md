@@ -14,8 +14,13 @@ a ⌘K palette are next (ARCHITECTURE.md § Roadmap).
 ## Getting started
 
 **You need:** [`sbx`](https://docs.docker.com/ai/sandboxes/) (Docker Sandboxes) on your `PATH` with
-Docker running, `git`, and [`gh`](https://cli.github.com) authenticated (`gh auth login`). macOS or
-Linux. `jq` inside the sandbox is installed for you.
+Docker running, and `git`. macOS or Linux. `jq` inside the sandbox is installed for you.
+
+[`gh`](https://cli.github.com) is needed by **the review queue and nothing else** — it is what reads
+pull requests. It does *not* need `gh auth login`: any token skein already has is passed to it (see
+[One credential](#configuration)). Without `gh` installed, everything else works and the queue says
+what is missing rather than failing quietly; `skein doctor` and the cockpit's health banner both
+report it as a requirement once any repo has its queue on.
 
 ```sh
 cargo build --release                    # → target/release/{skein, skein-server}
