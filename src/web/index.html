@@ -667,8 +667,8 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #fleetnew { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #fleetnew.open { display:flex; justify-content:center; align-items:flex-start; }
   /* package requests: one row per ask, with the decision on it */
   .sq-pkgs { font-family:var(--mono); font-size:12px; color:var(--text); word-break:break-all; }
   .sq-meta { font-size:11px; color:var(--faint); margin-top:3px; }
@@ -1229,6 +1229,28 @@
     </div>
   </div>
 
+  <!-- Creating the fleet sandbox: the one thing skein builds that takes a real share of the machine,
+       and it used to happen as a side effect of launching a first box, at a size nobody was shown.
+       sbx fixes memory, CPUs and disk when a sandbox is created — none can be changed afterwards
+       without rebuilding it — so this is the only moment the numbers are a choice. -->
+  <div id="fleetnew" aria-hidden="true">
+    <div class="nb-card" style="max-width:560px">
+      <div class="nb-head"><b>Create the fleet sandbox</b><span class="x" onclick="closeFleetNew()">✕</span></div>
+      <div class="ar-derived" id="fn-intro">Every box runs inside one sandbox and shares what it is given. These are set when it is created and cannot be changed without rebuilding it.</div>
+      <label class="nb-lbl">memory <span class="ar-opt" id="fn-mem-of"></span></label>
+      <input id="fn-memory" autocomplete="off" spellcheck="false" />
+      <div class="ar-derived">A ceiling shared by every box, not a reservation each. Leave the host enough to keep working.</div>
+      <label class="nb-lbl">CPUs <span class="ar-opt" id="fn-cpu-of"></span></label>
+      <input id="fn-cpus" autocomplete="off" spellcheck="false" />
+      <div class="ar-derived">Shared and uncapped between boxes: one busy box gets them all and hands them back under contention.</div>
+      <label class="nb-lbl">disk <span class="ar-opt" id="fn-disk-of"></span></label>
+      <input id="fn-disk" autocomplete="off" spellcheck="false" />
+      <div class="ar-derived">The sandbox's filesystem, shared by every box's checkout. Sparse — it grows into this, it does not take it up front.</div>
+      <div class="ar-msg" id="fn-msg" style="display:none"></div>
+      <div class="nb-foot"><span class="hint" id="fn-hint">nothing is created until you confirm</span><button class="primary" id="fn-go">Create →</button></div>
+    </div>
+  </div>
+
   <div id="addrepo" aria-hidden="true">
     <div class="nb-card" style="max-width:520px">
       <div class="nb-head"><b>Add a repository</b><span class="x" onclick="closeAddRepo()">✕</span></div>
@@ -1350,6 +1372,10 @@
             <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box. A scoped box has this socket blanked, since a forwarded agent signs for anything the key reaches and would undo the scoping above</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
           </section>
           <section class="set-pane" data-pane="fleet">
+            <!-- What the numbers below are a share of. They are meaningless without it: 26g is
+                 prudent on one machine and most of the RAM on another, and nothing else on this
+                 screen says which machine this is. -->
+            <div class="set-head">This machine<span class="sub" id="set-hostcap">measuring…</span></div>
             <label class="set-field narrow"><span class="set-title">Fleet memory</span><span class="desc">the <b>shared ceiling</b> for every box in the fleet sandbox — not a reservation each, which is why one number can be generous. Too low and a single <code>cargo build</code> takes the whole fleet down with it.</span><input id="set-fleetmem" placeholder="26g" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet CPUs</span><span class="desc">left blank, every host core but one — so the machine keeps answering while the fleet compiles</span><input id="set-fleetcpus" placeholder="(all but one)" autocomplete="off" spellcheck="false" /></label>
             <label class="set-field narrow"><span class="set-title">Fleet disk</span><span class="desc">one filesystem shared by every box, <b>20G</b> by default. Memory stopped summing when boxes started sharing a sandbox; disk did not. Fixed when the sandbox is created, so changing it rebuilds.</span><input id="set-fleetdisk" placeholder="20g" autocomplete="off" spellcheck="false" /></label>
@@ -4678,6 +4704,16 @@ function setPane(pane) {
 // Unsaved-changes indicator: the footer says so, so Save is never a guess about whether it's needed.
 function markDirty(on) { document.getElementById("set-dirty").classList.toggle("on", on); }
 function openSettings(pane = "repos") {
+  // The host's own numbers, beside the ones being typed. Fetched with the rest so the pane never
+  // renders a size against a blank.
+  loadFleetPlan().then(() => {
+    const el = document.getElementById("set-hostcap");
+    if (!el) return;
+    const host = fleetPlan?.host;
+    el.textContent = host
+      ? `${host.cpus} CPUs · ${gbOf(host.memory_mb)} memory · ${gbOf(host.disk_free_mb)} free on ${host.disk_path}`
+      : "could not be measured";
+  });
   Promise.all([loadRuntimes(), loadSettings(), loadRepos(), loadSync()]).then(() => {
     // `!== false` would read an absent field as chosen, which is exactly the default this stopped
     // being. Unset means nobody picked the account token, so the switch is off.
@@ -5183,7 +5219,7 @@ function currentRepoId() {
   if (repos.length) return repos[0].id;
   return "box";
 }
-function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
+function openNewBox() { newbox.classList.add("open"); nbBranch.value = ""; clearIdentityFields(); Promise.all([loadRuntimes(),loadSettings(),loadRepos(),loadSync(),loadGitScopeEffective(),loadFleetPlan()]).then(() => { fillRepoSelect(); fillSyncSelect(); fillGitScopeSelect(); gateLaunch(); }); nbBranch.focus(); }
 
 // A box belongs to a repo. With none registered there is nothing to clone, nothing to name it
 // after, and nothing for the agent to open — `currentRepoId` falls back to the literal string
@@ -5668,6 +5704,74 @@ function addRepoPrompt() { openAddRepo(); }
 // while the real branch (e.g. feat/auth) is passed through and checked out in the box. Mirror of
 // lib::slug — keep them in sync.
 const slug = s => s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+// ---------- the fleet sandbox, sized by the person whose machine it is ----------
+//
+// It is created lazily, by the first box launch, and until now that meant `fleet_memory` — 26g on a
+// fresh install, a number chosen for a different machine — was applied to whatever laptop this is,
+// silently, at the moment someone clicked Launch. sbx fixes memory, CPUs and disk at creation, so
+// that first click decided all three permanently.
+let fleetPlan = null;
+async function loadFleetPlan() {
+  // In demo mode there is no host to measure and nothing to create; a dialog about a machine that
+  // does not exist would be the one modal a visitor cannot dismiss their way out of.
+  if (DEMO) { fleetPlan = null; return null; }
+  try {
+    const r = await fetch("/api/fleet/plan");
+    fleetPlan = r.ok ? await r.json() : null;
+  } catch { fleetPlan = null; }
+  return fleetPlan;
+}
+const gbOf = mb => mb ? `${Math.round(mb / 1024)} GB` : "unknown";
+function openFleetNew(after) {
+  const p = fleetPlan || {};
+  const host = p.host || {}, want = p.proposed || {};
+  document.getElementById("fn-memory").value = want.memory || "";
+  document.getElementById("fn-cpus").value = want.cpus || "";
+  document.getElementById("fn-disk").value = want.disk || "";
+  // What it is a share OF, beside each field. A number without its denominator is not a decision
+  // anyone can make: "26g" is prudent on one machine and most of the RAM on another.
+  document.getElementById("fn-mem-of").textContent = `this machine has ${gbOf(host.memory_mb)}`;
+  document.getElementById("fn-cpu-of").textContent = host.cpus ? `this machine has ${host.cpus}` : "";
+  document.getElementById("fn-disk-of").textContent =
+    host.disk_free_mb ? `${gbOf(host.disk_free_mb)} free on ${host.disk_path}` : "";
+  const msg = document.getElementById("fn-msg");
+  msg.style.display = "none"; msg.textContent = "";
+  fleetNewAfter = after || null;
+  document.getElementById("fleetnew").classList.add("open");
+  document.getElementById("fn-memory").focus();
+}
+function closeFleetNew() { document.getElementById("fleetnew").classList.remove("open"); fleetNewAfter = null; }
+let fleetNewAfter = null;
+async function createFleet() {
+  const go = document.getElementById("fn-go"), msg = document.getElementById("fn-msg");
+  const body = {
+    memory: document.getElementById("fn-memory").value.trim(),
+    cpus: document.getElementById("fn-cpus").value.trim(),
+    disk: document.getElementById("fn-disk").value.trim(),
+  };
+  go.disabled = true;
+  document.getElementById("fn-hint").textContent = "creating — this boots a virtual machine, so it takes a moment";
+  try {
+    const r = await fetch("/api/fleet/create", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    fleetPlan = null;
+    const next = fleetNewAfter;
+    closeFleetNew();
+    toast("fleet sandbox created");
+    if (next) next();
+  } catch (e) {
+    // In the dialog, not a toast that outlives it: the person is looking here, and the numbers they
+    // may need to change are on this screen.
+    msg.style.display = ""; msg.textContent = String(e.message || e);
+    document.getElementById("fn-hint").textContent = "nothing was created";
+  } finally {
+    go.disabled = false;
+  }
+}
+document.getElementById("fn-go").addEventListener("click", createFleet);
+
 function launchBox(branch) {
   branch = (branch||"").trim(); if (!branch) return;   // keep slashes — they belong to the branch
   // Here rather than only on the button, because the button was not the only way in: Enter in the
@@ -5678,6 +5782,15 @@ function launchBox(branch) {
   if (!repos.length) {
     toast("add a repository first — a box is a branch of one");
     openAddRepo();
+    return;
+  }
+  // Ask before building it. `exists === false` is the only state that means "there is none": a
+  // `null` is sbx declining to answer, and creating on that guess would make a second sandbox or
+  // trample the one that is already there.
+  if (fleetPlan && fleetPlan.exists === false) {
+    const again = () => launchBox(branch);
+    closeNewBox();
+    openFleetNew(again);
     return;
   }
   const id = currentRepoId();

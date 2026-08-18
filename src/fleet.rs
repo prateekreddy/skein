@@ -1096,6 +1096,168 @@ fn parse_mib(value: &str) -> Option<u64> {
 
 /// Every host CPU but one, so the host stays responsive while the fleet is busy. Empty when the
 /// count cannot be read, which leaves the flag off and sbx's own default in charge.
+/// What this machine actually has, so a fleet can be sized against it rather than against a number
+/// someone typed once.
+///
+/// Every field is the host's, not the sandbox's: these are the quantities `sbx create` is about to
+/// take a share of, and the share is invisible from inside afterwards. Reported in MB because that
+/// is what the arithmetic below wants; the UI turns them back into GB, which is how the flags are
+/// spelled.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HostCapacity {
+    pub cpus: u64,
+    /// Total RAM. `0` when it could not be read — reported as unknown rather than guessed, because a
+    /// proposal derived from a wrong total is worse than no proposal.
+    pub memory_mb: u64,
+    /// Free space on [`HostCapacity::disk_path`], which is where the sandbox's disk image grows.
+    pub disk_free_mb: u64,
+    pub disk_total_mb: u64,
+    pub disk_path: String,
+}
+
+/// Total RAM in MB, or 0 when this platform will not say.
+fn host_memory_mb() -> u64 {
+    // Linux: the first field of MemTotal, in kB. Read rather than shelled out for, because this runs
+    // on the path that draws a dialog and a subprocess per open would be felt.
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                if let Some(kb) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<u64>().ok())
+                {
+                    return kb / 1024;
+                }
+            }
+        }
+    }
+    // macOS: bytes, and the only way to ask.
+    let mut cmd = std::process::Command::new("sysctl");
+    cmd.args(["-n", "hw.memsize"]);
+    crate::util::output_with_timeout(&mut cmd, Duration::from_secs(5))
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+        .map(|bytes| bytes / 1024 / 1024)
+        .unwrap_or(0)
+}
+
+/// Free and total MB on the filesystem holding `path`, via `df`. `(0, 0)` when it cannot be read.
+///
+/// `df -Pk` rather than a `statvfs` binding: POSIX-portable output, no new dependency, and this is
+/// asked once per dialog rather than per tick.
+fn disk_space_mb(path: &str) -> (u64, u64) {
+    let mut cmd = std::process::Command::new("df");
+    cmd.args(["-Pk", path]);
+    let Some(out) = crate::util::output_with_timeout(&mut cmd, Duration::from_secs(10))
+        .filter(|o| o.status.success())
+    else {
+        return (0, 0);
+    };
+    parse_df(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `(free_mb, total_mb)` from `df -Pk` output.
+///
+/// Counted from the END of the row, not the start: the columns are Filesystem, 1024-blocks, Used,
+/// Available, Capacity, Mounted-on, and a device name longer than the column wraps onto its own
+/// line under some `df`s while the mount point can contain spaces. The five numeric columns are
+/// always the last six fields minus the mount point, so the tail is the stable end to count from.
+fn parse_df(text: &str) -> (u64, u64) {
+    let Some(row) = text.lines().nth(1).filter(|l| !l.trim().is_empty()) else {
+        return (0, 0);
+    };
+    let fields: Vec<&str> = row.split_whitespace().collect();
+    if fields.len() < 5 {
+        return (0, 0);
+    }
+    let at = |back: usize| -> u64 {
+        fields
+            .get(fields.len().wrapping_sub(back))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|kb| kb / 1024)
+            .unwrap_or(0)
+    };
+    // …1024-blocks, Used, Available, Capacity, Mounted-on
+    (at(3), at(5))
+}
+
+/// This machine, measured.
+pub fn host_capacity() -> HostCapacity {
+    // Where the sandbox's disk actually grows. Docker's own data root would be exact, and asking for
+    // it costs a `docker info` on a daemon that may be the very thing that is unwell — so this
+    // reports the filesystem it is *on*, and names the path so the number can be checked.
+    let disk_path = "/".to_string();
+    let (disk_free_mb, disk_total_mb) = disk_space_mb(&disk_path);
+    HostCapacity {
+        cpus: std::thread::available_parallelism()
+            .map(|n| n.get() as u64)
+            .unwrap_or(0),
+        memory_mb: host_memory_mb(),
+        disk_free_mb,
+        disk_total_mb,
+        disk_path,
+    }
+}
+
+/// A size for the fleet, proposed from what the host has. Every field is a string in sbx's own
+/// spelling, so the dialog shows exactly what will be passed.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct FleetSize {
+    pub memory: String,
+    pub cpus: String,
+    pub disk: String,
+    pub box_disk_max: String,
+}
+
+/// What skein would ask for, given this host — the numbers the confirmation dialog starts on.
+///
+/// Deliberately a *proposal* and not a default that silently applies. A fleet sandbox is the largest
+/// thing skein creates on someone's machine, and until now it was created by a side effect of
+/// launching a first box, at whatever `fleet_memory` happened to say — 26g, a number chosen for a
+/// different machine. On a 16 GB laptop that is most of the RAM, decided by nobody.
+///
+/// The shares: memory is 70% of the host, which leaves the host itself working while the fleet is
+/// busy; CPUs are all but one, so a saturated fleet still leaves a core to type in; disk is half the
+/// free space capped at 60 GB, because the image is sparse and grows into what it is given.
+pub fn proposed_fleet_size(host: &HostCapacity) -> FleetSize {
+    let gb = |mb: u64| format!("{}g", (mb / 1024).max(1));
+    // `configured_field`, not the loaded `Config`: `fleet_memory` reads back this build's 26g on a
+    // machine nobody has configured, so deferring to it would defer to a number chosen elsewhere.
+    let memory =
+        crate::config::configured_field("fleet_memory").unwrap_or_else(|| match host.memory_mb {
+            0 => default_fleet_memory_hint(),
+            total => gb((total * 7 / 10).max(4096)),
+        });
+    // From the capacity passed in, not a fresh probe: this function's whole contract is "given this
+    // machine", and a proposal that measured a different one would be untestable and, on a host
+    // whose CPU count skein was told rather than read, wrong.
+    let cpus = crate::config::configured_field("fleet_cpus")
+        .unwrap_or_else(|| host.cpus.saturating_sub(1).max(1).to_string());
+    let disk =
+        crate::config::configured_field("fleet_disk").unwrap_or_else(|| match host.disk_free_mb {
+            0 => "20g".to_string(),
+            free => gb((free / 2).clamp(20 * 1024, 60 * 1024)),
+        });
+    FleetSize {
+        memory,
+        cpus,
+        disk,
+        box_disk_max: load_config().box_disk_max,
+    }
+}
+
+/// The memory to propose when the host will not say how much it has. Named rather than inlined so
+/// the one place a guess survives is obvious.
+fn default_fleet_memory_hint() -> String {
+    "8g".to_string()
+}
+
 fn host_cpus_less_one() -> String {
     std::thread::available_parallelism()
         .map(|n| n.get().saturating_sub(1).max(1).to_string())
@@ -5101,6 +5263,74 @@ b idle 5000000 1048576 4
 
         std::env::remove_var("SKEIN_LS_CMD");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The fleet is sized against the machine it is going onto.
+    ///
+    /// It used to be sized by `fleet_memory`, whose default is a number chosen for the machine this
+    /// was written on. On a 16 GB laptop that default is most of the RAM, applied by a first box
+    /// launch, to a sandbox whose memory cannot be changed afterwards without rebuilding it.
+    #[test]
+    fn a_fleet_is_proposed_from_what_the_machine_actually_has() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let host = HostCapacity {
+            cpus: 8,
+            memory_mb: 16 * 1024,
+            disk_free_mb: 100 * 1024,
+            disk_total_mb: 500 * 1024,
+            disk_path: "/".into(),
+        };
+        let want = proposed_fleet_size(&host);
+        // 70% of 16 GB, leaving the host itself able to work while the fleet is busy.
+        assert_eq!(want.memory, "11g", "{want:?}");
+        // All but one: a saturated fleet still leaves a core to type in.
+        assert_eq!(want.cpus, "7", "{want:?}");
+        // Half the free space, and the cap: sparse or not, 300 GB of headroom is not a proposal.
+        assert_eq!(want.disk, "50g", "{want:?}");
+
+        // A machine that will not say how much memory it has gets a modest number rather than a
+        // number derived from zero — which is what "70% of unknown" would be.
+        let blind = HostCapacity {
+            memory_mb: 0,
+            disk_free_mb: 0,
+            ..host.clone()
+        };
+        let want = proposed_fleet_size(&blind);
+        assert_eq!(want.memory, default_fleet_memory_hint());
+        assert_eq!(want.disk, "20g", "sbx's own default, not a guess: {want:?}");
+
+        // What is already configured wins over any proposal: this dialog also opens on a fleet that
+        // has been sized before, and overwriting that with an arithmetic default would silently undo
+        // a decision someone made.
+        let mut config = load_config();
+        config.fleet_memory = "26g".into();
+        config.fleet_cpus = "3".into();
+        save_config(&config).unwrap();
+        let want = proposed_fleet_size(&host);
+        assert_eq!((want.memory.as_str(), want.cpus.as_str()), ("26g", "3"));
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// `df` output, read from the end.
+    ///
+    /// The columns are fixed but the first and last can both be awkward: a long device name wraps
+    /// onto its own line under some `df`s, and a mount point may contain spaces. Counting from the
+    /// front gets the wrapped case wrong, which is how a fleet on an ordinary LVM host would have
+    /// been proposed a 20 GB disk with 900 GB free.
+    #[test]
+    fn free_space_is_read_from_the_end_of_the_row() {
+        let plain = "Filesystem 1024-blocks     Used Available Capacity Mounted on\n                     /dev/vda1     62914560 21495808  41418752      35% /\n";
+        assert_eq!(parse_df(plain), (40448, 61440));
+
+        let wrapped = "Filesystem 1024-blocks Used Available Capacity Mounted on\n                       /dev/mapper/ubuntu--vg-ubuntu--lv 1048576 524288 524288 50% /\n";
+        assert_eq!(parse_df(wrapped), (512, 1024));
+
+        assert_eq!(parse_df(""), (0, 0), "no output is not zero free");
+        assert_eq!(parse_df("Filesystem 1024-blocks\n"), (0, 0));
     }
 
     /// The transport gets another chance after the one at startup.

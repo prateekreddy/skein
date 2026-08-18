@@ -659,6 +659,15 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 > The `*_CMD` templates run via `sh -c`; values you substitute are shell-quoted, but only
 > point them at trusted commands.
 
+**Sizing the fleet.** Every box runs inside one sbx sandbox, and its memory, CPUs and disk are
+fixed when that sandbox is created — sbx has no resize, so changing any of them means rebuilding it.
+So skein asks before it builds one: the first launch on a machine with no fleet opens a dialog with
+what the host has (RAM, cores, free disk) beside what skein proposes to take of it — 70% of memory,
+all cores but one, half the free disk capped at 60 GB. Nothing is created until you confirm, and the
+numbers you confirm are saved, so a later rebuild starts from them. Settings → fleet shows the same
+host figures beside the fields, and **Rebuild the fleet at these limits** is the same operation
+afterwards, carrying every box across.
+
 **How skein reaches the fleet.** By default it installs a small agent inside the fleet sandbox and
 talks to it over one held-open connection, falling back to `sbx exec` for anything the agent cannot
 carry. That is the faster path, and more importantly the one that survives a stalled sbx daemon: a

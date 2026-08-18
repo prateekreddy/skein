@@ -334,6 +334,31 @@ pub fn config_path_if_written() -> Option<String> {
         .then(|| crate::util::shorten(&path.to_string_lossy()))
 }
 
+/// The value someone actually *wrote* for `key`, or `None` when they never did.
+///
+/// Every field of [`Config`] has a serde default, which is what keeps old files working — and it
+/// also means a loaded `Config` cannot tell a choice from a fallback. Usually that is fine: a
+/// default is meant to be indistinguishable in use. It is not fine when the question is "has anyone
+/// decided this yet?", which is exactly what sizing a new fleet asks: `fleet_memory` reads back
+/// "26g" on a machine nobody has ever configured, because that is this build's default, and a
+/// proposal that deferred to it would propose a number chosen for a different laptop.
+///
+/// So this reads the file, not the struct. Absent file, absent key, empty value and unreadable JSON
+/// all answer `None` — in every one of them, nobody has said.
+pub fn configured_field(key: &str) -> Option<String> {
+    let text = fs::read_to_string(config_json()).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get(key)?
+        .clone();
+    let value = match value {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    };
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
 /// What is wrong with `config.json`, or `None` when it parses (or is simply not there yet).
 ///
 /// Exposed so the board and `skein doctor` can say it out loud. A config skein cannot read is

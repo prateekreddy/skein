@@ -199,6 +199,15 @@ await check("the add-repo dialog takes a local path", async () => {
   await settle(200);
   await page.click("#ar-go");
   await settle(2500);
+  // The fixture repo has no `origin`, so the dialog deliberately stays up with the note that boxes
+  // for it cannot push — which is worth saying, and is exactly what a person adopting a local
+  // checkout will meet. Read it, then dismiss it the way they would.
+  const note = (await page.textContent("#ar-msg")) || "";
+  if (!/origin/i.test(note)) throw new Error(`a repo with no remote was accepted silently: "${note.trim()}"`);
+  await page.click("#ar-go");
+  await settle(500);
+  if (await page.evaluate(() => arModal().classList.contains("open")))
+    throw new Error("the add-repo dialog would not close after it was done");
 });
 
 await check("the repo is registered", async () => {
@@ -230,10 +239,50 @@ await check("the footer names the box that will be created, not a placeholder", 
     throw new Error(`the hint never names the box: "${hint.trim()}"`);
 });
 
-await check("launching does not refuse the box it just named", async () => {
-  await page.evaluate(() => { document.getElementById("nb-branch").value = "main"; });
+// The fleet sandbox is the largest thing skein builds on the machine, and it used to appear as a
+// side effect of this click, sized by a config default written for someone else's laptop. Nothing
+// about it was ever shown, and sbx fixes all three at creation.
+await check("the first launch asks what the fleet may take, before taking it", async () => {
   await page.evaluate(() => launchBox("main"));
-  await settle(6000);
+  await settle(1500);
+  await mustSee("#fleetnew.open", "the create-fleet dialog");
+  const calls = fs.readFileSync(path.join(fx.root, "sbx.log"), "utf8");
+  if (/^create /m.test(calls)) throw new Error("the sandbox was created before anyone confirmed it");
+});
+
+await check("and says what it is a share of", async () => {
+  const shown = await page.evaluate(() => ({
+    memory: document.getElementById("fn-memory").value,
+    cpus: document.getElementById("fn-cpus").value,
+    disk: document.getElementById("fn-disk").value,
+    memOf: document.getElementById("fn-mem-of").textContent,
+    cpuOf: document.getElementById("fn-cpu-of").textContent,
+    diskOf: document.getElementById("fn-disk-of").textContent,
+  }));
+  for (const [field, value] of Object.entries(shown))
+    if (!String(value).trim()) throw new Error(`${field} is blank — a size with no number to check it against`);
+  // A proposal in sbx's own spelling, so what is on screen is what is passed.
+  if (!/^\d+g$/.test(shown.memory)) throw new Error(`memory is not a size sbx takes: ${shown.memory}`);
+  if (!/this machine has/.test(shown.memOf)) throw new Error(`memory does not say what it is a share of: ${shown.memOf}`);
+});
+
+await check("confirming creates it at the size that was on screen", async () => {
+  await page.fill("#fn-memory", "6g");
+  await page.fill("#fn-cpus", "2");
+  await page.fill("#fn-disk", "24g");
+  await page.click("#fn-go");
+  await settle(3000);
+  const calls = fs.readFileSync(path.join(fx.root, "sbx.log"), "utf8");
+  const create = calls.split("\n").find(l => l.startsWith("create "));
+  if (!create) throw new Error(`confirming created nothing:\n${calls.split("\n").slice(-8).join("\n")}`);
+  if (!/-m 6g/.test(create)) throw new Error(`created at a size nobody chose: ${create}`);
+  if (!/--cpus 2/.test(create)) throw new Error(`created with the wrong CPUs: ${create}`);
+  const cfg = JSON.parse(fs.readFileSync(path.join(fx.root, "home", "config.json"), "utf8"));
+  if (cfg.fleet_disk !== "24g") throw new Error(`the disk was not kept: ${JSON.stringify(cfg.fleet_disk)}`);
+});
+
+await check("launching does not refuse the box it just named", async () => {
+  await settle(4000);
   // Whatever else happens, the one answer that means the flow is broken at the naming step is the
   // launcher refusing the name the dialog itself composed.
   const term = await page.evaluate(() => {

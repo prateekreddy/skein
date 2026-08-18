@@ -211,6 +211,8 @@ async fn main() {
         )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
         .route("/api/settings", get(api_settings).post(api_set_settings))
+        .route("/api/fleet/plan", get(api_fleet_plan))
+        .route("/api/fleet/create", post(api_fleet_create))
         .route("/api/fleet/resize", post(api_fleet_resize))
         .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/fleet/resources", get(api_fleet_resources))
@@ -1609,6 +1611,72 @@ async fn api_fleet_resources() -> Response {
     match tokio::task::spawn_blocking(skein::fleet_resources).await {
         Ok(Some(r)) => Json(r).into_response(),
         _ => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+/// What creating the fleet sandbox would take, and from what.
+///
+/// The fleet sandbox is the largest thing skein builds on someone's machine, and it used to appear
+/// as a side effect of launching a first box — sized by whatever `fleet_memory` said, which on a new
+/// install is a number chosen for somebody else's laptop. Nobody was ever shown it, and it cannot be
+/// changed afterwards without a rebuild: sbx fixes memory, CPUs and disk at creation.
+///
+/// So this is the dialog's whole content in one call: what the host has, what skein proposes to take
+/// of it, and whether there is a sandbox already. `exists` is a tri-state on purpose — `null` means
+/// sbx could not be asked, which must not be shown as "no sandbox yet" or the answer would be to
+/// create a second one.
+async fn api_fleet_plan() -> Json<serde_json::Value> {
+    let (host, exists, sandbox) = tokio::task::spawn_blocking(|| {
+        let sandbox = skein::fleet_sandbox();
+        let exists = (!sandbox.is_empty())
+            .then(|| skein::fleet_exists(&sandbox))
+            .flatten();
+        (skein::host_capacity(), exists, sandbox)
+    })
+    .await
+    .unwrap_or_else(|_| (skein::host_capacity(), None, String::new()));
+    let proposed = skein::proposed_fleet_size(&host);
+    Json(serde_json::json!({
+        "sandbox": sandbox,
+        "exists": exists,
+        "why": skein::fleet_failure(),
+        "host": host,
+        "proposed": proposed,
+    }))
+}
+
+/// Create the fleet sandbox at the size the person just confirmed.
+///
+/// The numbers are saved before the create, not after: `create_argv` and `create_env` read the
+/// config, so a size that was only passed here would be ignored by the very command it is for. It
+/// also means the sandbox and the settings agree afterwards, which is what a later resize starts
+/// from.
+async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
+    let out = tokio::task::spawn_blocking(move || {
+        let mut config = skein::load_config();
+        for (field, value) in [
+            (&mut config.fleet_memory, &r.memory),
+            (&mut config.fleet_cpus, &r.cpus),
+            (&mut config.fleet_disk, &r.disk),
+        ] {
+            // Empty means "leave what is configured", so a client sending only what it changed does
+            // not clear the rest.
+            if !value.trim().is_empty() {
+                *field = value.trim().to_string();
+            }
+        }
+        skein::save_config(&config)?;
+        let sandbox = config.fleet_sandbox.trim().to_string();
+        if sandbox.is_empty() {
+            return Err("no fleet sandbox is named (fleet_sandbox is empty)".to_string());
+        }
+        skein::ensure_fleet(&sandbox, &skein::fleet_mounts()).map(|()| sandbox)
+    })
+    .await;
+    match out {
+        Ok(Ok(sandbox)) => Json(serde_json::json!({ "sandbox": sandbox })).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

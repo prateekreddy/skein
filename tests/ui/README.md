@@ -54,6 +54,11 @@ launch dialog, launch. Three defects surfaced on the first run of it, all in the
 reachable from the CLI — Enter bypassing the no-repo gate, the repo control hidden whenever there
 was exactly one, and a footer promising `<repo>-<branch>` instead of the name about to be created.
 
+It also covers the fleet-sizing confirmation: the first launch must open the create dialog with the
+host's own numbers in it, `sbx create` must not have run before the confirm, and the sandbox that
+results must carry the sizes that were on screen — asserted against the recorded `sbx` argv, not
+against the config it was saved to.
+
 Its fixture root is under `target/`, not `$TMPDIR`: a box binds its own `/tmp` and `$HOME` over the
 sandbox's, so `box-session.sh` refuses a fleet root under either.
 
