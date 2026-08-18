@@ -14,6 +14,7 @@ mod diff;
 mod files;
 mod fleet;
 pub mod gitgate;
+pub mod github;
 mod health;
 mod mailbox;
 pub mod moduledocs;

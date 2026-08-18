@@ -155,14 +155,7 @@ const STAGE2_BYTES: usize = 140_000;
 
 /// The PR's diff, and whether it was cut short.
 fn pr_diff(slug: &str, number: u64, limit: usize) -> Result<(String, bool), String> {
-    let n = number.to_string();
-    let (out, err, code) =
-        crate::prq::run_gh_for(&["pr", "diff", &n, "--repo", slug], Duration::from_secs(60))?;
-    if code != 0 {
-        let msg = if err.trim().is_empty() { out } else { err };
-        return Err(msg.trim().to_string());
-    }
-    Ok(truncate(&out, limit))
+    Ok(truncate(&crate::prq::pr_diff_text(slug, number)?, limit))
 }
 
 /// Cut on a character boundary, reporting whether anything was dropped.
@@ -179,21 +172,7 @@ fn truncate(text: &str, limit: usize) -> (String, bool) {
 
 /// The paths a PR touches.
 fn changed_paths(slug: &str, number: u64) -> Vec<String> {
-    let n = number.to_string();
-    crate::prq::run_gh_for(
-        &["pr", "diff", &n, "--repo", slug, "--name-only"],
-        Duration::from_secs(30),
-    )
-    .ok()
-    .filter(|(_, _, code)| *code == 0)
-    .map(|(out, _, _)| {
-        out.lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect()
-    })
-    .unwrap_or_default()
+    crate::prq::pr_files(slug, number).unwrap_or_default()
 }
 
 // ───────────────────────────── stage 0: ownership ─────────────────────────────

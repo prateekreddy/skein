@@ -1,4 +1,4 @@
-//! The review queue end to end, against a stubbed `gh`.
+//! The review queue end to end, against a stubbed GitHub.
 //!
 //! The unit tests in `src/prq.rs` cover lane and check derivation from one JSON item. What they
 //! cannot cover is the part where a PR goes missing: three separate searches are merged into one
@@ -8,46 +8,94 @@
 //!   cargo test --test review_queue
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// A `gh` that answers from fixture files instead of GitHub.
+/// A GitHub that answers from fixture files instead of the real one.
 ///
-/// Dispatch is on argv, exactly as the real thing is called: `api user`, `api user/teams`, and
-/// `pr list … --search <term>`. Each search reads `search-<term>.json` if present, else returns an
-/// empty list — so a test declares only the queries it cares about.
-fn stub_gh(dir: &Path, login: &str, teams: &str) -> PathBuf {
-    let bin = dir.join("gh");
-    fs::write(
-        &bin,
-        format!(
-            r#"#!/bin/sh
-# args: $@
-if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf '%s\n' '{login}'; exit 0; fi
-if [ "$1" = "api" ] && [ "$2" = "user/teams" ]; then {teams}; fi
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  term=""
-  while [ $# -gt 0 ]; do
-    if [ "$1" = "--search" ]; then term="$2"; fi
-    shift
-  done
-  safe=$(printf '%s' "$term" | tr -c 'a-zA-Z0-9' '_')
-  if [ -f "{dir}/fail-$safe" ]; then printf 'HTTP 403: forbidden\n' >&2; exit 1; fi
-  f="{dir}/search-$safe.json"
-  if [ -f "$f" ]; then cat "$f"; else printf '[]\n'; fi
-  exit 0
-fi
-printf 'unexpected: %s\n' "$*" >&2
-exit 1
-"#,
-            login = login,
-            teams = teams,
-            dir = dir.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-    bin
+/// It used to be a stub `gh` on `$PATH`; skein reads the API directly now, so the stub is an API.
+/// Dispatch is on the request: `/user`, `/user/teams`, and one GraphQL search whose `q` variable
+/// names the query. Each search reads `search-<term>.json` if present, else answers empty — so a
+/// test declares only the queries it cares about.
+///
+/// One connection at a time, closed after each answer, on a thread that lives as long as the
+/// process. A test's stub outliving its test is harmless here because each gets its own port.
+fn stub_github(dir: &Path, login: &str, teams_ok: bool) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let root = dir.to_path_buf();
+    let login = login.to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let mut length = 0usize;
+            // The request line, then headers. `Content-Length` is the only one that matters: the
+            // GraphQL body has to be read to know which search this is.
+            reader.read_line(&mut request).ok();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; length];
+            if length > 0 {
+                reader.read_exact(&mut body).ok();
+            }
+            let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let (status, payload) = if path.starts_with("/user/teams") {
+                match teams_ok {
+                    true => (
+                        200,
+                        r#"[{"slug":"core","organization":{"login":"acme"}}]"#.to_string(),
+                    ),
+                    // What a token without `read:org` actually gets.
+                    false => (403, r#"{"message":"Requires read:org"}"#.to_string()),
+                }
+            } else if path.starts_with("/user") {
+                (200, format!(r#"{{"login":"{login}"}}"#))
+            } else if path.starts_with("/graphql") {
+                let sent: serde_json::Value =
+                    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                let q = sent
+                    .get("variables")
+                    .and_then(|v| v.get("q"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                // The term is what follows `is:open ` — the part the caller asked for.
+                let term = q.rsplit("is:open ").next().unwrap_or("").trim().to_string();
+                let safe = safe_term(&term);
+                if root.join(format!("fail-{safe}")).exists() {
+                    (
+                        200,
+                        r#"{"errors":[{"message":"HTTP 403: forbidden"}]}"#.to_string(),
+                    )
+                } else {
+                    let nodes = std::fs::read_to_string(root.join(format!("search-{safe}.json")))
+                        .unwrap_or_else(|_| "[]".to_string());
+                    (
+                        200,
+                        format!(r#"{{"data":{{"search":{{"nodes":{nodes}}}}}}}"#),
+                    )
+                }
+            } else {
+                (404, format!(r#"{{"message":"no stub for {path}"}}"#))
+            };
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}")
 }
 
 fn safe_term(term: &str) -> String {
@@ -79,7 +127,7 @@ fn repo(id: &str) -> skein::Repo {
     }
 }
 
-/// One PR item, with the fields `gh pr list --json` would return.
+/// One PR item, in the shape the GraphQL search returns.
 fn pr_json(number: u64, title: &str, extra: &str) -> String {
     format!(
         r#"{{"number":{number},"title":"{title}","author":{{"login":"someone"}},"url":"https://github.com/acme/thing/pull/{number}","headRefName":"feat-{number}","headRefOid":"sha{number}","baseRefName":"main","isDraft":false,"updatedAt":"2026-08-1{number}T00:00:00Z"{extra}}}"#
@@ -97,16 +145,20 @@ struct Env {
     _dir: tempdir::TempDir,
 }
 
-/// Point skein's home and `gh` at a scratch directory for the duration of one test.
-fn setup(login: &str, teams: &str) -> (Env, PathBuf) {
+/// Point skein's home and its GitHub at a scratch directory for the duration of one test.
+fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
     // Ignore poisoning: one failing test must not cascade into every other test panicking on the
     // lock, which buries the real failure. The guarded data is `()`.
     let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempdir::TempDir::new("skein-review").unwrap();
     let path = dir.path().to_path_buf();
-    let gh = stub_gh(&path, login, teams);
-    std::env::set_var("SKEIN_GH_BIN", &gh);
+    let api = stub_github(&path, login, teams);
+    std::env::set_var("SKEIN_GITHUB_API", &api);
     std::env::set_var("SKEIN_HOME", &path);
+    // A token, because the queue refuses to run without one now — the credential is skein's rather
+    // than `gh`'s, so the test has to supply it the way a fleet would.
+    std::env::set_var("GH_TOKEN", "test-token");
+    skein::prq::forget_host_token();
     (
         Env {
             _lock: lock,
@@ -149,7 +201,7 @@ mod tempdir {
 /// subtle version, and it breaks the author/reviewer/mentioned filter rather than the list.
 #[test]
 fn a_pr_matching_several_queries_appears_once_with_every_reason() {
-    let (_env, dir) = setup("me", "exit 1");
+    let (_env, dir) = setup("me", false);
     let both = format!("[{}]", pr_json(1, "shared", ""));
     put_search(&dir, "review-requested:me", &both);
     put_search(&dir, "author:me", &both);
@@ -167,7 +219,7 @@ fn a_pr_matching_several_queries_appears_once_with_every_reason() {
 
 #[test]
 fn every_query_contributes_its_own_prs() {
-    let (_env, dir) = setup("me", "exit 1");
+    let (_env, dir) = setup("me", false);
     put_search(
         &dir,
         "review-requested:me",
@@ -187,7 +239,7 @@ fn every_query_contributes_its_own_prs() {
 /// exactly the omission that costs a merge.
 #[test]
 fn a_queue_that_cannot_see_your_teams_says_so() {
-    let (_env, dir) = setup("me", "exit 1");
+    let (_env, dir) = setup("me", false);
     put_search(&dir, "review-requested:me", "[]");
 
     let q = skein::prq::queue(&repo("acme"), true).unwrap();
@@ -201,8 +253,8 @@ fn a_queue_that_cannot_see_your_teams_says_so() {
 }
 
 #[test]
-fn teams_are_queried_when_gh_can_list_them() {
-    let (_env, dir) = setup("me", "printf 'acme/core\\n'; exit 0");
+fn teams_are_queried_when_github_can_list_them() {
+    let (_env, dir) = setup("me", true);
     put_search(&dir, "review-requested:me", "[]");
     put_search(
         &dir,
@@ -228,7 +280,7 @@ fn teams_are_queried_when_gh_can_list_them() {
 /// this guards against — it looks identical to "nothing needs you".
 #[test]
 fn a_failing_query_is_reported_rather_than_swallowed() {
-    let (_env, dir) = setup("me", "exit 1");
+    let (_env, dir) = setup("me", false);
     fail_search(&dir, "review-requested:me");
     put_search(&dir, "author:me", &format!("[{}]", pr_json(5, "mine", "")));
 
@@ -246,16 +298,16 @@ fn a_failing_query_is_reported_rather_than_swallowed() {
 
 #[test]
 fn lanes_follow_your_review_against_the_current_head() {
-    let (_env, dir) = setup("me", "exit 1");
+    let (_env, dir) = setup("me", false);
     let approved = pr_json(
         1,
         "decided",
-        r#","latestReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"sha1"}}]"#,
+        r#","latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"sha1"}}]}"#,
     );
     let stale = pr_json(
         2,
         "moved on",
-        r#","latestReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"older"}}]"#,
+        r#","latestReviews":{"nodes":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"older"}}]}"#,
     );
     let fresh = pr_json(3, "untouched", "");
     put_search(
@@ -277,7 +329,7 @@ fn lanes_follow_your_review_against_the_current_head() {
 
 #[test]
 fn archiving_moves_a_pr_out_of_needs_you_and_back() {
-    let (_env, dir) = setup("me", "exit 1");
+    let (_env, dir) = setup("me", false);
     put_search(
         &dir,
         "review-requested:me",
@@ -297,7 +349,7 @@ fn archiving_moves_a_pr_out_of_needs_you_and_back() {
 /// hide a still-open PR, so it only ever removes numbers absent from the fetched open set.
 #[test]
 fn the_archive_is_pruned_to_prs_that_are_still_open() {
-    let (_env, dir) = setup("me", "exit 1");
+    let (_env, dir) = setup("me", false);
     put_search(
         &dir,
         "review-requested:me",
@@ -316,7 +368,7 @@ fn the_archive_is_pruned_to_prs_that_are_still_open() {
 
 #[test]
 fn a_repo_with_no_github_remote_has_no_queue() {
-    let (_env, _dir) = setup("me", "exit 1");
+    let (_env, _dir) = setup("me", false);
     let mut r = repo("local");
     r.source = "/Users/me/code/thing".into();
     let err = skein::prq::queue(&r, true).unwrap_err();

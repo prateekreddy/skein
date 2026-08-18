@@ -233,20 +233,16 @@ pub fn health_report() -> HealthReport {
         },
     };
     let git = tool("git", true);
-    // `gh` is optional only when nothing is asking for it. The review queue is on by default, runs
-    // on the host, and is built entirely out of `gh` — so on a fleet with a queue this is a hard
-    // requirement that was reported as an optional nicety, and the queue's failure was the first
-    // anyone heard of it. A dependency nothing announces is one people meet as a bug.
-    let wants_gh = crate::load_repos().iter().any(|r| r.review_queue);
-    let gh = match (program_on_path("gh"), wants_gh) {
-        (true, _) => tool("gh", false),
-        (false, false) => HealthCheck {
-            ok: true,
-            detail: "not installed (optional — nothing here needs it)".into(),
-        },
-        (false, true) => HealthCheck {
-            ok: false,
-            detail: "not installed, and the review queue is built out of it — install it from                      cli.github.com, or switch the queue off per repo in Settings → repositories"
+    // What actually reads GitHub. It used to be `gh`, which made a third-party CLI a hard
+    // requirement of a default-on feature and dragged its keyring in with it; the queue now talks to
+    // the API with a token skein already has. curl is what carries that, and gitgate has always
+    // needed it to mint App tokens.
+    let gh = HealthCheck {
+        ok: crate::github::have_curl(),
+        detail: match crate::github::have_curl() {
+            true => "available".into(),
+            false => "curl is not installed — skein reads GitHub with it (pull requests, diffs, \
+                      merges, and minting App tokens)"
                 .into(),
         },
     };

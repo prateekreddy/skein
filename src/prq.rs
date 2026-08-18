@@ -105,24 +105,14 @@ pub struct Queue {
     pub blind_spots: Vec<String>,
 }
 
-/// The `gh` binary, overridable so tests can stub GitHub without a network or a login.
-pub(crate) fn gh_bin() -> String {
-    std::env::var("SKEIN_GH_BIN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "gh".into())
-}
-
-/// Where the token skein hands `gh` came from, in the order it is looked for.
+/// Where the token the host talks to GitHub with came from, in the order it is looked for.
 ///
-/// The point of the order is that **`gh auth login` is the last resort, not the requirement.** A
-/// fleet on the PAT path has already given skein a token; making it also authenticate `gh` asks for
-/// a second credential to do a job the first one covers — and on Linux that second credential lives
-/// in the login keyring, so it asks for a password too.
+/// The order is the point: skein offers three ways to give it GitHub access, and the review queue
+/// used to require a fourth — `gh auth login` — because it was built out of the `gh` CLI and `gh`
+/// only knows its own store. One credential the user chose should do every job it is capable of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GhToken {
-    /// `$GH_TOKEN` / `$GITHUB_TOKEN` — already in the environment, so nothing is read and `gh`
-    /// inherits it untouched.
+    /// `$GH_TOKEN` / `$GITHUB_TOKEN`.
     Environment,
     /// The read token stored in Settings. A user's own PAT, which is what a review queue needs: it
     /// answers "who are you" and can see the repositories its owner can.
@@ -131,10 +121,8 @@ pub enum GhToken {
     /// Narrower than a read token — what it cannot see is reported as a blind spot rather than
     /// quietly missing from the queue.
     WritePat,
-    /// `gh auth token` — the account path. The only one that can reach the system keyring.
-    GhLogin,
-    /// Nothing to hand it. `gh` will try its own store, and if that is empty the queue says so
-    /// rather than reporting an empty queue.
+    /// Nothing. The queue says so instead of reporting an empty queue, which is the one failure it
+    /// must never look like.
     None,
 }
 
@@ -144,103 +132,70 @@ impl GhToken {
             GhToken::Environment => "$GH_TOKEN",
             GhToken::ReadToken => "the read token in Settings",
             GhToken::WritePat => "a repository write token you stored",
-            GhToken::GhLogin => "`gh auth login`",
-            GhToken::None => "nothing — `gh` is on its own",
+            GhToken::None => "no token at all",
         }
     }
 }
 
-/// The token every `gh` skein runs is handed, resolved **at most once per process**.
+/// The token and where it came from, resolved **once per process**.
 ///
-/// Two problems, one answer. The first is the keyring: `gh` keeps its token there on a modern Linux,
-/// so every invocation is a libsecret read, and a locked login keyring answers each with an unlock
-/// dialog. This module runs four per repo and the cockpit polls it every three minutes.
-///
-/// The second is that `gh auth login` was effectively mandatory. skein offers three credential
-/// paths — a GitHub App, a per-repo PAT, this account token — and the first two are about what a
-/// *box* pushes with. The review queue runs on the *host*, always went through `gh`, and `gh` only
-/// knew its own login. So someone who deliberately chose a PAT was still told to authenticate `gh`,
-/// which is a second credential for a job the first one covers.
-///
-/// A stored read token is a user's own PAT and is exactly what the queue needs, so it is preferred
-/// over the account login. `gh` accepts any token through `GH_TOKEN` and never consults its keyring
-/// when one is set — so on the PAT path `gh` needs to be installed and never needs to be logged in.
-fn gh_source() -> (GhToken, Option<String>) {
+/// An App is deliberately absent from this list. An installation token authenticates an
+/// installation, not a person, so it cannot answer "whose review is this waiting on" — the queue's
+/// whole question. That limit is the App's, and saying so beats falling back to something that
+/// half-works.
+fn host_credential() -> (GhToken, Option<String>) {
     let mut slot = match GH_TOKEN.lock() {
         Ok(slot) => slot,
         Err(poisoned) => poisoned.into_inner(),
     };
     slot.get_or_insert_with(|| {
-        // Exported already ⇒ the child inherits it and there is nothing to add or to read.
-        if ["GH_TOKEN", "GITHUB_TOKEN"]
-            .iter()
-            .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
-        {
-            return (GhToken::Environment, None);
+        for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            if let Ok(value) = std::env::var(key) {
+                if !value.trim().is_empty() {
+                    return (GhToken::Environment, Some(value.trim().to_string()));
+                }
+            }
         }
-        // The credential the user actually chose, before the one they were being made to acquire.
         if let Some(pat) = crate::gitgate::read_pat() {
             return (GhToken::ReadToken, Some(pat));
         }
-        // And failing that, any write PAT they stored. It belongs to a person, so it can say who
-        // that person is — which is the whole of what this needs. A fleet on the PAT path has
-        // already given skein a usable credential; making it acquire another is the thing being
-        // fixed, not a smaller version of it.
+        // Any write PAT they stored. It belongs to a person, so it can say who that person is —
+        // which is the whole of what this needs.
         if let Some(pat) = crate::gitgate::any_user_pat() {
             return (GhToken::WritePat, Some(pat));
         }
-        // Last: ask `gh`. This is the one read that can reach the keyring, and it happens lazily —
-        // when something already wanted to run `gh` — so it never adds a prompt that was not coming.
-        let mut command = std::process::Command::new(gh_bin());
-        command.args(["auth", "token"]);
-        match crate::util::output_with_timeout(&mut command, std::time::Duration::from_secs(20))
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|t| !t.is_empty())
-        {
-            Some(token) => (GhToken::GhLogin, Some(token)),
-            None => (GhToken::None, None),
-        }
+        (GhToken::None, None)
     })
     .clone()
 }
 
 /// Which credential the host's GitHub calls are running on, for the places that report it.
-pub fn gh_token_source() -> GhToken {
-    gh_source().0
+pub fn host_token_source() -> GhToken {
+    host_credential().0
 }
 
-fn gh_child_env() -> Vec<(String, String)> {
-    match gh_source().1 {
-        Some(token) => vec![("GH_TOKEN".to_string(), token)],
-        None => Vec::new(),
-    }
+/// The token itself, or the sentence to show instead of an empty queue.
+fn host_token() -> Result<String, String> {
+    host_credential().1.ok_or_else(|| {
+        "no GitHub token: the review queue reads pull requests as you, and nothing here names a \
+         user. Export GH_TOKEN, or add a read token in Settings → GitHub & keys. A GitHub App \
+         cannot do this one — an installation token is not a person."
+            .to_string()
+    })
 }
 
 /// The one resolution, remembered. A `Mutex<Option<_>>` rather than a `OnceLock` so a test can
 /// forget it; the outer `Option` is "have we looked yet".
 static GH_TOKEN: std::sync::Mutex<Option<(GhToken, Option<String>)>> = std::sync::Mutex::new(None);
 
-/// Forget it, so the next `gh` resolves again. Tests only — in a run, resolving twice is the prompt
-/// this exists to prevent.
-#[cfg(test)]
-pub(crate) fn forget_gh_token() {
+/// Forget it, so the next call resolves again.
+///
+/// Public because `tests/review_queue.rs` is a separate crate and points skein at a different stub
+/// per test: a token resolved once for the process would be the first test's, in every test.
+pub fn forget_host_token() {
     if let Ok(mut slot) = GH_TOKEN.lock() {
         *slot = None;
     }
-}
-
-/// Run `gh` the way every caller always should have: one process, one inherited token.
-pub(crate) fn run_gh(args: &[&str]) -> Result<(String, String, i32), String> {
-    run_gh_for(args, std::time::Duration::from_secs(30))
-}
-
-/// [`run_gh`] with the budget named at the call site — a `pr diff` is not a `pr list`.
-pub(crate) fn run_gh_for(
-    args: &[&str],
-    timeout: std::time::Duration,
-) -> Result<(String, String, i32), String> {
-    crate::util::run_capture_for_env(&gh_bin(), args, timeout, &gh_child_env())
 }
 
 /// The GitHub repository a managed repo maps to, as `owner/name`.
@@ -261,41 +216,39 @@ pub fn repo_slug(repo: &Repo) -> Option<String> {
 /// may lack. When it fails the caller records a blind spot instead of quietly returning a queue
 /// missing every team-requested review — the one omission that would cost you a merge.
 pub fn viewer() -> Result<(String, Vec<String>), String> {
-    let (out, err, code) = run_gh(&["api", "user", "--jq", ".login"])?;
-    if code != 0 {
-        let msg = if err.trim().is_empty() { out } else { err };
-        // Which credential this ran on, and every way to change it. The queue is about *your*
-        // pull requests, so it needs a token that answers "who are you" — and the answer used to be
-        // "run `gh auth login`", as if that were the only one. It is the last of three.
-        return Err(format!(
-            "GitHub could not identify you from {}: {}. The review queue needs a token that names a \
-             user — export GH_TOKEN, or add a read token in Settings → GitHub & keys (a PAT of your \
-             own, which is also what a fleet on the PAT path already has), or `gh auth login`.",
-            gh_token_source().label(),
-            msg.trim()
-        ));
-    }
-    let login = out.trim().to_string();
+    let token = host_token()?;
+    let user = crate::github::get_json("/user", &token).map_err(|e| {
+        // Which credential this ran on, and every way to change it. The queue is about *your* pull
+        // requests, so it needs a token that names a user — and the answer used to be "run
+        // `gh auth login`", as if that were the only one.
+        format!(
+            "GitHub could not identify you from {}: {e}. The review queue needs a token that names \
+             a user — export GH_TOKEN, or add a read token in Settings → GitHub & keys (a PAT of \
+             your own, which is what a fleet on the PAT path already has).",
+            host_token_source().label()
+        )
+    })?;
+    let login = user
+        .get("login")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     if login.is_empty() {
-        return Err("gh returned an empty login".into());
+        return Err("GitHub returned no login for this token".into());
     }
-    let teams = run_gh(&[
-        "api",
-        "user/teams",
-        "--paginate",
-        "--jq",
-        r#".[] | .organization.login + "/" + .slug"#,
-    ])
-    .ok()
-    .filter(|(_, _, code)| *code == 0)
-    .map(|(out, _, _)| {
-        out.lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_string)
-            .collect()
-    })
-    .unwrap_or_default();
+    // Best-effort: `read:org` is a scope a perfectly good token may lack, and the caller records a
+    // blind spot rather than quietly returning a queue missing every team-requested review.
+    let teams = crate::github::get_json("/user/teams?per_page=100", &token)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| {
+            let org = t.get("organization")?.get("login")?.as_str()?;
+            let slug = t.get("slug")?.as_str()?;
+            Some(format!("{org}/{slug}"))
+        })
+        .collect();
     Ok((login, teams))
 }
 
@@ -342,11 +295,6 @@ fn write_archive(repo_id: &str, list: &[u64]) -> Result<(), String> {
 }
 
 // ───────────────────────────── fetching ─────────────────────────────
-
-/// The JSON fields asked of `gh pr list`. `latestReviews` is the load-bearing one: it carries the
-/// **commit** each review was submitted against, which is what distinguishes "you approved this"
-/// from "you approved something three commits ago".
-const PR_FIELDS: &str = "number,title,author,url,headRefName,headRefOid,baseRefName,isDraft,updatedAt,reviewDecision,latestReviews,statusCheckRollup";
 
 /// 60s micro-cache **per repo**, for the same reason [`crate::repos::REPOS_CACHE`] exists: the
 /// cockpit re-renders far more often than GitHub changes, and each fetch is three network round
@@ -478,20 +426,88 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
     Ok(q)
 }
 
-/// One `gh pr list --search` call, returning the raw JSON items.
-fn search_prs(slug: &str, search: &str) -> Result<Vec<serde_json::Value>, String> {
-    // Through the wrapper like every other call. This one was not, and it is the one that matters
-    // most: three per repo per poll, against `viewer`'s one — so most of the keyring reads the
-    // previous fix was meant to end were still happening, from the busiest caller in the module.
-    let (out, err, code) = run_gh(&[
-        "pr", "list", "--repo", slug, "--state", "open", "--search", search, "--limit", "100",
-        "--json", PR_FIELDS,
-    ])?;
-    if code != 0 {
-        let msg = if err.trim().is_empty() { &out } else { &err };
-        return Err(msg.trim().to_string());
+/// The query behind the queue. One call per membership rule, and every field the parser needs.
+///
+/// GraphQL rather than REST, and not as a preference: a pull request's reviews, the commit each was
+/// left against, and its check rollup are three more REST calls **per pull request**. This returns
+/// all of it for a hundred at once. It is also, underneath, exactly what `gh pr list --json` did —
+/// its field names *are* these — which is why [`shape`] below is almost an identity.
+const SEARCH_QUERY: &str = r#"
+query($q: String!, $n: Int!) {
+  search(query: $q, type: ISSUE, first: $n) {
+    nodes {
+      ... on PullRequest {
+        number title url isDraft updatedAt
+        headRefName headRefOid baseRefName reviewDecision
+        author { login }
+        latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
+        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+          ... on CheckRun { status conclusion }
+          ... on StatusContext { state }
+        } } } } } }
+      }
     }
-    serde_json::from_str::<Vec<serde_json::Value>>(&out).map_err(|e| e.to_string())
+  }
+}"#;
+
+/// One search, returning items in the shape the parser has always read.
+fn search_prs(slug: &str, search: &str) -> Result<Vec<serde_json::Value>, String> {
+    let token = host_token()?;
+    // `is:pr is:open` and the repo are what `gh pr list --repo … --state open` added for us. Spelled
+    // out here because the search string is now ours to build rather than gh's.
+    let q = format!("repo:{slug} is:pr is:open {search}");
+    let data = crate::github::graphql(
+        SEARCH_QUERY,
+        serde_json::json!({ "q": q, "n": 100 }),
+        &token,
+    )?;
+    let nodes = data
+        .get("search")
+        .and_then(|s| s.get("nodes"))
+        .and_then(|n| n.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // A search that matches an issue rather than a pull request comes back as an empty object — the
+    // inline fragment simply does not apply — so those are dropped rather than parsed into a PR
+    // with number 0.
+    Ok(nodes
+        .iter()
+        .filter(|node| node.get("number").is_some())
+        .map(shape)
+        .collect())
+}
+
+/// GraphQL's nesting, flattened into the shape `gh --json` produced.
+///
+/// Two differences, both structural rather than semantic: a GraphQL connection is `{nodes: […]}`
+/// where gh gave a bare array, and the check rollup hangs off the last commit rather than off the
+/// pull request. Everything else is the same name and the same value, which is what made this port
+/// a translation rather than a rewrite — and what lets every test of [`build_pr`],
+/// [`my_review_state`] and [`rollup`] keep asserting on the fixtures they always had.
+fn shape(node: &serde_json::Value) -> serde_json::Value {
+    let mut out = node.clone();
+    let reviews = node
+        .get("latestReviews")
+        .and_then(|r| r.get("nodes"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let checks = node
+        .get("commits")
+        .and_then(|c| c.get("nodes"))
+        .and_then(|n| n.as_array())
+        .and_then(|n| n.first())
+        .and_then(|c| c.get("commit"))
+        .and_then(|c| c.get("statusCheckRollup"))
+        .and_then(|r| r.get("contexts"))
+        .and_then(|c| c.get("nodes"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    if let Some(map) = out.as_object_mut() {
+        map.insert("latestReviews".into(), reviews);
+        map.insert("statusCheckRollup".into(), checks);
+        map.remove("commits");
+    }
+    out
 }
 
 fn build_pr(
@@ -705,17 +721,7 @@ pub enum Verdict {
     Comment,
 }
 
-impl Verdict {
-    fn flag(self) -> &'static str {
-        match self {
-            Verdict::Approve => "--approve",
-            Verdict::RequestChanges => "--request-changes",
-            Verdict::Comment => "--comment",
-        }
-    }
-}
-
-/// Submit a review as **you**, via the host's own `gh` login.
+/// Submit a review as **you**, with the token the host holds.
 ///
 /// GitHub refuses an empty body on `--request-changes` and `--comment`, so this refuses first with a
 /// sentence you can act on rather than passing the rejection through.
@@ -732,23 +738,53 @@ pub fn submit_review(
                 .into(),
         );
     }
-    let n = number.to_string();
-    let mut args = vec!["pr", "review", &n, "--repo", slug, verdict.flag()];
-    if !body.is_empty() {
-        args.push("--body");
-        args.push(body);
-    }
-    let (out, err, code) = run_gh(&args)?;
-    if code != 0 {
-        let msg = if err.trim().is_empty() { out } else { err };
-        return Err(msg.trim().to_string());
-    }
+    let event = match verdict {
+        Verdict::Approve => "APPROVE",
+        Verdict::RequestChanges => "REQUEST_CHANGES",
+        Verdict::Comment => "COMMENT",
+    };
+    crate::github::send_json(
+        "POST",
+        &format!("/repos/{slug}/pulls/{number}/reviews"),
+        &host_token()?,
+        &serde_json::json!({ "event": event, "body": body }),
+    )?;
     Ok(match verdict {
         Verdict::Approve => "approved",
         Verdict::RequestChanges => "changes requested",
         Verdict::Comment => "commented",
     }
     .into())
+}
+
+/// A pull request's diff, as a diff — the media type is the whole of what `gh pr diff` did.
+pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
+    crate::github::get_text(
+        &format!("/repos/{slug}/pulls/{number}"),
+        &host_token()?,
+        "application/vnd.github.diff",
+    )
+}
+
+/// The paths a pull request touches.
+///
+/// Its own endpoint rather than parsing the diff for `+++` lines: a rename, a binary file and a
+/// mode-only change are all files GitHub names here and none of them appear the way a parser would
+/// expect. One page of 100 — a review over that many files is not one this tool is helping with.
+pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
+    Ok(crate::github::get_json(
+        &format!("/repos/{slug}/pulls/{number}/files?per_page=100"),
+        &host_token()?,
+    )?
+    .as_array()
+    .map(|files| {
+        files
+            .iter()
+            .filter_map(|f| f.get("filename").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default())
 }
 
 /// Merge a PR by number. Separate from approving on purpose: with a protected base branch your
@@ -761,18 +797,31 @@ pub fn merge(slug: &str, number: u64) -> Result<String, String> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "--squash".into());
-    let n = number.to_string();
-    let (out, err, code) = run_gh(&["pr", "merge", &n, "--repo", slug, &method])?;
-    if code != 0 {
-        let msg = if err.trim().is_empty() { out } else { err };
-        return Err(msg.trim().to_string());
-    }
-    let msg = out.trim();
-    Ok(if msg.is_empty() {
-        "merged".into()
-    } else {
-        msg.to_string()
-    })
+    // The same values, without the leading dashes `gh` wanted. An unrecognised setting is refused
+    // here rather than sent: GitHub answers a bad `merge_method` with a 422 whose message is about
+    // JSON, which reads as a skein bug.
+    let method = match method.trim().trim_start_matches("--") {
+        "squash" => "squash",
+        "merge" => "merge",
+        "rebase" => "rebase",
+        other => {
+            return Err(format!(
+                "$SKEIN_MERGE_METHOD is {other:?}; GitHub takes squash, merge or rebase"
+            ))
+        }
+    };
+    let out = crate::github::send_json(
+        "PUT",
+        &format!("/repos/{slug}/pulls/{number}/merge"),
+        &host_token()?,
+        &serde_json::json!({ "merge_method": method }),
+    )?;
+    Ok(out
+        .get("message")
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or("merged")
+        .to_string())
 }
 
 /// A `Deserialize` twin of [`Lane`], so a route can accept a lane name as input.
@@ -788,161 +837,205 @@ pub enum LaneInput {
 mod tests {
     use super::*;
 
-    /// `gh` is asked for its token **once per run**, not once per call.
+    /// A tiny GitHub that records what it was handed. Returns `(base_url, seen)`.
     ///
-    /// On a modern Linux `gh` keeps its token in the system keyring, so every invocation is a
-    /// libsecret read and a locked login keyring answers with an unlock dialog. This module runs four
-    /// per repo, the cockpit polls it every three minutes, and each poll spawns fresh processes — a
-    /// password prompt every three minutes, for ever, from a feature that is on by default. It was
-    /// reported as "the credentials popup still keeps happening", and it was this, not the account
-    /// token that had already been made opt-in.
+    /// A real socket rather than a stubbed function, because the thing worth testing after this port
+    /// is the wire: which credential reached the API, in which header. A stub would agree with
+    /// whatever the client did.
+    fn fake_github(body: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                // Headers only: every request here either has no body or one this does not read,
+                // and the connection is closed immediately after answering.
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("authorization:") {
+                        recorder.lock().unwrap().push(rest.trim().to_string());
+                    }
+                    line.clear();
+                }
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    /// The host uses the credential you already gave it, and never asks for another.
+    ///
+    /// This replaces a test about `gh`'s keyring, because the keyring is no longer reachable from
+    /// here: the queue talks to the API with a token skein holds. What survives is the property
+    /// that mattered — one credential the user chose, doing every job it is capable of — and it is
+    /// now asserted on the wire rather than on a subprocess's environment.
     #[test]
-    fn gh_is_asked_for_its_token_once_a_run_and_not_once_a_call() {
-        use std::os::unix::fs::PermissionsExt;
+    fn the_host_reads_github_with_the_credential_you_already_gave_it() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
-        let log = home.join("gh.log");
-        let fake = home.join("gh");
-        // Records what it was asked and what it was handed. `auth token` answers with a token, the
-        // way a keyring read would after someone typed their password.
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nprintf '%s | GH_TOKEN=%s\\n' \"$*\" \"${{GH_TOKEN:-}}\" >> {log}\n\
-                 [ \"$1\" = auth ] && echo gho_fromkeyring\nexit 0\n",
-                log = log.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("SKEIN_GH_BIN", &fake);
-        // Neither exported: this is the case that has to reach the keyring at all.
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::remove_var("GH_TOKEN");
         std::env::remove_var("GITHUB_TOKEN");
-        forget_gh_token();
+        let (base, seen) = fake_github(r#"{"login":"prateek"}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
 
-        for _ in 0..3 {
-            let _ = run_gh(&["api", "user"]);
-        }
-        assert_eq!(
-            gh_token_source(),
-            GhToken::GhLogin,
-            "with nothing else, gh's own login"
-        );
-        let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        let asked = calls
-            .lines()
-            .filter(|l| l.starts_with("auth token"))
-            .count();
-        assert_eq!(
-            asked, 1,
-            "one keyring read per run, not one per call:\n{calls}"
-        );
-        // And every real call carries it, so `gh` never goes to the keyring itself.
-        for line in calls.lines().filter(|l| l.starts_with("api ")) {
-            assert!(
-                line.contains("GH_TOKEN=gho_fromkeyring"),
-                "a gh call went out without the token, so it read the keyring itself: {line}"
-            );
-        }
-
-        // An exported token means the keyring is never touched at all — the fix a user can apply
-        // themselves, and the one `skein doctor` points at.
-        forget_gh_token();
-        std::fs::write(&log, "").unwrap();
-        std::env::set_var("GH_TOKEN", "gho_exported");
-        let _ = run_gh(&["api", "user"]);
-        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        // A read token: the credential someone stores when they want cross-repo reads without an App.
+        crate::gitgate::set_read_pat("github_pat_read").unwrap();
+        forget_host_token();
+        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(host_token_source(), GhToken::ReadToken);
         assert!(
-            !calls.contains("auth token"),
-            "an exported token still went to the keyring:\n{calls}"
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|h| h == "bearer github_pat_read"),
+            "the token the user chose never reached GitHub: {:?}",
+            seen.lock().unwrap()
         );
 
-        assert_eq!(gh_token_source(), GhToken::Environment);
-        std::env::remove_var("GH_TOKEN");
-
-        // And the answer to "why must I log `gh` in when I chose a PAT": a stored read token is a
-        // user's own PAT, which is exactly what a queue about *your* pull requests needs. It is
-        // preferred over the account login, so on the PAT path `gh` is installed and never
-        // authenticated — and the keyring is never opened.
-        let skein_home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", skein_home.as_ref() as &std::path::Path);
-        crate::gitgate::set_read_pat("github_pat_mine").unwrap();
-        forget_gh_token();
-        std::fs::write(&log, "").unwrap();
-        let _ = run_gh(&["api", "user"]);
-        let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        assert_eq!(gh_token_source(), GhToken::ReadToken);
-        assert!(
-            !calls.contains("auth token"),
-            "a fleet with its own PAT was still made to log `gh` in:\n{calls}"
-        );
-        assert!(
-            calls.contains("GH_TOKEN=github_pat_mine"),
-            "the token the user chose was not the one used:\n{calls}"
-        );
-
-        // And the sharper case: a fleet that stored only a *write* PAT. That token belongs to a
-        // person too, so it can answer "who are you" — one credential the user chose, doing every
-        // job it is capable of, instead of a second one being asked for.
+        // And with only a per-repo write token stored: it belongs to a person too, so it can say
+        // who that person is. Nothing else is asked for.
         crate::gitgate::set_read_pat("").unwrap();
         crate::gitgate::set_write_credential("mine", "mine", &["me/repo".into()]).unwrap();
         crate::gitgate::set_credential_token("mine", "github_pat_write").unwrap();
-        forget_gh_token();
-        std::fs::write(&log, "").unwrap();
-        let _ = run_gh(&["api", "user"]);
-        let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        assert_eq!(gh_token_source(), GhToken::WritePat);
-        assert!(
-            !calls.contains("auth token"),
-            "a fleet with a PAT of its own was still made to log `gh` in:\n{calls}"
-        );
-        assert!(calls.contains("GH_TOKEN=github_pat_write"), "{calls}");
+        forget_host_token();
+        seen.lock().unwrap().clear();
+        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(host_token_source(), GhToken::WritePat);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|h| h == "bearer github_pat_write"));
 
+        // The environment wins over both, for headless and CI.
+        std::env::set_var("GH_TOKEN", "gho_exported");
+        forget_host_token();
+        seen.lock().unwrap().clear();
+        let _ = viewer();
+        assert_eq!(host_token_source(), GhToken::Environment);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|h| h == "bearer gho_exported"));
+
+        // With nothing at all, the queue says what is missing — and says which credential cannot
+        // cover it, because an App is the one path that genuinely cannot.
+        std::env::remove_var("GH_TOKEN");
+        let bare = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", bare.as_ref() as &std::path::Path);
+        forget_host_token();
+        let why = viewer().expect_err("no token, no queue");
+        assert!(
+            why.contains("GH_TOKEN") && why.contains("read token"),
+            "{why}"
+        );
+        assert!(
+            why.contains("App"),
+            "the one path that cannot do this: {why}"
+        );
+
+        std::env::remove_var("SKEIN_GITHUB_API");
         std::env::remove_var("SKEIN_HOME");
-        std::env::remove_var("SKEIN_GH_BIN");
-        forget_gh_token();
+        forget_host_token();
     }
 
-    /// Every `gh` in this crate goes through the wrapper.
+    /// GraphQL's nesting, flattened into what the parser has always read.
     ///
-    /// Asserted against the source, because the mistake it catches is the one already made: the
-    /// keyring fix rewrote three call sites and missed `search_prs`, whose argv is formatted across
-    /// lines — and that one runs three times per repo per poll, against `viewer`'s one. Most of the
-    /// prompts the fix was for kept happening, from the busiest caller in the file, and everything
-    /// still compiled and passed.
+    /// The load-bearing part of the port: `gh --json` gave `latestReviews` as a bare array and
+    /// `statusCheckRollup` on the pull request, while GraphQL gives connections and hangs the rollup
+    /// off the last commit. Everything downstream — lanes, "is your approval current", the check
+    /// summary — reads those two keys, so this is the seam where a port either preserves behaviour
+    /// or silently changes it.
     #[test]
-    fn no_gh_call_goes_round_the_one_that_carries_the_token() {
-        for file in ["src/prq.rs", "src/review.rs"] {
-            let source = std::fs::read_to_string(file).expect(file);
-            // Production code only — this file's own tests name `gh_bin()` in string literals,
-            // including the message below, and a check that fails on itself teaches nothing.
-            //
-            // Cut at the test *module*, not at `#[cfg(test)]`: that attribute also sits on a helper
-            // two hundred lines above it, so cutting there scanned a fifth of the file and passed
-            // over the very call this exists to catch. Verified by putting the bypass back.
-            let source = source
-                .split("\nmod tests {")
-                .next()
-                .unwrap_or_default()
-                .to_string();
+    fn a_graphql_pull_request_reads_as_the_one_the_parser_knows() {
+        let node = item(
+            r#"{
+              "number": 7, "title": "t", "url": "u", "isDraft": false,
+              "updatedAt": "2026-08-18T00:00:00Z",
+              "headRefName": "feat", "headRefOid": "abc", "baseRefName": "main",
+              "reviewDecision": "REVIEW_REQUIRED",
+              "author": {"login": "someone"},
+              "latestReviews": {"nodes": [
+                {"state": "APPROVED", "author": {"login": "me"}, "commit": {"oid": "abc"}}
+              ]},
+              "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
+                {"status": "COMPLETED", "conclusion": "SUCCESS"}
+              ]}}}}]}
+            }"#,
+        );
+        let flat = shape(&node);
+
+        assert!(flat.get("latestReviews").unwrap().is_array(), "{flat}");
+        assert!(flat.get("statusCheckRollup").unwrap().is_array(), "{flat}");
+        assert!(flat.get("commits").is_none(), "the nesting is gone: {flat}");
+        // Identity for everything else, which is what made this a translation and not a rewrite.
+        assert_eq!(flat.get("headRefOid").unwrap(), "abc");
+
+        // And the parsers that read those two keys still agree with what they always said.
+        assert_eq!(
+            my_review_state(&flat, "me", "abc"),
+            ("approved".into(), true)
+        );
+        assert_eq!(rollup(&flat), "passing");
+    }
+
+    /// Nothing in skein runs `gh` any more.
+    ///
+    /// The queue was built out of the CLI, which made a third-party binary a hard requirement of a
+    /// default-on feature — announced nowhere, met as a bug — and dragged in its credential store:
+    /// `gh` keeps its token in the system keyring on Linux, so every call was a keyring read and a
+    /// locked keyring answered each with a password dialog, every three minutes, for ever.
+    ///
+    /// Asserted against the source because the way it comes back is a single convenient call in a
+    /// module that has no other reason to think about it — the same shape as the bypass that made
+    /// most of the earlier keyring fix a no-op.
+    #[test]
+    fn nothing_here_shells_out_to_gh() {
+        let mut offenders = Vec::new();
+        for file in std::fs::read_dir("src").expect("src") {
+            let path = file.expect("entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // The one legitimate `gh`: seeding the *account token* into sbx so boxes can push. That
+            // path is about `gh`'s own login by definition, it is opt-in, and it is not this — the
+            // queue's dependency was the hidden one.
+            if path.ends_with("repos.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap_or_default();
+            // Production code only: this test names `gh` in its own strings.
+            let source = source.split("\nmod tests {").next().unwrap_or_default();
             for (n, line) in source.lines().enumerate() {
-                if !line.contains("gh_bin()") {
-                    continue;
+                let runs_gh = line.contains("Command::new(\"gh\")")
+                    || line.contains("run_capture(\"gh\"")
+                    || line.contains("run_capture_for(\"gh\"")
+                    || line.contains("gh_bin()");
+                if runs_gh {
+                    offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
                 }
-                // The two places it is legitimate: resolving the token, and the wrapper that hands
-                // it to everything else.
-                let allowed = line.contains("fn gh_bin")
-                    || line.contains("Command::new(gh_bin())")
-                    || line.contains("run_capture_for_env(&gh_bin()");
-                assert!(
-                    allowed,
-                    "{file}:{} runs gh outside `run_gh`, so it reads the keyring itself: {}",
-                    n + 1,
-                    line.trim()
-                );
             }
         }
+        assert!(
+            offenders.is_empty(),
+            "skein reads GitHub over its own API client; these run the CLI instead:\n{}",
+            offenders.join("\n")
+        );
     }
 
     fn item(json: &str) -> serde_json::Value {

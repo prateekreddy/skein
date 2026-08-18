@@ -388,7 +388,9 @@ fn cmd_doctor() -> Result<(), String> {
     for (prog, why) in [
         ("sbx", "attach + launch boxes"),
         ("git", "host-side diffs"),
-        ("gh", "PR / checks / merge"),
+        // curl, not gh: skein reads GitHub over the API with a token it already holds. `gh` was a
+        // hard requirement of the review queue and is now not used at all.
+        ("curl", "reading GitHub (PRs, diffs, merges)"),
     ] {
         if have(prog) {
             println!("{OK} {prog:<13} on PATH  {DIM}{why}{RESET}");
@@ -396,66 +398,28 @@ fn cmd_doctor() -> Result<(), String> {
             println!("{BAD} {prog:<13} not on PATH — {why} unavailable");
         }
     }
-    if have("gh") {
-        let authed = Command::new("gh")
-            .args(["auth", "status"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if authed {
-            println!("{OK} gh auth       authenticated");
-        } else {
-            println!("{WARN} gh auth       `gh auth status` not OK {DIM}(fine if a proxy injects credentials){RESET}");
-        }
-        // Where the token lives, because on Linux that decides whether using skein means typing a
-        // password. `gh` keeps it in the system keyring by default, so every `gh` process is a
-        // libsecret read and a locked login keyring answers each one with a dialog. skein now reads
-        // it once per run and hands it to its own `gh` calls — but once per run is still once, and
-        // the two ways to make it none are the user's to choose.
+    {
         // Which credential the host's own GitHub calls run on. It matters because only one of the
         // three can reach the system keyring, and that is the one people were being pushed onto.
         use skein::prq::GhToken;
-        match skein::prq::gh_token_source() {
+        match skein::prq::host_token_source() {
             GhToken::Environment => {
                 println!(
                     "{OK} gh token      {DIM}$GH_TOKEN — nothing is read, nothing prompts{RESET}"
                 )
             }
             GhToken::WritePat => println!(
-                "{OK} gh token      {DIM}a repository write token you stored — `gh` needs no login \
-                 of its own. A read token in Settings would widen what the queue can see{RESET}"
+                "{OK} github token  {DIM}a repository write token you stored. A read token in \
+                 Settings would widen what the queue can see{RESET}"
             ),
-            GhToken::ReadToken => println!(
-                "{OK} gh token      {DIM}the read token in Settings — `gh` needs no login of its \
-                 own, and your keyring is never opened{RESET}"
-            ),
-            GhToken::GhLogin => {
-                // In the file ⇒ `--insecure-storage`; absent ⇒ the keyring holds it. A marker, not
-                // a parse: what matters is which store answers.
-                let hosts = std::path::Path::new(&env::var("HOME").unwrap_or_default())
-                    .join(".config/gh/hosts.yml");
-                let in_file = std::fs::read_to_string(&hosts)
-                    .map(|text| text.contains("oauth_token:"))
-                    .unwrap_or(false);
-                if in_file {
-                    println!(
-                        "{OK} gh token      {DIM}`gh auth login`, in ~/.config/gh/hosts.yml — no \
-                         keyring prompt{RESET}"
-                    );
-                } else {
-                    println!(
-                        "{WARN} gh token      `gh auth login`, in your login keyring — a locked \
-                         keyring prompts.\n              {DIM}skein reads it once per run. To stop \
-                         it entirely: export GH_TOKEN, or store a read token in Settings → GitHub & \
-                         keys (your own PAT — no `gh` login at all), or \
-                         `gh auth login --insecure-storage`{RESET}"
-                    );
-                }
+            GhToken::ReadToken => {
+                println!("{OK} github token  {DIM}the read token in Settings{RESET}")
             }
             GhToken::None => println!(
-                "{WARN} gh token      none — the review queue cannot say whose PRs these are.\n    \
-                 {DIM}export GH_TOKEN, add a read token in Settings → GitHub & keys, or \
-                 `gh auth login`{RESET}"
+                "{WARN} github token  none — the review queue reads PRs as you, and nothing here \
+                 names a user.\n              {DIM}export GH_TOKEN, or add a read token in \
+                 Settings → GitHub & keys. A GitHub App cannot do this one: an installation token \
+                 is not a person{RESET}"
             ),
         }
     }

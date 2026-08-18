@@ -17,6 +17,7 @@ import { chromium } from "playwright";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +30,62 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 //   #2 approved on the head    → waiting
 //   #3 approved, then moved on → needs you (the case that returns work to you)
 //   #4 authored by you         → the "mine" filter
-function makeFixture() {
+/// A GitHub the size of what skein asks for: `/user`, `/user/teams`, one GraphQL search, a diff and
+/// a file list. Answers from the fixture files written beside it.
+///
+/// It exists because the client changed, not because the test wanted rewriting: skein used to shell
+/// out to `gh`, so the stub was a shell script on `$PATH`. It reads the API now, so the stub is an
+/// API — and the test gained something in the move, because what it asserts is the request that
+/// actually goes out.
+async function createGitHub(root) {
+  const search = q =>
+    /review-requested:/.test(q) ? JSON.parse(fs.readFileSync(path.join(root, "search-review-requested.json"), "utf8"))
+    : /author:/.test(q)         ? JSON.parse(fs.readFileSync(path.join(root, "search-author.json"), "utf8"))
+    : [];
+  const DIFFS = {
+    3: "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n+++ b/src/parser.rs\n@@\n-const TIMEOUT: u64 = 30;\n+const TIMEOUT: u64 = 5;\n",
+    // Per PR, because the scanner reads the real diff: one diff for every number would put a moved
+    // constant inside the "bug fix" too, and escalating that would be correct.
+    other: "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n+++ b/src/parser.rs\n@@\n-    let head = input.chars().next().unwrap();\n+    let Some(head) = input.chars().next() else { return Ok(()) };\n",
+  };
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", c => { body += c; });
+    req.on("end", () => {
+      const send = (code, payload, type = "application/json") => {
+        res.writeHead(code, { "Content-Type": type });
+        res.end(typeof payload === "string" ? payload : JSON.stringify(payload));
+      };
+      const url = req.url.split("?")[0];
+      if (url === "/user") return send(200, { login: "me" });
+      if (url === "/user/teams") return send(403, { message: "Requires read:org" });
+      if (url === "/graphql") {
+        const q = (JSON.parse(body || "{}").variables || {}).q || "";
+        return send(200, { data: { search: { nodes: search(q) } } });
+      }
+      // Acting on a PR: submitting a review, and merging. Both answer the way GitHub does — a JSON
+      // object — because the client reads `message` out of it for what to show.
+      const reviews = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/reviews$/);
+      if (reviews) return send(200, { id: 1, state: "COMMENTED" });
+      const merge = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/merge$/);
+      if (merge) return send(200, { merged: true, message: "Pull Request successfully merged" });
+      const files = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/files$/);
+      if (files) return send(200, [{ filename: "src/parser.rs" }, { filename: "web/app.js" }]);
+      const diff = url.match(/^\/repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/);
+      if (diff) return send(200, DIFFS[diff[1]] || DIFFS.other, "text/plain");
+      send(404, { message: `no stub for ${url}` });
+    });
+  });
+  // Awaited, because `listen` is asynchronous and `address()` is null until it has happened.
+  return new Promise(resolve => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
+    });
+  });
+}
+
+async function makeFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "skein-review-ui-"));
   const bin = path.join(root, "bin");
   const home = path.join(root, "home");
@@ -44,23 +100,28 @@ function makeFixture() {
       store: path.join(root, "store"), agent: "claude", plane_project: "", sync_connection: "" },
   ]));
 
-  const pr = (number, title, author, extra = "") =>
-    `{"number":${number},"title":"${title}","author":{"login":"${author}"},` +
-    `"url":"https://github.com/acme/thing/pull/${number}","headRefName":"feat-${number}",` +
-    `"headRefOid":"sha${number}","baseRefName":"main","isDraft":false,` +
-    `"updatedAt":"2026-08-0${number}T00:00:00Z"${extra}}`;
+  // GraphQL's shape, because that is what skein reads now: connections rather than bare arrays, and
+  // the check rollup hanging off the last commit. Same four states, one layer deeper.
+  const pr = (number, title, author, extra = {}) => ({
+    number, title, author: { login: author },
+    url: `https://github.com/acme/thing/pull/${number}`,
+    headRefName: `feat-${number}`, headRefOid: `sha${number}`, baseRefName: "main",
+    isDraft: false, updatedAt: `2026-08-0${number}T00:00:00Z`,
+    latestReviews: { nodes: [] },
+    commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+    ...extra,
+  });
   const reviewed = (state, oid) =>
-    `,"latestReviews":[{"author":{"login":"me"},"state":"${state}","commit":{"oid":"${oid}"}}]`;
+    ({ latestReviews: { nodes: [{ author: { login: "me" }, state, commit: { oid } }] } });
+  const checks = nodes => ({ commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes } } } }] } });
 
-  const requested = [
-    pr(1, "fix a null deref in the parser", "dana", `,"statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]`),
+  fs.writeFileSync(path.join(root, "search-review-requested.json"), JSON.stringify([
+    pr(1, "fix a null deref in the parser", "dana", checks([{ status: "COMPLETED", conclusion: "SUCCESS" }])),
     pr(2, "rename the retry flag", "dana", reviewed("APPROVED", "sha2")),
     pr(3, "change the default timeout", "erin", reviewed("APPROVED", "older")),
-  ].join(",");
-  const mine = pr(4, "my own change to the store layout", "me");
-
-  fs.writeFileSync(path.join(root, "search-review-requested.json"), `[${requested}]`);
-  fs.writeFileSync(path.join(root, "search-author.json"), `[${mine}]`);
+  ]));
+  fs.writeFileSync(path.join(root, "search-author.json"),
+    JSON.stringify([pr(4, "my own change to the store layout", "me")]));
 
   // A working clone with a CODEOWNERS, so stage 0 (ownership) runs for real rather than being
   // skipped by an absent file — the path that decides how deep a summary goes, and the same file
@@ -74,39 +135,12 @@ function makeFixture() {
   fs.writeFileSync(path.join(root, "work", "src", "parser.rs"), "const TIMEOUT: u64 = 5;\n");
   fs.writeFileSync(path.join(root, "work", "web", "app.js"), "export const app = 1;\n");
 
-  // A `gh` that answers from fixture files. `user/teams` fails on purpose: that is the common real
-  // shape (a login without read:org) and it must surface as a stated blind spot, not silence.
-  const gh = path.join(bin, "gh");
-  fs.writeFileSync(gh, `#!/bin/sh
-if [ "$1" = "api" ] && [ "$2" = "user" ]; then printf 'me\\n'; exit 0; fi
-if [ "$1" = "api" ] && [ "$2" = "user/teams" ]; then exit 1; fi
-if [ "$1" = "pr" ] && [ "$2" = "diff" ]; then
-  for a in "$@"; do if [ "$a" = "--name-only" ]; then printf 'src/parser.rs\\nweb/app.js\\n'; exit 0; fi; done
-  # Per PR, because the scanner reads the real diff: serving one diff for every number would put a
-  # moved constant inside the "bug fix" too, and it would be correct to escalate it.
-  if [ "$3" = "3" ]; then
-    printf -- 'diff --git a/src/parser.rs b/src/parser.rs\\n--- a/src/parser.rs\\n+++ b/src/parser.rs\\n@@\\n-const TIMEOUT: u64 = 30;\\n+const TIMEOUT: u64 = 5;\\n'
-  else
-    printf -- 'diff --git a/src/parser.rs b/src/parser.rs\\n--- a/src/parser.rs\\n+++ b/src/parser.rs\\n@@\\n-    let head = input.chars().next().unwrap();\\n+    let Some(head) = input.chars().next() else { return Ok(()) };\\n'
-  fi
-  exit 0
-fi
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  term=""
-  while [ $# -gt 0 ]; do
-    if [ "$1" = "--search" ]; then term="$2"; fi
-    shift
-  done
-  case "$term" in
-    review-requested:*) cat "${root}/search-review-requested.json" ;;
-    author:*)           cat "${root}/search-author.json" ;;
-    *)                  printf '[]\\n' ;;
-  esac
-  exit 0
-fi
-exit 0
-`);
-  fs.chmodSync(gh, 0o755);
+  // A GitHub that answers from fixture files, on a real socket. This replaces a fake `gh` binary on
+  // `$PATH`: skein reads the API directly now, so the seam that tells the truth is the wire.
+  //
+  // `user/teams` answers 403 on purpose — a login without `read:org` is the common real shape, and
+  // it must surface as a stated blind spot rather than as silence.
+  const github = await createGitHub(root);
 
   // sbx stand-in: an empty fleet is fine — review does not depend on any box being alive, which is
   // itself part of what this file proves.
@@ -134,7 +168,7 @@ esac
 exit 0
 `);
   fs.chmodSync(claude, 0o755);
-  return { root, bin, home, gh, sbx, claude };
+  return { root, bin, home, github, sbx, claude };
 }
 
 // The fleet's API token. Written by the fixture rather than read back after startup: the server
@@ -162,7 +196,7 @@ async function startServer(fx, port) {
       SKEIN_REGISTRY: path.join(fx.root, "sandboxes.json"),
       SKEIN_LS_CMD: `${fx.sbx} ls --json`,
       SKEIN_HOME: fx.home,
-      SKEIN_GH_BIN: fx.gh,
+      SKEIN_GITHUB_API: fx.github.url,
       // Deliberately NO SKEIN_REVIEW_AI: reading PRs is on by default, and the whole summary half
       // of this suite passing without an override is the proof of it.
       SKEIN_CLAUDE_BIN: fx.claude,
@@ -206,7 +240,7 @@ const laneTitles = async (label) => page.evaluate(l => {
 }, label);
 
 // ---------- run ----------
-const fx = makeFixture();
+const fx = await makeFixture();
 const port = await freePort();
 const srv = await startServer(fx, port);
 const browser = await chromium.launch();

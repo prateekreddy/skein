@@ -16,11 +16,9 @@ a ⌘K palette are next (ARCHITECTURE.md § Roadmap).
 **You need:** [`sbx`](https://docs.docker.com/ai/sandboxes/) (Docker Sandboxes) on your `PATH` with
 Docker running, and `git`. macOS or Linux. `jq` inside the sandbox is installed for you.
 
-[`gh`](https://cli.github.com) is needed by **the review queue and nothing else** — it is what reads
-pull requests. It does *not* need `gh auth login`: any token skein already has is passed to it (see
-[One credential](#configuration)). Without `gh` installed, everything else works and the queue says
-what is missing rather than failing quietly; `skein doctor` and the cockpit's health banner both
-report it as a requirement once any repo has its queue on.
+skein does **not** need [`gh`](https://cli.github.com). It reads GitHub over the API with a token
+you have already given it — see [One credential](#configuration) — so there is no CLI to install and
+nothing to authenticate. `curl` carries those calls and is on every macOS and ordinary Linux.
 
 ```sh
 cargo build --release                    # → target/release/{skein, skein-server}
@@ -665,17 +663,16 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 > point them at trusted commands.
 
 **One credential, doing every job it can.** skein needs GitHub in two places: inside a box (push,
-open a PR) and on the host (the review queue, `gh pr diff`). The box side has always been a choice
-of three — a GitHub App, a per-repo PAT, or the account `gh` token — but the host side went through
-`gh` and only ever knew `gh`'s own login, so choosing a PAT still meant running `gh auth login` as
-well. It no longer does. The host's calls use, in order: an exported `GH_TOKEN`/`GITHUB_TOKEN`, the
-read token in Settings, any per-repo write token you stored, and only then `gh auth token`. All of
-them are handed to `gh` through `GH_TOKEN`, which it prefers over its own store — so on the PAT path
-`gh` needs to be installed and never needs to be authenticated.
+open a PR) and on the host (the review queue, PR diffs, merges). The box side has always been a
+choice of three — a GitHub App, a per-repo PAT, or the account token. The host side used to be a
+fourth: it went through the `gh` CLI, which only knows its own login, so choosing a PAT still meant
+running `gh auth login` as well — and on Linux `gh` keeps that token in the system keyring, so a
+queue polling every three minutes asked for a password every three minutes.
 
-That last step is also why `gh` used to ask for a password: it keeps its token in the system keyring
-on Linux, every `gh` process is a keyring read, and the review queue polls every three minutes.
-skein now resolves the token once per run, and `skein doctor` says which of the four it used.
+The host now talks to the API itself, with a token you already gave it, resolved once per run in
+this order: an exported `GH_TOKEN`/`GITHUB_TOKEN`, the read token in Settings, any per-repo write
+token you stored. `skein doctor` says which one it used. There is no `gh` to install, nothing to
+authenticate, and no keyring in the picture at all.
 
 A GitHub App is the one credential that cannot cover the host side: an installation token
 authenticates an installation, not a person, so it cannot say whose review a PR is waiting on. The
