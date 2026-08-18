@@ -412,28 +412,51 @@ fn cmd_doctor() -> Result<(), String> {
         // libsecret read and a locked login keyring answers each one with a dialog. skein now reads
         // it once per run and hands it to its own `gh` calls — but once per run is still once, and
         // the two ways to make it none are the user's to choose.
-        let exported = ["GH_TOKEN", "GITHUB_TOKEN"]
-            .iter()
-            .any(|k| env::var(k).is_ok_and(|v| !v.trim().is_empty()));
-        let keyring = std::path::Path::new(&env::var("HOME").unwrap_or_default())
-            .join(".config/gh/hosts.yml");
-        // The token is in that file when `--insecure-storage` was used; absent from it means the
-        // keyring holds it. Read as a marker, not parsed: what matters is which store answers.
-        let in_file = std::fs::read_to_string(&keyring)
-            .map(|text| text.contains("oauth_token:"))
-            .unwrap_or(false);
-        if exported {
-            println!("{OK} gh token      {DIM}from $GH_TOKEN — no keyring, no prompts{RESET}");
-        } else if in_file {
-            println!(
-                "{OK} gh token      {DIM}in ~/.config/gh/hosts.yml — no keyring prompt{RESET}"
-            );
-        } else {
-            println!(
-                "{WARN} gh token      in your login keyring — every `gh` reads it, and a locked \
-                 keyring prompts.\n              {DIM}skein reads it once per run. To stop the \
-                 prompt entirely: export GH_TOKEN=…, or `gh auth login --insecure-storage`{RESET}"
-            );
+        // Which credential the host's own GitHub calls run on. It matters because only one of the
+        // three can reach the system keyring, and that is the one people were being pushed onto.
+        use skein::prq::GhToken;
+        match skein::prq::gh_token_source() {
+            GhToken::Environment => {
+                println!(
+                    "{OK} gh token      {DIM}$GH_TOKEN — nothing is read, nothing prompts{RESET}"
+                )
+            }
+            GhToken::WritePat => println!(
+                "{OK} gh token      {DIM}a repository write token you stored — `gh` needs no login \
+                 of its own. A read token in Settings would widen what the queue can see{RESET}"
+            ),
+            GhToken::ReadToken => println!(
+                "{OK} gh token      {DIM}the read token in Settings — `gh` needs no login of its \
+                 own, and your keyring is never opened{RESET}"
+            ),
+            GhToken::GhLogin => {
+                // In the file ⇒ `--insecure-storage`; absent ⇒ the keyring holds it. A marker, not
+                // a parse: what matters is which store answers.
+                let hosts = std::path::Path::new(&env::var("HOME").unwrap_or_default())
+                    .join(".config/gh/hosts.yml");
+                let in_file = std::fs::read_to_string(&hosts)
+                    .map(|text| text.contains("oauth_token:"))
+                    .unwrap_or(false);
+                if in_file {
+                    println!(
+                        "{OK} gh token      {DIM}`gh auth login`, in ~/.config/gh/hosts.yml — no \
+                         keyring prompt{RESET}"
+                    );
+                } else {
+                    println!(
+                        "{WARN} gh token      `gh auth login`, in your login keyring — a locked \
+                         keyring prompts.\n              {DIM}skein reads it once per run. To stop \
+                         it entirely: export GH_TOKEN, or store a read token in Settings → GitHub & \
+                         keys (your own PAT — no `gh` login at all), or \
+                         `gh auth login --insecure-storage`{RESET}"
+                    );
+                }
+            }
+            GhToken::None => println!(
+                "{WARN} gh token      none — the review queue cannot say whose PRs these are.\n    \
+                 {DIM}export GH_TOKEN, add a read token in Settings → GitHub & keys, or \
+                 `gh auth login`{RESET}"
+            ),
         }
     }
 

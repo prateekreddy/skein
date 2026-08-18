@@ -659,6 +659,23 @@ real env vars still win). Copy [`.env.example`](.env.example) to `.env` and you 
 > The `*_CMD` templates run via `sh -c`; values you substitute are shell-quoted, but only
 > point them at trusted commands.
 
+**One credential, doing every job it can.** skein needs GitHub in two places: inside a box (push,
+open a PR) and on the host (the review queue, `gh pr diff`). The box side has always been a choice
+of three — a GitHub App, a per-repo PAT, or the account `gh` token — but the host side went through
+`gh` and only ever knew `gh`'s own login, so choosing a PAT still meant running `gh auth login` as
+well. It no longer does. The host's calls use, in order: an exported `GH_TOKEN`/`GITHUB_TOKEN`, the
+read token in Settings, any per-repo write token you stored, and only then `gh auth token`. All of
+them are handed to `gh` through `GH_TOKEN`, which it prefers over its own store — so on the PAT path
+`gh` needs to be installed and never needs to be authenticated.
+
+That last step is also why `gh` used to ask for a password: it keeps its token in the system keyring
+on Linux, every `gh` process is a keyring read, and the review queue polls every three minutes.
+skein now resolves the token once per run, and `skein doctor` says which of the four it used.
+
+A GitHub App is the one credential that cannot cover the host side: an installation token
+authenticates an installation, not a person, so it cannot say whose review a PR is waiting on. The
+queue reports that rather than listing nothing.
+
 **Sizing the fleet.** Every box runs inside one sbx sandbox, and its memory, CPUs and disk are
 fixed when that sandbox is created — sbx has no resize, so changing any of them means rebuilding it.
 So skein asks before it builds one: the first launch on a machine with no fleet opens a dialog with

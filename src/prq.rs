@@ -113,56 +113,116 @@ pub(crate) fn gh_bin() -> String {
         .unwrap_or_else(|| "gh".into())
 }
 
-/// The token every `gh` skein runs is handed, read **at most once per process**.
+/// Where the token skein hands `gh` came from, in the order it is looked for.
 ///
-/// `gh` keeps its token in the system keyring on a modern Linux, so every `gh` invocation is a
-/// libsecret read — and a locked login keyring answers that with an unlock dialog. This module runs
-/// four of them per repo (viewer, then three searches), the cockpit polls it every three minutes,
-/// and each poll spawns fresh processes. On an Ubuntu desktop that is a password prompt every three
-/// minutes, for ever, from a feature that is on by default.
+/// The point of the order is that **`gh auth login` is the last resort, not the requirement.** A
+/// fleet on the PAT path has already given skein a token; making it also authenticate `gh` asks for
+/// a second credential to do a job the first one covers — and on Linux that second credential lives
+/// in the login keyring, so it asks for a password too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhToken {
+    /// `$GH_TOKEN` / `$GITHUB_TOKEN` — already in the environment, so nothing is read and `gh`
+    /// inherits it untouched.
+    Environment,
+    /// The read token stored in Settings. A user's own PAT, which is what a review queue needs: it
+    /// answers "who are you" and can see the repositories its owner can.
+    ReadToken,
+    /// A per-repo write token, used because it is also a user's PAT and no read token was stored.
+    /// Narrower than a read token — what it cannot see is reported as a blind spot rather than
+    /// quietly missing from the queue.
+    WritePat,
+    /// `gh auth token` — the account path. The only one that can reach the system keyring.
+    GhLogin,
+    /// Nothing to hand it. `gh` will try its own store, and if that is empty the queue says so
+    /// rather than reporting an empty queue.
+    None,
+}
+
+impl GhToken {
+    pub fn label(self) -> &'static str {
+        match self {
+            GhToken::Environment => "$GH_TOKEN",
+            GhToken::ReadToken => "the read token in Settings",
+            GhToken::WritePat => "a repository write token you stored",
+            GhToken::GhLogin => "`gh auth login`",
+            GhToken::None => "nothing — `gh` is on its own",
+        }
+    }
+}
+
+/// The token every `gh` skein runs is handed, resolved **at most once per process**.
 ///
-/// So the token is fetched once and passed to the children through `GH_TOKEN`, which `gh` prefers
-/// over its keyring. The environment is consulted first, so an exported `GH_TOKEN` or `GITHUB_TOKEN`
-/// means the keyring is never touched at all.
+/// Two problems, one answer. The first is the keyring: `gh` keeps its token there on a modern Linux,
+/// so every invocation is a libsecret read, and a locked login keyring answers each with an unlock
+/// dialog. This module runs four per repo and the cockpit polls it every three minutes.
 ///
-/// This is not the account-token seeding that was deliberately made opt-in: nothing is given to a
-/// box, nothing is stored, and no credential leaves the host. It is the same token `gh` was about to
-/// read for itself, read once instead of forty times an hour.
-fn gh_child_env() -> Vec<(String, String)> {
+/// The second is that `gh auth login` was effectively mandatory. skein offers three credential
+/// paths — a GitHub App, a per-repo PAT, this account token — and the first two are about what a
+/// *box* pushes with. The review queue runs on the *host*, always went through `gh`, and `gh` only
+/// knew its own login. So someone who deliberately chose a PAT was still told to authenticate `gh`,
+/// which is a second credential for a job the first one covers.
+///
+/// A stored read token is a user's own PAT and is exactly what the queue needs, so it is preferred
+/// over the account login. `gh` accepts any token through `GH_TOKEN` and never consults its keyring
+/// when one is set — so on the PAT path `gh` needs to be installed and never needs to be logged in.
+fn gh_source() -> (GhToken, Option<String>) {
     let mut slot = match GH_TOKEN.lock() {
         Ok(slot) => slot,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let token = slot.get_or_insert_with(|| {
-        // Exported already ⇒ the child inherits it and there is nothing to add. Returning `None`
-        // here rather than the value keeps the "we never read it" case honest.
+    slot.get_or_insert_with(|| {
+        // Exported already ⇒ the child inherits it and there is nothing to add or to read.
         if ["GH_TOKEN", "GITHUB_TOKEN"]
             .iter()
             .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
         {
-            return None;
+            return (GhToken::Environment, None);
         }
-        // Ask `gh` itself. This is the one keyring read per run — and it happens lazily, when
-        // something already wanted to run `gh`, so it never adds a prompt that was not coming.
+        // The credential the user actually chose, before the one they were being made to acquire.
+        if let Some(pat) = crate::gitgate::read_pat() {
+            return (GhToken::ReadToken, Some(pat));
+        }
+        // And failing that, any write PAT they stored. It belongs to a person, so it can say who
+        // that person is — which is the whole of what this needs. A fleet on the PAT path has
+        // already given skein a usable credential; making it acquire another is the thing being
+        // fixed, not a smaller version of it.
+        if let Some(pat) = crate::gitgate::any_user_pat() {
+            return (GhToken::WritePat, Some(pat));
+        }
+        // Last: ask `gh`. This is the one read that can reach the keyring, and it happens lazily —
+        // when something already wanted to run `gh` — so it never adds a prompt that was not coming.
         let mut command = std::process::Command::new(gh_bin());
         command.args(["auth", "token"]);
-        crate::util::output_with_timeout(&mut command, std::time::Duration::from_secs(20))
+        match crate::util::output_with_timeout(&mut command, std::time::Duration::from_secs(20))
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|t| !t.is_empty())
-    });
-    match token {
-        Some(t) => vec![("GH_TOKEN".to_string(), t.clone())],
+        {
+            Some(token) => (GhToken::GhLogin, Some(token)),
+            None => (GhToken::None, None),
+        }
+    })
+    .clone()
+}
+
+/// Which credential the host's GitHub calls are running on, for the places that report it.
+pub fn gh_token_source() -> GhToken {
+    gh_source().0
+}
+
+fn gh_child_env() -> Vec<(String, String)> {
+    match gh_source().1 {
+        Some(token) => vec![("GH_TOKEN".to_string(), token)],
         None => Vec::new(),
     }
 }
 
-/// The one read, remembered. A `Mutex<Option<Option<_>>>` rather than a `OnceLock` so a test can
-/// forget it: the outer `Option` is "have we asked", the inner is "was there a token".
-static GH_TOKEN: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+/// The one resolution, remembered. A `Mutex<Option<_>>` rather than a `OnceLock` so a test can
+/// forget it; the outer `Option` is "have we looked yet".
+static GH_TOKEN: std::sync::Mutex<Option<(GhToken, Option<String>)>> = std::sync::Mutex::new(None);
 
-/// Forget the cached token, so the next `gh` asks again. Tests only — in a run, asking twice is the
-/// prompt this exists to prevent.
+/// Forget it, so the next `gh` resolves again. Tests only — in a run, resolving twice is the prompt
+/// this exists to prevent.
 #[cfg(test)]
 pub(crate) fn forget_gh_token() {
     if let Ok(mut slot) = GH_TOKEN.lock() {
@@ -204,22 +264,28 @@ pub fn viewer() -> Result<(String, Vec<String>), String> {
     let (out, err, code) = run_gh(&["api", "user", "--jq", ".login"])?;
     if code != 0 {
         let msg = if err.trim().is_empty() { out } else { err };
-        return Err(format!("gh could not identify you: {}", msg.trim()));
+        // Which credential this ran on, and every way to change it. The queue is about *your*
+        // pull requests, so it needs a token that answers "who are you" — and the answer used to be
+        // "run `gh auth login`", as if that were the only one. It is the last of three.
+        return Err(format!(
+            "GitHub could not identify you from {}: {}. The review queue needs a token that names a \
+             user — export GH_TOKEN, or add a read token in Settings → GitHub & keys (a PAT of your \
+             own, which is also what a fleet on the PAT path already has), or `gh auth login`.",
+            gh_token_source().label(),
+            msg.trim()
+        ));
     }
     let login = out.trim().to_string();
     if login.is_empty() {
         return Err("gh returned an empty login".into());
     }
-    let teams = run_capture(
-        &gh_bin(),
-        &[
-            "api",
-            "user/teams",
-            "--paginate",
-            "--jq",
-            r#".[] | .organization.login + "/" + .slug"#,
-        ],
-    )
+    let teams = run_gh(&[
+        "api",
+        "user/teams",
+        "--paginate",
+        "--jq",
+        r#".[] | .organization.login + "/" + .slug"#,
+    ])
     .ok()
     .filter(|(_, _, code)| *code == 0)
     .map(|(out, _, _)| {
@@ -758,6 +824,11 @@ mod tests {
         for _ in 0..3 {
             let _ = run_gh(&["api", "user"]);
         }
+        assert_eq!(
+            gh_token_source(),
+            GhToken::GhLogin,
+            "with nothing else, gh's own login"
+        );
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         let asked = calls
             .lines()
@@ -787,7 +858,48 @@ mod tests {
             "an exported token still went to the keyring:\n{calls}"
         );
 
+        assert_eq!(gh_token_source(), GhToken::Environment);
         std::env::remove_var("GH_TOKEN");
+
+        // And the answer to "why must I log `gh` in when I chose a PAT": a stored read token is a
+        // user's own PAT, which is exactly what a queue about *your* pull requests needs. It is
+        // preferred over the account login, so on the PAT path `gh` is installed and never
+        // authenticated — and the keyring is never opened.
+        let skein_home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", skein_home.as_ref() as &std::path::Path);
+        crate::gitgate::set_read_pat("github_pat_mine").unwrap();
+        forget_gh_token();
+        std::fs::write(&log, "").unwrap();
+        let _ = run_gh(&["api", "user"]);
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(gh_token_source(), GhToken::ReadToken);
+        assert!(
+            !calls.contains("auth token"),
+            "a fleet with its own PAT was still made to log `gh` in:\n{calls}"
+        );
+        assert!(
+            calls.contains("GH_TOKEN=github_pat_mine"),
+            "the token the user chose was not the one used:\n{calls}"
+        );
+
+        // And the sharper case: a fleet that stored only a *write* PAT. That token belongs to a
+        // person too, so it can answer "who are you" — one credential the user chose, doing every
+        // job it is capable of, instead of a second one being asked for.
+        crate::gitgate::set_read_pat("").unwrap();
+        crate::gitgate::set_write_credential("mine", "mine", &["me/repo".into()]).unwrap();
+        crate::gitgate::set_credential_token("mine", "github_pat_write").unwrap();
+        forget_gh_token();
+        std::fs::write(&log, "").unwrap();
+        let _ = run_gh(&["api", "user"]);
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(gh_token_source(), GhToken::WritePat);
+        assert!(
+            !calls.contains("auth token"),
+            "a fleet with a PAT of its own was still made to log `gh` in:\n{calls}"
+        );
+        assert!(calls.contains("GH_TOKEN=github_pat_write"), "{calls}");
+
+        std::env::remove_var("SKEIN_HOME");
         std::env::remove_var("SKEIN_GH_BIN");
         forget_gh_token();
     }

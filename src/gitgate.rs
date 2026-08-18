@@ -760,6 +760,33 @@ pub fn credential_for(slug: &str) -> Option<(WriteCredential, String)> {
     })
 }
 
+/// Any user PAT this fleet already holds, for the host's own GitHub calls.
+///
+/// The principle: **one credential the user chose, doing every job it is capable of.** A per-repo
+/// write token is a PAT belonging to a person — it can say who that person is, and it can read the
+/// repository it writes to. Asking someone who has already stored one to *also* authenticate `gh`
+/// is asking for a second credential to do a job the first one covers, and on Linux that second one
+/// lives in the login keyring, so it asks for a password as well.
+///
+/// A [`read_pat`] is preferred over these by the caller, because a read credential may safely be
+/// broad and a write one may not. This is the fallback for a fleet that has only ever been given
+/// write tokens — the ordinary PAT path.
+///
+/// Not an App: an installation token authenticates an *installation*, not a person, so it cannot
+/// answer "whose review is this waiting on". That limit is the App's, not skein's, and the review
+/// queue says so rather than silently listing nothing.
+pub fn any_user_pat() -> Option<String> {
+    write_credentials().into_iter().find_map(|c| {
+        if c.problem().is_some() {
+            return None;
+        }
+        std::fs::read_to_string(credential_token_path(&c.id))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+}
+
 /// Store or replace a credential's description. Its token is set separately.
 pub fn set_write_credential(id: &str, label: &str, repos: &[String]) -> Result<(), String> {
     if !valid_credential_id(id) {
