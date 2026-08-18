@@ -322,6 +322,18 @@ fn read_config() -> Result<Option<Config>, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// The settings file's path, but only once there is one.
+///
+/// skein does not write a `config.json` on a first run and should not: the file is a record of
+/// choices, and an absent one means "every default this build has" — which is what lets a default
+/// change reach an install that never had an opinion. So the places that name the path say whether
+/// it is there, rather than pointing at a file that does not exist.
+pub fn config_path_if_written() -> Option<String> {
+    let path = config_json();
+    path.exists()
+        .then(|| crate::util::shorten(&path.to_string_lossy()))
+}
+
 /// What is wrong with `config.json`, or `None` when it parses (or is simply not there yet).
 ///
 /// Exposed so the board and `skein doctor` can say it out loud. A config skein cannot read is

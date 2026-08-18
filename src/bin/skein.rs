@@ -462,9 +462,17 @@ fn cmd_doctor() -> Result<(), String> {
         );
     }
     println!(
-        "{DIM}·{RESET} settings      gh-seed:{} ssh-key:{} {DIM}(~/.skein/config.json){RESET}",
+        "{DIM}·{RESET} settings      gh-seed:{} ssh-key:{} {DIM}({}){RESET}",
         on_off(cfg.seed_gh_secret),
         if cfg.ssh_key.is_empty() { "—" } else { "set" },
+        // A file that is not there is not a fault: skein writes one the first time something is
+        // saved, and every setting is at this build's default until then. Naming a path that does
+        // not exist reads as "go and look at it", which sends someone after a file to explain
+        // behaviour the file has no part in.
+        match skein::config_path_if_written() {
+            Some(path) => path,
+            None => "no config.json yet — every setting is this build's default".into(),
+        }
     );
     // Which of the three credential paths this fleet is on. First, because "can a box push" is the
     // question every other GitHub line here is a detail of — and because all three are opt-in, so
@@ -679,6 +687,18 @@ fn have(prog: &str) -> bool {
 /// does not exist until the session runs, and provisioning has to go through the placement that pid
 /// produces. `skein attach` then behaves exactly as it always has.
 fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
+    let out = start_the_box(name, opts);
+    // The cockpit runs this in a PTY that closes when it returns, and the browser then reconnects
+    // into a fresh terminal holding none of the output. Keep the reason where that reconnect will
+    // read it — including the failures that happen before `start_box` is reached at all, which is
+    // where "no registered repo for box X" lives.
+    if let Err(why) = &out {
+        skein::remember_start_failure(name, why);
+    }
+    out
+}
+
+fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
     let repo = skein::repo_for_box(name)
         .ok_or_else(|| format!("no registered repo for box {name} — `skein repos` to check"))?;
     let branch =

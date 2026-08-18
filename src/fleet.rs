@@ -2405,6 +2405,61 @@ pub fn provision_script(name: &str, store: &str) -> String {
 /// a tree that already exists and `box-session.sh` refuses a second server, because both are how a
 /// re-run would otherwise hand a box someone else's uncommitted work or strand its namespace.
 pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> Result<(), String> {
+    let out = start_box_inner(name, repo, branch, agent_command);
+    // Kept, because the person who needs it is not looking at this terminal. Creating a box from the
+    // cockpit runs `skein start` in a PTY; when it fails, that terminal closes, the browser
+    // reconnects, and the fresh one has none of the output. What it said instead was "its last start
+    // failed, and the error came from that run rather than from this terminal" — an admission that
+    // the answer existed and had been thrown away.
+    match &out {
+        Ok(()) => forget_start_failure(name),
+        Err(why) => remember_start_failure(name, why),
+    }
+    out
+}
+
+/// Where the last failed start's reason is kept, per box.
+///
+/// Under `$SKEIN_HOME` rather than in the fleet, because a start that failed may never have reached
+/// the sandbox — the commonest failure of all is not being able to see it.
+fn start_failure_path(name: &str) -> Option<std::path::PathBuf> {
+    valid_name(name).then(|| skein_home().join("starts").join(format!("{name}.err")))
+}
+
+/// Keep why a start failed, for the terminal that will ask later. Public because the CLI fails
+/// *before* [`start_box`] too — no repo registered for the name, no branch to start on — and those
+/// vanish with the create terminal exactly as the others did.
+pub fn remember_start_failure(name: &str, why: &str) {
+    let Some(path) = start_failure_path(name) else {
+        return;
+    };
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_ok() {
+        let _ = crate::util::write_atomic(&path, dir, why.trim().as_bytes());
+    }
+}
+
+/// Drop the record once the box starts. A stale reason on a working box is worse than none: it
+/// would explain a failure that is over.
+fn forget_start_failure(name: &str) {
+    if let Some(path) = start_failure_path(name) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Why this box's last start failed, if one did and the box still is not there.
+pub fn last_start_failure(name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(start_failure_path(name)?).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| crate::util::clip(text, 400))
+}
+
+fn start_box_inner(
+    name: &str,
+    repo: &Repo,
+    branch: &str,
+    agent_command: &str,
+) -> Result<(), String> {
     if !valid_name(name) {
         return Err(format!("invalid box name {name:?}"));
     }
@@ -3556,10 +3611,14 @@ pub fn absent_box_reason(name: &str) -> Option<String> {
     Some(format!(
         "box {name} does not exist: skein has no placement for it, and sbx has no sandbox by that \
          name.\r\n\
-         Its last start failed, and the error came from that run rather than from this terminal.\r\n\
-         Run `skein start {name} --branch <branch>` on the host to see it.\r\n\
+         {}\r\n\
+         Run `skein start {name} --branch <branch>` on the host to try again.\r\n\
          Do not run `sbx create` — sbx suggests it, and it would build the per-VM box skein no longer \
-         supports, reserving a whole VM's memory whether or not the box is working.\r\n"
+         supports, reserving a whole VM's memory whether or not the box is working.\r\n",
+        match last_start_failure(name) {
+            Some(why) => format!("Its last start failed: {why}"),
+            None => "There is no record of a start having been attempted.".to_string(),
+        }
     ))
 }
 
@@ -4990,6 +5049,46 @@ b idle 5000000 1048576 4
         );
 
         std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The reason a box was never created outlives the terminal that was told it.
+    ///
+    /// Creating a box from the cockpit runs `skein start` in a PTY. When it fails, that terminal
+    /// closes with the error in it, the browser reconnects, and the fresh terminal knows only that
+    /// there is no box — so it said "its last start failed, and the error came from that run rather
+    /// than from this terminal", which is an admission that the answer existed and was discarded.
+    /// Reported as: the box will not create, and the message is about a box that does not exist.
+    #[test]
+    fn the_reason_a_box_never_started_survives_the_terminal_that_was_told_it() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        // sbx answers, and has no sandbox by that name: the "box does not exist" branch.
+        std::env::set_var("SKEIN_LS_CMD", "echo '[]'");
+
+        let bare = absent_box_reason("web-main").expect("an unplaced box has a reason");
+        assert!(
+            bare.contains("no record of a start"),
+            "a box nobody tried to start must not claim a failure: {bare}"
+        );
+
+        remember_start_failure(
+            "web-main",
+            "cannot tell whether the fleet sandbox exists: `sbx` is not on this process's PATH",
+        );
+        let told = absent_box_reason("web-main").expect("still unplaced");
+        assert!(
+            told.contains("not on this process's PATH"),
+            "the reason was recorded and then not said: {told}"
+        );
+
+        // Cleared when a start works, because a stale reason explains a failure that is over — and
+        // it would be read the next time any box of that name is missing for an unrelated reason.
+        forget_start_failure("web-main");
+        assert_eq!(last_start_failure("web-main"), None);
+
+        std::env::remove_var("SKEIN_LS_CMD");
         std::env::remove_var("SKEIN_HOME");
     }
 
