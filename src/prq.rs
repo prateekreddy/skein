@@ -113,6 +113,76 @@ pub(crate) fn gh_bin() -> String {
         .unwrap_or_else(|| "gh".into())
 }
 
+/// The token every `gh` skein runs is handed, read **at most once per process**.
+///
+/// `gh` keeps its token in the system keyring on a modern Linux, so every `gh` invocation is a
+/// libsecret read — and a locked login keyring answers that with an unlock dialog. This module runs
+/// four of them per repo (viewer, then three searches), the cockpit polls it every three minutes,
+/// and each poll spawns fresh processes. On an Ubuntu desktop that is a password prompt every three
+/// minutes, for ever, from a feature that is on by default.
+///
+/// So the token is fetched once and passed to the children through `GH_TOKEN`, which `gh` prefers
+/// over its keyring. The environment is consulted first, so an exported `GH_TOKEN` or `GITHUB_TOKEN`
+/// means the keyring is never touched at all.
+///
+/// This is not the account-token seeding that was deliberately made opt-in: nothing is given to a
+/// box, nothing is stored, and no credential leaves the host. It is the same token `gh` was about to
+/// read for itself, read once instead of forty times an hour.
+fn gh_child_env() -> Vec<(String, String)> {
+    let mut slot = match GH_TOKEN.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let token = slot.get_or_insert_with(|| {
+        // Exported already ⇒ the child inherits it and there is nothing to add. Returning `None`
+        // here rather than the value keeps the "we never read it" case honest.
+        if ["GH_TOKEN", "GITHUB_TOKEN"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+        {
+            return None;
+        }
+        // Ask `gh` itself. This is the one keyring read per run — and it happens lazily, when
+        // something already wanted to run `gh`, so it never adds a prompt that was not coming.
+        let mut command = std::process::Command::new(gh_bin());
+        command.args(["auth", "token"]);
+        crate::util::output_with_timeout(&mut command, std::time::Duration::from_secs(20))
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|t| !t.is_empty())
+    });
+    match token {
+        Some(t) => vec![("GH_TOKEN".to_string(), t.clone())],
+        None => Vec::new(),
+    }
+}
+
+/// The one read, remembered. A `Mutex<Option<Option<_>>>` rather than a `OnceLock` so a test can
+/// forget it: the outer `Option` is "have we asked", the inner is "was there a token".
+static GH_TOKEN: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+
+/// Forget the cached token, so the next `gh` asks again. Tests only — in a run, asking twice is the
+/// prompt this exists to prevent.
+#[cfg(test)]
+pub(crate) fn forget_gh_token() {
+    if let Ok(mut slot) = GH_TOKEN.lock() {
+        *slot = None;
+    }
+}
+
+/// Run `gh` the way every caller always should have: one process, one inherited token.
+pub(crate) fn run_gh(args: &[&str]) -> Result<(String, String, i32), String> {
+    run_gh_for(args, std::time::Duration::from_secs(30))
+}
+
+/// [`run_gh`] with the budget named at the call site — a `pr diff` is not a `pr list`.
+pub(crate) fn run_gh_for(
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<(String, String, i32), String> {
+    crate::util::run_capture_for_env(&gh_bin(), args, timeout, &gh_child_env())
+}
+
 /// The GitHub repository a managed repo maps to, as `owner/name`.
 ///
 /// One resolver, in [`crate::gitgate`], because the queue and the write token must agree on what repo
@@ -131,7 +201,7 @@ pub fn repo_slug(repo: &Repo) -> Option<String> {
 /// may lack. When it fails the caller records a blind spot instead of quietly returning a queue
 /// missing every team-requested review — the one omission that would cost you a merge.
 pub fn viewer() -> Result<(String, Vec<String>), String> {
-    let (out, err, code) = run_capture(&gh_bin(), &["api", "user", "--jq", ".login"])?;
+    let (out, err, code) = run_gh(&["api", "user", "--jq", ".login"])?;
     if code != 0 {
         let msg = if err.trim().is_empty() { out } else { err };
         return Err(format!("gh could not identify you: {}", msg.trim()));
@@ -602,7 +672,7 @@ pub fn submit_review(
         args.push("--body");
         args.push(body);
     }
-    let (out, err, code) = run_capture(&gh_bin(), &args)?;
+    let (out, err, code) = run_gh(&args)?;
     if code != 0 {
         let msg = if err.trim().is_empty() { out } else { err };
         return Err(msg.trim().to_string());
@@ -626,7 +696,7 @@ pub fn merge(slug: &str, number: u64) -> Result<String, String> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "--squash".into());
     let n = number.to_string();
-    let (out, err, code) = run_capture(&gh_bin(), &["pr", "merge", &n, "--repo", slug, &method])?;
+    let (out, err, code) = run_gh(&["pr", "merge", &n, "--repo", slug, &method])?;
     if code != 0 {
         let msg = if err.trim().is_empty() { out } else { err };
         return Err(msg.trim().to_string());
@@ -651,6 +721,76 @@ pub enum LaneInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `gh` is asked for its token **once per run**, not once per call.
+    ///
+    /// On a modern Linux `gh` keeps its token in the system keyring, so every invocation is a
+    /// libsecret read and a locked login keyring answers with an unlock dialog. This module runs four
+    /// per repo, the cockpit polls it every three minutes, and each poll spawns fresh processes — a
+    /// password prompt every three minutes, for ever, from a feature that is on by default. It was
+    /// reported as "the credentials popup still keeps happening", and it was this, not the account
+    /// token that had already been made opt-in.
+    #[test]
+    fn gh_is_asked_for_its_token_once_a_run_and_not_once_a_call() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let log = home.join("gh.log");
+        let fake = home.join("gh");
+        // Records what it was asked and what it was handed. `auth token` answers with a token, the
+        // way a keyring read would after someone typed their password.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s | GH_TOKEN=%s\\n' \"$*\" \"${{GH_TOKEN:-}}\" >> {log}\n\
+                 [ \"$1\" = auth ] && echo gho_fromkeyring\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("SKEIN_GH_BIN", &fake);
+        // Neither exported: this is the case that has to reach the keyring at all.
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("GITHUB_TOKEN");
+        forget_gh_token();
+
+        for _ in 0..3 {
+            let _ = run_gh(&["api", "user"]);
+        }
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let asked = calls
+            .lines()
+            .filter(|l| l.starts_with("auth token"))
+            .count();
+        assert_eq!(
+            asked, 1,
+            "one keyring read per run, not one per call:\n{calls}"
+        );
+        // And every real call carries it, so `gh` never goes to the keyring itself.
+        for line in calls.lines().filter(|l| l.starts_with("api ")) {
+            assert!(
+                line.contains("GH_TOKEN=gho_fromkeyring"),
+                "a gh call went out without the token, so it read the keyring itself: {line}"
+            );
+        }
+
+        // An exported token means the keyring is never touched at all — the fix a user can apply
+        // themselves, and the one `skein doctor` points at.
+        forget_gh_token();
+        std::fs::write(&log, "").unwrap();
+        std::env::set_var("GH_TOKEN", "gho_exported");
+        let _ = run_gh(&["api", "user"]);
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !calls.contains("auth token"),
+            "an exported token still went to the keyring:\n{calls}"
+        );
+
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("SKEIN_GH_BIN");
+        forget_gh_token();
+    }
 
     fn item(json: &str) -> serde_json::Value {
         serde_json::from_str(json).unwrap()

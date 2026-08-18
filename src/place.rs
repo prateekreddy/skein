@@ -962,18 +962,35 @@ impl Place {
                 buf
             })
         });
-        child
-            .stdin
-            .take()
-            .ok_or("sbx exec: no stdin")?
-            .write_all(body)
-            .map_err(|e| format!("sbx exec: writing stdin: {e}"))?;
+        // Written on its own thread, and that is not symmetry with the stderr drain — it is the one
+        // way this call has a deadline at all. A pipe holds ~64KB; past that `write_all` blocks
+        // until the guest reads, and the guest is `cat` in a sandbox that may be exactly the thing
+        // that has stopped answering. The deadline below starts *after* this returns, so a blocking
+        // write was an unbounded wait no timeout covered — with an `sbx exec` held open for its
+        // whole duration. Every install skein does goes through here, so a sandbox that went quiet
+        // took the caller with it.
+        let mut pipe = child.stdin.take().ok_or("sbx exec: no stdin")?;
+        let body = body.to_vec();
+        let writing = std::thread::spawn(move || {
+            pipe.write_all(&body)
+                .and_then(|()| pipe.flush())
+                .map_err(|e| format!("sbx exec: writing stdin: {e}"))
+            // `pipe` drops here, which is the EOF the guest command is waiting for.
+        });
         // Deadlined rather than a bare wait: a box that never exits would otherwise hang the
         // caller — and one of this function's callers is holding a freshly minted credential.
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match child.try_wait().map_err(|e| e.to_string())? {
-                Some(status) if status.success() => return Ok(()),
+                Some(status) if status.success() => {
+                    // Joined only once the child is gone, so this cannot be the thing that blocks:
+                    // a writer still stuck on a full pipe is released by the child's exit closing
+                    // the read end.
+                    return match writing.join() {
+                        Ok(Err(e)) => Err(e),
+                        _ => Ok(()),
+                    };
+                }
                 Some(status) => {
                     let detail = errors
                         .and_then(|h| h.join().ok())
@@ -987,8 +1004,20 @@ impl Place {
                     });
                 }
                 None if std::time::Instant::now() >= deadline => {
+                    // Killed AND reaped. A kill without a wait leaves a zombie per timed-out write,
+                    // and this is the path a struggling fleet takes over and over.
                     let _ = child.kill();
-                    return Err("sbx exec timed out".into());
+                    let _ = child.wait();
+                    return Err(format!(
+                        "sbx exec did not finish within {}s — the body was {}",
+                        timeout.as_secs(),
+                        match writing.is_finished() {
+                            true => "sent, so the box has it and did not finish with it",
+                            // The distinction worth having: a guest that never drained the pipe is
+                            // a sandbox that has stopped, not a script that is slow.
+                            false => "still being sent, so nothing in the box read it",
+                        }
+                    ));
                 }
                 None => std::thread::sleep(Duration::from_millis(50)),
             }
@@ -1000,6 +1029,53 @@ impl Place {
 mod tests {
     use super::*;
     use crate::testutil::*;
+
+    /// A guest that never reads its stdin must time out, not hang for ever.
+    ///
+    /// A pipe holds about 64KB. Past that `write_all` blocks until something on the other end reads,
+    /// and the deadline in `Place::write` only started *after* the write returned — so a body larger
+    /// than the pipe, sent to a sandbox that had stopped answering, was an unbounded wait that no
+    /// timeout covered, holding an `sbx exec` open for its whole duration. Every install skein does
+    /// goes through this call, including the ones at server start.
+    ///
+    /// Driven with a fake `sbx` that never reads stdin, and a body far larger than the buffer.
+    #[test]
+    fn a_write_to_a_box_that_never_reads_it_gives_up_instead_of_hanging() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sbx");
+        // Never reads stdin, never exits on its own: the sandbox that has gone quiet.
+        std::fs::write(&fake, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let place = crate::place::own_sandbox("skein-fleet");
+        let body = vec![b'x'; 1 << 20]; // 1 MB — sixteen times the pipe
+        let started = std::time::Instant::now();
+        let why = place
+            .write("cat > /tmp/x", &body, Duration::from_secs(2))
+            .expect_err("a guest that never reads must not succeed");
+        let spent = started.elapsed();
+
+        assert!(
+            spent < Duration::from_secs(20),
+            "the write hung past its own deadline ({spent:?}) — this is the shape that took the \
+             whole server with it"
+        );
+        assert!(why.contains("did not finish"), "{why}");
+        // And it says which half stalled, because they are different faults: a body that was sent
+        // means the box has it and is slow, one still being sent means nothing read it at all.
+        assert!(why.contains("nothing in the box read it"), "{why}");
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
 
     /// The whole justification for a 30-second connect budget is that a dead port never spends it.
     ///

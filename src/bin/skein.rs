@@ -407,6 +407,34 @@ fn cmd_doctor() -> Result<(), String> {
         } else {
             println!("{WARN} gh auth       `gh auth status` not OK {DIM}(fine if a proxy injects credentials){RESET}");
         }
+        // Where the token lives, because on Linux that decides whether using skein means typing a
+        // password. `gh` keeps it in the system keyring by default, so every `gh` process is a
+        // libsecret read and a locked login keyring answers each one with a dialog. skein now reads
+        // it once per run and hands it to its own `gh` calls — but once per run is still once, and
+        // the two ways to make it none are the user's to choose.
+        let exported = ["GH_TOKEN", "GITHUB_TOKEN"]
+            .iter()
+            .any(|k| env::var(k).is_ok_and(|v| !v.trim().is_empty()));
+        let keyring = std::path::Path::new(&env::var("HOME").unwrap_or_default())
+            .join(".config/gh/hosts.yml");
+        // The token is in that file when `--insecure-storage` was used; absent from it means the
+        // keyring holds it. Read as a marker, not parsed: what matters is which store answers.
+        let in_file = std::fs::read_to_string(&keyring)
+            .map(|text| text.contains("oauth_token:"))
+            .unwrap_or(false);
+        if exported {
+            println!("{OK} gh token      {DIM}from $GH_TOKEN — no keyring, no prompts{RESET}");
+        } else if in_file {
+            println!(
+                "{OK} gh token      {DIM}in ~/.config/gh/hosts.yml — no keyring prompt{RESET}"
+            );
+        } else {
+            println!(
+                "{WARN} gh token      in your login keyring — every `gh` reads it, and a locked \
+                 keyring prompts.\n              {DIM}skein reads it once per run. To stop the \
+                 prompt entirely: export GH_TOKEN=…, or `gh auth login --insecure-storage`{RESET}"
+            );
+        }
     }
 
     // Which GitHub credential a box actually gets. Worth a line of its own because when this is

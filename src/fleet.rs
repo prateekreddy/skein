@@ -328,6 +328,21 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
     // Start before publishing: `ensure_fleet_agent_port` judges a mapping by whether the agent
     // answers through it, so publishing first would fail every candidate and burn all three.
     start_fleet_agent(sandbox)?;
+    // And publish only once something is actually behind the mapping.
+    //
+    // **sbx has no unpublish.** Every mapping made here lasts as long as the sandbox, so publishing
+    // to find out whether the agent is up spends a permanent resource on a question that has a
+    // cheap answer: ask the sandbox whether the process exists. Without this, a fleet that cannot
+    // run the agent at all — no python3, a substrate that never installed, a crash loop — leaks two
+    // mappings per attempt, for ever, and each dead one is exactly the phantom sbx keeps reporting
+    // as published (docker/sbx-releases#297).
+    if !agent_process_is_up(sandbox) {
+        return Err(format!(
+            "the agent was installed and started in {sandbox} but no python process is running \
+             there — nothing was published, since a port mapping cannot be withdrawn. Check \
+             `tmux -S … capture-pane` in the sandbox, or that python3 is present"
+        ));
+    }
     ensure_fleet_agent_port(sandbox)?;
     Ok(token)
 }
@@ -365,6 +380,25 @@ fn remove_fleet_agent(sandbox: &str) {
         return;
     }
     stop_fleet_agent(sandbox);
+}
+
+/// Is the agent's python actually running in the sandbox?
+///
+/// Asked over `sbx exec` and not over the agent, for the obvious reason: the answer is about whether
+/// there is an agent to ask. `pgrep -f` against the same anchored pattern the retirement uses, so
+/// the two cannot disagree about what "the agent" is.
+///
+/// A sandbox that cannot answer at all reads as *not up*: publishing a port to something skein
+/// cannot see is exactly the permanent mistake this check exists to avoid.
+fn agent_process_is_up(sandbox: &str) -> bool {
+    let script = format!(
+        "pgrep -f {} >/dev/null 2>&1 && echo up",
+        sh_quote(&agent_pkill_pattern(&fleet_agent_path()))
+    );
+    own_sandbox(sandbox)
+        .exec_sbx(&script, Duration::from_secs(20))
+        .map(|out| out.trim() == "up")
+        .unwrap_or(false)
 }
 
 /// Stop the agent and its supervisor. Silent about failure on purpose — see the callers, each of
@@ -1412,6 +1446,7 @@ pub fn heal_transport() -> Option<String> {
     }
     let state = transport_state();
     if state.speaks >= state.wants {
+        transport_attempt_worked();
         return announce(
             &format!("up:{}:{}", state.speaks, state.port),
             format!(
@@ -1432,8 +1467,24 @@ pub fn heal_transport() -> Option<String> {
     if !up {
         return None;
     }
+    // Backed off, and this is not tidiness — it is the difference between a watcher and a leak.
+    //
+    // `ensure_fleet_agent` publishes a port when the current one does not answer, and **sbx has no
+    // unpublish**: every attempt that fails leaves a mapping behind for the life of the sandbox. A
+    // fleet where the agent cannot come up at all — no python3, a wedged daemon, an image without
+    // the substrate — therefore accumulated two dead port mappings a minute, permanently, along with
+    // four `sbx exec`s to install and start something that was never going to start. That is a fleet
+    // being made worse by the thing watching it.
+    //
+    // Doubling from a minute to an hour keeps the fast recovery that this exists for — a daemon that
+    // was merely cold is picked up on the first or second tick — while a fleet that cannot host an
+    // agent is asked twice an hour instead of sixty times.
+    if !transport_attempt_due() {
+        return None;
+    }
     match ensure_fleet_agent(&sandbox) {
         Ok(_) => {
+            transport_attempt_worked();
             let now = transport_state();
             announce(
                 &format!("up:{}:{}", now.speaks, now.port),
@@ -1451,6 +1502,42 @@ pub fn heal_transport() -> Option<String> {
         ),
     }
 }
+
+/// Whether enough quiet has passed to try bringing the agent up again.
+///
+/// The wait doubles per consecutive failure — one minute, two, four — capped by
+/// [`TRANSPORT_MAX_WAIT`] so a fleet whose daemon recovers in the afternoon is still picked up.
+/// [`transport_attempt_worked`] clears it, so the next problem starts from a minute again rather
+/// than from the last one's backoff.
+fn transport_attempt_due() -> bool {
+    let Ok(mut next) = TRANSPORT_NEXT.lock() else {
+        return false;
+    };
+    if next.is_some_and(|at| std::time::Instant::now() < at) {
+        return false;
+    }
+    let fails = TRANSPORT_FAILS.load(std::sync::atomic::Ordering::Relaxed);
+    let wait = Duration::from_secs(60u64 << fails.min(5)).min(TRANSPORT_MAX_WAIT);
+    *next = Some(std::time::Instant::now() + wait);
+    TRANSPORT_FAILS.store(
+        fails.saturating_add(1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    true
+}
+
+/// The agent is serving: forget the backoff.
+fn transport_attempt_worked() {
+    TRANSPORT_FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut next) = TRANSPORT_NEXT.lock() {
+        *next = None;
+    }
+}
+
+/// However bad it gets, try at least this often.
+const TRANSPORT_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
+static TRANSPORT_NEXT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+static TRANSPORT_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Say it once. The same news on the next tick is not news.
 ///
@@ -5395,11 +5482,84 @@ b idle 5000000 1048576 4
         );
 
         // The same news next minute is not news: a watcher on a one-minute tick that repeated itself
-        // would bury the line that matters under sixty copies an hour.
+        // would bury the line that matters under sixty copies an hour. The backoff is cleared first,
+        // so this tests the announcement and not the wait — otherwise it would pass for the wrong
+        // reason the moment the backoff was introduced, which is exactly what happened.
+        transport_attempt_worked();
         assert_eq!(heal_transport(), None, "the watcher repeated itself");
 
         std::env::set_var("PATH", path);
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A port is never published to something that is not there.
+    ///
+    /// sbx has **no unpublish**: a mapping lasts as long as the sandbox. So publishing in order to
+    /// find out whether the agent came up spends a permanent resource on a question with a cheap
+    /// answer, and a fleet that cannot run the agent at all — no python3, a substrate that never
+    /// installed, a crash loop — leaked two mappings per attempt. With the watcher retrying every
+    /// minute that was 120 dead mappings an hour on a fleet already in trouble, each one a phantom
+    /// sbx keeps reporting as published.
+    #[test]
+    fn a_port_is_not_published_for_an_agent_that_never_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        // Everything succeeds and nothing is running: `pgrep` finds no agent, so `exec` prints
+        // nothing. This is the shape of a sandbox with no python3 — every step "works" and the
+        // agent is not there.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncat >/dev/null\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let why = ensure_fleet_agent("skein-fleet").expect_err("no agent is running");
+        assert!(why.contains("no python process"), "{why}");
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !argv.contains("--publish"),
+            "a permanent port mapping was spent on an agent that is not there:\n{argv}"
+        );
+        // It still tried to start it — the check is about what happens *after* that fails, not about
+        // skipping the attempt.
+        assert!(argv.contains(AGENT_SESSION), "{argv}");
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The watcher backs off, because its retry is not free.
+    ///
+    /// Each attempt writes the agent, writes its token, restarts it and may publish a port that can
+    /// never be withdrawn. Run every minute against a fleet that cannot host an agent, the thing
+    /// watching the fleet becomes the thing degrading it.
+    #[test]
+    fn a_failing_transport_is_asked_less_and_less_often() {
+        let _g = env_lock();
+        transport_attempt_worked();
+        assert!(transport_attempt_due(), "the first attempt must go ahead");
+        assert!(
+            !transport_attempt_due(),
+            "a minute has not passed, so this is the retry that must not happen"
+        );
+        // A success puts it back to trying promptly: the next problem is a new problem, and starting
+        // it at the last one's backoff would leave a recovered fleet waiting half an hour.
+        transport_attempt_worked();
+        assert!(transport_attempt_due(), "a recovery must reset the wait");
+        transport_attempt_worked();
     }
 
     /// A transport that is already current costs one loopback connection and no `sbx` at all.

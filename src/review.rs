@@ -30,7 +30,7 @@
 
 use crate::ai::claude_oneshot_with;
 use crate::codeowners;
-use crate::prq::{gh_bin, review_dir, Pr};
+use crate::prq::{review_dir, Pr};
 use crate::repos::Repo;
 use crate::util::*;
 use serde::{Deserialize, Serialize};
@@ -156,11 +156,8 @@ const STAGE2_BYTES: usize = 140_000;
 /// The PR's diff, and whether it was cut short.
 fn pr_diff(slug: &str, number: u64, limit: usize) -> Result<(String, bool), String> {
     let n = number.to_string();
-    let (out, err, code) = run_capture_for(
-        &gh_bin(),
-        &["pr", "diff", &n, "--repo", slug],
-        Duration::from_secs(60),
-    )?;
+    let (out, err, code) =
+        crate::prq::run_gh_for(&["pr", "diff", &n, "--repo", slug], Duration::from_secs(60))?;
     if code != 0 {
         let msg = if err.trim().is_empty() { out } else { err };
         return Err(msg.trim().to_string());
@@ -183,8 +180,7 @@ fn truncate(text: &str, limit: usize) -> (String, bool) {
 /// The paths a PR touches.
 fn changed_paths(slug: &str, number: u64) -> Vec<String> {
     let n = number.to_string();
-    run_capture_for(
-        &gh_bin(),
+    crate::prq::run_gh_for(
         &["pr", "diff", &n, "--repo", slug, "--name-only"],
         Duration::from_secs(30),
     )
