@@ -5162,9 +5162,13 @@ function loadRepos() {
   }).catch(() => {});
 }
 function fillRepoSelect() {
+  // Shown whenever there is one, not only when there is a choice. Hiding a single-option select is
+  // ordinarily right and is wrong here: the box is NAMED after the repo, and the moment someone
+  // most needs to see which repo they are launching into is the first box after adding one — the
+  // moment the control was hidden. "Where is the repo?" was the first question a new user asked.
   const show = repos.length > 0;
-  nbRepo.style.display = show && repos.length > 1 ? "" : "none";
-  nbRepoLbl.style.display = show && repos.length > 1 ? "" : "none";
+  nbRepo.style.display = show ? "" : "none";
+  nbRepoLbl.style.display = show ? "" : "none";
   const cur = nbRepo.value;
   nbRepo.innerHTML = repos.map(r => `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join("");
   if (cur && repos.some(r => r.id === cur)) nbRepo.value = cur;
@@ -5244,11 +5248,18 @@ function gateLaunch() {
   const hint = document.querySelector("#newbox .nb-foot .hint");
   const none = !repos.length;
   go.disabled = none;
-  if (hint) {
-    hint.innerHTML = none
-      ? `add a repository first — a box is a branch of one`
-      : `creates <code id="nb-cmd">&lt;repo&gt;-&lt;branch&gt;</code> → opens in the dock`;
+  if (!hint) return;
+  if (none) {
+    hint.innerHTML = `add a repository first — a box is a branch of one`;
+    return;
   }
+  // The real name, not a placeholder shaped like one. `<repo>-<branch>` in angle brackets is the
+  // documentation of a naming rule; what someone about to click Launch wants is the string that is
+  // going to exist, because that string is also the box's binding to its repo — get it wrong and
+  // the launcher refuses a box the dialog itself named.
+  const branch = (nbBranch.value || "").trim();
+  const name = `${currentRepoId()}-${branch ? slug(branch) : "…"}`;
+  hint.innerHTML = `creates <code id="nb-cmd">${esc(name)}</code> → opens in the dock`;
 }
 
 // Blank on every open, because these are a per-box exception: carrying the last box's identity
@@ -5659,6 +5670,16 @@ function addRepoPrompt() { openAddRepo(); }
 const slug = s => s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 function launchBox(branch) {
   branch = (branch||"").trim(); if (!branch) return;   // keep slashes — they belong to the branch
+  // Here rather than only on the button, because the button was not the only way in: Enter in the
+  // branch field called this directly, so a disabled Launch stopped nothing. With no repo the name
+  // falls back to the literal "box", and `box-my-feature` belongs to no registered repo — the
+  // launcher refuses it, after the dialog has closed and a dock tab has opened onto the refusal.
+  // A box IS a branch of a repo; there is nothing to create without one.
+  if (!repos.length) {
+    toast("add a repository first — a box is a branch of one");
+    openAddRepo();
+    return;
+  }
   const id = currentRepoId();
   const agent = nbAgent.value || settings.default_agent || runtimes[0]?.id;
   const name = `${id}-${slug(branch)}`;                 // e.g. thing-feat-auth
@@ -5723,7 +5744,8 @@ settingsModal().addEventListener("change", e => {
 });
 // Click the backdrop (not the dialog) to dismiss — expected of a modal, and it was missing.
 settingsModal().addEventListener("mousedown", e => { if (e.target === settingsModal()) closeSettings(); });
-document.getElementById("nb-repo").addEventListener("change", fillSyncSelect);
+document.getElementById("nb-repo").addEventListener("change", () => { fillSyncSelect(); gateLaunch(); });
+nbBranch.addEventListener("input", gateLaunch);
 document.getElementById("bs-go").addEventListener("click", saveBoxSettings);
 document.getElementById("boxset").addEventListener("mousedown", e => { if (e.target.id === "boxset") closeBoxSettings(); });
 document.getElementById("nb-go").addEventListener("click", () => launchBox(nbBranch.value));

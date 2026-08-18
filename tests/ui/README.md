@@ -41,6 +41,22 @@ prints a screenshot path and keeps the fixture for inspection.
 Not wired into `cargo test` on purpose: it needs node and a browser, which the Rust toolchain can't
 assume. Run it before shipping anything that touches `src/web/index.html`.
 
+## `onboarding.mjs` — the first run, with nothing on disk
+
+Every other suite here starts from a fixture that has already been onboarded: a repo in
+`repos.json`, a placement record, a box on the board. So the path a new person actually walks — open
+the cockpit, add a repo, launch the first box — was the one path nothing ever took, and it is the
+one that broke.
+
+It starts from an empty `$SKEIN_HOME`: no `config.json`, no `repos.json`, no registry, no sandbox,
+and an `sbx` that has never been asked for one. Then it clicks: add a repo by local path, open the
+launch dialog, launch. Three defects surfaced on the first run of it, all in the dialog and none
+reachable from the CLI — Enter bypassing the no-repo gate, the repo control hidden whenever there
+was exactly one, and a footer promising `<repo>-<branch>` instead of the name about to be created.
+
+Its fixture root is under `target/`, not `$TMPDIR`: a box binds its own `/tmp` and `$HOME` over the
+sandbox's, so `box-session.sh` refuses a fleet root under either.
+
 ## `tabs.mjs` — do your open tabs survive a reload
 
 ```sh
