@@ -176,3 +176,66 @@ A pattern worth naming, because it recurred:
 In each case the code is right and the law needed a qualifier. The lesson for the next revision is to
 derive laws **from** this document rather than asserting them and discovering the qualifier in
 review.
+
+---
+
+## 8. The operations already exist
+
+`grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs` → **fifteen**, plus `heal_fleet` and
+`heal_transport`. skein is already written as idempotent ensures; the Operation primitive names
+something the codebase does rather than importing a pattern.
+
+Sorted by which privilege domain they need (§1) — this is the table the architecture's §7 should have
+been derived from:
+
+| operation | domain |
+|---|---|
+| `ensure_fleet` | **host** (`sbx create`) *and* **sandbox root** (apt replay) |
+| `ensure_fleet_agent_port` | **host** (`sbx ports --publish`) |
+| `ensure_gh_secret` | **host** (`sbx secret set -g`) — dissolves once credentials live on the volume |
+| `ensure_fleet_root` | **sandbox root** (`sudo mkdir`, `chown`) |
+| `ensure_substrate` | **sandbox root** (`apt-get`) |
+| `ensure_fleet_agent` | in-sandbox, unprivileged — deleted by the rewrite |
+| `ensure_box_session` | box |
+| `ensure_kit`, `ensure_store`, `ensure_probe_all`, `ensure_probe_in` | filesystem |
+| `ensure_ssh_key`, `ensure_known_hosts`, `ensure_box_known_hosts`, `ensure_agent_token` | credentials |
+| `heal_fleet` | **sandbox root** (cgroup ceilings via `sudo tee`) |
+| `heal_transport` | host (port publishing) — deleted by the rewrite |
+
+Note `ensure_probe_all` deserves its own line in any design: it writes 19 scripts and merges hooks
+into **every registered repo's `settings.json` on every server start**. Parity records that without
+it there is no turn state at all, which makes it the highest-blast-radius write in the system.
+
+## 9. The level signal is six values
+
+`Screen` (`signals.rs:259`): `Busy`, `Waiting`, `Blocked(kind)`, `Error(detail)`, `Dead`, `Unknown`.
+`Blocked` carries four kinds (permission · question · trust · auth-or-quota).
+
+Provenance is a **five**-valued freshness, not four as the architecture says:
+`"" | none | stale | unreadable | unsupported`. `none` — no observer was ever started, so reattach —
+is not `stale`, which is observations having stopped. Collapsing them repeats the error the section
+warns about.
+
+## 10. What is actually in the state root
+
+`skein_home().join(...)` across the codebase:
+
+```
+api-token  boxes  fleet-home  gh-secret-seeded  github-pats  github-read-token
+kit  places  plane-token  repos  review  starts  tokens
+```
+
+plus `config.json`, `repos.json`, `connections.json`, `git-grants.json`, `substrate.json`.
+
+Three of these must **not** move to a durable volume unchanged:
+
+- **`places/`** holds live pids. The architecture explicitly excludes namespace anchors from the
+  volume, so relocating the root wholesale carries state the design forbids there.
+- **`fleet-agent.token` / `fleet-agent.port`** are instance-scoped. The migration must re-mint them,
+  not copy them, or "no machine-global secret" is untrue on day one.
+- **`repos/<id>/work`** is a working checkout, not a mirror, and `diff.rs`, `moduledocs.rs` and
+  `codeowners.rs` read it directly.
+
+And `$SKEIN_HOME` is already a single relocatable root (`config.rs:17`), so "move state onto a
+volume" is closer to a mount and an env var than to a rewrite — the work is in the three exceptions
+above and in adding a writer discipline, not in the move.
