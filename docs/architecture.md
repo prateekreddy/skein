@@ -869,14 +869,18 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    never reaches this policy: inside its user namespace `sudo` has nothing to escalate to, which is
    why the in-box shim is a message rather than a boundary.
 
-   ### The address must not come from the box
+   ### The address must not come from the box — **done**, `bcaf90b` and `77e738f`
 
-   R1 crosses into `/proc/<anchor>/ns/user`, and **today the anchor is read out of a file the box can
-   write**: `read_anchor` `cat`s the pidfile under the box's own root, which is bound read-write. A
+   R1 crosses into `/proc/<anchor>/ns/user`, and the anchor was read out of a file the box can
+   write: `read_anchor` `cat`ed the pidfile under the box's own root, which is bound read-write. A
    box writes a *sibling's* tmux server pid into its own anchor, and skein's next provisioning, diff,
    upload or takeover for that box executes **in the sibling's namespace**. A confused deputy walking
    straight through §9.1's file cover — and §9.5.8's rule names it, while §9.5.8's enumerated list
    missed it.
+
+   All five parts below are in. What follows is why each is required, kept because the reasoning is
+   what stops any one of them being dropped later as belt-and-braces: the vulnerability survives any
+   four of the five.
 
    > **The anchor is reported to skein over the channel skein opened, never read from a path the box
    > can write.** skein spawns the launcher; the launcher asks its own tmux server for the server pid
@@ -885,12 +889,15 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 
    Three consequences, each of which the channel alone does not give:
 
-   **(a) Adoption must re-launch.** Today `start_box_inner` reads the anchor *unconditionally* —
+   **(a) Adoption must not read it either.** `start_box_inner` read the anchor *unconditionally* —
    including on the branch that keeps an already-live session, where **no launcher is spawned at
-   all**. "The launcher reports it" never reaches that path, so the confused deputy survives there.
-   Either skein re-launches rather than adopting, or it re-derives the anchor from something it owns.
+   all**. "The launcher reports it" never reached that path, so the confused deputy survived there.
    Adopting a session and trusting the box's file for its address is the one thing that must not
    happen.
+
+   Resolved by the second of the two options: skein re-derives the anchor from something it owns —
+   the placement record — and *checks* it. `adopt_anchor` refuses with a sentence naming the fix
+   when it cannot, rather than falling back to the file.
 
    **(b) It must survive a skein restart — and `places/` is where it already lives.** Boxes outlive
    skein, so on reconnect the launcher is gone; the existing placement record exists for exactly this
@@ -905,12 +912,29 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    box is gone* — never "enter this instead". Generation guards the sandbox cycle; start time guards
    recycling inside one.
 
-   **And the report must come from a binary the box cannot shadow.** It is produced today by an
-   unqualified `tmux` inside a **login shell**, whose PATH includes `~/.local/bin` — which is shared
-   read-write with every box (§9.2.1). So the anchor's integrity would silently depend on R4. Invoke
-   it by **absolute path**, with a fixed PATH.
+   **(d) The check runs in the process that crosses.** A check anywhere earlier is a check with a
+   gap after it, and a box that exits in the gap is entered as whatever took its number. So the
+   crossing is a shell: read, compare, then `exec nsenter` — the caller's argv rides in as `"$@"`,
+   so nothing between the two re-quotes anything. An address that cannot be proved builds no
+   `nsenter` at all, rather than one behind a check.
 
-   This has to be settled before R1 is built, because every other part of R1 is downstream of an
+   **And the report must come from a binary the box cannot shadow.** It was produced by an
+   unqualified `tmux` inside a **login shell**, whose PATH includes `~/.local/bin` — which is shared
+   read-write with every box (§9.2.1), so the anchor's integrity silently depended on R4. Resolved
+   in the launcher's outer shell against a PATH of root-owned directories only, before any box
+   namespace exists.
+
+   **The fleet agent is handed the crossing, not the address.** It used to be sent `ns_pid` and build
+   the hop itself, so that a host newer than the agent could not hand it a command *shape* it did not
+   understand. Sound for shapes and wrong for checks: an agent predating (c) would ignore the fields
+   carrying the proof and cross anyway. It now receives one script with its check in front, which an
+   agent of any age runs correctly or not at all.
+
+   **The upgrade path is a restart.** A record written before the stamp existed cannot be checked, so
+   it is refused rather than trusted — a fleet where the guard is present and silently does nothing
+   for every box nobody restarted is worse than one that says so.
+
+   This had to be settled before R1 is built, because every other part of R1 is downstream of an
    address it trusts.
 
    **`tmux` is in that list because the `socket` Source is a crossing too**, and an earlier draft
