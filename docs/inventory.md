@@ -61,10 +61,11 @@ mechanism — the launcher's ceilings path, not the per-box writes above.
 
 ### 1.3 What this means for the design
 
-The decision already taken — **skein runs as root inside the fleet sandbox** — is not only a security
-measure. It *supplies this entire domain directly.* Today these operations are reached by
-unprivileged processes through a `sudo` shim; with skein as root they are ordinary calls, and the
-shim's remaining job is what it was always documented to be: **a message, not a boundary.**
+**skein performs this domain with `sudo`, as it does today.** An earlier note here said skein would
+run as *root* and so supply the domain directly; root turned out to destroy the box user namespace
+entirely (architecture §9.5.1), and the claim went with it. The asymmetry that matters is already
+built: **skein can escalate, a box cannot** — inside its user namespace a box's `sudo` has nothing to
+escalate to, which is why the in-box shim is a message rather than a boundary.
 
 Four kinds of sandbox-root work, each wanting naming in the architecture rather than eliding:
 
