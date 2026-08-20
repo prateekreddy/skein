@@ -71,15 +71,29 @@ tidy-up after it.
 **3 — Build the warden, and route create/destroy through it from *host* skein.** Both callers
 exercised before anything moves — which was the whole argument for having a warden.
 
-**4 — The privilege split, then move skein into the fleet.** In that order, and the split is a gate
-rather than a follow-up: skein runs as root inside the fleet sandbox and boxes stay unprivileged
-(architecture §9.5.1). Note this is doing double duty — it also supplies the sandbox-root domain that
-every box start and every server start already needs (architecture §7.2). Until it lands, a box can signal the control plane, read its files and write
-the cgroup plane, so moving in first and hardening after would mean shipping a window in which every
-one of those is open.
+**4 — The mount cover, then the uid split, then move in.** In that order, and the first two are gates
+rather than follow-ups (architecture §9.5).
 
-Then the move itself, with host-driven mode still working one environment variable away. This is
-where the six items in §2 get answered, with a fallback available while answering them.
+**4a — the cover.** `tmpfs` the state root and bind back what a box needs, *derived per box*. This is
+most of the value and the cheapest part: it closes a box reading skein's credentials, token and
+declared state, and it supplies the secret that lets the warden tell skein from a box. It also closes
+the one that is live today and that nothing in the current cover reaches — `~/.skein/repos` is mounted
+into the sandbox uncovered, so every box has read-write access to every repo's store and to the host's
+own working checkouts, and skein runs `git -C <repo.work>` **on the host**.
+
+**4b — the uid split.** skein on its own uid, boxes on theirs, every crossing through
+`sudo -u <box uid>` — for the launcher and for `nsenter` alike. Do not attempt this as "skein runs as
+root" (no user namespace is created at all) or as "skein runs as another uid" (every `setns` is
+EPERM); architecture §9.5.1 has the derivation. Budget the sudoers policy as the security-critical
+artifact it is, and one extra `exec` per crossing — launch, attach, upload, diff, takeover, none of
+which is on the per-tick path.
+
+If 4b slips, what remains exposed is a denial of service against the control plane, which the
+supervisor restarts. That is a materially different risk from what 4a closes, which is why they are
+ordered rather than bundled.
+
+**4c — the move**, with host-driven mode still working one environment variable away. This is where
+the six items in §2 get answered, with a fallback available while answering them.
 
 **5 — The cockpit.** Orthogonal, and it can start on day one — with three things named rather than
 assumed, because "the API is a stable seam" is true of transport and false of semantics:
