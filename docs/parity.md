@@ -5,26 +5,26 @@ implementation does.** `docs/architecture.md` governs *how*; this governs *what*
 
 ## How this was audited, and how to re-audit it
 
-The first version of this list was written from prose recollection. It contained three capabilities
-that **do not exist** (`download`, a `max` subcommand, an "adopted-module surface"), omitted the
-CLI's default command, and missed roughly fifty-five real capabilities. A list with fabricated
-entries cannot function as a gate, because the absence of an item then carries no information.
+The first version was written from recollection. It contained capabilities that **do not exist**
+(`download`, a `max` subcommand, an "adopted-module surface") and missed roughly fifty-five real
+ones. A second pass added two more inventions (`substrate reporting`, a per-box "notes" field) and
+printed three counts none of its own commands reproduced. **A list with fabricated entries cannot be
+a gate**, because the absence of an item stops carrying information.
 
-This version is derived mechanically:
+These commands reproduce the numbers stated here. They have been run:
 
 ```sh
-grep -n '\.route("' src/bin/skein-server.rs          # 67 routes — 7 are multi-line
-sed -n '25,90p' src/bin/skein.rs                      # subcommands and flags
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html     # 155 elements
-grep -c 'function ' src/web/index.html                # 257 functions
+grep -c '\.route('  src/bin/skein-server.rs                    # 67   (NOT '.route("' — that gives 60)
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 155 unique, 158 occurrences
+grep -c 'function ' src/web/index.html                          # 265
+sed -n '25,90p' src/bin/skein.rs                                # subcommands and flags
 ```
 
-Re-run these before declaring parity. **A grep for words is not an audit** — that is exactly how the
-first version acquired a `download` feature that has no route, no UI and no function.
+Keyboard shortcuts are **not** a known gap: `const KEYMAP` at `src/web/index.html:4636` is the single
+declaration, and its comment says it exists "so the keys documented here cannot drift from the keys
+the app binds."
 
 **The rule:** an item leaves this list only by moving to §7 with a reason. Never by being forgotten.
-
----
 
 ## 1. Triage
 
@@ -43,7 +43,20 @@ first version acquired a `download` feature that has no route, no UI and no func
   disk, ranked) and the per-box resource hover card and disk chip.
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever
   *add* a hold.
+- **The board's state taxonomy** — `GROUPS` (`index.html:1422`): eight ranked groups over ~14 states,
+  plus `NEEDS_YOU` and `labelOf`. Its comment records a shipped defect: three copies of "owed to you"
+  disagreed, so the title said "3 need you" while the mouth stayed shut. **One definition, or the bug
+  returns.**
+- **The standing-debt announcer** — `announceStandingDebt` / `owedSentence` / `settledOwed`
+  (`index.html:3744-3852`): level-triggered rather than edge ("a box that turned while you were
+  looking at the board was marked seen and never spoken"), a grace window, once-per-box dedup, a ≤2
+  threshold before collapsing to a count. The channels below are not the feature; this policy is.
 - Alerts, toasts, **favicon badge, document title count, audio beep**.
+- **The first-run checklist** — `firstRunHtml()` (`index.html:5240`): four gated steps, each carrying
+  the action that resolves it, driven from `/api/health`. This is the shipped implementation of the
+  architecture's laws 1, 6 and 7.
+- **Keyboard shortcuts** from `KEYMAP`: `j`/`k`, `↵`, `d`, `]`, `l`, `/`, `⌘N`, `?`, `esc`, plus the
+  Mac/non-Mac glyph translation.
 - Voice: mouth and ear, including *read what needs me*.
 - Command palette; mobile on-screen key bar; **resizable sidebar gutter** with persisted width and a
   docked rail mode.
@@ -55,7 +68,7 @@ first version acquired a `download` feature that has no route, no UI and no func
 - **The tabbed session dock**: multiple concurrent live terminals, persisted across reload,
   drag-to-reorder with order remembered, `⌥1`–`⌥9`, `⌥[`/`⌥]`, `⌥⇧[`/`⌥⇧]`, close-all, cycling.
 - **Attachments**: paste a file, drag-and-drop onto a board row or the dock, or the button; folders
-  keep structure; capped at 200; streamed not buffered; one batch directory per drop; the in-box path
+  keep structure; capped at 200 files and `UPLOAD_CAP` 2 GB per file, enforced as the bytes go past; streamed not buffered; one batch directory per drop; the in-box path
   is pasted into the live terminal.
 - **Terminal clipboard** — `⌘C`/`⌘V` inside the keydown gesture; `⌃C` deliberately never intercepted.
 - Session lifecycle: start, stop, restart the agent, resume, **resume in batch**.
@@ -94,15 +107,29 @@ first version acquired a `download` feature that has no route, no UI and no func
 ## 4. Box and fleet management
 
 - Create, destroy with confirmation, stop, repin, per-box disk allowance, identity, git scope,
-  tracking, notes, sync provisioning and refresh.
+  tracking, sync provisioning and refresh.
+- **Box creation happens over the WebSocket, not a REST route** — `terminal()` takes
+  `?launch=<branch>` and creates the box before attaching. Any plan that ports the API before the WS
+  loses box creation.
+- **Per-box filesystem isolation** (`box-session.sh:912-990`): a `--tmpfs` over the fleet root and
+  over the box-state parent with only this box's own directories bound back — covering boxes created
+  *after* this one starts, "which an enumeration could not" — an empty file bound over the
+  fleet-agent token, and another over `$SSH_AUTH_SOCK`. The measurement that motivated it is in the
+  comment: another box's conversation history was simply readable, and "the shortest path out of a
+  box was not an exploit at all, it was `cat`."
+- **The workshop (privileged) box** — `POST /api/boxes/:name/privileged`, the `bs-priv` control, and
+  a per-start terminal banner whose comment says "the whole risk of this switch is forgetting which
+  box carries it". It removes the bind hiding the fleet-agent token, i.e. **it grants a box sandbox
+  root at any time from the cockpit**. Deliberately non-exclusive.
 - **The package-request queue** — a box asks for apt/npm, the owner approves, and the approval is
   **remembered in a manifest replayed into every future launch**. An approval system with an install
   path, not a setting.
 - **The git-write-request queue** — the git shim intercepts a push the box is not scoped for and
   files a request; grants are hour-limited, revocable, displayed live or expired; plus the credential
   probe.
-- Fleet create with sizing, resize, plan and host capacity, resource and limit editing, transport and
-  substrate reporting, GitHub credentials, read token, health.
+- Fleet create with sizing, resize, plan and host capacity, resource and limit editing, transport
+  reporting, GitHub credentials, read token, health. (`/api/fleet/substrate` is **not** a second
+  readout — it *is* the package-request queue above.)
 - **`ensure_probe_all` / `ensure_kit` / fleet healing** — skein installs 19 probe scripts and hook
   wiring into every registered repo's store on every start, and repairs a running fleet to match the
   binary. **Without these there is no turn state at all.**
@@ -120,13 +147,22 @@ first version acquired a `download` feature that has no route, no UI and no func
   host-capacity measurement, and refusal to save when config is unparseable.
 - `.env` loading, with a malformed file reported rather than silently truncated.
 - Sync connections and their tokens.
+- **Per-repo settings** — `plane_project`, `sync_connection`, `review_queue`, plus `agent`, `store`
+  and a per-repo write PAT from the Add-repository overlay. These live in `repos.json` /
+  `connections.json`, not `Config`, and save on blur — a different persistence contract.
+- **Four vendored asset routes** — xterm, xterm.css, addon-fit and marked served from the binary.
+  "The cockpit works with no CDN and no network" is a capability, and these are the only other
+  entries in `open_to_all`.
+- **The `sudo` shim** and **`git-credential-skein`** — named, because only the git shim was.
+- **`realign_transcript`** — the conversation-slug repair for a moved checkout.
+- Mailbox message kinds (note / handoff / review-request) and `⌘↵` to send.
 - **SSH key handling** — loads a host key into the host ssh-agent, which is forwarded into boxes.
   See §7.
 - **`/api/pick-path`** — the native host folder/file picker. See §7.
 - CLI: `ls`/`status` (**the default command**), `add`, `repos`, `remove`/`rm`, `doctor`, `shared`
   (including `shared import <box> [--include] [--apply]`), `start`, `login`, `resize`, `attach`,
-  `version`, `help`; flags `--branch --agent --attach --id --store --include --apply --disk
-  --drop-docker`.
+  `version`, `help`; flags `--branch --agent --attach --handoff --id --store --include --apply
+  --disk --drop-docker --version/-v --help/-h`.
 - **`--drop-docker`**: resize *refuses* rather than warns when Docker holds unpushed images, and
   refuses on "could not ask" too.
 
@@ -134,8 +170,9 @@ first version acquired a `download` feature that has no route, no UI and no func
 
 ## 6. Items listed here that have no UI caller
 
-`repin` is API- and CLI-only. Listing it as parity overstates the gate; it is kept because removing
-it should still be a decision.
+`repin` is **API-only** — there is no `repin` CLI arm and no UI caller. An earlier version of this
+document said "API- and CLI-only", which was wrong. It is kept because removing it should be a
+decision rather than an omission.
 
 ## 7. Deliberate removals and forced changes
 
@@ -173,14 +210,41 @@ carries unpushed commits, index and worktree patches, untracked files, and delib
 files. If that machinery is not built, resize destroys every box's uncommitted work — which would be
 a larger removal than everything else on this page combined.
 
+**Transcript and diff tabs — redesign, not port.** The owner reports never opening either. That is a
+usage fact, not a defect report, and it cuts two ways. Transcript is a reader with no loop attached
+and can be rebuilt last or not at all. **Diff is different**: the intended loop is *launch → terminal
+→ diff → inline comments back to the agent → merge*, so a diff nobody opens means the surface does
+not serve the loop it was built for — which is the PR-interface overhaul's whole premise. Neither is
+removed here; both are marked *not preserved as-is*, so porting them pixel-for-pixel is not what
+satisfies this gate.
+
+**The CLI stops working without a server** — if the architecture's "the CLI is a client of the
+server" stands. Today all twelve subcommands drive the library directly and work with no server
+running; `add` writes `repos.json` itself, `start` builds the whole box. As a client, none of them
+work before the cockpit exists — and the cockpit is inside the fleet, which does not exist before
+`create`. **This collides head-on with "first run is `skein doctor` in a terminal."** One of the two
+has to give, and until it does this is an unpriced removal rather than a decision.
+
+**The `~/.skein` mount split.** `apiauth.rs:24-26` records that the API token is safe *because*
+`~/.skein/repos` and `~/.skein/boxes` are bind-mounted into boxes while `~/.skein` itself is not —
+"checked, not assumed". A durable volume mounted whole into the fleet puts `credentials/`,
+`api-token`, `github-pats/` and `tokens/` inside every box's reach on the shared uid. The volume's
+privileged subtrees must stay outside every box's mount view, and that cover list is a tested
+enumeration.
+
+**Foreign-sandbox *display* goes; the *state* does not.** The `foreign:` filter is removed above, but
+the architecture keeps `declared = deleted` as a first-class cell — a half-completed destroy is still
+a thing skein must recognise and clean up. Only the board rows go.
+
 ---
 
 ## 8. Known gaps in this audit
 
 Stated so the next reader knows what has not been checked, rather than inferring completeness:
 
-- The 257 JavaScript functions were sampled, not enumerated one by one.
-- Keyboard shortcuts are listed where found in the dock and palette; there is no single place they
-  are declared, so the list may be short.
-- Per-repo and per-box settings were counted from the UI, not cross-checked against every `Config`
-  field — `Config` has 24 fields and the UI exposes more controls than that.
+- The 265 JavaScript functions were sampled, not enumerated one by one. This is the largest
+  remaining hole and the only honest way to close it is to walk them.
+- Settings controls were counted from the UI. The count mismatch against `Config`'s 24 fields is
+  explained, not outstanding: repo and connection settings are not `Config` at all.
+- **Two rounds of this document invented capabilities.** Treat any entry with no file reference
+  beside it as unverified until someone greps for it.
