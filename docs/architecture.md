@@ -244,7 +244,7 @@ but the *cell* is a level signal, and the cell is what is rendered.
 | upload | an Act **with an outcome channel** — see below |
 | takeover | *not* an Act: a privileged snapshot, then an Operation, then a paid signal, plus durable rollback state |
 | merging a pull request | an Operation, class `destructive` — Acts have no class, and this is the one destructive verb in the review surface |
-| launching a box | an Operation whose check is "the anchor is alive" |
+| launching a box | an Operation whose check is "the box's tmux server is alive" (§6) |
 | foreign detection | `declared absent ∧ observed present` |
 | crash recovery | reconcile the DAG |
 
@@ -316,6 +316,12 @@ live where the thing being audited can reach it — so it lives **on the host, w
 the mirror), namespace anchors (a live pid, meaningless across a restart), caches and build output.
 
 The test for anything new: *if the fleet were destroyed right now, would losing this hurt?*
+
+**Reclamation.** `boxes/<name>/` is garbage-collected when a box is destroyed, along with its
+tombstone (§2.6); transcripts rotate; `repos/<id>/mirror` is repacked and pruned on a schedule; a
+resize archive left by a failed restore is retained deliberately and reported, never silently deleted.
+An earlier draft's whole policy was "transcripts and the audit log rotate" — and the audit log is not
+even on the volume.
 
 **The volume can fill.** Every operation that writes has a free-space precondition; `boxes/<name>/` is
 garbage-collected when a box is destroyed; transcripts and the audit log rotate. Today per-box disk
@@ -844,21 +850,49 @@ Each is a specific way this codebase has previously accumulated debt.
 
 | module | owns | depends on |
 |---|---|---|
-| `state` | the volume: declared and recorded, schema and locks | — |
-| `source` | `enter`, `socket`, `file`, `http`; exec/stream/pty | — |
-| `signal` | kinds, freshness, budgets, cadence, gates, fusion | `source` |
+| `state` | the volume: declared, requested, recorded; schema, locks | — |
+| `source` | `enter`, `socket`, `file`, `http` | — |
+| `signal` | kinds, freshness, budgets, cadence, gates, fusion | `source`, `state` |
 | `operation` | desired, tri-state check, recipe, doer, DAG, leases | `state`, `signal` |
-| `act` | streaming interactions; emits edges | `source`, `signal` |
-| `warden` | client and protocol | `operation` |
-| `box` | identity and lifecycle | `state`, `operation`, `act` |
+| `act` | streaming interactions; emits edges; reports outcomes | `source`, `signal`, `state` |
+| `warden-client` | protocol, operation ids | `operation` |
+| `warden` | the host service: capabilities, approval surface, outcome store, audit log | — (separate binary) |
+| `box` | identity and lifecycle | `state`, `operation`, `act`, `source`, `signal` |
 | `server` | cockpit, API, event stream, transitions | everything |
-| `cli` | `skein` — a **client of the server**, not a second writer | `server` |
+| `cli` | `skein` | `state`, `operation`, `signal`, `box` |
 
 `state` and `source` depend on nothing. `source` never depends on `operation` — reaching a subject
-must never require privilege. The CLI is a client rather than a peer, because two processes doing
-unsynchronised read-modify-write on the same declared state is today's silent last-write-wins.
+must never require privilege. The **warden is a separate binary** with no dependency on skein's
+modules; an earlier draft gave it no row while §13 required it be built three ways.
 
----
+### 14.1 The CLI stays standalone, and declared state gets a lock
+
+An earlier draft made the CLI a client of the server. That was wrong twice.
+
+**Inverted against the code**: today the *server spawns the CLI* — the cockpit creates a box by running
+`skein start … --attach` as a subprocess, resolving the sibling binary. There is no HTTP client in the
+crate at all.
+
+**Circular against §11.6**: first run is `skein doctor` in a terminal *because the cockpit needs a
+fleet that does not exist yet*. A CLI that is a client cannot run before the server, and the server
+cannot run before the fleet.
+
+So the CLI keeps driving the library directly, and the problem the client idea was solving — two
+processes doing unsynchronised read-modify-write on declared state — is solved where it belongs:
+
+> **Declared state is written under a lock, by whoever holds it.** Not "one writer" as a count. Today
+> `config.json` and `repos.json` are atomic-write but unlocked, so two cockpit tabs saving settings is
+> silent last-write-wins; the mailbox and the sandbox registry already lock, and are the model.
+
+### 14.2 What must be dismantled before any of this is checkable
+
+`src/lib.rs` re-exports sixteen modules with `pub use <mod>::*`, so cross-module references go through
+a flat root namespace — `grep -rn "crate::signals::"` from other modules returns **zero**, not because
+nothing uses it but because everything uses the re-exports. There is also a live cycle: `place.rs`
+calls into `fleet`, and `fleet.rs` imports `place`.
+
+**Every dependency rule above is unverifiable until the façade comes off.** That makes removing it the
+first task of extraction, not a tidy-up afterwards.
 
 ## 15. Open
 
