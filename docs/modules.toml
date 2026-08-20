@@ -76,11 +76,10 @@ depends_on = ["state", "source"]
 
 [destination.api]
 owns = "HTTP transport, auth, routes, the WebSocket"
-# §14 writes this row as "everything below", which is the one row of the table that cannot be read
-# mechanically: taken literally — the rows printed below it — it would make `api` depend on `cli`
-# and on `cockpit`, and `cockpit` already depends on `api`. So this is the reading, not the text:
-# everything api sits on top of, and nothing that sits on top of api. If the reading is wrong, the
-# acyclicity check is what will say so.
+# §14 used to write this row as "everything below", which is the only row of the table that could
+# not be read mechanically: taken literally — the rows printed below it — it made `api` depend on
+# `cli` and on `cockpit`, and `cockpit` already depends on `api`. Writing this list out is what
+# forced the question, and §14 now names the modules instead.
 depends_on = [
   "state", "source", "signal", "operation", "act", "warden-client",
   "box", "fleet", "grant", "mailbox", "github", "probes", "stream",

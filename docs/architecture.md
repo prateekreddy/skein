@@ -1346,7 +1346,7 @@ trust boundary needs to be able to answer:
 | `mailbox` | cross-box and cross-project messaging, and its provenance (R10) | `state` |
 | `github` | HTTP client, review queue, CODEOWNERS, contract signals, summary cache and its throttle | `state`, `source` |
 | `probes` | the in-box probe scripts and hook merging — installed into every store, and the highest-blast-radius write in the system; owns the probe/binary compatibility contract | `state`, `source` |
-| `api` | HTTP transport, auth, routes, the WebSocket | everything below |
+| `api` | HTTP transport, auth, routes, the WebSocket | every module above, plus `stream` — **not** `cockpit`, `migrate` or `cli` |
 | `stream` | the **single** event producer and its fan-out (§10.1), and transitions | `signal`, `state` |
 | `cockpit` | the page, its build, and the component library (§11.7) | `api` (over the wire only) |
 | `migrate` | the one-shot: snapshot, carry, rewrite hooks, refuse (see `docs/delivery.md` §4.3) | `state`, `operation`, `box` |
@@ -1416,11 +1416,6 @@ form, and `tools/module-check.py` runs in CI. It holds three lines:
   the graph is acyclic. That is what enforces "`state` and `source` depend on nothing" and
   "`source` never depends on `operation`": both are properties of a DAG with those rows empty, and
   an edit that breaks either one fails the build with the cycle spelled out.
-
-One row of the table above could not be made machine-readable, and `docs/modules.toml` says so
-rather than papering over it: `api`'s "everything below" is ambiguous. Read literally — the rows
-printed below it — it makes `api` depend on `cli` and on `cockpit`, and `cockpit` already depends on
-`api`. The file encodes the intended reading (everything `api` sits on top of) and flags it.
 
 What neither change fixed is larger than the `place → fleet` edge §14.2 was written about. The exact
 graph has **two cycles, and the larger holds eighteen of the twenty-six modules** — see
