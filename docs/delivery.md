@@ -152,7 +152,7 @@ assumed, because "the API is a stable seam" is true of transport and false of se
 avoidable risk in the plan.
 
 **What runs in parallel from the start:** the component library, the GitHub module (already
-self-contained since `gh` was dropped), and the warden's two capability modules.
+self-contained since `gh` was dropped), and the warden's two removable capability modules.
 
 **The cost of incremental**: two placement shapes and the `sbx exec` fallback survive one more cycle
 — the very things the architecture wants deleted. That is real. It is smaller than a six-month branch
