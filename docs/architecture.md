@@ -332,6 +332,7 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | `credentials/` | declared — protected by the **mount cover**, not by a file mode (§9.5.2) |
 | `boxes/<name>/recorded/` — launch spec, conversation, transcript, notes | recorded |
 | `boxes/<name>/declared/` — `privileged`, `git-scope`, `disk`, `identity` | declared — **never bound into the box** (§9.5.2) |
+| `boxes/<name>/declared/anchor` — `(pid, starttime)` for the box's tmux server (§9.5.1) | declared |
 | `uids` — the box-uid allocation, if per-box uids are in use (§9.5.1) | declared |
 | `boxes/<name>/artifacts/` — `git-tokens/` | approved artifact — bound **read-only** |
 | `boxes/<name>/transitions` — retained signal values and watermarks | recorded |
@@ -872,6 +873,18 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    > can write.** skein spawns the launcher; the launcher asks its own tmux server for the server pid
    > and writes it to **stdout**; skein records it. The pidfile in the box's tree may remain for the
    > box's own use, and skein must never read it.
+
+   **And it must survive a skein restart, which the channel alone does not.** Boxes outlive skein, so
+   on reconnect the launcher is long gone. The anchor is therefore **declared state**, written by
+   skein at launch into `boxes/<name>/declared/anchor` — never bound into the box (§9.5.2) — and read
+   back from there.
+
+   **A bare pid is not enough**, because pids recycle: a box that dies frees its anchor, and an
+   unrelated process may hold that number by the time skein reconnects. So the record is
+   **`(pid, starttime)`**, and every use re-reads the process's start time and compares. A mismatch
+   means *the box is gone* — never "enter this instead". That is the standard way to make a pid
+   reference unambiguous, and it is the difference between a stale anchor being a dead box and a stale
+   anchor being someone else's namespace.
 
    This has to be settled before R1 is built, because every other part of R1 is downstream of an
    address it trusts.
