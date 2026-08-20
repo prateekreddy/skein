@@ -397,15 +397,35 @@ Stated because it must not be discovered later. Relative to host-side skein, co-
 Chosen over moving skein back out, because that would give back the reason for doing this. These are
 requirements, and each is a project rather than a paragraph:
 
-1. **skein's control API is a filesystem socket outside every box's mount view — never a TCP port.**
-   The mount namespace does protect that. The cockpit's HTTP port is a separate question (§9.4).
-2. **skein runs as a uid distinct from boxes**, closing signal/kill and same-uid file reads. Note
-   `newuidmap`/`newgidmap` are not installed today though `/etc/subuid` is configured, and the
-   launcher rejected per-box uids for a measured reason: the tmux socket is `0700 uid 1000` and a
-   box on its own uid leaves the cockpit unable to attach. **The attach mechanism must be redesigned
-   with the uid split, not after it.**
-3. **The warden authenticates a caller skein can prove to be and a box cannot.** With shared netns
-   and shared uid, no such secret exists today. Requirement 2 is its prerequisite.
+1. **skein's control API is a root-owned filesystem socket, never a TCP port**, and the cockpit's
+   HTTP auth token is a root-owned file. Boxes may still *connect* to the cockpit port — shared netns
+   makes that unavoidable — but cannot authenticate. That mechanism already exists precisely because
+   a box once reached the host cockpit.
+2. **skein runs as root inside the fleet sandbox; boxes remain unprivileged.** This is the
+   privilege split, and it is done **first** — everything else here depends on it.
+
+   Root *in the sandbox* is bounded by the VM: it is not root on the host, and boxes still cannot
+   sudo. It closes signal/kill (an unprivileged process cannot signal root), gives skein files
+   boxes cannot read regardless of mount view, and puts the cgroup plane out of reach (requirement
+   4) at no extra cost.
+
+   It is chosen over per-box uid mapping because **the attach mechanism survives unchanged**. That
+   was the blocker: the tmux socket is `0700 uid 1000`, so skein on a neighbouring uid could not
+   open it, and the launcher had already rejected per-box uids for exactly that measured reason.
+   Root can open it, and root in the initial user namespace has CAP_SYS_ADMIN over descendant
+   namespaces, so `nsenter` needs no `newuidmap` — which is not installed, though `/etc/subuid` is
+   configured.
+
+   The cost, stated: a skein bug reachable from a box yields root in the sandbox rather than uid
+   1000. Small, because a skein compromise is already total — it holds the tokens and drives every
+   box.
+
+   **Per-box subuid mapping is the second step, not the first.** It is strictly stronger, because it
+   isolates boxes *from each other* by uid rather than only from skein — but it needs the `uidmap`
+   package in the fleet image, an `unshare` + `newuidmap` sequence before bwrap (unprivileged bwrap
+   can map only its own uid), and it does not close the tmux socket path on its own.
+3. **The warden authenticates a caller skein can prove to be and a box cannot.** Requirement 2 is its
+   prerequisite and supplies it: a secret at `0600 root` inside the sandbox.
 4. **The cgroup control plane is outside every box's write reach.** Today a fleet-scoped box can
    raise `memory.max`, defeating the ceilings §10 depends on.
 5. **The audit log is append-only and written by the approving side.**
@@ -593,9 +613,8 @@ unsynchronised read-modify-write on the same declared state is today's silent la
 
 ## 15. Open
 
-- **The uid split versus the attach mechanism** (§9.3.2). The tmux socket's permissions are what make
-  the current attach work; a uid split requires redesigning it, and `newuidmap` is not present.
-  This is the largest unresolved item and it gates the whole hardening plan.
+- **Per-box subuid isolation** (§9.3.2, second step). Boxes are still isolated from each other only
+  by mount namespace and convention; the tmux socket remains a cross-box code path until this lands.
 - **The agent-credential proxy** (§9.4). Unbuilt, and the only real defence for the credential that
   matters most.
 - **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the warden's

@@ -152,10 +152,13 @@ paths at all, so a local-path remote is host-driven only unless the mirror is se
 filter. That feature mitigated skein listing every sandbox on the host; the rewrite does not list
 sandboxes, so the confusion cannot arise.
 
-**`/api/pick-path`.** The native host picker needs a host process with display access, which in-fleet
-skein cannot have. It backs the Browse buttons for adding a repository, the shared-data folder and
-the SSH key path. Replacement needed, not just removal — typing an absolute path into a text field is
-a worse first run and law 7 forbids it.
+**`/api/pick-path` and every Browse button — removed, not replaced.** The native host picker needs a
+host process with display access, which in-fleet skein cannot have. Browse existed mainly to pick a
+local repository path, and repositories are remotes now, so its main job is gone with it. The
+remaining fields — the shared-data folder and the SSH key path — become text inputs **with a check
+that reports whether the path resolved**, which satisfies law 1 without a host round-trip. A
+warden-served picker was considered and rejected: a third warden capability for an affordance used
+twice in a fleet's life.
 
 **The host ssh-agent path.** In-fleet skein has no host ssh-agent to load a key into. SSH remotes
 either move to the warden or to HTTPS with injected credentials.
