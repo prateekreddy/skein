@@ -242,7 +242,7 @@ revision said eight, which is the number of cells *removed*.
 
 The cases the square got wrong, each of which is a real feature today:
 
-| situation | square said | cube says |
+| situation | the 2×2 said | this says |
 |---|---|---|
 | a box you deliberately stopped | "an operation is owed — start it", forever | declared present, **desired stopped** — nothing owed |
 | a box whose start failed | same cell, so retry forever | `observed = failed(reason)`, and the reason is shown |
@@ -333,12 +333,15 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | `grants/`, `substrate/` — git-write grants and approved packages | declared |
 | *(no `audit/` — see below)* | |
 
-`grants/` and `substrate/` are on the volume because they exist *precisely* to outlive the sandbox:
+`grants/` and `substrate/` are **requested** state (§2.1), and they are on the volume because they
+exist *precisely* to outlive the sandbox:
 lose them and every box re-asks for push access and for packages already approved. Both are
 **requested** state (§2.1): a box writes the request, and the approved artifact is written elsewhere
 by the approving side.
 
-**The audit log is not on the volume, and it must not record only the warden.** The warden has two
+**The audit log is not on the volume, and it must not record only the warden.** The volume is inside
+the fleet and writable by skein, which shares a sandbox with coding agents — so a record of an
+approval would live where the thing being audited can reach it. The warden has two
 capabilities, so a log scoped to it covers fleet lifecycle and **none of the approvals that actually
 grant privilege** — package approval (root apt, fleet-wide, permanent), git-write grants, workshop
 promotion, credential rotation. Those are decided by skein, and §5 has just argued skein cannot audit
@@ -355,14 +358,15 @@ the mirror), namespace anchors (a live pid, meaningless across a restart), cache
 The test for anything new: *if the fleet were destroyed right now, would losing this hurt?*
 
 **Reclamation.** `boxes/<name>/` is garbage-collected when a box is destroyed, along with its
-tombstone (§2.6); transcripts rotate; `repos/<id>/mirror` is repacked and pruned on a schedule; a
+tombstone (§2.6); transcripts rotate (the audit log is not here to rotate — it is on the host);
+`repos/<id>/mirror` is repacked and pruned on a schedule; a
 resize archive left by a failed restore is retained deliberately and reported, never silently deleted.
 An earlier draft's whole policy was "transcripts and the audit log rotate" — and the audit log is not
 even on the volume.
 
 **The volume can fill.** Every operation that writes has a free-space precondition; `boxes/<name>/` is
 garbage-collected when a box is destroyed; transcripts and the audit log rotate. Today per-box disk
-limits are *displayed and never enforced*, and no code matches `ENOSPC` anywhere — the first symptom
+limits are *displayed and never enforced*, and no code *handles* `ENOSPC` — it appears twice, in comments — the first symptom
 is another box's build failing. A check for "the volume is mounted" without one for "the volume has
 room" repeats that.
 
@@ -427,14 +431,21 @@ microVM-sized budget rather than an action timeout.
 | **resource ceilings** — create the box's cgroup, write `memory.max`/`high`/`pids.max`, move the session in; and `rmdir` it on destroy | every box start and every box destroy; plus server start, through `heal_fleet` → the launcher's ceilings path, which is a *different mechanism* from the per-box writes |
 | **package installation** — `apt-get` **and `npm install -g`** | on approval; replaying the approved manifest on **every box start** (via `ensure_fleet`), not every server start; plus the takeover-tools installer and the box startup kit |
 | **filesystem ownership** — create and chown the fleet root; `tar` a box out and back | every box start (fleet root); resize |
-| **container runtime config** — write `/etc/docker/daemon.json` | fleet setup |
+| **container runtime config** — write `/etc/docker/daemon.json` | every box start *and* every server start (it runs in both the ensure and the heal paths) |
 
 Four kinds, not three. And note `npm install -g` is not a spelling variant of `apt-get`: it writes
 into the toolchain that is shared read-write with every box, which is what makes it violate §9.5.4.
 
-**skein running as root inside the fleet sandbox (§9.5.1) supplies this whole domain directly.** Today
-these are reached by unprivileged processes through a `sudo` shim; as root they are ordinary calls,
-and the shim reverts to what it was always documented as — a message, not a boundary.
+**skein performs this domain with `sudo`, exactly as it does today** — and that is unchanged by the
+privilege split (§9.5.1), which is about separating skein from *boxes*, not about giving skein root.
+An earlier revision claimed root "supplies this whole domain directly"; root turned out to be
+self-defeating for a different reason (§9.5.1), and the claim went with it.
+
+The asymmetry that matters is already built and is the thing to preserve: **skein can escalate;
+a box cannot.** Inside a box the `sudo` shim has nothing to escalate to — the box is in an
+unprivileged user namespace mapping only its own uid — so the shim is a *message*, not a boundary,
+and the boundary is the namespace. The split gives skein a uid of its own so that a box cannot reach
+skein's files or signal it; neither side's relationship to `sudo` changes.
 
 ### 7.3 Resize is a byte copy, and that was a decision
 
@@ -565,7 +576,7 @@ Two more that follow, and neither is an implementation detail:
 ### 8.5 Flooding
 
 A compromised skein controls *what* is proposed and *when*. One outstanding request at a time, a rate
-limit, and the timeout §11.4 already names.
+limit, and the timeout §11.5 already names.
 
 ### 8.3 Capabilities are compiled
 
@@ -575,7 +586,20 @@ not configured — absent. A runtime check falls to a bug in the check; absent c
 Only the **doer** is removable. Recipes and checks live in skein, always compiled, never privileged —
 they are needed precisely when the doer is absent.
 
-Two capabilities, and the default build ships **both**. An earlier draft shipped only `create` — but
+**Four endpoints, of which two are removable.** The removable ones are the doers — `create` and
+`destroy` — and the default build ships both.
+
+The other two are neither privileged nor optional, so they are **never compilable-out**:
+
+- **the audit sink** (§5): skein's own approval decisions append to the host-side log, because skein
+  cannot audit itself.
+- **fleet observation**: `fleet_exists` today is `sbx ls`, which is **host-only** — so in-fleet skein
+  cannot run the check that gates its own first run. That check becomes a `Source: http` call to the
+  warden. It reads; it decides nothing; §8.5's one-outstanding-request rule does not apply to it.
+
+This is the exception to §12.10, and it is stated rather than left implicit: a capability that
+*performs* something may be left unbuilt; one that only *reports* may not, or the design loses the
+ability to see and to account for itself. An earlier draft shipped only `create` — but
 resize is destroy + create (§7.3), so a create-only warden cannot resize, which is the commonest
 lifecycle operation after create, and cannot retire a tombstone (§2.6). Making `destroy` optional
 made `resize` optional by accident.
@@ -611,6 +635,22 @@ A box is isolated by **two** namespaces — mount and user (`src/box-session.sh:
 then only *this* box's root and state are bound back, with `.skein` read-only. So one box cannot read
 another's checkout, conversation or tokens — and cannot reach another's tmux socket, which lives
 under the covered root.
+
+**And there is a third path, out of the sandbox entirely, that the file cover does not reach.**
+`fleet_mounts()` mounts `~/.skein/repos` — every repo's `store` **and**, for an adopted repo, the
+host's own working checkout — into the sandbox. The box cover tmpfses only `/boxes` and
+`~/.skein/boxes`, so `~/.skein/repos` is **read-write from every box**. Two consequences, and the
+second is the worst thing in this document:
+
+- **across repos, the file boundary does not hold.** A box working on one repo reads and writes
+  another repo's store, launch specs and status.
+- **it is a box → host code-execution path.** skein runs git against those trees *on the host* —
+  `git -C <repo.work> log …` for module notes, `git -C <repo.work> pull --ff-only` on a repo pull. A
+  box that writes `<repo.work>/.git/config` with `core.fsmonitor` (or a pager, or an alias) gets
+  execution **as the host user** at the next host-side git call. In-fleet it becomes execution as
+  skein's uid, which defeats the privilege split as well.
+
+> **This is live today, and it is why §9.5.2's cover must be derived per box rather than listed.**
 
 **That cover list is an enumeration, and it must grow with every new shared path.** It covers exactly
 two parents today. It does not cover `/run`, and the launcher itself records that
@@ -991,7 +1031,8 @@ Each is a specific way this codebase has previously accumulated debt.
   this possible.
 - **Browser tests run in a box.** Correcting the first draft: this was fixed, and
   `tests/ui/README.md` names the libraries Playwright's own list omits.
-- **The warden is built and tested three ways**: empty, each capability alone, both.
+- **The warden is built and tested four ways**: sink-and-observation only (the minimal build — not
+"empty", since two endpoints are never removable), plus each doer alone, plus both.
 - **Screen grammars are verified against a real box**, never a clean-room one — a bare tmux session
   has no configured statusline, a short pane and no scrollback, which hides exactly the defects that
   matter.
@@ -1053,9 +1094,14 @@ trust boundary needs to be able to answer:
 | `act` | streaming interactions; emits edges; reports outcomes | `source`, `signal`, `state` |
 | `warden-client` | protocol, operation ids | `operation` |
 | `warden` | the host service: capabilities, approval surface, outcome store, audit log | — (separate binary) |
-| `box` | identity and lifecycle | `state`, `operation`, `act`, `source`, `signal` |
+| `box` | box identity and lifecycle | `state`, `operation`, `act`, `source`, `signal` |
+| `fleet` | **fleet** lifecycle — create, destroy, resize as their composition | `operation`, `warden-client`, `state` |
 | `server` | cockpit, API, event stream, transitions | everything |
-| `cli` | `skein` | `state`, `operation`, `signal`, `box` |
+| `cli` | `skein` | `state`, `operation`, `act`, `signal`, `box`, `fleet`, `warden-client` |
+
+The `cli` row carries `act` because law §11.4.4 requires every Act to have a CLI form, and
+`warden-client` because first run is `skein doctor` (§11.6) against a fleet that does not exist yet.
+`fleet` exists because otherwise nothing owns the two privileged operations.
 
 `state` and `source` depend on nothing. `source` never depends on `operation` — reaching a subject
 must never require privilege. The **warden is a separate binary** with no dependency on skein's
