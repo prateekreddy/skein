@@ -24,6 +24,11 @@ counted.
 | publish a port | `sbx ports --publish` — **no unpublish exists** |
 | seed the fleet-wide credential | `sbx secret set -g`, token on the argv |
 
+**And this table is host *privilege*, not host *dependency*.** `sbx exec` — the entire transport —
+plus `sbx ls --json`, `sbx ports` (read), and the interactive attach paths are all host-only too. They
+need no privilege, so they are not in this table, but omitting them is what makes "four" look tidy.
+The rewrite deletes them (architecture §13a) rather than delegating them.
+
 Four, and two of them dissolve: the credential seed becomes a file write once credentials live on the
 volume, and port publishing folds into create **only if the cockpit is the sole port**. That is what
 survives of the collapse to two — it was right *for this domain* and was wrongly stated as covering
@@ -31,7 +36,8 @@ everything.
 
 ### 1.2 Sandbox root — used constantly, in normal operation
 
-`grep -c "sudo " src/box-session.sh` → **21**. The distinct call sites:
+`grep -c "sudo " src/box-session.sh` → **21**; tree-wide it is **63 lines across 8 files**. The
+distinct call sites:
 
 | when | what | where |
 |---|---|---|
@@ -43,10 +49,15 @@ everything.
 | **every server start** | create and chown the fleet root | `fleet.rs:1876` |
 | fleet setup | write `/etc/docker/daemon.json` | `fleet.rs:1053` |
 | **resize** | `tar` the whole box tree, and restore it | `fleet.rs:3171, 3205` |
-| **on approval** | `apt-get install` the approved packages | `substrate.rs:236-237` |
+| **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs:226, 236-237` |
+| **every box destroy** | `rmdir` the box's cgroup | `sandbox.rs:526` |
+| **every box startup** | apt in the startup kit | `kit/skein-startup.sh` |
+| takeover setup | `apt-get install` the tools a source box needs | `lib.rs:1489` |
 
 So the honest statement is: **normal operation is full of sandbox-root work.** Cgroups on every box
-start, package replay and ceiling healing on every server start.
+start *and* every box destroy; the package manifest replayed on every **box** start (through
+`ensure_fleet`, not on server start); and ceiling healing on server start through a *different*
+mechanism — the launcher's ceilings path, not the per-box writes above.
 
 ### 1.3 What this means for the design
 
@@ -93,6 +104,11 @@ written down.
 lib.rs 104 · fleet.rs 67 · place.rs 14 · gitgate.rs 12 · signals.rs 8
 moduledocs.rs 6 · mailbox.rs 5 · diff.rs 5 · repos.rs 4 · util.rs 3 · tracking.rs 3
 ```
+
+**Those counts include test fixtures and are inflated roughly fourfold.** `signals.rs` and `diff.rs`
+have *zero* production writes — every hit is a test. Non-test, it is ~55 sites across 21 files, and
+`gitgate.rs` outranks `fleet.rs`. The argument survives; the evidence did not, and counting test
+fixtures as writers is the same class of error this document exists to stop.
 
 "Declared state has one writer" is a goal, not a description. And the split into *declared* and
 *recorded* is not exhaustive: the package queue and the git-write queue are **durable, written by an
@@ -181,7 +197,8 @@ review.
 
 ## 8. The operations already exist
 
-`grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs` → **fifteen**, plus `heal_fleet` and
+`grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs` → **fifteen public**, plus one private (`ensure_source_takeover_tools`, itself a sandbox-root apt
+install) for **sixteen**, plus `heal_fleet` and
 `heal_transport`. skein is already written as idempotent ensures; the Operation primitive names
 something the codebase does rather than importing a pattern.
 
@@ -225,7 +242,9 @@ api-token  boxes  fleet-home  gh-secret-seeded  github-pats  github-read-token
 kit  places  plane-token  repos  review  starts  tokens
 ```
 
-plus `config.json`, `repos.json`, `connections.json`, `git-grants.json`, `substrate.json`.
+plus `config.json`, `repos.json`, `connections.json`, `git-grants.json`, `substrate.json`,
+`github-pats.json`, and the instance-scoped `fleet-agent.token` / `fleet-agent.port`. **This list is
+what the codebase joins onto the root by name; treat it as a floor, not a census.**
 
 Three of these must **not** move to a durable volume unchanged:
 
@@ -233,8 +252,9 @@ Three of these must **not** move to a durable volume unchanged:
   volume, so relocating the root wholesale carries state the design forbids there.
 - **`fleet-agent.token` / `fleet-agent.port`** are instance-scoped. The migration must re-mint them,
   not copy them, or "no machine-global secret" is untrue on day one.
-- **`repos/<id>/work`** is a working checkout, not a mirror, and `diff.rs`, `moduledocs.rs` and
-  `codeowners.rs` read it directly.
+- **`repos/<id>/work`** is a working checkout, not a mirror. `diff.rs` and `moduledocs.rs` derive it
+  and read it directly; `codeowners.rs` takes the path as a parameter and does not, so it is the
+  cheapest of the three to repoint.
 
 And `$SKEIN_HOME` is already a single relocatable root (`config.rs:17`), so "move state onto a
 volume" is closer to a mount and an env var than to a rewrite — the work is in the three exceptions
