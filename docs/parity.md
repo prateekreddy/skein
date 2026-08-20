@@ -210,13 +210,19 @@ carries unpushed commits, index and worktree patches, untracked files, and delib
 files. If that machinery is not built, resize destroys every box's uncommitted work — which would be
 a larger removal than everything else on this page combined.
 
-**Transcript and diff tabs — redesign, not port.** The owner reports never opening either. That is a
-usage fact, not a defect report, and it cuts two ways. Transcript is a reader with no loop attached
-and can be rebuilt last or not at all. **Diff is different**: the intended loop is *launch → terminal
-→ diff → inline comments back to the agent → merge*, so a diff nobody opens means the surface does
-not serve the loop it was built for — which is the PR-interface overhaul's whole premise. Neither is
-removed here; both are marked *not preserved as-is*, so porting them pixel-for-pixel is not what
-satisfies this gate.
+**The diff pane and its inline comment composer — replaced, not ported.** Stated by the owner:
+diffs do not matter today, because agentic coding is good enough at writing code that line-by-line
+reading is rarely where the value is. What matters is **the shape of a change — which modules, how
+the design decomposes, drill-down to code when warranted** — and mostly the code is not read at all.
+If the text is wanted, GitHub has it.
+
+So skein does not compete on diff rendering. Architecture §11.1 replaces this surface with a change
+view built on two things that already exist: standing module notes and contract signals, both
+reframed as signals whose subject is a module. **Commenting back to an agent is not lost** — it is an
+Act against a box, which the terminal already is.
+
+**The transcript tab — not ported until asked for.** Never opened, and a reader with no loop attached
+to it. Kept on this page so its removal stays a decision.
 
 **The CLI stops working without a server** — if the architecture's "the CLI is a client of the
 server" stands. Today all twelve subcommands drive the library directly and work with no server

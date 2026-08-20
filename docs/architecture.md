@@ -68,7 +68,7 @@ Every signal declares six things. The declaration is part of its definition, not
 
 | | |
 |---|---|
-| **subject** | what it is about. **Keyed by subject, never by observer.** |
+| **subject** | what it is about — a **box, a module, a pull request, or the fleet**. **Keyed by subject, never by observer.** |
 | **kind** | `level` or `edge` |
 | **source** | which Source produced it (§2.3) |
 | **observed_at** | freshness is never implicit |
@@ -87,8 +87,15 @@ signal — arriving sooner than the next poll — never be its sole basis. And t
 own bug: turn state keyed by box but written by session let any helper process overwrite the agent's
 state, producing seventeen spurious `ended` events in 114 seconds.
 
-**A signal's value is four-valued, not two**: `value | stale | unreadable | unsupported`.
+The subject being open is what lets one mechanism carry things that otherwise need bespoke features:
+a module's standing note and a diff's contract signals are signals *about a module*, and a review
+request is a signal *about a pull request*. Assuming the subject was always a box is what made those
+look like separate machinery.
+
+**A signal's value is five-valued, not two**: `value | none | stale | unreadable | unsupported`.
 "Could not observe" is not "observed absent", and collapsing them is what drives spurious action.
+`none` — no observer was ever started, so reattach — is not `stale`, which is observations having
+stopped; the shipped code distinguishes them and an earlier draft of this document did not.
 
 **The Gate contract.** Every signal's observation is mediated by a gate that provides: single-flight
 (concurrent askers share one observation), serve-stale-refresh-behind (the last good value is
@@ -192,7 +199,9 @@ but the *cell* is a level signal, and the cell is what is rendered.
 | the board | level signals per subject, ranked by attention |
 | "what needs me" | a predicate over signals |
 | turn state | level (pane grammar) fused with edges (hooks) that only accelerate it |
-| the review queue | signals whose Source is `http` rather than `enter`/`socket` |
+| the review queue | signals whose Source is `http`, subject a pull request |
+| module notes, contract signals | signals whose subject is a **module** — §11.1 |
+| understanding a change | those signals, ranked, with drill-down |
 | voice, notifications, the away digest | signal **transitions** — see below |
 | `doctor` | every operation's check, reported, including `unknown` |
 | onboarding, breakage, approval | failing checks with their recipes — three components, one language (§11.4) |
@@ -521,13 +530,50 @@ this governs *how*.
 |---|---|---|
 | **triage** — who needs me? | constant | a ranked queue, a calm empty state |
 | **converse** — talk to an agent | often | terminals that never lie about freshness |
-| **review** — read a diff, comment back | often | diff and comment in one place |
+| **understand** — what did it change? | often | the *shape* of the change: modules, decomposition, drill-down |
 | **recover** — something broke | rare, high-stakes | the failing check and the command that fixes it |
 | **set up** — add a repo, make a box | rare | one action, no configuration exercise |
 
 **Attention is the scarce resource, not screen space.**
 
-### 11.1 One queue, many sources
+### 11.1 Understanding a change is architectural, not textual
+
+The job is **not** reading a diff. Agentic coding is good enough at writing code that line-by-line
+reading is rarely where the value is; what matters is **which modules changed, how the design
+decomposes now, and the ability to drill to code when something warrants it.** Mostly the code is not
+read at all.
+
+So **skein does not compete with GitHub on diff rendering.** If someone wants the text, GitHub has
+it, and it is one click away. What skein owes is the layer above it:
+
+```
+web-main · warden owns fleet lifecycle           3 modules · +412 −180
+
+  ▸ warden        NEW      the host side of create and destroy
+  ▸ operation     CHANGED  checks become tri-state; doers optional
+  ▸ fleet         SHRANK   lifecycle moved out
+
+  ⚠ operation::check changed shape — 12 call sites
+```
+
+Each row opens: the module's **standing note** (what it is for), then what this change did to it, then
+the files, then the code. Four levels, and most of the time you stop at the first.
+
+Two things already in the codebase are the primitives, and they were previously filed as review
+features rather than architecture ones:
+
+- **standing module notes**, whose freshness is keyed to the commit the module was at, so a stale
+  note is never used. That is a continuously-maintained description of how the system decomposes —
+  exactly the artifact this job needs, and it already exists.
+- **contract signals**, a mechanical scanner over the diff that escalates a change the model called
+  boring. That is what fills the `⚠` line: the structural consequence a summary would miss.
+
+Both are **signals whose subject is a module** (§2.2). No new machinery.
+
+The consequence for scope: the diff pane and its inline comment composer are not ported. Commenting
+back to an agent is an Act against a *box*, which the terminal already is.
+
+### 11.2 One queue, many sources
 
 The board is a **queue, not a dashboard**, ranked by who needs you; a box that needs nothing is
 recessive. Because "needs you" is a predicate over signals and the review queue is a signal source, a
@@ -539,7 +585,7 @@ sections with counts, persisted collapse state, and per-group pull and new-box a
 that is decoration; at eight it *is* the board. A flat three-section list is a different product, and
 the first draft's mock-up quietly chose it.
 
-### 11.2 Three states most tools botch
+### 11.3 Three states most tools botch
 
 - **Nothing needs you.** Say so, plainly and calmly. A dashboard that looks the same whether or not
   anything is wrong has failed at its only job.
@@ -548,7 +594,7 @@ the first draft's mock-up quietly chose it.
 - **Setup is incomplete.** Failing checks at the top of the same queue — but see §11.5, because the
   cockpit is not where a new user starts.
 
-### 11.3 The laws
+### 11.4 The laws
 
 1. **Never report a problem without the action that resolves it.**
 2. **Never show an observation without its freshness.** A stale signal must *look* stale.
@@ -561,14 +607,14 @@ the first draft's mock-up quietly chose it.
 7. **The first screen has exactly one action**, which requires prerequisite collapsing (§11.5).
 8. **Quiet by default.** Colour, badges and motion are an attention budget.
 
-### 11.4 The blocked state is three components, not one
+### 11.5 The blocked state is three components, not one
 
 Onboarding needs *sequence and prerequisites*; breakage needs *what changed and when it last passed*;
 approval needs *what will happen, who asked, and a timeout* — and lives on the host (§8.1). They share
 a visual language and two primitives (the recipe block, the live check pip). They are not one card
 with eleven optional props.
 
-### 11.5 First run is the CLI
+### 11.6 First run is the CLI
 
 The blocked state renders in the cockpit; the cockpit needs the fleet created and the port published
 — privileged operations. So **the first-run surface is `skein doctor` in a terminal**, and check cards
@@ -577,7 +623,7 @@ must render as text. Law 6 is preserved: it is still the blocked state, just not
 Because operations form a DAG (§2.4), **a failing prerequisite collapses its dependents**: a missing
 fleet shows one card, not five, which is what makes law 7 achievable.
 
-### 11.6 Identity and build
+### 11.7 Identity and build
 
 Fresh, and mostly monochrome: **warm means a human is needed, cool means the machine is working,
 muted green means finished, grey means nothing is happening.** Learned in one glance, and it leaves
