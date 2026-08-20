@@ -119,6 +119,17 @@ where it discovers a hole:
 R5, R7 and R9 are small. R4 is a product decision as much as a security one. R8 is a cluster, not an
 item.
 
+**Which of these gate 4c**, since 4c is the point of no return and the rest is a backlog:
+
+| must land before 4c | may follow |
+|---|---|
+| **R3** — the control API is on a TCP port today, and moving in is what makes that reachable from every box | R4 (a product decision, and the exposure is unchanged by the move) |
+| **R5** — the warden cannot tell skein from a box without it, and after the move it must | R9, R10, R11 |
+| **R6** — skein cannot audit itself once it shares a sandbox with the agents | |
+| **R7, R8** — both are live today and the move puts skein's own state inside their blast radius | |
+
+So 4c is gated on five, not nine.
+
 **4c — the move**, with host-driven mode still working one environment variable away. This is where
 the six items in §2 get answered, with a fallback available while answering them.
 

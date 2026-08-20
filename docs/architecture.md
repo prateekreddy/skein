@@ -346,9 +346,7 @@ The queues are on the volume because they exist *precisely* to outlive the sandb
 lose them and every box re-asks for push access and for packages already approved. The request is **requested** state and the approval is **declared** — written elsewhere, by the
 approving side (§8.4).
 
-**The audit log is not on the volume, and it must not record only the warden.** The volume is inside
-the fleet and writable by skein, which shares a sandbox with coding agents — so a record of an
-approval would live where the thing being audited can reach it. The warden has two
+**The audit log is not on the volume, and it must not record only the warden.** The warden has two
 capabilities, so a log scoped to it covers fleet lifecycle and **none of the approvals that actually
 grant privilege** — package approval (root apt, fleet-wide, permanent), git-write grants, workshop
 promotion, credential rotation. Those are decided by skein, and §5 has just argued skein cannot audit
@@ -1344,6 +1342,8 @@ trust boundary needs to be able to answer:
 | `warden` | the host service: capabilities, approval surface, outcome store, audit log | — (separate binary) |
 | `box` | box identity and lifecycle | `state`, `operation`, `act`, `source`, `signal` |
 | `fleet` | **fleet** lifecycle — create, destroy, resize as their composition | `operation`, `warden-client`, `state` |
+| `grant` | **who may do what, and with which credential**: the git-write and package decisions (§8.4's three steps), the agent-login comparison (R7), the installation-token refresher and `artifacts/` (R8), the approved-artifact writes | `state`, `source`, `warden-client` |
+| `mailbox` | cross-box and cross-project messaging, and its provenance (R10) | `state` |
 | `github` | HTTP client, review queue, CODEOWNERS, contract signals, summary cache and its throttle | `state`, `source` |
 | `probes` | the in-box probe scripts and hook merging — installed into every store, and the highest-blast-radius write in the system; owns the probe/binary compatibility contract | `state`, `source` |
 | `api` | HTTP transport, auth, routes, the WebSocket | everything below |
@@ -1351,6 +1351,11 @@ trust boundary needs to be able to answer:
 | `cockpit` | the page, its build, and the component library (§11.7) | `api` (over the wire only) |
 | `migrate` | the one-shot: snapshot, carry, rewrite hooks, refuse (see `docs/delivery.md` §4.3) | `state`, `operation`, `box` |
 | `cli` | `skein` | `state`, `operation`, `act`, `signal`, `box`, `fleet`, `warden-client` |
+
+`grant` exists because nothing owned the *deciding*. `state` owns the rules an artifact obeys;
+until this row, no module owned who decides — which is where §8.4's three-step fix, R6, R7 and most of
+R8 live, i.e. the heaviest security work in the plan. Two people decomposing without it would invent
+two different owners.
 
 `server` was one row owning "everything", which cannot be decomposed against — it is split into
 `api`, `stream` and `cockpit`, because the single-producer fan-out and the cockpit build are separate
@@ -1363,7 +1368,7 @@ The `cli` row carries `act` because law §11.4.4 requires every Act to have a CL
 
 `state` and `source` depend on nothing. `source` never depends on `operation` — reaching a subject
 must never require privilege. The **warden is a separate binary** with no dependency on skein's
-modules; an earlier draft gave it no row while §13 required it be built three ways.
+modules; an earlier draft gave it no row while §13 required it be built four ways.
 
 ### 14.1 The CLI stays standalone, and declared state gets a lock
 
