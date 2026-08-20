@@ -80,22 +80,59 @@ pub fn load_repos() -> Vec<Repo> {
             }
         }
     }
-    let repos = fs::read_to_string(repos_json())
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<Repo>>(&t).ok())
-        .unwrap_or_default();
+    let repos = read_repos_uncached();
     *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
         Some((std::time::Instant::now(), repos.clone()));
     repos
 }
 
+/// The repo list straight off disk. For the writers, which must see what another writer just put
+/// down rather than what this process read a moment ago.
+fn read_repos_uncached() -> Vec<Repo> {
+    fs::read_to_string(repos_json())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Vec<Repo>>(&t).ok())
+        .unwrap_or_default()
+}
+
 /// Persist the repo list to `~/.skein/repos.json` (pretty, atomic).
 pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
+    crate::util::with_lock(&repos_lock(), || write_repos(repos))
+}
+
+/// Where the repo-list lock lives. Beside the file it guards.
+fn repos_lock() -> std::path::PathBuf {
+    skein_home().join(".repos.lock")
+}
+
+/// Write the repo list with the lock **already held**. Never call this without it.
+fn write_repos(repos: &[Repo]) -> Result<(), String> {
     *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None; // mutation → drop the micro-cache
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(repos).map_err(|e| e.to_string())?;
     write_atomic(&repos_json(), &home, &bytes)
+}
+
+/// Change the repo list: read, apply, write — all under one lock.
+///
+/// Worth more here than for the settings, because every mutation of this file is a read-modify-write
+/// over the **whole list**. Losing one is not losing a field, it is losing a repository: adding one
+/// while another tab renames a second, and the new repo is simply gone.
+///
+/// The read happens inside the lock. `f` may refuse by returning `Err`, and nothing is written then
+/// — which is what `set_repo_settings` needs, since a half-applied update across two fields is
+/// worse than a refusal.
+pub fn update_repos<T>(f: impl FnOnce(&mut Vec<Repo>) -> Result<T, String>) -> Result<T, String> {
+    crate::util::with_lock(&repos_lock(), || {
+        // Straight off disk, not through the micro-cache: the cache exists to spare a per-tick read
+        // and is exactly the wrong thing here, where the point is to see what another writer just
+        // put down.
+        let mut current = read_repos_uncached();
+        let out = f(&mut current)?;
+        write_repos(&current)?;
+        Ok(out)
+    })
 }
 
 /// Update a repo's own settings. Every field is optional: `None` leaves it alone, `Some("")` clears
@@ -125,38 +162,36 @@ pub fn set_repo_settings(
             return Err(format!("no work-tracking connection called {conn:?}"));
         }
     }
-    let mut repos = load_repos();
-    let repo = repos
-        .iter_mut()
-        .find(|r| r.id == id)
-        .ok_or_else(|| format!("no repo with id {id:?}"))?;
-    if let Some(v) = plane_project {
-        repo.plane_project = v.trim().to_string();
-    }
-    if let Some(v) = sync_connection {
-        repo.sync_connection = v.trim().to_string();
-        repo.sync_gateway_url.clear(); // the selection is now the whole answer
-    }
-    if let Some(v) = review_queue {
-        repo.review_queue = v;
-    }
-    let updated = repo.clone();
-    save_repos(&repos)?;
-    Ok(updated)
+    update_repos(|repos| {
+        let repo = repos
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(|| format!("no repo with id {id:?}"))?;
+        if let Some(v) = plane_project {
+            repo.plane_project = v.trim().to_string();
+        }
+        if let Some(v) = sync_connection {
+            repo.sync_connection = v.trim().to_string();
+            repo.sync_gateway_url.clear(); // the selection is now the whole answer
+        }
+        if let Some(v) = review_queue {
+            repo.review_queue = v;
+        }
+        Ok(repo.clone())
+    })
 }
 
 /// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
 /// clone or store on disk (they may hold unpushed work / a clone-mode box's only copy) — only skein's
 /// registration is removed; report the paths so the user can delete them deliberately.
 pub fn remove_repo(id: &str) -> Result<Repo, String> {
-    let mut repos = load_repos();
-    let pos = repos
-        .iter()
-        .position(|r| r.id == id)
-        .ok_or_else(|| format!("no repo with id {id:?}"))?;
-    let removed = repos.remove(pos);
-    save_repos(&repos)?;
-    Ok(removed)
+    update_repos(|repos| {
+        let pos = repos
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| format!("no repo with id {id:?}"))?;
+        Ok(repos.remove(pos))
+    })
 }
 
 /// The repo a box belongs to: the registered repo whose id is the box-name prefix (`<id>-<branch>`).
@@ -395,12 +430,12 @@ pub fn add_repo(
         review_queue: true,
         sync_gateway_url: String::new(),
     };
-    let mut repos = load_repos();
-    repos.retain(|r| r.id != id); // replace any existing entry with the same id
-    repos.push(repo.clone());
-    repos.sort_by(|a, b| a.id.cmp(&b.id));
-    save_repos(&repos)?;
-    Ok(repo)
+    update_repos(|repos| {
+        repos.retain(|r| r.id != id); // replace any existing entry with the same id
+        repos.push(repo.clone());
+        repos.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(repo.clone())
+    })
 }
 
 /// Pull the latest code into a managed repo's working clone (`git -C <work> pull --ff-only`), so the
@@ -664,6 +699,62 @@ pub fn agent_for_box(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::{env_lock, tempdir};
+
+    /// Two writers adding repos at once, and none of them vanishes.
+    ///
+    /// Worse here than for the settings: every mutation of this file is a read-modify-write over
+    /// the whole list, so a lost update is a lost **repository** rather than a lost field. Adding
+    /// one while another tab renames a second, and the new repo is simply not there — no error, no
+    /// half-written file, just a registration that never happened.
+    ///
+    /// Counting, for the reason the settings test spells out: a version where each thread writes
+    /// its own distinct thing passes against the unlocked code often enough to be useless.
+    #[test]
+    fn two_writers_adding_repos_lose_none_of_them() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        save_repos(&[]).unwrap();
+
+        const EACH: usize = 60;
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let hands: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|who| {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for n in 0..EACH {
+                        update_repos(|repos| {
+                            repos.push(Repo {
+                                id: format!("{who}{n}"),
+                                source: String::new(),
+                                work: String::new(),
+                                store: String::new(),
+                                agent: "claude".into(),
+                                plane_project: String::new(),
+                                sync_connection: String::new(),
+                                review_queue: true,
+                                sync_gateway_url: String::new(),
+                            });
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hands {
+            h.join().unwrap();
+        }
+
+        let end = read_repos_uncached();
+        assert_eq!(
+            end.len(),
+            EACH * 2,
+            "repositories were lost between two writers"
+        );
+    }
 
     /// The account token stops being seeded the moment the fleet can scope.
     ///

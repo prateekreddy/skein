@@ -199,7 +199,7 @@ pub(crate) fn unique_connection_id(base: &str, taken: &[SyncConnection]) -> Stri
 /// then the legacy state — so an interrupted run leaves the old layout intact and simply migrates
 /// again next time.
 pub(crate) fn migrate_legacy_sync_config() -> Vec<SyncConnection> {
-    let mut cfg = load_config();
+    let cfg = load_config();
     let legacy_url = cfg
         .sync_gateway_url
         .trim()
@@ -277,8 +277,13 @@ pub(crate) fn migrate_legacy_sync_config() -> Vec<SyncConnection> {
     if let Err(e) = save_repos(&repos) {
         eprintln!("skein: recording which connection each repo uses: {e}");
     }
-    cfg.sync_gateway_url.clear();
-    if let Err(e) = save_config(&cfg) {
+    // Under the lock, and re-read there: this runs on a migration path that may be racing an
+    // ordinary settings save, and clearing one field by writing back a whole snapshot is how the
+    // other save is lost.
+    if let Err(e) = crate::config::update_config(|c| {
+        c.sync_gateway_url.clear();
+        Ok(())
+    }) {
         eprintln!("skein: clearing the superseded gateway setting: {e}");
     }
     let _ = fs::remove_file(legacy_token_path());
@@ -299,7 +304,7 @@ pub fn upsert_connection(
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("a gateway URL has to start with http:// or https://".into());
     }
-    let mut list = load_connections();
+    let list = load_connections();
     let id = match id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(id) => {
             if !valid_connection_id(id) {
@@ -322,16 +327,21 @@ pub fn upsert_connection(
         label,
         gateway_url: url,
     };
-    match list.iter_mut().find(|c| c.id == id) {
-        Some(existing) => *existing = conn.clone(),
-        None => list.push(conn.clone()),
-    }
     // The token first: a connection listed as ready before its credential landed would send someone
     // to press Track work against a gateway that will refuse them.
     if let Some(t) = token {
         set_connection_token(&id, t)?;
     }
-    save_connections(&list)?;
+    // Read-modify-write under the lock, and the list is re-read there: `list` above was loaded to
+    // work out the id and the label, and adding this connection onto that snapshot would drop any
+    // connection added since.
+    crate::util::update_json(&connections_json(), |all: &mut Vec<SyncConnection>| {
+        match all.iter_mut().find(|c| c.id == id) {
+            Some(existing) => *existing = conn.clone(),
+            None => all.push(conn.clone()),
+        }
+        Ok(())
+    })?;
     Ok(conn)
 }
 
@@ -357,13 +367,14 @@ pub fn remove_connection(id: &str) -> Result<(), String> {
             },
         ));
     }
-    let mut list = load_connections();
-    let before = list.len();
-    list.retain(|c| c.id != id);
-    if list.len() == before {
-        return Err(format!("no work-tracking connection called {id:?}"));
-    }
-    save_connections(&list)?;
+    crate::util::update_json(&connections_json(), |all: &mut Vec<SyncConnection>| {
+        let before = all.len();
+        all.retain(|c| c.id != id);
+        match all.len() == before {
+            true => Err(format!("no work-tracking connection called {id:?}")),
+            false => Ok(()),
+        }
+    })?;
     let _ = set_connection_token(id, "");
     Ok(())
 }

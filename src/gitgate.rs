@@ -449,24 +449,22 @@ fn record(req: &Request, hours: Option<i64>) -> Result<(), String> {
             Some(h) => (now + chrono::Duration::hours(h)).to_rfc3339(),
         },
     };
-    write_grants(merged(grants(), grant))
+    // Under the lock, with the existing grants read inside it: `merged` replaces the entry for one
+    // (box, repo) pair and keeps the rest, so a stale read here would drop whatever grant another
+    // approval had just recorded.
+    crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
+        *all = merged(std::mem::take(all), grant);
+        Ok(())
+    })
 }
 
 /// Withdraw a grant early. The token file is removed by the next refresh, and until then the grant
 /// is already gone from [`access`] — so a revoke is effective the moment it is recorded.
 pub fn revoke(box_name: &str, repo: &str) -> Result<(), String> {
-    let left: Vec<Grant> = grants()
-        .into_iter()
-        .filter(|g| !(g.box_name == box_name && same_repo(&g.repo, repo)))
-        .collect();
-    write_grants(left)
-}
-
-fn write_grants(all: Vec<Grant>) -> Result<(), String> {
-    let body = serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?;
-    let home = crate::config::skein_home();
-    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    crate::util::write_atomic(&grants_path(), &home, body.as_bytes())
+    crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
+        all.retain(|g| !(g.box_name == box_name && same_repo(&g.repo, repo)));
+        Ok(())
+    })
 }
 
 /// The live grants for one box, which is what the token refresher acts on.

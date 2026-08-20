@@ -14,6 +14,82 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+/// Hold an exclusive advisory lock on `lock_path` for as long as `f` runs.
+///
+/// **What this is for, and what atomic writes do not do.** `write_atomic` makes one write whole: a
+/// reader never sees half a file. It says nothing about two writers. Every declared file in skein
+/// is read-modify-write — load the settings, change one, save them back — and two of those
+/// interleaving is silent last-write-wins, where the loser's change simply never happened. Two
+/// cockpit tabs is enough.
+///
+/// So the lock has to be held across **both halves**, which is why this takes a closure rather than
+/// returning a guard: a guard can be dropped early by accident, and the accident is invisible.
+///
+/// `flock` is per open file description, so a nested call on the same path deadlocks against
+/// itself. Callers that lock then write use an unlocked inner write for exactly that reason.
+///
+/// Advisory, and shares the discipline the box hooks already use on `.sandboxes.lock`: everything
+/// that writes these files is skein or a skein-generated script, so the advisory nature costs
+/// nothing and the alternative — mandatory locking — is not portable.
+pub fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    use fs2::FileExt;
+    if let Some(dir) = lock_path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    }
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|e| format!("opening {}: {e}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .map_err(|e| format!("locking {}: {e}", lock_path.display()))?;
+    let out = f();
+    // Explicit rather than left to the drop: the unlock has to happen whichever way `f` went, and
+    // saying so is cheaper to check than tracing the lifetime of a file handle.
+    let _ = FileExt::unlock(&lock);
+    out
+}
+
+/// Read a JSON file, change it, write it back — with an exclusive lock held across all three.
+///
+/// The generic form of [`with_lock`], for the declared files that are lists or maps rather than one
+/// struct: grants, the package manifest, work-tracking connections. Every one of them is a
+/// read-modify-write over a whole collection, so a lost update is a lost *entry*, not a lost field.
+///
+/// A file that is missing or unreadable reads as `T::default()`. That is right for a collection —
+/// an absent grants file is no grants — and wrong for anything where an empty value is a decision,
+/// which is why the settings have their own version of this that refuses instead.
+///
+/// The lock file sits beside the target, named for it, so two different files never contend.
+pub fn update_json<T, R>(
+    path: &Path,
+    f: impl FnOnce(&mut T) -> Result<R, String>,
+) -> Result<R, String>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Default,
+{
+    let dir = path
+        .parent()
+        .ok_or("no directory to write into")?
+        .to_path_buf();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("unusable file name")?;
+    with_lock(&dir.join(format!(".{name}.lock")), || {
+        let mut current: T = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let out = f(&mut current)?;
+        let bytes = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        write_atomic(path, &dir, &bytes)?;
+        Ok(out)
+    })
+}
+
 /// Load a local `.env` (searched from the cwd upward) so the registry/repo paths and `*_CMD`
 /// templates needn't be passed on every invocation. Variables already set in the real
 /// environment win — dotenv never overrides — so a command-line `VAR=… skein …` still takes

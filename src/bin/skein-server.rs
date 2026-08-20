@@ -1250,19 +1250,26 @@ async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Response {
     let Some(patch) = patch.as_object() else {
         return (StatusCode::BAD_REQUEST, "settings must be an object").into_response();
     };
-    let current = skein::config::load_config();
-    let mut merged = match serde_json::to_value(&current) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => return (StatusCode::INTERNAL_SERVER_ERROR, "unreadable config").into_response(),
+    // The merge happens INSIDE the lock, against settings read inside it. Reading the base outside
+    // is what made two tabs lose each other: each merged its patch onto a snapshot taken before the
+    // other saved, so the second write put the first one's field back to what it had been.
+    let saved = skein::config::update_config(|c| {
+        let mut merged = match serde_json::to_value(&*c) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => return Err("unreadable config".to_string()),
+        };
+        for (key, value) in patch {
+            merged.insert(key.clone(), value.clone());
+        }
+        *c =
+            serde_json::from_value(serde_json::Value::Object(merged)).map_err(|e| e.to_string())?;
+        Ok(c.clone())
+    });
+    let c = match &saved {
+        Ok(c) => c.clone(),
+        Err(_) => skein::config::Config::default(),
     };
-    for (key, value) in patch {
-        merged.insert(key.clone(), value.clone());
-    }
-    let c: skein::config::Config = match serde_json::from_value(serde_json::Value::Object(merged)) {
-        Ok(c) => c,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-    match skein::config::save_config(&c) {
+    match saved.map(|_| ()) {
         Ok(()) => {
             // Apply a newly-set SSH key immediately (load into the agent) so the user needn't restart.
             if let Err(e) = skein::config::ensure_ssh_key() {
@@ -1699,20 +1706,20 @@ async fn api_fleet_plan() -> Json<serde_json::Value> {
 /// from.
 async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
     let out = tokio::task::spawn_blocking(move || {
-        let mut config = skein::config::load_config();
-        for (field, value) in [
-            (&mut config.fleet_memory, &r.memory),
-            (&mut config.fleet_cpus, &r.cpus),
-            (&mut config.fleet_disk, &r.disk),
-        ] {
-            // Empty means "leave what is configured", so a client sending only what it changed does
-            // not clear the rest.
-            if !value.trim().is_empty() {
-                *field = value.trim().to_string();
+        let sandbox = skein::config::update_config(|config| {
+            for (field, value) in [
+                (&mut config.fleet_memory, &r.memory),
+                (&mut config.fleet_cpus, &r.cpus),
+                (&mut config.fleet_disk, &r.disk),
+            ] {
+                // Empty means "leave what is configured", so a client sending only what it changed
+                // does not clear the rest.
+                if !value.trim().is_empty() {
+                    *field = value.trim().to_string();
+                }
             }
-        }
-        skein::config::save_config(&config)?;
-        let sandbox = config.fleet_sandbox.trim().to_string();
+            Ok(config.fleet_sandbox.trim().to_string())
+        })?;
         if sandbox.is_empty() {
             return Err("no fleet sandbox is named (fleet_sandbox is empty)".to_string());
         }

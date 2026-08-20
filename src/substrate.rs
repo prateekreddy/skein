@@ -453,11 +453,13 @@ pub fn manifest() -> Manifest {
 
 /// Add an approved request to the manifest.
 fn record(req: &Request) -> Result<(), String> {
-    let next = merged(manifest(), req);
-    let body = serde_json::to_string_pretty(&next).map_err(|e| e.to_string())?;
-    let home = crate::config::skein_home();
-    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    crate::util::write_atomic(&manifest_path(), &home, body.as_bytes())
+    // Under the lock. Two approvals landing together is not exotic here — the cockpit installs off
+    // the request thread, so two boxes answered in quick succession finish whenever apt does — and
+    // a lost update means a package its owner approved is missing from every future launch.
+    crate::util::update_json(&manifest_path(), |m: &mut Manifest| {
+        *m = merged(std::mem::take(m), req);
+        Ok(())
+    })
 }
 
 /// The packages a rebuilt sandbox must reinstall, as one `ensure_substrate` can splice in.

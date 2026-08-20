@@ -404,10 +404,57 @@ pub fn save_config(c: &Config) -> Result<(), String> {
              setting in that file with a default. Fix or move the file, then save again."
         ));
     }
+    with_lock(&config_lock(), || write_config(c))
+}
+
+/// Where the settings lock lives. Beside the file it guards, and hidden, because it is skein's own
+/// bookkeeping rather than anything a person edits.
+fn config_lock() -> std::path::PathBuf {
+    skein_home().join(".config.lock")
+}
+
+/// Write the settings with the lock **already held**. Never call this without it.
+fn write_config(c: &Config) -> Result<(), String> {
     let home = skein_home();
     fs::create_dir_all(&home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
     let bytes = serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?;
     write_atomic(&config_json(), &home, &bytes)
+}
+
+/// Change the settings: read, apply, write — all under one lock.
+///
+/// **The read has to happen inside the lock**, which is the whole reason this exists rather than a
+/// `lock(); save_config(load_config())` at each call site. Reading outside means acting on a value
+/// that may already be stale, so the write puts back fields somebody else has since changed: two
+/// cockpit tabs saving different settings, and one of them silently never happened.
+///
+/// `f` sees the current settings and mutates them in place. It returns whatever the caller wants
+/// out of the transaction — usually `()`, sometimes the value it just set.
+pub fn update_config<T>(f: impl FnOnce(&mut Config) -> Result<T, String>) -> Result<T, String> {
+    with_lock(&config_lock(), || {
+        // The same refusal `save_config` makes, for the same reason: `load_config` hands back
+        // defaults for a file it could not parse, and writing those over the file loses every
+        // setting in it.
+        // `None` is a first run with no file yet, which is an empty opinion rather than an
+        // unreadable one — it takes the defaults. An `Err` is the unreadable case, and is refused.
+        let mut current = read_config()
+            .map_err(|why| {
+                format!(
+                    "not saving over settings skein cannot read ({why}). Saving now would replace \
+                     every setting in that file with a default. Fix or move the file, then save again."
+                )
+            })?
+            .unwrap_or_default();
+        let out = f(&mut current)?;
+        if !valid_runtime(&current.default_agent) {
+            return Err(format!(
+                "unsupported default runtime {:?}",
+                current.default_agent
+            ));
+        }
+        write_config(&current)?;
+        Ok(out)
+    })
 }
 
 fn default_fleet_memory() -> String {
@@ -510,6 +557,58 @@ mod tests {
     /// refusing here would mean skein could never write its first config. It is also where the
     /// in-sandbox transport is decided for a new install — see
     /// `a_new_install_gets_the_faster_transport_without_being_asked` in `fleet`.
+    /// Two writers, and no update is lost.
+    ///
+    /// **Counting, not two different fields**, and that distinction is the whole test. The obvious
+    /// version — thread A sets the memory, thread B sets the cpus, assert both stuck — passes
+    /// against the unlocked code, because each thread writes the same value every round and the
+    /// last writer of each field usually happens to be the right one. It was written that way
+    /// first, checked against the broken shape, and passed. A test that cannot fail is worse than
+    /// no test: it is a claim.
+    ///
+    /// Incrementing one field is the sensitive form. Every lost interleave is a lost `+1` that no
+    /// later round puts back, so the final count is arithmetic rather than a race: with the lock
+    /// held across read and write it is exactly `2 * ROUNDS`, and without it, it is not.
+    #[test]
+    fn two_writers_lose_nothing_between_them() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        save_config(&Config {
+            fleet_cpus: "0".into(),
+            ..Config::default()
+        })
+        .unwrap();
+
+        const ROUNDS: usize = 200;
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let hands: Vec<_> = (0..2)
+            .map(|_| {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..ROUNDS {
+                        update_config(|c| {
+                            let n: usize = c.fleet_cpus.parse().unwrap_or(0);
+                            c.fleet_cpus = (n + 1).to_string();
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hands {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            load_config().fleet_cpus,
+            (ROUNDS * 2).to_string(),
+            "updates were lost between two writers"
+        );
+    }
+
     #[test]
     fn an_absent_config_is_not_an_error_and_saves_normally() {
         let _guard = env_lock();
