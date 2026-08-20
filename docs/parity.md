@@ -20,9 +20,11 @@ grep -c 'function ' src/web/index.html                          # 265
 sed -n '25,90p' src/bin/skein.rs                                # subcommands and flags
 ```
 
-Keyboard shortcuts are **not** a known gap: `const KEYMAP` at `src/web/index.html:4636` is the single
-declaration, and its comment says it exists "so the keys documented here cannot drift from the keys
-the app binds."
+Keyboard shortcuts have a single declaration — `const KEYMAP` at `src/web/index.html:4636`, whose
+comment says it exists "so the keys documented here cannot drift from the keys the app binds". **The
+code has drifted from it anyway**, so this is still a gap: `ArrowDown`/`ArrowUp` alias `j`/`k`, `o`
+aliases `↵`, `[` and `}` move between sessions (asymmetric because `]` is taken — likely a latent
+bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* the keydown handlers.
 
 **The rule:** an item leaves this list only by moving to §7 with a reason. Never by being forgotten.
 
@@ -168,7 +170,40 @@ the app binds."
 
 ---
 
+## 5a. Found in the third audit, and previously missing
+
+- **The voice command grammar** — six verb groups, longest-phrase-first matching, and `voiceTarget`
+  resolution (named box → last spoken → selected → the only one owed an answer). Including
+  **`tell it <words>` / `tell <box> <words>`, which posts a free-form prompt to the agent verbatim** —
+  a second write path into a box, by voice.
+- **Desktop notifications** — permission, per-box tag and renotify, click focuses and opens the box.
+- **Writing a module note from the cockpit**, with a one-at-a-time lock, a fresh/stale/absent chip,
+  per-module owners, and the rule that notes answer questions about a PR and never write its summary.
+  This matters directly to §11.1's change view.
+- **How inline review comments are delivered**: assembled per file and line and **bracketed-pasted
+  into the agent's live terminal**, then cleared. That is *why* "commenting is an Act against a box"
+  is true rather than aspirational.
+- **The shared toolchain and build cache** across boxes (see §7).
+- **`shared-paths.txt`** — surfacing a repo's gitignored essentials into every box's clone, RO by
+  symlink from the mirror, `rw` seeded once and live fleet-wide, with surfaced paths excluded from git
+  so `git add -A` cannot stage a host-absolute symlink.
+- **`$HOME/shared`** — a project-scoped durable workspace symlinked into every box, failing loudly.
+- **The health banner** — always-on, seven checks plus dark and stale box counts, showing the first
+  failure's own sentence and clicking through to diagnostics.
+- **Row hook-health with one-click repair** — `no signals` and `update probes`, the latter for a
+  session predating the installed probe contract.
+- **The `open` scope tag** — badges a box holding the fleet-wide credential.
+- **Terminal scrollback carry-over on reconnect**, with its `── reconnected ──` marker.
+- **Fleet settings**: Docker shares the fleet disk (one disk vs two — "the two disks are also two
+  firewalls"), base branch for PRs, confirm-before-destroy as a *setting*, overwrite-token-on-startup.
+- **The inherit/override grammar** in box settings — absent means inherit, empty means explicitly
+  nothing, a value overrides — across tracking, identity, disk and git-scope, each default naming what
+  inheriting currently means. And **disk is measured, not enforced**, said in the UI.
+
 ## 6. Items listed here that have no UI caller
+
+`store/telemetry/<vmid>.jsonl` — durable per-turn token usage, written by two probes and **read by
+nothing** anywhere in the server or the page. It belongs here or it should be deleted deliberately.
 
 `repin` is **API-only** — there is no `repin` CLI arm and no UI caller. An earlier version of this
 document said "API- and CLI-only", which was wrong. It is kept because removing it should be a
@@ -204,11 +239,27 @@ either move to the warden or to HTTPS with injected credentials.
 transport goes; the readout goes with it. This is recorded here because §12.2 of the first draft
 claimed no user-visible feature hid in the deletion list, and this was the counter-example.
 
-**Resize discards nothing, but it does copy.** Corrected from the first draft's claim of
-"nothing to copy": the checkout is reclonable from the mirror, but uncommitted work is not, so resize
-carries unpushed commits, index and worktree patches, untracked files, and deliberately-swept ignored
-files. If that machinery is not built, resize destroys every box's uncommitted work — which would be
-a larger removal than everything else on this page combined.
+**Resize is a root byte copy, and the earlier entry here described an abandoned mechanism.** It
+`tar`s the whole box tree out and back, which is why it demands 1.2× the box size free first. The
+bundle-and-patches reconstruction this page previously demanded is *not* what runs — it has no
+production caller, and the comment beside it says the reconstruction "is slower, less faithful, and
+it is where the fragility lives". Nothing here is removed; the requirement is that resize keeps
+carrying every box's work, by whatever mechanism, with the symlink and ignored-file rules in
+`docs/delivery.md` §5 intact.
+
+**The shared toolchain stops being shared.** `share_paths` binds `~/.local`, `~/.cargo`, `~/.rustup`
+and `~/.npm` read-write from the sandbox into every box, so one box's `cargo install` or
+`npm i -g` reaches all of them and the build cache warms them all. Architecture §9.5.4 removes that —
+either read-only with a per-box overlay, or not shared. **The speed and the convenience are the cost**,
+and the `sudo` shim's own text currently tells users to rely on it.
+
+**Everything that travels with the diff pane.** Not just a pane: the `d` shortcut, one of the six
+voice verbs ("show me the diff"), the palette's per-box `Diff:` entries, the refresh and "Send N"
+controls, and the diff tab as an attachment drop target.
+
+**The change view needs machinery that does not exist.** `moduledocs::touched` maps changed files to
+modules and contract signals are *file*-scoped — but per-module line counts, the NEW/CHANGED/SHRANK
+classification and "12 call sites" are three new things. "No new machinery" was too strong.
 
 **The diff pane and its inline comment composer — replaced, not ported.** Stated by the owner:
 diffs do not matter today, because agentic coding is good enough at writing code that line-by-line
@@ -224,12 +275,10 @@ Act against a box, which the terminal already is.
 **The transcript tab — not ported until asked for.** Never opened, and a reader with no loop attached
 to it. Kept on this page so its removal stays a decision.
 
-**The CLI stops working without a server** — if the architecture's "the CLI is a client of the
-server" stands. Today all twelve subcommands drive the library directly and work with no server
-running; `add` writes `repos.json` itself, `start` builds the whole box. As a client, none of them
-work before the cockpit exists — and the cockpit is inside the fleet, which does not exist before
-`create`. **This collides head-on with "first run is `skein doctor` in a terminal."** One of the two
-has to give, and until it does this is an unpriced removal rather than a decision.
+**The CLI stays standalone — settled, and no longer a removal.** Architecture §14.1 keeps it driving
+the library directly, because as a client it was inverted against the code (the server spawns it) and
+circular against first run needing a terminal before any server exists. The problem the client idea
+was solving is handled by a lock on declared state instead.
 
 **The `~/.skein` mount split.** `apiauth.rs:24-26` records that the API token is safe *because*
 `~/.skein/repos` and `~/.skein/boxes` are bind-mounted into boxes while `~/.skein` itself is not —
