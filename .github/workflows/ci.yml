@@ -16,3 +16,6 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+      # The module graph. Rust cannot express "this module may not depend on that one", so the rule
+      # architecture.md §14 is built on has no compiler behind it — this is the compiler.
+      - run: python3 tools/module-check.py

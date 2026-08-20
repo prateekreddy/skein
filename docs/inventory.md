@@ -175,22 +175,31 @@ from other modules returned **0** — not because nothing used it, but because e
 re-exports. Any module graph drawn against that code was aspiration.
 
 Removed in `8e38964`: `grep -c 'pub use' src/lib.rs` → **0**, and every reference is now a qualified
-`crate::<mod>::` path or an explicit `use crate::<mod>::…`. `tools/module-edges.py` records the
-weight on each edge (`tools/module-edges.tsv`, 266 rows, unchanged by the removal — none added, none
-gone).
+`crate::<mod>::` path or an explicit `use crate::<mod>::…`.
 
 The crate root followed in `6e3944b`. `wc -l src/lib.rs` → **58**, and
 `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**: what it held became `registry`,
-`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`. The
-recorded graph is now 417 edges over 26 modules.
+`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`.
 
-One thing both left, still true of the code today: the cycle. `place.rs:309` calls into `fleet`, and
-`fleet.rs:19` imports `place`.
+**The graph is now read exactly, and checked.** `python3 tools/module-check.py --graph` → **210
+edges over 38 units**, from `use crate::<mod>::` and `crate::<mod>::` alone: no heuristic, comments
+excluded because a doc link is not a call, and test code counted separately because a fixture
+reaching across modules is not a dependency of the design. `docs/modules.toml` is the allow-list and
+CI fails on an edge that is not in it.
 
-Two rows in `tools/module-edges.tsv` still name `lib` as a consumer, and they are false positives,
-not residue — the tool counts bare names, `moduledocs` exports one called `modules`, and lib.rs's
-module doc uses the word twice. It is the clearest live example of why the CI check should read the
-imports rather than the words.
+### What the exact graph says, and it is not comfortable
+
+`tools/module-check.py` reports **two strongly connected components**, and the larger one holds
+**eighteen of the twenty-six** modules: `ai config diff digest fleet gitgate kit mailbox place probes
+registry repos runtime sandbox sbx signals substrate tracking`. The second is `moduledocs prq review`.
+
+That is not eighteen mistakes. It is what one 7,400-line crate root looks like once it is split —
+`kit` calls `probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads
+`repos` to find a box's store while `repos` reads the registry to find its boxes. Every one of those
+was a call between two functions in one file, and invisible until there were two files.
+
+The `place → fleet` edge that §14.2 named is one strand of the larger knot rather than a cycle of its
+own. `place.rs:309` calls into `fleet`, and `fleet.rs:19` imports `place`.
 
 ---
 

@@ -1400,17 +1400,32 @@ rather than a tidy-up afterwards.
 **Done** — commit `8e38964`. The modules are `pub mod`, there are no re-exports at the root, and
 every cross-module reference is a qualified `crate::<mod>::` path or an explicit
 `use crate::<mod>::…`. Check: `grep -c 'pub use' src/lib.rs` → **0**. The edge set is now readable
-straight off the imports; `tools/module-edges.py` counts the weight on each edge.
+straight off the imports.
 
 The catch-all went with it (`6e3944b`). `src/lib.rs` is now 58 lines, every one a module
 declaration or the doc that says why; the ~2,570 lines of implementation it held became `registry`,
-`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`. The
-graph is 417 edges over 26 modules where it was 266 with a `lib` node holding a quarter of the code.
+`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`.
 Check: `wc -l src/lib.rs`, and `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**.
 
-One thing neither change fixed, and it has its own row on the board: the `place → fleet` cycle.
-`place.rs:309` reaches `fleet::recorded_agent_port`, which §13a deletes outright, so it dissolves
-with the transport rather than needing its own untangling.
+**And the table above is now enforced.** `docs/modules.toml` is this section in machine-readable
+form, and `tools/module-check.py` runs in CI. It holds three lines:
+
+- every edge in `src/` is in the allow-list, so a new dependency is a reviewed diff;
+- no module joins a dependency cycle that is not already recorded;
+- **this table is consistent with itself** — every dependency it names is a module it declares, and
+  the graph is acyclic. That is what enforces "`state` and `source` depend on nothing" and
+  "`source` never depends on `operation`": both are properties of a DAG with those rows empty, and
+  an edit that breaks either one fails the build with the cycle spelled out.
+
+One row of the table above could not be made machine-readable, and `docs/modules.toml` says so
+rather than papering over it: `api`'s "everything below" is ambiguous. Read literally — the rows
+printed below it — it makes `api` depend on `cli` and on `cockpit`, and `cockpit` already depends on
+`api`. The file encodes the intended reading (everything `api` sits on top of) and flags it.
+
+What neither change fixed is larger than the `place → fleet` edge §14.2 was written about. The exact
+graph has **two cycles, and the larger holds eighteen of the twenty-six modules** — see
+`docs/inventory.md` §6. That is the condition this section exists to end, and it ends by extraction
+into the modules above rather than by untangling the ones below.
 
 ## 15. Open
 

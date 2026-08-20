@@ -1,0 +1,240 @@
+# What each module may depend on. Read by `tools/module-check.py`, which fails the build on an edge
+# that is not here.
+#
+# Two graphs, because the rewrite has two. `[destination.*]` is architecture.md §14 — the design,
+# which nothing implements yet, checked only against itself. `[current.*]` is what `src/` has today,
+# generated from the code and then reviewed, so that adding a dependency is a line in a diff rather
+# than an import nobody looked at.
+#
+# The point of the allow-list is not that today's edges are right. Most of them are not: eighteen of
+# the twenty-six modules are one mutually dependent knot, which is the condition §14 exists to end.
+# The point is that the knot cannot quietly get bigger.
+
+# ─────────────────────────── the destination: architecture.md §14 ───────────────────────────
+#
+# `owns` is abbreviated; the table in §14 is the text. What is load-bearing here is `depends_on`,
+# because two of §14's rules are statements about it and nothing else:
+#
+#   - `state` and `source` depend on nothing.
+#   - `source` never depends on `operation` — reaching a subject must never require privilege.
+#
+# Both are enforced by those rows being empty, and by the whole graph being acyclic.
+
+[destination.state]
+owns = "the volume: declared, requested, artifact, recorded — and the rule each carries"
+depends_on = []
+
+[destination.source]
+owns = "enter, socket, file, http"
+depends_on = []
+
+[destination.signal]
+owns = "kinds, freshness, budgets, cadence, gates, fusion"
+depends_on = ["source", "state"]
+
+[destination.operation]
+owns = "desired, tri-state check, recipe, doer, DAG, leases"
+depends_on = ["state", "signal"]
+
+[destination.act]
+owns = "streaming interactions; emits edges; reports outcomes"
+depends_on = ["source", "signal", "state"]
+
+[destination.warden-client]
+owns = "protocol, operation ids"
+depends_on = ["operation"]
+
+[destination.warden]
+owns = "the host service: capabilities, approval surface, outcome store, audit log"
+# Deliberately empty, and not an oversight: the warden is a separate binary with no dependency on
+# skein's modules. §14 says so in the row itself.
+depends_on = []
+
+[destination.box]
+owns = "box identity and lifecycle"
+depends_on = ["state", "operation", "act", "source", "signal"]
+
+[destination.fleet]
+owns = "fleet lifecycle — create, destroy, resize as their composition"
+depends_on = ["operation", "warden-client", "state"]
+
+[destination.grant]
+owns = "who may do what, and with which credential"
+depends_on = ["state", "source", "warden-client"]
+
+[destination.mailbox]
+owns = "cross-box and cross-project messaging, and its provenance"
+depends_on = ["state"]
+
+[destination.github]
+owns = "HTTP client, review queue, CODEOWNERS, contract signals, summary cache and its throttle"
+depends_on = ["state", "source"]
+
+[destination.probes]
+owns = "the in-box probe scripts and hook merging; the probe/binary compatibility contract"
+depends_on = ["state", "source"]
+
+[destination.api]
+owns = "HTTP transport, auth, routes, the WebSocket"
+# §14 writes this row as "everything below", which is the one row of the table that cannot be read
+# mechanically: taken literally — the rows printed below it — it would make `api` depend on `cli`
+# and on `cockpit`, and `cockpit` already depends on `api`. So this is the reading, not the text:
+# everything api sits on top of, and nothing that sits on top of api. If the reading is wrong, the
+# acyclicity check is what will say so.
+depends_on = [
+  "state", "source", "signal", "operation", "act", "warden-client",
+  "box", "fleet", "grant", "mailbox", "github", "probes", "stream",
+]
+
+[destination.stream]
+owns = "the single event producer and its fan-out, and transitions"
+depends_on = ["signal", "state"]
+
+[destination.cockpit]
+owns = "the page, its build, and the component library"
+depends_on = ["api"]  # over the wire only
+
+[destination.migrate]
+owns = "the one-shot: snapshot, carry, rewrite hooks, refuse"
+depends_on = ["state", "operation", "box"]
+
+[destination.cli]
+owns = "skein"
+depends_on = ["state", "operation", "act", "signal", "box", "fleet", "warden-client"]
+
+# ──────────────────────────────── the cycles that exist today ────────────────────────────────
+#
+# Recorded, not tolerated. Each one needs a reason and something that ends it; the check fails when
+# a module JOINS one, and fails when a recorded cycle is gone and this file still claims it.
+
+[[cycle]]
+modules = [
+  "ai", "config", "diff", "digest", "fleet", "gitgate", "kit", "mailbox", "place", "probes",
+  "registry", "repos", "runtime", "sandbox", "sbx", "signals", "substrate", "tracking",
+]
+why = """
+Eighteen modules in one strongly connected component — two thirds of the crate. It is not a
+mistake anyone made in one place: it is what a single 7,400-line crate root looked like once it was
+split, and the mutual references were function calls inside one file until then. `kit` calls
+`probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads `repos` to find
+a box's store while `repos` reads the registry to find its boxes; `place` reaches into `fleet` for a
+port that §13a deletes.
+
+This is the condition architecture.md §14 exists to end, and it ends by extraction into the
+destination modules rather than by untangling these. Recorded here so it cannot silently grow.
+"""
+item = "SKEIN-1"
+
+[[cycle]]
+modules = ["moduledocs", "prq", "review"]
+why = """
+The review queue, the PR store and the module-doc enrichment call each other directly. Separable
+from the big knot and separately fixable: all three want one `github` module beneath them, which
+§14 gives them.
+"""
+item = "SKEIN-1"
+
+# ─────────────────────────────────── today's allow-list ───────────────────────────────────
+#
+# Generated by `python3 tools/module-check.py --update`, then read. Regenerating is how you accept
+# a new edge; the diff is where somebody decides whether it should exist.
+# @CURRENT
+
+[current.ai]
+depends_on = ["config", "signals", "util"]
+
+[current.apiauth]
+depends_on = ["config"]
+
+[current."bin/skein"]
+depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util"]
+
+[current."bin/skein-server"]
+depends_on = ["ai", "apiauth", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util"]
+
+[current.board]
+depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
+
+[current.config]
+depends_on = ["runtime", "util"]
+
+[current.diff]
+depends_on = ["answer", "config", "registry", "sandbox", "sbx", "util"]
+
+[current.digest]
+depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
+
+[current.files]
+depends_on = ["answer", "place", "sandbox", "sbx", "util"]
+
+[current.fleet]
+depends_on = ["config", "gitgate", "kit", "place", "repos", "sbx", "substrate", "util"]
+
+[current.gitgate]
+depends_on = ["config", "fleet", "place", "repos", "util"]
+
+[current.github]
+depends_on = ["util"]
+
+[current.handoff]
+depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util"]
+
+[current.health]
+depends_on = ["ai", "board", "fleet", "gitgate", "github", "registry", "repos", "runtime", "sbx", "util"]
+
+[current.kit]
+depends_on = ["config", "probes", "repos", "util"]
+
+[current.mailbox]
+depends_on = ["registry", "repos", "util"]
+
+[current.moduledocs]
+depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
+
+[current.place]
+depends_on = ["config", "fleet", "util"]
+
+[current.probes]
+depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]
+
+[current.prq]
+depends_on = ["config", "gitgate", "github", "repos", "review", "util"]
+
+[current.registry]
+depends_on = ["mailbox", "repos", "sbx", "util"]
+
+[current.repos]
+depends_on = ["config", "gitgate", "kit", "place", "registry", "runtime", "sbx", "tracking", "util"]
+
+[current.review]
+depends_on = ["ai", "codeowners", "config", "contracts", "moduledocs", "prq", "repos", "util"]
+
+[current.runtime]
+depends_on = ["repos", "util"]
+
+[current.sandbox]
+depends_on = ["ai", "fleet", "kit", "place", "registry", "repos", "runtime", "sbx", "tracking", "util"]
+
+[current.sbx]
+depends_on = ["fleet", "place", "registry", "util"]
+
+[current.sharedhome]
+depends_on = ["kit", "repos", "sandbox", "util"]
+
+[current.signals]
+depends_on = ["digest", "registry", "util"]
+
+[current.substrate]
+depends_on = ["config", "fleet", "place", "util"]
+
+[current.takeover]
+depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", "sandbox", "sbx", "util"]
+
+[current.testutil]
+depends_on = ["place", "registry"]
+
+[current.tracking]
+depends_on = ["config", "repos", "sandbox", "sbx", "util"]
+
+[current.transcript]
+depends_on = ["fleet", "place", "repos", "sandbox", "util"]
