@@ -481,12 +481,12 @@ pub fn live_grants_for(box_name: &str, now: chrono::DateTime<chrono::Utc>) -> Ve
 
 /// Where a box's own answer to "scope my GitHub credential?" is kept.
 ///
-/// A file in the box's host state directory, exactly as its disk override already is. Host-side, so
-/// the cockpit can flip it with the fleet down, and per box so one box can be opened up without
-/// opening the fleet.
-fn scope_override_path(box_name: &str) -> std::path::PathBuf {
-    std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-scope")
-}
+/// [`crate::fleet::box_declared`], which is host-only and not in the sandbox at all — not the box's
+/// state directory, which is bound read-write into the box because its conversation lives there.
+/// This file decides whether the box gets a token scoped to its own repository or the account-wide
+/// one, so a box that could write it could hand itself the account: exactly the outcome `apiauth`
+/// exists to prevent, reached with no API call at all.
+const SCOPE_FLAG: &str = "git-scope";
 
 /// Is this box's GitHub credential scoped to its own repository?
 ///
@@ -494,6 +494,22 @@ fn scope_override_path(box_name: &str) -> std::path::PathBuf {
 /// else — an empty file, a hand-edit, a half-written write — falls back to the default rather than
 /// guessing, because the two failure directions are not equal: guessing "fleet" hands a box the
 /// account, and guessing "repo" costs it a push it can ask for.
+/// The box's own declared scope, if it has one — `None` means it follows the fleet default.
+///
+/// Separate from [`box_is_scoped`] so the *inheritance* can be asserted apart from the answer: the
+/// two failure directions are not equal, and "no override" has to be distinguishable from "override
+/// says fleet" for a test to show that an abandoned file is not being read as one.
+pub fn declared_scope(box_name: &str) -> Option<String> {
+    match crate::fleet::declared_read(box_name, SCOPE_FLAG)
+        .unwrap_or_default()
+        .trim()
+    {
+        "repo" => Some("repo".into()),
+        "fleet" => Some("fleet".into()),
+        _ => None,
+    }
+}
+
 pub fn box_is_scoped(box_name: &str) -> bool {
     // Nothing to issue with is nothing to scope with. With neither an App nor a stored PAT there is
     // no write token for a box's *own* repo either, so scoping here would not narrow a box's reach —
@@ -504,7 +520,7 @@ pub fn box_is_scoped(box_name: &str) -> bool {
     if !can_issue_write_tokens() {
         return false;
     }
-    match std::fs::read_to_string(scope_override_path(box_name))
+    match crate::fleet::declared_read(box_name, SCOPE_FLAG)
         .unwrap_or_default()
         .trim()
     {
@@ -520,22 +536,15 @@ pub fn set_box_scope(box_name: &str, scope: Option<&str>) -> Result<(), String> 
     if !crate::util::valid_name(box_name) {
         return Err(format!("unusable box name {box_name:?}"));
     }
-    let path = scope_override_path(box_name);
     let Some(scope) = scope else {
         // A missing file is inheritance, so removing it is how a box goes back to following the
         // fleet — not writing the fleet's current answer into it, which would freeze today's default.
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
+        return crate::fleet::declared_clear(box_name, SCOPE_FLAG);
     };
     if scope != "repo" && scope != "fleet" {
         return Err(format!("unknown scope {scope:?}"));
     }
-    let dir = path.parent().ok_or("no state directory")?.to_path_buf();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    crate::util::write_atomic(&path, &dir, scope.as_bytes())
+    crate::fleet::declared_write(box_name, SCOPE_FLAG, scope.as_bytes())
 }
 
 /// The GitHub repository a managed repo maps to, as `owner/name` — the one answer to that question.

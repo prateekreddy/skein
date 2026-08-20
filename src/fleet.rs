@@ -483,15 +483,6 @@ pub fn box_state_root() -> String {
     skein_home().join("boxes").to_string_lossy().into_owned()
 }
 
-/// Where one box's "this is the workshop box" answer is kept.
-///
-/// A file in the box's host state directory, exactly as its disk and git-scope overrides already
-/// are. Host-side so the cockpit can set it with the fleet down, and per box because the whole
-/// point is that it is true of one box and false of the rest.
-fn privileged_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(&box_state(name)).join("privileged")
-}
-
 /// Is this the workshop box — the one that may see every box's files and act at fleet scope?
 ///
 /// Ordinary boxes get a mount namespace that hides the other boxes' directories, and an empty file
@@ -502,10 +493,7 @@ fn privileged_path(name: &str) -> std::path::PathBuf {
 /// — is off, because the two failure directions are nothing like each other: guessing "privileged"
 /// hands one box every other box's credentials, and guessing "ordinary" costs a restart.
 pub fn box_is_privileged(name: &str) -> bool {
-    std::fs::read_to_string(privileged_path(name))
-        .unwrap_or_default()
-        .trim()
-        == "1"
+    declared_read(name, "privileged").unwrap_or_default().trim() == "1"
 }
 
 /// Make `name` the workshop box, or return it to being ordinary. Takes effect at its **next start**:
@@ -518,22 +506,93 @@ pub fn set_box_privileged(name: &str, on: bool) -> Result<(), String> {
     if !crate::util::valid_name(name) {
         return Err(format!("unusable box name {name:?}"));
     }
-    let path = privileged_path(name);
-    if !on {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
-        };
+    match on {
+        false => declared_clear(name, "privileged"),
+        true => declared_write(name, "privileged", b"1"),
     }
-    let dir = path.parent().ok_or("no state directory")?.to_path_buf();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    crate::util::write_atomic(&path, &dir, b"1")
 }
 
-/// One box's durable host-side state directory.
+/// One box's durable host-side state directory — **and the box can write it.**
+///
+/// It has to be writable: the conversation, the transcripts and the box's git tokens live here, and
+/// the box is what produces them. That makes it the wrong home for anything skein *decides*, which
+/// is what [`box_declared`] exists for. Reported state here; declared state there (§2.1).
 pub fn box_state(name: &str) -> String {
     format!("{}/{name}", box_state_root())
+}
+
+/// Where skein keeps what it has **decided** about a box, as opposed to what the box reports.
+///
+/// Host-only, and never in [`fleet_mounts`] — so it is not merely covered inside a box's namespace,
+/// it is not in the sandbox at all. That is the difference between this and a bind a box could be
+/// handed by a launcher that skipped a cover.
+///
+/// **Why it is a separate directory and not a file mode.** Four security-deciding answers used to
+/// live in `box_state`, beside the conversation, in a directory the box writes read-write:
+/// `privileged`, `git-scope`, `disk` and `identity`. From inside any box, `echo 1 > .../privileged`
+/// made it the workshop box at its next start — every isolation bind skipped and the fleet agent's
+/// token readable, which runs scripts as root at fleet scope and reaches every other box's
+/// credentials and conversations. `git-scope` was the same shape for the account-wide GitHub token,
+/// `disk` for its own allowance on a shared disk, `identity` for who it commits as.
+///
+/// None of those was a bug in how the file was read. Each was a decision stored where the party it
+/// constrains could write it, so the fix is where it lives rather than how it is parsed.
+pub fn box_declared(name: &str) -> std::path::PathBuf {
+    skein_home().join("declared").join(name)
+}
+
+/// Boxes whose abandoned pre-split files have already been mentioned, so a per-tick reader does not
+/// say it every tick.
+static SAID_ABANDONED: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> =
+    std::sync::Mutex::new(None);
+
+/// Read one declared answer, or `None`.
+///
+/// A value left at the OLD path is **ignored, not migrated**, and said out loud once. Migrating it
+/// would carry the vulnerability across: any box could have written any of those files at any point
+/// before this existed, so a value found there proves nothing about who chose it. The cost of
+/// ignoring is that someone re-ticks a setting; the cost of trusting is the workshop box.
+pub(crate) fn declared_read(name: &str, flag: &str) -> Option<String> {
+    if !crate::util::valid_name(name) {
+        return None;
+    }
+    let fresh = std::fs::read_to_string(box_declared(name).join(flag)).ok();
+    if fresh.is_none() {
+        let stale = std::path::Path::new(&box_state(name)).join(flag);
+        if stale.exists() {
+            let mut said = SAID_ABANDONED.lock().unwrap_or_else(|e| e.into_inner());
+            let seen = said.get_or_insert_with(Default::default);
+            if seen.insert(format!("{name}/{flag}")) {
+                eprintln!(
+                    "skein: {name} has an old {flag} setting at {} — ignored, because that \
+                     directory is writable from inside the box. Set it again in the cockpit and \
+                     delete the old file.",
+                    stale.display()
+                );
+            }
+        }
+    }
+    fresh
+}
+
+pub(crate) fn declared_write(name: &str, flag: &str, body: &[u8]) -> Result<(), String> {
+    if !crate::util::valid_name(name) {
+        return Err(format!("unusable box name {name:?}"));
+    }
+    let dir = box_declared(name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    write_atomic(&dir.join(flag), &dir, body)
+}
+
+pub(crate) fn declared_clear(name: &str, flag: &str) -> Result<(), String> {
+    if !crate::util::valid_name(name) {
+        return Err(format!("unusable box name {name:?}"));
+    }
+    match std::fs::remove_file(box_declared(name).join(flag)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// The `sbx create` argv for the fleet sandbox.
@@ -2395,9 +2454,7 @@ static RESOURCE_GATE: crate::util::Gate<FleetResources> = crate::util::Gate::new
 /// This box's disk allowance in MiB: its own if it has one, else the fleet-wide default, `None` for
 /// unlimited. Read at every check, so changing it takes effect on the next refresh — no restart.
 pub fn box_disk_limit(name: &str) -> Option<u64> {
-    let own = std::fs::read_to_string(std::path::Path::new(&box_state(name)).join("disk"))
-        .ok()
-        .map(|s| s.trim().to_string());
+    let own = declared_read(name, "disk").map(|s| s.trim().to_string());
     match own {
         // An empty override is a decision — this box is allowed to use the whole disk.
         Some(v) if v.is_empty() => None,
@@ -2408,15 +2465,8 @@ pub fn box_disk_limit(name: &str) -> Option<u64> {
 
 /// Give one box a different allowance, or hand it back to the default. Takes effect immediately.
 pub fn set_box_disk_limit(name: &str, limit: Option<&str>) -> Result<(), String> {
-    let dir = std::path::PathBuf::from(box_state(name));
-    let path = dir.join("disk");
     let Some(limit) = limit else {
-        return match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Err(format!("clearing {}: {e}", path.display()))
-            }
-            _ => Ok(()),
-        };
+        return declared_clear(name, "disk");
     };
     // Three states, and only two of them are a size: `none` says this box may use the whole disk,
     // which is different from having no opinion (that is `None`, and inherits the default).
@@ -2429,8 +2479,7 @@ pub fn set_box_disk_limit(name: &str, limit: Option<&str>) -> Result<(), String>
             "{limit:?} is not a size — try 10g, 512m, or `none` for unlimited"
         ));
     }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-    write_atomic(&path, &dir, limit.as_bytes())
+    declared_write(name, "disk", limit.as_bytes())
 }
 
 /// Who a box commits as: its own choice, else the configured default, else the host clone's.
@@ -2467,8 +2516,7 @@ pub fn box_identity(name: &str, repo: &Repo) -> (String, String) {
 
 /// A box's own committer, recorded at creation. `name\nemail`, beside its other durable state.
 pub fn box_identity_override(name: &str) -> Option<(String, String)> {
-    let raw =
-        std::fs::read_to_string(std::path::Path::new(&box_state(name)).join("identity")).ok()?;
+    let raw = declared_read(name, "identity")?;
     let mut lines = raw.lines();
     Some((
         lines.next().unwrap_or_default().trim().to_string(),
@@ -2478,19 +2526,11 @@ pub fn box_identity_override(name: &str) -> Option<(String, String)> {
 
 /// Record (or clear) that committer. `None` returns the box to the configured default.
 pub fn set_box_identity(name: &str, who: Option<(&str, &str)>) -> Result<(), String> {
-    let dir = std::path::PathBuf::from(box_state(name));
-    let path = dir.join("identity");
     let Some((who_name, email)) = who else {
-        return match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Err(format!("clearing {}: {e}", path.display()))
-            }
-            _ => Ok(()),
-        };
+        return declared_clear(name, "identity");
     };
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let body = format!("{}\n{}\n", who_name.trim(), email.trim());
-    write_atomic(&path, &dir, body.as_bytes())
+    declared_write(name, "identity", body.as_bytes())
 }
 
 /// Set that identity inside the box, so its first commit is not `Author identity unknown`.
@@ -4220,6 +4260,93 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing skein DECIDES about a box lives where that box can write.
+    ///
+    /// This is the bug, stated as a property. All four of these used to sit in `box_state`, which is
+    /// bound read-write into the box because the conversation and the git tokens live there. From
+    /// inside any box: `echo 1 > .../privileged`, and at its next start every isolation bind is
+    /// skipped and the fleet agent's token is readable — and that token runs scripts as root at
+    /// fleet scope, reaching every other box's credentials and conversations. `git-scope` was the
+    /// same shape for the account-wide GitHub token, `disk` for its own allowance on a shared disk,
+    /// `identity` for who it commits as.
+    ///
+    /// Written as "not under the mounted root" rather than "under this exact path", because the
+    /// property is what matters: a future flag put back beside the conversation fails this, and so
+    /// does mounting the declared directory into the sandbox.
+    #[test]
+    fn what_skein_decides_about_a_box_is_not_where_the_box_can_write_it() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let declared = box_declared("web-main");
+        assert!(
+            !declared.starts_with(box_state_root()),
+            "declared state is back inside the directory boxes write: {}",
+            declared.display()
+        );
+        // And not merely covered inside a namespace — not in the sandbox at all, so a launcher that
+        // skipped a cover could not hand it over either.
+        for mount in fleet_mounts() {
+            assert!(
+                !declared.starts_with(&mount),
+                "{} is mounted into the sandbox, so {} is reachable from a box",
+                mount,
+                declared.display()
+            );
+        }
+
+        // Each of the four round-trips through the new home, and none of them writes the old one.
+        set_box_privileged("web-main", true).unwrap();
+        set_box_disk_limit("web-main", Some("4g")).unwrap();
+        set_box_identity("web-main", Some(("A Dev", "dev@example.com"))).unwrap();
+        crate::gitgate::set_box_scope("web-main", Some("fleet")).unwrap();
+        assert!(box_is_privileged("web-main"));
+        assert_eq!(box_disk_limit("web-main"), Some(4096));
+        assert_eq!(
+            box_identity_override("web-main"),
+            Some(("A Dev".into(), "dev@example.com".into()))
+        );
+        assert!(!crate::gitgate::box_is_scoped("web-main"));
+
+        let box_writable = std::path::Path::new(&box_state("web-main")).to_path_buf();
+        for flag in ["privileged", "disk", "identity", "git-scope"] {
+            assert!(
+                !box_writable.join(flag).exists(),
+                "{flag} was written where the box can rewrite it"
+            );
+        }
+    }
+
+    /// A value left at the old path is ignored, not migrated.
+    ///
+    /// Migrating would carry the vulnerability across: any box could have written any of these at
+    /// any point before the split, so a value found there proves nothing about who chose it. The
+    /// cost of ignoring is that someone re-ticks a setting once.
+    #[test]
+    fn a_setting_left_where_a_box_could_have_written_it_is_not_believed() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let stale = std::path::PathBuf::from(box_state("web-main"));
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("privileged"), "1").unwrap();
+        std::fs::write(stale.join("git-scope"), "fleet").unwrap();
+
+        assert!(
+            !box_is_privileged("web-main"),
+            "a box that promoted itself before the split stays promoted"
+        );
+        // `fleet` in the old file must not un-scope the credential either; with nothing declared,
+        // the answer comes from the fleet default rather than from the box.
+        assert_eq!(
+            crate::gitgate::declared_scope("web-main"),
+            None,
+            "the abandoned override was read as an answer"
+        );
+    }
 
     /// The anchor is whatever the launcher *marked*, not whatever it printed last.
     ///
