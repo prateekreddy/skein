@@ -78,17 +78,38 @@ fn yes() -> bool {
 
 /// Every package skein is willing to name on a privileged command line.
 ///
-/// Deliberately a whitelist of shapes rather than a blacklist of tricks. apt and npm both accept
-/// names far narrower than this, so nothing legitimate is lost, and the rejected set includes the
-/// only two that matter: a leading `-` (which apt reads as an option, not a package) and any `..`
-/// (a path escape, however it is spelled). An empty list is refused too — `apt-get install` with no
-/// arguments is not a no-op worth running as root.
-fn package_is_nameable(p: &str) -> bool {
-    !p.is_empty()
-        && !p.starts_with('-')
-        && !p.contains("..")
-        && p.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._+@/-".contains(c))
+/// **This is an argv-injection guard and never a privilege guard, and the difference matters.** Any
+/// approved apt or npm package is arbitrary root code by design: maintainer scripts and lifecycle
+/// scripts run as root, at fleet scope, and — once remembered — at every future launch. Nothing
+/// here makes a package safe. It makes the *shape* of a name safe, so that what runs is a package
+/// install and not an option skein never meant to pass.
+///
+/// A whitelist of shapes rather than a blacklist of tricks, and it is **per kind**, which it was
+/// not. It admitted `/` for every kind, so `apt-get install ./x.deb` installed a file out of the
+/// box's own tree and `npm install -g /path` ran that path's lifecycle scripts — both as root, both
+/// then written into the manifest and replayed at every launch. `/` is legitimate in exactly one
+/// place, an npm scope, so that is the only place it is allowed.
+fn package_is_nameable(kind: &str, p: &str) -> bool {
+    if p.is_empty() || p.starts_with('-') || p.starts_with('.') || p.contains("..") {
+        return false;
+    }
+    let body = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+    };
+    match kind {
+        // `@scope/name`, and nothing else with a slash in it. Not "at most one slash": the scope
+        // has to be a scope, or `x/../../y` is one slash and a path.
+        "npm" => match p.strip_prefix('@') {
+            Some(scoped) => match scoped.split_once('/') {
+                Some((scope, name)) => body(scope) && body(name),
+                None => false,
+            },
+            None => body(p),
+        },
+        _ => body(p),
+    }
 }
 
 impl Request {
@@ -103,7 +124,11 @@ impl Request {
         if self.packages.is_empty() {
             return Some("no packages named".into());
         }
-        if let Some(bad) = self.packages.iter().find(|p| !package_is_nameable(p)) {
+        if let Some(bad) = self
+            .packages
+            .iter()
+            .find(|p| !package_is_nameable(&self.kind, p))
+        {
             return Some(format!("{bad:?} is not a package name"));
         }
         if self.id.is_empty() || self.id.contains('/') || self.id.contains("..") {
@@ -162,7 +187,23 @@ pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
         sh_quote(&requests_dir())
     );
     let out = own_sandbox(sandbox).exec(&script, Duration::from_secs(30))?;
-    Ok(parse_requests(&out))
+    // The queue says what was ASKED; the host says what was DECIDED, and where they disagree the
+    // host wins outright. A box can rewrite its own file after approval — changing the packages,
+    // or setting the state back to `pending` to be asked about again — and neither reaches here.
+    Ok(decided_over(parse_requests(&out)))
+}
+
+/// The host's decision wins over the box's copy of it, request by request.
+///
+/// Separate and pure because it is the rule, not a detail of reading: the queue says what was
+/// ASKED and the host says what was DECIDED, and a box that rewrites its own file after approval —
+/// changing the packages, or setting the state back to `pending` to be asked again — must not
+/// reach anything downstream of this.
+fn decided_over(asked: Vec<Request>) -> Vec<Request> {
+    asked
+        .into_iter()
+        .map(|asked| decision(&asked.id).unwrap_or(asked))
+        .collect()
 }
 
 /// The script that records a decision against a request.
@@ -185,27 +226,75 @@ fn decision_script(id: &str, state: &str, remember: bool) -> String {
     )
 }
 
-/// Approve or deny a request. Approving does not install — [`install`] does, so the cockpit can
-/// answer immediately and the wait for apt belongs to the caller.
-pub fn decide(sandbox: &str, id: &str, approve: bool, remember: bool) -> Result<Request, String> {
-    let mut found = list(sandbox)?
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(|| format!("no request {id}"))?;
-    if let Some(why) = found.problem() {
+/// Where the fleet's decisions live: on the **host**, one file per request.
+///
+/// This is the artifact, and it is the whole fix. The queue in the sandbox is a box's *input* and
+/// nothing else — a box can rewrite its own request at any moment, including while its owner is
+/// reading it. So the decision is not written there and is never read back from there.
+fn decision_path(id: &str) -> Option<std::path::PathBuf> {
+    (!id.is_empty() && !id.contains('/') && !id.contains("..")).then(|| {
+        crate::config::skein_home()
+            .join("substrate")
+            .join(format!("{id}.json"))
+    })
+}
+
+/// The decision skein recorded for `id`, if it has made one.
+pub fn decision(id: &str) -> Option<Request> {
+    let body = std::fs::read_to_string(decision_path(id)?).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
+/// Approve or deny **the request the caller was looking at**. Approving does not install —
+/// [`install`] does, so the cockpit can answer immediately and the wait for apt belongs to it.
+///
+/// `rendered` is not a convenience and not an optimisation: it is the request as it was shown to
+/// the person who clicked, and it is what gets approved. The rule "the approving side writes the
+/// artifact" is necessary and was never sufficient, because the artifact used to be written from a
+/// **re-read by id** — which moved the window from approve-to-install (machine scale) out to
+/// render-to-click (human scale, seconds to minutes). Larger, not smaller. So the approving side
+/// keeps the bytes it rendered and acts on those, and does not re-open the file at all.
+///
+/// A decision is made **once**. A second call for the same id is refused rather than overwriting,
+/// so a box cannot get a fresh decision by resurrecting a request under an id already answered.
+pub fn decide(
+    sandbox: &str,
+    rendered: &Request,
+    approve: bool,
+    remember: bool,
+) -> Result<Request, String> {
+    if let Some(why) = rendered.problem() {
         return Err(format!("refusing to act on this request: {why}"));
     }
-    if !found.is_pending() {
-        return Err(format!("request {id} is already {}", found.state));
+    let path = decision_path(&rendered.id).ok_or("unusable request id")?;
+    if let Some(already) = decision(&rendered.id) {
+        return Err(format!(
+            "request {} is already {} — a decision is made once",
+            rendered.id, already.state
+        ));
     }
-    let state = if approve { "approved" } else { "denied" };
-    own_sandbox(sandbox).exec(
-        &decision_script(id, state, approve && remember),
+    let mut decided = rendered.clone();
+    decided.state = if approve { "approved" } else { "denied" }.into();
+    decided.remember = approve && remember;
+    decided.decided = chrono::Utc::now().to_rfc3339();
+    decided.log = String::new();
+    write_decision(&path, &decided)?;
+
+    // Courtesy only, and it must stay that way: the box reads its own file to learn what happened,
+    // and skein never reads that answer back. Best-effort because a box that has deleted or locked
+    // its request has told skein nothing skein needs — the decision above is the record.
+    let _ = own_sandbox(sandbox).exec(
+        &decision_script(&rendered.id, &decided.state, decided.remember),
         Duration::from_secs(30),
-    )?;
-    found.state = state.into();
-    found.remember = approve && remember;
-    Ok(found)
+    );
+    Ok(decided)
+}
+
+fn write_decision(path: &std::path::Path, req: &Request) -> Result<(), String> {
+    let dir = path.parent().ok_or("no decisions directory")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let body = serde_json::to_vec_pretty(req).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(path, dir, &body)
 }
 
 /// The install itself, as a script.
@@ -243,12 +332,13 @@ pub fn install_script(kind: &str, packages: &[String]) -> String {
 ///
 /// Slow by nature — apt on a cold index is minutes — so callers run it off the request thread.
 pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
-    let req = list(sandbox)?
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(|| format!("no request {id}"))?;
-    // Re-checked here and not merely at approval: approval and install are separate calls, and the
-    // file between them is writable by every box in the fleet.
+    // The artifact, never the queue. This was the third id-keyed read of a box-writable file, and
+    // closing render-to-click while leaving click-to-install open would have moved the window
+    // rather than shut it: a box whose request was approved could still swap the package list
+    // before apt saw it.
+    let req = decision(id).ok_or_else(|| format!("skein has no decision recorded for {id}"))?;
+    // Checked again even though `decide` checked it: this is the last thing between a name and a
+    // root command line, and a decision file on the host can be hand-edited.
     if let Some(why) = req.problem() {
         return Err(format!("refusing to install: {why}"));
     }
@@ -272,6 +362,15 @@ pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
         .chars()
         .rev()
         .collect();
+    // The outcome lands on the ARTIFACT first, because that is skein's record.
+    let mut done = req.clone();
+    done.state = state.into();
+    done.log = tail.clone();
+    if let Some(path) = decision_path(id) {
+        write_decision(&path, &done)?;
+    }
+    // Then the box's own copy, so an agent can read why its install failed. Courtesy, best-effort,
+    // and never read back.
     let script = format!(
         "f={}/{}.json; [ -f \"$f\" ] || exit 0; t=$(mktemp \"$(dirname \"$f\")/.tmp.XXXXXX\") || exit 1; \
          jq --arg s {} --arg l {} '.state=$s | .log=$l' \"$f\" >\"$t\" && mv -f \"$t\" \"$f\" || {{ rm -f \"$t\"; exit 1; }}",
@@ -288,9 +387,6 @@ pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
     if state == "installed" && req.remember {
         record(&req)?;
     }
-    let mut done = req;
-    done.state = state.into();
-    done.log = tail;
     outcome
         .map(|_| done.clone())
         .map_err(|e| format!("{e}\n{}", done.log))
@@ -306,8 +402,8 @@ pub fn fleet_requests() -> Vec<Request> {
 /// Approve a request and install it, or deny it. Returns once the *decision* is recorded; the
 /// install that follows an approval is left to the caller to run, because apt takes minutes and
 /// nothing about the answer should wait for it.
-pub fn fleet_decide(id: &str, approve: bool, remember: bool) -> Result<Request, String> {
-    decide(&crate::place::fleet_sandbox(), id, approve, remember)
+pub fn fleet_decide(rendered: &Request, approve: bool, remember: bool) -> Result<Request, String> {
+    decide(&crate::place::fleet_sandbox(), rendered, approve, remember)
 }
 
 /// Run the install for an already-approved request.
@@ -335,7 +431,7 @@ pub fn merged(mut m: Manifest, req: &Request) -> Manifest {
         &mut m.apt
     };
     for p in &req.packages {
-        if package_is_nameable(p) && !list.contains(p) {
+        if package_is_nameable(&req.kind, p) && !list.contains(p) {
             list.push(p.clone());
         }
     }
@@ -371,10 +467,12 @@ fn record(req: &Request) -> Result<(), String> {
 /// at every launch, which makes it the one place a bad name would persist rather than fail once.
 pub fn approved_packages() -> (Vec<String>, Vec<String>) {
     let m = manifest();
-    let keep = |v: Vec<String>| -> Vec<String> {
-        v.into_iter().filter(|p| package_is_nameable(p)).collect()
+    let keep = |kind: &str, v: Vec<String>| -> Vec<String> {
+        v.into_iter()
+            .filter(|p| package_is_nameable(kind, p))
+            .collect()
     };
-    (keep(m.apt), keep(m.npm))
+    (keep("apt", m.apt), keep("npm", m.npm))
 }
 
 #[cfg(test)]
@@ -417,6 +515,88 @@ mod tests {
         assert!(req("apt", &["libatk1.0-0", "g++", "python3-dev"])
             .problem()
             .is_none());
+    }
+
+    /// A slash is a path, except in the one place npm makes it a scope.
+    ///
+    /// The filter used to admit `/` for every kind, which is not a near miss: `apt-get install
+    /// ./x.deb` installs a file out of the box's own tree and `npm install -g /path` runs that
+    /// path's lifecycle scripts — both as root, for the whole fleet, and then written into the
+    /// manifest and replayed at every launch. Neither is an exploit of a bug; both are apt and npm
+    /// doing exactly what they are for.
+    /// What was on screen is what gets approved, and what gets approved is what gets installed.
+    ///
+    /// The rule "the approving side writes the artifact" was already implemented and was still
+    /// wrong, because the artifact was written from a **re-read by id** at click time. That does
+    /// not close the window, it moves it: from approve-to-install, which is machine scale, out to
+    /// render-to-click, which is a person reading a card — seconds to minutes. This is the test
+    /// that the bytes decided on are the bytes rendered.
+    #[test]
+    fn the_packages_approved_are_the_ones_that_were_on_screen() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let rendered = req("apt", &["libnss3"]);
+        // No sandbox here, so the courtesy write-back into the box's file fails and is ignored —
+        // which is itself the point: the decision does not depend on the box's file at all.
+        let decided = decide("no-such-sandbox", &rendered, true, true).expect("decided");
+        assert_eq!(decided.state, "approved");
+        assert_eq!(decided.packages, vec!["libnss3".to_string()]);
+
+        // The box now rewrites its own request to name something else. Everything downstream still
+        // sees what was approved.
+        let swapped = Request {
+            packages: vec!["evil".into()],
+            state: "pending".into(),
+            ..rendered.clone()
+        };
+        let shown = decided_over(vec![swapped]);
+        assert_eq!(shown[0].packages, vec!["libnss3".to_string()]);
+        assert_eq!(shown[0].state, "approved", "and it cannot ask again");
+
+        // A decision is made once, so a resurrected request under a used id gets no second answer.
+        let again = decide("no-such-sandbox", &rendered, true, true);
+        assert!(
+            again.unwrap_err().contains("already"),
+            "a second decision on one id must be refused"
+        );
+    }
+
+    /// The install reads the artifact, and there is nothing else for it to read.
+    ///
+    /// This was the third id-keyed read of a box-writable file. Closing render-to-click and leaving
+    /// click-to-install open would have moved the window rather than shut it.
+    #[test]
+    fn an_install_with_no_recorded_decision_has_nothing_to_install() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let said = install("no-such-sandbox", "20260812-101010-1").unwrap_err();
+        assert!(
+            said.contains("no decision recorded"),
+            "an install must not be able to fall back to the queue: {said}"
+        );
+    }
+
+    #[test]
+    fn a_slash_is_a_path_unless_it_is_an_npm_scope() {
+        for bad in ["./x.deb", "/tmp/x.deb", "x/../../etc/y", ".hidden"] {
+            assert!(
+                req("apt", &[bad]).problem().is_some(),
+                "{bad:?} reached a root command line"
+            );
+            assert!(
+                req("npm", &[bad]).problem().is_some(),
+                "{bad:?} reached a root command line"
+            );
+        }
+        // The scope has to be a scope. "At most one slash" would admit `@a/../b`.
+        assert!(req("npm", &["@scope/name"]).problem().is_none());
+        assert!(req("npm", &["@scope/../name"]).problem().is_some());
+        assert!(req("npm", &["scope/name"]).problem().is_some());
+        // apt has no scopes, so it has no slashes either.
+        assert!(req("apt", &["@scope/name"]).problem().is_some());
     }
 
     #[test]

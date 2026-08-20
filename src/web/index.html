@@ -4173,9 +4173,19 @@ function closeSubq() { const o = document.getElementById("subq"); o.classList.re
 
 // `installed`/`failed` land on the request itself, so the panel needs no progress channel of its
 // own — approving flips it to `approved` and a later poll shows how it ended.
+// What each card was rendered from, keyed by id. The decision is sent back from HERE, not looked
+// up again server-side: the queue lives in the sandbox and every box can write it, so between this
+// render and the click on it — seconds to minutes — the box that asked can change what its request
+// says. Approving a re-read approves whatever it says *then*. This is the thing that was seen.
+const subqShown = new Map();
+
+// Any approved apt or npm package runs maintainer or lifecycle scripts as root, for the whole
+// fleet, and a remembered one runs them again at every launch. That is what the button does, and
+// the card says so rather than leaving it to be inferred from "Approve & install".
 function subqCard(r) {
   const pending = r.state === "pending";
   const log = (r.log || "").trim();
+  if (pending) subqShown.set(r.id, { box: r.box || "", kind: r.kind || "", packages: r.packages || [] });
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc((r.packages || []).join(" "))}</div>
@@ -4185,7 +4195,8 @@ function subqCard(r) {
         ${pending ? `
           <label><input type="checkbox" checked id="sq-rem-${esc(r.id)}" /> remember for rebuilt sandboxes</label>
           <button class="kbtn primary" onclick="decideSubq('${esc(r.id)}', true)">Approve &amp; install</button>
-          <button class="kbtn ghost" onclick="decideSubq('${esc(r.id)}', false)">Deny</button>` : ""}
+          <button class="kbtn ghost" onclick="decideSubq('${esc(r.id)}', false)">Deny</button>
+          <span class="sq-meta">runs as root for the whole fleet</span>` : ""}
         ${r.state === "approved" ? `<span class="sq-meta">installing… apt can take a few minutes</span>` : ""}
         ${r.state === "installed" && r.remember ? `<span class="sq-meta">recorded — a rebuilt sandbox reinstalls it</span>` : ""}
       </div>
@@ -4211,9 +4222,11 @@ function decideSubq(id, approve) {
   // Unticked means approve this once without recording it, so a rebuilt sandbox comes back without
   // it. Denials never record, whatever the box happens to be showing.
   const remember = approve ? !!(rem && rem.checked) : false;
+  const shown = subqShown.get(id);
+  if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
   fetch("/api/fleet/substrate/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ approve, remember }),
+    body: JSON.stringify({ approve, remember, ...shown }),
   }).then(r => { if (!r.ok) throw 0; loadSubq(); })
     .catch(() => toast("could not record that decision"));
 }

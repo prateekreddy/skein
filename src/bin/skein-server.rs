@@ -1555,6 +1555,18 @@ struct DecideReq {
     /// Defaults to true — the cockpit sends `false` only when its owner unticks it.
     #[serde(default = "yes")]
     remember: bool,
+    /// **What the page actually showed.** The decision is made on these, not on a re-read.
+    ///
+    /// The queue lives in the sandbox and every box can write it, so between the render that
+    /// produced the card and the click on it — seconds to minutes — the box that filed the request
+    /// can change what it says. Re-reading by id at click time approves whatever it says *then*.
+    /// Echoing the rendered fields back means the thing approved is the thing seen.
+    #[serde(rename = "box", default)]
+    box_name: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    packages: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -1571,7 +1583,15 @@ async fn api_substrate_decide(Path(id): Path<String>, Json(r): Json<DecideReq>) 
     let decided = {
         let id = id.clone();
         tokio::task::spawn_blocking(move || {
-            skein::substrate::fleet_decide(&id, r.approve, r.remember)
+            let rendered = skein::substrate::Request {
+                id,
+                box_name: r.box_name,
+                kind: r.kind,
+                packages: r.packages,
+                state: "pending".into(),
+                ..Default::default()
+            };
+            skein::substrate::fleet_decide(&rendered, r.approve, r.remember)
         })
         .await
     };
