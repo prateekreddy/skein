@@ -33,7 +33,7 @@ Five. Two nouns, one reach, two verbs.
 
 | | idempotent / self-healing | lossy / one-shot |
 |---|---|---|
-| **durable** | State: *declared* | State: *recorded* |
+| **durable** | State: *declared* | State: *recorded* / *requested* |
 | **observed** | Signal: *level* | Signal: *edge* |
 | **acting** | Operation | Act |
 | **reaching** | Source | |
@@ -45,6 +45,11 @@ defect the first draft shipped:
 
 **Declared** — what the user told skein. Repo remotes, box identities, config, branch choices.
 Small, versioned, **sole writer**, guarded by a lock or an owning process.
+
+**Requested** — written by an **untrusted party**, read by an approving side, **never authoritative**,
+and **never in the same directory as the artifact it produces**. The package queue and the git-write
+queue are both this. Giving them no rules is the category error behind §8.4, and it has a live exploit
+today (below).
 
 **Recorded** — what skein and the boxes write as they work. Conversations, transcripts, journals,
 hook logs, per-box status, mailbox messages. **Many writers by design** — every box writes these
@@ -108,15 +113,25 @@ stopped; the shipped code distinguishes them and an earlier draft of this docume
 **Fusion, defined** — because §13 mandates a scenario matrix for it and an earlier draft never said
 what it was. Given a level observation `(screen, t_level)` and an edge `(status, t_edge)`:
 
-1. no level observation → the edge, provenance `hooks only`
-2. level is `Unknown` → the edge, provenance `screen unread`
-3. `t_edge > t_level` **and** the edge is an *outcome* (blocked, needs-input, needs-decision, error,
-   ended, done, waiting) → the edge; the fresher observation wins
-4. otherwise → the level, mapped to a displayed state
+1. no level observation → the edge
+2. level is `Unknown` → the edge
+3. `t_edge > t_level + 1` **and** the edge is an *outcome* (blocked, needs-input, needs-decision,
+   error, ended, done, waiting) → the edge; the fresher observation wins. The `+1` is a deliberate
+   one-second tie-break, not a `>`.
+4. level is `Dead` **and** the edge is `done` → `done` — a human-set outcome a screen cannot
+   contradict. The edge wins here *without* being newer, which is why this is its own rule.
+5. otherwise → the level, mapped to a displayed state
 
-Rule 3's outcome list is the load-bearing part: a *progress* edge must never override a level, or a
-stale hook re-latches the bug this whole primitive exists to prevent. This is what `fuse_status`
-already does, written down so the matrix has something to test.
+Rule 3's outcome list is load-bearing: a *progress* edge must never override a level, or a stale hook
+re-latches the bug this primitive exists to prevent.
+
+**Where the disclosure law is currently violated, and it is rule 3.** Provenance is a *separate*
+function from fusion — it reports `hooks only`, `screen lost`, `screen unread` on its own conditions.
+Rules 1, 2 and 4 land on one of those, so they disclose. **Rule 3 does not**: the screen is fresh and
+readable, provenance returns empty, the badge renders nothing, and the board shows a state derived
+solely from an edge while saying so nowhere. An earlier revision cited provenance as the reason the
+relaxed law was safe; that is true of three rules and false of the one it leaned on. **Rule 3 needs a
+provenance value of its own** — the law is right, and the code does not yet meet it here.
 
 **The Gate contract.** Every signal's observation is mediated by a gate that provides: single-flight
 (concurrent askers share one observation), serve-stale-refresh-behind (the last good value is
@@ -213,11 +228,13 @@ unnamed makes them grow *beside* the primitives, which is the debt §12.8 exists
 **An Act emits an edge signal as a side effect** — skein knows it delivered the keystroke, and that
 knowledge is what makes an optimistic state clear correct.
 
-### 2.6 The reconciliation cube
+### 2.6 Reconciliation
 
 Not a cube — `desired` is meaningful only when `declared = present`, so calling it an orthogonal
 axis would repeat the 2×2's error one dimension up. It is **`declared`, then `desired` where it
-applies, against `observed`**: eight meaningful combinations, not twenty-four.
+applies, against `observed`**: four declared-and-desired states (`absent`, `present/running`,
+`present/stopped`, `deleted`) against four observed values — **sixteen**, not twenty-four. An earlier
+revision said eight, which is the number of cells *removed*.
 
 - **declared** ∈ `absent | present | deleted`
 - **desired** ∈ `running | stopped` — *only when declared is present*
@@ -321,8 +338,13 @@ lose them and every box re-asks for push access and for packages already approve
 **requested** state (§2.1): a box writes the request, and the approved artifact is written elsewhere
 by the approving side.
 
-**The audit log is not on the volume.** It records warden approvals, and the volume is inside the
-fleet, writable by skein, which shares a sandbox with coding agents. A record of an approval must not
+**The audit log is not on the volume, and it must not record only the warden.** The warden has two
+capabilities, so a log scoped to it covers fleet lifecycle and **none of the approvals that actually
+grant privilege** — package approval (root apt, fleet-wide, permanent), git-write grants, workshop
+promotion, credential rotation. Those are decided by skein, and §5 has just argued skein cannot audit
+itself. So **skein's approval decisions are appended to the warden's log through a third, non-privileged
+warden capability — a sink, not a doer — and that sink is never compilable-out.** It records warden
+approvals, and the volume is inside the fleet, writable by skein, which shares a sandbox with coding agents. A record of an approval must not
 live where the thing being audited can reach it — so it lives **on the host, written by the warden**.
 "Append-only" on a volume path would be unenforceable anyway: there is no `chattr +a` without
 `CAP_LINUX_IMMUTABLE`. (For reference, there is no audit log today at all.)
@@ -402,9 +424,13 @@ microVM-sized budget rather than an action timeout.
 
 | kind | when |
 |---|---|
-| **resource ceilings** — create the box's cgroup, write `memory.max`/`high`/`pids.max`, move the session in | every box start; and every server start, healing every box |
-| **package installation** — `apt-get` | on approval, and replaying the approved manifest every server start |
-| **filesystem ownership** — create and chown the fleet root; `tar` a box out and back | fleet setup; resize |
+| **resource ceilings** — create the box's cgroup, write `memory.max`/`high`/`pids.max`, move the session in; and `rmdir` it on destroy | every box start and every box destroy; plus server start, through `heal_fleet` → the launcher's ceilings path, which is a *different mechanism* from the per-box writes |
+| **package installation** — `apt-get` **and `npm install -g`** | on approval; replaying the approved manifest on **every box start** (via `ensure_fleet`), not every server start; plus the takeover-tools installer and the box startup kit |
+| **filesystem ownership** — create and chown the fleet root; `tar` a box out and back | every box start (fleet root); resize |
+| **container runtime config** — write `/etc/docker/daemon.json` | fleet setup |
+
+Four kinds, not three. And note `npm install -g` is not a spelling variant of `apt-get`: it writes
+into the toolchain that is shared read-write with every box, which is what makes it violate §9.5.4.
 
 **skein running as root inside the fleet sandbox (§9.5.1) supplies this whole domain directly.** Today
 these are reached by unprivileged processes through a `sudo` shim; as root they are ordinary calls,
@@ -497,11 +523,41 @@ worse than fixing neither.**
 That covers the payload, not just the boolean — which is the difference between the rule as stated
 before and the rule that would have prevented this.
 
+**And the rule as stated is necessary but not sufficient.** `gitgate::decide` *already* implements it
+— it never trusts a `state` field and writes a `Grant` to a host-side file the refresher alone reads —
+and it is exploitable today, because the artifact is written from a **re-read by id after the human
+clicks**:
+
+1. a box files a request naming a repo you own;
+2. the cockpit renders it, you read it, you approve;
+3. the handler re-reads the file **by id** — and the box rewrote it in between;
+4. a grant is written for the other repo, and a real installation token lands in the box.
+
+The window is render→click: **human-scale, seconds to minutes**, where the substrate window is
+machine-scale. So moving the hazard from approve→install to render→click made it *larger*.
+
+> **An operation id correlates a decision to a request. It must never be what the decision re-reads
+> by.** The approving side binds the artifact to **the bytes it rendered** — carrying a digest through
+> the round trip and refusing if the file no longer matches.
+
+And the artifact carries the **resolved argv**, not a name list: if the actor re-splices names into a
+command, the splice is still the trust boundary.
+
+**One more the shape check misses.** The package-name whitelist admits `/`, and both `apt-get install
+./x.deb` and `npm install -g /path/pkg` install a *local* package and run its maintainer or lifecycle
+scripts as root — then persist into the replayed manifest, so one approval becomes root execution at
+every future launch. The whitelist's own comment claims the rejected set covers "the only two that
+matter"; there is a third.
+
 Two more that follow, and neither is an implementation detail:
 
-- **the request channel and the approval channel are different paths.** The requester must be able to
-  write the first and unable to write the second. The read-only bind above is half of this by
-  accident; the other half was never built.
+- **the request channel and the approval channel are different paths, and §5 must lay them out that
+  way.** The requester writes the first and cannot write the second. Covering the whole of
+  `substrate/` would enshrine today's masking bug as a requirement — requests would never land, while
+  the shim still says one was filed. The layout: **`substrate/requests/` box-writable and the only
+  box-writable thing under it; `substrate/approved` and the replayed manifest root-owned under the
+  cover.** Same for the git-write queue. The code already gets this right and splits them; the
+  document previously merged them into one line.
 - **an operation id is correlation, not content.** The warden must render **the resolved arguments it
   will itself execute**, derived from its own parse — never display text the requester supplied.
   Stated the other way round in an earlier draft, which made it an obstacle sold as a boundary.
@@ -509,7 +565,7 @@ Two more that follow, and neither is an implementation detail:
 ### 8.5 Flooding
 
 A compromised skein controls *what* is proposed and *when*. One outstanding request at a time, a rate
-limit, and the timeout §11.5 already names.
+limit, and the timeout §11.4 already names.
 
 ### 8.3 Capabilities are compiled
 
@@ -614,8 +670,25 @@ against *host-side* skein: a box reached `host.docker.internal:7878/api/fleet/gi
 200, followed by a three-step defeat of the git gate. In-fleet, that host becomes `localhost`.
 
 The answer is not to hide the port. It is that **connecting is not authenticating**: the bearer token
-is a root-owned file under the volume's mount cover (§9.5.2, §9.5.3), so a box can open the socket
-and get nothing. The mechanism already exists — it was built *because* of that incident.
+is a file under the volume's mount cover (§9.5.2, §9.5.3), owned by skein's uid (§9.5.1), so a box can
+open the socket and get nothing. The mechanism already exists — it was built *because* of that
+incident, and it fails closed when the token cannot be read.
+
+That answers the box→skein direction and **only** that direction. Four things it does not cover, each
+of which needs a requirement rather than an inference:
+
+- **the auth-off switch.** `SKEIN_NO_API_AUTH` voids all of this, and the server already prints that
+  anything reaching the port drives the fleet, boxes included. It exists for a fleet whose owner has
+  some other boundary; **in-fleet there is no such boundary, so the switch is refused.**
+- **the token has a second copy.** It is printed as `?t=…` on stdout at every start, and in-fleet
+  stdout lands in a log, a tmux scrollback or a supervisor capture inside the sandbox. Covering the
+  file does nothing for that.
+- **port squatting, the reverse direction.** Shared netns plus no-unpublish (§7.4) means the mapping
+  outlives skein — so **a box that binds the cockpit port before skein starts becomes the cockpit**,
+  and the browser hands it the token on the first request. A distinct uid stops SO_REUSEPORT theft
+  from a live listener; it does not stop an empty port at sandbox start.
+- **pre-auth connection exhaustion.** The gate runs after accept, and §10.1's cap is post-auth. A box
+  gets a free denial of the control plane, and therefore of the approval surface, with no credential.
 
 Relative to host-side skein, co-residence gives a box: the ability to signal or kill skein (shared
 PID namespace, same uid); network reach to skein's own API; reach to the warden over the gateway,
@@ -626,27 +699,72 @@ indistinguishable from skein by address or uid; and credentials inside the blast
 Independent unless stated. The privilege split (R1) is done first by decision, not because the others
 wait on it — an earlier draft claimed they did, and that was wrong.
 
-1. **skein runs as root inside the fleet sandbox; boxes remain unprivileged.** Root *in the sandbox*
-   is bounded by the VM: not root on the host, and boxes still cannot sudo. It closes signal/kill,
-   and gives skein files no box can read whatever the mount view.
+1. **skein runs as a distinct non-root uid, and the launcher splits.** An earlier revision said
+   *root*, and that was wrong in a way worth recording because it inverts the whole boundary.
 
-   Chosen over per-box uid mapping because **the attach mechanism survives unchanged** — the tmux
-   socket is `0700 uid 1000` and root can open it, where a neighbouring uid would need a shared group
-   and a `0770` socket. Root in the initial user namespace also has CAP_SYS_ADMIN over descendants,
-   so `nsenter` needs no `newuidmap`.
+   **Why root cannot work.** `grep -c 'unshare-user' src/box-session.sh` → **0**. There is no explicit
+   user namespace anywhere. It exists *only because `bwrap` is invoked by an unprivileged uid* — bwrap
+   must create one to obtain mount capability. The launcher says so: *"only this box's uid is mapped
+   into its user namespace… setuid cannot grant uid 0 inside a namespace you created yourself."* The
+   chain is skein → CLI → `session_script` → launcher → `bwrap`, so **a root skein makes that chain
+   root, bwrap creates no user namespace, and every box runs as uid 0 in the initial namespace with
+   `--dev-bind / /`** — CAP_SYS_ADMIN over the sandbox, and `nsenter -a -t 1` straight out of its own
+   mount namespace. Root would have destroyed the one boundary §9.1 confirms holds.
+
+   **What the split actually requires**, and it is a project rather than a flag:
+   - a **privileged prologue** — create and join the box's cgroup, chown the fleet root;
+   - then an explicit **drop to the box's uid with `$HOME` reset**, *before* any bind is computed. The
+     binds derive from the launcher's `$HOME` (`box-session.sh:465, 699-701`); as root that is
+     `/root`, and the seed loop's `[ -e "$HOME/$rel" ]` guards fail **silently**, so boxes come up
+     with no agent binary and no credentials.
+   - the tmux socket is `0700 uid 1000`, so attach needs a **shared group and a `0770` socket** —
+     per-box group, skein a member of each. This is the redesign root appeared to avoid.
+
+   `newuidmap` is needed only to map *several* uids inside one namespace, which a skein-side split
+   does not do — so its absence is not a blocker here.
 
    Per-box subuid mapping remains the stronger second step: it separates boxes from *each other* by
    uid, which is the axis §9.2 shows is open.
 
-2. **The privileged subtrees of the volume are outside every box's mount view, and the cover list is
-   a tested enumeration.** Without this every box sees `credentials/`, `grants/` and `audit/`
-   read-write as uid 1000, and §5's `0700` means nothing under one fleet-wide uid. **A mount cover,
-   not a file mode, is what protects them.**
+2. **The cover is an inversion, not an enumeration.** `tmpfs` the whole of the state root and bind
+   back the short list a box needs — which is what `box-session.sh:943-956` already does for the
+   fleet root. Enumerating what to *hide* is the wrong direction and an earlier revision froze that
+   list at three names while the root holds fifteen things that matter, among them `substrate.json`
+   (replayed onto a **root** `apt-get`), `api-token`, `config.json`, `repos.json`, `github-pats`,
+   `tokens`, `plane-token`.
+
+   **A mount cover, not a file mode**: `0700` means nothing under one fleet-wide uid.
+
+   **And per-box state must split**, which is where the current design has a live exploit.
+   `privileged` and `git-scope` are **declared** state — sole-writer, security-deciding — living at
+   `boxes/<name>/`, a directory bound **read-write** into the box because the conversation and
+   transcript live there. So today:
+
+   ```sh
+   echo 1 > ~/.skein/boxes/$SKEIN_BOX/privileged   # from inside any box
+   ```
+
+   and at its next start that box is the workshop box: every isolation bind skipped, the fleet-agent
+   token readable, and that token runs scripts as root at fleet scope. `git-scope` is the same shape
+   — write `fleet` and keep the account-wide token and the forwarded ssh-agent.
+
+   > **`boxes/<name>/` splits into `declared/` and `recorded/`, and only `recorded/` is bound in.**
 3. **skein's control API is a root-owned filesystem socket under that cover, never a TCP port**, and
    the cockpit's HTTP auth token is a root-owned file. Boxes may still *connect* to the cockpit port
    — shared netns makes that unavoidable — and cannot authenticate.
 4. **No shared writable path contains an executable another box runs** (§9.2.1). Either the shared
    toolchains become read-only with a per-box overlay for writes, or they stop being shared.
+
+   Two honest qualifications. This hardens **durability and blast radius, not control**: §9.2.2 is a
+   shipped feature that lets one box drive another's agent directly, so R4 does not close the cheapest
+   path and must not be sold as doing so. And **skein's own approved-package installer breaks it** —
+   `sudo npm install -g` writes into the very toolchain that is bound read-write into every box, so
+   the rule is violated by the honest path before any attacker arrives.
+9. **Cross-box messaging renders provenance** (§9.2.2, kept). At minimum, inbound-from-a-box is
+   distinguishable from inbound-from-you — otherwise the one channel that carries control between
+   boxes is also the one with no attribution.
+10. **`/run` is covered, or its exposure is stated.** §9.1 notes the cover reaches neither `/run` nor
+   the per-user socket directory, and no requirement followed.
 5. **The warden authenticates with a secret under the cover of requirement 2.** A mount cover hides
    it regardless of uid; cross-userns `/proc` access is already denied, so a box cannot lift it out of
    skein's memory either.
@@ -704,6 +822,11 @@ The event stream today re-sends the whole fleet every two seconds: no deltas, no
 lag counter, no connection cap, and a missed-tick policy that bursts at a drained slow client. The
 diagnosis is easy and an earlier draft stopped there. The design:
 
+- **one producer, fanned out.** Today there is no broadcast channel at all: **every SSE client
+  independently runs the fleet snapshot on the blocking pool every two seconds.** A per-client bounded
+  channel presupposes a single producer, so that is the first thing to build — and it is the only
+  thing that bounds the `boxes × transitions × clients` budget. The lesson is already paid for:
+  check-then-act once gave every browser tab its own subprocess every tick.
 - **transitions, not snapshots.** §3 already requires server-side transitions; the stream carries
   them, and a full snapshot only on connect or on request.
 - **a bounded per-client channel with a lag counter.** On overflow the client is told it fell behind
@@ -801,7 +924,7 @@ the first draft's mock-up quietly chose it.
    largest uncosted item in the first draft.
 5. **Destructive actions say what is lost** — including when the answer is "nothing".
 6. **No modal onboarding.** Onboarding is the blocked state rendered well.
-7. **The first screen has exactly one action**, which requires prerequisite collapsing (§11.5).
+7. **The first screen has exactly one action**, which requires prerequisite collapsing (§11.6).
 8. **Quiet by default.** Colour, badges and motion are an attention budget.
 
 ### 11.5 The blocked state is three components, not one
@@ -864,7 +987,7 @@ Each is a specific way this codebase has previously accumulated debt.
   unconditionally is worse than no check: it makes a broken system report as healthy.
 - **Every check has a test for `unknown`** — that an unreachable source reports rather than drives.
 - **Signal fusion is a scenario matrix**, including every missing-edge case.
-- **Anything the UI computes is a pure function tested in node.** The build step (§11.6) is what makes
+- **Anything the UI computes is a pure function tested in node.** The build step (§11.7) is what makes
   this possible.
 - **Browser tests run in a box.** Correcting the first draft: this was fixed, and
   `tests/ui/README.md` names the libraries Playwright's own list omits.
@@ -911,8 +1034,10 @@ trust boundary needs to be able to answer:
 - **which check failed, when it last passed, and what it returned** — the check history is recorded
   state, bounded and rotated.
 - **which operations hold leases, and since when** (§2.4).
-- **which gate is degraded and how long it has been serving stale** — `degraded()` exists and nothing
-  surfaces it.
+- **which gate is degraded and how long it has been serving stale.** `degraded()` exists and *two of
+  four* production gates surface it — the fleet gate drives the health card's "showing last successful
+  snapshot", and the resource gate marks the gauges stale. The disk and liveness gates surface
+  nothing, and no gate reports *how long*.
 - **what the warden was asked, what was approved, by whom** — the host-side audit log (§5).
 
 `skein doctor` is the read surface for the first three; it is already every check, reported.
@@ -975,6 +1100,6 @@ first task of extraction, not a tidy-up afterwards.
   matters most.
 - **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the warden's
   addressing both assume one.
-- **API authentication in-fleet.** Today it is one shared bearer token, and its own comment says
+- **API authentication in-fleet** (§9.4 answers the box→skein direction; the four gaps listed there are open). Today it is one shared bearer token, and its own comment says
   *"not a login — one shared secret"*. It exists because a box reached the host cockpit. In-fleet it
-  matters more, and §9.3.1 changes its shape rather than answering it.
+  matters more, and §9.5.3 changes its shape rather than answering it.
