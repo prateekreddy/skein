@@ -10,12 +10,17 @@
 //! it retires skein's own past entries by shape rather than by wholesale replacement, and why every
 //! one of those rules has a test that would fail loudly rather than quietly overwrite someone.
 
-use crate::repos::load_repos;
+use crate::repos::{agent_for_box, load_repos};
+use crate::runtime::runtime_adapter;
 use crate::runtime::RUNTIME_ADAPTERS;
+use crate::sandbox::sbx_guest_output;
+use crate::util::sh_quote;
 use crate::util::write_atomic;
+use crate::valid_name;
 use crate::{all_stores, ensure_store};
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 // ---------- the turn-state probe (skein-owned, installed into the shared store) ----------
 // skein ships these hook scripts and wires them into the store's settings.json, so a box reports
@@ -81,7 +86,7 @@ const SHARED_HOME_GUIDE: &str = include_str!("store/SHARED-HOME.md");
 const AGENT_GUIDE_SH: &str = include_str!("store/agent-guide.sh");
 const INSTALL_CODEX_HOOKS_SH: &str = include_str!("store/install-codex-hooks.sh");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
-pub(crate) const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
+const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 // Box-side path of the installed scripts (the store is linked at `<clone>/.claude`).
 const PROBE_STATUS_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-status.sh";
 const PROBE_TASK_CMD: &str = "$CLAUDE_PROJECT_DIR/.claude/skein/bin/box-task.sh";
@@ -632,6 +637,30 @@ fn codex_hooks_with_probe() -> serde_json::Value {
         add("Stop", None, command("Stop", file, args));
     }
     json!({ "hooks": hooks })
+}
+
+/// Render the provider-neutral one-line footer for a box whose runtime needs an adapter. Claude
+/// invokes the same renderer natively with its status-line stdin, so it returns `None` here. Codex
+/// maps its latest token_count event into that schema and is polled by the cockpit every 30 seconds.
+/// The renderer is embedded in the guest command rather than addressed through the shared store:
+/// direct-workspace and older boxes may not mount that store, but every managed box has Bash + jq.
+pub fn agent_statusline(name: &str) -> Result<Option<String>, String> {
+    if !valid_name(name) {
+        return Err("invalid box name".into());
+    }
+    let runtime_id = agent_for_box(name);
+    let runtime = runtime_adapter(&runtime_id).ok_or("runtime adapter unavailable")?;
+    let Some(input) = runtime.statusline_input else {
+        return Ok(None);
+    };
+    let renderer = sh_quote(STATUSLINE_SH);
+    let setup = runtime.interactive_setup;
+    let shell = format!(
+        r#"set -o pipefail; {setup}; payload="$({input})"; [ -n "$payload" ] || exit 0; printf '%s\n' "$payload" | bash -c {renderer}"#
+    );
+    let rendered = sbx_guest_output(name, &shell, Duration::from_secs(30))?;
+    let rendered = rendered.trim_end_matches(['\r', '\n']).to_string();
+    Ok((!rendered.is_empty()).then_some(rendered))
 }
 
 #[cfg(test)]

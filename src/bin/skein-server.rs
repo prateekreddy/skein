@@ -492,7 +492,7 @@ async fn api_statusline(Path(name): Path<String>) -> Response {
     if !skein::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
-    match tokio::task::spawn_blocking(move || skein::agent_statusline(&name)).await {
+    match tokio::task::spawn_blocking(move || skein::probes::agent_statusline(&name)).await {
         Ok(Ok(line)) => Json(serde_json::json!({ "line": line })).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),

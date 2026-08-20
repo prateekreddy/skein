@@ -180,12 +180,12 @@ fn cmd_shared(args: &[String]) -> Result<(), String> {
         if selected.is_empty() {
             return Err("--apply requires at least one explicit --include <top-level-name>".into());
         }
-        let result = skein::import_shared_home(box_name, &selected)?;
+        let result = skein::sharedhome::import_shared_home(box_name, &selected)?;
         print!("{result}");
         return Ok(());
     }
 
-    let inventory = skein::shared_home_inventory(box_name)?;
+    let inventory = skein::sharedhome::shared_home_inventory(box_name)?;
     println!("{BOLD}shared-home import inventory{RESET}  {CYAN}{box_name}{RESET}");
     println!("{DIM}read-only: nothing has been copied{RESET}\n");
     for item in inventory {
