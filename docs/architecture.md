@@ -382,6 +382,11 @@ Five jobs, in descending frequency. Everything on every screen serves one of the
 | **recover** — something broke | rare, high-stakes | the failing check and the command that fixes it |
 | **set up** — add a repo, make a box | rare | one action, no configuration exercise |
 
+**One cockpit serves one person.** Decided, not assumed: "needs you" has a single meaning, credentials
+belong to one identity, and the sidecar's approver is that same person. Multi-user would change the
+queue, the credential model and the approval model together, so it is a different design rather than
+a later feature.
+
 **Attention is the scarce resource, not screen space.** That is the whole design thesis for a tool
 whose subject is a fleet of agents working without you. Every decision below follows from it.
 
@@ -446,6 +451,15 @@ cockpit reduces to roughly eight:
 | **calm empty state** | nothing needs you |
 | **gauge strip** | fleet resources, recessive |
 | **command palette** | every action, one keystroke — the CLI's vocabulary (law 4) |
+
+**Density is adaptive**: dense when the fleet is large and the job is triage, comfortable when it is
+small. Both are the same components at two spacing scales, not two designs.
+
+**The identity is fresh, and mostly monochrome.** Colour is spent only on state, which is law 8 made
+visual: **warm means a human is needed, cool means the machine is working, muted green means
+finished, grey means nothing is happening.** A user learns that in one glance and never re-reads a
+legend. Brand comes from type, spacing and a single signature accent rather than from a colourful UI
+— which also leaves the whole colour budget available for the one thing it must convey.
 
 This library is maintained as a Claude Design project so it can be reviewed visually rather than
 inferred from code, and so the cockpit is assembled from a reviewed kit instead of accumulating one.
