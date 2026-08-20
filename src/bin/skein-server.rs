@@ -1450,6 +1450,16 @@ struct GrantReq {
     /// deliberate choice rather than the accidental one.
     #[serde(default)]
     hours: Option<i64>,
+    /// **What the page actually showed.** The grant is built from these, not from a re-read.
+    ///
+    /// The box matters as much as the repo, and that is easy to miss: `refresh_tokens` writes the
+    /// minted installation token into the box the grant names, so a request swapped between render
+    /// and click is not "a different repository" — it is a live write token landing in a box of the
+    /// requester's choosing.
+    #[serde(rename = "box", default)]
+    box_name: String,
+    #[serde(default)]
+    repo: String,
 }
 
 /// Approve or deny one write request.
@@ -1464,9 +1474,18 @@ async fn api_git_grant_decide(Path(id): Path<String>, Json(r): Json<GrantReq>) -
     };
     let decided = {
         let id = id.clone();
-        tokio::task::spawn_blocking(move || skein::gitgate::fleet_decide(&id, r.approve, hours))
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()))
+        tokio::task::spawn_blocking(move || {
+            let rendered = skein::gitgate::Request {
+                id,
+                box_name: r.box_name,
+                repo: r.repo,
+                state: "pending".into(),
+                ..Default::default()
+            };
+            skein::gitgate::fleet_decide(&rendered, r.approve, hours)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
     };
     match decided {
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),

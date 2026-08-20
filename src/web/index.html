@@ -4282,9 +4282,17 @@ let gitqPrimed = false;
 function openGitq() { const o = document.getElementById("gitq"); o.classList.add("open"); o.setAttribute("aria-hidden","false"); loadGitq(); }
 function closeGitq() { const o = document.getElementById("gitq"); o.classList.remove("open"); o.setAttribute("aria-hidden","true"); }
 
+// What each card was rendered from, keyed by id — sent back with the decision instead of being
+// looked up again server-side. The queue lives in the sandbox and every box can write it, so a
+// request re-read at click time can name a different repo AND a different box. The box is the part
+// that surprises: the minted installation token is written into the box the grant names, so a swap
+// puts a live write credential wherever the requester likes.
+const gitqShown = new Map();
+
 function gitqCard(r) {
   const pending = r.state === "pending";
   const reason = (r.reason || "").trim();
+  if (pending) gitqShown.set(r.id, { box: r.box || "", repo: r.repo || "" });
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc(r.repo || "?")}</div>
@@ -4522,9 +4530,11 @@ function decideGitq(id, approve) {
   // 0 means "never expires" to the API. Ticking keep is the deliberate act; the number is ignored
   // when it is set, so the two controls cannot disagree about what was granted.
   const hours = approve ? (keep && keep.checked ? 0 : Math.max(1, parseInt(hrs && hrs.value, 10) || 24)) : 24;
+  const shown = gitqShown.get(id);
+  if (!shown) { toast("that request is no longer on screen — reopen the panel"); return; }
   fetch("/api/fleet/git-grants/" + encodeURIComponent(id), {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ approve, hours }),
+    body: JSON.stringify({ approve, hours, ...shown }),
   }).then(r => { if (!r.ok) throw 0; loadGitq(); })
     .catch(() => toast("could not record that decision"));
 }

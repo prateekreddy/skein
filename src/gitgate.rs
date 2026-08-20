@@ -363,30 +363,39 @@ fn decision_script(id: &str, state: &str) -> String {
 
 /// Approve or deny a request. Approving records the grant host-side; the token that makes it usable
 /// is minted by the refresher, so the cockpit answers immediately rather than waiting on GitHub.
+/// Approve or deny **the request the approver was looking at**.
+///
+/// `rendered` rather than an id, and the difference is the whole of this fix. The queue lives in
+/// the sandbox and every box can write it, so re-reading by id at click time grants whatever the
+/// file says *then* — and the grant is built from the request's **box** as well as its repo, so the
+/// swap is not merely "a different repository". It is *put a live installation token in a box of my
+/// choosing*: the box field decides which box `refresh_tokens` writes the minted token into.
+///
+/// So box, repo and expiry all travel from the render. Nothing about the grant comes from a read
+/// that happened after the person decided.
 pub fn decide(
     sandbox: &str,
-    id: &str,
+    rendered: &Request,
     approve: bool,
     hours: Option<i64>,
 ) -> Result<Request, String> {
-    let mut found = list(sandbox)?
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(|| format!("no request {id}"))?;
-    if let Some(why) = found.problem() {
+    if let Some(why) = rendered.problem() {
         return Err(format!("refusing to act on this request: {why}"));
     }
-    if !found.is_pending() {
-        return Err(format!("request {id} is already {}", found.state));
-    }
     let state = if approve { "granted" } else { "denied" };
-    crate::place::own_sandbox(sandbox)
-        .exec(&decision_script(id, state), Duration::from_secs(30))?;
     if approve {
-        record(&found, hours)?;
+        record(rendered, hours)?;
     }
-    found.state = state.into();
-    Ok(found)
+    // Courtesy, so the asking box can see it was answered — and best-effort, because the record
+    // above is what skein acts on. A box that deletes its request has changed nothing that matters.
+    let _ = crate::place::own_sandbox(sandbox).exec(
+        &decision_script(&rendered.id, state),
+        Duration::from_secs(30),
+    );
+    let mut done = rendered.clone();
+    done.state = state.into();
+    done.decided = chrono::Utc::now().to_rfc3339();
+    Ok(done)
 }
 
 /// Every write request the fleet has been asked for, for the cockpit.
@@ -398,8 +407,12 @@ pub fn fleet_requests() -> Vec<Request> {
 }
 
 /// Approve or deny a request. `hours` is `None` for a grant that never expires.
-pub fn fleet_decide(id: &str, approve: bool, hours: Option<i64>) -> Result<Request, String> {
-    decide(&crate::place::fleet_sandbox(), id, approve, hours)
+pub fn fleet_decide(
+    rendered: &Request,
+    approve: bool,
+    hours: Option<i64>,
+) -> Result<Request, String> {
+    decide(&crate::place::fleet_sandbox(), rendered, approve, hours)
 }
 
 // ───────────────────────────── the grant record ─────────────────────────────
@@ -1566,6 +1579,47 @@ fn curl_json(args: &[&str], jwt: &str) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grant that gets recorded is the one that was on screen — box included.
+    ///
+    /// "The approving side writes the artifact" was already true here: `record` writes the grant on
+    /// the host. It was still wrong, because the grant was built from a **re-read by id** at click
+    /// time, and the window that opened is not approve-to-install but render-to-click — a person
+    /// reading a card, seconds to minutes.
+    ///
+    /// And the swap is worse than "a different repository". `refresh_tokens` writes the minted
+    /// installation token into the box the grant names, so a request rewritten between render and
+    /// click puts a live write credential in a box of the requester's choosing.
+    #[test]
+    fn the_grant_recorded_is_the_one_that_was_shown() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let rendered = Request {
+            id: "20260812-101010-1".into(),
+            box_name: "web-main".into(),
+            repo: "acme/web".into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        // No sandbox, so the courtesy write-back into the box's file fails and is ignored — which
+        // is the point: nothing about the grant depends on that file.
+        let done = decide("no-such-sandbox", &rendered, true, Some(24)).expect("granted");
+        assert_eq!(done.state, "granted");
+
+        let recorded = grants();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            (recorded[0].box_name.as_str(), recorded[0].repo.as_str()),
+            ("web-main", "acme/web"),
+            "box and repo both travel from the render, or the token lands somewhere nobody chose"
+        );
+        assert!(
+            !recorded[0].expires.is_empty(),
+            "and so does the expiry: a grant meant for a day must not become permanent"
+        );
+    }
 
     fn grant(box_name: &str, repo: &str, expires: &str) -> Grant {
         Grant {
