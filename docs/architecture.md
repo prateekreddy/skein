@@ -325,12 +325,15 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | on the volume | kind |
 |---|---|
 | `VERSION`, `config.json`, `repos.json` | declared |
-| `credentials/` | declared, `0700`, and see §9 |
-| `boxes/<name>/` — launch spec, conversation, transcript, notes, overrides | recorded |
+| `credentials/` | declared — protected by the **mount cover**, not by a file mode (§9.5.2) |
+| `boxes/<name>/recorded/` — launch spec, conversation, transcript, notes | recorded |
+| `boxes/<name>/declared/` — `privileged`, `git-scope`, `disk`, `identity` | declared — **never bound into the box** (§9.5.2) |
+| `boxes/<name>/artifacts/` — `git-tokens/` | approved artifact — bound **read-only** |
 | `boxes/<name>/transitions` — retained signal values and watermarks | recorded |
 | `repos/<id>/mirror` — a bare git mirror | recorded |
 | `repos/<id>/store` — the shared `.claude` every box for that repo reads | recorded, many writers |
-| `grants/`, `substrate/` — git-write grants and approved packages | declared |
+| `<queue>/requests/` — git-write and package requests | **requested** — box-writable, and the only box-writable thing under it |
+| `<queue>/approved` — the artifacts, and the replayed manifest | declared — written by the approving side, under the cover |
 | *(no `audit/` — see below)* | |
 
 `grants/` and `substrate/` are **requested** state (§2.1), and they are on the volume because they
@@ -429,7 +432,7 @@ microVM-sized budget rather than an action timeout.
 | kind | when |
 |---|---|
 | **resource ceilings** — create the box's cgroup, write `memory.max`/`high`/`pids.max`, move the session in; and `rmdir` it on destroy | every box start and every box destroy; plus server start, through `heal_fleet` → the launcher's ceilings path, which is a *different mechanism* from the per-box writes |
-| **package installation** — `apt-get` **and `npm install -g`** | on approval; replaying the approved manifest on **every box start** (via `ensure_fleet`), not every server start; plus the takeover-tools installer and the box startup kit |
+| **package installation** — `apt-get` **and `npm install -g`** (whose root prefix is unverified — §9.5.4) | on approval; replaying the approved manifest on **every box start** (via `ensure_fleet`), not every server start; plus the takeover-tools installer and the box startup kit |
 | **filesystem ownership** — create and chown the fleet root; `tar` a box out and back | every box start (fleet root); resize |
 | **container runtime config** — write `/etc/docker/daemon.json` | every box start *and* every server start (it runs in both the ensure and the heal paths) |
 
@@ -513,71 +516,6 @@ warden has **durable state of its own**, on the host: an outcome store keyed by 
 retention window (an id older than the window is answered "unknown", never re-executed). It is a
 module in §14 and a thing to back up, not an implementation detail.
 
-### 8.4 The approving side writes the artifact, not a flag
-
-§8.1's rule needs its sharper half, because the current code has the weaker one and a live defect to
-show for it.
-
-`substrate.rs:245` re-reads the whole request at install time and checks `state` and the *shape* of
-the package names — but `packages` comes from that same re-read, and the comment above it says the
-file "is writable by every box in the fleet". Approve `jq`, rewrite the file, get arbitrary names in
-a root `apt-get`. And the result is recorded into a manifest replayed as root on every fleet ensure,
-so one window buys permanent root execution.
-
-It is currently masked by a second defect: `/boxes/.skein` is read-only in every non-privileged box,
-so the request never lands at all — while the shim prints that it filed one. **Fixing either alone is
-worse than fixing neither.**
-
-> **Approval writes the approved artifact to a location only the approving side can write. The actor
-> reads only that. The requester's file is input, never state** (§2.1, *requested*).
-
-That covers the payload, not just the boolean — which is the difference between the rule as stated
-before and the rule that would have prevented this.
-
-**And the rule as stated is necessary but not sufficient.** `gitgate::decide` *already* implements it
-— it never trusts a `state` field and writes a `Grant` to a host-side file the refresher alone reads —
-and it is exploitable today, because the artifact is written from a **re-read by id after the human
-clicks**:
-
-1. a box files a request naming a repo you own;
-2. the cockpit renders it, you read it, you approve;
-3. the handler re-reads the file **by id** — and the box rewrote it in between;
-4. a grant is written for the other repo, and a real installation token lands in the box.
-
-The window is render→click: **human-scale, seconds to minutes**, where the substrate window is
-machine-scale. So moving the hazard from approve→install to render→click made it *larger*.
-
-> **An operation id correlates a decision to a request. It must never be what the decision re-reads
-> by.** The approving side binds the artifact to **the bytes it rendered** — carrying a digest through
-> the round trip and refusing if the file no longer matches.
-
-And the artifact carries the **resolved argv**, not a name list: if the actor re-splices names into a
-command, the splice is still the trust boundary.
-
-**One more the shape check misses.** The package-name whitelist admits `/`, and both `apt-get install
-./x.deb` and `npm install -g /path/pkg` install a *local* package and run its maintainer or lifecycle
-scripts as root — then persist into the replayed manifest, so one approval becomes root execution at
-every future launch. The whitelist's own comment claims the rejected set covers "the only two that
-matter"; there is a third.
-
-Two more that follow, and neither is an implementation detail:
-
-- **the request channel and the approval channel are different paths, and §5 must lay them out that
-  way.** The requester writes the first and cannot write the second. Covering the whole of
-  `substrate/` would enshrine today's masking bug as a requirement — requests would never land, while
-  the shim still says one was filed. The layout: **`substrate/requests/` box-writable and the only
-  box-writable thing under it; `substrate/approved` and the replayed manifest root-owned under the
-  cover.** Same for the git-write queue. The code already gets this right and splits them; the
-  document previously merged them into one line.
-- **an operation id is correlation, not content.** The warden must render **the resolved arguments it
-  will itself execute**, derived from its own parse — never display text the requester supplied.
-  Stated the other way round in an earlier draft, which made it an obstacle sold as a boundary.
-
-### 8.5 Flooding
-
-A compromised skein controls *what* is proposed and *when*. One outstanding request at a time, a rate
-limit, and the timeout §11.5 already names.
-
 ### 8.3 Capabilities are compiled
 
 Each capability is its own module; a warden that does not need one is built without it. Not gated,
@@ -612,6 +550,91 @@ The capability set is derived from what is linked, not read from config. But ske
 offer a button. Advertisement decides what skein *offers*; it never decides what skein *believes*.
 
 ---
+
+### 8.4 The approving side writes the artifact, not a flag
+
+§8.1's rule needs its sharper half, because the current code has the weaker one and a live defect to
+show for it.
+
+`substrate.rs:245` re-reads the whole request at install time and checks `state` and the *shape* of
+the package names — but `packages` comes from that same re-read, and the comment above it says the
+file "is writable by every box in the fleet". Approve `jq`, rewrite the file, get arbitrary names in
+a root `apt-get`. And the result is recorded into a manifest replayed as root on every fleet ensure,
+so one window buys permanent root execution.
+
+**Order matters between the two.** Making the queue writable to fix the masking bug makes the TOCTOU
+live — and once *every* box can write the queue, each can also overwrite, delete or flip the state of
+every *other* box's requests. So: **artifact binding first, then unmask the queue.**
+
+It is currently masked by a second defect: `/boxes/.skein` is read-only in every non-privileged box,
+so the request never lands at all — while the shim prints that it filed one. **Fixing either alone is
+worse than fixing neither.**
+
+> **Approval writes the approved artifact to a location only the approving side can write. The actor
+> reads only that. The requester's file is input, never state** (§2.1, *requested*).
+
+That covers the payload, not just the boolean — which is the difference between the rule as stated
+before and the rule that would have prevented this.
+
+**And the rule as stated is necessary but not sufficient.** `gitgate::decide` *already* implements it
+— it never trusts a `state` field and writes a `Grant` to a host-side file the refresher alone reads —
+and it is exploitable today, because the artifact is written from a **re-read by id after the human
+clicks**:
+
+1. a box files a request naming a repo you own;
+2. the cockpit renders it, you read it, you approve;
+3. the handler re-reads the file **by id** — and the box rewrote it in between;
+4. a grant is written for the other repo, and a real installation token lands in the box.
+
+The window is render→click: **human-scale, seconds to minutes**, where the substrate window is
+machine-scale. So moving the hazard from approve→install to render→click made it *larger*.
+
+> **An operation id correlates a decision to a request. It must never be what the decision re-reads
+> by.** The approving side **keeps the bytes it rendered and acts on those**. It does not re-open the
+> file; a digest check is the fallback for a design that still does.
+
+Four ways to implement that and still be wrong:
+
+- **there are three reads on the package path, not two** — the decision re-reads by id, and the
+  install re-reads by id *again*. Closing render→click leaves click→install open. Both need the same
+  binding.
+- **digesting the wrong bytes.** The queue is read through a JSON normaliser before it is parsed, so a
+  digest over the parsed value — or over the normaliser's output — is a digest of something the
+  requester can steer. It must be over the **file bytes, read once**, and that same read must be what
+  was rendered.
+- **the artifact must carry every field the actor uses.** The git grant is built from the re-read's
+  *box* as well as its repo, so the swap is not only "another repo" — it is "put a live token in a box
+  of my choosing". Box, repo and expiry all travel in the artifact.
+- **the requester's file must stop being a state machine.** The decision is currently written back
+  into the box's own file by id, so a box can drop the state change or resurrect a request. Once the
+  artifact is authoritative, the requester's copy is a message, not a record.
+
+And the artifact carries the **resolved argv**, not a name list: if the actor re-splices names into a
+command, the splice is still the trust boundary.
+
+**One more the shape check misses.** The package-name whitelist admits `/`, and both `apt-get install
+./x.deb` and `npm install -g /path/pkg` install a *local* package and run its maintainer or lifecycle
+scripts as root — then persist into the replayed manifest, so one approval becomes root execution at
+every future launch. The whitelist's own comment claims the rejected set covers "the only two that
+matter"; there is a third.
+
+Two more that follow, and neither is an implementation detail:
+
+- **the request channel and the approval channel are different paths, and §5 must lay them out that
+  way.** The requester writes the first and cannot write the second. Covering the whole of
+  `substrate/` would enshrine today's masking bug as a requirement — requests would never land, while
+  the shim still says one was filed. The layout: **`substrate/requests/` box-writable and the only
+  box-writable thing under it; `substrate/approved` and the replayed manifest root-owned under the
+  cover.** Same for the git-write queue. The code already gets this right and splits them; the
+  document previously merged them into one line.
+- **an operation id is correlation, not content.** The warden must render **the resolved arguments it
+  will itself execute**, derived from its own parse — never display text the requester supplied.
+  Stated the other way round in an earlier draft, which made it an obstacle sold as a boundary.
+
+### 8.5 Flooding
+
+A compromised skein controls *what* is proposed and *when*. One outstanding request at a time, a rate
+limit, and the timeout §11.5 already names.
 
 ## 9. The trust model
 
@@ -849,14 +872,11 @@ wait on it — an earlier draft claimed they did, and that was wrong.
 
    Two honest qualifications. This hardens **durability and blast radius, not control**: §9.2.2 is a
    shipped feature that lets one box drive another's agent directly, so R4 does not close the cheapest
-   path and must not be sold as doing so. And **skein's own approved-package installer breaks it** —
-   `sudo npm install -g` writes into the very toolchain that is bound read-write into every box, so
-   the rule is violated by the honest path before any attacker arrives.
-9. **Cross-box messaging renders provenance** (§9.2.2, kept). At minimum, inbound-from-a-box is
-   distinguishable from inbound-from-you — otherwise the one channel that carries control between
-   boxes is also the one with no attribution.
-10. **`/run` is covered, or its exposure is stated.** §9.1 notes the cover reaches neither `/run` nor
-   the per-user socket directory, and no requirement followed.
+   path and must not be sold as doing so. And **skein's own approved-package installer may break it**: `sudo npm install -g` writes to
+   whatever prefix npm resolves under root, and nothing in this tree sets one. If that prefix is the
+   shared `~/.local`, the rule is violated by the honest path before any attacker arrives — and worse,
+   it is root writing through a box-writable path (requirement 8). **Check `npm config get prefix`
+   under `sudo` in the fleet image before designing around either answer.**
 5. **The warden authenticates with a secret under the cover of requirement 2.** A mount cover hides
    it regardless of uid; cross-userns `/proc` access is already denied, so a box cannot lift it out of
    skein's memory either.
@@ -864,8 +884,26 @@ wait on it — an earlier draft claimed they did, and that was wrong.
    "Append-only" is unenforceable on a path a uid-1000 box can reach — there is no `chattr +a`
    without `CAP_LINUX_IMMUTABLE`.
 7. **Credentials are compared on evidence skein controls, never on a field the file asserts** (§9.3).
-8. **The workshop toggle states what it grants.** It is fleet root, and it is the boundary's only
+8. **No privileged actor reads, writes, chowns or follows a path a box can influence.** §8.4 states
+   this for approvals; that was too narrow, and the general form sweeps in three more:
+
+   - **the resize archive** is parked in the box-writable state directory, created with root `tar`
+     and `chown`, and restored with root `tar -x` **preserving owners and modes**. Its name is a
+     second-resolution timestamp, so it is pre-plantable as a symlink. A root actor writing through a
+     path a box controls is the same class as the approval TOCTOU.
+   - **`git-tokens/`** is host-*written* and box-*read* — an **approved artifact** (§2.1), which is a
+     third category the declared/recorded split has no slot for. It is bound **read-only**.
+   - **`disk` and `identity`** join `privileged` and `git-scope` as declared per-box files in a
+     box-writable directory: a box raises its own disk allowance on a shared disk, or forges its
+     committer.
+
+9. **The workshop toggle states what it grants.** It is fleet root, and it is the boundary's only
    deliberate in-fleet escape hatch.
+9. **Cross-box messaging renders provenance** (§9.2.2, kept). At minimum, inbound-from-a-box is
+   distinguishable from inbound-from-you — otherwise the one channel that carries control between
+   boxes is also the one with no attribution.
+10. **`/run` is covered, or its exposure is stated.** §9.1 notes the cover reaches neither `/run` nor
+   the per-user socket directory, and no requirement followed.
 
 Corrected from an earlier draft: the cgroup control plane is **not** box-writable. Every cgroup write
 in the launcher goes through `sudo` before `bwrap`, and the source is explicit that a write from
