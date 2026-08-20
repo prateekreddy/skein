@@ -1,14 +1,17 @@
 # skein — architecture
 
-The design for a clean rewrite. Decided 2026-08-20.
+The destination design. Revised 2026-08-20 against three independent reviews (architecture,
+security, delivery), each of which found real defects in the first draft. Where a claim below
+contradicts something skein does today, it is because the current behaviour was checked and found
+to be the better answer — not because it was overlooked.
 
-The root `ARCHITECTURE.md` describes the system that exists today and stays accurate until this
-replaces it.
+Companion documents: `docs/delivery.md` (sequence, migration, landmines) and `docs/parity.md` (the
+audited capability inventory). The root `ARCHITECTURE.md` describes today's system and is **stale**
+— it still describes ratatui, Svelte and per-box microVM kernels. It should be retired, not trusted.
 
-This document is organised primitives-first: §2 states the four things skein is built from, §3 shows
-every feature as a composition of them. If a feature cannot be written as a composition, that is a
-signal the primitive set is wrong — and fixing the primitive set is the correct response, not adding
-a mechanism beside it.
+Organised primitives-first: §2 states the five things skein is built from, §3 shows every feature as
+a composition. **A feature that cannot be written as a composition means the primitive set is wrong**,
+and the correct response is to fix the primitive set — not to add a mechanism beside it.
 
 ---
 
@@ -17,148 +20,192 @@ a mechanism beside it.
 > **A board of boxes. Each box is a coding agent working on a branch. The board's job is to tell you
 > which one needs you.**
 
-That sentence is the mental model, and every surface should reinforce it. A user who understands only
-that sentence should be able to predict what any screen does.
-
-One structural change from today: **skein runs inside the sandbox, alongside the boxes it manages.**
-It therefore holds no host privilege, and that constraint — not sbx, not containers — is what shapes
-the rest of this document.
+One person uses one cockpit. That is a decision, not an assumption: "needs you" has a single meaning,
+credentials belong to one identity, and whoever approves a privileged operation is that same person.
+Multi-user moves the queue, the credential model and the approval model together, so it is a
+different design rather than a later feature.
 
 ---
 
 ## 2. The primitives
 
-Four. Everything else is composition.
+Five. Two nouns, one reach, two verbs.
 
-### 2.1 Fact — what skein was told
+| | idempotent / self-healing | lossy / one-shot |
+|---|---|---|
+| **durable** | State: *declared* | State: *recorded* |
+| **observed** | Signal: *level* | Signal: *edge* |
+| **acting** | Operation | Act |
+| **reaching** | Source | |
 
-Durable, declared, never inferred. Repo remotes, box identities, config, credentials, the branch a
-box was created for.
+### 2.1 State — what is written down
 
-- Lives on the durable volume (§5), which is the only thing that persists.
-- **One writer.** A fact with two writers is a race with a UI on top.
-- Surviving a fleet rebuild is the definition of a fact. If losing it on rebuild would not hurt, it
-  is not one.
+Durable, on the volume (§5). Two kinds, with **different rules**, because treating them alike is a
+defect the first draft shipped:
 
-### 2.2 Signal — what skein can observe
+**Declared** — what the user told skein. Repo remotes, box identities, config, branch choices.
+Small, versioned, **sole writer**, guarded by a lock or an owning process.
 
-An observation about the world right now. Every signal declares four things, and the declaration is
-part of its definition rather than documentation:
+**Recorded** — what skein and the boxes write as they work. Conversations, transcripts, journals,
+hook logs, per-box status, mailbox messages. **Many writers by design** — every box writes these
+continuously — so the rule is one file per writer, or a documented lock protocol, never "one writer".
+
+Today's code already needs this discipline (`flock` on `.sandboxes.lock`, per-message `.lock` files
+in the mailbox) and today's code also violates it where it matters most: `config.json` and
+`repos.json` are unsynchronised read-modify-write with no locking, so two cockpit tabs saving
+settings is silent last-write-wins. Declared state gets a lock or an owner. That is not optional.
+
+**Every durable file carries `"schema": N`, and the volume carries a `VERSION`.** The volume is the
+only survivor of a fleet rebuild, so a volume written by version N *will* routinely be opened by
+N+k. skein refuses to open a volume newer than it understands, with a printable recipe (§11 law 1
+applies to skein itself). There are zero version fields in the codebase today and exactly one
+migration, which fires on *unparseable* as well as absent — so a corrupt file silently re-migrates.
+Retrofitting this after users have volumes is what kills a project in year two.
+
+### 2.2 Signal — what can be observed
+
+Every signal declares six things. The declaration is part of its definition, not documentation:
 
 | | |
 |---|---|
+| **subject** | what it is about. **Keyed by subject, never by observer.** |
 | **kind** | `level` or `edge` |
-| **source** | who observed it, and how |
-| **observed_at** | when — freshness is never implicit |
-| **cost** | what one observation costs (§10) |
+| **source** | which Source produced it (§2.3) |
+| **observed_at** | freshness is never implicit |
+| **cost** | in which budget, and how much (§10) |
+| **cadence** | interval, staleness threshold, and the Gate contract below |
 
-**Level** signals are re-readable and self-healing: read the pane, stat the file, connect to the
-port. Missing one observation costs nothing, because the next one is authoritative.
-
-**Edge** signals are events, and they are **lossy**: a hook that did not fire, a message that was not
-delivered, a process that died before writing. They cannot recover.
-
-The law that this whole primitive exists to enforce, learned the expensive way (`docs/turn-state.md`
-— a permission answered at 13:27 still displayed as blocking at 13:47):
+**Level** signals are re-readable and self-healing. Missing one observation costs nothing.
+**Edge** signals are events and are **lossy** — a hook that never fired, a process that died before
+writing.
 
 > **An edge-triggered latch with incomplete edge coverage cannot recover. A state nobody clears is
 > shown forever.**
 
-Therefore:
+Therefore: **no displayed state may rest on an edge alone.** Edges may only *accelerate* a level
+signal — arriving sooner than the next poll — never be its sole basis. And the keying rule is its
+own bug: turn state keyed by box but written by session let any helper process overwrite the agent's
+state, producing seventeen spurious `ended` events in 114 seconds.
 
-> **No displayed state may rest on an edge alone.** Every derived state is grounded in a level
-> signal. Edges may only *accelerate* it — arriving sooner than the next poll — never be its sole
-> basis.
+**A signal's value is four-valued, not two**: `value | stale | unreadable | unsupported`.
+"Could not observe" is not "observed absent", and collapsing them is what drives spurious action.
 
-And a corollary that was its own bug: **a signal is keyed by what it is about, not by who observed
-it.** Turn state keyed by box but written by session meant any helper process could overwrite the
-agent's state — seventeen spurious `ended` events in 114 seconds.
+**The Gate contract.** Every signal's observation is mediated by a gate that provides: single-flight
+(concurrent askers share one observation), serve-stale-refresh-behind (the last good value is
+returned immediately while a refresh runs), exponential backoff on failure, and a sticky last-good
+value so a wedged source does not blank the board. This exists today in `util.rs` and is load-bearing
+— check-then-act previously gave every browser tab its own subprocess every tick, and a board refresh
+walked four gates in series and took 31 seconds. Cadence without a gate is not a cadence.
 
-### 2.3 Operation — an intent to change the world
+### 2.3 Source — how a subject is reached
 
-An operation is not a function call. It is four things:
+A Source is a way of observing and acting on something. Four, and each declares its cost and its
+failure modes:
+
+| source | reaches |
+|---|---|
+| `enter` | a box's namespace, via nsenter |
+| `socket` | a box's tmux server, without entering |
+| `file` | the volume, and paths visible in the fleet |
+| `http` | GitHub, and the warden |
+
+Each carries three modes, because "execute" does not cover what the jobs need: **`exec`** (capture
+output), **`stream`** (stdin or stdout as bytes, up to gigabytes, never buffered whole), **`pty`** (a
+terminal).
+
+Source exists as a primitive because the first draft promoted `enter` to one and that was wrong twice
+over. The cheapest and most-used signal in the whole system reaches a box **by socket, without
+nsenter** — so "nothing reaches a box except through `enter`" broke on day one. And `github` is a
+world-facing transport that was left outside the primitive set entirely. With Source, the law becomes
+enforceable: **no code reaches anything except through a Source.**
+
+`enter` has two load-bearing details, learned from a real box: the user and mount namespaces must be
+joined **together** — joining mount alone is refused — and credentials must be preserved, or
+`setgroups` fails for an unprivileged caller.
+
+### 2.4 Operation — an idempotent intent
 
 | | |
 |---|---|
-| **desired** | the fact that should be true |
-| **check** | a **level signal** that says whether it is |
-| **recipe** | the exact command that would make it true — always present, always printable |
-| **doer** | skein performing the recipe — **optional** |
+| **desired** | the declared state that should hold |
+| **check** | a **tri-state** level signal: `satisfied \| unsatisfied \| unknown` |
+| **recipe** | the exact command, with environment. Always present, always printable |
+| **doer** | performing it. **Optional** |
+| **requires** | prerequisite operations — operations form a **DAG**, not a list |
+| **class** | `idempotent` or `destructive` |
+| **lease** | an in-flight attempt: id, started_at, deadline |
 
-Consequences, all of which fall out rather than being built:
+**`unknown` may never drive a doer.** It may only be reported. A binary check makes "the daemon is
+wedged" and "the fleet is absent" indistinguishable, and the reconciler responds by creating a fleet
+that already exists. Today's `fleet_exists` returns `Option<bool>` with exactly this comment; the
+first draft threw that knowledge away.
 
-- **Idempotent by construction.** You run an operation by reading its check and closing the gap.
-  Running it twice is running it once. `ensure`, never `do`.
-- **Crash recovery is free.** Re-run everything; the checks decide what is actually needed.
-- **Partial failure is free.** Nothing is left half-done that the next reconcile cannot see.
-- **Manual operation is not a degraded path.** It is the same path with the doer removed: skein shows
-  the recipe and polls the check.
-- **skein can never be blocked without saying what would unblock it**, because the check is *how it
-  knows* it is blocked.
+**A lease distinguishes owed from in flight.** Creating a fleet takes minutes, during which its check
+fails; without a lease a reconciler fires it repeatedly.
 
-Note that the check is a level signal. **§2.2 and §2.3 are the same mechanism pointed at different
-subjects** — turn state observes boxes, checks observe infrastructure. One reconciler serves both.
+**`destructive` operations are never auto-driven**, even when a doer exists and the check is
+unsatisfied. Re-running a destroy is not "running it once".
 
-### 2.4 Enter — execution inside a box
+What this buys, and only with all four qualifications above: crash recovery is re-running the
+reconcile; partial failure leaves nothing the next reconcile cannot see; manual operation is the same
+path with the doer removed; and **skein can never be blocked without saying what would unblock it,
+because the check is how it knows.**
 
-The one way to run something in a box: join its namespace and execute.
+### 2.5 Act — a non-idempotent interaction
 
-Both the user and mount namespaces must be joined together — joining mount alone is refused — and
-credentials must be preserved or `setgroups` fails for an unprivileged caller. Both details are
-load-bearing and were learned from a real box; getting either wrong presents as a permissions bug
-rather than a missing flag.
+Sending a message to an agent. Answering its question. Interrupting a turn. Uploading a file.
+Attaching a terminal. Taking a box over onto another runtime.
 
-Signals and operations both reach into boxes through this and nothing else.
+These have no `desired` and no `check`. They are streaming, unacknowledged, and doing them twice is
+doing them twice. Forcing them into Operation makes "`ensure`, never `do`" a lie; leaving them
+unnamed makes them grow *beside* the primitives, which is the debt §12.8 exists to prevent.
 
-> **`enter` must never depend on `privileged`.** Reaching a box is precisely the thing that must not
-> require host privilege. Any change that couples them has broken the architecture, not just a
-> module boundary.
+**An Act emits an edge signal as a side effect** — skein knows it delivered the keystroke, and that
+knowledge is what makes an optimistic state clear correct.
 
-### 2.5 The fact/signal square
+### 2.6 The reconciliation cube
 
-Facts and signals are independently true, and **their disagreement is the most useful thing skein
-knows**. Every reconciler, and most of what skein needs to say to a user, is one of four cells:
+Three axes, because the 2×2 of the first draft mishandled four common cases:
 
-| | signal present | signal absent |
+- **declared** ∈ `absent | present | deleted`
+- **desired** ∈ `running | stopped`
+- **observed** ∈ `present | absent | unknown | failed(reason)`
+
+The cases the square got wrong, each of which is a real feature today:
+
+| situation | square said | cube says |
 |---|---|---|
-| **fact present** | healthy | **an operation is owed** — start it, create it, publish it |
-| **fact absent** | **foreign** — real, not skein's; report, never touch | absent, correctly |
+| a box you deliberately stopped | "an operation is owed — start it", forever | declared present, **desired stopped** — nothing owed |
+| a box whose start failed | same cell, so retry forever | `observed = failed(reason)`, and the reason is shown |
+| a half-completed destroy | "foreign — never touch", so skein cannot clean up its own corpse | `declared = deleted` — a tombstone, and cleanup is owed |
+| sbx unreachable | "absent" | `observed = unknown` — report, drive nothing |
 
-This single square replaces a set of features that are currently bespoke: a box that will not start,
-a fleet that is missing, a port that was never published, someone else's sandbox appearing on the
-board, an orphaned namespace after a crash. Same model, four cells, one implementation.
+`failed(reason)` is how a start failure is displayed without violating §2.2: the reason is an edge,
+but the *cell* is a level signal, and the cell is what is rendered.
 
 ---
 
 ## 3. Features as compositions
 
-The payoff. Nothing below is a mechanism of its own.
-
 | feature | composition |
 |---|---|
-| the board | current level signals per box, ranked by attention |
+| the board | level signals per subject, ranked by attention |
 | "what needs me" | a predicate over signals |
-| turn state | fusion of a level signal (pane grammar) with edges (hooks) that only accelerate it |
-| voice, notifications | signal **transitions**, filtered |
-| the review queue | signals whose source is GitHub rather than a box |
-| `doctor` | every operation's check, reported |
-| **onboarding** | failing checks, rendered with their recipes |
-| **the blocked state** | *the same thing* — see §8.2 |
-| launching a box | an operation whose check is "the namespace is alive" |
-| resize | an operation whose check is "reported resources match config" |
-| manual mode | operations with the doer omitted |
-| foreign detection | the bottom-left cell of §2.5 |
-| crash recovery | reconcile every operation |
+| turn state | level (pane grammar) fused with edges (hooks) that only accelerate it |
+| the review queue | signals whose Source is `http` rather than `enter`/`socket` |
+| voice, notifications, the away digest | signal **transitions** — see below |
+| `doctor` | every operation's check, reported, including `unknown` |
+| onboarding, breakage, approval | failing checks with their recipes — three components, one language (§11.4) |
+| converse, answer, interrupt, upload, takeover | **Acts** |
+| launching a box | an Operation whose check is "the anchor is alive" |
+| foreign detection | `declared absent ∧ observed present` |
+| crash recovery | reconcile the DAG |
 
-Two of those are worth pausing on, because they are unifications rather than restatements.
-
-**The review queue stops being a feature.** It is a signal source: observations about pull requests
-instead of observations about panes. It gets ranking, staleness, transitions and voice for free,
-because those are compositions over signals and it is now producing signals.
-
-**Onboarding stops being a flow.** There is no separate first-run experience to build, and therefore
-none to rot. A new user's screen is the blocked state, which is failing checks plus their recipes,
-which is the same code that handles a fleet that breaks eighteen months later.
+**Transitions need durable state that neither noun covers**, and the first draft had nowhere to put
+it. A transition requires the retained previous value per `(subject, signal)`, plus a watermark for
+"what changed since I last looked". That is **recorded** state (§2.1) on the volume, written by
+skein. It must be server-side: today's away digest computes the delta client-side on tab re-focus,
+which is why a box that turned while you were looking elsewhere was never announced.
 
 ---
 
@@ -166,391 +213,361 @@ which is the same code that handles a fleet that breaks eighteen months later.
 
 ```
 host
-  ├── durable volume            the only thing that persists
-  ├── sidecar (optional)        performs privileged operations, a human approving
-  └── :PORT ──────────────┐     one published port, to the cockpit
-                          │
-  fleet sandbox           │
-    ├── skein ────────────┘     control plane: cockpit, board, signals, operations
-    └── boxes                   each a namespace; skein enters them directly
+  └── warden          creates and destroys fleets. Nothing else.
+        │             owns its own approval surface (§8)
+        ▼
+  fleet sandbox
+    ├── volume        mounted at create; the only thing that persists
+    ├── skein         cockpit, board, signals, operations, acts
+    └── boxes         namespaces; skein reaches them by socket and by enter
 ```
 
-One VM. No host-to-guest command path in normal operation.
+The warden is **not optional convenience**. It exists because the two remaining privileged operations
+(§7) both terminate skein, so skein cannot be the thing that performs them. Fleet lifecycle lives
+outside the fleet, permanently, and that is a boundary rather than a limitation.
 
 ---
 
 ## 5. The durable volume
 
-**The volume is the only thing that persists; everything else is reconstructible.** Destroy the
-fleet, recreate it, remount, and nothing is lost. Every other decision exists to keep that true.
+**The volume is the only thing that persists; everything else is reconstructible.**
 
-| on the volume | |
+| on the volume | kind |
 |---|---|
-| `config.json` | settings |
-| `repos.json` | the registry: id, remote, default branch |
-| `credentials/` | tokens and logins — `0700`, see §9 |
-| `boxes/<name>/` | launch spec, conversation, transcript, notes |
-| `repos/<id>/mirror` | a bare git mirror, so box clones are local and fast |
-| `repos/<id>/store` | the shared `.claude` every box for that repo reads |
+| `VERSION`, `config.json`, `repos.json` | declared |
+| `credentials/` | declared, `0700`, and see §9 |
+| `boxes/<name>/` — launch spec, conversation, transcript, notes, overrides | recorded |
+| `boxes/<name>/transitions` — retained signal values and watermarks | recorded |
+| `repos/<id>/mirror` — a bare git mirror | recorded |
+| `repos/<id>/store` — the shared `.claude` every box for that repo reads | recorded, many writers |
+| `grants/`, `substrate/` — git-write grants and approved packages | declared |
+| `audit/` — an append-only log of every approved privileged operation | recorded |
 
-Deliberately **not** on it:
+`grants/` and `substrate/` are on the volume because they exist *precisely* to outlive the sandbox:
+lose them and every box re-asks for push access and for packages already approved.
 
-- **box checkouts** — VM-local disk is several times faster for build work than a mount, and a
-  checkout is reclonable from the mirror in seconds. (Already true today; checkouts were never
-  mounted.)
-- **namespace anchors** — reachability is a live pid, meaningless across a restart. Persisting it
-  would have skein confidently address a corpse.
-- **caches and build output** — cheap to rebuild, expensive to sync.
+**Not** on the volume: box checkouts (VM-local; measurably faster for build work and reclonable from
+the mirror), namespace anchors (a live pid, meaningless across a restart), caches and build output.
 
 The test for anything new: *if the fleet were destroyed right now, would losing this hurt?*
 
-This is also what makes **resize non-destructive**. Today resize is destroy-recreate-copy. With
-durable state on the volume it is recreate-and-remount: nothing to copy, nothing to lose.
+**The volume can fill.** Every operation that writes has a free-space precondition; `boxes/<name>/` is
+garbage-collected when a box is destroyed; transcripts and the audit log rotate. Today per-box disk
+limits are *displayed and never enforced*, and no code matches `ENOSPC` anywhere — the first symptom
+is another box's build failing. A check for "the volume is mounted" without one for "the volume has
+room" repeats that.
 
 ---
 
-## 6. Boxes
+## 6. Boxes and repos
 
-A box is an **identity** — name, repo, branch, conversation — and its identity is a fact that
-outlives every process.
-
-A box **runs** as a bwrap namespace with its own `/tmp` and `$HOME`, anchored by its tmux server. The
-server is the honest anchor: the launcher double-forks away, so its pid names a corpse while the box
-runs happily.
+A box is an **identity** — name, repo, branch, conversation — that outlives every process. It **runs**
+as a bwrap namespace anchored by its tmux server, because the launcher double-forks away and its pid
+names a corpse while the box runs happily.
 
 > **box alive ⇔ tmux server alive ⇔ namespace joinable**
 
-One level signal, read locally and instantly. It replaces listing sandboxes on the host to find out
-whether a box exists.
+**A repo is a remote.** Adding one clones a bare mirror onto the volume; a box clones its checkout
+from the mirror onto VM-local disk. Crucially, **a local filesystem path is a valid remote** — so a
+repo with no server anywhere still works: skein fetches from your path.
 
-**Repos are remotes.** A repo is a URL; adding one clones a bare mirror onto the volume; a box clones
-its checkout from that mirror. There is no adopt-in-place and no mounted working checkout in *either*
-deployment — skein never touches the code you are working on.
+What is lost, precisely: **uncommitted work in your host checkout is not visible to boxes.** You
+commit — not push — and skein fetches. That is a smaller loss than "local repos stop working", which
+is what the first draft claimed.
 
-The cost, stated plainly: **uncommitted work on your host is invisible to boxes.** Push it or it is
-not there. That is the change existing users notice first.
+Two consequences to state rather than discover:
 
----
-
-## 7. Privileged operations
-
-Six, all of them fleet lifecycle:
-
-| operation | check |
-|---|---|
-| create the fleet | it is listed, and it answers |
-| publish the cockpit port | connect; does anything answer |
-| mount the durable volume | present and writable |
-| resize | reported cpu / memory / disk match config |
-| store the push credential | the token resolves |
-| destroy the fleet | it is gone |
-
-Doer sources, configurable **per operation**:
-
-- **direct** — skein runs it (host-driven skein, with the tooling in reach)
-- **sidecar** — skein asks the host service (§8)
-- **none** — recipe and check only
-
-**Nothing in normal operation appears in that table.** Not running commands in boxes, not reading
-trees, not terminals, not signals, not the review queue, not the cockpit. A skein that can perform
-none of the six still does its entire job, provided someone set the fleet up.
-
-## 8. The host sidecar
-
-A small host service exposing privileged operations. Reachable → doers exist. Unreachable → recipes
-and checks. Host-driven and in-fleet skein are therefore not two code paths: both call the sidecar,
-one over localhost and one over the sandbox gateway, so the in-fleet path is exercised by everyone
-rather than only by those who chose it.
-
-### 8.1 Capabilities are compiled, not configured
-
-**Each capability is its own module, and a sidecar that does not need a capability is built without
-it.** Not disabled by a flag, not gated by a permission check — the code is not in the binary.
-
-This is the strongest form of the guarantee available:
-
-| defence | defeated by |
-|---|---|
-| a runtime permission check | a bug in the check, a path that forgets to call it, a confused deputy |
-| a config setting | anything that can write config |
-| **absent code** | nothing |
-
-A sidecar built without `destroy-fleet` cannot destroy a fleet through any bug, any injection, any
-mistake in an unrelated module, because there is no code path that ends in that call. The class of
-accident is removed rather than defended against.
-
-**What is removable and what is not.** Only the **doer** lives in a capability module. Recipes and
-checks live in skein, are always compiled, and are never privileged — they are needed *precisely
-when* the doer is absent. So a stripped sidecar degrades to "show the command and watch for the
-result", which is the ordinary path, not a failure.
-
-**The capability set is advertised, not declared.** At handshake the sidecar reports which
-capabilities it holds, and that list is *derived from what is linked* rather than read from a config
-— a configured list can be wrong, and a wrong one here means skein waits for a doer that does not
-exist. skein renders the difference directly: an operation with no doer shows its recipe, an
-operation with one shows an approval button. Same component (§8.3), different affordance.
-
-**The default build has no capabilities.** You opt in, explicitly, at build time. Onboarding does not
-need a sidecar at all — recipes and checks carry it — so nothing is lost by making the safe build the
-default one, and the list of what a given host's sidecar can do is then a fact someone chose rather
-than a default nobody read.
-
-**Capability modules are mutually independent.** No capability may reference another. That is what
-keeps the build matrix linear rather than exponential (§16) and what makes each one reviewable in
-isolation.
-
-**Where this principle stops.** Compile-time removal is for capabilities that **cross a trust
-boundary**. Applying it to ordinary features would produce 2^N build configurations, of which CI
-tests two, which is its own defect factory. The privileged operations qualify. Almost nothing else
-does.
-
-### 8.2 It is an approval channel, not an execution channel
-
-Even a compiled capability does not run unattended. A host service that creates sandboxes and mounts
-host directories, reachable from inside the fleet, would otherwise hand every process in that fleet
-the ability to mount `/` into a fresh sandbox and read the machine — and skein shares the fleet with
-the boxes, which run coding agents.
-
-So **the sidecar removes the copy-paste, not the human.** It receives a request, shows the exact
-command, and does nothing until a human approves. The precedent already works here: a box asks for a
-package through the sudo shim and its owner approves it in the cockpit.
-
-Two layers, and they fail independently: a capability that is not compiled cannot be invoked at all,
-and one that is compiled cannot be invoked without a person seeing what it will run.
-
-This also dissolves the doer/recipe distinction — the recipe is *always* what a human sees; the only
-question is whether approving it costs one click or a terminal window. Rare, consequential operations
-are exactly where a human in the loop costs nothing and buys the entire boundary.
-
-A pre-authorised allowlist can come later, narrowly, per capability, with the widening stated. Not in
-the first version.
-
-### 8.3 Why this is also the UX
-
-The sidecar's approval card, the onboarding screen, and the "something is broken" screen are **the
-same component**: a failing check, its recipe, and a live indication of when it passes. The only
-variation is whether a doer exists to offer a button. Build it once, well.
-
-## 9. The credential boundary
-
-The honest cost of §4, which must not be discovered later.
-
-Host skein keeps credentials outside the VM the boxes run in. In-fleet skein keeps them on the
-durable volume, **inside** it. A box that escapes its namespace reaches them. That is inherent to
-skein sharing the fleet, and it is what the simplicity in §2.4 and §12 is bought with.
-
-Two requirements, not preferences:
-
-1. **`credentials/` is mounted into skein's namespace, not the fleet root.** Boxes cannot reach the
-   master credential by walking the filesystem — only by defeating a namespace.
-2. **Boxes receive scoped, short-lived tokens** minted per box for what that box needs, never the
-   master credential handed down.
-
-Neither makes an escape harmless. They make a namespace escape the *only* way through, which is the
-property that can actually be defended and tested.
+- **In-fleet skein cannot reach host paths.** A local-path remote works host-driven; in-fleet, the
+  mirror must be seeded at import or the repo must live on the volume. A real asymmetry between the
+  two deployments.
+- **Three host-side features read the working checkout directly** — `diff`, `moduledocs`,
+  `codeowners`. They repoint at the mirror. That is a refactor, not a deletion, and it is budgeted
+  in `docs/delivery.md`.
 
 ---
 
-## 10. Cost
+## 7. The two privileged operations
 
-A hard constraint, restated by the user twice and measured rather than asserted: **skein must never
-be expensive enough to disturb development on the machine it runs on.** The current budget is one
-tmux round-trip per box per second, niced, with adaptive backoff, measured at 0.11% of a core.
+**create a fleet** and **destroy a fleet**. That is the whole list.
 
-Therefore every signal declares its observation cost (§2.2), and the board's total is a budget rather
-than an emergent property. A signal whose cost is not known is not admissible.
+The first draft had six. Four collapsed once "repos are clones onto the volume" was actually applied:
 
-In-fleet mode makes this strictly cheaper: observation no longer crosses a host-to-guest boundary,
-so the per-tick cost falls to a local process spawn.
+| was | became |
+|---|---|
+| mount a repo | gone — it existed only for adopt-in-place and the mounted store parent |
+| publish the cockpit port | a parameter of create |
+| mount the durable volume | a parameter of create |
+| store the push credential | **not privileged** — on the volume it is a file write |
+
+**resize is a composition**: destroy + create, carrying the delta. Not "nothing to copy" — the
+checkout is reclonable but its *uncommitted* work is not, so resize preserves unpushed commits, index
+and worktree patches, untracked files and deliberately-swept ignored files. That is small and fast,
+and it is what today's snapshot already does. Getting this wrong destroys a week of someone's work;
+the current code refuses rather than warns in four separate places, and that instinct is correct.
+
+**Nothing in normal operation is privileged.** Not commands in boxes, not terminals, not signals, not
+the review queue, not the cockpit, not storing credentials.
+
+One caveat the first draft got wrong: **package approval is not fleet lifecycle but does need root in
+the sandbox.** A box asks for `apt`/`npm`, its owner approves, and the approval is remembered in a
+manifest replayed into every future launch. It belongs to the fleet's own root, not the host's, and
+it is an approval system rather than a setting.
+
+---
+
+## 8. The host warden
+
+A small host service owning fleet create and destroy. Two capability modules.
+
+### 8.1 Its approval surface is its own, on the host
+
+The first draft made the warden's approval card the same component as the cockpit's check card. The
+cockpit is served by skein, inside the fleet, beside coding agents. That closes a loop: box →
+compromise skein → skein asserts "a human approved" → warden runs a privileged host command.
+
+So: **the warden renders and confirms its own approvals, on the host, outside the fleet.** It never
+trusts an `approved` field on the wire. Requests carry an operation id it echoes into the approval
+text, so what you see is what will run.
+
+Generalised, because this is the shape of the whole class: **approval is a fact the approving side
+writes, never a field the requester supplies.** The current package queue is a box-writable JSON file
+carrying a `state` field; whether that is safe depends entirely on the host re-deriving approval
+rather than trusting the field. It must re-derive.
+
+### 8.2 Requests are at-most-once
+
+A timeout on `destroy-fleet` means exactly "did it happen or not?". The first draft congratulated
+itself on deleting the transport-failure-versus-command-failure distinction; that distinction is a
+**safety property**, not redundancy, and moving to HTTP relocates the hazard rather than removing it.
+Operation ids, and the warden answers a repeated id with the original outcome.
+
+### 8.3 Capabilities are compiled
+
+Each capability is its own module; a warden that does not need one is built without it. Not gated,
+not configured — absent. A runtime check falls to a bug in the check; absent code falls to nothing.
+
+Only the **doer** is removable. Recipes and checks live in skein, always compiled, never privileged —
+they are needed precisely when the doer is absent.
+
+Two capabilities, so the default build ships **create** and leaves **destroy** opt-in. A default that
+can do nothing makes first run worse, which is what the first draft's "default has no capabilities"
+did.
+
+The capability set is derived from what is linked, not read from config. But skein must not extend
+*trust* on the strength of an advertised list — a malicious endpoint advertises whatever makes skein
+offer a button. Advertisement decides what skein *offers*; it never decides what skein *believes*.
+
+---
+
+## 9. The trust model
+
+The first draft asserted that a namespace escape was "the only way through". That is false, and the
+correction is the most important change in this revision.
+
+### 9.1 What a box actually shares
+
+Verified in `src/box-session.sh:1206-1214`. A box is isolated by **two** namespaces — mount and user.
+It **shares** with every other box and with anything else in the sandbox:
+
+- **network** — no `--unshare-net`. Any localhost port in the sandbox is reachable from every box.
+- **PID** — no `--unshare-pid`, and deliberately: *"the pid recorded below has to be the pid skein
+  sees from outside, or nsenter has nothing to anchor on."*
+- **IPC, UTS, cgroup**, and `/sys/fs/cgroup` is writable.
+- **uid** — every box is uid 1000, as is everything else.
+
+And one thing that is not a hole but an addressing scheme: **a box's tmux socket sits outside its
+private mounts by design**, so skein can list, attach and kill without entering. Since every box sees
+`/boxes/*` read-write as uid 1000, **any box can run code in any other box** via that socket. The
+launcher says so plainly: *"Other boxes here are not a security boundary."*
+
+> **The security boundary is the fleet sandbox. Boxes are isolated from each other's files, not from
+> each other.**
+
+### 9.2 What moving skein inside costs
+
+Stated because it must not be discovered later. Relative to host-side skein, co-residence gives a box:
+
+- the ability to **signal or kill skein** (shared PID namespace, same uid)
+- **network reach to skein's own API** (shared netns) — a mount boundary protects files, not ports
+- **reach to the warden over the gateway**, indistinguishable from skein by address or uid
+- **credentials inside the blast radius**, since they move onto the volume
+
+### 9.3 What hardening co-residence requires
+
+Chosen over moving skein back out, because that would give back the reason for doing this. These are
+requirements, and each is a project rather than a paragraph:
+
+1. **skein's control API is a filesystem socket outside every box's mount view — never a TCP port.**
+   The mount namespace does protect that. The cockpit's HTTP port is a separate question (§9.4).
+2. **skein runs as a uid distinct from boxes**, closing signal/kill and same-uid file reads. Note
+   `newuidmap`/`newgidmap` are not installed today though `/etc/subuid` is configured, and the
+   launcher rejected per-box uids for a measured reason: the tmux socket is `0700 uid 1000` and a
+   box on its own uid leaves the cockpit unable to attach. **The attach mechanism must be redesigned
+   with the uid split, not after it.**
+3. **The warden authenticates a caller skein can prove to be and a box cannot.** With shared netns
+   and shared uid, no such secret exists today. Requirement 2 is its prerequisite.
+4. **The cgroup control plane is outside every box's write reach.** Today a fleet-scoped box can
+   raise `memory.max`, defeating the ceilings §10 depends on.
+5. **The audit log is append-only and written by the approving side.**
+
+### 9.4 The agent's own credential cannot be scoped
+
+GitHub tokens can be scoped per repo, short-lived, and revoked — that part is real and well built.
+
+The agent's Claude/Codex OAuth login is different: it must be **inside the box** for the agent to run
+at all, it is seeded down into every box and flows back up on refresh, and it is the credential a
+rogue agent most wants. There is no scoping primitive for it from any provider.
+
+So it is carved out explicitly rather than covered by a claim that does not hold: **the agent login is
+fleet-shared and unscopable.** The only real defence is a proxy that injects it outside the box's
+reach, and that is unbuilt. Saying "boxes get scoped short-lived tokens" without this carve-out is an
+obstacle sold as a property.
+
+---
+
+## 10. Budgets
+
+**skein must never be expensive enough to disturb development on the machine it runs on.** Measured,
+not asserted: the in-box observer costs 0.11% of a core.
+
+Cost is **not one number**. Five budgets, each with its own unit and its own enforcement:
+
+| budget | unit | note |
+|---|---|---|
+| CPU | core-fraction | the observer's; the host side is already zero |
+| wall-clock | ms per board refresh | gates, single-flight, backoff |
+| GitHub | API units | 403 with a reset time, not a slowdown |
+| model | dollars | AI summaries, narrate, the resume safety gate |
+| volume I/O | writes/s | mounted writes are expensive; the observer shapes its writes for this |
+
+Correcting the first draft: in-fleet mode does **not** make observation cheaper, because host cost was
+already zero by design. What it does is put skein's web server, SSE fan-out, git operations and
+GitHub polling **inside the fleet's memory reservation** — the reservation whose summing is the entire
+reason the one-VM design exists. Every byte skein takes is a byte a box cannot have. That is the real
+cost and nobody had costed it.
+
+**Delivery cost is a budget too.** The event stream today re-sends every box every two seconds with no
+deltas, no bounded channel, no lag counter and no connection cap. It scales as boxes × transitions ×
+clients and belongs in the table.
 
 ---
 
 ## 11. Surfaces
 
-Designed from the ground up. The current cockpit is a **parity checklist** (§12), never a blueprint:
-ground-up applies to *how*, the inventory applies to *what*.
+Designed from the five jobs, not ported from the current layout. `docs/parity.md` governs *what*;
+this governs *how*.
 
-### 11.1 What the user is actually doing
-
-Five jobs, in descending frequency. Everything on every screen serves one of them or is in the way.
-
-| job | frequency | what it needs |
+| job | frequency | needs |
 |---|---|---|
-| **triage** — who needs me? | constant | a ranked queue, and a calm empty state |
-| **converse** — talk to an agent | often | a terminal that never lies about its own freshness |
-| **review** — read a diff, comment back | often | diff and comment in one place, not two |
+| **triage** — who needs me? | constant | a ranked queue, a calm empty state |
+| **converse** — talk to an agent | often | terminals that never lie about freshness |
+| **review** — read a diff, comment back | often | diff and comment in one place |
 | **recover** — something broke | rare, high-stakes | the failing check and the command that fixes it |
 | **set up** — add a repo, make a box | rare | one action, no configuration exercise |
 
-**One cockpit serves one person.** Decided, not assumed: "needs you" has a single meaning, credentials
-belong to one identity, and the sidecar's approver is that same person. Multi-user would change the
-queue, the credential model and the approval model together, so it is a different design rather than
-a later feature.
+**Attention is the scarce resource, not screen space.**
 
-**Attention is the scarce resource, not screen space.** That is the whole design thesis for a tool
-whose subject is a fleet of agents working without you. Every decision below follows from it.
+### 11.1 One queue, many sources
 
-### 11.2 One queue, many sources
+The board is a **queue, not a dashboard**, ranked by who needs you; a box that needs nothing is
+recessive. Because "needs you" is a predicate over signals and the review queue is a signal source, a
+pull request awaiting review belongs in the same queue as a box awaiting an answer — they are the
+same thing to the user, and separate today only because they were built separately.
 
-The board is a **queue, not a dashboard**. It is ranked by who needs you, and a box that needs nothing
-is visually recessive.
+**The queue groups by repo, and grouping is not cosmetic.** Today's board has collapsible per-repo
+sections with counts, persisted collapse state, and per-group pull and new-box actions. At two repos
+that is decoration; at eight it *is* the board. A flat three-section list is a different product, and
+the first draft's mock-up quietly chose it.
 
-Because "needs you" is a predicate over signals (§3), and the review queue is a signal source (§3),
-**a pull request awaiting your review belongs in the same queue as a box awaiting your answer.** They
-are the same thing to the user — work that stopped and is waiting on them — and the current design
-separates them only because they were built as separate features.
+### 11.2 Three states most tools botch
 
-```
-Needs you  3
-  ▸ web-main        permission · git push          4m
-  ▸ api-refactor    question                      12m
-  ▸ PR #412         review requested               2h
-Working  5                                    (recessive)
-Idle  2                                        (collapsed)
-```
-
-Three states this design must handle deliberately, because tools usually botch them:
-
-- **Nothing needs you.** The screen says so, plainly and calmly. A dashboard that looks identical
-  whether or not anything is wrong has failed at its only job.
-- **You were away.** An agent fleet is asynchronous, so continuity across absence is a first-class
-  requirement, not a nicety. Signal *transitions* (§3) are what answers "what changed while I was
-  gone" — and the current implementation announced only at the instant of change, so a box that
-  turned while you were looking elsewhere was never announced at all.
-- **Setup is incomplete.** Failing checks and their recipes, in the same queue, at the top. Not a
-  separate onboarding surface (§3, §8.3).
+- **Nothing needs you.** Say so, plainly and calmly. A dashboard that looks the same whether or not
+  anything is wrong has failed at its only job.
+- **You were away.** Continuity across absence is a requirement, not a nicety, and it needs
+  server-side transitions (§3) rather than a client-side delta on tab focus.
+- **Setup is incomplete.** Failing checks at the top of the same queue — but see §11.5, because the
+  cockpit is not where a new user starts.
 
 ### 11.3 The laws
 
-1. **Never report a problem without the action that resolves it.** A message with no next move is a
-   bug, not a message.
-2. **Never show an observation without its freshness.** A stale signal must *look* stale. Rendering a
-   five-minute-old "waiting" identically to a current one is lying with the timestamp in hand.
-3. **The board answers one question: who needs me.** Everything else looks secondary because it is.
-4. **The CLI and the cockpit share one model and one vocabulary.** Anything doable in one is doable
-   in the other, named identically.
-5. **Destructive actions say what is lost** — including when the answer is "nothing", which the
-   volume now makes common and which is worth saying out loud.
+1. **Never report a problem without the action that resolves it.**
+2. **Never show an observation without its freshness.** A stale signal must *look* stale.
+3. **The board answers one question: who needs me.**
+4. **Every Operation and every Act has a CLI form, named identically to its cockpit form.** Scoped
+   deliberately: "anything doable in one is doable in the other" against ~80 capabilities was the
+   largest uncosted item in the first draft.
+5. **Destructive actions say what is lost** — including when the answer is "nothing".
 6. **No modal onboarding.** Onboarding is the blocked state rendered well.
-7. **The first screen has exactly one action.**
-8. **Quiet by default.** Anything that does not need you must not look like it does. Badges, colour
-   and motion are spent only on attention, and they are a budget.
+7. **The first screen has exactly one action**, which requires prerequisite collapsing (§11.5).
+8. **Quiet by default.** Colour, badges and motion are an attention budget.
 
-### 11.4 The component library
+### 11.4 The blocked state is three components, not one
 
-Ground-up design means the components come first and the screens are assembled from them. The whole
-cockpit reduces to roughly eight:
+Onboarding needs *sequence and prerequisites*; breakage needs *what changed and when it last passed*;
+approval needs *what will happen, who asked, and a timeout* — and lives on the host (§8.1). They share
+a visual language and two primitives (the recipe block, the live check pip). They are not one card
+with eleven optional props.
 
-| component | used by |
-|---|---|
-| **signal chip** | state + freshness, everywhere a signal is shown |
-| **queue row** | subject, why, age, one action |
-| **check card** | a failing check, its recipe, live indication when it passes — §8.3's universal component: onboarding, breakage, and the sidecar's approval card are all this |
-| **terminal pane** | converse |
-| **diff + comment** | review |
-| **calm empty state** | nothing needs you |
-| **gauge strip** | fleet resources, recessive |
-| **command palette** | every action, one keystroke — the CLI's vocabulary (law 4) |
+### 11.5 First run is the CLI
 
-**Density is adaptive**: dense when the fleet is large and the job is triage, comfortable when it is
-small. Both are the same components at two spacing scales, not two designs.
+The blocked state renders in the cockpit; the cockpit needs the fleet created and the port published
+— privileged operations. So **the first-run surface is `skein doctor` in a terminal**, and check cards
+must render as text. Law 6 is preserved: it is still the blocked state, just not in a browser.
 
-**The identity is fresh, and mostly monochrome.** Colour is spent only on state, which is law 8 made
-visual: **warm means a human is needed, cool means the machine is working, muted green means
-finished, grey means nothing is happening.** A user learns that in one glance and never re-reads a
-legend. Brand comes from type, spacing and a single signature accent rather than from a colourful UI
-— which also leaves the whole colour budget available for the one thing it must convey.
+Because operations form a DAG (§2.4), **a failing prerequisite collapses its dependents**: a missing
+fleet shows one card, not five, which is what makes law 7 achievable.
 
-This library is maintained as a Claude Design project so it can be reviewed visually rather than
-inferred from code, and so the cockpit is assembled from a reviewed kit instead of accumulating one.
+### 11.6 Identity and build
 
-### 11.5 The CLI
+Fresh, and mostly monochrome: **warm means a human is needed, cool means the machine is working,
+muted green means finished, grey means nothing is happening.** Learned in one glance, and it leaves
+the whole colour budget for the only thing colour has to say.
 
+Density is adaptive — dense when the fleet is large, comfortable when it is small. Same components,
+two spacing scales.
 
-
-```
-skein                    the board, in the terminal
-skein add <url>          register a repo
-skein new <repo> <branch>  create a box
-skein open <box>         attach
-skein doctor             every check; failures print their recipe inline
-skein <operation> --show print the recipe, run nothing
-```
-
-`--show` is the Operation primitive surfaced directly: any operation can be asked for its recipe
-instead of its effect. That is what makes "I want to run it myself" a first-class request rather than
-a documented workaround.
+**The cockpit has a build step.** The current single 6516-line `index.html` cannot support both the
+pure-function testing law (§13) and a reviewed component library; a build makes both achievable and
+removes the third source of truth. The component library lives in a Claude Design project and is the
+source the cockpit is assembled from.
 
 ---
 
-## 12. Feature parity — the gate
+## 12. Rules that keep it clean
 
-**The rewrite is not done when it works. It is done when it does everything the current
-implementation does.** Ground-up design (§11) governs *how*; this inventory governs *what*. Anything
-removed from it is removed deliberately and recorded at the bottom of this section — never by being
-forgotten.
+Each is a specific way this codebase has previously accumulated debt.
 
-The inventory is grouped by the job it serves rather than by the route that implements it, because a
-route-shaped list would smuggle today's structure into a ground-up design.
+1. **Declared state has one writer. Recorded state has a documented protocol.** Not "one writer per
+   fact", which is false for most of the volume.
+2. **No dual code paths to the same outcome.**
+3. **Every Operation is idempotent, or marked `destructive` and never auto-driven.**
+4. **No displayed state from an edge alone.**
+5. **Every signal is keyed by its subject, not its observer.**
+6. **Every signal declares its budget, its cadence and its staleness threshold.**
+7. **Everything a human might do by hand has a printable recipe.**
+8. **A new feature is a composition of primitives — or it adds a primitive deliberately and amends
+   this document.**
+9. **Trust-boundary capabilities are modules that can be left unbuilt**, and they never reference one
+   another.
+10. **Approval is written by the approving side, never supplied by the requester.**
+11. **Every durable file carries a schema version, and skein refuses a volume it does not understand.**
 
-**Triage** — the board and its ranking; live updates; attention states and their four decision kinds
-(permission · question · trust · auth-or-quota); per-box task line; search and filters; the needs
-strip; gauges for fleet load, resources and limits; alerts; voice (mouth and ear); the command
-palette; keyboard bar.
+---
 
-**Converse** — terminal attach; session lifecycle (start, stop, restart the agent, resume, resume in
-batch); takeover of a running box; narrate; transcript; statusline; runtime selection.
+## 13. Testing
 
-**Review** — diff; file tree and file read; comment back to the agent; the pull-request queue with
-per-PR act, archive and summary; review counts; AI summaries.
-
-**Box management** — create, destroy (with confirmation), settings (disk, git identity, git scope,
-notes, sync, privileged/package requests), identity, repin, disk usage, upload, download, git
-credential grants per box and repo.
-
-**Repos** — add, remove, per-repo settings, modules read and write, pull, adopted-module surface.
-
-**Fleet** — create with sizing, resize, plan and host capacity, transport and substrate reporting,
-resource and limit editing, git credentials, git probe, read token, health.
-
-**Cross-cutting** — the event stream; mailbox; settings (agent, AI, keys, GitHub App, SSH key,
-diagnostics, confirm-destroy, base branch, dirty handling); sync connections and their tokens;
-`skein` CLI: `add`, `attach`, `doctor`, `login`, `max`, `repos`, `resize`, `shared`, `start`.
-
-### 12.1 Deliberate removals
-
-Two, both already decided, both user-visible, and neither is a consequence of the rewrite being
-unfinished:
-
-- **Adopt-in-place repos.** `skein add <local-path>` and the mounting of a working checkout. Repos
-  are remotes in both deployments (§6). The cost is that uncommitted work on your host is invisible
-  to boxes.
-- **Foreign sandbox display.** The board's rows for sandboxes skein did not create, and the
-  `foreign:` filter. That feature was a *mitigation* for skein listing every sandbox on the host; the
-  rewrite does not list sandboxes at all, so the confusion it fixed cannot occur.
-
-### 12.2 What §13 is not
-
-§13 lists mechanisms the rewrite deletes. **No user-visible feature appears in it.** Every entry
-there exists to solve a problem the new topology does not have — a transport for a hop that no longer
-happens, a fallback for a call that is no longer made, a copy for state that no longer moves. If a
-deletion in §13 would cost a capability in §12, it is wrong and this document is where that must be
-caught.
-
-## 13. What the rewrite deletes
-
-Not a refactor. These stop existing:
-
-- the in-sandbox agent, its transport, its port publishing, its healing loop and backoff — all of it
-  exists to survive a hop that no longer happens
-- every `sbx exec` path **and its fallback twin**, and with them the transport-failure-versus-
-  command-failure distinction that made the pairing necessary and dangerous
-- two placement shapes collapsing to one
-- sandbox listing as the truth about boxes, and the foreign-sandbox filtering it required
-- the machine-global secret store — and the defect where two fleets on one host share one token
-- the destroy-recreate-copy resize dance
-- host-absolute mount path translation
-- adopt-in-place repos and their mounts
+- **Every check has a test that it fails when the thing is absent.** A check that passes
+  unconditionally is worse than no check: it makes a broken system report as healthy.
+- **Every check has a test for `unknown`** — that an unreachable source reports rather than drives.
+- **Signal fusion is a scenario matrix**, including every missing-edge case.
+- **Anything the UI computes is a pure function tested in node.** The build step (§11.6) is what makes
+  this possible.
+- **Browser tests run in a box.** Correcting the first draft: this was fixed, and
+  `tests/ui/README.md` names the libraries Playwright's own list omits.
+- **The warden is built and tested three ways**: empty, each capability alone, both.
+- **Screen grammars are verified against a real box**, never a clean-room one — a bare tmux session
+  has no configured statusline, a short pane and no scrollback, which hides exactly the defects that
+  matter.
 
 ---
 
@@ -558,65 +575,31 @@ Not a refactor. These stop existing:
 
 | module | owns | depends on |
 |---|---|---|
-| `fact` | the volume: config, registry, credentials, box records. Sole writer. | — |
-| `signal` | observation: kinds, freshness, cost, fusion | `enter` |
-| `enter` | namespace entry — the one way into a box | — |
-| `operation` | desired / check / recipe / doer; the reconciler | `fact`, `signal` |
-| `sidecar` | client and protocol | `operation` |
-| `github` | HTTP client; a signal source | `fact` |
-| `box` | identity and lifecycle | `fact`, `operation`, `enter` |
-| `server` | cockpit, API, event stream | everything |
-| `cli` | `skein` | everything |
+| `state` | the volume: declared and recorded, schema and locks | — |
+| `source` | `enter`, `socket`, `file`, `http`; exec/stream/pty | — |
+| `signal` | kinds, freshness, budgets, cadence, gates, fusion | `source` |
+| `operation` | desired, tri-state check, recipe, doer, DAG, leases | `state`, `signal` |
+| `act` | streaming interactions; emits edges | `source`, `signal` |
+| `warden` | client and protocol | `operation` |
+| `box` | identity and lifecycle | `state`, `operation`, `act` |
+| `server` | cockpit, API, event stream, transitions | everything |
+| `cli` | `skein` — a **client of the server**, not a second writer | `server` |
 
-`fact` and `enter` depend on nothing. `operation` knows nothing of boxes or GitHub. `enter` never
-depends on `sidecar` or `operation` (§2.4).
-
----
-
-## 15. Rules that keep it clean
-
-Stated as rules because each one is a specific way this codebase has previously accumulated debt.
-
-1. **One writer per fact.**
-2. **No dual code paths to the same outcome.** The agent-plus-`sbx exec` pairing had to be kept in
-   step by hand, and the two halves disagreeing was a whole bug class.
-3. **Every operation is idempotent.** `ensure`, never `do`.
-4. **No displayed state from an edge alone** (§2.2).
-5. **Every signal is keyed by its subject, not its observer.**
-6. **Every signal declares its cost** (§10).
-7. **Everything a human might have to do by hand has a printable recipe.**
-8. **A new feature is a composition of primitives — or it adds a primitive deliberately, and says
-   so in this document.** Anything that is neither is the debt.
-9. **A capability that crosses a trust boundary is a module that can be left unbuilt** (§8.1), and
-   capability modules never reference one another.
+`state` and `source` depend on nothing. `source` never depends on `operation` — reaching a subject
+must never require privilege. The CLI is a client rather than a peer, because two processes doing
+unsynchronised read-modify-write on the same declared state is today's silent last-write-wins.
 
 ---
 
-## 16. Testing
+## 15. Open
 
-- **Every check has a test that it fails when the thing is absent.** That is not coverage, it is the
-  mutation: a check that passes unconditionally is worse than no check, because it makes a broken
-  system report as healthy.
-- **Signal fusion is tested as a scenario matrix** — every combination of level and edge, including
-  the missing-edge cases that motivated §2.2.
-- **Anything the UI computes is a pure function**, tested in node without a browser. The current
-  design fails this and it has cost real defects: voice shipped with `waiting` missing from both
-  paths because the only test that would have caught it needed a browser, and a browser cannot run
-  in a box.
-- Browser tests cover the page, and nothing that could have been a pure function.
-- **The sidecar is built and tested three ways: empty, each capability alone, and all of them.**
-  That is `N + 2` builds rather than `2^N`, and it is sufficient *because* capability modules are
-  independent (§8.1) — which makes that rule a testability property, not only a security one. The
-  empty build is the one that must never be skipped: it is what most users should run, and it is the
-  one whose breakage nobody would notice.
-
----
-
-## 17. Open
-
-- **Scoped per-box tokens** (§9.2) need a mechanism. App installation tokens are the obvious
-  candidate and skein already mints them; the scoping story is unwritten.
-- **Is host-driven mode eventually retired?** First-class for now. Ask once in-fleet has run a while
-  rather than assuming here.
-- **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the sidecar's
-  addressing both currently assume one.
+- **The uid split versus the attach mechanism** (§9.3.2). The tmux socket's permissions are what make
+  the current attach work; a uid split requires redesigning it, and `newuidmap` is not present.
+  This is the largest unresolved item and it gates the whole hardening plan.
+- **The agent-credential proxy** (§9.4). Unbuilt, and the only real defence for the credential that
+  matters most.
+- **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the warden's
+  addressing both assume one.
+- **API authentication in-fleet.** Today it is one shared bearer token, and its own comment says
+  *"not a login — one shared secret"*. It exists because a box reached the host cockpit. In-fleet it
+  matters more, and §9.3.1 changes its shape rather than answering it.
