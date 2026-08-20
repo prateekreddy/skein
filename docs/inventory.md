@@ -167,18 +167,25 @@ Which the parity gate already requires, and the first draft's absolute version f
 
 ---
 
-## 6. The module graph carries no information
+## 6. The module graph carried no information, and now carries most of one
 
-`src/lib.rs:35-50` is `pub use <mod>::*` over sixteen modules, so almost every cross-module reference
-goes through the flat root namespace rather than a module path. `grep -rn "crate::signals::"` from
-other modules returns **0** — not because nothing uses it, but because everything uses the
-re-exports.
+`src/lib.rs:35-50` was `pub use <mod>::*` over sixteen modules, so almost every cross-module
+reference went through the flat root namespace rather than a module path. `grep -rn "crate::signals::"`
+from other modules returned **0** — not because nothing used it, but because everything used the
+re-exports. Any module graph drawn against that code was aspiration.
 
-There is also a live cycle: `place.rs:309` calls into `fleet`, and `fleet.rs:19` imports `place`.
+Removed in `8e38964`: `grep -c 'pub use' src/lib.rs` → **0**, and every reference is now a qualified
+`crate::<mod>::` path or an explicit `use crate::<mod>::…`. `tools/module-edges.py` records the
+weight on each edge (`tools/module-edges.tsv`, 266 rows, unchanged by the removal — none added, none
+gone).
 
-**Any module graph drawn today is aspiration.** The architecture's dependency rules cannot be checked
-against the code until the façade is removed, and removing it is the first real task of any
-extraction step — not a tidy-up after.
+Two things it left, both still true of the code today:
+
+- The cycle: `place.rs:309` calls into `fleet`, and `fleet.rs:19` imports `place`.
+- `wc -l src/lib.rs` → **7443**, of which roughly 2,570 are implementation rather than tests. That is
+  registry parsing, `sbx ls` parsing, the kit and store assets, the probe scripts and hook merging,
+  handoff and box replacement — sitting in the crate root, reached as `crate::X`, a path that names
+  no module.
 
 ---
 

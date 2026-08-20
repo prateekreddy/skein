@@ -65,10 +65,15 @@ sixteen `ensure_*` functions already exist (fifteen `pub`, plus a private one th
 sandbox-root apt install) — the Operation primitive names something the codebase
 does. `doctor` becomes "every check, reported" with no UI change.
 
-**Two structural obstacles hit on day one**, and neither is optional: `lib.rs` re-exports sixteen
-modules with `pub use *`, so the current module graph carries no information about real edges; and
-there is a live `place ↔ fleet` cycle. Removing the façade is the first task of this step, not a
-tidy-up after it.
+**Two structural obstacles hit on day one**, and neither was optional: `lib.rs` re-exported sixteen
+modules with `pub use *`, so the module graph carried no information about real edges; and there is a
+live `place ↔ fleet` cycle.
+
+The façade is gone (`8e38964`) — that was the first task of this step rather than a tidy-up after it,
+and the graph is now readable off the imports. The cycle remains, and dissolves with the transport in
+step 4 rather than needing work of its own. What the façade removal exposed is a third obstacle on
+the same footing: `lib.rs` still holds ~2,570 lines of implementation in the crate root, so the graph
+keeps a catch-all node that no module row corresponds to.
 
 **3 — Build the warden, and route create/destroy through it from *host* skein.** Both callers
 exercised before anything moves — which was the whole argument for having a warden.

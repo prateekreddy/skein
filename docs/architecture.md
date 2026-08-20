@@ -1389,15 +1389,27 @@ processes doing unsynchronised read-modify-write on declared state — is solved
 > `config.json` and `repos.json` are atomic-write but unlocked, so two cockpit tabs saving settings is
 > silent last-write-wins; the mailbox and the sandbox registry already lock, and are the model.
 
-### 14.2 What must be dismantled before any of this is checkable
+### 14.2 What had to be dismantled before any of this became checkable
 
-`src/lib.rs` re-exports sixteen modules with `pub use <mod>::*`, so cross-module references go through
-a flat root namespace — `grep -rn "crate::signals::"` from other modules returns **zero**, not because
-nothing uses it but because everything uses the re-exports. There is also a live cycle: `place.rs`
-calls into `fleet`, and `fleet.rs` imports `place`.
+`src/lib.rs` re-exported sixteen modules with `pub use <mod>::*`, so cross-module references went
+through a flat root namespace — `grep -rn "crate::signals::"` from other modules returned **zero**,
+not because nothing used it but because everything used the re-exports. Every dependency rule above
+was unverifiable against the code, which is why removing the façade was the first task of extraction
+rather than a tidy-up afterwards.
 
-**Every dependency rule above is unverifiable until the façade comes off.** That makes removing it the
-first task of extraction, not a tidy-up afterwards.
+**Done** — commit `8e38964`. The modules are `pub mod`, there are no re-exports at the root, and
+every cross-module reference is a qualified `crate::<mod>::` path or an explicit
+`use crate::<mod>::…`. Check: `grep -c 'pub use' src/lib.rs` → **0**. The edge set is now readable
+straight off the imports; `tools/module-edges.py` counts the weight on each edge.
+
+Two things it did not fix, and both have their own row on the board:
+
+- The `place → fleet` cycle is still there — `place.rs:309` reaches `fleet::recorded_agent_port`,
+  which §13a deletes outright, so it dissolves with the transport rather than needing its own
+  untangling.
+- `src/lib.rs` is still ~7,400 lines of implementation in the crate root, so a reference into it is
+  spelled `crate::X` and names nothing. Until that is split, the graph keeps a `lib` catch-all node
+  that no row of the table above corresponds to.
 
 ## 15. Open
 
