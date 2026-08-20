@@ -116,11 +116,15 @@ Eighteen modules in one strongly connected component — two thirds of the crate
 mistake anyone made in one place: it is what a single 7,400-line crate root looked like once it was
 split, and the mutual references were function calls inside one file until then. `kit` calls
 `probes::ensure_probe_in` while `probes` calls `kit::ensure_store`; `registry` reads `repos` to find
-a box's store while `repos` reads the registry to find its boxes; `place` reaches into `fleet` for a
-port that §13a deletes.
+a box's store while `repos` reads the registry to find its boxes.
 
 This is the condition architecture.md §14 exists to end, and it ends by extraction into the
 destination modules rather than by untangling these. Recorded here so it cannot silently grow.
+
+The `place -> fleet` reference that used to be named here is gone (SKEIN-22), and the knot did not
+change size — `place` is still in it through `config -> runtime -> repos -> place`. Worth knowing
+before anyone spends a day on a single edge: in a component this dense, removing one is a local
+tidy, not a structural change.
 """
 item = "SKEIN-1"
 
@@ -191,7 +195,7 @@ depends_on = ["registry", "repos", "util"]
 depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
 
 [current.place]
-depends_on = ["config", "fleet", "util"]
+depends_on = ["config", "util"]
 
 [current.probes]
 depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]

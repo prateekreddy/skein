@@ -297,6 +297,36 @@ const AGENT_CONNECT: Duration = Duration::from_secs(30);
 /// a caller that someday does falls back to `sbx exec` instead of writing a mangled script.
 const MAX_META: usize = 32 * 1024;
 
+/// Where skein records the host port it published and verified.
+///
+/// State, not configuration: skein chooses this and re-chooses it when healing, so it does not
+/// belong in the file the user edits. [`crate::config::Config::fleet_agent_port`] stays the user's
+/// to pin when they want a particular number.
+///
+/// It lives here with the transport rather than with the code that publishes it, and that is what
+/// ends the one `place -> fleet` reference in the crate: the port is the transport's own address,
+/// so reading it is not a question for whoever manages the sandbox. `fleet` still chooses and heals
+/// the number; it calls in to record it, in the direction it already depends.
+fn agent_port_path() -> std::path::PathBuf {
+    skein_home().join("fleet-agent.port")
+}
+
+/// The host port skein last published and saw working, if any.
+pub fn recorded_agent_port() -> Option<u16> {
+    std::fs::read_to_string(agent_port_path())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Record a port as published and verified. `fleet` calls this after proving something answers.
+pub(crate) fn record_agent_port(port: u16) {
+    let home = skein_home();
+    let _ = std::fs::create_dir_all(&home);
+    let _ = crate::util::write_atomic(&agent_port_path(), &home, port.to_string().as_bytes());
+}
+
 /// The port and token that reach the agent, or `None` when there is no usable one to reach.
 ///
 /// `None` covers every "not available" case there is — the setting off, no port verified yet, no
@@ -307,7 +337,7 @@ fn agent_target() -> Option<(u16, String)> {
     }
     // The port skein published and *verified*, not the one it was configured with: a pinned port
     // that never came up must not send every call into a connection that cannot answer.
-    let port = crate::fleet::recorded_agent_port()?;
+    let port = recorded_agent_port()?;
     if port == 0 {
         return None;
     }
@@ -1158,7 +1188,7 @@ mod tests {
     fn point_config_at(home: &std::path::Path, port: u16) {
         let config = serde_json::json!({ "fleet_agent": true });
         fs::write(home.join("config.json"), config.to_string()).unwrap();
-        fs::write(home.join("fleet-agent.port"), port.to_string()).unwrap();
+        record_agent_port(port);
     }
 
     #[test]

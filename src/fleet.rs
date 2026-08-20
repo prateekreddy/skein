@@ -22,6 +22,7 @@ use crate::place::{
     fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
     Place, PlaceRecord,
 };
+use crate::place::{record_agent_port, recorded_agent_port};
 use crate::repos::agent_for_box;
 use crate::repos::{
     branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, remote_origin_url, repo_for_box,
@@ -92,30 +93,6 @@ pub fn fleet_agent_token_path() -> String {
 /// host-side conflict is re-published with one call and never has to restart the agent, or reach
 /// into a sandbox that may be exactly the thing not answering.
 pub const AGENT_SANDBOX_PORT: u16 = 8317;
-
-/// Where skein records the host port it published and verified.
-///
-/// State, not configuration: skein chooses this and re-chooses it when healing, so it does not
-/// belong in the file the user edits. [`crate::config::Config::fleet_agent_port`] stays the user's
-/// to pin when they want a particular number.
-fn agent_port_path() -> std::path::PathBuf {
-    skein_home().join("fleet-agent.port")
-}
-
-/// The host port skein last published and saw working, if any.
-pub fn recorded_agent_port() -> Option<u16> {
-    std::fs::read_to_string(agent_port_path())
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-}
-
-fn record_agent_port(port: u16) {
-    let home = skein_home();
-    let _ = std::fs::create_dir_all(&home);
-    let _ = crate::util::write_atomic(&agent_port_path(), &home, port.to_string().as_bytes());
-}
 
 /// A host port nothing is listening on right now.
 ///
