@@ -45,7 +45,8 @@ to a mount and an environment variable. The work is in four things none of which
 - **the mount split.** The API token is safe today *because* `~/.skein/repos` and `~/.skein/boxes` are
   bind-mounted into boxes while `~/.skein` itself is not — "checked, not assumed". Mounting a volume
   root whole puts `credentials/`, `api-token`, `github-pats/` and `tokens/` inside every box's reach
-  on the shared uid. The cover list must grow, and it is a tested enumeration.
+  on the shared uid. The cover is an **inversion derived per box** — tmpfs the state
+  root, bind back what this box needs — not a list of things to hide (architecture §9.5.2).
 - **`places/` holds live pids**, which the architecture excludes from the volume. Relocating the root
   wholesale carries state the design forbids there.
 - **`repos/<id>/work` is a working checkout**, not a mirror, and `diff.rs`, `moduledocs.rs` and
