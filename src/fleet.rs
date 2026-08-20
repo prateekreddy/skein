@@ -2877,10 +2877,18 @@ fn start_box_inner(
     // from there rather than demand the box be destroyed: cloning is the only step here that is not
     // idempotent, and it is also the only one whose work a repeat would throw away.
     let (has_tree, has_session) = box_progress(&fleet, name, "skein-shell")?;
+    // What the remote has *now*, not what it had when this mirror was last touched. Best-effort:
+    // a box created while the network is down is still worth creating, from a mirror that is a day
+    // old, and the alternative is a fleet that cannot start a box because GitHub is unreachable.
+    if let Err(why) = crate::repos::fetch_mirror(repo) {
+        eprintln!("skein: {name} is cloning from a mirror that could not be refreshed: {why}");
+    }
     let source = clone_source(repo);
-    // Only an adopted repo needs this: a URL source already clones from the place it pushes to.
+    // Every repo needs this now, not only an adopted one: the clone comes from the mirror, so
+    // `git clone` sets `origin` to a path on the volume, and a box that pushed there would push
+    // into skein's own mirror instead of the repo it came from.
     let upstream = match crate::repos::is_git_url(&repo.source) {
-        true => String::new(),
+        true => repo.source.trim().to_string(),
         false => remote_origin_url(&repo.work).unwrap_or_default(),
     };
     if has_tree {
@@ -3705,36 +3713,61 @@ struct Carried {
     live: bool,
 }
 
-/// What a box clones from. The registered source when it is a URL — a box should start from the
-/// same base the diff is taken against, not from whatever is stale or half-committed in the host's
-/// clone. For a repo adopted in place there is no URL, so the host clone is it; that is mounted
-/// (see [`fleet_mounts`]) at the same path, and git is content to clone a local directory.
+/// What a box clones from: **the repo's mirror on the volume**, whatever the repo was registered as.
 ///
-/// That fallback carries a real consequence, stated here because nothing else would say it: for an
-/// adopted repo the host clone's freshness *is* what every new box starts from. Nobody pulling it
-/// means every new box quietly starts behind, with a green checkout and no signal at all. That is
-/// what [`crate::repos::pull_repo`] is for, and why it did not become redundant when boxes started
-/// cloning from remotes.
+/// One answer instead of two, and the two it replaces were each wrong in their own way. A URL repo
+/// cloned from the network — a fresh clone per box, over the wire, needing the box to hold a
+/// credential for a repository it is only reading. A repo adopted in place cloned from the host's
+/// own working checkout, which meant the checkout had to be mounted into the sandbox for every box
+/// of that repo, and a box's clone inherited whichever branch the host had checked out.
+///
+/// The mirror is local, is on the volume already mounted at [`fleet_workspace`], has every branch,
+/// and has no working tree to inherit anything from.
+///
+/// The freshness question does not go away, it moves: what a new box starts from is now the
+/// mirror's last fetch rather than the host checkout's last pull. [`crate::repos::fetch_mirror`] is
+/// what advances it, and [`ensure_box`] calls it before cloning so that a box created right now
+/// starts from what the remote has right now.
 pub(crate) fn clone_source(repo: &Repo) -> String {
-    if is_git_url(&repo.source) {
-        repo.source.clone()
-    } else {
-        repo.work.clone()
+    match crate::repos::ensure_mirror(repo) {
+        Ok(mirror) => mirror.to_string_lossy().into_owned(),
+        // Said out loud, and then the old answer: a fleet whose mirror cannot be made should still
+        // be able to start a box, and this is the one place where the difference is invisible from
+        // inside the box. For a URL repo the fallback is a slower clone over the network; for an
+        // adopted one it is the host checkout, which is only reachable if it is still mounted.
+        Err(why) => {
+            eprintln!(
+                "skein: {} has no mirror ({why}), so its boxes clone from {} instead — \
+                 `skein pull {}` makes one",
+                repo.id,
+                match is_git_url(&repo.source) {
+                    true => "the remote",
+                    false => "the host checkout",
+                },
+                repo.id
+            );
+            match is_git_url(&repo.source) {
+                true => repo.source.clone(),
+                false => repo.work.clone(),
+            }
+        }
     }
 }
 
 /// The branch a box's own branch is cut from.
 ///
-/// Asked of the REMOTE skein is about to clone from, because that is the only copy whose answer is
-/// necessarily true. `refs/remotes/origin/HEAD` looks like the remote's answer and is not: it is a
-/// local cache written when the host clone was made, and it goes stale when the default is renamed
-/// on the far side. A box migration failed on exactly that — the cached ref said `main`, the remote
-/// had only `master`, and `git clone --branch main` refused, leaving the box's old sandbox stopped
-/// with no fleet box to replace it.
+/// Asked of the SAME SOURCE the clone will use — the mirror ([`clone_source`]) — because an answer
+/// from anywhere else can name a branch the clone will not find. `refs/remotes/origin/HEAD` in the
+/// host checkout looks like the remote's answer and is not: it is a cache written when that clone
+/// was made, and it goes stale when the default is renamed on the far side. A box migration failed
+/// on exactly that — the cached ref said `main`, the remote had only `master`, and
+/// `git clone --branch main` refused, leaving the box's old sandbox stopped with no fleet box to
+/// replace it.
 ///
-/// So: `ls-remote --symref HEAD` first, one round trip against the same source the clone will use.
-/// The cached ref and the host clone's own branch remain the offline fallbacks, and `main` only when
-/// there is nothing left to ask.
+/// So: `ls-remote --symref HEAD` against the mirror, which answers from its own refs and cannot be
+/// unreachable. That makes the freshness of the answer the freshness of the mirror, which is why
+/// [`ensure_box`] fetches it first; the local guesses remain the fallback for a repo with no mirror
+/// at all, and `main` is never assumed.
 pub fn base_branch(repo: &Repo) -> String {
     let git = |args: &[&str]| -> Option<String> {
         let mut argv = vec!["-C", repo.work.as_str()];
@@ -7899,11 +7932,21 @@ b idle 5000000 1048576 4
             "no `main` here — fall through"
         );
 
-        // A configured base the repo DOES have wins, ahead of the remote's default.
+        // A configured base the repo DOES have wins, ahead of the remote's default — once the
+        // mirror has been told the branch exists.
         git(&origin, &["branch", "develop"]);
         let mut config = load_config();
         config.base_branch = "develop".into();
         save_config(&config).unwrap();
+        // The staleness this question now has, stated rather than discovered: the answer comes from
+        // the mirror, so a branch created since its last fetch is one the mirror has never heard of.
+        // `ensure_box` fetches before it asks, which is why this is a property and not a bug.
+        assert_eq!(
+            base_branch(&repo),
+            "master",
+            "an unfetched mirror cannot know about a branch made a moment ago"
+        );
+        crate::repos::fetch_mirror(&repo).unwrap();
         assert_eq!(base_branch(&repo), "develop", "the user's own answer leads");
 
         std::env::remove_var("SKEIN_HOME");
