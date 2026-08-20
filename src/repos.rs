@@ -12,8 +12,8 @@ use crate::runtime::*;
 use crate::sbx::lookup_dir;
 use crate::sbx::{fleet_boxes, git_branch_for};
 use crate::tracking::{load_connections, plane_project_id};
+use crate::util::valid_name;
 use crate::util::*;
-use crate::valid_name;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -663,6 +663,7 @@ pub fn agent_for_box(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{env_lock, tempdir};
 
     /// The account token stops being seeded the moment the fleet can scope.
     ///
@@ -731,5 +732,163 @@ mod tests {
             Some(p) => env::set_var("PATH", p),
             None => env::remove_var("PATH"),
         }
+    }
+
+    #[test]
+    fn repo_id_and_url_detection() {
+        assert_eq!(
+            repo_id_from_source("https://github.com/acme/gadget-demo.git"),
+            "gadget-demo"
+        );
+        assert_eq!(
+            repo_id_from_source("git@github.com:org/My-Repo.git"),
+            "My-Repo"
+        );
+        assert_eq!(repo_id_from_source("/Users/you/work/thing/"), "thing");
+        assert!(is_git_url("https://github.com/x/y.git"));
+        assert!(is_git_url("git@github.com:x/y.git"));
+        assert!(is_git_url("ssh://git@host/x.git"));
+        assert!(!is_git_url("/Users/you/work/thing"));
+    }
+
+    #[test]
+    fn repo_for_box_matches_longest_id_prefix() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let repos = vec![
+            Repo {
+                id: "web".into(),
+                source: "s".into(),
+                work: "/w".into(),
+                store: "/s".into(),
+                agent: "claude".into(),
+                plane_project: String::new(),
+                sync_connection: String::new(),
+                review_queue: true,
+                sync_gateway_url: String::new(),
+            },
+            Repo {
+                id: "web-api".into(),
+                source: "s".into(),
+                work: "/w".into(),
+                store: "/s".into(),
+                agent: "claude".into(),
+                plane_project: String::new(),
+                sync_connection: String::new(),
+                review_queue: true,
+                sync_gateway_url: String::new(),
+            },
+        ];
+        save_repos(&repos).unwrap();
+        // longest matching id wins, so "web-api-feat-x" is web-api/feat-x, not web/api-feat-x.
+        let r = repo_for_box("web-api-feat-x").unwrap();
+        assert_eq!(r.id, "web-api");
+        assert_eq!(branch_from_box("web-api-feat-x", &r), "feat-x");
+        let r2 = repo_for_box("web-login").unwrap();
+        assert_eq!(r2.id, "web");
+        assert_eq!(branch_from_box("web-login", &r2), "login");
+        assert!(repo_for_box("other-x").is_none());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn repin_branch_rewrites_launch_spec_without_relaunch() {
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        let store = home.join("st").join(".claude");
+        fs::create_dir_all(&store).unwrap();
+        let repos = vec![Repo {
+            id: "thing".into(),
+            source: "s".into(),
+            work: "/w".into(),
+            store: store.to_string_lossy().to_string(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }];
+        save_repos(&repos).unwrap();
+        // box created on the wrong branch (its creation branch)…
+        write_launch_spec_for_agent("thing-feat-x", "feat-x", &repos[0], "claude").unwrap();
+        assert_eq!(
+            launch_spec_branch(&repos[0], "thing-feat-x").as_deref(),
+            Some("feat-x")
+        );
+        // …re-pinned to the branch the agent actually moved to, without relaunching.
+        repin_branch("thing-feat-x", "feat-y").unwrap();
+        assert_eq!(
+            launch_spec_branch(&repos[0], "thing-feat-x").as_deref(),
+            Some("feat-y")
+        );
+        // unknown / unregistered box name errs rather than silently no-opping.
+        assert!(repin_branch("no-such-box", "main").is_err());
+        assert!(repin_branch("thing-feat-x", "").is_err());
+        env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn ssh_url_detection_and_https_conversion() {
+        assert!(is_ssh_url("git@github.com:org/repo.git"));
+        assert!(is_ssh_url("ssh://git@github.com/org/repo.git"));
+        assert!(!is_ssh_url("https://github.com/org/repo.git"));
+        assert_eq!(
+            ssh_to_https("git@github.com:org/repo.git").as_deref(),
+            Some("https://github.com/org/repo.git")
+        );
+        assert_eq!(
+            ssh_to_https("ssh://git@gitlab.com/org/repo.git").as_deref(),
+            Some("https://gitlab.com/org/repo.git")
+        );
+        assert_eq!(host_of("git@github.com:org/repo.git"), Some("github.com"));
+        assert_eq!(
+            host_of("ssh://git@gitlab.com/org/repo.git"),
+            Some("gitlab.com")
+        );
+    }
+
+    #[test]
+    fn slug_and_box_name_handle_slashes() {
+        assert_eq!(slug("feat/auth"), "feat-auth");
+        assert_eq!(slug("feat/auth/v2"), "feat-auth-v2");
+        assert_eq!(slug("user@host~weird"), "user-host-weird");
+        assert_eq!(slug("keep.dots_and-dashes"), "keep.dots_and-dashes");
+        assert_eq!(slug("/leading/and/trailing/"), "leading-and-trailing");
+        assert_eq!(box_name("thing", "feat/auth"), "thing-feat-auth");
+    }
+
+    #[test]
+    fn a_repo_refuses_a_project_no_uuid_can_be_read_from() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        save_repos(&[Repo {
+            id: "web".into(),
+            source: "/src/web".into(),
+            work: "/w".into(),
+            store: dir.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+        assert!(set_repo_settings("web", Some("the backlog one"), None, None).is_err());
+        assert_eq!(
+            load_repos()[0].plane_project,
+            "",
+            "a refusal stores nothing"
+        );
+        // The URL is kept verbatim — the uuid is derived, so a board link stays possible.
+        let url =
+            "https://plane.example.net/acme/projects/1e2a3b4c-5d6e-4f70-8912-abcdefabcdef/issues";
+        set_repo_settings("web", Some(url), None, None).unwrap();
+        assert_eq!(load_repos()[0].plane_project, url);
+        set_repo_settings("web", Some(""), None, None).unwrap();
+        assert_eq!(load_repos()[0].plane_project, "", "empty clears it");
+        env::remove_var("SKEIN_HOME");
     }
 }

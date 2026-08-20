@@ -158,6 +158,7 @@ mod tests {
     use super::*;
     use crate::testutil::*;
     use std::env;
+    use std::process::Command;
 
     // The provisioning script is one file with two callers — the kit hook and the fleet path — and
     // the kit's copy is spliced into a YAML block scalar, where indentation IS the syntax. A line
@@ -298,5 +299,193 @@ mod tests {
             "an existing README is left alone"
         );
         env::remove_var("SKEIN_HOME");
+    }
+
+    #[test]
+    fn shared_home_links_two_private_homes_and_refuses_real_path() {
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store/.claude");
+        ensure_store(&store).unwrap();
+        let helper = store.join("skein/bin/shared-home.sh");
+        let home_a_tmp = tempdir();
+        let home_a = home_a_tmp.join("home-a");
+        let home_b_tmp = tempdir();
+        let home_b = home_b_tmp.join("home-b");
+        fs::create_dir_all(&home_a).unwrap();
+        fs::create_dir_all(&home_b).unwrap();
+
+        let run = |home: &Path| {
+            Command::new("bash")
+                .arg(&helper)
+                .arg(&store)
+                .env("HOME", home)
+                .output()
+                .unwrap()
+        };
+        assert!(run(&home_a).status.success());
+        assert!(run(&home_b).status.success());
+        assert_eq!(
+            fs::read_link(home_a.join("shared")).unwrap(),
+            store.join("shared-home")
+        );
+        assert_eq!(
+            fs::read_link(home_b.join("shared")).unwrap(),
+            store.join("shared-home")
+        );
+
+        fs::write(home_a.join("shared/from-a.txt"), "visible in b").unwrap();
+        assert_eq!(
+            fs::read_to_string(home_b.join("shared/from-a.txt")).unwrap(),
+            "visible in b"
+        );
+        fs::write(home_a.join("private-sentinel"), "private").unwrap();
+        assert!(!home_b.join("private-sentinel").exists());
+
+        fs::remove_file(home_b.join("shared")).unwrap();
+        fs::create_dir(home_b.join("shared")).unwrap();
+        fs::write(home_b.join("shared/do-not-clobber"), "mine").unwrap();
+        let conflict = run(&home_b);
+        assert!(!conflict.status.success());
+        assert!(String::from_utf8_lossy(&conflict.stderr).contains("refusing to replace real path"));
+        assert_eq!(
+            fs::read_to_string(home_b.join("shared/do-not-clobber")).unwrap(),
+            "mine"
+        );
+    }
+
+    #[test]
+    fn agent_guide_uses_native_instruction_files_without_prompt_hook_bloat() {
+        use std::os::unix::fs::symlink;
+
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store/.claude");
+        let home_tmp = tempdir();
+        let home = home_tmp.join("home");
+        let work_tmp = tempdir();
+        let work = work_tmp.join("work");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        symlink(&store, work.join(".claude")).unwrap();
+        fs::write(home.join(".codex/AGENTS.md"), "# My existing guidance\n").unwrap();
+        let helper = store.join("skein/bin/agent-guide.sh");
+        let run = |normal: &str, override_: &str| {
+            Command::new("bash")
+                .arg(&helper)
+                .arg(&store)
+                .arg(normal)
+                .arg(override_)
+                .env("HOME", &home)
+                .output()
+                .unwrap()
+        };
+
+        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+            .status
+            .success());
+        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+            .status
+            .success());
+        let agents = fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap();
+        assert!(agents.contains("My existing guidance"));
+        assert_eq!(agents.matches("skein:shared-home:start").count(), 1);
+
+        fs::write(
+            home.join(".codex/AGENTS.override.md"),
+            "# My temporary override\n",
+        )
+        .unwrap();
+        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+            .status
+            .success());
+        let override_ = fs::read_to_string(home.join(".codex/AGENTS.override.md")).unwrap();
+        assert!(override_.contains("My temporary override"));
+        assert_eq!(override_.matches("skein:shared-home:start").count(), 1);
+
+        assert!(run(".claude/CLAUDE.md", "").status.success());
+        assert!(fs::read_to_string(home.join(".claude/CLAUDE.md"))
+            .unwrap()
+            .contains("$HOME/shared"));
+
+        // Without a real takeover, the turn-scoped handoff hook must emit no context at all.
+        let handoff = Command::new("bash")
+            .arg(store.join("skein/bin/box-handoff.sh"))
+            .arg("codex")
+            .env("CLAUDE_PROJECT_DIR", &work)
+            .env("SANDBOX_VM_ID", "box-a")
+            .output()
+            .unwrap();
+        assert!(handoff.status.success());
+        assert!(handoff.stdout.is_empty());
+    }
+
+    #[test]
+    fn a_box_with_no_clone_mirror_still_gets_the_repos_shared_paths() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let dir = tempdir();
+        let store = dir.join("store").join(".claude");
+        let work = dir.join("work"); // the host checkout: what /run/sandbox/source used to be
+        let tree = dir.join("tree"); // the box's own clone
+        ensure_store(&store).unwrap();
+        for d in [&work, &tree] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(work.join(".env"), "SECRET=from-host\n").unwrap();
+        fs::write(work.join("CLAUDE.md"), "# direction\n").unwrap();
+        fs::write(store.join("shared-paths.txt"), ".env\nCLAUDE.md\n").unwrap();
+        fs::write(
+            store.join("skein").join("mirror"),
+            format!("{}\n", work.display()),
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        symlink(&store, tree.join(".claude")).unwrap();
+        // The wreckage an earlier migration left: a link into a mount this box does not have.
+        symlink("/run/sandbox/source/.env", tree.join(".env")).unwrap();
+
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let out = Command::new("bash")
+            .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+            .env("CLAUDE_PROJECT_DIR", &tree)
+            .env("HOME", &home)
+            .env("SKEIN_BOX", "demo-main")
+            // This box may itself be clone-mode, so name the mirror rather than letting the
+            // script find the harness's own /run/sandbox/source.
+            .env("SKEIN_MIRROR", &work)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        for name in [".env", "CLAUDE.md"] {
+            let dst = tree.join(name);
+            let target = fs::read_link(&dst).unwrap_or_else(|e| panic!("{name}: {e}"));
+            // Canonical, because the box reaches its store through a symlink: the same directory
+            // has two spellings and only one of them is the one written here.
+            let target = fs::canonicalize(&target).unwrap();
+            assert!(
+                target.starts_with(fs::canonicalize(store.join("shared-rw")).unwrap()),
+                "{name} must resolve through the store, never straight at the host checkout: {}",
+                target.display()
+            );
+            assert!(
+                fs::read_to_string(&dst).unwrap().contains("from-host") || name == "CLAUDE.md",
+                "{name} must carry the host's content"
+            );
+        }
+        // The point of routing through the store: writing here must not touch the host checkout.
+        fs::write(tree.join(".env"), "SECRET=changed\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(work.join(".env")).unwrap(),
+            "SECRET=from-host\n",
+            "a box must never be able to edit the host's own working copy"
+        );
     }
 }

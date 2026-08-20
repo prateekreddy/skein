@@ -19,7 +19,7 @@ use axum::{Json, Router};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
 use skein::board::load_views;
-use skein::BoxView;
+use skein::board::BoxView;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::{Read, Write};
@@ -27,7 +27,7 @@ use std::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
-const INDEX: &str = include_str!("../web/index.html");
+use skein::cockpit::INDEX;
 // Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
 const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
 const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
@@ -490,7 +490,7 @@ async fn api_boxes() -> Json<Vec<BoxView>> {
 /// Provider-neutral custom footer. Claude renders it natively from stdin; Codex maps its latest
 /// token_count event (the `/status` data source) through the same renderer for the browser terminal.
 async fn api_statusline(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     match tokio::task::spawn_blocking(move || skein::probes::agent_statusline(&name)).await {
@@ -506,7 +506,7 @@ struct TakeoverReq {
 }
 
 async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>) -> Response {
-    if !skein::valid_name(&name) || !skein::runtime::valid_runtime(&request.target) {
+    if !skein::util::valid_name(&name) || !skein::runtime::valid_runtime(&request.target) {
         return (StatusCode::BAD_REQUEST, "invalid box or target runtime").into_response();
     }
     match tokio::task::spawn_blocking(move || skein::takeover::replace_box(&name, &request.target))
@@ -781,7 +781,7 @@ async fn api_set_box_identity(Path(name): Path<String>, Json(r): Json<IdentityRe
 /// question is "what does this box do today, and is that its own choice or the default?" — so each
 /// field carries the override (possibly empty) and the value in force.
 async fn api_box_settings(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let config = skein::config::load_config();
@@ -923,7 +923,7 @@ async fn api_forget_connection_token(Path(id): Path<String>) -> Response {
 /// Mint this box a tracker token and register the `sync` MCP server inside it. Spends a network
 /// round trip and creates a real credential, so — like verify — it only ever happens on a click.
 async fn api_sync_provision(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     match tokio::task::spawn_blocking(move || skein::tracking::sync_provision_box(&name)).await {
@@ -942,7 +942,7 @@ async fn api_sync_refresh(
     Path(name): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let force = q.get("replace").is_some_and(|v| v == "1" || v == "true");
@@ -961,7 +961,7 @@ async fn api_transcript(
     Path(name): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let bytes = q
@@ -979,7 +979,7 @@ async fn api_transcript(
 
 /// The branch-vs-base patch a box last reported (plain text; empty when none yet).
 async fn api_diff(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     // Computed inside the box, so it forks a git in a sandbox — off the async runtime, like every
@@ -1003,7 +1003,7 @@ async fn api_diff(Path(name): Path<String>) -> Response {
 /// List a directory in a box's host-side workspace (`?path=rel/dir`, default root). Traversal,
 /// absolute paths, and symlink escapes are rejected in the lib (resolve_in_workspace).
 async fn api_files(Path(name): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let rel = q.get("path").cloned().unwrap_or_default();
@@ -1020,7 +1020,7 @@ async fn api_files(Path(name): Path<String>, Query(q): Query<HashMap<String, Str
 /// text/plain (the UI renders markdown itself), images with their own type so <img> works, and
 /// anything else as octet-stream. `X-Truncated: 1` marks a read capped at FILE_READ_CAP.
 async fn api_file(Path(name): Path<String>, Query(q): Query<HashMap<String, String>>) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let rel = q.get("path").cloned().unwrap_or_default();
@@ -1058,7 +1058,7 @@ async fn api_file(Path(name): Path<String>, Query(q): Query<HashMap<String, Stri
 /// The free session digest for a box — "what happened here" assembled from commits, diff,
 /// the agent's journal, and its last reported message. No model tokens spent. 404 if unknown.
 async fn api_session(Path(name): Path<String>) -> Response {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     match tokio::task::spawn_blocking(move || skein::digest::session_digest(&name)).await {
@@ -1765,7 +1765,7 @@ struct RepinReq {
 /// checked back onto the stale one every reconnect. Takes effect on the box's next reconnect.
 /// Returns {ok, error?}.
 async fn api_repin(Path(name): Path<String>, Json(r): Json<RepinReq>) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let branch = r.branch;
@@ -1790,7 +1790,7 @@ async fn api_resume(
     Path(name): Path<String>,
     body: Option<Json<ResumeReq>>,
 ) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let prompt = body.map(|Json(b)| b.prompt).unwrap_or_default();
@@ -1812,7 +1812,7 @@ async fn api_restart_agent(
     Path(name): Path<String>,
     body: Option<Json<RestartAgentReq>>,
 ) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let runtime = body
@@ -1833,7 +1833,7 @@ async fn api_restart_agent(
 /// keeps no journal (step 7). Returns {summary} (null when AI is off / unavailable). Called on demand
 /// only (Session-tab open), cached per turn-end; never per fleet tick.
 async fn api_narrate(Path(name): Path<String>) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return Json(serde_json::json!({ "summary": null }));
     }
     let s = tokio::task::spawn_blocking(move || skein::ai::narrate(&name))
@@ -1862,7 +1862,7 @@ async fn api_resume_batch(Json(r): Json<BatchReq>) -> Json<serde_json::Value> {
 /// Stop a box: halt the sandbox (frees compute; resume later via attach). Non-destructive — the box
 /// stays listed and goes stale until resumed. Returns {ok} or {ok:false, error}.
 async fn api_stop(Path(name): Path<String>) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let r = tokio::task::spawn_blocking(move || skein::sandbox::stop_box(&name)).await;
@@ -1876,7 +1876,7 @@ async fn api_stop(Path(name): Path<String>) -> Json<serde_json::Value> {
 /// Destroy a box: tear the sandbox down (sbx rm — reclaims its resources) then delist it.
 /// Destructive. Returns {ok} or {ok:false, error}.
 async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Value> {
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let r = tokio::task::spawn_blocking(move || skein::sandbox::destroy_box(&name)).await;
@@ -2188,7 +2188,7 @@ async fn terminal(
     if !origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin terminal blocked").into_response();
     }
-    if !skein::valid_name(&name) {
+    if !skein::util::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let launch = q.get("launch").filter(|s| !s.is_empty()).cloned();

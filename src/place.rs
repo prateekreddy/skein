@@ -21,8 +21,8 @@
 
 use crate::config::skein_home;
 use crate::config::*;
+use crate::util::valid_name;
 use crate::util::*;
-use crate::valid_name;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};

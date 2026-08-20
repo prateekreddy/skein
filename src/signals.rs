@@ -10,8 +10,8 @@
 
 use crate::digest::read_journal;
 use crate::registry::store_for_box;
+use crate::util::valid_name;
 use crate::util::*;
-use crate::valid_name;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;

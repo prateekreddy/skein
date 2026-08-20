@@ -17,8 +17,8 @@ use crate::runtime::runtime_adapter;
 use crate::runtime::RUNTIME_ADAPTERS;
 use crate::sandbox::sbx_guest_output;
 use crate::util::sh_quote;
+use crate::util::valid_name;
 use crate::util::write_atomic;
-use crate::valid_name;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -1374,6 +1374,323 @@ mod tests {
         assert!(
             !alone.contains("SKEIN_TMUX_SOCK"),
             "a legacy box's tmux is the only one there: {alone}"
+        );
+    }
+
+    #[test]
+    fn codex_status_line_setup_defaults_without_overriding_user_choice() {
+        let home = tempdir();
+        let codex = home.join(".codex");
+        let setup = runtime_adapter("codex").unwrap().interactive_setup;
+        let run = || {
+            Command::new("bash")
+                .arg("-c")
+                .arg(setup)
+                .env("HOME", &home)
+                .status()
+                .unwrap()
+        };
+
+        assert!(run().success());
+        let config = codex.join("config.toml");
+        let generated = fs::read_to_string(&config).unwrap();
+        assert!(generated.contains("[tui]"));
+        assert!(generated.contains("status_line = [] # skein custom statusline"));
+
+        fs::write(&config, "[tui]\nanimations = false\n").unwrap();
+        assert!(run().success());
+        let extended = fs::read_to_string(&config).unwrap();
+        assert!(extended.contains("animations = false"));
+        assert!(extended.contains("status_line = [] # skein custom statusline"));
+
+        fs::write(
+            &config,
+            "[tui]\nstatus_line = [\"context-used\", \"five-hour-limit\", \"weekly-limit\", \"used-tokens\", \"git-branch\", \"model-with-reasoning\"]\n",
+        )
+        .unwrap();
+        assert!(run().success());
+        assert!(fs::read_to_string(&config)
+            .unwrap()
+            .contains("status_line = [] # skein custom statusline"));
+
+        fs::write(
+            &config,
+            "[tui]\nstatus_line = null # skein custom statusline\n",
+        )
+        .unwrap();
+        assert!(run().success());
+        assert!(fs::read_to_string(&config)
+            .unwrap()
+            .contains("status_line = [] # skein custom statusline"));
+
+        let chosen = "[tui]\nstatus_line = [\"model\"]\n";
+        fs::write(&config, chosen).unwrap();
+        assert!(run().success());
+        assert_eq!(fs::read_to_string(config).unwrap(), chosen);
+    }
+
+    #[test]
+    fn codex_statusline_uses_default_quota_when_named_pool_arrives_last() {
+        let home = tempdir();
+        let sessions = home.join(".codex/sessions/2026/07/14");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            home.join(".codex/config.toml"),
+            "[tui]\nstatus_line = [] # skein custom statusline\n",
+        )
+        .unwrap();
+        fs::write(
+            sessions.join("rollout.jsonl"),
+            concat!(
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":100},"model_context_window":1000},"rate_limits":{"limit_id":"default-pool","limit_name":null,"primary":{"used_percent":18,"window_minutes":10080,"resets_at":2000000000},"secondary":null,"individual_limit":null}}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":200},"model_context_window":1000},"rate_limits":{"limit_id":"named-pool","limit_name":"Future Model Pool","primary":{"used_percent":0,"window_minutes":10080,"resets_at":2100000000},"secondary":null,"individual_limit":null}}}"#,
+                "\n",
+                r#"{"type":"turn_context","payload":{"model":"future-model","effort":"medium"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let command = runtime_adapter("codex").unwrap().statusline_input.unwrap();
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+        assert_eq!(payload["rate_limits"]["seven_day"]["used_percentage"], 18);
+        assert_eq!(
+            payload["rate_limits"]["seven_day"]["resets_at"],
+            2000000000_i64
+        );
+        // Context remains tied to the newest token event, independent of quota-pool selection.
+        assert_eq!(payload["context_window"]["total_input_tokens"], 200);
+    }
+
+    #[test]
+    fn codex_hook_installer_preserves_user_hooks_and_is_idempotent() {
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store/.claude");
+        let home_tmp = tempdir();
+        let home = home_tmp.join("home");
+        ensure_store(&store).unwrap();
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(
+            home.join(".codex/hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"hooks/user.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let installer = store.join("skein/bin/install-codex-hooks.sh");
+        let run = || {
+            Command::new("bash")
+                .arg(&installer)
+                .arg(&store)
+                .env("HOME", &home)
+                .status()
+                .unwrap()
+        };
+        assert!(run().success());
+        let once: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert!(run().success());
+        let twice: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(once, twice);
+        let text = twice.to_string();
+        assert!(text.contains("hooks/user.sh"));
+        assert!(text.contains("box-status.sh"));
+    }
+
+    #[test]
+    fn boxes_sharing_one_sandbox_each_report_under_their_own_name() {
+        // The regression that made the fleet's first migrated box show `stale` on the board while
+        // it was visibly working: every probe keyed its signals on SANDBOX_VM_ID, which names the
+        // VM. One box per VM made that an identity by accident; several boxes in one sandbox all
+        // answer with the SAME string, so they overwrite one another's status and the board — which
+        // looks up each box by name — finds nothing for any of them.
+        //
+        // Runs the installed script, not a Rust-side model of it, because the bug was in the shell.
+        let _g = env_lock();
+        let store_tmp = tempdir();
+        let store = store_tmp.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let script = store.join("skein").join("bin").join("box-status.sh");
+        let project_dir = store.parent().unwrap().to_path_buf();
+
+        let report = |box_name: &str, mode: &str| {
+            let out = Command::new("bash")
+                .arg(&script)
+                .arg(mode)
+                .env("CLAUDE_PROJECT_DIR", &project_dir)
+                // What both boxes agree on: they are in one sandbox, so this is the same for each.
+                .env("SANDBOX_VM_ID", "skein-fleet")
+                .env("SKEIN_BOX", box_name)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("run box-status.sh");
+            assert!(out.status.success(), "{box_name} {mode}");
+            // A UserPromptSubmit hook's stdout is injected into the prompt, so it must stay empty.
+            assert!(out.stdout.is_empty(), "{box_name} {mode} wrote to stdout");
+        };
+        report("alpha", "working");
+        report("beta", "waiting");
+
+        let status = |name: &str| -> serde_json::Value {
+            let p = store.join("status").join(format!("{name}.json"));
+            serde_json::from_str(
+                &fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())),
+            )
+            .unwrap()
+        };
+        assert_eq!(status("alpha")["status"], "working");
+        assert_eq!(status("beta")["status"], "waiting");
+        assert!(
+            !store.join("status").join("skein-fleet.json").exists(),
+            "a box must never report under the name of the sandbox holding it"
+        );
+        // The heartbeat is per box too: hook health that pools every box into one log cannot say
+        // WHICH box's probes have gone quiet, which is the only question it is asked.
+        for name in ["alpha", "beta"] {
+            assert!(
+                store
+                    .join("hook-log")
+                    .join(format!("{name}.jsonl"))
+                    .exists(),
+                "{name} left no heartbeat"
+            );
+        }
+
+        // A legacy box sets no SKEIN_BOX and is alone in its VM: there the VM name IS the box name,
+        // and it has to keep working exactly as before.
+        let out = Command::new("bash")
+            .arg(&script)
+            .arg("waiting")
+            .env("CLAUDE_PROJECT_DIR", &project_dir)
+            .env("SANDBOX_VM_ID", "old-style-box")
+            .env_remove("SKEIN_BOX")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run box-status.sh");
+        assert!(out.status.success());
+        assert_eq!(status("old-style-box")["status"], "waiting");
+    }
+
+    #[test]
+    fn box_token_usage_sums_new_assistant_entries_and_is_idempotent() {
+        // Shells out to the installed script directly (like the mailbox round-trip test) so this
+        // proves the real jq pipeline, not just a Rust-side assumption about its behavior.
+        let _g = env_lock();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let script = store.join("skein").join("bin").join("box-token-usage.sh");
+
+        // The turn-start marker box-status.sh's `working` mode writes — read here to compute
+        // duration_secs. Backdated so the test doesn't depend on real wall-clock timing.
+        let start_dir = store.join("telemetry").join(".turn-start");
+        fs::create_dir_all(&start_dir).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        fs::write(start_dir.join("boxA"), (now - 5).to_string()).unwrap();
+
+        let transcript = home.join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#, "\n",
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":0,"cache_creation_input_tokens":200},"content":[{"type":"tool_use","name":"Bash"}]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+
+        // box-token-usage.sh resolves its store via `git -C $CLAUDE_PROJECT_DIR rev-parse
+        // --show-toplevel` (falling back to $CLAUDE_PROJECT_DIR itself when it's not a git repo,
+        // as here) + `.claude` — so this must point at the store's *parent*, not `home`.
+        let project_dir = store.parent().unwrap().to_path_buf();
+        let run = || -> std::process::Output {
+            use std::io::Write as _;
+            let mut child = Command::new("bash")
+                .arg(&script)
+                // See the mailbox round-trip test: the box wins over the VM, and leaving SKEIN_BOX
+                // to be inherited files this turn's tokens under whichever box ran the test.
+                .env("SKEIN_BOX", "boxA")
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .env("CLAUDE_PROJECT_DIR", &project_dir)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn box-token-usage.sh");
+            write!(
+                child.stdin.take().unwrap(),
+                r#"{{"transcript_path":"{}"}}"#,
+                transcript.display()
+            )
+            .unwrap();
+            child.wait_with_output().expect("run box-token-usage.sh")
+        };
+
+        assert!(run().status.success());
+        let log = store.join("telemetry").join("boxA.jsonl");
+        let entries: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1, "one turn logged");
+        assert_eq!(entries[0]["input"], 100);
+        assert_eq!(entries[0]["output"], 50);
+        assert_eq!(entries[0]["cache_creation"], 200);
+        assert_eq!(entries[0]["total"], 350);
+        assert_eq!(entries[0]["tools"]["Bash"], 1);
+        let duration = entries[0]["duration_secs"].as_i64().unwrap();
+        assert!((4..=6).contains(&duration), "duration was {duration}");
+
+        // No new transcript lines: rerunning must not duplicate the entry.
+        assert!(run().status.success());
+        let lines_after: usize = fs::read_to_string(&log).unwrap().lines().count();
+        assert_eq!(lines_after, 1, "must not re-log unchanged transcript");
+
+        // A second turn with two assistant entries (a tool-call round trip) sums both.
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"more"}}}}"#
+        )
+        .unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":2,"output_tokens":782,"cache_read_input_tokens":447904,"cache_creation_input_tokens":1247}},"content":[{{"type":"tool_use","name":"Bash"}},{{"type":"tool_use","name":"Read"}}]}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":5,"output_tokens":100,"cache_read_input_tokens":448000,"cache_creation_input_tokens":0}},"content":[{{"type":"tool_use","name":"Read"}}]}}}}"#).unwrap();
+        drop(f);
+        assert!(run().status.success());
+        let entries2: Vec<serde_json::Value> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries2.len(), 2);
+        assert_eq!(entries2[1]["input"], 7);
+        assert_eq!(entries2[1]["output"], 882);
+        assert_eq!(entries2[1]["cache_read"], 895904);
+        assert_eq!(entries2[1]["tools"]["Bash"], 1);
+        assert_eq!(
+            entries2[1]["tools"]["Read"], 2,
+            "counts across both assistant entries"
         );
     }
 }

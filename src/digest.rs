@@ -9,13 +9,14 @@
 //! feeds turn state, `recent_commits` feeds the board, and `session_digest` is the assembly.
 
 use crate::diff::{git_range, read_diffstat_file, DiffStat};
+use crate::registry::Sandbox;
 use crate::registry::{registry_entry_for_box, store_for_box};
 use crate::repos::branch_of;
 use crate::sbx::box_liveness;
 use crate::sbx::lookup_dir;
 use crate::signals::{classify_message, current_status, session_signal, Pause};
+use crate::util::valid_name;
 use crate::util::{bounded_output, keep_tail};
-use crate::{valid_name, Sandbox};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;

@@ -11,10 +11,10 @@
 //! The order is "who needs me first" rather than alphabetical or newest-first, because a board that
 //! is read at a glance answers exactly one question and the answer has to be the top row.
 
-use crate::diff::read_diffstat_file;
+use crate::diff::{read_diffstat_file, DiffStat};
 use crate::fleet::{box_disk_limit, fleet_disk_usage};
 use crate::place::{fleet_sandbox, placed_boxes, shared_record};
-use crate::registry::{all_sandboxes, store_for_box};
+use crate::registry::{all_sandboxes, store_for_box, Sandbox};
 use crate::repos::{branch_from_box, launch_spec_agent, launch_spec_branch, repo_for_box};
 use crate::runtime::{default_agent, valid_runtime};
 use crate::sbx::{box_liveness, fleet_boxes, git_branch_for, Liveness};
@@ -25,7 +25,7 @@ use crate::signals::{
 };
 use crate::tracking::sync_docs_available;
 use crate::util::{first_line, shorten};
-use crate::{BoxView, Sandbox};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
@@ -277,6 +277,86 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             .then(a.name.cmp(&b.name))
     });
     Ok(views)
+}
+
+/// A registry entry enriched for display — what the CLI table and the web API both render.
+#[derive(Debug, Default, Serialize)]
+pub struct BoxView {
+    pub name: String,
+    pub state: String,
+    /// 0 waiting/done-attention, sorted up; higher = quieter. See [`Sandbox::state`].
+    pub tier: u8,
+    pub branch: String,
+    pub age: String,
+    pub dir: String,
+    /// the registered repo this box belongs to (`<repo>-<branch>`), empty if it matches none.
+    /// Lets the cockpit group rows by repo once more than one is managed.
+    #[serde(default)]
+    pub repo: String,
+    /// Runtime configured for this sandbox (`claude` or `codex`). The cockpit uses this as the
+    /// default agent and offers the other runtime as a replacement-box takeover target.
+    #[serde(default = "default_agent")]
+    pub agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffStat>,
+    /// one-line gist of the box's last reported signal (the inbox headline) — the blocking
+    /// prompt when it's waiting on you, else the first line of its last message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headline: Option<String>,
+    /// what the box is doing *right now* — the in-progress TodoWrite item (or journal `next`).
+    /// The peripheral "what's happening in the other tabs" signal; shown subtly on every row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// why the turn ended (the fork-detector) — lets the inbox label & batch the trivial asks.
+    pub pause: Pause,
+    /// which dialog is blocking, when the box's own screen says one is: `permission` | `question` |
+    /// `trust` | `auth`. Empty when nothing blocks, or when no screen observation was available —
+    /// each wants a different move from you, so the row names it instead of saying "decision".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub blocked_kind: String,
+    /// probe wiring health: "" = fine; "never" = the sandbox is Running but no probe has EVER
+    /// reported (no heartbeat, no status file) — hooks dark for this box; the cockpit badges it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hook_health: String,
+    /// the *other* half's health — whether this box's own screen is being read, and if not why:
+    /// "" | "none" | "stale" | "unreadable" | "unsupported". See [`screen_health`]. Without it,
+    /// falling back to hook-only turn state looks exactly like everything working.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub screen_health: String,
+    /// this repo's store holds work-tracking documents newer than the ones installed from it, so a
+    /// re-apply has something to deliver. Repo-scoped and host-side, because that half of the answer
+    /// is free; whether *this box's* CLAUDE.md is stale can only be read inside the box, and is not
+    /// worth waking one on every snapshot to find out. See [`sync_docs_available`].
+    #[serde(default)]
+    pub docs_update: bool,
+    /// This sandbox is not a box skein placed — so skein can see it, and can do nothing with it.
+    ///
+    /// Two kinds land here and they need no telling apart: a sandbox someone created with `sbx`
+    /// directly, and a box from a skein old enough to give every box its own microVM. Neither has a
+    /// placement record, a store skein provisioned, or the tmux contract the cockpit attaches through.
+    ///
+    /// The board *hides* these by default and reveals them on the `foreign:` filter, because they are
+    /// on the list only as an artefact of how the list is built: `sbx ls` is authoritative for which
+    /// sandboxes exist, and it does not know which of them are skein's. Showing them made a first run
+    /// on a machine with other sandboxes look like a fleet full of broken boxes.
+    #[serde(default)]
+    pub foreign: bool,
+    /// Whether this box's GitHub credential is scoped to its own repository — `None` when the fleet
+    /// cannot scope at all, so there is no distinction to draw.
+    ///
+    /// On the row because it is otherwise invisible: a scoped box and an unscoped one look
+    /// identical everywhere in the cockpit, so "did the switch take" had no answer short of trying
+    /// a push inside the box and reading the 403. Three-valued for the same reason `legacy` is
+    /// suppressed on an unadopted host — badging every row before the distinction exists would
+    /// label the normal case as the odd one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped: Option<bool>,
+    /// MiB this box occupies on the fleet's shared disk, and what it is allowed. Absent for a box
+    /// with a sandbox of its own, whose disk is nobody else's problem.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_limit_mb: Option<u64>,
 }
 
 #[cfg(test)]

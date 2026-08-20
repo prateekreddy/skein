@@ -3,6 +3,10 @@
 //!
 //! Nothing here knows what a box is. If a helper needs to know, it belongs in the module that
 //! owns that concept — this one stays safe to call from anywhere.
+//!
+//! `valid_name` is the one that looks like an exception and is not: what it enforces is that a
+//! string is safe to join onto a path, and every caller happens to be passing a box name. It lives
+//! here so the check is available to code that must not depend on the registry to make it.
 
 use std::env;
 use std::fs;
@@ -335,7 +339,7 @@ pub(crate) fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
 
 /// A remembered answer to a question only a subprocess can answer: fresh for a while, asked by one
 /// caller at a time, and asked progressively less often while the answers keep failing.
-pub(crate) struct Gate<T> {
+pub struct Gate<T> {
     cell: std::sync::Mutex<Asked<T>>,
     /// Consecutive failures — the backoff exponent, reset by any success.
     fails: std::sync::atomic::AtomicU32,
@@ -686,9 +690,21 @@ pub fn file_ago(path: &Path) -> Option<String> {
     Some(ago(secs as i64))
 }
 
+/// A box name is a registry key / vmid — never a path or a shell token. Reject anything that
+/// could escape the store dir on a filesystem join (`..`, separators, NUL). The server validates
+/// every `:name` route with this, and the path-touching lib fns guard with it too so the check
+/// can't be bypassed by a non-HTTP caller.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.contains("..")
+        && !name.contains(['/', '\\', '\0'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{env_lock, sb, secs_ago};
 
     /// A command that could not run says **which** way it could not run.
     ///
@@ -794,5 +810,197 @@ mod tests {
             "the marker plus the cap: {out:.40}"
         );
         assert!(out.ends_with("did: reset onto master"));
+    }
+
+    #[test]
+    fn valid_name_guards_paths() {
+        assert!(valid_name("thing-feature"));
+        assert!(valid_name("box_123"));
+        for bad in ["", "../etc", "a/b", "a\\b", "..", "x..y", "a\0b"] {
+            assert!(!valid_name(bad), "should reject {bad:?}");
+        }
+        assert!(!valid_name(&"x".repeat(200)));
+    }
+
+    /// The property the board's tick depends on: however many callers arrive together, the sandbox
+    /// is asked once. Check-then-act gave every browser tab its own subprocess, because the answer
+    /// was only remembered once the first one returned.
+    #[test]
+    fn concurrent_callers_ask_the_sandbox_once_between_them() {
+        static GATE: Gate<u32> = Gate::new();
+        static ASKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        GATE.invalidate();
+        ASKS.store(0, std::sync::atomic::Ordering::Relaxed);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    GATE.get(Duration::from_secs(60), || {
+                        ASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Long enough that the others are certainly waiting on the lane rather
+                        // than having missed each other by luck.
+                        std::thread::sleep(Duration::from_millis(50));
+                        Some(1)
+                    })
+                });
+            }
+        });
+        assert_eq!(
+            ASKS.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "eight simultaneous callers must cost one subprocess, not eight"
+        );
+    }
+
+    /// What a caller pays when the sandbox is wedged. Measured against a hung sbx daemon, a board
+    /// refresh walked four gates in series and took 31 seconds to hand back the answers it already
+    /// had — so the property is that ageing out costs the caller *nothing* once the gate holds one.
+    #[test]
+    fn an_aged_out_answer_is_served_at_once_and_refreshed_behind_the_caller() {
+        static GATE: Gate<u32> = Gate::new();
+        static ASKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        use std::sync::atomic::Ordering::Relaxed;
+        const HUNG: Duration = Duration::from_millis(300);
+        let fresh = Duration::from_millis(20);
+        GATE.invalidate();
+        ASKS.store(0, Relaxed);
+
+        // Cold: nothing to serve, so this caller does have to wait.
+        assert_eq!(GATE.get(fresh, || Some(1)), Some(1));
+        assert_eq!(
+            ASKS.load(Relaxed),
+            0,
+            "the cold ask is the one under test next"
+        );
+
+        // Now aged out, with the sandbox hung. The caller must not wait on it.
+        std::thread::sleep(fresh * 2);
+        let began = std::time::Instant::now();
+        let answer = GATE.get(fresh, || {
+            ASKS.fetch_add(1, Relaxed);
+            std::thread::sleep(HUNG);
+            Some(2)
+        });
+        assert_eq!(
+            answer,
+            Some(1),
+            "the remembered answer, not a wait for a new one"
+        );
+        assert!(
+            began.elapsed() < HUNG / 2,
+            "a stale gate must not make its caller sit out the timeout: waited {:?}",
+            began.elapsed()
+        );
+
+        // …and the refresh really did run, so the *next* caller finds a fresh answer.
+        std::thread::sleep(HUNG * 2);
+        assert_eq!(
+            ASKS.load(Relaxed),
+            1,
+            "exactly one refresh, behind the caller"
+        );
+        assert_eq!(
+            GATE.get(fresh, || Some(3)),
+            Some(2),
+            "refreshed to the new value"
+        );
+    }
+
+    /// The exception, and why it is one: `invalidate` means skein has just *changed* the thing being
+    /// asked about, so the remembered answer is wrong rather than merely old. Serving it while a
+    /// refresh ran behind would show a box as stopped immediately after starting it.
+    #[test]
+    fn a_gate_skein_has_invalidated_makes_its_caller_wait_for_the_truth() {
+        static GATE: Gate<u32> = Gate::new();
+        let fresh = Duration::from_millis(20);
+        GATE.invalidate();
+        assert_eq!(GATE.get(fresh, || Some(1)), Some(1));
+
+        GATE.invalidate();
+        assert_eq!(
+            GATE.get(fresh, || Some(2)),
+            Some(2),
+            "an invalidated gate must return what it just asked for, not what it remembered"
+        );
+    }
+
+    /// The property that lets a struggling daemon recover: consecutive failures space the attempts
+    /// out instead of re-arming at the same interval, and one success puts it straight back.
+    #[test]
+    fn repeated_failure_asks_less_often_and_success_restores_the_cadence() {
+        static GATE: Gate<u32> = Gate::new();
+        let gate = &GATE;
+        gate.invalidate();
+        let fresh = Duration::from_millis(100);
+        assert_eq!(gate.interval(fresh), fresh, "healthy: ask at the full rate");
+
+        for expected in [200u64, 400, 800] {
+            gate.invalidate();
+            gate.get(fresh, || None);
+            assert_eq!(gate.interval(fresh), Duration::from_millis(expected));
+        }
+        // Capped, so a daemon that comes back is still noticed within half a minute.
+        for _ in 0..20 {
+            gate.invalidate();
+            gate.get(fresh, || None);
+        }
+        assert_eq!(gate.interval(fresh), GATE_MAX_INTERVAL);
+
+        gate.invalidate();
+        gate.get(fresh, || Some(7));
+        assert_eq!(gate.interval(fresh), fresh);
+    }
+
+    #[test]
+    fn age_buckets() {
+        assert!(sb("", &secs_ago(5)).age().ends_with("s ago"));
+        assert!(sb("", &secs_ago(120)).age().ends_with("m ago"));
+        assert!(sb("", &secs_ago(7200)).age().ends_with("h ago"));
+        assert_eq!(sb("", "nope").age(), "?");
+    }
+
+    #[test]
+    fn sh_quote_escapes() {
+        assert_eq!(sh_quote("a b"), "'a b'");
+        assert_eq!(sh_quote("x'; rm -rf ~"), "'x'\\''; rm -rf ~'");
+    }
+
+    #[test]
+    fn shorten_replaces_home() {
+        let _g = env_lock();
+        env::set_var("HOME", "/home/me");
+        assert_eq!(shorten("/home/me/work/x"), "~/work/x");
+        assert_eq!(shorten("/other/x"), "/other/x");
+    }
+
+    #[test]
+    fn safe_component_caps_length_but_keeps_extension() {
+        let long = format!("{}.mp4", "n".repeat(200));
+        let s = safe_component(&long);
+        assert_eq!(s.chars().count(), 80);
+        assert!(
+            s.ends_with(".mp4"),
+            "extension tells the agent the type: {s}"
+        );
+        // a multibyte name must truncate on a char boundary, never panic
+        let s = safe_component(&format!("{}.pdf", "é".repeat(120)));
+        assert_eq!(s.chars().count(), 80);
+        assert!(s.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn safe_component_keeps_readable_names() {
+        // letters of any script survive; only the shell/path-hostile characters collapse to '-'
+        assert_eq!(safe_component("née deed.pdf"), "née-deed.pdf");
+        assert_eq!(safe_component("契約書.docx"), "契約書.docx");
+        assert_eq!(safe_component("a'b\"c;d|e$f*g.txt"), "a-b-c-d-e-f-g.txt");
+        assert_eq!(safe_component(".hidden"), "hidden");
+    }
+
+    #[test]
+    fn pct_decode_recovers_unicode_filenames() {
+        assert_eq!(pct_decode("n%C3%A9e%20deed.pdf"), "née deed.pdf");
+        assert_eq!(pct_decode("plain.txt"), "plain.txt");
+        assert_eq!(pct_decode("100%"), "100%"); // dangling escape left verbatim
+        assert_eq!(pct_decode("a%zz"), "a%zz");
     }
 }

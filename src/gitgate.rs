@@ -104,7 +104,7 @@ impl Request {
         if self.id.is_empty() || self.id.contains('/') || self.id.contains("..") {
             return Some(format!("unusable request id {:?}", self.id));
         }
-        if !crate::valid_name(&self.box_name) {
+        if !crate::util::valid_name(&self.box_name) {
             return Some(format!("unusable box name {:?}", self.box_name));
         }
         match slug_is_nameable(&self.repo) {
@@ -504,7 +504,7 @@ pub fn box_is_scoped(box_name: &str) -> bool {
 /// Set (or clear, with `None`) one box's override. Takes effect at the box's **next start**: the
 /// credential is placed as the box comes up, and a running box already holds what it was given.
 pub fn set_box_scope(box_name: &str, scope: Option<&str>) -> Result<(), String> {
-    if !crate::valid_name(box_name) {
+    if !crate::util::valid_name(box_name) {
         return Err(format!("unusable box name {box_name:?}"));
     }
     let path = scope_override_path(box_name);

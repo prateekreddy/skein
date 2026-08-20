@@ -4,10 +4,10 @@
 //! neither box has to be running when the other writes.
 
 use crate::registry::parse_registry;
+use crate::registry::Sandbox;
 use crate::registry::{all_stores, store_for_box};
 use crate::repos::load_repos;
 use crate::util::*;
-use crate::Sandbox;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

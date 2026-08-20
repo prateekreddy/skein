@@ -11,8 +11,8 @@
 
 use crate::config::load_config;
 use crate::signals::{session_signal, SessionSignal};
+use crate::util::valid_name;
 use crate::util::*;
-use crate::valid_name;
 use std::env;
 use std::process::Command;
 use std::time::Duration;

@@ -28,8 +28,8 @@ use crate::repos::{
     write_launch_spec_for_agent, Repo,
 };
 use crate::sbx::fleet_boxes;
+use crate::util::valid_name;
 use crate::util::*;
-use crate::valid_name;
 use chrono::Utc;
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -538,7 +538,7 @@ pub fn box_is_privileged(name: &str) -> bool {
 /// privileged boxes is a thing someone may want and the cockpit shows plainly; silently un-privileging
 /// a box someone is working in, because they ticked a box elsewhere, is not.
 pub fn set_box_privileged(name: &str, on: bool) -> Result<(), String> {
-    if !crate::valid_name(name) {
+    if !crate::util::valid_name(name) {
         return Err(format!("unusable box name {name:?}"));
     }
     let path = privileged_path(name);
@@ -2040,7 +2040,8 @@ fn parse_disk_usage(out: &str) -> std::collections::HashMap<String, u64> {
 /// See [`crate::util::Gate`]: remembered, asked by one caller at a time, and asked less often while the
 /// sandbox is failing to answer — a `du` over every box is the most expensive question skein asks
 /// on a tick, and the last thing a struggling sandbox should be handed more of.
-static DISK_GATE: crate::util::Gate<std::collections::HashMap<String, u64>> = crate::Gate::new();
+static DISK_GATE: crate::util::Gate<std::collections::HashMap<String, u64>> =
+    crate::util::Gate::new();
 
 /// What the fleet's one VM is actually using right now — the gauge behind [`fleet_resources`].
 ///
@@ -2412,7 +2413,7 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
 
 /// See [`crate::util::Gate`]. Asked rarely and backed off hard: nothing depends on this answer, so it must
 /// never be a reason the sandbox is busy.
-static RESOURCE_GATE: crate::util::Gate<FleetResources> = crate::Gate::new();
+static RESOURCE_GATE: crate::util::Gate<FleetResources> = crate::util::Gate::new();
 
 /// This box's disk allowance in MiB: its own if it has one, else the fleet-wide default, `None` for
 /// unlimited. Read at every check, so changing it takes effect on the next refresh — no restart.
@@ -3945,7 +3946,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
 /// [`crate::util::Gate`] for the same reason too — see the note there — since this is the `sbx exec` skein
 /// runs most often, and the one that kept a slow daemon slow.
 static LIVENESS_GATE: crate::util::Gate<std::collections::HashMap<String, bool>> =
-    crate::Gate::new();
+    crate::util::Gate::new();
 
 /// Which boxes in the fleet sandbox have a live session — asked of the sandbox, in one round-trip.
 ///

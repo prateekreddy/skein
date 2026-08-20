@@ -17,8 +17,8 @@
 use crate::fleet::fleet_liveness;
 use crate::place::shared_record;
 use crate::registry::registry_entry_for_box;
+use crate::util::valid_name;
 use crate::util::{bounded_output, clip, output_with_timeout_why, Gate};
-use crate::valid_name;
 use std::env;
 use std::process::Command;
 use std::time::Duration;

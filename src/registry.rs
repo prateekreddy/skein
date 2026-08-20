@@ -13,8 +13,11 @@
 
 use crate::mailbox::sandboxes_in;
 use crate::repos::{load_repos, repo_for_box};
+use crate::sbx::Liveness;
+use crate::util::ago;
 use crate::util::bounded_output;
-use crate::Sandbox;
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -153,6 +156,77 @@ pub(crate) fn registry_entry_for_box(name: &str) -> Option<Sandbox> {
         .or_else(|| all_sandboxes().remove(name))
 }
 
+/// One entry in the shared `sandboxes.json` registry written by sandbox-bootstrap.sh.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct Sandbox {
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default, rename = "lastSeen")]
+    pub last_seen: String,
+    /// Set by the box status hook (box-status.sh); usually empty until a box reports.
+    #[serde(default)]
+    pub status: String,
+}
+
+impl Sandbox {
+    /// Human label + sort/colour tier, ordered "who needs me first" (lower = more urgent):
+    ///   0 error       (the turn died on an API error — most urgent) / needs-input (a decision blocks it)
+    ///   1 waiting     (turn ended — your move)
+    ///   2 done        (task finished — review / merge)
+    ///   3 working     (in flight — leave it alone) / compacting / `live` when no explicit status
+    ///   4 ended       (session terminated) / idle        5 stale / unknown
+    /// Prefers the explicit status the box's hooks write; falls back to liveness
+    /// derived from `lastSeen` when no box has reported a status yet.
+    pub fn state(&self) -> (String, u8) {
+        match self.status.as_str() {
+            "error" => return ("error".into(), 0),
+            "needs-input" | "needs-decision" | "blocked" => return ("needs-input".into(), 0),
+            "waiting" => return ("waiting".into(), 1),
+            "done" => return ("done".into(), 2),
+            "working" | "running" => return ("working".into(), 3),
+            "compacting" => return ("compacting".into(), 3),
+            "ended" => return ("ended".into(), 4),
+            "" => {} // derive from lastSeen below
+            other => return (other.to_string(), 3),
+        }
+        match self.age_secs() {
+            Some(s) if s < 120 => ("live".into(), 3),
+            Some(s) if s < 1800 => ("idle".into(), 4),
+            Some(_) => ("stale".into(), 5),
+            None => ("unknown".into(), 5),
+        }
+    }
+
+    pub(crate) fn age_secs(&self) -> Option<i64> {
+        let t = DateTime::parse_from_rfc3339(&self.last_seen).ok()?;
+        Some((Utc::now() - t.with_timezone(&Utc)).num_seconds())
+    }
+
+    pub fn age(&self) -> String {
+        self.age_secs().map(ago).unwrap_or_else(|| "?".into())
+    }
+
+    /// State, refined by what sbx itself reports about the box's run state (`fleet_boxes`).
+    /// `live` is this box's entry from that map:
+    ///   - `Some(Running)`: the sandbox is up. An explicit agent turn-status still wins (it's more
+    ///     specific); otherwise the box is `live` — *never* aged to `idle`/`stale`. This is the fix
+    ///     for "goes idle while still working": liveness is "is the sandbox running", which sbx
+    ///     knows directly, not "did a hook fire in the last 120s".
+    ///   - `Some(Stopped)`: halted — show stale regardless of a now-meaningless registry status.
+    ///   - `None`: sbx couldn't be consulted, or doesn't list this box (e.g. a direct-mode box) —
+    ///     fall back to the `lastSeen`-derived `state()`.
+    pub fn state_with(&self, live: Option<Liveness>) -> (String, u8) {
+        match live {
+            Some(Liveness::Running) if self.status.is_empty() => ("live".into(), 3),
+            Some(Liveness::Running) => self.state(), // explicit agent turn-status wins
+            Some(Liveness::Stopped) => ("stale".into(), 5),
+            None => self.state(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +310,51 @@ mod tests {
         // a valid registry is returned untouched.
         let ok = r#"{"a":{"branch":"b"}}"#;
         assert_eq!(parse_registry(ok).unwrap()["a"]["branch"], "b");
+    }
+
+    #[test]
+    fn state_prefers_explicit_status() {
+        assert_eq!(sb("needs-input", "").state(), ("needs-input".into(), 0));
+        assert_eq!(sb("waiting", "").state().1, 1);
+        assert_eq!(sb("done", "").state().1, 2);
+        assert_eq!(sb("working", "").state().1, 3);
+        assert_eq!(sb("compiling", "").state(), ("compiling".into(), 3)); // passthrough
+                                                                          // the richer lifecycle states
+        assert_eq!(sb("error", "").state(), ("error".into(), 0)); // most urgent
+        assert_eq!(sb("blocked", "").state(), ("needs-input".into(), 0)); // permission → needs you
+        assert_eq!(sb("compacting", "").state(), ("compacting".into(), 3)); // busy, not stuck
+        assert_eq!(sb("ended", "").state(), ("ended".into(), 4)); // distinct from stale
+    }
+
+    #[test]
+    fn state_derives_liveness_from_last_seen() {
+        assert_eq!(sb("", &secs_ago(10)).state().0, "live");
+        assert_eq!(sb("", &secs_ago(600)).state().0, "idle");
+        assert_eq!(sb("", &secs_ago(7200)).state().0, "stale");
+        assert_eq!(sb("", "not-a-date").state().0, "unknown");
+    }
+
+    #[test]
+    fn state_with_sbx_liveness() {
+        // A running sandbox with no hook status is LIVE even if lastSeen is ancient — the fix.
+        assert_eq!(
+            sb("", &secs_ago(99999)).state_with(Some(Liveness::Running)),
+            ("live".into(), 3)
+        );
+        // An explicit agent turn-status still wins over the generic "live".
+        assert_eq!(
+            sb("needs-input", &secs_ago(99999)).state_with(Some(Liveness::Running)),
+            ("needs-input".into(), 0)
+        );
+        // Stopped → stale regardless of a stale "working" left in the registry.
+        assert_eq!(
+            sb("working", &secs_ago(5)).state_with(Some(Liveness::Stopped)),
+            ("stale".into(), 5)
+        );
+        // No sbx info → behaves exactly like the lastSeen-derived state().
+        assert_eq!(
+            sb("", &secs_ago(600)).state_with(None),
+            sb("", &secs_ago(600)).state()
+        );
     }
 }

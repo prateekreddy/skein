@@ -6,7 +6,7 @@
 //! crate, not a per-module copy.
 
 use crate::place::{record_place, PlaceRecord};
-use crate::Sandbox;
+use crate::registry::Sandbox;
 use chrono::Utc;
 use std::env;
 use std::fs;
