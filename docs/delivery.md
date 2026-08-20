@@ -5,8 +5,8 @@ destroying a working tool on the way.
 
 ## 1. The measurement that should govern the plan
 
-**358 commits since 2026-06-28. 164 are `fix:`, 131 are `feat:`.** Fifty-six percent of the
-*conventional-commit* work is fixing what was already built — 164 of 295; against all 358 it is 46%.
+**364 commits since 2026-06-28. 164 are `fix:`, 131 are `feat:`.** Fifty-six percent of the
+*conventional-commit* work is fixing what was already built — 164 of 295; against all 364 it is 45%.
 Count subjects, not `--grep='^fix'`: `^` anchors at any line start in the body, which inflates it by
 three. The denominator is named because the number invites a challenge that would discredit the rest, and the fix titles are not polish:
 

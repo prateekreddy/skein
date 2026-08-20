@@ -44,9 +44,9 @@ distinct call sites:
 | **every box start** | create the box's cgroup, enable `+memory +pids` | `box-session.sh:86-87, 860-862` |
 | **every box start** | write `memory.max`, `memory.high`, `pids.max` | `:871-873` |
 | **every box start** | move the session into its cgroup | `:877` |
-| **every server start** | write cgroup ceilings for every box | `fleet.rs:904` |
-| **every server start** | replay the approved-package manifest as root | `fleet.rs:1625-1628` |
-| **every server start** | create and chown the fleet root | `fleet.rs:1876` |
+| **every server start** | write cgroup ceilings for every box — through `heal_fleet` and the launcher's ceilings path, a *different* mechanism from the per-box writes above | `fleet.rs:904` |
+| **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet.rs:1625-1628` |
+| **every box start** | create and chown the fleet root (one caller: `ensure_fleet`) | `fleet.rs:1876` |
 | fleet setup | write `/etc/docker/daemon.json` | `fleet.rs:1053` |
 | **resize** | `tar` the whole box tree, and restore it | `fleet.rs:3171, 3205` |
 | **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs:226, 236-237` |
@@ -66,11 +66,12 @@ measure. It *supplies this entire domain directly.* Today these operations are r
 unprivileged processes through a `sudo` shim; with skein as root they are ordinary calls, and the
 shim's remaining job is what it was always documented to be: **a message, not a boundary.**
 
-Three kinds of sandbox-root work, and each wants naming in the architecture rather than eliding:
+Four kinds of sandbox-root work, each wanting naming in the architecture rather than eliding:
 
 - **resource ceilings** — cgroups, per box start and per server heal
 - **package installation** — apt, on approval and on replay
 - **filesystem ownership** — the fleet root, and box archive/restore
+- **container runtime config** — `/etc/docker/daemon.json`, written in both the ensure and heal paths
 
 Note the last one contains the resize mechanism, which is the next finding.
 
