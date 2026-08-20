@@ -59,36 +59,21 @@ DEFAULT_TIMEOUT = 30.0
 
 
 def _argv(req):
-    """The same argv `Place::exec_argv` builds, minus the `sbx exec` hop we are replacing.
+    """Run what the host sent, and nothing more.
 
-    The namespace hop and the HOME/tree wrapping are reproduced here rather than sent pre-built by
-    the host, so a host that is newer than this agent cannot hand it a shell it does not understand.
-    That failure mode is not hypothetical: a launcher older than the skein driving it is what took
-    the whole fleet down once already.
+    **This agent does not build namespace hops, and that is deliberate.** It used to: the host sent
+    `ns_pid`, `home` and `tree`, and the `nsenter` was assembled here, so that a host newer than
+    this agent could not hand it a command *shape* it did not understand. That reasoning was sound
+    for shapes and wrong for checks.
+
+    A box is addressed by a pid, and a pid is only an identity together with the boot it belongs to
+    and the process start time — otherwise a cycled sandbox or a reused pid means the address now
+    names some other box. An agent that predates that check would have ignored the fields carrying
+    the proof and crossed anyway, and the host would have had no way to know which kind of agent it
+    was talking to. So the crossing arrives as a script with its own check in front of it, which an
+    agent of any age runs correctly *or not at all*.
     """
-    script = req["script"]
-    ns_pid = req.get("ns_pid")
-    if ns_pid:
-        home, tree, name = req.get("home", ""), req.get("tree", ""), req.get("name", "")
-        # Order and flags matter and were verified inside a real box: both namespaces must be joined
-        # together, and credentials preserved or setgroups fails for an unprivileged caller.
-        prefix = [
-            "nsenter",
-            f"--user=/proc/{int(ns_pid)}/ns/user",
-            f"--mount=/proc/{int(ns_pid)}/ns/mnt",
-            "--preserve-credentials",
-            "--",
-        ]
-        wrapped = (
-            f"export HOME={_quote(home)} SKEIN_BOX={_quote(name)} "
-            f"&& cd {_quote(tree)} && {script}"
-        )
-        return prefix + ["bash", "-lc", wrapped]
-    return ["bash", "-lc", script]
-
-
-def _quote(s):
-    return "'" + str(s).replace("'", "'\\''") + "'"
+    return ["bash", "-lc", req["script"]]
 
 
 class Handler(BaseHTTPRequestHandler):

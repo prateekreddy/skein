@@ -5280,7 +5280,8 @@ b idle 5000000 1048576 4
                 home: "/home/agent".into(),
                 tree: "/boxes/placed-box/tree".into(),
                 sock: "/boxes/placed-box/session.sock".into(),
-                ..Default::default()
+                generation: "test-boot".into(),
+                ns_start: 1,
             },
         )
         .unwrap();

@@ -191,7 +191,11 @@ pub(crate) fn placed(name: &str) {
             home: format!("/boxes/{name}/home"),
             tree: format!("/boxes/{name}/tree"),
             sock: format!("/boxes/{name}/session.sock"),
-            ..Default::default()
+            // Stamped, because an unstamped record is not a placed box any more — it is a box whose
+            // address skein refuses to use. A fixture that left this off would be testing the
+            // refusal path while claiming to test the thing it refused.
+            generation: "test-boot".into(),
+            ns_start: 1,
         },
     )
     .unwrap();

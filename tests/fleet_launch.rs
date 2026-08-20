@@ -243,6 +243,19 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
         eprintln!("skipping the cgroup assertions: no delegation on this machine");
     }
 
+    // The stamp that makes the anchor an identity rather than a number, read the way skein reads
+    // it — from this machine, which is the sandbox for this test.
+    let generation = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .expect("a boot id")
+        .trim()
+        .to_string();
+    let ns_start = sh(&format!(
+        "sed -n 's/.*) //p' /proc/{anchor}/stat | cut -d' ' -f20"
+    ))
+    .trim()
+    .parse::<u64>()
+    .expect("the anchor's start time");
+
     record_place(
         BOX,
         &PlaceRecord {
@@ -254,7 +267,50 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             home: std::env::var("HOME").unwrap_or_default(),
             tree: tree.clone(),
             sock: box_sock(BOX),
-            ..Default::default()
+            generation: generation.clone(),
+            ns_start,
+        },
+    )
+    .unwrap();
+
+    // The guard is not decoration, and this is the assertion that says so: the same box, one field
+    // of its recorded identity wrong, is refused rather than entered. Every way of being wrong
+    // means the box is gone — the pid still exists, and it belongs to something else.
+    record_place(
+        BOX,
+        &PlaceRecord {
+            sandbox: FLEET.into(),
+            ns_pid: anchor,
+            home: std::env::var("HOME").unwrap_or_default(),
+            tree: tree.clone(),
+            sock: box_sock(BOX),
+            generation,
+            ns_start: ns_start + 1,
+        },
+    )
+    .unwrap();
+    let refused = place_of(BOX)
+        .expect("placed")
+        .exec("pwd", Duration::from_secs(30))
+        .expect_err("a recycled pid must not be entered");
+    assert!(
+        refused.contains("is gone") && refused.contains(&anchor.to_string()),
+        "the refusal says the box is gone and names the pid: {refused}"
+    );
+
+    record_place(
+        BOX,
+        &PlaceRecord {
+            sandbox: FLEET.into(),
+            ns_pid: anchor,
+            home: std::env::var("HOME").unwrap_or_default(),
+            tree: tree.clone(),
+            sock: box_sock(BOX),
+            generation: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .unwrap()
+                .trim()
+                .to_string(),
+            ns_start,
         },
     )
     .unwrap();

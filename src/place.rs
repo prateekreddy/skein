@@ -66,6 +66,16 @@ pub enum Where {
         /// inside and out. That is what lets skein list, attach to and kill a box's session from
         /// the sandbox without entering its namespace first — and `ns_pid` is that very server.
         sock: String,
+        /// The proof that `ns_pid` is still the process skein recorded — see
+        /// [`PlaceRecord::generation`] and [`PlaceRecord::ns_start`].
+        ///
+        /// Carried in the *address* rather than checked when the address is built, because a check
+        /// that ran here would be a check with a gap after it: pids die, and a box that exited
+        /// between the check and the `nsenter` would be entered as whatever took its number. The
+        /// only place the answer cannot go stale is the same process that crosses, immediately
+        /// before it crosses — so this rides along and [`Place::guard`] spends it there.
+        generation: String,
+        ns_start: u64,
     },
 }
 
@@ -235,6 +245,8 @@ pub fn place_of(name: &str) -> Option<Place> {
                 home: rec.home,
                 tree: rec.tree,
                 sock: rec.sock,
+                generation: rec.generation,
+                ns_start: rec.ns_start,
             },
         });
     }
@@ -797,13 +809,116 @@ impl Place {
     fn enter(&self) -> Vec<String> {
         match &self.at {
             Where::OwnSandbox => vec![],
-            Where::Shared { ns_pid, .. } => vec![
-                "nsenter".into(),
-                format!("--user=/proc/{ns_pid}/ns/user"),
-                format!("--mount=/proc/{ns_pid}/ns/mnt"),
-                "--preserve-credentials".into(),
-                "--".into(),
+            // A shell rather than a bare `nsenter`, because the check has to happen in the process
+            // that crosses. `"$@"` carries whatever the caller appends through untouched, so this
+            // stays an argv splice and nothing gets re-quoted on the way in.
+            // An address that cannot be proved builds no `nsenter` at all, rather than one behind
+            // a check. Nothing then has to hold for the refusal to hold.
+            Where::Shared { .. } if !self.provable() => {
+                vec!["bash".into(), "-c".into(), self.guard(), "bash".into()]
+            }
+            Where::Shared { .. } => vec![
+                "bash".into(),
+                "-c".into(),
+                format!("{}exec {} -- \"$@\"", self.guard(), self.nsenter()),
+                "bash".into(),
             ],
+        }
+    }
+
+    /// The `nsenter` invocation itself, without the guard in front of it.
+    fn nsenter(&self) -> String {
+        match &self.at {
+            Where::OwnSandbox => String::new(),
+            Where::Shared { ns_pid, .. } => format!(
+                "nsenter --user=/proc/{ns_pid}/ns/user --mount=/proc/{ns_pid}/ns/mnt \
+                 --preserve-credentials"
+            ),
+        }
+    }
+
+    /// Refuse the crossing unless the anchor is still the process skein recorded.
+    ///
+    /// **Why it is here and not where the address is looked up.** A pid is a name that can be
+    /// reused, so any check with a gap after it is a check on a different question than the one the
+    /// crossing asks. This runs in the shell that is about to `exec nsenter`, one line before it —
+    /// the smallest gap available without a kernel handle.
+    ///
+    /// **Why a refusal and never a fallback.** A pid that no longer names what skein recorded names
+    /// something *else in the same sandbox*, and everything else in that sandbox is another box. So
+    /// there is no degraded mode to fall back to: "enter this instead" is the vulnerability, not the
+    /// recovery from it.
+    ///
+    /// An address recorded before the stamp existed cannot be checked, so it is refused too. The
+    /// alternative is a fleet where the guard is present and silently does nothing for every box
+    /// that has not been restarted, which is worse than one that says so.
+    /// Does this address carry the two halves that make it checkable?
+    ///
+    /// False for a record written before the stamp existed. Not "unknown" — unprovable, which is
+    /// treated exactly as a mismatch is.
+    fn provable(&self) -> bool {
+        match &self.at {
+            Where::OwnSandbox => true,
+            Where::Shared {
+                generation,
+                ns_start,
+                ..
+            } => !generation.is_empty() && *ns_start > 0,
+        }
+    }
+
+    fn guard(&self) -> String {
+        let Where::Shared {
+            ns_pid,
+            generation,
+            ns_start,
+            ..
+        } = &self.at
+        else {
+            return String::new();
+        };
+        let name = &self.name;
+        if generation.is_empty() || *ns_start == 0 {
+            return format!(
+                "echo \"skein: {name} was placed before skein checked anchors, so its address \
+                 cannot be proved to be its own; restart it with: skein restart {name}\" >&2; \
+                 exit 78\n"
+            );
+        }
+        // Cut after the LAST `) ` rather than taking whitespace field 22: `comm` is the process's
+        // own name in parentheses and may contain spaces and parentheses of its own, so `$22` is
+        // right until something is called an awkward name and then it is silently off.
+        format!(
+            "skein_gen=\"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"\n\
+             skein_start=\"$(sed -n 's/.*) //p' /proc/{ns_pid}/stat 2>/dev/null | cut -d' ' -f20)\"\n\
+             if [ \"$skein_gen\" != {gen_q} ] || [ \"$skein_start\" != {start_q} ]; then\n\
+             \x20 echo \"skein: {name} is gone — pid {ns_pid} is no longer the session skein \
+             recorded, so entering it would be entering some other box\" >&2\n\
+             \x20 exit 78\n\
+             fi\n",
+            gen_q = sh_quote(generation),
+            start_q = sh_quote(&ns_start.to_string()),
+        )
+    }
+
+    /// The whole crossing as one shell string — what the fleet agent is sent.
+    ///
+    /// The agent used to be handed the *address* and build the `nsenter` itself, so that a host
+    /// newer than the agent could not hand it a command shape it did not understand. That reasoning
+    /// holds for shapes and not for this: every agent ever installed runs `bash -lc <script>`, so
+    /// sending the crossing as a script is understood by all of them — and it means an agent too
+    /// old to know about anchor checks cannot cross without one, which sending the address would
+    /// have let it do silently.
+    fn crossing(&self, script: &str) -> String {
+        match &self.at {
+            Where::OwnSandbox => script.to_string(),
+            Where::Shared { .. } if !self.provable() => self.guard(),
+            Where::Shared { .. } => format!(
+                "{}exec {} -- bash -lc {}",
+                self.guard(),
+                self.nsenter(),
+                sh_quote(&self.wrap(script))
+            ),
         }
     }
 
@@ -874,20 +989,19 @@ impl Place {
     /// Fields the agent does not recognise are ignored; a field it needs and does not get makes the
     /// request fail loudly, and the caller falls back to `sbx exec`.
     fn agent_request(&self, script: &str, timeout: Duration) -> serde_json::Value {
-        let mut req = serde_json::json!({
-            "script": script,
+        // The crossing goes over as a *script*, not as an address.
+        //
+        // This reverses an earlier decision, and the reason it reverses is version skew rather than
+        // taste. Sending the address let the agent build the `nsenter` itself, so a host newer than
+        // the agent could not hand it a command shape it did not understand — sound, for shapes.
+        // But an anchor check is not a shape: an agent that predates it would ignore the two fields
+        // that carry the proof and cross anyway, and skein would have no way to tell. Sending the
+        // whole crossing means an old agent cannot cross unchecked, because the check is inside the
+        // only thing it is given. Every agent ever installed runs `bash -lc <script>`.
+        serde_json::json!({
+            "script": self.crossing(script),
             "timeout": timeout.as_secs_f64(),
-        });
-        if let Where::Shared {
-            ns_pid, home, tree, ..
-        } = &self.at
-        {
-            req["ns_pid"] = (*ns_pid).into();
-            req["home"] = home.as_str().into();
-            req["tree"] = tree.as_str().into();
-            req["name"] = self.name.as_str().into();
-        }
-        req
+        })
     }
 
     /// Run `script` through the held connection, or `None` when there is no usable agent.
@@ -1615,9 +1729,8 @@ mod tests {
     // and mount namespaces must be joined TOGETHER (mount alone is refused), credentials must be
     // preserved (or setgroups fails unprivileged), and HOME/cwd/SKEIN_BOX must be set explicitly
     // because nsenter carries the caller's environment, not the box's.
-    #[test]
-    fn a_shared_sandbox_is_entered_by_namespace_with_the_boxs_own_home() {
-        let p = Place {
+    fn shared(generation: &str, ns_start: u64) -> Place {
+        Place {
             name: "web-main".into(),
             sandbox: "skein-fleet".into(),
             at: Where::Shared {
@@ -1625,43 +1738,76 @@ mod tests {
                 home: "/boxes/web-main/home".into(),
                 tree: "/boxes/web-main/tree".into(),
                 sock: "/boxes/web-main/session.sock".into(),
+                generation: generation.into(),
+                ns_start,
             },
-        };
-        assert_eq!(
-            p.exec_argv("git status"),
-            [
-                "sbx",
-                "exec",
-                "skein-fleet",
-                "nsenter",
-                "--user=/proc/4242/ns/user",
-                "--mount=/proc/4242/ns/mnt",
-                "--preserve-credentials",
-                "--",
-                "bash",
-                "-lc",
-                "export HOME='/boxes/web-main/home' SKEIN_BOX='web-main' && cd '/boxes/web-main/tree' && git status",
-            ]
+        }
+    }
+
+    #[test]
+    fn a_shared_sandbox_is_entered_by_namespace_with_the_boxs_own_home() {
+        let p = shared("boot-a", 900);
+        let argv = p.exec_argv("git status");
+        assert_eq!(&argv[..3], ["sbx", "exec", "skein-fleet"]);
+        // A shell, because the anchor check has to run in the process that crosses. The caller's
+        // argv rides in as `"$@"`, so nothing between here and `nsenter` re-quotes it.
+        assert_eq!(&argv[3..5], ["bash", "-c"]);
+        assert_eq!(argv[5..].last().unwrap(), "export HOME='/boxes/web-main/home' SKEIN_BOX='web-main' && cd '/boxes/web-main/tree' && git status");
+        assert_eq!(&argv[6..9], ["bash", "bash", "-lc"]);
+
+        let crossing = &argv[5];
+        // The order is the property: refuse, THEN cross. Reversed, the check is a log line.
+        let checked = crossing
+            .find("skein_start=")
+            .expect("the anchor is re-read");
+        let entered = crossing.find("exec nsenter").expect("and then entered");
+        assert!(
+            checked < entered,
+            "the check must precede the crossing: {crossing}"
         );
+        assert!(
+            crossing.contains("!= 'boot-a'") && crossing.contains("!= '900'"),
+            "both halves of the identity are compared: {crossing}"
+        );
+        assert!(
+            crossing.contains("--user=/proc/4242/ns/user")
+                && crossing.contains("--mount=/proc/4242/ns/mnt")
+                && crossing.contains("--preserve-credentials"),
+            "both namespaces together, credentials preserved: {crossing}"
+        );
+
         // The stdin path keeps `-i` in front of the sandbox and the hop after it.
         let w = p.write_argv("cat > f");
         assert_eq!(&w[..4], ["sbx", "exec", "-i", "skein-fleet"]);
-        assert!(w.contains(&"--preserve-credentials".to_string()));
+        assert!(w.iter().any(|a| a.contains("--preserve-credentials")));
         // And a streamed copy enters the namespace too, or it would `cat` the wrong /tmp entirely.
-        assert_eq!(
-            p.raw_argv(&["cat", "/tmp/artifact"]),
-            [
-                "sbx",
-                "exec",
-                "skein-fleet",
-                "nsenter",
-                "--user=/proc/4242/ns/user",
-                "--mount=/proc/4242/ns/mnt",
-                "--preserve-credentials",
-                "--",
-                "cat",
-                "/tmp/artifact",
-            ]
+        let raw = p.raw_argv(&["cat", "/tmp/artifact"]);
+        assert_eq!(&raw[raw.len() - 2..], ["cat", "/tmp/artifact"]);
+        assert!(raw.iter().any(|a| a.contains("exec nsenter")));
+    }
+
+    /// An address skein cannot prove is refused, on every transport, rather than used.
+    ///
+    /// A record written before the stamp existed is the upgrade case, and the tempting thing is to
+    /// let it through "just this once" — which produces a fleet where the guard is present and does
+    /// nothing for every box nobody has restarted. The refusal names the fix instead.
+    #[test]
+    fn an_address_that_cannot_be_proved_is_refused_rather_than_entered() {
+        let p = shared("", 0);
+        let crossing = p.exec_argv("git status")[5].clone();
+        assert!(
+            crossing.contains("exit 78") && !crossing.contains("exec nsenter"),
+            "an unprovable address must not reach nsenter at all: {crossing}"
+        );
+        assert!(
+            crossing.contains("skein restart web-main"),
+            "and it names the fix: {crossing}"
+        );
+        // The agent is handed the same crossing, so it cannot be the way around the check.
+        let agent = p.crossing("git status");
+        assert!(
+            agent.contains("exit 78") && !agent.contains("exec nsenter"),
+            "the agent path must refuse it too: {agent}"
         );
     }
 
@@ -1685,6 +1831,8 @@ mod tests {
                 home: "/boxes/web-main/home".into(),
                 tree: "/boxes/web-main/tree".into(),
                 sock: "/boxes/web-main/session.sock".into(),
+                generation: "boot-a".into(),
+                ns_start: 900,
             },
         };
         assert_eq!(shared.tmux(), "tmux -S '/boxes/web-main/session.sock'");
@@ -1717,7 +1865,8 @@ mod tests {
                 home: "/boxes/a b/home".into(),
                 tree: "/boxes/a b/tree".into(),
                 sock: "/boxes/a b/session.sock".into(),
-                ..Default::default()
+                generation: "test-boot".into(),
+                ns_start: 1,
             },
         )
         .unwrap();
@@ -1759,7 +1908,8 @@ mod tests {
                 home: "/boxes/web-main/home".into(),
                 tree: "/boxes/web-main/tree".into(),
                 sock: "/boxes/web-main/session.sock".into(),
-                ..Default::default()
+                generation: "test-boot".into(),
+                ns_start: 1,
             },
         )
         .unwrap();
@@ -1781,7 +1931,8 @@ mod tests {
                 home: "/h".into(),
                 tree: "/t".into(),
                 sock: "/s".into(),
-                ..Default::default()
+                generation: "test-boot".into(),
+                ns_start: 1,
             },
         )
         .unwrap();

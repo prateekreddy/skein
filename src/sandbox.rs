@@ -1197,7 +1197,8 @@ mod tests {
                 home: "/home/agent".into(),
                 tree: "/boxes/thing-x/tree".into(),
                 sock: "/boxes/thing-x/session.sock".into(),
-                ..Default::default()
+                generation: "test-boot".into(),
+                ns_start: 1,
             },
         )
         .unwrap();
@@ -1252,7 +1253,8 @@ mod tests {
                 home: "/boxes/thing-x/home".into(),
                 tree: "/boxes/thing-x/tree".into(),
                 sock: "/boxes/thing-x/session.sock".into(),
-                ..Default::default()
+                generation: "test-boot".into(),
+                ns_start: 1,
             },
         )
         .unwrap();
@@ -1264,8 +1266,14 @@ mod tests {
                 "the sandbox is the fleet's, not the box's"
             );
             assert!(
-                argv.contains(&"--preserve-credentials".to_string()),
+                argv.iter().any(|a| a.contains("--preserve-credentials")),
                 "the attach itself runs in the namespace — its setup writes the box's HOME and tree"
+            );
+            // The crossing is a shell now, so the flag is inside an argument rather than being one:
+            // the anchor check has to run in the process that execs `nsenter`, one line before it.
+            assert!(
+                argv.iter().any(|a| a.contains("skein_start=")),
+                "and it proves the anchor is still this box before entering it: {argv:?}"
             );
             let shell = argv.last().unwrap();
             assert!(
@@ -1448,7 +1456,8 @@ mod tests {
                 home: "/boxes/thing-x/home".into(),
                 tree: "/boxes/thing-x/tree".into(),
                 sock: "/boxes/thing-x/session.sock".into(),
-                ..Default::default()
+                generation: "test-boot".into(),
+                ns_start: 1,
             },
         )
         .unwrap();
