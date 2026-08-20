@@ -5,9 +5,10 @@ destroying a working tool on the way.
 
 ## 1. The measurement that should govern the plan
 
-**348 commits since 2026-06-28. 165 are `fix:`, 133 are `feat:`.** Fifty-five percent of the
-*conventional-commit* work is fixing what was already built — 165 of 298; against all 348 it is 47%.
-The denominator is named because the number invites a challenge that would discredit the rest, and the fix titles are not polish:
+**358 commits since 2026-06-28. 164 are `fix:`, 131 are `feat:`.** Fifty-six percent of the
+*conventional-commit* work is fixing what was already built — 164 of 295; against all 358 it is 46%.
+Count subjects, not `--grep='^fix'`: `^` anchors at any line start in the body, which inflates it by
+three. The denominator is named because the number invites a challenge that would discredit the rest, and the fix titles are not polish:
 
 > *a box could read the fleet agent's token, and be root in the sandbox* · *close the ways a
 > credential outlived the decision to withdraw it* · *a logged-out box can no longer log out the
@@ -58,7 +59,8 @@ not a serde attribute and should be scoped deliberately.
 
 **2 — Extract `state`, `source`, `signal` and `operation` as modules in the current binary.**
 `signals.rs` is already most of the way there, `util.rs` already implements the gate contract, and
-fifteen `ensure_*` functions already exist — the Operation primitive names something the codebase
+sixteen `ensure_*` functions already exist (fifteen `pub`, plus a private one that is itself a
+sandbox-root apt install) — the Operation primitive names something the codebase
 does. `doctor` becomes "every check, reported" with no UI change.
 
 **Two structural obstacles hit on day one**, and neither is optional: `lib.rs` re-exports sixteen
@@ -82,16 +84,19 @@ where the six items in §2 get answered, with a fallback available while answeri
 **5 — The cockpit.** Orthogonal, and it can start on day one — with three things named rather than
 assumed, because "the API is a stable seam" is true of transport and false of semantics:
 
-- **the semantics are client-side.** `/api/boxes` returns a raw state string; the eight-group ranking,
-  `NEEDS_YOU`, away deltas, provenance rendering and pause ordering are all in the page. A `/v2`
+- **some semantics are client-side, not all.** The server already computes `tier` (a six-level
+  who-needs-me ranking), `pause`, `headline`, `task`, `blocked_kind`, `hook_health`, `screen_health`,
+  `scoped` and `diff`. What lives in the page is `GROUPS`, `NEEDS_YOU`, `labelOf`, the away deltas and
+  provenance *rendering*. The conclusion holds; the earlier evidence for it did not. A `/v2`
   cockpit re-derives them and drifts from `/` unless they move server-side — which the architecture
   requires anyway for transitions, and which means new endpoints, i.e. not purely "against the
   existing server".
 - **box creation is not a route.** It happens over the WebSocket, via `?launch=<branch>` on the
   terminal endpoint. Port the REST API and you lose box creation.
-- **there is no static-asset layer.** The page is one `include_str!`, so a built `/v2` bundle either
-  gets embedded — rebuilding the binary for every UI change, which contradicts "orthogonal" — or needs
-  a new asset route family. Build that first. Treating "ground-up surfaces" and "new topology" as one project is the single biggest
+- **the asset layer is compile-time.** Five `include_str!` and a shared `static_asset` helper behind
+  four `/vendor/*` routes — so the machinery exists, but every file is embedded and hand-registered. A
+  built `/v2` bundle needs a **runtime** asset route: smaller than building one from scratch, and real
+  either way. Do it first, or every UI change rebuilds the binary and "orthogonal" is untrue. Treating "ground-up surfaces" and "new topology" as one project is the single biggest
 avoidable risk in the plan.
 
 **What runs in parallel from the start:** the component library, the GitHub module (already
@@ -152,7 +157,10 @@ One shot, and it must:
 3. rewrite hook paths in every registered store, using the existing legacy-repair pattern;
 4. **stop every box first** — a live box's tmux server, cgroup and bind mounts anchor to paths under
    the current root, so moving it under a running fleet breaks live sessions and orphans namespaces;
-5. **verify the restore, and refuse on a failed snapshot** — naming what could not be read;
+5. **verify the restore, and refuse on a failed snapshot** — naming what could not be read. The rule
+   is narrower than "`--ignore-failed-read` is banned", which is false tree-wide: it is banned where
+   the output is a **restore**, and permitted where the output is declared best-effort and every
+   warning is captured;
 6. leave the old state directory intact.
 
 An earlier draft said "refuse when any box has unpushed commits **or a dirty tree**". Every actively
@@ -181,7 +189,12 @@ easy half; the grammar is the product.**
 
 **The snapshot sweep.** Ignored files are work too — the sweep was once `--others --exclude-standard`,
 so `.env` and each box's own journal were silently left behind on every migration and every resize.
-The bundle must be checked for the box's own branch. tar preserves symlinks as symlinks. Not
+The bundle must be checked for the box's own branch. **Symlinks need three rules, not one**: a box's
+`.env` is often a symlink into a host mount that does not exist in the fleet, and tar preserving it
+*as a symlink* is the bug — the box gets a dangling link where its config should be, which looks like
+the file is there. So it is carried as a symlink **only while it points inside the tree**; pointing
+outside it is carried as its **content**; already dangling it is **reported, not carried**. An earlier
+draft of this page stated the bug as the rule. Not
 `--ignore-failed-read`, because that restores a box short of its contents with nobody told. The agent
 login must be captured *before* the destroy — measured the hard way, when a login made between two
 resizes was gone after the second.
@@ -244,9 +257,8 @@ skipped-files report.
 
 ## 6. Underspecified — settle before two engineers build incompatible things
 
-- **Signal schema**: identity/key, value type, how cost is expressed, who enforces the budget, and
-  what "fusion" is as a function. §13 of the architecture demands a scenario matrix for a function
-  nobody has defined.
+- **Signal schema**: identity/key, value type, how cost is expressed, and who enforces the
+  budget. *(Fusion is no longer here — architecture §2.2 defines it, matched against the code.)*
 - **Operation failure model**: partial progress, check-passes-but-doer-errored, what the reconciler
   runs on, and stuck versus slow — which the gate story says is the most important distinction here.
 - **The component list versus the surface**: eight components against ~155 elements. Missing at
