@@ -332,6 +332,7 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | `credentials/` | declared — protected by the **mount cover**, not by a file mode (§9.5.2) |
 | `boxes/<name>/recorded/` — launch spec, conversation, transcript, notes | recorded |
 | `boxes/<name>/declared/` — `privileged`, `git-scope`, `disk`, `identity` | declared — **never bound into the box** (§9.5.2) |
+| `uids` — the box-uid allocation, if per-box uids are in use (§9.5.1) | declared |
 | `boxes/<name>/artifacts/` — `git-tokens/` | approved artifact — bound **read-only** |
 | `boxes/<name>/transitions` — retained signal values and watermarks | recorded |
 | `repos/<id>/mirror` — a bare git mirror | recorded |
@@ -763,6 +764,12 @@ of which needs a requirement rather than an inference:
   from a live listener; it does not stop an empty port at sandbox start.
 - **pre-auth connection exhaustion.** The gate runs after accept, and §10.1's cap is post-auth. A box
   gets a free denial of the control plane, and therefore of the approval surface, with no credential.
+- **box-authored content rendered inside the authenticated cockpit.** The file viewer parses markdown
+  from a box's tree into the page. Raw HTML is escaped, but the link renderer is not overridden, so a
+  `javascript:` href survives — and one click in a rendered README is same-origin script with the
+  cookie attached. The code still justifies its choice by "the unauthenticated cockpit API", an
+  assumption the bearer token retired. **Sanitising box-authored content is part of the boundary**,
+  not a rendering detail.
 
 Relative to host-side skein, co-residence gives a box: the ability to signal or kill skein (shared
 PID namespace, same uid); network reach to skein's own API; reach to the warden over the gateway,
@@ -983,8 +990,13 @@ other way and a still earlier one claimed the rest waited on the split; neither 
      and `chown`, and restored with root `tar -x` **preserving owners and modes**. Its name is a
      second-resolution timestamp, so it is pre-plantable as a symlink. A root actor writing through a
      path a box controls is the same class as the approval TOCTOU.
-   - **`git-tokens/`** is host-*written* and box-*read* — an **artifact** (§2.1's fourth kind). It is
-     bound **read-only**.
+   - **`git-tokens/`** is host-*written* and box-*read* — an **artifact** (§2.1's fourth kind), bound
+     **read-only**. The requirement is that a box cannot *replace the path*, not merely cannot write
+     through it: the privileged refresher does `create_dir_all`, an unlink loop and a secret write
+     under that directory, so a box that swaps it for a symlink gets the privileged side to unlink
+     host files and drop a **live installation token** somewhere of its choosing. Note the launcher
+     also creates and chmods that directory *from inside the box* today, and will start failing
+     silently against a read-only bind — a line that has to move with the requirement.
    - **`disk` and `identity`** join `privileged` and `git-scope` as declared per-box files in a
      box-writable directory: a box raises its own disk allowance on a shared disk, or forges its
      committer.

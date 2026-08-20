@@ -85,7 +85,11 @@ own working checkouts, and skein runs `git -C <repo.work>` **on the host**.
 **4b — the uid split.** skein on its own uid, boxes on theirs, every crossing through
 `sudo -u <box uid>` — for the launcher and for `nsenter` alike. Do not attempt this as "skein runs as
 root" (no user namespace is created at all) or as "skein runs as another uid" (every `setns` is
-EPERM); architecture §9.5.1 has the derivation. Budget the sudoers policy as the security-critical
+EPERM); architecture §9.5.1 has the derivation.
+
+**Do not start 4b until the anchor moves.** skein crosses to `/proc/<anchor>/ns/user`, and the anchor
+is currently read from a file inside the box's own writable root — so a box picks the namespace skein
+lands in. Everything else in 4b is downstream of an address it trusts. Budget the sudoers policy as the security-critical
 artifact it is, and one extra `exec` per crossing. Crossings are launch, attach, upload, diff, takeover **and the
 tmux control operations** — the socket is a crossing too, and its sockets are `0700` per box. The
 board stays off that path only because liveness moves from probing each socket to reading the anchor
