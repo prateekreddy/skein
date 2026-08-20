@@ -296,7 +296,7 @@ default one, and the list of what a given host's sidecar can do is then a fact s
 than a default nobody read.
 
 **Capability modules are mutually independent.** No capability may reference another. That is what
-keeps the build matrix linear rather than exponential (§15) and what makes each one reviewable in
+keeps the build matrix linear rather than exponential (§16) and what makes each one reviewable in
 isolation.
 
 **Where this principle stops.** Compile-time removal is for capabilities that **cross a trust
@@ -367,23 +367,92 @@ so the per-tick cost falls to a local process spawn.
 
 ## 11. Surfaces
 
-### 11.1 The laws
+Designed from the ground up. The current cockpit is a **parity checklist** (§12), never a blueprint:
+ground-up applies to *how*, the inventory applies to *what*.
+
+### 11.1 What the user is actually doing
+
+Five jobs, in descending frequency. Everything on every screen serves one of them or is in the way.
+
+| job | frequency | what it needs |
+|---|---|---|
+| **triage** — who needs me? | constant | a ranked queue, and a calm empty state |
+| **converse** — talk to an agent | often | a terminal that never lies about its own freshness |
+| **review** — read a diff, comment back | often | diff and comment in one place, not two |
+| **recover** — something broke | rare, high-stakes | the failing check and the command that fixes it |
+| **set up** — add a repo, make a box | rare | one action, no configuration exercise |
+
+**Attention is the scarce resource, not screen space.** That is the whole design thesis for a tool
+whose subject is a fleet of agents working without you. Every decision below follows from it.
+
+### 11.2 One queue, many sources
+
+The board is a **queue, not a dashboard**. It is ranked by who needs you, and a box that needs nothing
+is visually recessive.
+
+Because "needs you" is a predicate over signals (§3), and the review queue is a signal source (§3),
+**a pull request awaiting your review belongs in the same queue as a box awaiting your answer.** They
+are the same thing to the user — work that stopped and is waiting on them — and the current design
+separates them only because they were built as separate features.
+
+```
+Needs you  3
+  ▸ web-main        permission · git push          4m
+  ▸ api-refactor    question                      12m
+  ▸ PR #412         review requested               2h
+Working  5                                    (recessive)
+Idle  2                                        (collapsed)
+```
+
+Three states this design must handle deliberately, because tools usually botch them:
+
+- **Nothing needs you.** The screen says so, plainly and calmly. A dashboard that looks identical
+  whether or not anything is wrong has failed at its only job.
+- **You were away.** An agent fleet is asynchronous, so continuity across absence is a first-class
+  requirement, not a nicety. Signal *transitions* (§3) are what answers "what changed while I was
+  gone" — and the current implementation announced only at the instant of change, so a box that
+  turned while you were looking elsewhere was never announced at all.
+- **Setup is incomplete.** Failing checks and their recipes, in the same queue, at the top. Not a
+  separate onboarding surface (§3, §8.3).
+
+### 11.3 The laws
 
 1. **Never report a problem without the action that resolves it.** A message with no next move is a
    bug, not a message.
 2. **Never show an observation without its freshness.** A stale signal must *look* stale. Rendering a
-   five-minute-old "waiting" identically to a current one is lying with a timestamp available.
-3. **The board answers one question: who needs me.** Everything else on it is secondary and should
-   look secondary.
+   five-minute-old "waiting" identically to a current one is lying with the timestamp in hand.
+3. **The board answers one question: who needs me.** Everything else looks secondary because it is.
 4. **The CLI and the cockpit share one model and one vocabulary.** Anything doable in one is doable
    in the other, named identically.
 5. **Destructive actions say what is lost** — including when the answer is "nothing", which the
    volume now makes common and which is worth saying out loud.
-6. **No modal onboarding.** Onboarding is the blocked state rendered well (§3, §8.2).
-7. **The first screen has exactly one action.** Progressive disclosure or the tool reads as a
-   configuration exercise.
+6. **No modal onboarding.** Onboarding is the blocked state rendered well.
+7. **The first screen has exactly one action.**
+8. **Quiet by default.** Anything that does not need you must not look like it does. Badges, colour
+   and motion are spent only on attention, and they are a budget.
 
-### 11.2 The CLI
+### 11.4 The component library
+
+Ground-up design means the components come first and the screens are assembled from them. The whole
+cockpit reduces to roughly eight:
+
+| component | used by |
+|---|---|
+| **signal chip** | state + freshness, everywhere a signal is shown |
+| **queue row** | subject, why, age, one action |
+| **check card** | a failing check, its recipe, live indication when it passes — §8.3's universal component: onboarding, breakage, and the sidecar's approval card are all this |
+| **terminal pane** | converse |
+| **diff + comment** | review |
+| **calm empty state** | nothing needs you |
+| **gauge strip** | fleet resources, recessive |
+| **command palette** | every action, one keystroke — the CLI's vocabulary (law 4) |
+
+This library is maintained as a Claude Design project so it can be reviewed visually rather than
+inferred from code, and so the cockpit is assembled from a reviewed kit instead of accumulating one.
+
+### 11.5 The CLI
+
+
 
 ```
 skein                    the board, in the terminal
@@ -400,7 +469,61 @@ a documented workaround.
 
 ---
 
-## 12. What the rewrite deletes
+## 12. Feature parity — the gate
+
+**The rewrite is not done when it works. It is done when it does everything the current
+implementation does.** Ground-up design (§11) governs *how*; this inventory governs *what*. Anything
+removed from it is removed deliberately and recorded at the bottom of this section — never by being
+forgotten.
+
+The inventory is grouped by the job it serves rather than by the route that implements it, because a
+route-shaped list would smuggle today's structure into a ground-up design.
+
+**Triage** — the board and its ranking; live updates; attention states and their four decision kinds
+(permission · question · trust · auth-or-quota); per-box task line; search and filters; the needs
+strip; gauges for fleet load, resources and limits; alerts; voice (mouth and ear); the command
+palette; keyboard bar.
+
+**Converse** — terminal attach; session lifecycle (start, stop, restart the agent, resume, resume in
+batch); takeover of a running box; narrate; transcript; statusline; runtime selection.
+
+**Review** — diff; file tree and file read; comment back to the agent; the pull-request queue with
+per-PR act, archive and summary; review counts; AI summaries.
+
+**Box management** — create, destroy (with confirmation), settings (disk, git identity, git scope,
+notes, sync, privileged/package requests), identity, repin, disk usage, upload, download, git
+credential grants per box and repo.
+
+**Repos** — add, remove, per-repo settings, modules read and write, pull, adopted-module surface.
+
+**Fleet** — create with sizing, resize, plan and host capacity, transport and substrate reporting,
+resource and limit editing, git credentials, git probe, read token, health.
+
+**Cross-cutting** — the event stream; mailbox; settings (agent, AI, keys, GitHub App, SSH key,
+diagnostics, confirm-destroy, base branch, dirty handling); sync connections and their tokens;
+`skein` CLI: `add`, `attach`, `doctor`, `login`, `max`, `repos`, `resize`, `shared`, `start`.
+
+### 12.1 Deliberate removals
+
+Two, both already decided, both user-visible, and neither is a consequence of the rewrite being
+unfinished:
+
+- **Adopt-in-place repos.** `skein add <local-path>` and the mounting of a working checkout. Repos
+  are remotes in both deployments (§6). The cost is that uncommitted work on your host is invisible
+  to boxes.
+- **Foreign sandbox display.** The board's rows for sandboxes skein did not create, and the
+  `foreign:` filter. That feature was a *mitigation* for skein listing every sandbox on the host; the
+  rewrite does not list sandboxes at all, so the confusion it fixed cannot occur.
+
+### 12.2 What §13 is not
+
+§13 lists mechanisms the rewrite deletes. **No user-visible feature appears in it.** Every entry
+there exists to solve a problem the new topology does not have — a transport for a hop that no longer
+happens, a fallback for a call that is no longer made, a copy for state that no longer moves. If a
+deletion in §13 would cost a capability in §12, it is wrong and this document is where that must be
+caught.
+
+## 13. What the rewrite deletes
 
 Not a refactor. These stop existing:
 
@@ -417,7 +540,7 @@ Not a refactor. These stop existing:
 
 ---
 
-## 13. Modules
+## 14. Modules
 
 | module | owns | depends on |
 |---|---|---|
@@ -436,7 +559,7 @@ depends on `sidecar` or `operation` (§2.4).
 
 ---
 
-## 14. Rules that keep it clean
+## 15. Rules that keep it clean
 
 Stated as rules because each one is a specific way this codebase has previously accumulated debt.
 
@@ -455,7 +578,7 @@ Stated as rules because each one is a specific way this codebase has previously 
 
 ---
 
-## 15. Testing
+## 16. Testing
 
 - **Every check has a test that it fails when the thing is absent.** That is not coverage, it is the
   mutation: a check that passes unconditionally is worse than no check, because it makes a broken
@@ -475,7 +598,7 @@ Stated as rules because each one is a specific way this codebase has previously 
 
 ---
 
-## 16. Open
+## 17. Open
 
 - **Scoped per-box tokens** (§9.2) need a mechanism. App installation tokens are the obvious
   candidate and skein already mints them; the scoping story is unwritten.
