@@ -105,10 +105,25 @@ look like separate machinery.
 `none` — no observer was ever started, so reattach — is not `stale`, which is observations having
 stopped; the shipped code distinguishes them and an earlier draft of this document did not.
 
+**Fusion, defined** — because §13 mandates a scenario matrix for it and an earlier draft never said
+what it was. Given a level observation `(screen, t_level)` and an edge `(status, t_edge)`:
+
+1. no level observation → the edge, provenance `hooks only`
+2. level is `Unknown` → the edge, provenance `screen unread`
+3. `t_edge > t_level` **and** the edge is an *outcome* (blocked, needs-input, needs-decision, error,
+   ended, done, waiting) → the edge; the fresher observation wins
+4. otherwise → the level, mapped to a displayed state
+
+Rule 3's outcome list is the load-bearing part: a *progress* edge must never override a level, or a
+stale hook re-latches the bug this whole primitive exists to prevent. This is what `fuse_status`
+already does, written down so the matrix has something to test.
+
 **The Gate contract.** Every signal's observation is mediated by a gate that provides: single-flight
 (concurrent askers share one observation), serve-stale-refresh-behind (the last good value is
-returned immediately while a refresh runs), exponential backoff on failure, and a sticky last-good
-value so a wedged source does not blank the board. This exists today in `util.rs` and is load-bearing
+returned immediately while a refresh runs), exponential backoff on failure, a sticky last-good value
+so a wedged source does not blank the board, and **`invalidate`** — the one property that couples
+acting to observing. Without it the board serves the pre-Act value and "an Act emits an edge" is not
+enough; resize already depends on it. This exists today in `util.rs` and is load-bearing
 — check-then-act previously gave every browser tab its own subprocess every tick, and a board refresh
 walked four gates in series and took 31 seconds. Cadence without a gate is not a cadence.
 
@@ -822,9 +837,10 @@ Each is a specific way this codebase has previously accumulated debt.
 7. **Everything a human might do by hand has a printable recipe.**
 8. **A new feature is a composition of primitives — or it adds a primitive deliberately and amends
    this document.**
-9. **Trust-boundary capabilities are modules that can be left unbuilt**, and they never reference one
+9. **A requester's file is input, never state. The approving side writes the approved artifact, and
+   the actor reads only that** (§2.1, §8.4).
+10. **Trust-boundary capabilities are modules that can be left unbuilt**, and they never reference one
    another.
-10. **Approval is written by the approving side, never supplied by the requester.**
 11. **Every durable file carries a schema version, and skein refuses a volume it does not understand.**
 
 ---
@@ -845,6 +861,48 @@ Each is a specific way this codebase has previously accumulated debt.
   matter.
 
 ---
+
+## 13a. What the rewrite deletes
+
+Restored, because an earlier draft removed the whole list after one entry was found wrong — which
+made the other seven unauditable rather than fixing the one. **Every entry here is a mechanism.
+Anything user-visible belongs in `docs/parity.md` §7 instead, and the transport *readout* is there
+for exactly that reason.**
+
+| deleted | why it can go |
+|---|---|
+| the in-sandbox agent and its transport | it exists to survive a host-to-guest hop that no longer happens |
+| its port publishing, healing loop and backoff | same, and it is the one thing that inherits sbx's no-unpublish trap (§7.4) |
+| every `sbx exec` path **and its fallback twin** | with them, the transport-failure-versus-command-failure distinction that made the pairing necessary — but see below |
+| two placement shapes | one remains |
+| sandbox listing as the truth about boxes | replaced by the box's own anchor (§6) |
+| the machine-global secret store | with it, two fleets on one host sharing one token |
+| host-absolute mount path translation | no host mounts of repos remain |
+| adopt-in-place mounts | replaced by local-path remotes (§6) |
+
+**The hazard the fallback twin guarded is not deleted, it moves.** "Did it run or not?" becomes a
+timeout on a warden request, and §8.2's operation ids are what answer it there. Deleting the
+distinction without carrying the safety property forward is how this becomes worse than what it
+replaced.
+
+**How they retire**: the transport and the `sbx exec` twin survive until delivery step 4, because
+until skein is in the fleet there is still a hop. They are removed *with* the move, not before it and
+not after — `docs/delivery.md` §3.
+
+## 13b. Debugging skein itself
+
+Law 1 applies to skein's own failures, and today there is no structured logging anywhere — `eprintln!`
+only, no request log, no metrics. A design whose central claims are a reconciler, a set of gates and a
+trust boundary needs to be able to answer:
+
+- **which check failed, when it last passed, and what it returned** — the check history is recorded
+  state, bounded and rotated.
+- **which operations hold leases, and since when** (§2.4).
+- **which gate is degraded and how long it has been serving stale** — `degraded()` exists and nothing
+  surfaces it.
+- **what the warden was asked, what was approved, by whom** — the host-side audit log (§5).
+
+`skein doctor` is the read surface for the first three; it is already every check, reported.
 
 ## 14. Modules
 
