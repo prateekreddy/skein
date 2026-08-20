@@ -640,8 +640,8 @@ Two more that follow, and neither is an implementation detail:
   way.** The requester writes the first and cannot write the second. Covering the whole of
   `substrate/` would enshrine today's masking bug as a requirement — requests would never land, while
   the shim still says one was filed. The layout: **`substrate/requests/` box-writable and the only
-  box-writable thing under it; `substrate/approved` and the replayed manifest root-owned under the
-  cover.** Same for the git-write queue. The code already gets this right and splits them; the
+  box-writable thing under it; `substrate/approved` and the replayed manifest owned by the approving side
+  (skein, not root — R1) and under the cover.** Same for the git-write queue. The code already gets this right and splits them; the
   document previously merged them into one line.
 - **an operation id is correlation, not content.** The warden must render **the resolved arguments it
   will itself execute**, derived from its own parse — never display text the requester supplied.
