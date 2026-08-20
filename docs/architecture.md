@@ -590,9 +590,9 @@ worse than fixing neither.**
 That covers the payload, not just the boolean — which is the difference between the rule as stated
 before and the rule that would have prevented this.
 
-**And the rule as stated is necessary but not sufficient.** `gitgate::decide` *already* implements it
-— it never trusts a `state` field and writes a `Grant` to a host-side file the refresher alone reads —
-and it is exploitable today, because the artifact is written from a **re-read by id after the human
+**And the rule as stated is necessary but not sufficient.** `gitgate::decide` *already* implemented it
+— it never trusted a `state` field and wrote a `Grant` to a host-side file the refresher alone reads —
+and it was exploitable, because the artifact was written from a **re-read by id after the human
 clicks**:
 
 1. a box files a request naming a repo you own;
@@ -607,7 +607,14 @@ machine-scale. So moving the hazard from approve→install to render→click mad
 > by.** The approving side **keeps the bytes it rendered and acts on those**. It does not re-open the
 > file; a digest check is the fallback for a design that still does.
 
-Four ways to implement that and still be wrong:
+**Done** — `f1d4024` (packages) and `174475d` (git write). No digest was needed, because nothing
+re-opens the file: the cockpit sends back the fields it rendered, and the decision is made on those.
+`install` reads a host-side artifact under `~/.skein/substrate/` and the grant refresher reads the
+host-side grant; neither consults the queue. `substrate::decided_over` makes the host's decision win
+over the box's copy of it, so a box that rewrites its request after approval changes neither what is
+shown nor what runs.
+
+Four ways to implement that and still be wrong, all four closed:
 
 - **there are three reads on the package path, not two** — the decision re-reads by id, and the
   install re-reads by id *again*. Closing render→click leaves click→install open. Both need the same
@@ -623,14 +630,29 @@ Four ways to implement that and still be wrong:
   into the box's own file by id, so a box can drop the state change or resurrect a request. Once the
   artifact is authoritative, the requester's copy is a message, not a record.
 
-And the artifact carries the **resolved argv**, not a name list: if the actor re-splices names into a
-command, the splice is still the trust boundary.
+And the artifact should carry the **resolved argv**, not a name list: if the actor re-splices names
+into a command, the splice is still the trust boundary.
 
-**One more the shape check misses.** The package-name whitelist admits `/`, and both `apt-get install
-./x.deb` and `npm install -g /path/pkg` install a *local* package and run its maintainer or lifecycle
-scripts as root — then persist into the replayed manifest, so one approval becomes root execution at
-every future launch. The whitelist's own comment claims the rejected set covers "the only two that
-matter"; there is a third.
+**This one is deliberately not implemented literally, and the divergence is recorded rather than
+glossed.** The artifact carries the kind and the names. The splice happens host-side over host-owned
+bytes, each name `sh_quote`d and re-checked by `Request::problem` immediately before it reaches the
+command line — so the remaining exposure is a hand-edited artifact, which that check covers. A
+resolved argv was rejected because the *manifest replay* needs names: a rebuilt sandbox reinstalls
+from the manifest, and an argv frozen at approval time would replay a command rather than a
+dependency.
+
+**One more the shape check missed, now fixed.** The package-name whitelist admitted `/`, and both
+`apt-get install ./x.deb` and `npm install -g /path/pkg` install a *local* package and run its
+maintainer or lifecycle scripts as root — then persist into the replayed manifest, so one approval
+becomes root execution at every future launch. The whitelist's own comment claimed the rejected set
+covered "the only two that matter"; there was a third. It is per-kind now, and `/` is admitted only
+as an npm scope — with the scope required to *be* a scope, since "at most one slash" admits `@a/../b`.
+
+**And the deeper point is now on the card rather than left to be inferred.** *Any* approved apt or npm
+package is arbitrary root code by design — maintainer and lifecycle scripts run as root, fleet-wide,
+and a remembered one runs them again at every launch. The whitelist is an argv-injection guard and
+never a privilege guard. Package approval is a grant of root code execution at fleet scope,
+permanently, and the cockpit says so next to the button.
 
 Two more that follow, and neither is an implementation detail:
 
