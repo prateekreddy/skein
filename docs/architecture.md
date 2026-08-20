@@ -494,7 +494,7 @@ privilege, so the warden is not involved — but the *authority* question is rea
 
 ## 8. The host warden
 
-A small host service owning fleet create and destroy. Two capability modules.
+A small host service owning fleet create and destroy. **Four endpoints: two removable doers, two that are not** (§8.3).
 
 ### 8.1 Its approval surface is its own, on the host
 
