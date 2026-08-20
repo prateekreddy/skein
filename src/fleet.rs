@@ -2572,8 +2572,26 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // would fail until something reinstalled the script. An old launcher ignores an env var.
         "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} \
+         SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} SKEIN_BOX_MIRROR={mirror_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
+        // The mount set the launcher cannot learn for itself, and the two paths out of it this box
+        // is entitled to. The launcher covers every mount and binds these back — an inversion, not
+        // a list of things to hide, because `repo.work` and an adopted `repo.store` are arbitrary
+        // host paths chosen at repo-add time and no rule written over one root reaches
+        // `/home/you/code/thing`.
+        //
+        // Empty when there is no repo for this box, and that is the safe direction: the box gets a
+        // covered view with nothing bound back rather than an uncovered one.
+        mounts_q = sh_quote(&mount_manifest(name)),
+        store_q = sh_quote(&repo_for_box(name).map(|r| r.store).unwrap_or_default()),
+        // Read-only, and it is not a precaution. `sandbox-bootstrap.sh` reads the mirror to surface
+        // a repo's gitignored files and already copies every one of them into the store rather than
+        // linking at it, precisely so "a box can still never reach the host checkout". Nothing in a
+        // box writes here — but skein runs `git -C <repo.work>` on the HOST, so a box that could
+        // write `.git/config` would get `core.fsmonitor` executed as the host user. The convention
+        // was doing the work; this makes it a mount option.
+        mirror_q = sh_quote(&repo_for_box(name).map(|r| r.work).unwrap_or_default()),
         // Off unless the file says otherwise, and an unreadable answer is off. The two directions
         // are not equal: guessing "privileged" hands one box every other box's credentials, and
         // guessing "not" costs the workshop box a restart after someone flips the switch.
@@ -2593,6 +2611,42 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         fleet_q = sh_quote(&fleet_limits()),
         cmd_q = sh_quote(agent_command),
     )
+}
+
+/// The fleet's mount set, one host path per line, for the launcher to cover.
+///
+/// Newline-separated because these are arbitrary host paths and every other separator can occur in
+/// one. A path that contains a newline is *dropped* with a warning rather than passed: dropped, it
+/// stays covered and a box loses access to it loudly; passed, it would split into two lines and the
+/// launcher would bind back a directory nobody named.
+///
+/// **Empty when skein cannot name the box's repo**, which leaves the box uncovered rather than
+/// covered-with-nothing-back. `repo_for_box` resolves by longest id prefix, so a box named after
+/// its repo resolves and a box someone named themselves may not — and a box whose entitlements
+/// skein cannot compute is exactly the box that must not have them computed as "none": it would
+/// come up with no store, and provisioning gates startup. Said out loud, because a cover that
+/// silently did not apply is the failure this whole mechanism exists to prevent.
+fn mount_manifest(name: &str) -> String {
+    if repo_for_box(name).is_none() {
+        eprintln!(
+            "skein: {name} matches no repository skein knows, so it cannot be told which mounts \
+             are its own — it starts with the sandbox's whole view, as boxes did before covers"
+        );
+        return String::new();
+    }
+    let mut out = String::new();
+    for mount in fleet_mounts() {
+        if mount.contains('\n') {
+            eprintln!(
+                "skein: {mount:?} has a newline in it, so boxes cannot be told about it — \
+                 it stays covered, and a box of that repo will not see it"
+            );
+            continue;
+        }
+        out.push_str(&mount);
+        out.push('\n');
+    }
+    out
 }
 
 /// The shell that provisions a box: the store link, the branch, the hooks, the guide, the tracker.

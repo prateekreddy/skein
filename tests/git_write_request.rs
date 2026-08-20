@@ -618,6 +618,18 @@ fn isolation_binds(
     state_parent: &std::path::Path,
     privileged: bool,
 ) -> String {
+    isolation_binds_with(fleet, state_parent, privileged, "", "", "")
+}
+
+/// The same, told what the sandbox mounts and which two paths this box owns of it.
+fn isolation_binds_with(
+    fleet: &std::path::Path,
+    state_parent: &std::path::Path,
+    privileged: bool,
+    mounts: &str,
+    store: &str,
+    mirror: &str,
+) -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
     let from = lines
@@ -634,12 +646,16 @@ fn isolation_binds(
     let out = Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "set -uo pipefail; binds=(); root={}; state={}; export SKEIN_FLEET_ROOT={} SKEIN_BOX_PRIVILEGED={}; \
+            "set -uo pipefail; binds=(); root={}; state={}; export SKEIN_FLEET_ROOT={} SKEIN_BOX_PRIVILEGED={} \
+             SKEIN_FLEET_MOUNTS={} SKEIN_BOX_STORE={} SKEIN_BOX_MIRROR={}; \
              {block}; printf '%s\\n' \"${{binds[@]-}}\"",
             fleet.join("web-main").display(),
             state_parent.join("web-main").display(),
             fleet.display(),
             if privileged { "1" } else { "0" },
+            skein::util::sh_quote(mounts),
+            skein::util::sh_quote(store),
+            skein::util::sh_quote(mirror),
         ))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -713,6 +729,162 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
     );
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// A box sees its own repo, and nothing the sandbox mounts for anyone else.
+///
+/// The other half of the cover, and the half no rule could be written for. `fleet_mounts()` also
+/// binds in every repo's store and every repo's *work tree*, and for a repo added by path those are
+/// wherever the person keeps their code — `/home/you/code/thing`, which no pattern over `~/.skein`
+/// reaches. Until this, a box could read every other repo's memory and mailbox, and write every
+/// repo's checkout on the host.
+///
+/// The last of those was the sharpest: skein runs `git -C <repo.work>` on the HOST, so a box that
+/// could write `.git/config` there had `core.fsmonitor` executed as the host user. Its own mirror
+/// comes back read-only for exactly that reason — `sandbox-bootstrap.sh` already copies out of it
+/// rather than linking at it, so nothing loses a capability it was using.
+#[test]
+fn a_box_sees_its_own_repo_and_no_one_elses() {
+    let dir = std::env::temp_dir().join(format!("skein-iso-mounts-{}", std::process::id()));
+    let fleet = dir.join("boxes");
+    let states = dir.join("state");
+    let repos = dir.join("skein-repos");
+    let elsewhere = dir.join("home-code-thing"); // an adopted repo, at a path skein did not choose
+    let mine_store = repos.join("web/store/.claude");
+    let mine_work = repos.join("web/work");
+    for p in [
+        fleet.join(".skein"),
+        fleet.join("web-main"),
+        states.join("web-main"),
+        mine_store.clone(),
+        mine_work.clone(),
+        repos.join("other/store/.claude"),
+        repos.join("other/work"),
+        elsewhere.clone(),
+    ] {
+        fs::create_dir_all(&p).unwrap();
+    }
+
+    let mounts = format!("{}\n{}\n", repos.display(), elsewhere.display());
+    let binds = isolation_binds_with(
+        &fleet,
+        &states,
+        false,
+        &mounts,
+        mine_store.to_string_lossy().as_ref(),
+        mine_work.to_string_lossy().as_ref(),
+    );
+    let has = |a: &str, b: &str| {
+        binds
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w[0] == a && w[1] == b)
+    };
+
+    assert!(
+        has("--tmpfs", repos.to_string_lossy().as_ref()),
+        "the directory holding every repo's store must be covered: {binds}"
+    );
+    assert!(
+        has("--tmpfs", elsewhere.to_string_lossy().as_ref()),
+        "and so must a repo mounted from wherever its owner keeps it: {binds}"
+    );
+    assert!(
+        has("--bind", mine_store.to_string_lossy().as_ref()),
+        "the box must get its own repo's store back, read-write: {binds}"
+    );
+    assert!(
+        has("--ro-bind", mine_work.to_string_lossy().as_ref()),
+        "and its own mirror, read-only: {binds}"
+    );
+    assert!(
+        !has("--bind", mine_work.to_string_lossy().as_ref()),
+        "the mirror was also bound writable, which is the whole hole: {binds}"
+    );
+    assert!(
+        !binds.contains("other"),
+        "another repo was named in the bind list: {binds}"
+    );
+
+    // The property that makes this an inversion rather than a hide-list: a path skein starts
+    // mounting later is covered by the same code, with nobody remembering to add it. A hide-list
+    // would need a line per mount, and the failure of a missing line is silent exposure.
+    let newly = dir.join("something-skein-mounts-next-year");
+    fs::create_dir_all(&newly).unwrap();
+    let binds = isolation_binds_with(
+        &fleet,
+        &states,
+        false,
+        &format!("{mounts}{}\n", newly.display()),
+        mine_store.to_string_lossy().as_ref(),
+        mine_work.to_string_lossy().as_ref(),
+    );
+    assert!(
+        has_pair(&binds, "--tmpfs", newly.to_string_lossy().as_ref()),
+        "a mount nobody wrote a rule for was left exposed: {binds}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The two directories the older cover already owns are never re-covered here.
+///
+/// A tmpfs lands in the argument list in order, so one written over `$fleet_root` or over the box
+/// state parent AFTER their binds throws those binds away — and the box comes up with no root of
+/// its own and no state, which is worse than the exposure the loop exists to close.
+#[test]
+fn covering_the_mounts_does_not_uncover_the_box() {
+    let dir = std::env::temp_dir().join(format!("skein-iso-order-{}", std::process::id()));
+    let fleet = dir.join("boxes");
+    let states = dir.join("state");
+    for p in [
+        fleet.join(".skein"),
+        fleet.join("web-main"),
+        states.join("web-main"),
+    ] {
+        fs::create_dir_all(&p).unwrap();
+    }
+
+    // skein naming its own two directories in the mount set, plus an ancestor of one of them.
+    let mounts = format!(
+        "{}\n{}\n{}\n",
+        fleet.display(),
+        states.display(),
+        dir.display()
+    );
+    let binds = isolation_binds_with(&fleet, &states, false, &mounts, "", "");
+
+    let tmpfs_after_bind = |covered: &std::path::Path, bound: &std::path::Path| {
+        let lines: Vec<&str> = binds.lines().collect();
+        let bind_at = lines.iter().position(|l| *l == bound.to_string_lossy());
+        lines.windows(2).enumerate().any(|(i, w)| {
+            w[0] == "--tmpfs" && w[1] == covered.to_string_lossy() && bind_at.is_some_and(|b| i > b)
+        })
+    };
+    assert!(
+        !tmpfs_after_bind(&fleet, &fleet.join("web-main")),
+        "the fleet root was re-covered after the box got its root back: {binds}"
+    );
+    assert!(
+        !tmpfs_after_bind(&states, &states.join("web-main")),
+        "the state parent was re-covered after the box got its state back: {binds}"
+    );
+    assert!(
+        !has_pair(&binds, "--tmpfs", dir.to_string_lossy().as_ref()),
+        "an ancestor of both was covered, which erases both binds: {binds}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `--tmpfs <path>` present as an adjacent pair in the bind list.
+fn has_pair(binds: &str, a: &str, b: &str) -> bool {
+    binds
+        .lines()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| w[0] == a && w[1] == b)
 }
 
 /// The workshop box opts out of both — it exists to debug skein, which means reading the fleet.

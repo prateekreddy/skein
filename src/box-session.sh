@@ -952,8 +952,64 @@ if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
   if [ -d "$state_parent" ] && [ "$state_parent" != "$fleet_root_dir" ]; then
     binds+=(--tmpfs "$state_parent" --bind "$state" "$state")
   fi
-  unset fleet_root_dir state_parent
+
+  # --- and every OTHER host path the sandbox mounts ----------------------------------------------
+  #
+  # The two covers above are written against paths skein chose, so they could be spelled here. The
+  # rest cannot: `fleet_mounts()` also binds in every repo's store and every repo's work tree, and
+  # for a repo added by path those are wherever the person keeps their code. No rule written over
+  # `~/.skein` reaches `/home/you/code/thing`, so the cover has to be told what to cover.
+  #
+  # Hence an INVERSION rather than a list of things to hide: tmpfs each mount, then bind back the
+  # two paths this box is entitled to. Anything skein starts mounting later is covered the day it
+  # appears, with nobody remembering to add it — which is the property a hide-list cannot have.
+  #
+  # What the box loses, and each of these was reachable read-write until now:
+  #   * every OTHER repo's store — its memory, its mailbox, its skills, its boot records;
+  #   * every other repo's work tree on the host;
+  #   * its own repo's work tree read-write. `sandbox-bootstrap.sh` copies out of the mirror rather
+  #     than linking at it, exactly so "a box can still never reach the host checkout" — but skein
+  #     runs `git -C <repo.work>` on the HOST, so a box that could write `.git/config` there had
+  #     `core.fsmonitor` executed as the host user. That was a convention holding a boundary; it is
+  #     a mount option now.
+  #
+  # Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox
+  # predates this and passes nothing, and the two wrong guesses are not symmetric: covering with
+  # nothing bound back takes the store away from every box in that sandbox and none of them
+  # provisions, while covering nothing is exactly where the fleet already was.
+  if [ -n "${SKEIN_FLEET_MOUNTS-}" ]; then
+    while IFS= read -r fleet_mount; do
+      [ -n "$fleet_mount" ] || continue
+      [ -d "$fleet_mount" ] || continue
+      # The two covers above are already in `binds`, and a tmpfs over one of them — or over
+      # anything they sit inside — lands AFTER them in the argument list and throws their binds
+      # away. The box would come up with no root of its own and no state, which is a worse failure
+      # than the exposure this loop exists to close. Ancestors and not just equality: a store or a
+      # work tree at `~/.skein` would be an ancestor of `~/.skein/boxes`.
+      skip=
+      for owned in "$fleet_root_dir" "$state_parent"; do
+        case "$owned" in
+          "$fleet_mount"|"$fleet_mount"/*) skip=1 ;;
+        esac
+      done
+      [ -n "$skip" ] && continue
+      binds+=(--tmpfs "$fleet_mount")
+    done <<SKEIN_MOUNTS
+$SKEIN_FLEET_MOUNTS
+SKEIN_MOUNTS
+    # After every tmpfs, never between them: a bind whose destination is under a mount covered later
+    # in the argument list is thrown away by the tmpfs that follows it. Two repos sharing a parent
+    # directory is enough to hit that, and the symptom is one box of the pair starting fine.
+    [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ] &&
+      binds+=(--bind "$SKEIN_BOX_STORE" "$SKEIN_BOX_STORE")
+    [ -n "${SKEIN_BOX_MIRROR-}" ] && [ -d "$SKEIN_BOX_MIRROR" ] &&
+      binds+=(--ro-bind "$SKEIN_BOX_MIRROR" "$SKEIN_BOX_MIRROR")
+  fi
+  unset fleet_root_dir state_parent fleet_mount owned skip
 fi
+# Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
+# fleet, and the box has no use for it after this point.
+unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE SKEIN_BOX_MIRROR
 
 # --- The fleet agent's token is not a box's to hold ----------------------------------------------
 #
