@@ -79,7 +79,7 @@ async fn main() {
     skein::util::load_dotenv();
     // Install skein's turn-state probe into the shared store (idempotent), so every box reports
     // working/waiting/needs-input + task without the repo shipping hooks. Best-effort.
-    if let Err(e) = skein::ensure_probe_all() {
+    if let Err(e) = skein::probes::ensure_probe_all() {
         eprintln!("skein: turn-state probe not installed ({e}); boxes will show live/stale only");
     }
     // Install skein's own sbx kit (idempotent) so launching a box needs no repo-side kit.
