@@ -5,6 +5,7 @@
 //! env lock especially — are process-global and must be *the same* value for every test in the
 //! crate, not a per-module copy.
 
+use crate::place::{record_place, PlaceRecord};
 use crate::Sandbox;
 use chrono::Utc;
 use std::env;
@@ -170,6 +171,27 @@ pub(crate) fn write_session(dir: &std::path::Path, name: &str, last_message: &st
     fs::write(
         dir.join("sessions").join(format!("{name}.json")),
         body.to_string(),
+    )
+    .unwrap();
+}
+
+/// Give `name` a placement record, which is what makes it a box skein can address.
+///
+/// Needed by every test that builds an argv or execs into a box. It used to be needed by none of
+/// them: an unplaced name resolved to "a sandbox called `name`", skein's per-VM model, so a test
+/// could ask for a box's argv without there being a box. That fallback was a guess in production
+/// too — any name at all, including a sandbox skein never made — so it is gone, and a fixture now
+/// has to say the box exists.
+pub(crate) fn placed(name: &str) {
+    record_place(
+        name,
+        &PlaceRecord {
+            sandbox: "skein-fleet".into(),
+            ns_pid: std::process::id(), // alive, so the record is followed
+            home: format!("/boxes/{name}/home"),
+            tree: format!("/boxes/{name}/tree"),
+            sock: format!("/boxes/{name}/session.sock"),
+        },
     )
     .unwrap();
 }

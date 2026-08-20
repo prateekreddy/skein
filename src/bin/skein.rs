@@ -831,7 +831,7 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
         eprintln!(
             "{DIM}skein:{RESET} snapshotting {name} and creating a lightweight {agent} replacement…"
         );
-        let replacement = skein::replace_box(name, &agent)?;
+        let replacement = skein::takeover::replace_box(name, &agent)?;
         eprintln!(
             "{DIM}skein:{RESET} source preserved; replacement is {}",
             replacement.target
@@ -839,7 +839,7 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
         replacement.target
     } else {
         if handoff {
-            let path = skein::prepare_handoff(name, None, &agent)?;
+            let path = skein::handoff::prepare_handoff(name, None, &agent)?;
             eprintln!("{DIM}skein:{RESET} handoff prepared at {}", path.display());
         }
         name.to_string()

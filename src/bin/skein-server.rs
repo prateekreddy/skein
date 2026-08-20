@@ -508,7 +508,9 @@ async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>
     if !skein::valid_name(&name) || !skein::runtime::valid_runtime(&request.target) {
         return (StatusCode::BAD_REQUEST, "invalid box or target runtime").into_response();
     }
-    match tokio::task::spawn_blocking(move || skein::replace_box(&name, &request.target)).await {
+    match tokio::task::spawn_blocking(move || skein::takeover::replace_box(&name, &request.target))
+        .await
+    {
         Ok(Ok(replacement)) => Json(replacement).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
@@ -2238,8 +2240,10 @@ async fn terminal_session(
         let hn = name.clone();
         let ht = target_agent.clone();
         let hf = from.clone();
-        match tokio::task::spawn_blocking(move || skein::prepare_handoff(&hn, hf.as_deref(), &ht))
-            .await
+        match tokio::task::spawn_blocking(move || {
+            skein::handoff::prepare_handoff(&hn, hf.as_deref(), &ht)
+        })
+        .await
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
