@@ -564,11 +564,20 @@ file "is writable by every box in the fleet". Approve `jq`, rewrite the file, ge
 a root `apt-get`. And the result is recorded into a manifest replayed as root on every fleet ensure,
 so one window buys permanent root execution.
 
-**Order matters between the two.** Making the queue writable to fix the masking bug makes the TOCTOU
+**Three steps, not two.** Bind the artifact, make the request path **per box**
+(`requests/<box>/`, bound into that box only), *then* unmask. The per-box cover machinery already
+exists, so this costs nothing if it is decided now and cannot be fixed in place later.
+
+Making the queue writable to fix the masking bug makes the TOCTOU
 live — and once *every* box can write the queue, each can also overwrite, delete or flip the state of
 every *other* box's requests. So: **artifact binding first, then unmask the queue.**
 
-It is currently masked by a second defect: `/boxes/.skein` is read-only in every non-privileged box,
+**Both queues are masked the same way today, so neither is exploitable as things stand** — an
+earlier draft said the git-write one was. And the shim does not claim to have filed a request; what it
+does is tell the agent to file one by running the command that just failed, which is its own kind of
+misleading.
+
+The masking: `/boxes/.skein` is read-only in every non-privileged box,
 so the request never lands at all — while the shim prints that it filed one. **Fixing either alone is
 worse than fixing neither.**
 
@@ -786,6 +795,20 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    | **skein runs as root** | the whole launch chain is root, so (a) gives no user namespace at all: every box is uid 0 under `--dev-bind / /`, with CAP_SYS_ADMIN over the sandbox and a walk out of its own mount namespace. It destroys the one boundary §9.1 confirms holds. It also silently breaks every bind derived from `$HOME`, which as root is `/root`. |
    | **skein simply runs as a different uid** | (b) makes every `setns` **EPERM** — terminal, takeover, provisioning, diff, upload. The design would specify something that cannot run. |
 
+   ### Where each side sits
+
+   Three facts the mechanism depends on, none of them optional:
+
+   - **skein stays in the sandbox's initial user namespace.** The box's namespace must be a *direct
+     child* for the euid-equals-owner rule to apply, so skein must never be wrapped in a `bwrap` of
+     its own.
+   - **The cover is applied by the launcher, inside the box** — which is what the launcher already
+     does. It is not something skein wraps around itself, and §9.5.5's secret is protected because
+     the *box* cannot see it, not because the launcher cannot.
+   - **The `exec` is mandatory, not a cost.** Joining a user namespace is refused for a multithreaded
+     caller, so an in-process `setns` from the threaded server is impossible regardless of
+     credentials.
+
    ### The mechanism
 
    **Every crossing goes through `sudo -u <box uid>`.** skein does not enter a box *as skein*; it
@@ -817,10 +840,34 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    is a file read, not a crossing — so this is launch, attach, upload, diff and takeover, not the
    board.
 
-   And a **sudoers rule, which is now the boundary**: skein's uid may run *the launcher*, *`nsenter`*
+   And a **sudoers rule — a tripwire, not a boundary, and it must be labelled as one.** §7.2 keeps
+   broad `sudo` for skein's sandbox-root work, and a process with broad `sudo` can already become any
+   uid, so the narrow rule below constrains nobody who has defeated skein. It is worth writing anyway
+   — it documents intent and catches mistakes — but calling it the boundary would be an obstacle sold
+   as one. Narrowing it into a real boundary means enumerating §7.2's sudo (cgroup writes, apt, npm,
+   `tar`, `chown`, the docker config), which is a separate decision this document does not take.
+
+   The rule: skein's uid may run *the launcher*, *`nsenter`*
    and *`tmux`* as the box uids, and nothing else. Written wider than that, it is an escalation. A box
    never reaches this policy: inside its user namespace `sudo` has nothing to escalate to, which is
    why the in-box shim is a message rather than a boundary.
+
+   ### The address must not come from the box
+
+   R1 crosses into `/proc/<anchor>/ns/user`, and **today the anchor is read out of a file the box can
+   write**: `read_anchor` `cat`s the pidfile under the box's own root, which is bound read-write. A
+   box writes a *sibling's* tmux server pid into its own anchor, and skein's next provisioning, diff,
+   upload or takeover for that box executes **in the sibling's namespace**. A confused deputy walking
+   straight through §9.1's file cover — and §9.5.8's rule names it, while §9.5.8's enumerated list
+   missed it.
+
+   > **The anchor is reported to skein over the channel skein opened, never read from a path the box
+   > can write.** skein spawns the launcher; the launcher asks its own tmux server for the server pid
+   > and writes it to **stdout**; skein records it. The pidfile in the box's tree may remain for the
+   > box's own use, and skein must never read it.
+
+   This has to be settled before R1 is built, because every other part of R1 is downstream of an
+   address it trusts.
 
    **`tmux` is in that list because the `socket` Source is a crossing too**, and an earlier draft
    missed it: a box's tmux socket is `0700` owned by the box, and §2.3 is explicit that the cheapest
@@ -832,9 +879,14 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    not need to: §6 defines liveness as *the tmux server is alive*, and the anchor **is** that server,
    so the level signal is a `/proc` read. Cheaper than the probe it replaces, and uid-independent.
 
-   There is a **second sudoers policy**, which the single-uid version did not need: the launcher's
-   cgroup prologue now runs as the box's uid, so each box uid needs its own narrow root grant for the
-   cgroup writes. And `nsenter` keeps `--preserve-credentials` (§2.3) — without it `setgroups` fails.
+   **The cgroup prologue does not become a second sudoers policy.** Under `sudo -u` the launcher runs
+   as the box's uid, so its `sudo` cgroup writes would need every box uid to hold root — which is the
+   opposite of the point. Instead **skein pre-creates the box's cgroup and writes its limits as
+   itself**, and the only thing left for the launcher is joining: it must write *its own* pid to
+   `cgroup.procs` so bwrap and tmux inherit membership. So **`cgroup.procs` alone is chowned to the
+   box uid — never the directory.** The control files stay root-owned, which is what keeps §9.5's
+   closing paragraph true: a box can add its own processes to its own cgroup, and cannot change what
+   that cgroup permits. And `nsenter` keeps `--preserve-credentials` (§2.3) — without it `setgroups` fails.
 
    **Per-box uids are the stronger form and are *not* free**, contrary to an earlier draft. They
    collide with two things this design keeps: the per-user socket directory that carries cross-box
@@ -842,6 +894,13 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    uid today. They also need a uid allocation record — **declared state on the volume, and §5 must
    list it** — a chown of every existing box tree at migration, and a decision about the uid a box
    sees *inside* its own namespace, which is 1000 today.
+
+   **And they are gated on the credential path**, which is what makes them a redesign rather than an
+   argument to `sudo -u`: the agent login is seeded by copying uid 1000's `0600` credentials into the
+   box and flows *back* into that same canonical copy on refresh; the shared toolchains are
+   uid-1000-owned and boxes install into them; and the cross-box session directory (§9.2.2, kept)
+   lives in uid 1000's home. **Per-box logins (§9.6's second unbuilt defence) are a prerequisite of
+   per-box uids**, not an independent improvement.
 
    ### What the split actually buys — and what it does not
 
@@ -865,7 +924,11 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    against a range, and it separates boxes from *each other* by uid, which §9.2 shows is the open
    axis. It needs uid allocation and a sudoers range rather than a single target.
 
-2. **The cover is an inversion, not an enumeration.** `tmpfs` the whole of the state root and bind
+2. **The cover is an inversion, derived from the fleet's mount set.** Not from one root:
+   `repo.work` and an adopted `repo.store` are **arbitrary host paths chosen at repo-add time**, so a
+   rule written over the state root alone never reaches `/home/you/code/thing`. The launcher must be
+   *given* the mount set — it has no way to learn it today — and each box gets back only its own
+   repo's store. `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what `box-session.sh:943-956` already does for the
    fleet root. Enumerating what to *hide* is the wrong direction and an earlier revision froze that
    list at three names while the root holds fifteen things that matter, among them `substrate.json`
@@ -892,7 +955,8 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    > `recorded/` would remove git push, since the box's credential helper reads its own token out of
    > `artifacts/git-tokens/`.
 3. **skein's control API is a filesystem socket under that cover, owned by skein's uid, never a TCP
-   port**, and the cockpit's HTTP auth token is a file with the same ownership. (An earlier draft said
+   port**, and the cockpit's HTTP auth token is a file with the same ownership — skein mints it, so it cannot be
+   root-owned. (An earlier draft said
    *root-owned*; skein is not root — R1.) Boxes may still *connect* to the cockpit port
    — shared netns makes that unavoidable — and cannot authenticate.
 4. **No shared writable path contains an executable another box runs** (§9.2.1). Either the shared
