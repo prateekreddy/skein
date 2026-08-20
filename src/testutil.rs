@@ -47,7 +47,7 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// **One directory a run still survives this**, and it is not a removal failure — instrumenting
 /// `drop` showed `remove_dir_all` never erroring. It is *recreated* after the guard has removed it,
-/// by work that outlives the test that started it: [`crate::Gate`] refreshes behind its caller on a
+/// by work that outlives the test that started it: [`crate::util::Gate`] refreshes behind its caller on a
 /// spawned thread, and a thread still running when the test ends writes through an env var that
 /// still names the deleted path. Bounded and understood, against ~180 a run before.
 ///

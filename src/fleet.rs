@@ -15,17 +15,19 @@
 //! running as their own VM keep running that way: [`crate::place::place_of`] follows a box's own
 //! record, so turning this on never retroactively reinterprets one.
 
+use crate::config::skein_home;
 use crate::config::*;
 use crate::place::{
     fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
     Place, PlaceRecord,
 };
+use crate::repos::agent_for_box;
 use crate::repos::{
     branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, remote_origin_url, repo_for_box,
     write_launch_spec_for_agent, Repo,
 };
 use crate::util::*;
-use crate::{agent_for_box, fleet_boxes, skein_home, valid_name, KIT_STARTUP_SH};
+use crate::{fleet_boxes, valid_name, KIT_STARTUP_SH};
 use chrono::Utc;
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -1915,7 +1917,7 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
 /// in place has no URL, so the clone comes from the host's own checkout ([`clone_source`]) — and
 /// `git clone <path>` sets `origin` to that path, discarding the URL the host clone pushes to. The
 /// box then depends on the host for something it should never need it for: skein *validates* the
-/// host clone's origin ([`crate::remote_warning`] warns when there isn't one, precisely because "a
+/// host clone's origin ([`crate::repos::remote_warning`] warns when there isn't one, precisely because "a
 /// box can't push or open a PR until one exists") and then provisions a box pointing somewhere else
 /// entirely. Pushing worked anyway until a box shared the host's checked-out branch, at which point
 /// git refused with a message about `receive.denyCurrentBranch` — a remote-side policy error for
@@ -2033,10 +2035,10 @@ fn parse_disk_usage(out: &str) -> std::collections::HashMap<String, u64> {
         .collect()
 }
 
-/// See [`crate::Gate`]: remembered, asked by one caller at a time, and asked less often while the
+/// See [`crate::util::Gate`]: remembered, asked by one caller at a time, and asked less often while the
 /// sandbox is failing to answer — a `du` over every box is the most expensive question skein asks
 /// on a tick, and the last thing a struggling sandbox should be handed more of.
-static DISK_GATE: crate::Gate<std::collections::HashMap<String, u64>> = crate::Gate::new();
+static DISK_GATE: crate::util::Gate<std::collections::HashMap<String, u64>> = crate::Gate::new();
 
 /// What the fleet's one VM is actually using right now — the gauge behind [`fleet_resources`].
 ///
@@ -2091,7 +2093,7 @@ pub struct FleetResources {
     /// ceiling (see [`fleet_limits`] for why `docker` cannot), so this is the line the workload is
     /// meant to stay under, and `docker` can cross it without being stopped.
     pub workload_max: u64,
-    /// True while the sandbox is failing to answer — see [`crate::Gate`]. The figures are then the
+    /// True while the sandbox is failing to answer — see [`crate::util::Gate`]. The figures are then the
     /// last ones that arrived, and saying so is the difference between stale and wrong.
     pub stale: bool,
 }
@@ -2101,7 +2103,7 @@ pub struct FleetResources {
 /// `None` when no fleet sandbox is configured — there is no VM to ask — or when one has never
 /// answered. Deliberately coarse and deliberately stale-tolerant: this is a gauge you glance at, not
 /// a number anything decides on, so it is worth at most one `sbx exec` every 30 seconds and worth
-/// nothing at all when the sandbox is busy. The [`crate::Gate`] enforces both, and backs off further
+/// nothing at all when the sandbox is busy. The [`crate::util::Gate`] enforces both, and backs off further
 /// while the sandbox is unwell — a struggling VM being asked how it feels every 2 seconds is how
 /// skein used to keep it struggling.
 ///
@@ -2144,7 +2146,7 @@ pub struct Transport {
 
 pub fn transport_state() -> Transport {
     let wants = crate::place::AGENT_PROTOCOL;
-    let settings = crate::config_error();
+    let settings = crate::config::config_error();
     if !load_config().fleet_agent {
         return Transport {
             wants,
@@ -2341,7 +2343,7 @@ fn effective_docker_root() -> String {
 ///
 /// That last condition is the point of returning an `Option`: `sbx exec` can succeed while the guest
 /// prints nothing usable — a sandbox mid-boot, a `/proc` not yet mounted — and without the check the
-/// [`Gate`](crate::Gate) would remember a zeroed machine as a good answer and stop asking for 30
+/// [`Gate`](crate::util::Gate) would remember a zeroed machine as a good answer and stop asking for 30
 /// seconds. Missing individual fields are fine and stay zero; the browser hides a gauge whose
 /// denominator is zero rather than drawing a bar against nothing.
 fn parse_resources(out: &str) -> Option<FleetResources> {
@@ -2406,9 +2408,9 @@ fn parse_resources(out: &str) -> Option<FleetResources> {
     (r.mem_total > 0).then_some(r)
 }
 
-/// See [`crate::Gate`]. Asked rarely and backed off hard: nothing depends on this answer, so it must
+/// See [`crate::util::Gate`]. Asked rarely and backed off hard: nothing depends on this answer, so it must
 /// never be a reason the sandbox is busy.
-static RESOURCE_GATE: crate::Gate<FleetResources> = crate::Gate::new();
+static RESOURCE_GATE: crate::util::Gate<FleetResources> = crate::Gate::new();
 
 /// This box's disk allowance in MiB: its own if it has one, else the fleet-wide default, `None` for
 /// unlimited. Read at every check, so changing it takes effect on the next refresh — no restart.
@@ -2758,7 +2760,7 @@ fn start_box_inner(
     let (has_tree, has_session) = box_progress(&fleet, name, "skein-shell")?;
     let source = clone_source(repo);
     // Only an adopted repo needs this: a URL source already clones from the place it pushes to.
-    let upstream = match crate::is_git_url(&repo.source) {
+    let upstream = match crate::repos::is_git_url(&repo.source) {
         true => String::new(),
         false => remote_origin_url(&repo.work).unwrap_or_default(),
     };
@@ -3851,7 +3853,7 @@ pub fn absent_box_reason(name: &str) -> Option<String> {
     // Only speak when sbx has answered at least once. `None` is "cannot tell", and refusing a
     // terminal on that would be worse than letting sbx speak for itself.
     //
-    // Note what this does *not* guarantee: [`crate::Gate`] serves the last good snapshot while sbx is
+    // Note what this does *not* guarantee: [`crate::util::Gate`] serves the last good snapshot while sbx is
     // failing, so this can be reading a stale list. Safe in the direction that matters — a box created
     // since the snapshot has a placement record, which is checked first.
     let boxes = crate::fleet_boxes()?;
@@ -3938,9 +3940,10 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
 
 /// Micro-cache over the fleet's liveness sweep, for the same reason [`crate::fleet_boxes`] has one:
 /// the board asks per box, and a refresh must not become one `sbx exec` per box per tick. A
-/// [`crate::Gate`] for the same reason too — see the note there — since this is the `sbx exec` skein
+/// [`crate::util::Gate`] for the same reason too — see the note there — since this is the `sbx exec` skein
 /// runs most often, and the one that kept a slow daemon slow.
-static LIVENESS_GATE: crate::Gate<std::collections::HashMap<String, bool>> = crate::Gate::new();
+static LIVENESS_GATE: crate::util::Gate<std::collections::HashMap<String, bool>> =
+    crate::Gate::new();
 
 /// Which boxes in the fleet sandbox have a live session — asked of the sandbox, in one round-trip.
 ///
@@ -4097,7 +4100,7 @@ pub fn read_anchor(sandbox: &str, name: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::save_repos;
+    use crate::repos::save_repos;
     use crate::testutil::*;
 
     /// A box's CPU is a *rate*, and the cgroup only offers a running total.

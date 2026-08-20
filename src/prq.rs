@@ -665,7 +665,7 @@ pub struct Count {
 /// would be a guaranteed error rather than a real one. Goes through the same 60s per-repo cache as
 /// the pane, so opening the queue right after a poll costs nothing.
 pub fn counts() -> Vec<Count> {
-    crate::load_repos()
+    crate::repos::load_repos()
         .into_iter()
         .map(|repo| {
             // Why a repo was not asked, before spending anything on it. Reported rather than filtered
@@ -1095,7 +1095,7 @@ mod tests {
             .output()
             .unwrap();
 
-        crate::save_repos(&[
+        crate::repos::save_repos(&[
             repo_at("queue-off", &work, false),
             repo_at("no-remote", &bare, true),
         ])

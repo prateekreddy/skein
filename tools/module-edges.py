@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
-"""The real module graph, resolved through `lib.rs`'s glob re-exports.
+"""The weight of the module graph, counted at the use sites.
 
-Why this exists: `src/lib.rs` re-exports sixteen modules with `pub use <mod>::*`, so almost every
-cross-module reference goes through a flat root namespace. Grepping for `crate::signals::` from
-other modules returns **zero** — not because nothing uses `signals`, but because everything reaches
-it by a bare name. The declared `mod` graph therefore carries no information, and none of
-`docs/architecture.md` §14's dependency rules can be checked.
+What this counted, and why it had to: `src/lib.rs` used to re-export sixteen modules with
+`pub use <mod>::*`, so almost every cross-module reference went through a flat root namespace.
+Grepping for `crate::signals::` from other modules returned **zero** — not because nothing used
+`signals`, but because everything reached it by a bare name. The declared `mod` graph carried no
+information, and none of `docs/architecture.md` §14's dependency rules could be checked.
 
 So this resolves the other way round: collect each module's exported names, then count which other
-modules mention them. Approximate by construction — a bare name that happens to collide with a local
-one is counted, and a name used only in a comment is counted — but it is *reproducible*, and it is
-the baseline the façade removal is verified against rather than believed.
+modules mention them.
+
+**The façade is gone** (SKEIN-23). Every cross-module reference is now either a qualified
+`crate::<mod>::` path or an explicit `use crate::<mod>::…`, and the surviving module-level globs
+(`use crate::util::*`) still name their provider — so the *edge set* is now readable straight off
+the imports, without any of this. What is not readable that way is the **weight**: an import line
+says `fleet` uses `util`, not that it does so 130 times. That is what this file records, and why it
+is still here.
+
+Approximate by construction, and in one direction: a bare name that collides with a local one is
+counted, and a name used only in a comment is counted, so a count is an upper bound on real calls
+and the edge set is wider than the real one. Reproducible, though, which is the point — it is a
+baseline that is verified rather than believed. An exact reader belongs in the CI check (SKEIN-24),
+where a wrong edge must fail a build rather than colour a report.
 
 Usage:  python3 tools/module-edges.py [--check baseline.tsv]
 """

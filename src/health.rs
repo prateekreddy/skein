@@ -1,9 +1,10 @@
 //! Is skein's own environment sound? One report the cockpit and `skein doctor` both render, so a
 //! misconfiguration is diagnosed in one place rather than guessed at from a failure downstream.
 
+use crate::repos::load_repos;
 use crate::runtime::*;
 use crate::util::*;
-use crate::{fleet_boxes, fleet_degraded, load_registry, load_repos, load_views};
+use crate::{fleet_boxes, fleet_degraded, load_registry, load_views};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -127,7 +128,7 @@ pub fn health_report_gitgate() -> HealthCheck {
 pub fn health_report() -> HealthReport {
     let ai = HealthCheck {
         ok: true,
-        detail: if !crate::ai_enabled() {
+        detail: if !crate::ai::ai_enabled() {
             "off — Settings → Boxes turns it on: a one-line summary for boxes with no \
              journal, and a second opinion before Continue N resumes anything"
                 .into()
@@ -143,7 +144,7 @@ pub fn health_report() -> HealthReport {
     // Every box shares one sandbox, so there is always a division to report. This used to have a
     // "one sandbox per box — nothing to divide" arm for a fleet whose name was cleared; that model is
     // gone, and with it the only way to reach it.
-    let memory = match crate::memory_plan() {
+    let memory = match crate::fleet::memory_plan() {
         Some(plan) => HealthCheck {
             ok: true,
             detail: format!(
@@ -173,7 +174,7 @@ pub fn health_report() -> HealthReport {
     // after a different project, which no new user has. So the first thing anyone saw was the
     // product declaring itself broken, permanently, over a file it no longer needs — and every real
     // fault afterwards was noise in a banner that never cleared.
-    let repos_registered = !crate::load_repos().is_empty();
+    let repos_registered = !crate::repos::load_repos().is_empty();
     // An unset registry is not a broken registry. It is a fault only when someone has *named* one —
     // `$SKEIN_REGISTRY` or `$SKEIN_SHARED` — and it cannot be read. With neither set and no repos
     // yet, the honest report is "nothing here yet"; the empty state already says to add a repo, and
@@ -190,7 +191,7 @@ pub fn health_report() -> HealthReport {
             ok: true,
             detail: format!(
                 "not in use — {} repos are managed directly ({error})",
-                crate::load_repos().len()
+                crate::repos::load_repos().len()
             ),
         },
         Err(error) if !registry_named => HealthCheck {
@@ -371,7 +372,7 @@ pub fn health_report() -> HealthReport {
         ai,
         memory,
         gitgate,
-        logins: crate::signed_in_runtimes(),
+        logins: crate::fleet::signed_in_runtimes(),
         dark_boxes,
         stale_boxes,
         runtimes: supported_runtimes(),

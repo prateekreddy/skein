@@ -4,50 +4,67 @@
 //! (`skein-server`). It owns no state the sandboxes don't already write; it only reads
 //! `sandboxes.json` and derives status. See ARCHITECTURE.md.
 
-mod ai;
-mod answer;
+// Modules are public and there are no re-exports at the root. There used to be sixteen
+// `pub use <mod>::*` lines here, and they cost more than they looked: every cross-module reference
+// resolved through a flat namespace, so `crate::signals::` matched nothing from anywhere and the
+// declared `mod` graph carried no information at all — none of `docs/architecture.md` §14's
+// dependency rules could be checked against it. A reference now says where it comes from, and the
+// price is paid at the import rather than hidden in the façade.
+//
+// What is below the modules is `use`, not `pub use`, and the distinction is the whole point: those
+// are what THIS file's own body needs, not a surface anyone else reaches through.
+pub mod ai;
+pub mod answer;
 pub mod apiauth;
 pub mod codeowners;
-mod config;
+pub mod config;
 pub mod contracts;
-mod diff;
-mod files;
-mod fleet;
+pub mod diff;
+pub mod files;
+pub mod fleet;
 pub mod gitgate;
 pub mod github;
-mod health;
-mod mailbox;
+pub mod health;
+pub mod mailbox;
 pub mod moduledocs;
-mod place;
+pub mod place;
 pub mod prq;
-mod repos;
+pub mod repos;
 pub mod review;
-mod runtime;
-mod sandbox;
-mod signals;
+pub mod runtime;
+pub mod sandbox;
+pub mod signals;
 pub mod substrate;
 #[cfg(test)]
 mod testutil;
-mod tracking;
-mod transcript;
-mod util;
+pub mod tracking;
+pub mod transcript;
+pub mod util;
 
-pub use ai::*;
-pub use answer::*;
-pub use config::*;
-pub use diff::*;
-pub use files::*;
-pub use fleet::*;
-pub use health::*;
-pub use mailbox::*;
-pub use place::*;
-pub use repos::*;
-pub use runtime::*;
-pub use sandbox::*;
-pub use signals::*;
-pub use tracking::*;
-pub use transcript::*;
-pub use util::*;
+use crate::config::skein_home;
+use crate::diff::{changed_files, git_range, read_diffstat_file, DiffStat};
+use crate::fleet::{box_disk_limit, fleet_disk_usage, fleet_liveness};
+use crate::mailbox::sandboxes_in;
+use crate::place::{fleet_sandbox, place_of, placed_boxes, shared_record};
+use crate::repos::{
+    agent_for_box, box_name, branch_from_box, branch_of, ensure_gh_secret, launch_spec_agent,
+    launch_spec_branch, load_repos, repo_for_box, Repo,
+};
+use crate::runtime::{
+    default_agent, guarded_agent_command, runtime_adapter, valid_runtime, INITIAL_SETUP_WAIT,
+    RUNTIME_ADAPTERS, TMUX_AGENT_CONTRACT, TMUX_CONFIGURE,
+};
+use crate::sandbox::sbx_guest_output;
+use crate::signals::{
+    classify_message, classify_pane, current_status, current_status_detail, current_task,
+    fuse_status, is_generic_wait, pane_is_fresh, probe_is_stale, read_pane_raw, screen_health,
+    session_signal, status_edge, title_activity, Pause, Screen, TITLE_FRESH_SECS,
+};
+use crate::tracking::sync_docs_available;
+use crate::util::{
+    ago, bounded_output, clip, expand_tilde, first_line, keep_tail, output_with_timeout_why,
+    sh_quote, shorten, slug, write_atomic, Gate,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -999,7 +1016,7 @@ const STORE_README: &str = include_str!("store/README.md");
 /// no single repo — so that whole mechanism was inert in the fleet: not dangling links, *nothing*,
 /// including the `CLAUDE.md` an `gadget-demo` box gets its project direction from.
 ///
-/// The same directory is reachable, though, because [`crate::fleet_mounts`] mounts every repo's
+/// The same directory is reachable, though, because [`crate::fleet::fleet_mounts`] mounts every repo's
 /// `work` at its own host path. Recording it in the store — repo-scoped data, which is exactly what
 /// this is — lets the box find it without skein having to thread it through a session's environment.
 ///
@@ -2564,7 +2581,25 @@ pub fn session_digest(name: &str) -> Option<SessionDigest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{load_config, save_config, Config};
+    use crate::place::{forget_place, record_place, PlaceRecord};
+    use crate::repos::{
+        is_git_url, is_ssh_url, repin_branch, repo_id_from_source, save_repos, set_repo_settings,
+        ssh_to_https, write_launch_spec_for_agent, REPOS_CACHE,
+    };
+    use crate::sandbox::{
+        agent_resume_cmd, attach_argv, attach_argv_as, box_write_argv, delist_box, destroy_box,
+        drop_dest, initial_attach_argv_as, launch_command, repo_launch_command_as, resume_batch,
+        resume_box, shell_argv, stop_box,
+    };
     use crate::testutil::*;
+    use crate::tracking::{
+        connection_for_box, connection_token, describe_refresh, gateway_said, load_connections,
+        plane_project_id, remove_connection, revocation_outcome, set_box_tracking,
+        set_connection_token, sync_gateway_for_box, sync_mcp_url, sync_mint_token,
+        sync_provision_box, sync_revoke_token, sync_status, upsert_connection, SyncConnection,
+    };
+    use crate::util::{host_of, pct_decode, safe_component, GATE_MAX_INTERVAL};
     use std::process::Stdio;
 
     /// Give `name` a placement record, which is what makes it a box skein can address.

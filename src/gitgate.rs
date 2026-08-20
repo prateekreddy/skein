@@ -552,7 +552,7 @@ pub fn repo_slug(repo: &crate::repos::Repo) -> Option<String> {
 /// cannot push. That is the right failure for a repo with no GitHub remote — see [`repo_slug`] for
 /// why "added from a local path" is not the same thing.
 pub fn box_repo_slug(box_name: &str) -> String {
-    crate::repo_for_box(box_name)
+    crate::repos::repo_for_box(box_name)
         .and_then(|r| repo_slug(&r))
         .unwrap_or_default()
 }
@@ -706,7 +706,7 @@ fn credentials_path() -> std::path::PathBuf {
 
 /// The token file for one credential — 0600, and never in the JSON above.
 ///
-/// Same split, and the same reason, as [`crate::connection_token_path`]: `github-pats.json` is read
+/// Same split, and the same reason, as [`crate::tracking::connection_token_path`]: `github-pats.json` is read
 /// by the settings screen, so a token in it would be handed to every browser tab that opens Settings.
 /// The cockpit only ever learns *whether* one is set.
 fn credential_token_path(id: &str) -> std::path::PathBuf {
@@ -885,7 +885,7 @@ pub struct ProbeResult {
 /// The credential most in need of checking was the one the check could not see.
 pub fn probe_credentials() -> Vec<ProbeResult> {
     let mut out = Vec::new();
-    for repo in crate::load_repos() {
+    for repo in crate::repos::load_repos() {
         let Some(slug) = repo_slug(&repo) else {
             out.push(ProbeResult {
                 repo: repo.id,
@@ -1889,7 +1889,7 @@ mod tests {
 
     /// Register `slug` as a box's own repo and place a token for it, as a live fleet would.
     fn box_holding(name: &str, slug: &str) -> std::path::PathBuf {
-        crate::save_repos(&[crate::Repo {
+        crate::repos::save_repos(&[crate::repos::Repo {
             id: name.into(),
             source: format!("https://github.com/{slug}.git"),
             work: String::new(),
@@ -1995,9 +1995,9 @@ mod tests {
     #[test]
     fn an_app_id_that_is_not_a_number_is_refused_before_it_reaches_the_claim() {
         let (_lock, _home) = fresh_home();
-        let mut cfg = crate::load_config();
+        let mut cfg = crate::config::load_config();
         cfg.github_app_id = "12\",\"iss\":\"999".into();
-        crate::save_config(&cfg).unwrap();
+        crate::config::save_config(&cfg).unwrap();
         let why = app_credentials().unwrap_err();
         assert!(
             why.contains("numeric"),

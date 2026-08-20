@@ -12,7 +12,16 @@
 //! Skipped rather than failed where the substrate is absent: this suite is about skein's logic, and
 //! a machine without `bwrap` cannot host a box at all.
 
-use skein::*;
+use skein::config::{load_config, save_config, Config};
+use skein::fleet::{
+    box_root, box_session_path, box_sock, box_state, clone_script, ensure_box_session,
+    fleet_liveness, forget_fleet_liveness, heal_fleet, install_launcher, provision_script,
+    read_anchor, resize_fleet, session_script, snapshot_box, start_box,
+};
+use skein::place::{forget_place, own_sandbox, place_of, record_place, shared_record, PlaceRecord};
+use skein::repos::{branch_of, save_repos, Repo};
+use skein::sandbox::stop_box;
+use skein::{ensure_probe_in, ensure_store, fleet_boxes, Liveness};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

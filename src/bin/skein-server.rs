@@ -75,8 +75,8 @@ async fn main() {
         std::process::exit(if help { 0 } else { 2 });
     }
     // Pick up a local .env so the registry/repo paths needn't be typed each run (real env vars
-    // still win; a malformed file is reported, not silently half-applied). See skein::load_dotenv.
-    skein::load_dotenv();
+    // still win; a malformed file is reported, not silently half-applied). See skein::util::load_dotenv.
+    skein::util::load_dotenv();
     // Install skein's turn-state probe into the shared store (idempotent), so every box reports
     // working/waiting/needs-input + task without the repo shipping hooks. Best-effort.
     if let Err(e) = skein::ensure_probe_all() {
@@ -90,7 +90,7 @@ async fn main() {
     // ceilings it was last given, and an upgrade that changes what skein passes the launcher stops
     // every box in that fleet starting until the copy out there is replaced. A restart is the only
     // moment that mismatch is observable. Skips a sleeping fleet rather than booting a VM to fix it.
-    if let Err(e) = skein::heal_fleet() {
+    if let Err(e) = skein::fleet::heal_fleet() {
         eprintln!("skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings");
     }
     // The transport, watched rather than decided once at startup.
@@ -111,19 +111,20 @@ async fn main() {
             tick.tick().await;
             // Says something only when the answer *changed*, so a healthy fleet is silent and a
             // recovery is one line rather than a stream of them.
-            if let Ok(Some(said)) = tokio::task::spawn_blocking(skein::heal_transport).await {
+            if let Ok(Some(said)) = tokio::task::spawn_blocking(skein::fleet::heal_transport).await
+            {
                 eprintln!("skein: {said}");
             }
         }
     });
     // Seed the host gh token into sbx (global) so boxes can fetch/push/open PRs. Best-effort and
     // quiet — many setups rely on a proxy injecting credentials instead. Skip with $SKEIN_NO_GH_SECRET.
-    if let Err(e) = skein::ensure_gh_secret() {
+    if let Err(e) = skein::repos::ensure_gh_secret() {
         eprintln!("skein: gh token not seeded ({e}); boxes may not push without it");
     }
     // Load the configured SSH key into the host ssh-agent so sbx forwards it into boxes (SSH push).
     // No-op when none is configured. Best-effort.
-    if let Err(e) = skein::ensure_ssh_key() {
+    if let Err(e) = skein::config::ensure_ssh_key() {
         eprintln!("skein: ssh key not loaded ({e}); SSH git push from boxes may fail");
     }
     // Cross-project mailbox relay: a box only ever mounts its own project's store, so a message
@@ -135,7 +136,7 @@ async fn main() {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
             tick.tick().await;
-            if let Err(e) = skein::relay_cross_project_mail() {
+            if let Err(e) = skein::mailbox::relay_cross_project_mail() {
                 eprintln!("skein: mailbox relay: {e}");
             }
         }
@@ -504,7 +505,7 @@ struct TakeoverReq {
 }
 
 async fn api_takeover(Path(name): Path<String>, Json(request): Json<TakeoverReq>) -> Response {
-    if !skein::valid_name(&name) || !skein::valid_runtime(&request.target) {
+    if !skein::valid_name(&name) || !skein::runtime::valid_runtime(&request.target) {
         return (StatusCode::BAD_REQUEST, "invalid box or target runtime").into_response();
     }
     match tokio::task::spawn_blocking(move || skein::replace_box(&name, &request.target)).await {
@@ -530,7 +531,7 @@ async fn api_set_repo_settings(
     Path(id): Path<String>,
     Json(req): Json<RepoSettingsReq>,
 ) -> Response {
-    match skein::set_repo_settings(
+    match skein::repos::set_repo_settings(
         &id,
         req.plane_project.as_deref(),
         req.sync_connection.as_deref(),
@@ -543,7 +544,7 @@ async fn api_set_repo_settings(
 
 /// A repo's modules and whether skein holds a current note on each.
 async fn api_modules(Path(id): Path<String>) -> Response {
-    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
     match tokio::task::spawn_blocking(move || skein::moduledocs::status(&repo)).await {
@@ -566,7 +567,7 @@ async fn api_write_module(
     Path(id): Path<String>,
     Json(req): Json<WriteModuleReq>,
 ) -> Json<serde_json::Value> {
-    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
     };
     let out = tokio::task::spawn_blocking(move || skein::moduledocs::write(&repo, &req.path)).await;
@@ -599,7 +600,7 @@ async fn api_review_queue(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
-    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
     match tokio::task::spawn_blocking(move || skein::prq::queue(&repo, force)).await {
@@ -647,7 +648,7 @@ async fn api_review_summary(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
-    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
     let out = tokio::task::spawn_blocking(move || {
@@ -697,7 +698,7 @@ async fn api_review_act(
     Path((id, number)): Path<(String, u64)>,
     Json(req): Json<ActReq>,
 ) -> Json<serde_json::Value> {
-    let Some(repo) = skein::load_repos().into_iter().find(|r| r.id == id) else {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
     };
     let out = tokio::task::spawn_blocking(move || {
@@ -740,8 +741,8 @@ async fn api_review_act(
 
 /// The configured work-tracking connections. Never carries a Plane token — only whether one is
 /// stored, which is the whole question the settings screen needs answered.
-async fn api_sync_status() -> Json<skein::SyncStatus> {
-    Json(skein::sync_status())
+async fn api_sync_status() -> Json<skein::tracking::SyncStatus> {
+    Json(skein::tracking::sync_status())
 }
 
 /// Record which work tracker a box claims through — or that it claims through none.
@@ -750,7 +751,7 @@ async fn api_sync_status() -> Json<skein::SyncStatus> {
 /// minting a token against the repo's default and having it corrected afterwards. Absent
 /// `connection` clears the override and returns the box to its repo's setting.
 async fn api_set_box_tracking(Path(name): Path<String>, Json(r): Json<TrackingReq>) -> Response {
-    match skein::set_box_tracking(&name, r.connection.as_deref()) {
+    match skein::tracking::set_box_tracking(&name, r.connection.as_deref()) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -765,7 +766,7 @@ async fn api_set_box_identity(Path(name): Path<String>, Json(r): Json<IdentityRe
         (None, None) => None,
         (n, e) => Some((n.unwrap_or_default(), e.unwrap_or_default())),
     };
-    match skein::set_box_identity(&name, who) {
+    match skein::fleet::set_box_identity(&name, who) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -780,27 +781,27 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
     if !skein::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
-    let config = skein::load_config();
-    let repo = skein::repo_for_box(&name);
+    let config = skein::config::load_config();
+    let repo = skein::repos::repo_for_box(&name);
     let (git_name, git_email) = match &repo {
-        Some(repo) => skein::box_identity(&name, repo),
+        Some(repo) => skein::fleet::box_identity(&name, repo),
         None => (config.git_name.clone(), config.git_email.clone()),
     };
-    let own_identity = skein::box_identity_override(&name);
+    let own_identity = skein::fleet::box_identity_override(&name);
     Json(serde_json::json!({
         "name": name,
         "repo": repo.as_ref().map(|r| r.id.clone()).unwrap_or_default(),
         // the box's own choice, empty when it inherits
-        "connection": skein::box_tracking(&name).unwrap_or_default(),
+        "connection": skein::tracking::box_tracking(&name).unwrap_or_default(),
         // "" is a real answer (claims nowhere); absent is inheritance. A bare string cannot say which.
-        "has_tracking_override": skein::box_tracking(&name).is_some(),
+        "has_tracking_override": skein::tracking::box_tracking(&name).is_some(),
         "own_git_name": own_identity.clone().map(|(n, _)| n).unwrap_or_default(),
         "own_git_email": own_identity.map(|(_, e)| e).unwrap_or_default(),
         // The box's own answer, "" when it inherits — same grammar as tracking above. `effective`
         // is what it will actually come up with, which is not derivable in the page: it depends on
         // the fleet default *and* on whether a write token can be issued at all.
         "git_scope": std::fs::read_to_string(
-            std::path::Path::new(&skein::box_state(&name)).join("git-scope"),
+            std::path::Path::new(&skein::fleet::box_state(&name)).join("git-scope"),
         )
         .unwrap_or_default()
         .trim()
@@ -809,31 +810,31 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
         "git_scope_available": skein::gitgate::can_issue_write_tokens(),
         // The workshop box sees every box's files and can act at fleet scope. Reported per box so
         // the cockpit can say which one carries it without anyone opening a settings pane to check.
-        "privileged": skein::box_is_privileged(&name),
+        "privileged": skein::fleet::box_is_privileged(&name),
         "own_disk": std::fs::read_to_string(
-            std::path::Path::new(&skein::box_state(&name)).join("disk"),
+            std::path::Path::new(&skein::fleet::box_state(&name)).join("disk"),
         )
         .unwrap_or_default()
         .trim()
         .to_string(),
         // and what is actually in force
-        "effective_connection": skein::connection_for_box(&name).map(|c| c.label).unwrap_or_default(),
+        "effective_connection": skein::tracking::connection_for_box(&name).map(|c| c.label).unwrap_or_default(),
         "effective_git_name": git_name,
         "effective_git_email": git_email,
-        "effective_disk_mb": skein::box_disk_limit(&name),
+        "effective_disk_mb": skein::fleet::box_disk_limit(&name),
         // Asked of the box, because nothing host-side records it: the token lands in the box's own
         // `~/.config/sync/env`. One round trip, and only when someone opens this panel — the board
         // refreshes every 2s and could never pay for this per box.
-        "wired": skein::sbx_guest_output(
+        "wired": skein::sandbox::sbx_guest_output(
             &name,
             "test -s \"$HOME/.config/sync/env\" && echo wired",
             std::time::Duration::from_secs(15),
         )
         .unwrap_or_default()
         .contains("wired"),
-        "agent": skein::agent_for_box(&name),
+        "agent": skein::repos::agent_for_box(&name),
         "repo_connection": repo
-            .and_then(|r| skein::connection_for_repo(&r))
+            .and_then(|r| skein::tracking::connection_for_repo(&r))
             .map(|c| c.label)
             .unwrap_or_default(),
     }))
@@ -846,7 +847,7 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
 /// disk is one filesystem shared by every box, so this is the number skein measures against, not a
 /// wall the box hits. Absent `limit` restores the fleet default; an empty one means unlimited.
 async fn api_set_box_disk(Path(name): Path<String>, Json(r): Json<DiskReq>) -> Response {
-    match skein::set_box_disk_limit(&name, r.limit.as_deref()) {
+    match skein::fleet::set_box_disk_limit(&name, r.limit.as_deref()) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -889,29 +890,29 @@ struct ConnectionReq {
 /// write-only by design: no route reads one back, so a credential that reaches the host cannot
 /// leave it again.
 async fn api_save_connection(Json(req): Json<ConnectionReq>) -> Response {
-    match skein::upsert_connection(
+    match skein::tracking::upsert_connection(
         req.id.as_deref(),
         &req.label,
         &req.gateway_url,
         req.token.as_deref().filter(|t| !t.trim().is_empty()),
     ) {
-        Ok(_) => Json(skein::sync_status()).into_response(),
+        Ok(_) => Json(skein::tracking::sync_status()).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }
 
 /// Forget a connection entirely. Refused while a repo still selects it — see `remove_connection`.
 async fn api_remove_connection(Path(id): Path<String>) -> Response {
-    match skein::remove_connection(&id) {
-        Ok(()) => Json(skein::sync_status()).into_response(),
+    match skein::tracking::remove_connection(&id) {
+        Ok(()) => Json(skein::tracking::sync_status()).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }
 
 /// Forget one connection's stored token, keeping the connection itself.
 async fn api_forget_connection_token(Path(id): Path<String>) -> Response {
-    match skein::set_connection_token(&id, "") {
-        Ok(()) => Json(skein::sync_status()).into_response(),
+    match skein::tracking::set_connection_token(&id, "") {
+        Ok(()) => Json(skein::tracking::sync_status()).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),
     }
 }
@@ -922,7 +923,7 @@ async fn api_sync_provision(Path(name): Path<String>) -> Response {
     if !skein::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
-    match tokio::task::spawn_blocking(move || skein::sync_provision_box(&name)).await {
+    match tokio::task::spawn_blocking(move || skein::tracking::sync_provision_box(&name)).await {
         Ok(Ok(note)) => Json(serde_json::json!({ "ok": true, "note": note })).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
@@ -942,7 +943,8 @@ async fn api_sync_refresh(
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let force = q.get("replace").is_some_and(|v| v == "1" || v == "true");
-    match tokio::task::spawn_blocking(move || skein::sync_refresh_box(&name, force)).await {
+    match tokio::task::spawn_blocking(move || skein::tracking::sync_refresh_box(&name, force)).await
+    {
         Ok(Ok(note)) => Json(serde_json::json!({ "ok": true, "note": note })).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
@@ -963,7 +965,9 @@ async fn api_transcript(
         .get("bytes")
         .and_then(|b| b.parse::<u64>().ok())
         .unwrap_or(256 * 1024);
-    match tokio::task::spawn_blocking(move || skein::read_transcript(&name, bytes)).await {
+    match tokio::task::spawn_blocking(move || skein::transcript::read_transcript(&name, bytes))
+        .await
+    {
         Ok(Ok(view)) => Json(view).into_response(),
         Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
@@ -977,7 +981,7 @@ async fn api_diff(Path(name): Path<String>) -> Response {
     }
     // Computed inside the box, so it forks a git in a sandbox — off the async runtime, like every
     // other blocking box call.
-    let view = tokio::task::spawn_blocking(move || skein::box_diff(&name))
+    let view = tokio::task::spawn_blocking(move || skein::diff::box_diff(&name))
         .await
         .ok()
         .flatten();
@@ -1000,7 +1004,7 @@ async fn api_files(Path(name): Path<String>, Query(q): Query<HashMap<String, Str
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
     let rel = q.get("path").cloned().unwrap_or_default();
-    let res = tokio::task::spawn_blocking(move || skein::list_box_files(&name, &rel))
+    let res = tokio::task::spawn_blocking(move || skein::files::list_box_files(&name, &rel))
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
     match res {
@@ -1018,7 +1022,7 @@ async fn api_file(Path(name): Path<String>, Query(q): Query<HashMap<String, Stri
     }
     let rel = q.get("path").cloned().unwrap_or_default();
     let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    let res = tokio::task::spawn_blocking(move || skein::read_box_file(&name, &rel))
+    let res = tokio::task::spawn_blocking(move || skein::files::read_box_file(&name, &rel))
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
     let (bytes, truncated) = match res {
@@ -1061,8 +1065,8 @@ async fn api_session(Path(name): Path<String>) -> Response {
 }
 
 /// All cross-box messages, newest first.
-async fn api_mailbox() -> Json<Vec<skein::Message>> {
-    Json(skein::load_mailbox())
+async fn api_mailbox() -> Json<Vec<skein::mailbox::Message>> {
+    Json(skein::mailbox::load_mailbox())
 }
 
 #[derive(Deserialize)]
@@ -1081,7 +1085,7 @@ struct SendReq {
 /// disagreeing with the host about the same repo. Empty string ⇒ no GitHub remote anywhere.
 async fn api_repos() -> Json<Vec<serde_json::Value>> {
     Json(
-        skein::load_repos()
+        skein::repos::load_repos()
             .into_iter()
             .map(|r| {
                 let slug = skein::gitgate::repo_slug(&r).unwrap_or_default();
@@ -1097,59 +1101,59 @@ async fn api_repos() -> Json<Vec<serde_json::Value>> {
 
 /// Runtime choices come from the core adapter registry so every client stays in sync when a new
 /// provider is added.
-async fn api_runtimes() -> Json<Vec<skein::RuntimeInfo>> {
-    Json(skein::supported_runtimes())
+async fn api_runtimes() -> Json<Vec<skein::runtime::RuntimeInfo>> {
+    Json(skein::runtime::supported_runtimes())
 }
 
-async fn api_health() -> Json<skein::HealthReport> {
+async fn api_health() -> Json<skein::health::HealthReport> {
     Json(
-        tokio::task::spawn_blocking(skein::health_report)
+        tokio::task::spawn_blocking(skein::health::health_report)
             .await
-            .unwrap_or_else(|error| skein::HealthReport {
+            .unwrap_or_else(|error| skein::health::HealthReport {
                 ok: false,
-                registry: skein::HealthCheck {
+                registry: skein::health::HealthCheck {
                     ok: false,
                     detail: error.to_string(),
                 },
-                sbx: skein::HealthCheck {
+                sbx: skein::health::HealthCheck {
                     ok: false,
                     detail: "health task failed".into(),
                 },
-                git: skein::HealthCheck {
+                git: skein::health::HealthCheck {
                     ok: false,
                     detail: "health task failed".into(),
                 },
-                gh: skein::HealthCheck {
+                gh: skein::health::HealthCheck {
                     ok: false,
                     detail: "health task failed".into(),
                 },
-                ai: skein::HealthCheck {
+                ai: skein::health::HealthCheck {
                     ok: true,
                     detail: "health task failed".into(),
                 },
-                probes: skein::HealthCheck {
+                probes: skein::health::HealthCheck {
                     ok: false,
                     detail: "health task failed".into(),
                 },
-                mailbox: skein::HealthCheck {
+                mailbox: skein::health::HealthCheck {
                     ok: false,
                     detail: "health task failed".into(),
                 },
-                memory: skein::HealthCheck {
+                memory: skein::health::HealthCheck {
                     ok: true,
                     detail: "health task failed".into(),
                 },
                 // `ok: true` like the other opt-in checks: the health task falling over says
                 // nothing about whether scoping is configured, and a red line here would blame
                 // GitHub for a panic somewhere else entirely.
-                gitgate: skein::HealthCheck {
+                gitgate: skein::health::HealthCheck {
                     ok: true,
                     detail: "health task failed".into(),
                 },
                 logins: Vec::new(),
                 dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
-                runtimes: skein::supported_runtimes(),
+                runtimes: skein::runtime::supported_runtimes(),
                 // Empty rather than guessed: this is the report for a health task that *failed*, and
                 // the checklist reads this field as "boxes can push". Naming a credential here would
                 // tick that step off on the strength of a crash.
@@ -1180,7 +1184,7 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
         let id = (!r.id.trim().is_empty()).then(|| r.id.trim().to_string());
         let agent = (!r.agent.trim().is_empty()).then(|| r.agent.trim().to_string());
         let store = (!r.store.trim().is_empty()).then(|| r.store.trim().to_string());
-        skein::add_repo(
+        skein::repos::add_repo(
             r.source.trim(),
             id.as_deref(),
             agent.as_deref(),
@@ -1191,7 +1195,7 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     match res {
         Ok(Ok(repo)) => {
             // Warn up-front if the push path is shaky (no origin, or SSH without a loaded key).
-            let warning = skein::remote_warning(&repo.work);
+            let warning = skein::repos::remote_warning(&repo.work);
             // The repository this maps to, now that there is a clone to ask. The dialog cannot know
             // it while you are still typing a *path* — only adopting it reveals the origin — so this
             // is what lets a write token offered in the dialog be stored against the right repo.
@@ -1206,7 +1210,7 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
 
 /// Unregister a repo (files left on disk).
 async fn api_remove_repo(Path(id): Path<String>) -> Response {
-    match skein::remove_repo(&id) {
+    match skein::repos::remove_repo(&id) {
         Ok(repo) => Json(repo).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -1215,7 +1219,7 @@ async fn api_remove_repo(Path(id): Path<String>) -> Response {
 /// Pull the latest code into a repo's working clone (fast-forward only). `git pull` hits the network,
 /// so run the blocking work off the async runtime.
 async fn api_pull_repo(Path(id): Path<String>) -> Response {
-    let res = tokio::task::spawn_blocking(move || skein::pull_repo(&id)).await;
+    let res = tokio::task::spawn_blocking(move || skein::repos::pull_repo(&id)).await;
     match res {
         Ok(Ok(summary)) => Json(serde_json::json!({ "summary": summary })).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -1224,8 +1228,8 @@ async fn api_pull_repo(Path(id): Path<String>) -> Response {
 }
 
 /// Read skein's app settings (the cockpit's toggles).
-async fn api_settings() -> Json<skein::Config> {
-    Json(skein::load_config())
+async fn api_settings() -> Json<skein::config::Config> {
+    Json(skein::config::load_config())
 }
 
 /// Update skein's app settings — MERGED onto what is stored, never replacing it.
@@ -1243,7 +1247,7 @@ async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Response {
     let Some(patch) = patch.as_object() else {
         return (StatusCode::BAD_REQUEST, "settings must be an object").into_response();
     };
-    let current = skein::load_config();
+    let current = skein::config::load_config();
     let mut merged = match serde_json::to_value(&current) {
         Ok(serde_json::Value::Object(map)) => map,
         _ => return (StatusCode::INTERNAL_SERVER_ERROR, "unreadable config").into_response(),
@@ -1251,14 +1255,14 @@ async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Response {
     for (key, value) in patch {
         merged.insert(key.clone(), value.clone());
     }
-    let c: skein::Config = match serde_json::from_value(serde_json::Value::Object(merged)) {
+    let c: skein::config::Config = match serde_json::from_value(serde_json::Value::Object(merged)) {
         Ok(c) => c,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-    match skein::save_config(&c) {
+    match skein::config::save_config(&c) {
         Ok(()) => {
             // Apply a newly-set SSH key immediately (load into the agent) so the user needn't restart.
-            if let Err(e) = skein::ensure_ssh_key() {
+            if let Err(e) = skein::config::ensure_ssh_key() {
                 eprintln!("skein: ssh key not loaded ({e})");
             }
             Json(c).into_response()
@@ -1273,7 +1277,7 @@ async fn api_set_settings(Json(patch): Json<serde_json::Value>) -> Response {
 /// the cap on a running box with no restart, no snapshot and nothing to restore. 200 with the boxes
 /// that could not be adjusted — one box missing its cgroup must not stop the rest being corrected.
 async fn api_fleet_limits() -> Response {
-    match skein::apply_box_limits() {
+    match skein::fleet::apply_box_limits() {
         Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -1316,7 +1320,7 @@ async fn api_git_grants() -> Json<serde_json::Value> {
         "app_ready": skein::gitgate::app_credentials().is_ok(),
         // Not a credential — the id is public, and the settings screen names it so "scoped" can say
         // *what by*. The key it pairs with is a path that never leaves the host.
-        "app_id": skein::load_config().github_app_id,
+        "app_id": skein::config::load_config().github_app_id,
         "app_problem": skein::gitgate::app_credentials().err().unwrap_or_default(),
         // Whether a write token can be issued *at all* — by App or by a stored PAT. This is what
         // scoping is gated on, so it is the honest "is this switched on" answer; `app_ready` alone
@@ -1329,8 +1333,8 @@ async fn api_git_grants() -> Json<serde_json::Value> {
         // "boxes hold nothing". Those used to be the same sentence, because the account token was
         // seeded by default and therefore always the answer; now that it is chosen, a fleet with
         // nothing configured genuinely has no way to push and the pane has to say so.
-        "account_token": skein::load_config().seed_gh_secret,
-        "account_seeded": skein::gh_secret_seeded().is_some(),
+        "account_token": skein::config::load_config().seed_gh_secret,
+        "account_seeded": skein::repos::gh_secret_seeded().is_some(),
         // Descriptions only. The tokens themselves live in 0600 files and are never served — the
         // cockpit learns whether one is set, never what it is.
         "credentials": skein::gitgate::write_credentials().iter().map(|c| serde_json::json!({
@@ -1526,7 +1530,7 @@ async fn api_set_box_privileged(
     Path(name): Path<String>,
     Json(r): Json<PrivilegedReq>,
 ) -> Response {
-    match skein::set_box_privileged(&name, r.on) {
+    match skein::fleet::set_box_privileged(&name, r.on) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
@@ -1584,10 +1588,10 @@ async fn api_substrate_decide(Path(id): Path<String>, Json(r): Json<DecideReq>) 
     }
 }
 
-async fn api_fleet_transport() -> Json<skein::Transport> {
+async fn api_fleet_transport() -> Json<skein::fleet::Transport> {
     // Blocking: it opens a socket to the agent. Cheap, but not on an async worker.
     Json(
-        tokio::task::spawn_blocking(skein::transport_state)
+        tokio::task::spawn_blocking(skein::fleet::transport_state)
             .await
             .unwrap_or_default(),
     )
@@ -1599,16 +1603,16 @@ async fn api_fleet_transport() -> Json<skein::Transport> {
 /// different moments and cost different amounts: the gauge strip polls every 30 seconds and must
 /// stay cheap, while this measures a rate over half a second and is only wanted when something looks
 /// wrong. Folding it in would have put that half-second into every poll.
-async fn api_fleet_load() -> Json<Vec<skein::BoxLoad>> {
+async fn api_fleet_load() -> Json<Vec<skein::fleet::BoxLoad>> {
     Json(
-        tokio::task::spawn_blocking(skein::box_loads)
+        tokio::task::spawn_blocking(skein::fleet::box_loads)
             .await
             .unwrap_or_default(),
     )
 }
 
 async fn api_fleet_resources() -> Response {
-    match tokio::task::spawn_blocking(skein::fleet_resources).await {
+    match tokio::task::spawn_blocking(skein::fleet::fleet_resources).await {
         Ok(Some(r)) => Json(r).into_response(),
         _ => StatusCode::NO_CONTENT.into_response(),
     }
@@ -1627,15 +1631,15 @@ async fn api_fleet_resources() -> Response {
 /// create a second one.
 async fn api_fleet_plan() -> Json<serde_json::Value> {
     let (host, exists, sandbox) = tokio::task::spawn_blocking(|| {
-        let sandbox = skein::fleet_sandbox();
+        let sandbox = skein::place::fleet_sandbox();
         let exists = (!sandbox.is_empty())
-            .then(|| skein::fleet_exists(&sandbox))
+            .then(|| skein::fleet::fleet_exists(&sandbox))
             .flatten();
-        (skein::host_capacity(), exists, sandbox)
+        (skein::fleet::host_capacity(), exists, sandbox)
     })
     .await
-    .unwrap_or_else(|_| (skein::host_capacity(), None, String::new()));
-    let proposed = skein::proposed_fleet_size(&host);
+    .unwrap_or_else(|_| (skein::fleet::host_capacity(), None, String::new()));
+    let proposed = skein::fleet::proposed_fleet_size(&host);
     Json(serde_json::json!({
         "sandbox": sandbox,
         "exists": exists,
@@ -1653,7 +1657,7 @@ async fn api_fleet_plan() -> Json<serde_json::Value> {
 /// from.
 async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
     let out = tokio::task::spawn_blocking(move || {
-        let mut config = skein::load_config();
+        let mut config = skein::config::load_config();
         for (field, value) in [
             (&mut config.fleet_memory, &r.memory),
             (&mut config.fleet_cpus, &r.cpus),
@@ -1665,12 +1669,12 @@ async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
                 *field = value.trim().to_string();
             }
         }
-        skein::save_config(&config)?;
+        skein::config::save_config(&config)?;
         let sandbox = config.fleet_sandbox.trim().to_string();
         if sandbox.is_empty() {
             return Err("no fleet sandbox is named (fleet_sandbox is empty)".to_string());
         }
-        skein::ensure_fleet(&sandbox, &skein::fleet_mounts()).map(|()| sandbox)
+        skein::fleet::ensure_fleet(&sandbox, &skein::fleet::fleet_mounts()).map(|()| sandbox)
     })
     .await;
     match out {
@@ -1690,7 +1694,7 @@ async fn api_fleet_create(Json(r): Json<ResizeReq>) -> Response {
 /// 200 with the boxes that failed to come back: their work is already snapshotted on the host, so a
 /// partial return is a retry (`skein start <box>`), not a failure of the resize.
 async fn api_fleet_resize(Json(r): Json<ResizeReq>) -> Response {
-    match skein::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {
+    match skein::fleet::resize_fleet(&r.memory, &r.cpus, &r.disk, r.drop_docker) {
         Ok(failed) => Json(serde_json::json!({ "failed": failed })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -1702,7 +1706,7 @@ struct ResizeReq {
     memory: String,
     #[serde(default)]
     cpus: String,
-    /// Root filesystem size. Empty keeps the configured one — see [`skein::Config::fleet_disk`].
+    /// Root filesystem size. Empty keeps the configured one — see [`skein::config::Config::fleet_disk`].
     #[serde(default)]
     disk: String,
     /// Proceed even though the rebuild destroys locally-built images and named volumes.
@@ -1723,7 +1727,7 @@ async fn api_mailbox_send(Json(r): Json<SendReq>) -> Response {
     } else {
         r.to.trim()
     };
-    match skein::send_message(to, &r.kind, &r.body) {
+    match skein::mailbox::send_message(to, &r.kind, &r.body) {
         Ok(()) => (StatusCode::OK, "ok").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -1739,7 +1743,7 @@ struct PickPathReq {
 /// / remote — the user types the path instead).
 async fn api_pick_path(Json(r): Json<PickPathReq>) -> Json<serde_json::Value> {
     let kind = if r.kind == "file" { "file" } else { "folder" }.to_string();
-    let res = tokio::task::spawn_blocking(move || skein::pick_path(&kind)).await;
+    let res = tokio::task::spawn_blocking(move || skein::health::pick_path(&kind)).await;
     Json(match res {
         Ok(Ok(Some(path))) => serde_json::json!({ "ok": true, "path": path }),
         Ok(Ok(None)) => serde_json::json!({ "ok": true, "cancelled": true }),
@@ -1762,7 +1766,7 @@ async fn api_repin(Path(name): Path<String>, Json(r): Json<RepinReq>) -> Json<se
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let branch = r.branch;
-    let res = tokio::task::spawn_blocking(move || skein::repin_branch(&name, &branch)).await;
+    let res = tokio::task::spawn_blocking(move || skein::repos::repin_branch(&name, &branch)).await;
     Json(match res {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
@@ -1787,7 +1791,7 @@ async fn api_resume(
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
     let prompt = body.map(|Json(b)| b.prompt).unwrap_or_default();
-    let r = tokio::task::spawn_blocking(move || skein::resume_box(&name, &prompt)).await;
+    let r = tokio::task::spawn_blocking(move || skein::sandbox::resume_box(&name, &prompt)).await;
     Json(match r {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
@@ -1812,7 +1816,7 @@ async fn api_restart_agent(
         .map(|Json(value)| value.runtime)
         .filter(|value| !value.trim().is_empty());
     let result = tokio::task::spawn_blocking(move || {
-        skein::restart_agent_session(&name, runtime.as_deref())
+        skein::sandbox::restart_agent_session(&name, runtime.as_deref())
     })
     .await;
     Json(match result {
@@ -1829,7 +1833,7 @@ async fn api_narrate(Path(name): Path<String>) -> Json<serde_json::Value> {
     if !skein::valid_name(&name) {
         return Json(serde_json::json!({ "summary": null }));
     }
-    let s = tokio::task::spawn_blocking(move || skein::narrate(&name))
+    let s = tokio::task::spawn_blocking(move || skein::ai::narrate(&name))
         .await
         .ok()
         .flatten();
@@ -1845,9 +1849,10 @@ struct BatchReq {
 /// Batch-resume the boxes paused on a trivial "proceed?" (step 6). With AI on (step 7) each is first
 /// run past the conservative safety gate; genuine decisions are held back. Returns {ok, resumed, held}.
 async fn api_resume_batch(Json(r): Json<BatchReq>) -> Json<serde_json::Value> {
-    let (resumed, held) = tokio::task::spawn_blocking(move || skein::resume_batch(&r.names))
-        .await
-        .unwrap_or_default();
+    let (resumed, held) =
+        tokio::task::spawn_blocking(move || skein::sandbox::resume_batch(&r.names))
+            .await
+            .unwrap_or_default();
     Json(serde_json::json!({ "ok": true, "resumed": resumed, "held": held }))
 }
 
@@ -1857,7 +1862,7 @@ async fn api_stop(Path(name): Path<String>) -> Json<serde_json::Value> {
     if !skein::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
-    let r = tokio::task::spawn_blocking(move || skein::stop_box(&name)).await;
+    let r = tokio::task::spawn_blocking(move || skein::sandbox::stop_box(&name)).await;
     Json(match r {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
@@ -1871,7 +1876,7 @@ async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Value> {
     if !skein::valid_name(&name) {
         return Json(serde_json::json!({ "ok": false, "error": "invalid box name" }));
     }
-    let r = tokio::task::spawn_blocking(move || skein::destroy_box(&name)).await;
+    let r = tokio::task::spawn_blocking(move || skein::sandbox::destroy_box(&name)).await;
     Json(match r {
         Ok(Ok(())) => serde_json::json!({ "ok": true }),
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
@@ -1915,7 +1920,7 @@ const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 enum Sink {
     /// The agent's connection, driven from a blocking thread.
     ///
-    /// A thread and a channel rather than a direct call because [`skein::AgentWrite`] is
+    /// A thread and a channel rather than a direct call because [`skein::place::AgentWrite`] is
     /// synchronous — it owns a plain `TcpStream` — and writing to it from this async loop would
     /// block a tokio worker for the length of the upload. That is the freeze this file already
     /// documents twice: every terminal websocket scheduled on that worker starves until it ends.
@@ -1934,7 +1939,7 @@ enum Sink {
 impl Sink {
     /// Feed the agent from a blocking thread. `None` on the channel is the end marker: the writer
     /// has to tell "that was everything" from "the caller gave up", because only the first commits.
-    fn over(write: skein::AgentWrite) -> Sink {
+    fn over(write: skein::place::AgentWrite) -> Sink {
         let (chunks, mut pieces) = tokio::sync::mpsc::channel::<Option<Vec<u8>>>(8);
         let done = tokio::task::spawn_blocking(move || -> Result<(), String> {
             let mut write = write;
@@ -2044,7 +2049,7 @@ async fn stream_upload(
             .to_string()
     };
     let batch = hdr("x-skein-drop");
-    let mut rel = skein::pct_decode(&hdr("x-skein-name"));
+    let mut rel = skein::util::pct_decode(&hdr("x-skein-name"));
     if rel.trim().is_empty() {
         // A clipboard paste often has no filename. Name it from the content type so the suffix still
         // says what it is (an agent keys off `.png` to treat it as an image).
@@ -2059,7 +2064,7 @@ async fn stream_upload(
         let ext = if ext.is_empty() { "bin".into() } else { ext };
         rel = format!("paste.{ext}");
     }
-    let (dir, path) = skein::drop_dest(&batch, &rel)?;
+    let (dir, path) = skein::sandbox::drop_dest(&batch, &rel)?;
 
     // Which channel carries it is decided here, before a single byte is read, and that ordering is
     // the whole reason it is decided on the declared length rather than the real one: an upload is
@@ -2072,10 +2077,10 @@ async fn stream_upload(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok());
     let carried = match declared {
-        Some(n) if n <= skein::AGENT_WRITE_CAP => {
+        Some(n) if n <= skein::place::AGENT_WRITE_CAP => {
             let (box_name, dir, path) = (name.to_string(), dir.clone(), path.clone());
             tokio::task::spawn_blocking(move || {
-                skein::begin_box_write(&box_name, &dir, &path, UPLOAD_TIMEOUT)
+                skein::sandbox::begin_box_write(&box_name, &dir, &path, UPLOAD_TIMEOUT)
             })
             .await
             .ok()
@@ -2087,7 +2092,7 @@ async fn stream_upload(
         Some(write) => Sink::over(write),
         None => {
             // The argv carries its own program: where the box lives decides that too.
-            let argv = skein::box_write_argv(name, &dir, &path)?;
+            let argv = skein::sandbox::box_write_argv(name, &dir, &path)?;
             let mut child = tokio::process::Command::new(&argv[0])
                 .args(&argv[1..])
                 .stdin(std::process::Stdio::piped())
@@ -2135,14 +2140,14 @@ async fn stream_upload(
 /// Best-effort removal of a half-written attachment, so a failed upload leaves nothing for the agent
 /// to mistake for the real file. Bounded: a wedged box must not hold the response open.
 async fn discard_partial(name: &str, path: &str) {
-    let inner = format!("rm -f {}", skein::sh_quote(path));
+    let inner = format!("rm -f {}", skein::util::sh_quote(path));
     // Through the placement, like the write it is undoing — `sbx exec <box>` names no sandbox in the
     // fleet, so the cleanup would fail exactly when the upload it is cleaning up did. And through
     // the agent when there is one, for the same reason: the moment a half-written file most needs
     // removing is the moment a fresh `sbx exec` is least likely to come back.
     let name = name.to_string();
     let _ = tokio::task::spawn_blocking(move || {
-        skein::place_of(&name).map(|place| place.exec(&inner, Duration::from_secs(10)))
+        skein::place::place_of(&name).map(|place| place.exec(&inner, Duration::from_secs(10)))
     })
     .await;
 }
@@ -2188,12 +2193,18 @@ async fn terminal(
         .get("shell")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
-    let agent = q.get("agent").filter(|a| skein::valid_runtime(a)).cloned();
+    let agent = q
+        .get("agent")
+        .filter(|a| skein::runtime::valid_runtime(a))
+        .cloned();
     let handoff = q
         .get("handoff")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
-    let from = q.get("from").filter(|a| skein::valid_runtime(a)).cloned();
+    let from = q
+        .get("from")
+        .filter(|a| skein::runtime::valid_runtime(a))
+        .cloned();
     ws.on_upgrade(move |socket| terminal_session(socket, name, launch, shell, agent, handoff, from))
 }
 
@@ -2222,7 +2233,7 @@ async fn terminal_session(
             return;
         }
     };
-    let target_agent = agent.unwrap_or_else(|| skein::agent_for_box(&name));
+    let target_agent = agent.unwrap_or_else(|| skein::repos::agent_for_box(&name));
     if handoff && !shell {
         let hn = name.clone();
         let ht = target_agent.clone();
@@ -2281,14 +2292,14 @@ async fn terminal_session(
         // never meant to exist. Say what is wrong once and stop, rather than forever and mislead.
         let boxed = name.clone();
         if let Ok(Some(why)) =
-            tokio::task::spawn_blocking(move || skein::absent_box_reason(&boxed)).await
+            tokio::task::spawn_blocking(move || skein::fleet::absent_box_reason(&boxed)).await
         {
             let _ = socket.send(Message::Text(format!("skein: {why}"))).await;
             return;
         }
         let boxed = name.clone();
         if let Ok(Err(e)) =
-            tokio::task::spawn_blocking(move || skein::ensure_box_session(&boxed)).await
+            tokio::task::spawn_blocking(move || skein::fleet::ensure_box_session(&boxed)).await
         {
             let _ = socket.send(Message::Text(format!("skein: {e}\r\n"))).await;
         }
@@ -2307,7 +2318,7 @@ async fn terminal_session(
         // agent session all future UI reloads reconnect to.
         let mut b = CommandBuilder::new("sh");
         b.arg("-c");
-        b.arg(skein::launch_command_with_agent(
+        b.arg(skein::sandbox::launch_command_with_agent(
             &name,
             branch,
             Some(&target_agent),
@@ -2317,8 +2328,8 @@ async fn terminal_session(
         match std::env::var(override_var) {
             Ok(c) if !c.is_empty() => {
                 let c = c
-                    .replace("{name}", &skein::sh_quote(&name))
-                    .replace("{dir}", &skein::sh_quote(&dir));
+                    .replace("{name}", &skein::util::sh_quote(&name))
+                    .replace("{dir}", &skein::util::sh_quote(&dir));
                 let mut b = CommandBuilder::new("sh");
                 b.arg("-c");
                 b.arg(c);
@@ -2327,9 +2338,9 @@ async fn terminal_session(
             _ => {
                 let mut b = CommandBuilder::new("sbx");
                 let argv = if shell {
-                    skein::shell_argv(&name)
+                    skein::sandbox::shell_argv(&name)
                 } else {
-                    skein::attach_argv_as(&name, &dir, &target_agent)
+                    skein::sandbox::attach_argv_as(&name, &dir, &target_agent)
                 };
                 for a in argv {
                     b.arg(a);

@@ -16,8 +16,8 @@ const CYAN: &str = "\x1b[36m";
 
 fn main() {
     // Pick up a local .env so $SKEIN_REGISTRY etc. needn't be typed each run (real env vars still
-    // win; a malformed file is reported, not silently half-applied). See skein::load_dotenv.
-    skein::load_dotenv();
+    // win; a malformed file is reported, not silently half-applied). See skein::util::load_dotenv.
+    skein::util::load_dotenv();
     let args: Vec<String> = env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("ls");
     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
@@ -63,9 +63,12 @@ fn main() {
                 ),
                 // Disk alone still needs a memory size to rebuild at, and the configured one is the
                 // right answer — nobody asking for a bigger disk is also asking to be re-sized.
-                (None, false) => {
-                    cmd_resize(&skein::load_config().fleet_memory, "", &disk, drop_docker)
-                }
+                (None, false) => cmd_resize(
+                    &skein::config::load_config().fleet_memory,
+                    "",
+                    &disk,
+                    drop_docker,
+                ),
                 (None, true) => Err("usage: skein resize <memory> [cpus] [--disk <size>] \
                      [--drop-docker]   \
                      e.g. skein resize 26g   |   skein resize --disk 60g"
@@ -127,12 +130,12 @@ fn cmd_add(source: &str, opts: &[String]) -> Result<(), String> {
     let id = flag(opts, "--id");
     let agent = flag(opts, "--agent");
     let store = flag(opts, "--store");
-    let repo = skein::add_repo(source, id.as_deref(), agent.as_deref(), store.as_deref())?;
+    let repo = skein::repos::add_repo(source, id.as_deref(), agent.as_deref(), store.as_deref())?;
     println!("{BOLD}added{RESET} {CYAN}{}{RESET}", repo.id);
     println!("  {DIM}source{RESET}  {}", repo.source);
     println!("  {DIM}work  {RESET}  {}", repo.work);
     println!("  {DIM}store {RESET}  {}", repo.store);
-    if let Some(w) = skein::remote_warning(&repo.work) {
+    if let Some(w) = skein::repos::remote_warning(&repo.work) {
         println!("\n\x1b[33m!\x1b[0m {w}");
     }
     println!(
@@ -223,7 +226,7 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 fn cmd_remove(id: &str) -> Result<(), String> {
-    let repo = skein::remove_repo(id)?;
+    let repo = skein::repos::remove_repo(id)?;
     println!(
         "{BOLD}removed{RESET} {CYAN}{}{RESET} {DIM}(unregistered){RESET}",
         repo.id
@@ -236,7 +239,7 @@ fn cmd_remove(id: &str) -> Result<(), String> {
 }
 
 fn cmd_repos() -> Result<(), String> {
-    let repos = skein::load_repos();
+    let repos = skein::repos::load_repos();
     if repos.is_empty() {
         println!("{DIM}no repos yet — add one with: skein add <git-url|path>{RESET}");
         return Ok(());
@@ -255,7 +258,7 @@ fn cmd_ls() -> Result<(), String> {
     // Best-effort cross-project mailbox relay pass, so the plain CLI (no skein-server running)
     // still makes progress on cross-project mail rather than only ever relaying when the web
     // cockpit happens to be up.
-    if let Err(e) = skein::relay_cross_project_mail() {
+    if let Err(e) = skein::mailbox::relay_cross_project_mail() {
         eprintln!("skein: mailbox relay: {e}");
     }
     // Same sbx-sourced, "who-needs-me-first"-sorted fleet the web cockpit shows (sbx ∪ registry).
@@ -430,13 +433,13 @@ fn cmd_doctor() -> Result<(), String> {
     // none of these repos) is known here and was previously only ever printed to a detached
     // server's stderr.
     {
-        let g = skein::health_report_gitgate();
+        let g = skein::health::health_report_gitgate();
         let mark = if g.ok { OK } else { BAD };
         println!("{mark} git scope     {}", g.detail);
     }
 
     // skein-managed repos + its own kit (the repo-agnostic path).
-    let repos = skein::load_repos();
+    let repos = skein::repos::load_repos();
     println!(
         "{} repos         {DIM}{} managed{RESET}",
         if repos.is_empty() { WARN } else { OK },
@@ -459,17 +462,17 @@ fn cmd_doctor() -> Result<(), String> {
             println!("{OK} review        {id}: {} need you", count.needs_you);
         }
     }
-    let kit = skein::skein_home().join("kit").join("spec.yaml");
+    let kit = skein::config::skein_home().join("kit").join("spec.yaml");
     if kit.exists() {
         println!("{OK} kit           {DIM}{}{RESET}", kit.display());
     } else {
         println!("{WARN} kit           {DIM}not written yet (server startup / `skein add` installs it){RESET}");
     }
-    let cfg = skein::load_config();
+    let cfg = skein::config::load_config();
     // Before the settings line, because it invalidates everything on it. A config skein cannot
     // parse is thrown away whole, so every value below is a default it fell back to rather than
     // anything anyone chose — and a default is indistinguishable from a choice on sight.
-    if let Some(why) = skein::config_error() {
+    if let Some(why) = skein::config::config_error() {
         println!("{BAD} settings      unreadable — {why}");
         println!(
             "{DIM}                every setting below is a fallback default, not your choice; \
@@ -484,7 +487,7 @@ fn cmd_doctor() -> Result<(), String> {
         // saved, and every setting is at this build's default until then. Naming a path that does
         // not exist reads as "go and look at it", which sends someone after a file to explain
         // behaviour the file has no part in.
-        match skein::config_path_if_written() {
+        match skein::config::config_path_if_written() {
             Some(path) => path,
             None => "no config.json yet — every setting is this build's default".into(),
         }
@@ -505,7 +508,7 @@ fn cmd_doctor() -> Result<(), String> {
     // dialog. Reported because the fix for that dialog is to *skip* the call, and a silent skip is
     // indistinguishable from a broken seed until a box fails to push.
     if cfg.seed_gh_secret {
-        match skein::gh_secret_seeded() {
+        match skein::repos::gh_secret_seeded() {
             Some(when) => println!(
                 "{OK} gh secret     seeded {when} {DIM}— startup skips `gh auth token`, so no \
                  keyring is unlocked. Settings → Overwrite token on startup re-seeds{RESET}"
@@ -547,7 +550,7 @@ fn cmd_doctor() -> Result<(), String> {
         );
     } else {
         println!("\n{BOLD}fleet{RESET} {DIM}({fleet}){RESET}");
-        match skein::fleet_exists(&fleet) {
+        match skein::fleet::fleet_exists(&fleet) {
             Some(true) => println!("{OK} sandbox       up"),
             Some(false) => println!(
                 "{WARN} sandbox       not created yet {DIM}(the next launch creates it){RESET}"
@@ -557,7 +560,7 @@ fn cmd_doctor() -> Result<(), String> {
                 skein::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
             ),
         }
-        let place = skein::own_sandbox(&fleet);
+        let place = skein::place::own_sandbox(&fleet);
         let probe = |script: &str| {
             place
                 .exec(script, std::time::Duration::from_secs(20))
@@ -585,7 +588,7 @@ fn cmd_doctor() -> Result<(), String> {
         if probe("sudo mkdir -p /sys/fs/cgroup/skein 2>/dev/null && echo yes") == "yes" {
             println!(
                 "{OK} ceilings      cgroup delegation works {DIM}(per box: {}){RESET}",
-                skein::box_limits()
+                skein::fleet::box_limits()
             );
         } else {
             println!("{BAD} ceilings      no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box");
@@ -621,7 +624,7 @@ fn cmd_doctor() -> Result<(), String> {
         // here is silent by design — falling back to `sbx exec` is what skein did before the agent
         // existed, so the fleet keeps working and only its resilience is gone. That makes doctor
         // the only place it can be seen.
-        let t = skein::transport_state();
+        let t = skein::fleet::transport_state();
         let at = |p: u16| {
             if p == 0 {
                 "no port published yet".to_string()
@@ -653,7 +656,7 @@ fn cmd_doctor() -> Result<(), String> {
             ),
         }
         // A mount that is missing produces a box with no store, which looks entirely healthy.
-        for path in skein::fleet_mounts() {
+        for path in skein::fleet::fleet_mounts() {
             let seen = probe(&format!("test -d '{path}' && echo yes")) == "yes";
             println!(
                 "{} mount         {DIM}{path}{RESET}{}",
@@ -675,7 +678,7 @@ fn cmd_doctor() -> Result<(), String> {
     }
 
     // The sbx-dependent facts skein can't verify itself — surface them so they're not silent.
-    let runtimes = skein::supported_runtimes()
+    let runtimes = skein::runtime::supported_runtimes()
         .iter()
         .map(|runtime| runtime.id)
         .collect::<Vec<_>>()
@@ -715,34 +718,34 @@ fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
     // read it — including the failures that happen before `start_box` is reached at all, which is
     // where "no registered repo for box X" lives.
     if let Err(why) = &out {
-        skein::remember_start_failure(name, why);
+        skein::fleet::remember_start_failure(name, why);
     }
     out
 }
 
 fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
-    let repo = skein::repo_for_box(name)
+    let repo = skein::repos::repo_for_box(name)
         .ok_or_else(|| format!("no registered repo for box {name} — `skein repos` to check"))?;
     let branch =
-        flag(opts, "--branch").unwrap_or_else(|| skein::branch_of(name).unwrap_or_default());
+        flag(opts, "--branch").unwrap_or_else(|| skein::repos::branch_of(name).unwrap_or_default());
     if branch.trim().is_empty() {
         return Err(format!("no branch for box {name}; pass --branch <branch>"));
     }
-    let agent = flag(opts, "--agent").unwrap_or_else(|| skein::agent_for_box(name));
-    if !skein::valid_runtime(&agent) {
+    let agent = flag(opts, "--agent").unwrap_or_else(|| skein::repos::agent_for_box(name));
+    if !skein::runtime::valid_runtime(&agent) {
         return Err(format!("unsupported runtime {agent:?}"));
     }
     eprintln!("{DIM}skein:{RESET} starting {name} in the shared sandbox…");
     // The box's own persistent shell, not its agent. `skein attach` starts the runtime — with the
     // full setup it does for every box — into this same tmux server, so the fleet path does not get
     // its own second way of launching an agent to keep in step with the first.
-    skein::start_box(name, &repo, &branch, "exec bash -l")?;
+    skein::fleet::start_box(name, &repo, &branch, "exec bash -l")?;
     eprintln!("{DIM}skein:{RESET} {name} is up on {branch}");
     // `--attach` exists so the cockpit's create-a-box terminal can hand off into the agent without
     // the caller having to name the box's placement — which does not exist until the line above has
     // run. Resolved here, after the box is real.
     if opts.iter().any(|o| o == "--attach") {
-        return run_sbx(&skein::initial_attach_argv_as(name, &agent));
+        return run_sbx(&skein::sandbox::initial_attach_argv_as(name, &agent));
     }
     Ok(())
 }
@@ -776,7 +779,7 @@ fn cmd_resize(memory: &str, cpus: &str, disk: &str, drop_docker: bool) -> Result
              volumes included"
         );
     }
-    let failed = skein::resize_fleet(memory, cpus, disk, drop_docker)?;
+    let failed = skein::fleet::resize_fleet(memory, cpus, disk, drop_docker)?;
     if failed.is_empty() {
         eprintln!("{DIM}skein:{RESET} resized; every box came back");
     } else {
@@ -796,13 +799,13 @@ fn cmd_resize(memory: &str, cpus: &str, disk: &str, drop_docker: bool) -> Result
 /// box), so without this there is no way to reach the HOME that seeds all the others.
 fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
     let runtime = runtime.unwrap_or("claude");
-    if !skein::valid_runtime(runtime) {
+    if !skein::runtime::valid_runtime(runtime) {
         return Err(format!("unsupported runtime {runtime:?}"));
     }
     if runtime == "claude" {
         eprintln!("{DIM}skein:{RESET} type {CYAN}/login{RESET} once it starts, then {CYAN}/exit{RESET} — `setup-token` returns a token to export and leaves no credential to seed boxes with");
     }
-    skein::fleet_login(runtime)?;
+    skein::fleet::fleet_login(runtime)?;
     eprintln!(
         "{DIM}skein:{RESET} every new box now inherits this login; running boxes pick it up when their session next starts"
     );
@@ -811,10 +814,10 @@ fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
 
 fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // Reconnect to the box's existing agent session (same command the web cockpit uses).
-    let configured = skein::agent_for_box(name);
+    let configured = skein::repos::agent_for_box(name);
     let agent = flag(opts, "--agent").unwrap_or(configured.clone());
-    if !skein::valid_runtime(&agent) {
-        let available = skein::supported_runtimes()
+    if !skein::runtime::valid_runtime(&agent) {
+        let available = skein::runtime::supported_runtimes()
             .iter()
             .map(|runtime| runtime.id)
             .collect::<Vec<_>>()
@@ -844,7 +847,7 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // A fleet box loses its tmux server whenever its sandbox cycles; the tree, the private HOME and
     // the cgroup survive. Restart the session before addressing its namespace, or the first thing
     // the user sees is `nsenter: cannot open /proc/<pid>/ns/user`.
-    skein::ensure_box_session(&attach_name)?;
+    skein::fleet::ensure_box_session(&attach_name)?;
     let dir = skein::lookup_dir(&attach_name).unwrap_or_default();
-    run_sbx(&skein::attach_argv_as(&attach_name, &dir, &agent))
+    run_sbx(&skein::sandbox::attach_argv_as(&attach_name, &dir, &agent))
 }

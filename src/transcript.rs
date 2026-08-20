@@ -5,8 +5,10 @@
 //! that, tail-first, so a huge session opens instantly and pages backwards on demand.
 
 use crate::place::shared_record;
+use crate::repos::agent_for_box;
+use crate::sandbox::sbx_guest_output;
 use crate::util::*;
-use crate::{agent_for_box, sbx_guest_output, valid_name};
+use crate::valid_name;
 use serde::Serialize;
 use std::fs;
 use std::time::Duration;

@@ -3,8 +3,9 @@
 //! A file per message in the shared store, so delivery survives a restart on either side and
 //! neither box has to be running when the other writes.
 
+use crate::repos::load_repos;
 use crate::util::*;
-use crate::{all_stores, load_repos, store_for_box};
+use crate::{all_stores, store_for_box};
 use crate::{parse_registry, Sandbox};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -293,9 +294,10 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
 mod tests {
     use super::*;
     #[allow(unused_imports)]
-    use crate::testutil::*;
+    use crate::ensure_store;
+    use crate::repos::{save_repos, Repo};
     #[allow(unused_imports)]
-    use crate::{ensure_store, save_repos, Repo};
+    use crate::testutil::*;
     #[allow(unused_imports)]
     use std::process::Command;
     #[allow(unused_imports)]

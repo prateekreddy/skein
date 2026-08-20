@@ -7,10 +7,11 @@
 
 use crate::config::*;
 use crate::runtime::*;
+use crate::tracking::{load_connections, plane_project_id};
 use crate::util::*;
 use crate::{
-    ensure_kit, ensure_store, fleet_boxes, git_branch_for, load_connections, lookup_dir,
-    plane_project_id, registry_entry_for_box, valid_name,
+    ensure_kit, ensure_store, fleet_boxes, git_branch_for, lookup_dir, registry_entry_for_box,
+    valid_name,
 };
 use serde::{Deserialize, Serialize};
 use std::env;

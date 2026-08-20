@@ -1,18 +1,22 @@
 //! The `sbx` seam: everything skein does *to* a sandbox.
 //!
 //! Every call into a box funnels through a handful of helpers here — [`sbx_guest_output`],
-//! [`guest_write`], the launch/attach argv builders and the lifecycle commands. That is deliberate:
+//! `guest_write`, the launch/attach argv builders and the lifecycle commands. That is deliberate:
 //! it is the one place that knows a box is a sandbox, so changing what backs a box is a change to
 //! this module rather than to every feature that touches one.
 
+use crate::ai::ai_says_hold;
 use crate::fleet::box_root;
 use crate::place::{forget_place, own_sandbox, place_of, shared_record};
+use crate::repos::{
+    agent_for_box, branch_from_box, launch_spec, repo_for_box, write_launch_spec_for_agent, Repo,
+};
 use crate::runtime::*;
+use crate::tracking::sync_revoke_token;
 use crate::util::*;
 use crate::{
-    agent_for_box, ai_says_hold, box_liveness, branch_from_box, ensure_kit, ensure_store,
-    launch_spec, locate_registry, parse_registry, record_repo_mirror, repo_for_box, store_for_box,
-    sync_revoke_token, valid_name, write_launch_spec_for_agent, Liveness, Repo,
+    box_liveness, ensure_kit, ensure_store, locate_registry, parse_registry, record_repo_mirror,
+    store_for_box, valid_name, Liveness,
 };
 use chrono::Utc;
 use std::env;

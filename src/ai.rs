@@ -9,9 +9,10 @@
 //! wouldn't already have cleared. A flaky, garbled or absent answer therefore fails toward asking
 //! you.
 
-use crate::load_config;
+use crate::config::load_config;
+use crate::signals::{session_signal, SessionSignal};
 use crate::util::*;
-use crate::{session_signal, valid_name, SessionSignal};
+use crate::valid_name;
 use std::env;
 use std::process::Command;
 use std::time::Duration;

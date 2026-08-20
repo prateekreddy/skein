@@ -113,8 +113,8 @@ fn fail_search(dir: &Path, term: &str) {
     fs::write(dir.join(format!("fail-{}", safe_term(term))), "").unwrap();
 }
 
-fn repo(id: &str) -> skein::Repo {
-    skein::Repo {
+fn repo(id: &str) -> skein::repos::Repo {
+    skein::repos::Repo {
         id: id.into(),
         source: "https://github.com/acme/thing.git".into(),
         work: "/nonexistent".into(),

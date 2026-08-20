@@ -19,9 +19,10 @@
 //!   becomes a pool the boxes share instead of N reservations that sum, and `/tmp` and `$HOME`
 //!   have to be made private deliberately, because a shared VM does not hand them over.
 
+use crate::config::skein_home;
 use crate::config::*;
 use crate::util::*;
-use crate::{skein_home, valid_name};
+use crate::valid_name;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};

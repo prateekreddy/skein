@@ -6,11 +6,9 @@
 
 use crate::answer::Answer;
 use crate::config::*;
+use crate::sandbox::sbx_guest_output;
 use crate::util::*;
-use crate::{
-    box_liveness, locate_registry, lookup_dir, sbx_guest_output, store_for_box, valid_name,
-    Liveness,
-};
+use crate::{box_liveness, locate_registry, lookup_dir, store_for_box, valid_name, Liveness};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;

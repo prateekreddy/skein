@@ -1,11 +1,11 @@
 //! The per-runtime seam: one adapter table describing how each agent CLI is started, resumed and
 //! named, plus the argv construction that follows from it.
 //!
-//! Every provider difference lives in [`RUNTIME_ADAPTERS`]. Adding a runtime is a row there, not a
+//! Every provider difference lives in `RUNTIME_ADAPTERS`. Adding a runtime is a row there, not a
 //! branch in a caller — which is why the cockpit and CLI discover the choices from here instead of
 //! hardcoding their own lists.
 
-use crate::agent_for_box;
+use crate::repos::agent_for_box;
 use crate::util::*;
 use serde::Serialize;
 

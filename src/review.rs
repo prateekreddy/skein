@@ -40,7 +40,7 @@ use std::time::Duration;
 
 /// Is skein allowed to read pull requests? **On unless you turn it off.**
 ///
-/// Deliberately not [`crate::ai_enabled`], which stays off by default. The two spend on opposite
+/// Deliberately not [`crate::ai::ai_enabled`], which stays off by default. The two spend on opposite
 /// terms: enrichment sweetens a board that already works and runs unasked, while a summary happens
 /// only for a PR already in your queue, at most once per head commit — and without it the queue
 /// does not do the job it exists for. `$SKEIN_REVIEW_AI` wins, so one env var can pin a run.
@@ -51,7 +51,7 @@ pub fn summaries_enabled() -> bool {
     match std::env::var("SKEIN_REVIEW_AI").ok().as_deref() {
         Some("on" | "1" | "true" | "yes") => true,
         Some("off" | "0" | "false" | "no") => false,
-        _ => crate::load_config().review_summaries,
+        _ => crate::config::load_config().review_summaries,
     }
 }
 
@@ -621,7 +621,7 @@ mod tests {
 
         // An older config.json, from before the field was added.
         std::fs::write(
-            crate::skein_home().join("config.json"),
+            crate::config::skein_home().join("config.json"),
             br#"{"ai_enrichment":false}"#,
         )
         .unwrap();
