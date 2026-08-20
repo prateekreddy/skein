@@ -739,32 +739,84 @@ indistinguishable from skein by address or uid; and credentials inside the blast
 Independent unless stated. The privilege split (R1) is done first by decision, not because the others
 wait on it — an earlier draft claimed they did, and that was wrong.
 
-1. **skein runs as a distinct non-root uid, and the launcher splits.** An earlier revision said
-   *root*, and that was wrong in a way worth recording because it inverts the whole boundary.
+1. **skein runs as its own uid; boxes run as theirs; skein becomes a box to reach it.**
 
-   **Why root cannot work.** `grep -c 'unshare-user' src/box-session.sh` → **0**. There is no explicit
-   user namespace anywhere. It exists *only because `bwrap` is invoked by an unprivileged uid* — bwrap
-   must create one to obtain mount capability. The launcher says so: *"only this box's uid is mapped
-   into its user namespace… setuid cannot grant uid 0 inside a namespace you created yourself."* The
-   chain is skein → CLI → `session_script` → launcher → `bwrap`, so **a root skein makes that chain
-   root, bwrap creates no user namespace, and every box runs as uid 0 in the initial namespace with
-   `--dev-bind / /`** — CAP_SYS_ADMIN over the sandbox, and `nsenter -a -t 1` straight out of its own
-   mount namespace. Root would have destroyed the one boundary §9.1 confirms holds.
+   ### Why this is hard — two constraints that must hold at once
 
-   **What the split actually requires**, and it is a project rather than a flag:
-   - a **privileged prologue** — create and join the box's cgroup, chown the fleet root;
-   - then an explicit **drop to the box's uid with `$HOME` reset**, *before* any bind is computed. The
-     binds derive from the launcher's `$HOME` (`box-session.sh:465, 699-701`); as root that is
-     `/root`, and the seed loop's `[ -e "$HOME/$rel" ]` guards fail **silently**, so boxes come up
-     with no agent binary and no credentials.
-   - the tmux socket is `0700 uid 1000`, so attach needs a **shared group and a `0770` socket** —
-     per-box group, skein a member of each. This is the redesign root appeared to avoid.
+   **(a) The box's user namespace exists only because `bwrap` is invoked unprivileged.**
+   `grep -c 'unshare-user' src/box-session.sh` → **0**. It is never requested; bwrap creates one
+   because it must, to obtain mount capability without privilege. The launcher says so: *"only this
+   box's uid is mapped into its user namespace… setuid cannot grant uid 0 inside a namespace you
+   created yourself."*
 
-   `newuidmap` is needed only to map *several* uids inside one namespace, which a skein-side split
-   does not do — so its absence is not a blocker here.
+   **(b) `setns` into a user namespace needs CAP_SYS_ADMIN *in that namespace*.** An unprivileged
+   caller has it only when its **euid equals the namespace owner's** — the euid of whoever created
+   it.
 
-   Per-box subuid mapping remains the stronger second step: it separates boxes from *each other* by
-   uid, which is the axis §9.2 shows is open.
+   Together these rule out both obvious answers:
+
+   | attempt | fails because |
+   |---|---|
+   | **skein runs as root** | the whole launch chain is root, so (a) gives no user namespace at all: every box is uid 0 under `--dev-bind / /`, with CAP_SYS_ADMIN over the sandbox and a walk out of its own mount namespace. It destroys the one boundary §9.1 confirms holds. It also silently breaks every bind derived from `$HOME`, which as root is `/root`. |
+   | **skein simply runs as a different uid** | (b) makes every `setns` **EPERM** — terminal, takeover, provisioning, diff, upload. The design would specify something that cannot run. |
+
+   ### The mechanism
+
+   **Every crossing goes through `sudo -u <box uid>`.** skein does not enter a box *as skein*; it
+   becomes that box's uid for the duration.
+
+   - **launch**: `sudo -u <box uid> <launcher>` → bwrap runs unprivileged as that uid → constraint
+     (a) satisfied, and the namespace owner is the box's uid.
+   - **entry**: `sudo -u <box uid> nsenter …` → the caller's euid now equals the owner → constraint
+     (b) satisfied.
+   - **sandbox-root work** (cgroups, apt, fleet root, archive) — plain `sudo`, exactly as today.
+
+   Three things fall out that are worth stating, because an earlier draft got each of them wrong:
+
+   - **No shared group, and no group at all.** The tmux socket is `0700` owned by the box's uid, and
+     skein arrives *as* that uid, so it opens normally. An earlier draft proposed per-box groups with
+     `0770` sockets; that scheme also had a lifecycle bug (supplementary groups are fixed at process
+     start, so skein could not join the group of a box created after it started) and a shared group
+     would have let box A reach box B's socket — restoring the cross-box control path the split
+     exists to remove. All of it goes away.
+   - **No `newuidmap` on the critical path.** It is needed only to map *several* uids inside one
+     namespace, which this does not do. Its absence is not a blocker.
+   - **The launcher does not need "splitting".** It is already split — its privileged prologue is the
+     `sudo` prefix on the cgroup work, and `bwrap` already runs unprivileged. What changes is *which
+     uid invokes it*, and the `$HOME` it carries.
+
+   ### What it costs
+
+   One extra `exec` per box operation. Box operations are not on the hot path — the per-tick signal
+   is a file read, not a crossing — so this is launch, attach, upload, diff and takeover, not the
+   board.
+
+   And a **sudoers rule, which is now the boundary**: skein's uid may run *the launcher* and
+   *`nsenter`* as the box uids, and nothing else. Written wider than that, it is an escalation. A box
+   never reaches this policy: inside its user namespace `sudo` has nothing to escalate to, which is
+   why the in-box shim is a message rather than a boundary.
+
+   ### What the split actually buys — and what it does not
+
+   Honest accounting, because an earlier draft credited the uid split with things the **mount cover**
+   (requirement 2) provides on its own:
+
+   | threat | closed by |
+   |---|---|
+   | a box reads skein's credentials, token or state | **the cover** |
+   | a box impersonates skein to the warden | **the cover** (a secret it cannot read) |
+   | a box writes skein's declared state | **the cover** |
+   | a box signals or kills skein | **the uid split** |
+   | a box that defeats its mount namespace is skein's peer | **the uid split** |
+
+   So the cover carries most of the value and is cheap; the split is defence in depth and costs a
+   `sudo` hop per crossing plus a sudoers policy. **Do the cover first.** If the split slips, what
+   remains exposed is a denial of service against the control plane — which a supervisor restarts —
+   rather than a disclosure.
+
+   **Per-box uids are the stronger form and cost nothing extra here**: `sudo -u` works the same
+   against a range, and it separates boxes from *each other* by uid, which §9.2 shows is the open
+   axis. It needs uid allocation and a sudoers range rather than a single target.
 
 2. **The cover is an inversion, not an enumeration.** `tmpfs` the whole of the state root and bind
    back the short list a box needs — which is what `box-session.sh:943-956` already does for the
