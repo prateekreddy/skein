@@ -82,8 +82,16 @@ writing.
 > **An edge-triggered latch with incomplete edge coverage cannot recover. A state nobody clears is
 > shown forever.**
 
-Therefore: **no displayed state may rest on an edge alone.** Edges may only *accelerate* a level
-signal — arriving sooner than the next poll — never be its sole basis. And the keying rule is its
+Therefore: **no displayed state may rest on an edge alone *without saying so*.**
+
+The absolute form was wrong and the shipped code is right. `fuse_status` has four rules and three
+display an edge with no level behind it: no level observation at all, an unrecognised screen, and a
+newer edge carrying an outcome. Each is correct — showing nothing would be worse, and the third is
+the fresher observation winning. What makes it honest is **provenance, rendered**: `hooks only`,
+`screen lost`, `screen unread`. A runtime with no screen grammar runs on edges by design, and the
+display says so. The law is about disclosure, not grounding.
+
+And the keying rule is its
 own bug: turn state keyed by box but written by session let any helper process overwrite the agent's
 state, producing seventeen spurious `ended` events in 114 seconds.
 
@@ -116,9 +124,18 @@ failure modes:
 | `file` | the volume, and paths visible in the fleet |
 | `http` | GitHub, and the warden |
 
-Each carries three modes, because "execute" does not cover what the jobs need: **`exec`** (capture
-output), **`stream`** (stdin or stdout as bytes, up to gigabytes, never buffered whole), **`pty`** (a
-terminal).
+Each carries the modes it can support — **not** a 4×3 matrix, because `http`×pty and `file`×pty are
+meaningless and asserting a clean product invites someone to implement the empty cells:
+
+| | exec | stream | pty |
+|---|---|---|---|
+| `enter` | ✓ | ✓ | ✓ |
+| `socket` | ✓ | | ✓ |
+| `file` | | ✓ | |
+| `http` | ✓ | ✓ | |
+
+`stream` exists because "execute" does not cover stdin or stdout as bytes, up to gigabytes, never
+buffered whole.
 
 Source exists as a primitive because the first draft promoted `enter` to one and that was wrong twice
 over. The cheapest and most-used signal in the whole system reaches a box **by socket, without
@@ -150,6 +167,17 @@ first draft threw that knowledge away.
 **A lease distinguishes owed from in flight.** Creating a fleet takes minutes, during which its check
 fails; without a lease a reconciler fires it repeatedly.
 
+**The failure model, which an earlier draft left to be invented twice:**
+
+- **partial progress** is a lease heartbeat from the doer, never inferred from the check.
+- **check passes but the doer errored** → the operation is satisfied; the error is recorded and shown
+  once. The world is what the check says, not what the doer claims.
+- **stuck versus slow** is the lease deadline — the most important distinction in this codebase,
+  since a slow daemon asked again is where the gate story begins.
+- **the lease lives in recorded state on the volume**, keyed by operation id, holding
+  `(holder, started_at, deadline, last_heartbeat)`. A dead holder's lease expires by deadline;
+  nothing else reclaims it.
+
 **`destructive` operations are never auto-driven**, even when a doer exists and the check is
 unsatisfied. Re-running a destroy is not "running it once".
 
@@ -172,10 +200,12 @@ knowledge is what makes an optimistic state clear correct.
 
 ### 2.6 The reconciliation cube
 
-Three axes, because the 2×2 of the first draft mishandled four common cases:
+Not a cube — `desired` is meaningful only when `declared = present`, so calling it an orthogonal
+axis would repeat the 2×2's error one dimension up. It is **`declared`, then `desired` where it
+applies, against `observed`**: eight meaningful combinations, not twenty-four.
 
 - **declared** ∈ `absent | present | deleted`
-- **desired** ∈ `running | stopped`
+- **desired** ∈ `running | stopped` — *only when declared is present*
 - **observed** ∈ `present | absent | unknown | failed(reason)`
 
 The cases the square got wrong, each of which is a real feature today:
@@ -186,6 +216,11 @@ The cases the square got wrong, each of which is a real feature today:
 | a box whose start failed | same cell, so retry forever | `observed = failed(reason)`, and the reason is shown |
 | a half-completed destroy | "foreign — never touch", so skein cannot clean up its own corpse | `declared = deleted` — a tombstone, and cleanup is owed |
 | sbx unreachable | "absent" | `observed = unknown` — report, drive nothing |
+
+Two the earlier list still missed: **declared present, desired stopped, observed present** — you
+stopped a box and something restarted it — is drift in the opposite direction and is owed a *stop*.
+And the tombstone needs retiring or it is immortal: `declared = deleted ∧ observed = absent` is
+complete, and the record goes with the box's directory.
 
 `failed(reason)` is how a start failure is displayed without violating §2.2: the reason is an edge,
 but the *cell* is a level signal, and the cell is what is rendered.
@@ -205,10 +240,24 @@ but the *cell* is a level signal, and the cell is what is rendered.
 | voice, notifications, the away digest | signal **transitions** — see below |
 | `doctor` | every operation's check, reported, including `unknown` |
 | onboarding, breakage, approval | failing checks with their recipes — three components, one language (§11.4) |
-| converse, answer, interrupt, upload, takeover | **Acts** |
+| converse, answer, interrupt | **Acts** |
+| upload | an Act **with an outcome channel** — see below |
+| takeover | *not* an Act: a privileged snapshot, then an Operation, then a paid signal, plus durable rollback state |
+| merging a pull request | an Operation, class `destructive` — Acts have no class, and this is the one destructive verb in the review surface |
 | launching a box | an Operation whose check is "the anchor is alive" |
 | foreign detection | `declared absent ∧ observed present` |
 | crash recovery | reconcile the DAG |
+
+**Acts need an outcome channel.** §2.5 called them "unacknowledged", and upload is the counter-example
+that matters: an empty piece mid-stream terminates the stream and silently truncates the file. An
+unacknowledged upload with a silent-truncation mode is the defect, not the design. So: an Act is
+non-idempotent and streaming, and it **reports what it did** — it simply has no `check`, which is a
+different thing from having no result.
+
+**This table is not the whole surface.** `docs/parity.md` lists roughly ninety capabilities; the rows
+here are the ones whose decomposition was in doubt. A row's absence is not a claim that a feature
+decomposes — it is a claim that nobody has argued it does not. The test in the preamble applies to
+any of them on demand.
 
 **Transitions need durable state that neither noun covers**, and the first draft had nowhere to put
 it. A transition requires the retained previous value per `(subject, signal)`, plus a watermark for
@@ -250,10 +299,18 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | `repos/<id>/mirror` — a bare git mirror | recorded |
 | `repos/<id>/store` — the shared `.claude` every box for that repo reads | recorded, many writers |
 | `grants/`, `substrate/` — git-write grants and approved packages | declared |
-| `audit/` — an append-only log of every approved privileged operation | recorded |
+| *(no `audit/` — see below)* | |
 
 `grants/` and `substrate/` are on the volume because they exist *precisely* to outlive the sandbox:
-lose them and every box re-asks for push access and for packages already approved.
+lose them and every box re-asks for push access and for packages already approved. Both are
+**requested** state (§2.1): a box writes the request, and the approved artifact is written elsewhere
+by the approving side.
+
+**The audit log is not on the volume.** It records warden approvals, and the volume is inside the
+fleet, writable by skein, which shares a sandbox with coding agents. A record of an approval must not
+live where the thing being audited can reach it — so it lives **on the host, written by the warden**.
+"Append-only" on a volume path would be unenforceable anyway: there is no `chattr +a` without
+`CAP_LINUX_IMMUTABLE`. (For reference, there is no audit log today at all.)
 
 **Not** on the volume: box checkouts (VM-local; measurably faster for build work and reclonable from
 the mirror), namespace anchors (a live pid, meaningless across a restart), caches and build output.
@@ -295,34 +352,79 @@ Two consequences to state rather than discover:
 
 ---
 
-## 7. The two privileged operations
+## 7. Privilege — two domains
 
-**create a fleet** and **destroy a fleet**. That is the whole list.
+Derived from `docs/inventory.md` §1, which counted call sites rather than operations. Two earlier
+drafts said "six operations", then "two", and both added "nothing in normal operation is privileged".
+That was false: it counted one domain and forgot the other.
 
-The first draft had six. Four collapsed once "repos are clones onto the volume" was actually applied:
+### 7.1 Host privilege — needs something outside the sandbox
 
-| was | became |
+| operation | today | after |
+|---|---|---|
+| create the fleet | `sbx create` | **warden** |
+| destroy the fleet | `sbx rm -f` | **warden** |
+| publish a port | `sbx ports --publish` | folds into create — §7.4 |
+| seed the fleet credential | `sbx secret set -g`, token on the argv | dissolves: a file write on the volume |
+
+**Two, after the two that dissolve.** This is the collapse an earlier draft claimed for everything;
+it is true here and only here.
+
+`sbx` is the substrate and is named deliberately, because its quirks are load-bearing: **there is no
+unpublish**, so a mapping outlives the sandbox and is still reported while refusing connections; and
+`sbx create` prompts before mounting host directories, which is why fleet creation carries a
+microVM-sized budget rather than an action timeout.
+
+### 7.2 Sandbox root — used constantly, in normal operation
+
+`grep -c "sudo " src/box-session.sh` → **21**. Three kinds:
+
+| kind | when |
 |---|---|
-| mount a repo | gone — it existed only for adopt-in-place and the mounted store parent |
-| publish the cockpit port | a parameter of create |
-| mount the durable volume | a parameter of create |
-| store the push credential | **not privileged** — on the volume it is a file write |
+| **resource ceilings** — create the box's cgroup, write `memory.max`/`high`/`pids.max`, move the session in | every box start; and every server start, healing every box |
+| **package installation** — `apt-get` | on approval, and replaying the approved manifest every server start |
+| **filesystem ownership** — create and chown the fleet root; `tar` a box out and back | fleet setup; resize |
 
-**resize is a composition**: destroy + create, carrying the delta. Not "nothing to copy" — the
-checkout is reclonable but its *uncommitted* work is not, so resize preserves unpushed commits, index
-and worktree patches, untracked files and deliberately-swept ignored files. That is small and fast,
-and it is what today's snapshot already does. Getting this wrong destroys a week of someone's work;
-the current code refuses rather than warns in four separate places, and that instinct is correct.
+**skein running as root inside the fleet sandbox (§9.5.1) supplies this whole domain directly.** Today
+these are reached by unprivileged processes through a `sudo` shim; as root they are ordinary calls,
+and the shim reverts to what it was always documented as — a message, not a boundary.
 
-**Nothing in normal operation is privileged.** Not commands in boxes, not terminals, not signals, not
-the review queue, not the cockpit, not storing credentials.
+### 7.3 Resize is a byte copy, and that was a decision
 
-One caveat the first draft got wrong: **package approval is not fleet lifecycle but does need root in
-the sandbox.** A box asks for `apt`/`npm`, its owner approves, and the approval is remembered in a
-manifest replayed into every future launch. It belongs to the fleet's own root, not the host's, and
-it is an approval system rather than a setting.
+`snapshot_box` — a git bundle plus two patches plus an ignored-file sweep — **has no production
+caller.** Real resize is `sudo tar` of the whole box tree and `tar -xf` back, which is why it demands
+1.2× the box size free before starting. `fleet.rs:3122` records the move away from reconstruction:
+*"the reconstruction is slower, less faithful, and it is where the fragility lives."*
 
----
+An earlier draft called resize "a composition carrying a small delta … what today's snapshot already
+does". It prescribed a regression and described it as the status quo. **Resize starts from the byte
+copy.** It is destroy + create around a `tar`, it is `destructive` (§2.4), and it needs a doer that
+can outlive skein (§7.5).
+
+Also unstated before: the fleet's **mount set is a function of registered repos**, so adding a repo
+after create makes its store unreachable and skein's own remedy is a rebuild. That is a third trigger
+for resize wearing another name — and it disappears once repos are clones on the volume (§6), which
+is a reason for §6 beyond the ones already given.
+
+### 7.4 Port publishing folds into create — conditionally
+
+Only because the cockpit is the sole port. Today publishing is a **recurring, self-healing host
+operation** (`ensure_fleet_agent_port` → `heal_fleet` on every server start), and it exists in that
+shape because sbx cannot unpublish, so a failed attempt is permanent. Host-side skein escapes it only
+by binding loopback.
+
+**If skein ever needs a second port in-fleet, it inherits that machinery whole, including the
+cannot-withdraw trap.** The fold is a consequence of the one-port decision, not an independent
+simplification.
+
+### 7.5 The two operations that terminate their own reconciler
+
+Create and destroy both kill skein — create because it does not exist yet, destroy because it will
+not afterwards. So **fleet lifecycle cannot live inside the fleet**, permanently. That is the
+warden's reason to exist (§8), and it is a boundary rather than a limitation.
+
+Package approval is different and must not be confused with it: it needs sandbox root, not host
+privilege, so the warden is not involved — but the *authority* question is real, and §8.4 answers it.
 
 ## 8. The host warden
 
@@ -348,7 +450,45 @@ rather than trusting the field. It must re-derive.
 A timeout on `destroy-fleet` means exactly "did it happen or not?". The first draft congratulated
 itself on deleting the transport-failure-versus-command-failure distinction; that distinction is a
 **safety property**, not redundancy, and moving to HTTP relocates the hazard rather than removing it.
-Operation ids, and the warden answers a repeated id with the original outcome.
+Operation ids, and the warden answers a repeated id with the original outcome — which means the
+warden has **durable state of its own**, on the host: an outcome store keyed by operation id, with a
+retention window (an id older than the window is answered "unknown", never re-executed). It is a
+module in §14 and a thing to back up, not an implementation detail.
+
+### 8.4 The approving side writes the artifact, not a flag
+
+§8.1's rule needs its sharper half, because the current code has the weaker one and a live defect to
+show for it.
+
+`substrate.rs:245` re-reads the whole request at install time and checks `state` and the *shape* of
+the package names — but `packages` comes from that same re-read, and the comment above it says the
+file "is writable by every box in the fleet". Approve `jq`, rewrite the file, get arbitrary names in
+a root `apt-get`. And the result is recorded into a manifest replayed as root on every fleet ensure,
+so one window buys permanent root execution.
+
+It is currently masked by a second defect: `/boxes/.skein` is read-only in every non-privileged box,
+so the request never lands at all — while the shim prints that it filed one. **Fixing either alone is
+worse than fixing neither.**
+
+> **Approval writes the approved artifact to a location only the approving side can write. The actor
+> reads only that. The requester's file is input, never state** (§2.1, *requested*).
+
+That covers the payload, not just the boolean — which is the difference between the rule as stated
+before and the rule that would have prevented this.
+
+Two more that follow, and neither is an implementation detail:
+
+- **the request channel and the approval channel are different paths.** The requester must be able to
+  write the first and unable to write the second. The read-only bind above is half of this by
+  accident; the other half was never built.
+- **an operation id is correlation, not content.** The warden must render **the resolved arguments it
+  will itself execute**, derived from its own parse — never display text the requester supplied.
+  Stated the other way round in an earlier draft, which made it an obstacle sold as a boundary.
+
+### 8.5 Flooding
+
+A compromised skein controls *what* is proposed and *when*. One outstanding request at a time, a rate
+limit, and the timeout §11.5 already names.
 
 ### 8.3 Capabilities are compiled
 
@@ -358,9 +498,13 @@ not configured — absent. A runtime check falls to a bug in the check; absent c
 Only the **doer** is removable. Recipes and checks live in skein, always compiled, never privileged —
 they are needed precisely when the doer is absent.
 
-Two capabilities, so the default build ships **create** and leaves **destroy** opt-in. A default that
-can do nothing makes first run worse, which is what the first draft's "default has no capabilities"
-did.
+Two capabilities, and the default build ships **both**. An earlier draft shipped only `create` — but
+resize is destroy + create (§7.3), so a create-only warden cannot resize, which is the commonest
+lifecycle operation after create, and cannot retire a tombstone (§2.6). Making `destroy` optional
+made `resize` optional by accident.
+
+What compile-time removal is *for* here is a warden built for a machine that should never destroy a
+fleet — a shared or long-lived host. That is a deliberate choice someone makes, not the default.
 
 The capability set is derived from what is linked, not read from config. But skein must not extend
 *trust* on the strength of an advertised list — a malicious endpoint advertises whatever makes skein
@@ -433,7 +577,17 @@ poisoning is the sharper one.
 
 > **A credential never wins on freshness it asserts about itself.**
 
-### 9.4 What moving skein inside costs
+### 9.4 What moving skein inside costs — and the cockpit port, answered here
+
+The single most important consequence of co-residence, stated where it arises rather than deferred:
+**the cockpit's HTTP port is reachable from every box, and there is nothing to be done about that** —
+one network namespace. This is not hypothetical. `apiauth.rs` documents the attack already happening
+against *host-side* skein: a box reached `host.docker.internal:7878/api/fleet/git-grants` and got a
+200, followed by a three-step defeat of the git gate. In-fleet, that host becomes `localhost`.
+
+The answer is not to hide the port. It is that **connecting is not authenticating**: the bearer token
+is a root-owned file under the volume's mount cover (§9.5.2, §9.5.3), so a box can open the socket
+and get nothing. The mechanism already exists — it was built *because* of that incident.
 
 Relative to host-side skein, co-residence gives a box: the ability to signal or kill skein (shared
 PID namespace, same uid); network reach to skein's own API; reach to the warden over the gateway,
@@ -508,6 +662,7 @@ Cost is **not one number**. Five budgets, each with its own unit and its own enf
 | GitHub | API units | 403 with a reset time, not a slowdown |
 | model | dollars | AI summaries, narrate, the resume safety gate |
 | volume I/O | writes/s | mounted writes are expensive; the observer shapes its writes for this |
+| delivery | boxes × transitions × clients | the event stream — §10.1 |
 
 Correcting the first draft: in-fleet mode does **not** make observation cheaper, because host cost was
 already zero by design. What it does is put skein's web server, SSE fan-out, git operations and
@@ -515,9 +670,17 @@ GitHub polling **inside the fleet's memory reservation** — the reservation who
 reason the one-VM design exists. Every byte skein takes is a byte a box cannot have. That is the real
 cost and nobody had costed it.
 
-**Delivery cost is a budget too.** The event stream today re-sends every box every two seconds with no
-deltas, no bounded channel, no lag counter and no connection cap. It scales as boxes × transitions ×
-clients and belongs in the table.
+### 10.1 Delivery, and what the design owes it
+
+The event stream today re-sends the whole fleet every two seconds: no deltas, no bounded channel, no
+lag counter, no connection cap, and a missed-tick policy that bursts at a drained slow client. The
+diagnosis is easy and an earlier draft stopped there. The design:
+
+- **transitions, not snapshots.** §3 already requires server-side transitions; the stream carries
+  them, and a full snapshot only on connect or on request.
+- **a bounded per-client channel with a lag counter.** On overflow the client is told it fell behind
+  and re-syncs from a snapshot — never silently skipped.
+- **a connection cap**, as the PTY path already has.
 
 ---
 
