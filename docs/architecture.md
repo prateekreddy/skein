@@ -361,89 +361,129 @@ offer a button. Advertisement decides what skein *offers*; it never decides what
 
 ## 9. The trust model
 
-The first draft asserted that a namespace escape was "the only way through". That is false, and the
-correction is the most important change in this revision.
+Rewritten twice. The first draft asserted a namespace escape was "the only way through", which was
+false. The second draft over-corrected: it named the tmux socket as a box-to-box code path, and the
+source had already closed that. Both errors came from reading the `bwrap` exec without reading the
+isolation block eighty lines above it.
 
 ### 9.1 What a box actually shares
 
-Verified in `src/box-session.sh:1206-1214`. A box is isolated by **two** namespaces — mount and user.
-It **shares** with every other box and with anything else in the sandbox:
+A box is isolated by **two** namespaces — mount and user (`src/box-session.sh:1210-1214`). It
+**shares** with everything else in the sandbox:
 
-- **network** — no `--unshare-net`. Any localhost port in the sandbox is reachable from every box.
-- **PID** — no `--unshare-pid`, and deliberately: *"the pid recorded below has to be the pid skein
-  sees from outside, or nsenter has nothing to anchor on."*
-- **IPC, UTS, cgroup**, and `/sys/fs/cgroup` is writable.
-- **uid** — every box is uid 1000, as is everything else.
+- **network** — no `--unshare-net`. Any port bound in the sandbox is reachable from every box.
+- **PID** — no `--unshare-pid`, deliberately: *"the pid recorded below has to be the pid skein sees
+  from outside, or nsenter has nothing to address."*
+- **IPC, UTS, cgroup**, and **uid** — every box is uid 1000.
 
-And one thing that is not a hole but an addressing scheme: **a box's tmux socket sits outside its
-private mounts by design**, so skein can list, attach and kill without entering. Since every box sees
-`/boxes/*` read-write as uid 1000, **any box can run code in any other box** via that socket. The
-launcher says so plainly: *"Other boxes here are not a security boundary."*
+**Files, however, are covered** (`src/box-session.sh:943-956`, and asserted by
+`tests/git_write_request.rs`). A `--tmpfs` goes over the fleet root and over the box-state parent,
+then only *this* box's root and state are bound back, with `.skein` read-only. So one box cannot read
+another's checkout, conversation or tokens — and cannot reach another's tmux socket, which lives
+under the covered root.
 
-> **The security boundary is the fleet sandbox. Boxes are isolated from each other's files, not from
-> each other.**
+**That cover list is an enumeration, and it must grow with every new shared path.** It covers exactly
+two parents today. It does not cover `/run`, and the launcher itself records that
+`/run/user/1000/cc-socks/` is box-visible.
 
-### 9.2 What moving skein inside costs
+### 9.2 The three real box-to-box paths
 
-Stated because it must not be discovered later. Relative to host-side skein, co-residence gives a box:
+Named because §9.1's cover makes the *file* axis safe and it is easy to stop there.
 
-- the ability to **signal or kill skein** (shared PID namespace, same uid)
-- **network reach to skein's own API** (shared netns) — a mount boundary protects files, not ports
-- **reach to the warden over the gateway**, indistinguishable from skein by address or uid
-- **credentials inside the blast radius**, since they move onto the volume
+**1 — Shared writable toolchains.** `share_paths=(".local" ".cargo" ".rustup" ".npm")`
+(`src/box-session.sh:465`) are bound read-write from the sandbox's real `$HOME` into every box, so
+boxes share one toolchain and one build cache. **`~/.local/bin/claude` is the agent binary every
+other box executes on next start.** Any box can overwrite it. This is stronger than any socket path:
+it is persistent, it survives restarts, and it needs no live target.
 
-### 9.3 What hardening co-residence requires
+> **No shared writable path may contain anything another box executes.**
 
-Chosen over moving skein back out, because that would give back the reason for doing this. These are
-requirements, and each is a project rather than a paragraph:
+**2 — Cross-box agent messaging, by design.** `~/.claude/sessions` is deliberately shared, the inbox
+sockets live in the sandbox-wide `/run/user/1000/cc-socks/`, and every box's settings are seeded with
+`crossSessionInbound: "accept"` so messages are delivered rather than held for approval. Every box is
+addressable by name. So any box can drive any other box's agent with text of its choosing. That is a
+feature, and it is also a trust fact: **control flows between boxes even though files do not.**
 
-1. **skein's control API is a root-owned filesystem socket, never a TCP port**, and the cockpit's
-   HTTP auth token is a root-owned file. Boxes may still *connect* to the cockpit port — shared netns
-   makes that unavoidable — but cannot authenticate. That mechanism already exists precisely because
-   a box once reached the host cockpit.
-2. **skein runs as root inside the fleet sandbox; boxes remain unprivileged.** This is the
-   privilege split, and it is done **first** — everything else here depends on it.
+**3 — The workshop box.** `SKEIN_BOX_PRIVILEGED=1` skips the entire isolation block and leaves the
+fleet-agent token readable — and that token runs a script as root at fleet scope. It is a per-box
+cockpit toggle, so **one switch grants a box fleet root**, reaching every other box's tokens,
+conversations and the credential helper.
 
-   Root *in the sandbox* is bounded by the VM: it is not root on the host, and boxes still cannot
-   sudo. It closes signal/kill (an unprivileged process cannot signal root), gives skein files
-   boxes cannot read regardless of mount view, and puts the cgroup plane out of reach (requirement
-   4) at no extra cost.
+> **The security boundary is the fleet sandbox. Inside it, boxes are separated by files but not by
+> control.**
 
-   It is chosen over per-box uid mapping because **the attach mechanism survives unchanged**. That
-   was the blocker: the tmux socket is `0700 uid 1000`, so skein on a neighbouring uid could not
-   open it, and the launcher had already rejected per-box uids for exactly that measured reason.
-   Root can open it, and root in the initial user namespace has CAP_SYS_ADMIN over descendant
-   namespaces, so `nsenter` needs no `newuidmap` — which is not installed, though `/etc/subuid` is
-   configured.
+### 9.3 Credential poisoning, not only theft
 
-   The cost, stated: a skein bug reachable from a box yields root in the sandbox rather than uid
-   1000. Small, because a skein compromise is already total — it holds the tokens and drives every
-   box.
+The agent login flows **both ways**: seeded down into each box, and flowed back up on refresh, with
+the winner chosen by `expiresAt` **read out of the file itself** (`better_login`, `merge_login`).
 
-   **Per-box subuid mapping is the second step, not the first.** It is strictly stronger, because it
-   isolates boxes *from each other* by uid rather than only from skein — but it needs the `uidmap`
-   package in the fleet image, an `unshare` + `newuidmap` sequence before bwrap (unprivileged bwrap
-   can map only its own uid), and it does not close the tmux socket path on its own.
-3. **The warden authenticates a caller skein can prove to be and a box cannot.** Requirement 2 is its
-   prerequisite and supplies it: a secret at `0600 root` inside the sandbox.
-4. **The cgroup control plane is outside every box's write reach.** Today a fleet-scoped box can
-   raise `memory.max`, defeating the ceilings §10 depends on.
-5. **The audit log is append-only and written by the approving side.**
+So a rogue box writes a credentials file with a far-future expiry and an attacker-chosen token. It
+wins the comparison, is copied up to the canonical copy, and **every box started afterwards seeds
+from it.** Self-asserted freshness, no signature, fleet-wide propagation. Theft is the obvious risk;
+poisoning is the sharper one.
 
-### 9.4 The agent's own credential cannot be scoped
+> **A credential never wins on freshness it asserts about itself.**
 
-GitHub tokens can be scoped per repo, short-lived, and revoked — that part is real and well built.
+### 9.4 What moving skein inside costs
 
-The agent's Claude/Codex OAuth login is different: it must be **inside the box** for the agent to run
-at all, it is seeded down into every box and flows back up on refresh, and it is the credential a
-rogue agent most wants. There is no scoping primitive for it from any provider.
+Relative to host-side skein, co-residence gives a box: the ability to signal or kill skein (shared
+PID namespace, same uid); network reach to skein's own API; reach to the warden over the gateway,
+indistinguishable from skein by address or uid; and credentials inside the blast radius.
 
-So it is carved out explicitly rather than covered by a claim that does not hold: **the agent login is
-fleet-shared and unscopable.** The only real defence is a proxy that injects it outside the box's
-reach, and that is unbuilt. Saying "boxes get scoped short-lived tokens" without this carve-out is an
-obstacle sold as a property.
+### 9.5 Requirements
 
----
+Independent unless stated. The privilege split (R1) is done first by decision, not because the others
+wait on it — an earlier draft claimed they did, and that was wrong.
+
+1. **skein runs as root inside the fleet sandbox; boxes remain unprivileged.** Root *in the sandbox*
+   is bounded by the VM: not root on the host, and boxes still cannot sudo. It closes signal/kill,
+   and gives skein files no box can read whatever the mount view.
+
+   Chosen over per-box uid mapping because **the attach mechanism survives unchanged** — the tmux
+   socket is `0700 uid 1000` and root can open it, where a neighbouring uid would need a shared group
+   and a `0770` socket. Root in the initial user namespace also has CAP_SYS_ADMIN over descendants,
+   so `nsenter` needs no `newuidmap`.
+
+   Per-box subuid mapping remains the stronger second step: it separates boxes from *each other* by
+   uid, which is the axis §9.2 shows is open.
+
+2. **The privileged subtrees of the volume are outside every box's mount view, and the cover list is
+   a tested enumeration.** Without this every box sees `credentials/`, `grants/` and `audit/`
+   read-write as uid 1000, and §5's `0700` means nothing under one fleet-wide uid. **A mount cover,
+   not a file mode, is what protects them.**
+3. **skein's control API is a root-owned filesystem socket under that cover, never a TCP port**, and
+   the cockpit's HTTP auth token is a root-owned file. Boxes may still *connect* to the cockpit port
+   — shared netns makes that unavoidable — and cannot authenticate.
+4. **No shared writable path contains an executable another box runs** (§9.2.1). Either the shared
+   toolchains become read-only with a per-box overlay for writes, or they stop being shared.
+5. **The warden authenticates with a secret under the cover of requirement 2.** A mount cover hides
+   it regardless of uid; cross-userns `/proc` access is already denied, so a box cannot lift it out of
+   skein's memory either.
+6. **The audit log is written by the warden, on the host, on a path no box's mount view includes.**
+   "Append-only" is unenforceable on a path a uid-1000 box can reach — there is no `chattr +a`
+   without `CAP_LINUX_IMMUTABLE`.
+7. **Credentials are compared on evidence skein controls, never on a field the file asserts** (§9.3).
+8. **The workshop toggle states what it grants.** It is fleet root, and it is the boundary's only
+   deliberate in-fleet escape hatch.
+
+Corrected from an earlier draft: the cgroup control plane is **not** box-writable. Every cgroup write
+in the launcher goes through `sudo` before `bwrap`, and the source is explicit that a write from
+inside a box "is not an option at all" — the userns maps only uid 1000 and cgroupfs is root-owned.
+
+### 9.6 The agent credential cannot be scoped
+
+GitHub tokens can be scoped per repo, short-lived and revoked — with one caveat that belongs beside
+the credit: `SKEIN_GIT_SCOPE=fleet` is an opt-out restoring the account-wide token *and* re-exposing
+the forwarded ssh-agent. And the guard is the token, never the shim: *"The shim is the message, not
+the boundary."*
+
+The agent's own OAuth login is different. It must be **inside the box** for the agent to run, and no
+provider offers a scoping primitive for it. So it is carved out rather than covered by a claim that
+does not hold: **the agent login is fleet-shared and unscopable.**
+
+Two defences exist and neither is built: a proxy that injects it outside the box's reach, and
+**per-box logins** — which the launcher already falls back to when `python3` is absent, so the path
+is not hypothetical.
 
 ## 10. Budgets
 
@@ -613,8 +653,9 @@ unsynchronised read-modify-write on the same declared state is today's silent la
 
 ## 15. Open
 
-- **Per-box subuid isolation** (§9.3.2, second step). Boxes are still isolated from each other only
-  by mount namespace and convention; the tmux socket remains a cross-box code path until this lands.
+- **Per-box subuid isolation** (§9.5.1, second step). Files are covered; control is not (§9.2).
+- **Whether cross-box agent messaging stays on by default.** It is seeded to `accept` in every box,
+  and it is the channel that carries control between boxes.
 - **The agent-credential proxy** (§9.4). Unbuilt, and the only real defence for the credential that
   matters most.
 - **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the warden's
