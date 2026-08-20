@@ -179,13 +179,18 @@ Removed in `8e38964`: `grep -c 'pub use' src/lib.rs` → **0**, and every refere
 weight on each edge (`tools/module-edges.tsv`, 266 rows, unchanged by the removal — none added, none
 gone).
 
-Two things it left, both still true of the code today:
+The crate root followed in `6e3944b`. `wc -l src/lib.rs` → **58**, and
+`grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**: what it held became `registry`,
+`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`. The
+recorded graph is now 417 edges over 26 modules.
 
-- The cycle: `place.rs:309` calls into `fleet`, and `fleet.rs:19` imports `place`.
-- `wc -l src/lib.rs` → **7443**, of which roughly 2,570 are implementation rather than tests. That is
-  registry parsing, `sbx ls` parsing, the kit and store assets, the probe scripts and hook merging,
-  handoff and box replacement — sitting in the crate root, reached as `crate::X`, a path that names
-  no module.
+One thing both left, still true of the code today: the cycle. `place.rs:309` calls into `fleet`, and
+`fleet.rs:19` imports `place`.
+
+Two rows in `tools/module-edges.tsv` still name `lib` as a consumer, and they are false positives,
+not residue — the tool counts bare names, `moduledocs` exports one called `modules`, and lib.rs's
+module doc uses the word twice. It is the clearest live example of why the CI check should read the
+imports rather than the words.
 
 ---
 

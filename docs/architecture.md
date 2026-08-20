@@ -1402,14 +1402,15 @@ every cross-module reference is a qualified `crate::<mod>::` path or an explicit
 `use crate::<mod>::…`. Check: `grep -c 'pub use' src/lib.rs` → **0**. The edge set is now readable
 straight off the imports; `tools/module-edges.py` counts the weight on each edge.
 
-Two things it did not fix, and both have their own row on the board:
+The catch-all went with it (`6e3944b`). `src/lib.rs` is now 58 lines, every one a module
+declaration or the doc that says why; the ~2,570 lines of implementation it held became `registry`,
+`sbx`, `board`, `kit`, `probes`, `digest`, `handoff`, `takeover`, `sharedhome` and `cockpit`. The
+graph is 417 edges over 26 modules where it was 266 with a `lib` node holding a quarter of the code.
+Check: `wc -l src/lib.rs`, and `grep -cE '^(pub )?(fn|struct|enum|impl) ' src/lib.rs` → **0**.
 
-- The `place → fleet` cycle is still there — `place.rs:309` reaches `fleet::recorded_agent_port`,
-  which §13a deletes outright, so it dissolves with the transport rather than needing its own
-  untangling.
-- `src/lib.rs` is still ~7,400 lines of implementation in the crate root, so a reference into it is
-  spelled `crate::X` and names nothing. Until that is split, the graph keeps a `lib` catch-all node
-  that no row of the table above corresponds to.
+One thing neither change fixed, and it has its own row on the board: the `place → fleet` cycle.
+`place.rs:309` reaches `fleet::recorded_agent_port`, which §13a deletes outright, so it dissolves
+with the transport rather than needing its own untangling.
 
 ## 15. Open
 

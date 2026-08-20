@@ -69,11 +69,11 @@ does. `doctor` becomes "every check, reported" with no UI change.
 modules with `pub use *`, so the module graph carried no information about real edges; and there is a
 live `place ↔ fleet` cycle.
 
-The façade is gone (`8e38964`) — that was the first task of this step rather than a tidy-up after it,
-and the graph is now readable off the imports. The cycle remains, and dissolves with the transport in
-step 4 rather than needing work of its own. What the façade removal exposed is a third obstacle on
-the same footing: `lib.rs` still holds ~2,570 lines of implementation in the crate root, so the graph
-keeps a catch-all node that no module row corresponds to.
+Both are dealt with except the cycle. The façade is gone (`8e38964`) — that was the first task of
+this step rather than a tidy-up after it — and the crate-root catch-all it exposed went with it
+(`6e3944b`): `src/lib.rs` is 58 lines of module declarations, and the ten modules its contents became
+are real nodes in a 417-edge graph. The cycle remains, and dissolves with the transport in step 4
+rather than needing work of its own.
 
 **3 — Build the warden, and route create/destroy through it from *host* skein.** Both callers
 exercised before anything moves — which was the whole argument for having a warden.
