@@ -10,8 +10,8 @@
 //! it retires skein's own past entries by shape rather than by wholesale replacement, and why every
 //! one of those rules has a test that would fail loudly rather than quietly overwrite someone.
 
-use crate::all_stores;
 use crate::kit::ensure_store;
+use crate::registry::all_stores;
 use crate::repos::{agent_for_box, load_repos};
 use crate::runtime::runtime_adapter;
 use crate::runtime::RUNTIME_ADAPTERS;

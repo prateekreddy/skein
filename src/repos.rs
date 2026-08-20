@@ -7,12 +7,13 @@
 
 use crate::config::*;
 use crate::kit::{ensure_kit, ensure_store};
+use crate::registry::registry_entry_for_box;
 use crate::runtime::*;
 use crate::sbx::lookup_dir;
 use crate::sbx::{fleet_boxes, git_branch_for};
 use crate::tracking::{load_connections, plane_project_id};
 use crate::util::*;
-use crate::{registry_entry_for_box, valid_name};
+use crate::valid_name;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;

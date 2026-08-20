@@ -6,11 +6,12 @@
 
 use crate::answer::Answer;
 use crate::config::*;
+use crate::registry::{locate_registry, store_for_box};
 use crate::sandbox::sbx_guest_output;
 use crate::sbx::lookup_dir;
 use crate::sbx::{box_liveness, Liveness};
 use crate::util::*;
-use crate::{locate_registry, store_for_box, valid_name};
+use crate::valid_name;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;

@@ -16,8 +16,9 @@
 
 use crate::fleet::fleet_liveness;
 use crate::place::shared_record;
+use crate::registry::registry_entry_for_box;
 use crate::util::{bounded_output, clip, output_with_timeout_why, Gate};
-use crate::{registry_entry_for_box, valid_name};
+use crate::valid_name;
 use std::env;
 use std::process::Command;
 use std::time::Duration;
@@ -378,8 +379,8 @@ pub fn lookup_dir(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::load_views;
     use crate::config::{load_config, save_config, Config};
-    use crate::load_views;
     use crate::place::{forget_place, record_place, PlaceRecord};
     use crate::repos::{Repo, REPOS_CACHE};
     use crate::takeover::replacement_name;

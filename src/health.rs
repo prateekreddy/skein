@@ -1,11 +1,12 @@
 //! Is skein's own environment sound? One report the cockpit and `skein doctor` both render, so a
 //! misconfiguration is diagnosed in one place rather than guessed at from a failure downstream.
 
+use crate::board::load_views;
+use crate::registry::load_registry;
 use crate::repos::load_repos;
 use crate::runtime::*;
 use crate::sbx::{fleet_boxes, fleet_degraded};
 use crate::util::*;
-use crate::{load_registry, load_views};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;

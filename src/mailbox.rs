@@ -3,10 +3,11 @@
 //! A file per message in the shared store, so delivery survives a restart on either side and
 //! neither box has to be running when the other writes.
 
+use crate::registry::parse_registry;
+use crate::registry::{all_stores, store_for_box};
 use crate::repos::load_repos;
 use crate::util::*;
-use crate::{all_stores, store_for_box};
-use crate::{parse_registry, Sandbox};
+use crate::Sandbox;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

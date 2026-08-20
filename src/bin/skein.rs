@@ -1,7 +1,7 @@
 //! skein — CLI surface over the fleet (status table + attach).
 //! The terminal-native client; `skein-server` is the web client. Both share `skein` (lib).
 
-use skein::load_registry;
+use skein::registry::load_registry;
 use std::env;
 use std::io::ErrorKind;
 use std::process::Command;
@@ -262,7 +262,7 @@ fn cmd_ls() -> Result<(), String> {
         eprintln!("skein: mailbox relay: {e}");
     }
     // Same sbx-sourced, "who-needs-me-first"-sorted fleet the web cockpit shows (sbx ∪ registry).
-    let views = skein::load_views()?;
+    let views = skein::board::load_views()?;
     if views.is_empty() {
         println!(
             "{DIM}the skein is empty — add a repo (skein add <url|path>) then launch a box{RESET}"
@@ -361,7 +361,7 @@ fn cmd_doctor() -> Result<(), String> {
             println!("{BAD} registry      {e}");
             println!(
                 "{DIM}              from {}{RESET}",
-                skein::registry_origin()
+                skein::registry::registry_origin()
             );
         }
     }

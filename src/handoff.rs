@@ -7,11 +7,12 @@
 
 use crate::diff::changed_files;
 use crate::digest::session_digest;
+use crate::registry::store_for_box;
 use crate::repos::agent_for_box;
 use crate::runtime::valid_runtime;
 use crate::signals::current_task;
 use crate::util::write_atomic;
-use crate::{store_for_box, valid_name};
+use crate::valid_name;
 use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
