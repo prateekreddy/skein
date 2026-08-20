@@ -29,7 +29,7 @@ different design rather than a later feature.
 
 ## 2. The primitives
 
-Five. Two nouns, one reach, two verbs.
+Five primitives. Two nouns, one reach, two verbs — and **State has four kinds**, not two.
 
 | | idempotent / self-healing | lossy / one-shot |
 |---|---|---|
@@ -50,6 +50,10 @@ Small, versioned, **sole writer**, guarded by a lock or an owning process.
 and **never in the same directory as the artifact it produces**. The package queue and the git-write
 queue are both this. Giving them no rules is the category error behind §8.4, and it has a live exploit
 today (below).
+
+**Artifact** — written by an approving or privileged side, **read** by an untrusted one. A box's git
+token is this: the box must read it, and must never be able to write it. Bound **read-only**; it is
+the output side of a *requested* decision, and conflating the two is what §9.5.8 exists to prevent.
 
 **Recorded** — what skein and the boxes write as they work. Conversations, transcripts, journals,
 hook logs, per-box status, mailbox messages. **Many writers by design** — every box writes these
@@ -271,7 +275,7 @@ but the *cell* is a level signal, and the cell is what is rendered.
 | understanding a change | those signals, ranked, with drill-down |
 | voice, notifications, the away digest | signal **transitions** — see below |
 | `doctor` | every operation's check, reported, including `unknown` |
-| onboarding, breakage, approval | failing checks with their recipes — three components, one language (§11.4) |
+| onboarding, breakage, approval | failing checks with their recipes — three components, one language (§11.5) |
 | converse, answer, interrupt | **Acts** |
 | upload | an Act **with an outcome channel** — see below |
 | takeover | *not* an Act: a privileged snapshot, then an Operation, then a paid signal, plus durable rollback state |
@@ -336,11 +340,9 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | `<queue>/approved` — the artifacts, and the replayed manifest | declared — written by the approving side, under the cover |
 | *(no `audit/` — see below)* | |
 
-`grants/` and `substrate/` are **requested** state (§2.1), and they are on the volume because they
-exist *precisely* to outlive the sandbox:
-lose them and every box re-asks for push access and for packages already approved. Both are
-**requested** state (§2.1): a box writes the request, and the approved artifact is written elsewhere
-by the approving side.
+The queues are on the volume because they exist *precisely* to outlive the sandbox:
+lose them and every box re-asks for push access and for packages already approved. The request is **requested** state and the approval is **declared** — written elsewhere, by the
+approving side (§8.4).
 
 **The audit log is not on the volume, and it must not record only the warden.** The volume is inside
 the fleet and writable by skein, which shares a sandbox with coding agents — so a record of an
@@ -361,7 +363,7 @@ the mirror), namespace anchors (a live pid, meaningless across a restart), cache
 The test for anything new: *if the fleet were destroyed right now, would losing this hurt?*
 
 **Reclamation.** `boxes/<name>/` is garbage-collected when a box is destroyed, along with its
-tombstone (§2.6); transcripts rotate (the audit log is not here to rotate — it is on the host);
+tombstone (§2.6); transcripts rotate;
 `repos/<id>/mirror` is repacked and pruned on a schedule; a
 resize archive left by a failed restore is retained deliberately and reported, never silently deleted.
 An earlier draft's whole policy was "transcripts and the audit log rotate" — and the audit log is not
@@ -427,7 +429,7 @@ microVM-sized budget rather than an action timeout.
 
 ### 7.2 Sandbox root — used constantly, in normal operation
 
-`grep -c "sudo " src/box-session.sh` → **21**. Three kinds:
+`grep -c "sudo " src/box-session.sh` → **21**; tree-wide, 63 lines across 8 files. Four kinds:
 
 | kind | when |
 |---|---|
@@ -759,8 +761,9 @@ indistinguishable from skein by address or uid; and credentials inside the blast
 
 ### 9.5 Requirements
 
-Independent unless stated. The privilege split (R1) is done first by decision, not because the others
-wait on it — an earlier draft claimed they did, and that was wrong.
+Independent unless stated, and **requirement 2 (the cover) is done before requirement 1 (the split)**
+— see the accounting under R1, and `docs/delivery.md` §3 step 4. An earlier draft ordered them the
+other way and a still earlier one claimed the rest waited on the split; neither was right.
 
 1. **skein runs as its own uid; boxes run as theirs; skein becomes a box to reach it.**
 
@@ -814,10 +817,31 @@ wait on it — an earlier draft claimed they did, and that was wrong.
    is a file read, not a crossing — so this is launch, attach, upload, diff and takeover, not the
    board.
 
-   And a **sudoers rule, which is now the boundary**: skein's uid may run *the launcher* and
-   *`nsenter`* as the box uids, and nothing else. Written wider than that, it is an escalation. A box
+   And a **sudoers rule, which is now the boundary**: skein's uid may run *the launcher*, *`nsenter`*
+   and *`tmux`* as the box uids, and nothing else. Written wider than that, it is an escalation. A box
    never reaches this policy: inside its user namespace `sudo` has nothing to escalate to, which is
    why the in-box shim is a message rather than a boundary.
+
+   **`tmux` is in that list because the `socket` Source is a crossing too**, and an earlier draft
+   missed it: a box's tmux socket is `0700` owned by the box, and §2.3 is explicit that the cheapest
+   signal reaches it *without* `nsenter`. So `has-session`, `attach`, `new-session` and `kill-server`
+   all become `sudo -u`.
+
+   **And liveness moves off the socket.** Today the board's liveness sweep opens every box's
+   `session.sock` each tick — which under the split would put the board on the crossing path. It does
+   not need to: §6 defines liveness as *the tmux server is alive*, and the anchor **is** that server,
+   so the level signal is a `/proc` read. Cheaper than the probe it replaces, and uid-independent.
+
+   There is a **second sudoers policy**, which the single-uid version did not need: the launcher's
+   cgroup prologue now runs as the box's uid, so each box uid needs its own narrow root grant for the
+   cgroup writes. And `nsenter` keeps `--preserve-credentials` (§2.3) — without it `setgroups` fails.
+
+   **Per-box uids are the stronger form and are *not* free**, contrary to an earlier draft. They
+   collide with two things this design keeps: the per-user socket directory that carries cross-box
+   messaging (§9.2.2) is `0700` per uid, and the shared toolchains (§9.2.1) are owned by the single
+   uid today. They also need a uid allocation record — **declared state on the volume, and §5 must
+   list it** — a chown of every existing box tree at migration, and a decision about the uid a box
+   sees *inside* its own namespace, which is 1000 today.
 
    ### What the split actually buys — and what it does not
 
@@ -863,9 +887,13 @@ wait on it — an earlier draft claimed they did, and that was wrong.
    token readable, and that token runs scripts as root at fleet scope. `git-scope` is the same shape
    — write `fleet` and keep the account-wide token and the forwarded ssh-agent.
 
-   > **`boxes/<name>/` splits into `declared/` and `recorded/`, and only `recorded/` is bound in.**
-3. **skein's control API is a root-owned filesystem socket under that cover, never a TCP port**, and
-   the cockpit's HTTP auth token is a root-owned file. Boxes may still *connect* to the cockpit port
+   > **`boxes/<name>/` splits four ways** — `declared/` (never bound in), `recorded/` (bound
+   > read-write), `artifacts/` (bound **read-only**) and `transitions` (recorded). Only binding
+   > `recorded/` would remove git push, since the box's credential helper reads its own token out of
+   > `artifacts/git-tokens/`.
+3. **skein's control API is a filesystem socket under that cover, owned by skein's uid, never a TCP
+   port**, and the cockpit's HTTP auth token is a file with the same ownership. (An earlier draft said
+   *root-owned*; skein is not root — R1.) Boxes may still *connect* to the cockpit port
    — shared netns makes that unavoidable — and cannot authenticate.
 4. **No shared writable path contains an executable another box runs** (§9.2.1). Either the shared
    toolchains become read-only with a per-box overlay for writes, or they stop being shared.
@@ -891,18 +919,18 @@ wait on it — an earlier draft claimed they did, and that was wrong.
      and `chown`, and restored with root `tar -x` **preserving owners and modes**. Its name is a
      second-resolution timestamp, so it is pre-plantable as a symlink. A root actor writing through a
      path a box controls is the same class as the approval TOCTOU.
-   - **`git-tokens/`** is host-*written* and box-*read* — an **approved artifact** (§2.1), which is a
-     third category the declared/recorded split has no slot for. It is bound **read-only**.
+   - **`git-tokens/`** is host-*written* and box-*read* — an **artifact** (§2.1's fourth kind). It is
+     bound **read-only**.
    - **`disk` and `identity`** join `privileged` and `git-scope` as declared per-box files in a
      box-writable directory: a box raises its own disk allowance on a shared disk, or forges its
      committer.
 
 9. **The workshop toggle states what it grants.** It is fleet root, and it is the boundary's only
    deliberate in-fleet escape hatch.
-9. **Cross-box messaging renders provenance** (§9.2.2, kept). At minimum, inbound-from-a-box is
+10. **Cross-box messaging renders provenance** (§9.2.2, kept). At minimum, inbound-from-a-box is
    distinguishable from inbound-from-you — otherwise the one channel that carries control between
    boxes is also the one with no attribution.
-10. **`/run` is covered, or its exposure is stated.** §9.1 notes the cover reaches neither `/run` nor
+11. **`/run` is covered, or its exposure is stated.** §9.1 notes the cover reaches neither `/run` nor
    the per-user socket directory, and no requirement followed.
 
 Corrected from an earlier draft: the cgroup control plane is **not** box-writable. Every cgroup write
@@ -1097,7 +1125,8 @@ Each is a specific way this codebase has previously accumulated debt.
    fact", which is false for most of the volume.
 2. **No dual code paths to the same outcome.**
 3. **Every Operation is idempotent, or marked `destructive` and never auto-driven.**
-4. **No displayed state from an edge alone.**
+4. **No displayed state from an edge alone *without saying so*** (§2.2 — the absolute form was wrong
+   and the shipped code is right).
 5. **Every signal is keyed by its subject, not its observer.**
 6. **Every signal declares its budget, its cadence and its staleness threshold.**
 7. **Everything a human might do by hand has a printable recipe.**
@@ -1232,7 +1261,7 @@ first task of extraction, not a tidy-up afterwards.
 - **Narrowing the workshop box** (§9.2.3). Kept as-is for now; whether developing skein needs *full*
   fleet root, or a named set of capabilities, is a smaller-blast-radius question worth revisiting once
   the privilege split lands.
-- **The agent-credential proxy** (§9.4). Unbuilt, and the only real defence for the credential that
+- **The agent-credential proxy** (§9.6). Unbuilt, and the only real defence for the credential that
   matters most.
 - **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the warden's
   addressing both assume one.

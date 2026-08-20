@@ -44,10 +44,11 @@ distinct call sites:
 | **every box start** | create the box's cgroup, enable `+memory +pids` | `box-session.sh:86-87, 860-862` |
 | **every box start** | write `memory.max`, `memory.high`, `pids.max` | `:871-873` |
 | **every box start** | move the session into its cgroup | `:877` |
-| **every server start** | write cgroup ceilings for every box — through `heal_fleet` and the launcher's ceilings path, a *different* mechanism from the per-box writes above | `fleet.rs:904` |
+| **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet.rs:948` → `box-session.sh:990` |
+| cockpit "apply now" | write one box's ceilings with `sudo tee` | `fleet.rs:866-904` |
 | **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet.rs:1625-1628` |
 | **every box start** | create and chown the fleet root (one caller: `ensure_fleet`) | `fleet.rs:1876` |
-| fleet setup | write `/etc/docker/daemon.json` | `fleet.rs:1053` |
+| every box start **and** every server start | write `/etc/docker/daemon.json` (ensure *and* heal) | `fleet.rs:1053` |
 | **resize** | `tar` the whole box tree, and restore it | `fleet.rs:3171, 3205` |
 | **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs:226, 236-237` |
 | **every box destroy** | `rmdir` the box's cgroup | `sandbox.rs:526` |
@@ -221,7 +222,7 @@ been derived from:
 | `ensure_box_session` | box |
 | `ensure_kit`, `ensure_store`, `ensure_probe_all`, `ensure_probe_in` | filesystem |
 | `ensure_ssh_key`, `ensure_known_hosts`, `ensure_box_known_hosts`, `ensure_agent_token` | credentials |
-| `heal_fleet` | **sandbox root** (cgroup ceilings via `sudo tee`) |
+| `heal_fleet` | **sandbox root** (cgroup ceilings, by shelling the launcher's `--ceilings` path) |
 | `heal_transport` | host (port publishing) — deleted by the rewrite |
 
 Note `ensure_probe_all` deserves its own line in any design: it writes 19 scripts and merges hooks

@@ -86,8 +86,10 @@ own working checkouts, and skein runs `git -C <repo.work>` **on the host**.
 `sudo -u <box uid>` — for the launcher and for `nsenter` alike. Do not attempt this as "skein runs as
 root" (no user namespace is created at all) or as "skein runs as another uid" (every `setns` is
 EPERM); architecture §9.5.1 has the derivation. Budget the sudoers policy as the security-critical
-artifact it is, and one extra `exec` per crossing — launch, attach, upload, diff, takeover, none of
-which is on the per-tick path.
+artifact it is, and one extra `exec` per crossing. Crossings are launch, attach, upload, diff, takeover **and the
+tmux control operations** — the socket is a crossing too, and its sockets are `0700` per box. The
+board stays off that path only because liveness moves from probing each socket to reading the anchor
+pid, which §6 already licenses.
 
 If 4b slips, what remains exposed is a denial of service against the control plane, which the
 supervisor restarts. That is a materially different risk from what 4a closes, which is why they are
