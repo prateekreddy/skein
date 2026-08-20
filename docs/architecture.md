@@ -255,37 +255,81 @@ Doer sources, configurable **per operation**:
 trees, not terminals, not signals, not the review queue, not the cockpit. A skein that can perform
 none of the six still does its entire job, provided someone set the fleet up.
 
-### 8. The host sidecar
+## 8. The host sidecar
 
-A small host service exposing exactly those six operations. Reachable → doers exist. Unreachable →
-recipes and checks. Host-driven and in-fleet skein are therefore not two code paths: both call the
-sidecar, one over localhost and one over the sandbox gateway, so the in-fleet path is exercised by
-everyone rather than only by those who chose it.
+A small host service exposing privileged operations. Reachable → doers exist. Unreachable → recipes
+and checks. Host-driven and in-fleet skein are therefore not two code paths: both call the sidecar,
+one over localhost and one over the sandbox gateway, so the in-fleet path is exercised by everyone
+rather than only by those who chose it.
 
-#### 8.1 It is an approval channel, not an execution channel
+### 8.1 Capabilities are compiled, not configured
 
-A host service that creates sandboxes and mounts host directories, reachable from inside the fleet,
-would hand every process in that fleet the ability to mount `/` into a fresh sandbox and read the
-machine. skein shares the fleet with the boxes, and the boxes run coding agents.
+**Each capability is its own module, and a sidecar that does not need a capability is built without
+it.** Not disabled by a flag, not gated by a permission check — the code is not in the binary.
+
+This is the strongest form of the guarantee available:
+
+| defence | defeated by |
+|---|---|
+| a runtime permission check | a bug in the check, a path that forgets to call it, a confused deputy |
+| a config setting | anything that can write config |
+| **absent code** | nothing |
+
+A sidecar built without `destroy-fleet` cannot destroy a fleet through any bug, any injection, any
+mistake in an unrelated module, because there is no code path that ends in that call. The class of
+accident is removed rather than defended against.
+
+**What is removable and what is not.** Only the **doer** lives in a capability module. Recipes and
+checks live in skein, are always compiled, and are never privileged — they are needed *precisely
+when* the doer is absent. So a stripped sidecar degrades to "show the command and watch for the
+result", which is the ordinary path, not a failure.
+
+**The capability set is advertised, not declared.** At handshake the sidecar reports which
+capabilities it holds, and that list is *derived from what is linked* rather than read from a config
+— a configured list can be wrong, and a wrong one here means skein waits for a doer that does not
+exist. skein renders the difference directly: an operation with no doer shows its recipe, an
+operation with one shows an approval button. Same component (§8.3), different affordance.
+
+**The default build has no capabilities.** You opt in, explicitly, at build time. Onboarding does not
+need a sidecar at all — recipes and checks carry it — so nothing is lost by making the safe build the
+default one, and the list of what a given host's sidecar can do is then a fact someone chose rather
+than a default nobody read.
+
+**Capability modules are mutually independent.** No capability may reference another. That is what
+keeps the build matrix linear rather than exponential (§15) and what makes each one reviewable in
+isolation.
+
+**Where this principle stops.** Compile-time removal is for capabilities that **cross a trust
+boundary**. Applying it to ordinary features would produce 2^N build configurations, of which CI
+tests two, which is its own defect factory. The privileged operations qualify. Almost nothing else
+does.
+
+### 8.2 It is an approval channel, not an execution channel
+
+Even a compiled capability does not run unattended. A host service that creates sandboxes and mounts
+host directories, reachable from inside the fleet, would otherwise hand every process in that fleet
+the ability to mount `/` into a fresh sandbox and read the machine — and skein shares the fleet with
+the boxes, which run coding agents.
 
 So **the sidecar removes the copy-paste, not the human.** It receives a request, shows the exact
 command, and does nothing until a human approves. The precedent already works here: a box asks for a
 package through the sudo shim and its owner approves it in the cockpit.
 
+Two layers, and they fail independently: a capability that is not compiled cannot be invoked at all,
+and one that is compiled cannot be invoked without a person seeing what it will run.
+
 This also dissolves the doer/recipe distinction — the recipe is *always* what a human sees; the only
-question is whether approving it costs one click or a terminal window. Six rare, consequential
-operations is exactly where a human in the loop costs nothing and buys the entire boundary.
+question is whether approving it costs one click or a terminal window. Rare, consequential operations
+are exactly where a human in the loop costs nothing and buys the entire boundary.
 
-A pre-authorised allowlist can come later, narrowly, with the widening stated. Not in the first
-version.
+A pre-authorised allowlist can come later, narrowly, per capability, with the widening stated. Not in
+the first version.
 
-#### 8.2 Why this is also the UX
+### 8.3 Why this is also the UX
 
 The sidecar's approval card, the onboarding screen, and the "something is broken" screen are **the
-same component**: a failing check, its recipe, and a live indication of when it passes. Build it
-once, well.
-
----
+same component**: a failing check, its recipe, and a live indication of when it passes. The only
+variation is whether a doer exists to offer a button. Build it once, well.
 
 ## 9. The credential boundary
 
@@ -406,6 +450,8 @@ Stated as rules because each one is a specific way this codebase has previously 
 7. **Everything a human might have to do by hand has a printable recipe.**
 8. **A new feature is a composition of primitives — or it adds a primitive deliberately, and says
    so in this document.** Anything that is neither is the debt.
+9. **A capability that crosses a trust boundary is a module that can be left unbuilt** (§8.1), and
+   capability modules never reference one another.
 
 ---
 
@@ -421,6 +467,11 @@ Stated as rules because each one is a specific way this codebase has previously 
   paths because the only test that would have caught it needed a browser, and a browser cannot run
   in a box.
 - Browser tests cover the page, and nothing that could have been a pure function.
+- **The sidecar is built and tested three ways: empty, each capability alone, and all of them.**
+  That is `N + 2` builds rather than `2^N`, and it is sufficient *because* capability modules are
+  independent (§8.1) — which makes that rule a testability property, not only a security one. The
+  empty build is the one that must never be skipped: it is what most users should run, and it is the
+  one whose breakage nobody would notice.
 
 ---
 
