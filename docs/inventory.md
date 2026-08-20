@@ -87,8 +87,10 @@ Real resize is `sudo tar -cf` of the entire `/boxes/<name>` tree and `sudo tar -
 (`fleet.rs:3171, 3205`) — a root byte copy including `.git`, `node_modules`, `target`, the private
 HOME and `/tmp`, which is why it demands 1.2× the box size free before starting.
 
-`fleet.rs:3122` records the move away from the bundle-and-patches approach deliberately: *"the
-reconstruction is slower, less faithful, and it is where the fragility lives."*
+`fleet.rs:3126-3128` records the move away from the bundle-and-patches approach deliberately: *"the
+reconstruction is slower, less faithful, and it is where the fragility lives."* Note the scope —
+`:3123-3125` calls that approach *"the right shape for a migration"*. It was abandoned **for
+resize**, not abandoned.
 
 **The architecture prescribes returning to an abandoned mechanism and describes it as the status
 quo.** Whatever resize becomes, it starts from the byte copy, and the reasons for the byte copy are
@@ -146,8 +148,9 @@ artifact, and the installer reads only that** — never the requester's file.
 | rule | condition | result |
 |---|---|---|
 | 1 | no level observation at all | the edge alone |
-| 3 | edge is newer than the sample **and** is an outcome | the edge overrides the level |
+| 3 | edge is **more than a second** newer than the sample (`> level_ts + 1`, a deliberate tie-break) **and** is an outcome | the edge overrides the level |
 | 4 | `Screen::Unknown` | the edge alone |
+| 5 | screen is `Dead` **and** the edge is `done` | `done` — the edge wins *without* being newer, because a human-set outcome is not something a screen can contradict |
 
 The architecture says "no displayed state may rest on an edge alone". The code is **right** and the
 law is too absolute — rule 1 with nothing shown would be worse, and rule 3 is simply the fresher
