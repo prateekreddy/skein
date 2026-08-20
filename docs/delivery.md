@@ -100,6 +100,25 @@ If 4b slips, what remains exposed is a denial of service against the control pla
 supervisor restarts. That is a materially different risk from what 4a closes, which is why they are
 ordered rather than bundled.
 
+**4b′ — the rest of §9.5.** Eleven requirements exist and an earlier version of this page sequenced
+two. The other nine are the security backlog, and they are where a decomposition starts rather than
+where it discovers a hole:
+
+| requirement | shape of the work | notes |
+|---|---|---|
+| R3 control API on a covered socket | move the control plane off a TCP port | independent of 4b |
+| R4 no shared writable executable path | read-only toolchains with a per-box overlay | **user-visible** — one box's `cargo install` stops reaching the others, and the shared build cache goes. In `docs/parity.md` §7. |
+| R5 warden secret under the cover | falls out of 4a | |
+| R6 audit log, warden-written, host-side | new: the sink endpoint, and skein reporting into it | never compilable-out |
+| R7 credentials never win on self-asserted freshness | replace the expiry comparison | small, and it closes fleet-wide credential poisoning |
+| R8 no privileged actor follows a box-influenced path | the resize archive, `git-tokens/`, `disk`/`identity`, and the anchor | the largest of the nine; several distinct sites |
+| R9 workshop toggle states its terms | wording plus a per-start banner | already half-built |
+| R10 cross-box messaging renders provenance | inbound-from-a-box distinguishable from inbound-from-you | §9.2.2 is kept, so this is the mitigation |
+| R11 `/run` covered, or its exposure stated | decide which | the per-user socket directory is the live case |
+
+R5, R7 and R9 are small. R4 is a product decision as much as a security one. R8 is a cluster, not an
+item.
+
 **4c — the move**, with host-driven mode still working one environment variable away. This is where
 the six items in §2 get answered, with a fallback available while answering them.
 
