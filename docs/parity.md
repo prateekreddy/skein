@@ -284,8 +284,10 @@ was solving is handled by a lock on declared state instead.
 `~/.skein/repos` and `~/.skein/boxes` are bind-mounted into boxes while `~/.skein` itself is not —
 "checked, not assumed". A durable volume mounted whole into the fleet puts `credentials/`,
 `api-token`, `github-pats/` and `tokens/` inside every box's reach on the shared uid. The volume's
-privileged subtrees must stay outside every box's mount view, and that cover list is a tested
-enumeration.
+privileged subtrees must stay outside every box's mount view — as an **inversion derived per box**
+(tmpfs the state root, bind back what this box needs), not a list of things to hide
+(architecture §9.5.2). And the mount nothing currently covers is `~/.skein/repos`, which carries
+every repo's store and the host's own checkouts.
 
 **Foreign-sandbox *display* goes; the *state* does not.** The `foreign:` filter is removed above, but
 the architecture keeps `declared = deleted` as a first-class cell — a half-completed destroy is still
