@@ -1645,7 +1645,7 @@ async fn api_fleet_plan() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "sandbox": sandbox,
         "exists": exists,
-        "why": skein::fleet_failure(),
+        "why": skein::sbx::fleet_failure(),
         "host": host,
         "proposed": proposed,
     }))
@@ -2308,7 +2308,7 @@ async fn terminal_session(
             let _ = socket.send(Message::Text(format!("skein: {e}\r\n"))).await;
         }
     }
-    let dir = skein::lookup_dir(&name).unwrap_or_default();
+    let dir = skein::sbx::lookup_dir(&name).unwrap_or_default();
     // $SKEIN_SHELL_CMD overrides the shell command, $SKEIN_ATTACH_CMD the agent attach (both run via
     // `sh -c`, `{name}`/`{dir}` substituted). Default agent: reconnect to the box's tmux+`claude
     // --continue` session; default shell: `sbx exec -it <box> /bin/bash` — a plain terminal.

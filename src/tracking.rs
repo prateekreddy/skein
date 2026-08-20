@@ -10,8 +10,8 @@
 use crate::config::*;
 use crate::repos::{load_repos, repo_for_box, save_repos, Repo};
 use crate::sandbox::{guest_write, sbx_guest_output};
+use crate::sbx::{box_liveness, Liveness};
 use crate::util::*;
-use crate::{box_liveness, Liveness};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};

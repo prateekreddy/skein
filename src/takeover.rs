@@ -21,8 +21,10 @@ use crate::runtime::{
     TMUX_CONFIGURE,
 };
 use crate::sandbox::sbx_guest_output;
+use crate::sbx::fleet_boxes;
+use crate::sbx::lookup_dir;
 use crate::util::{bounded_output, expand_tilde, slug, write_atomic};
-use crate::{fleet_boxes, lookup_dir, valid_name};
+use crate::valid_name;
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::BTreeSet;

@@ -23,7 +23,7 @@ use skein::place::{forget_place, own_sandbox, place_of, record_place, shared_rec
 use skein::probes::ensure_probe_in;
 use skein::repos::{branch_of, save_repos, Repo};
 use skein::sandbox::stop_box;
-use skein::{fleet_boxes, Liveness};
+use skein::sbx::{fleet_boxes, Liveness};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

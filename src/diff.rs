@@ -7,8 +7,10 @@
 use crate::answer::Answer;
 use crate::config::*;
 use crate::sandbox::sbx_guest_output;
+use crate::sbx::lookup_dir;
+use crate::sbx::{box_liveness, Liveness};
 use crate::util::*;
-use crate::{box_liveness, locate_registry, lookup_dir, store_for_box, valid_name, Liveness};
+use crate::{locate_registry, store_for_box, valid_name};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;

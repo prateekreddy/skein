@@ -27,8 +27,9 @@ use crate::repos::{
     branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, remote_origin_url, repo_for_box,
     write_launch_spec_for_agent, Repo,
 };
+use crate::sbx::fleet_boxes;
 use crate::util::*;
-use crate::{fleet_boxes, valid_name};
+use crate::valid_name;
 use chrono::Utc;
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -959,18 +960,18 @@ pub fn heal_fleet() -> Result<(), String> {
     // stands in front of the launcher, the agent and the docker config alike, so a daemon too busy
     // to answer within `fleet_boxes`'s budget skips all three and reports nothing. That is the same
     // stall the in-sandbox agent exists to survive, deciding whether the agent gets installed.
-    let Some(boxes) = crate::fleet_boxes() else {
+    let Some(boxes) = crate::sbx::fleet_boxes() else {
         eprintln!(
             "skein: {}, so {sandbox} was not brought into line with this build — its launcher, \
              agent and docker config are whatever the last server left. They are repaired on the \
              next box start.",
-            crate::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
+            crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
         );
         return Ok(());
     };
     let awake = boxes
         .iter()
-        .any(|b| b.name == sandbox && b.live == Some(crate::Liveness::Running));
+        .any(|b| b.name == sandbox && b.live == Some(crate::sbx::Liveness::Running));
     if !awake {
         return Ok(());
     }
@@ -1372,7 +1373,7 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
         None => {
             return Err(format!(
                 "cannot tell whether the fleet sandbox exists: {}",
-                crate::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
+                crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
             ))
         }
     }
@@ -1464,9 +1465,9 @@ pub fn heal_transport() -> Option<String> {
     }
     // Only into a sandbox that is up. Creating or waking one is a box start's business — a watcher
     // that booted a fleet nobody had asked for would be a background task with an opinion.
-    let up = crate::fleet_boxes()?
+    let up = crate::sbx::fleet_boxes()?
         .iter()
-        .any(|b| b.name == sandbox && b.live == Some(crate::Liveness::Running));
+        .any(|b| b.name == sandbox && b.live == Some(crate::sbx::Liveness::Running));
     if !up {
         return None;
     }
@@ -3857,7 +3858,7 @@ pub fn absent_box_reason(name: &str) -> Option<String> {
     // Note what this does *not* guarantee: [`crate::util::Gate`] serves the last good snapshot while sbx is
     // failing, so this can be reading a stale list. Safe in the direction that matters — a box created
     // since the snapshot has a placement record, which is checked first.
-    let boxes = crate::fleet_boxes()?;
+    let boxes = crate::sbx::fleet_boxes()?;
     // A sandbox that exists and skein did not place: someone's own `sbx` box, or one made by a skein
     // old enough to give every box its own VM. Both are read-only as far as skein is concerned. It
     // used to attach to these, which worked by accident for the per-VM ones and was always a guess for
@@ -3939,7 +3940,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Micro-cache over the fleet's liveness sweep, for the same reason [`crate::fleet_boxes`] has one:
+/// Micro-cache over the fleet's liveness sweep, for the same reason [`crate::sbx::fleet_boxes`] has one:
 /// the board asks per box, and a refresh must not become one `sbx exec` per box per tick. A
 /// [`crate::util::Gate`] for the same reason too — see the note there — since this is the `sbx exec` skein
 /// runs most often, and the one that kept a slow daemon slow.

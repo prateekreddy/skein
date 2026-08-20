@@ -13,9 +13,10 @@ use crate::repos::{
     agent_for_box, branch_from_box, launch_spec, repo_for_box, write_launch_spec_for_agent, Repo,
 };
 use crate::runtime::*;
+use crate::sbx::{box_liveness, Liveness};
 use crate::tracking::sync_revoke_token;
 use crate::util::*;
-use crate::{box_liveness, locate_registry, parse_registry, store_for_box, valid_name, Liveness};
+use crate::{locate_registry, parse_registry, store_for_box, valid_name};
 use chrono::Utc;
 use std::env;
 use std::fs;

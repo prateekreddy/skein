@@ -10,9 +10,11 @@
 
 use crate::diff::{git_range, read_diffstat_file, DiffStat};
 use crate::repos::branch_of;
+use crate::sbx::box_liveness;
+use crate::sbx::lookup_dir;
 use crate::signals::{classify_message, current_status, session_signal, Pause};
 use crate::util::{bounded_output, keep_tail};
-use crate::{box_liveness, lookup_dir, registry_entry_for_box, store_for_box, valid_name, Sandbox};
+use crate::{registry_entry_for_box, store_for_box, valid_name, Sandbox};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;

@@ -557,7 +557,7 @@ fn cmd_doctor() -> Result<(), String> {
             ),
             None => println!(
                 "{BAD} sandbox       cannot tell if it exists — {}",
-                skein::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
+                skein::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".into())
             ),
         }
         let place = skein::place::own_sandbox(&fleet);
@@ -848,6 +848,6 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // the cgroup survive. Restart the session before addressing its namespace, or the first thing
     // the user sees is `nsenter: cannot open /proc/<pid>/ns/user`.
     skein::fleet::ensure_box_session(&attach_name)?;
-    let dir = skein::lookup_dir(&attach_name).unwrap_or_default();
+    let dir = skein::sbx::lookup_dir(&attach_name).unwrap_or_default();
     run_sbx(&skein::sandbox::attach_argv_as(&attach_name, &dir, &agent))
 }

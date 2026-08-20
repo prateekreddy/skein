@@ -8,8 +8,10 @@
 use crate::answer::Answer;
 use crate::place::place_of;
 use crate::sandbox::sbx_guest_output;
+use crate::sbx::lookup_dir;
+use crate::sbx::{box_liveness, Liveness};
 use crate::util::*;
-use crate::{box_liveness, lookup_dir, valid_name, Liveness};
+use crate::valid_name;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
