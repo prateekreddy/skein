@@ -218,6 +218,30 @@ idle*. It is **not** true that every library call is on a blocking-safe executor
 handlers still call synchronously. Stated as "every call", a rewrite would not know it has to decide
 per call, which is the actual requirement.
 
+### 5.1 Landmines the first pass missed
+
+- **Launcher/binary version skew can take the whole fleet down.** An unrecognised ceiling value must
+  be *skipped*, not evaluated: under `set -u`, arithmetic on a word aborts the shell. Measured — a
+  skein sending a new ceiling spelling to sandboxes still carrying the old launcher killed every box,
+  and because the launcher died before tmux, each reconnect reported a namespace error for a fleet
+  that actually needed a file copied. **This is a direct constraint on the warden protocol.**
+- **Half a cgroup ceiling is worse than none.** Both halves are read before either is written, because
+  a `high` with no `max` above it is the throttle-forever shape.
+- **Ceilings scale down to observed memory, never up** — the sandbox's memory is fixed at creation, so
+  editing it without rebuilding describes a VM that does not exist.
+- **`chmod` follows symlinks.** Setting permissions followed a box's `.claude` into the shared store
+  and left it world-readable. Same family as the credential chmod rule above.
+- **Pane files collided across the fleet** — every box's screen observer wrote one filename, so no box
+  had a fresh observation. Same shape as cgroup name reuse.
+- **The registry self-heals a stray leading brace**, seen in the wild and repaired on read.
+- **Terminal scrollback is carried over by hand on reconnect** — tmux repaints only the visible pane,
+  so without it a server restart wiped everything you had already read.
+
+Two corrections to the sweep entry above: the untracked sweep was **added to**, not replaced — both
+passes still run — and what makes the ignored pass safe is that it filters by **size, not names**
+(a hand-written list of build directories is wrong for the next language), writing refusals to a
+skipped-files report.
+
 ## 6. Underspecified — settle before two engineers build incompatible things
 
 - **Signal schema**: identity/key, value type, how cost is expressed, who enforces the budget, and
