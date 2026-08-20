@@ -48,8 +48,14 @@ and all of it is testable today.
 **3 — Build the warden, and route create/destroy through it from *host* skein.** Both callers
 exercised before anything moves — which was the whole argument for having a warden.
 
-**4 — Move skein into the fleet**, with host-driven mode still working one environment variable away.
-This is where the six items in §2 get answered, with a fallback available while answering them.
+**4 — The privilege split, then move skein into the fleet.** In that order, and the split is a gate
+rather than a follow-up: skein runs as root inside the fleet sandbox and boxes stay unprivileged
+(architecture §9.3.2). Until it lands, a box can signal the control plane, read its files and write
+the cgroup plane, so moving in first and hardening after would mean shipping a window in which every
+one of those is open.
+
+Then the move itself, with host-driven mode still working one environment variable away. This is
+where the six items in §2 get answered, with a fallback available while answering them.
 
 **5 — The cockpit.** Orthogonal, and it can start on day one: the API is a stable seam, so the new
 cockpit ships at `/v2` against the *existing* server and cuts over when `docs/parity.md` is
