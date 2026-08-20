@@ -14,9 +14,9 @@
 
 use skein::config::{load_config, save_config, Config};
 use skein::fleet::{
-    box_root, box_session_path, box_sock, box_state, clone_script, ensure_box_session,
-    fleet_liveness, forget_fleet_liveness, heal_fleet, install_launcher, provision_script,
-    read_anchor, resize_fleet, session_script, snapshot_box, start_box,
+    anchor_from_launch, box_root, box_session_path, box_sock, box_state, clone_script,
+    ensure_box_session, fleet_liveness, forget_fleet_liveness, heal_fleet, install_launcher,
+    provision_script, resize_fleet, session_script, snapshot_box, start_box,
 };
 use skein::kit::ensure_store;
 use skein::place::{forget_place, own_sandbox, place_of, record_place, shared_record, PlaceRecord};
@@ -180,7 +180,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
     );
 
     // ---- the session, and the anchor that outlives its launcher ----
-    place
+    let launched = place
         .exec(
             &session_script(
                 BOX,
@@ -190,10 +190,23 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             Duration::from_secs(60),
         )
         .expect("start the box");
-    let anchor = read_anchor(FLEET, BOX).expect("anchor pid");
+    // Read off the launcher's own stdout, never out of the box's tree. The pidfile there is bound
+    // read-write, so a box can put a sibling's server pid in it — and skein entering that would be
+    // executing in the sibling's namespace with the box's name on it.
+    let anchor = anchor_from_launch(&launched).expect("the launcher reports its anchor pid");
     assert!(
         Path::new(&format!("/proc/{anchor}")).exists(),
         "the launcher has exited by now; the anchor must be the tmux server, which has not"
+    );
+    // And it is the same process the box was told to write down — the file stays for the box's own
+    // use, so the two must agree while nobody is lying.
+    let claimed = fs::read_to_string(skein::fleet::box_pidfile(BOX))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    assert_eq!(
+        claimed,
+        anchor.to_string(),
+        "the launcher reported one pid and wrote another"
     );
 
     // ---- the ceiling that keeps one box from taking the fleet down ----
@@ -241,6 +254,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             home: std::env::var("HOME").unwrap_or_default(),
             tree: tree.clone(),
             sock: box_sock(BOX),
+            ..Default::default()
         },
     )
     .unwrap();

@@ -333,6 +333,7 @@ mod tests {
                 home: String::new(),
                 tree: "/boxes/web-main/tree".into(),
                 sock: "/boxes/web-main/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();

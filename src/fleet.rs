@@ -18,11 +18,11 @@
 use crate::config::skein_home;
 use crate::config::*;
 use crate::kit::KIT_STARTUP_SH;
+use crate::place::{anchor_probe, parse_anchor_probe, record_agent_port, recorded_agent_port};
 use crate::place::{
     fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
     Place, PlaceRecord,
 };
-use crate::place::{record_agent_port, recorded_agent_port};
 use crate::repos::agent_for_box;
 use crate::repos::{
     branch_of, is_git_url, is_ssh_url, launch_spec, load_repos, remote_origin_url, repo_for_box,
@@ -2823,17 +2823,28 @@ fn start_box_inner(
         eprintln!("skein: {name} has no write token yet — {problem}");
     }
 
+    let mut launched: Option<String> = None;
     if has_session {
         eprintln!("skein: {name} already has a live session; keeping it");
     } else {
         forget_turn_state(repo, name);
-        fleet.exec(
+        launched = Some(fleet.exec(
             &session_script(name, "skein-shell", agent_command),
             Duration::from_secs(120),
-        )?;
+        )?);
     }
 
-    let ns_pid = read_anchor(&sandbox, name)?;
+    // Two different questions, and reading the anchor unconditionally answered the wrong one on the
+    // adoption branch: there, no launcher ran, so "the launcher reports it" reached nothing and the
+    // only file left to read was the box's own — which the box writes.
+    let (ns_pid, generation, ns_start) = match &launched {
+        Some(out) => {
+            let pid = anchor_from_launch(out)?;
+            let (generation, start) = stamp_anchor(&sandbox, name, pid)?;
+            (pid, generation, start)
+        }
+        None => adopt_anchor(&sandbox, name)?,
+    };
     record_place(
         name,
         &PlaceRecord {
@@ -2842,6 +2853,8 @@ fn start_box_inner(
             home: sandbox_home(&fleet)?,
             tree: format!("{}/tree", box_root(name)),
             sock: box_sock(name),
+            generation,
+            ns_start,
         },
     )?;
 
@@ -3947,17 +3960,20 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     if let Err(e) = install_launcher(&record.sandbox) {
         eprintln!("skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there", record.sandbox);
     }
-    fleet.exec(
+    let out = fleet.exec(
         &session_script(name, "skein-shell", "exec bash -l"),
         Duration::from_secs(120),
     )?;
     // The anchor is a new process, so the old record addresses nothing. Re-record before anyone
     // tries to enter the namespace — that is the whole point of doing this here.
-    let ns_pid = read_anchor(&record.sandbox, name)?;
+    let ns_pid = anchor_from_launch(&out)?;
+    let (generation, ns_start) = stamp_anchor(&record.sandbox, name, ns_pid)?;
     record_place(
         name,
         &PlaceRecord {
             ns_pid,
+            generation,
+            ns_start,
             ..record.clone()
         },
     )?;
@@ -4123,17 +4139,157 @@ fn box_progress(fleet: &Place, name: &str, session: &str) -> Result<(bool, bool)
     Ok((out.starts_with('1'), out.ends_with('1')))
 }
 
-pub fn read_anchor(sandbox: &str, name: &str) -> Result<u32, String> {
-    let script = format!("cat {}", sh_quote(&box_pidfile(name)));
-    let out = own_sandbox(sandbox).exec(&script, Duration::from_secs(10))?;
-    out.trim()
-        .parse::<u32>()
-        .map_err(|_| format!("box {name} did not report an anchor pid"))
+/// What the launcher printed on stdout, or an error naming what it printed instead.
+///
+/// The marker rather than "the last line": the launcher runs a login shell inside the box, and a
+/// profile that echoes anything at all would otherwise become the pid skein enters.
+pub fn anchor_from_launch(out: &str) -> Result<u32, String> {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("SKEIN_ANCHOR "))
+        .next_back()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .ok_or_else(|| {
+            format!(
+                "the launcher did not report an anchor pid; it said: {}",
+                crate::util::clip(out.trim(), 300)
+            )
+        })
+}
+
+/// Ask the sandbox what `pid` is, and stamp it.
+///
+/// One `sbx exec` on the launch path, which is not a hot path — and it has to be a separate one
+/// from the launch itself, because the answer has to come from OUTSIDE every box namespace. A box
+/// holds `CAP_SYS_ADMIN` in its own user namespace and can mount over its view of `/proc`.
+fn stamp_anchor(sandbox: &str, name: &str, ns_pid: u32) -> Result<(String, u64), String> {
+    let out = own_sandbox(sandbox).exec(&anchor_probe(ns_pid), Duration::from_secs(10))?;
+    parse_anchor_probe(&out).ok_or_else(|| {
+        format!("the sandbox could not say what pid {ns_pid} is, so {name} has no usable address")
+    })
+}
+
+/// The anchor for a box whose session is already live, taken from what skein recorded and *checked*.
+///
+/// Never from the box. The pidfile under a box's own root is bound read-write, so a box can put a
+/// sibling's tmux server pid there — and this is the path where reading it would matter most,
+/// because no launcher runs here to report anything.
+///
+/// Refuses rather than guesses. A live session skein cannot address is a real state and a rare one
+/// (it means the record predates this check, or was lost), and the honest answer is a sentence
+/// naming the fix — not an address that might be another box.
+fn adopt_anchor(sandbox: &str, name: &str) -> Result<(u32, String, u64), String> {
+    let record = shared_record(name).ok_or_else(|| {
+        format!(
+            "{name} has a live session but no placement record, so skein has no address for it \
+             that did not come from the box; restart it with `skein restart {name}`"
+        )
+    })?;
+    let seen = stamp_anchor(sandbox, name, record.ns_pid)?;
+    anchor_matches(name, &record, &seen)?;
+    Ok((record.ns_pid, seen.0, seen.1))
+}
+
+/// Is the process at the recorded pid still the one skein recorded?
+///
+/// Pure, and separate from the reading, because this is the decision: every way of answering "no"
+/// means **the box is gone**, and none of them means "enter this instead". Getting that backwards
+/// is the whole vulnerability — a wrong address is not a degraded address, it is another box.
+fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Result<(), String> {
+    let restart = format!("restart it with `skein restart {name}`");
+    if record.generation.is_empty() || record.ns_start == 0 {
+        return Err(format!(
+            "{name}'s placement record predates the anchor check, so skein cannot prove the \
+             session it would enter is {name}'s; {restart}"
+        ));
+    }
+    if record.generation != seen.0 {
+        return Err(format!(
+            "{name}'s anchor belongs to an earlier boot of the sandbox, so that pid now names \
+             some other process; {restart}"
+        ));
+    }
+    if record.ns_start != seen.1 {
+        return Err(format!(
+            "{name}'s anchor pid has been reused by a different process since skein recorded it; \
+             {restart}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The anchor is whatever the launcher *marked*, not whatever it printed last.
+    ///
+    /// The launcher runs a login shell inside the box, so the box's own `.profile` gets to write to
+    /// that stream first. Taking the last line would let a box choose the pid skein enters by
+    /// echoing a number on login — the same confused deputy the pidfile gave it, through the
+    /// channel that replaced the pidfile.
+    #[test]
+    fn the_launcher_report_is_read_by_its_marker_and_not_by_position() {
+        assert_eq!(anchor_from_launch("SKEIN_ANCHOR 4242\n").unwrap(), 4242);
+        assert_eq!(
+            anchor_from_launch("welcome to your box\nSKEIN_ANCHOR 4242\n1234\n").unwrap(),
+            4242,
+            "a profile that prints a number after the report must not become the anchor"
+        );
+        let said = anchor_from_launch("1234\n").unwrap_err();
+        assert!(
+            said.contains("did not report") && said.contains("1234"),
+            "an unmarked stream is a failure that quotes what it saw: {said}"
+        );
+    }
+
+    /// Half an answer is no answer. Both halves are required, and a missing one must not read as a
+    /// match against a record that also has a missing one.
+    #[test]
+    fn an_anchor_probe_that_could_not_answer_is_not_an_identity() {
+        assert_eq!(
+            parse_anchor_probe("abc-123 987\n"),
+            Some(("abc-123".to_string(), 987))
+        );
+        assert_eq!(parse_anchor_probe(" 987\n"), None, "no boot id");
+        assert_eq!(parse_anchor_probe("abc-123 0\n"), None, "no start time");
+        assert_eq!(parse_anchor_probe("abc-123\n"), None, "one field");
+        assert_eq!(parse_anchor_probe(""), None);
+    }
+
+    /// Every way of failing to match means the box is GONE, and says which way.
+    ///
+    /// Never "enter this instead": a pid that no longer names what skein recorded names something
+    /// else in the same sandbox, and every other candidate is another box.
+    #[test]
+    fn an_anchor_that_does_not_match_is_a_dead_box_not_a_different_one() {
+        let good = PlaceRecord {
+            ns_pid: 42,
+            generation: "boot-a".into(),
+            ns_start: 900,
+            ..Default::default()
+        };
+        assert!(anchor_matches("web-main", &good, &("boot-a".into(), 900)).is_ok());
+
+        let cycled = anchor_matches("web-main", &good, &("boot-b".into(), 900)).unwrap_err();
+        assert!(cycled.contains("earlier boot"), "{cycled}");
+
+        let reused = anchor_matches("web-main", &good, &("boot-a".into(), 901)).unwrap_err();
+        assert!(reused.contains("reused"), "{reused}");
+
+        // A record from before the stamp existed cannot be checked, so it cannot be trusted — the
+        // upgrade path is a restart, not a shrug.
+        let old = PlaceRecord {
+            ns_pid: 42,
+            ..Default::default()
+        };
+        let said = anchor_matches("web-main", &old, &("boot-a".into(), 900)).unwrap_err();
+        assert!(said.contains("predates"), "{said}");
+        assert!(
+            said.contains("skein restart web-main"),
+            "every refusal names the fix: {said}"
+        );
+    }
+
     use crate::repos::save_repos;
     use crate::testutil::*;
 
@@ -5124,6 +5280,7 @@ b idle 5000000 1048576 4
                 home: "/home/agent".into(),
                 tree: "/boxes/placed-box/tree".into(),
                 sock: "/boxes/placed-box/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();

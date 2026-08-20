@@ -260,6 +260,7 @@ SANDBOX_VM_ID=demo-old-claude bash -c "$shell"
                 home: box_home.to_string_lossy().into_owned(),
                 tree: work.to_string_lossy().into_owned(),
                 sock: "/boxes/demo-old-claude/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();

@@ -1197,6 +1197,7 @@ mod tests {
                 home: "/home/agent".into(),
                 tree: "/boxes/thing-x/tree".into(),
                 sock: "/boxes/thing-x/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1251,6 +1252,7 @@ mod tests {
                 home: "/boxes/thing-x/home".into(),
                 tree: "/boxes/thing-x/tree".into(),
                 sock: "/boxes/thing-x/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1446,6 +1448,7 @@ mod tests {
                 home: "/boxes/thing-x/home".into(),
                 tree: "/boxes/thing-x/tree".into(),
                 sock: "/boxes/thing-x/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();

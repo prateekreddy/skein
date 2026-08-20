@@ -573,6 +573,7 @@ mod tests {
                 home: "/boxes/web-main/home".into(),
                 tree: "/boxes/web-main/tree".into(),
                 sock: "/boxes/web-main/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -602,6 +603,7 @@ mod tests {
                 home: "/boxes/web-main-codex/home".into(),
                 tree: "/boxes/web-main-codex/tree".into(),
                 sock: "/boxes/web-main-codex/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -656,6 +658,7 @@ mod tests {
                 home: "/boxes/demo-task/home".into(),
                 tree: "/boxes/demo-task/tree".into(),
                 sock: "/boxes/demo-task/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();

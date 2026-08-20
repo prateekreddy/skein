@@ -1263,13 +1263,23 @@ export SKEIN_BOX="$box"
 # mount) and then binds the box's private directories over the two paths that must not be shared.
 # No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has
 # nothing to address.
+# The binary that reports the anchor, resolved here and by absolute path.
+#
+# The line that reports it runs in a LOGIN shell inside the box, whose PATH includes
+# `~/.local/bin` — which is shared read-write with every box in the fleet (see the share list
+# above). So an unqualified `tmux` there is a binary any box can replace, and the pid skein
+# addresses this box by would be whatever that binary chose to print. Resolved out here instead,
+# against a PATH that names only root-owned directories, before any box's namespace exists.
+tmux_bin="$(PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v tmux || true)"
+[ -n "$tmux_bin" ] || { echo "skein: no tmux on the sandbox's own PATH, so this box has no session" >&2; exit 1; }
+
 exec bwrap \
   --dev-bind / / \
   --bind "$tmp" /tmp \
   "${binds[@]}" \
   -- \
   bash -lc '
-    session="$1"; sock="$2"; pidfile="$3"; tree="$4"; shift 4
+    tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; shift 5
     # $TMUX is inherited from whatever session started skein, and when it is set tmux takes the
     # socket path from it VERBATIM instead of computing one and creating its parent directory. That
     # path names the OUTER /tmp, which does not exist in this box private one, so the server fails
@@ -1279,12 +1289,23 @@ exec bwrap \
     # cd here rather than relying on bwrap --chdir: this is a LOGIN shell, and sourcing the
     # profile can move it. Observed doing exactly that — the box started at / instead of its tree.
     cd "$tree" || exit 1
-    tmux -S "$sock" new-session -d -s "$session" -- "$@" || exit 1
+    "$tmux_bin" -S "$sock" new-session -d -s "$session" -- "$@" || exit 1
     # The anchor. A namespace lives as long as some process is in it, and the tmux server
     # double-forks away from this shell — so the shell exits while the box keeps running, and its
     # pid would name a corpse. The server is the right anchor on its own terms: it is in the
     # namespace, it lives exactly as long as the box does, and skein already treats it as the box life.
     # Box alive <=> server alive <=> namespace joinable, and kill-server drops the last process in
     # the namespace, which frees it.
-    tmux -S "$sock" display -p "#{pid}" > "$pidfile"
-  ' bash "$session" "$sock" "$pidfile" "$tree" "$@"
+    #
+    # Reported on STDOUT, over the channel skein opened, and written to the pidfile only for the
+    # box to read. skein must never read that file: it lives under the box own root, which is bound
+    # read-write, so a box can put a SIBLING tmux server pid there — and the next provisioning,
+    # diff, upload or takeover skein runs for this box would run in that sibling namespace instead.
+    # A confused deputy walking straight through the file cover above.
+    #
+    # (No apostrophes and no single quotes in here: the whole block is one single-quoted argument
+    # to bash -lc, so either one ends it early. Caught by a box that tried to cd to its pidfile.)
+    anchor="$("$tmux_bin" -S "$sock" display -p "#{pid}")" || exit 1
+    printf "%s\n" "$anchor" > "$pidfile"
+    printf "SKEIN_ANCHOR %s\n" "$anchor"
+  ' bash "$tmux_bin" "$session" "$sock" "$pidfile" "$tree" "$@"

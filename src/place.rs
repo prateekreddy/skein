@@ -84,7 +84,7 @@ pub struct Place {
 ///
 /// A file rather than a lookup, because the namespace's anchor pid is knowable only to whoever
 /// launched it, and skein must be able to reach a box after a restart of its own.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlaceRecord {
     pub sandbox: String,
     /// The box's tmux server — see [`Where::Shared::ns_pid`] for why it is that process and not
@@ -94,6 +94,51 @@ pub struct PlaceRecord {
     pub tree: String,
     #[serde(default)]
     pub sock: String,
+    /// Which *boot of the sandbox* [`Self::ns_pid`] belongs to — its `boot_id`.
+    ///
+    /// A pid is only a name inside one boot. Cycling the sandbox resets the pid space, so every
+    /// anchor recorded before it names a different process afterwards, and entering one would put
+    /// skein in whatever now happens to hold that number. A *skein* restart does not do this, which
+    /// is the distinction that matters: the record has to outlive skein and must not outlive the
+    /// sandbox, and only a stamp can tell those two restarts apart.
+    ///
+    /// Empty in a record written before this existed. Treated as unverifiable, never as a match.
+    #[serde(default)]
+    pub generation: String,
+    /// Field 22 of `/proc/<ns_pid>/stat`, the process start time.
+    ///
+    /// Pids recycle *within* a boot, so the generation stamp alone is not enough. Together they are
+    /// an identity: generation guards the sandbox cycle, start time guards recycling inside one.
+    ///
+    /// Zero in a record written before this existed. Treated as unverifiable, never as a match.
+    #[serde(default)]
+    pub ns_start: u64,
+}
+
+/// The shell that reports what `pid` actually is right now: `<boot-id> <starttime>`.
+///
+/// Run in the SANDBOX, never inside a box: `/proc` is the sandbox's, and a box holds
+/// `CAP_SYS_ADMIN` in its own user namespace, so it can mount over its view of `/proc` and answer
+/// this question with whatever it likes.
+///
+/// The start time is cut after the last `) ` rather than taken as whitespace field 22, because the
+/// `comm` field is the process's own name in parentheses and may contain both spaces and
+/// parentheses — `awk '{print $22}'` is right until a program is called something awkward, and then
+/// it is silently off by however many spaces are in the name.
+pub(crate) fn anchor_probe(pid: u32) -> String {
+    format!(
+        "printf '%s %s\n' \
+         \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\" \
+         \"$(sed -n 's/.*) //p' /proc/{pid}/stat 2>/dev/null | cut -d' ' -f20)\""
+    )
+}
+
+/// Read what [`anchor_probe`] printed: `(generation, start)`, or `None` if either is missing.
+pub(crate) fn parse_anchor_probe(out: &str) -> Option<(String, u64)> {
+    let line = out.lines().rev().find(|l| !l.trim().is_empty())?;
+    let (generation, start) = line.trim().split_once(' ')?;
+    let start: u64 = start.trim().parse().ok()?;
+    (!generation.is_empty() && start > 0).then(|| (generation.to_string(), start))
 }
 
 fn place_record_path(name: &str) -> PathBuf {
@@ -1672,6 +1717,7 @@ mod tests {
                 home: "/boxes/a b/home".into(),
                 tree: "/boxes/a b/tree".into(),
                 sock: "/boxes/a b/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1713,6 +1759,7 @@ mod tests {
                 home: "/boxes/web-main/home".into(),
                 tree: "/boxes/web-main/tree".into(),
                 sock: "/boxes/web-main/session.sock".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1734,6 +1781,7 @@ mod tests {
                 home: "/h".into(),
                 tree: "/t".into(),
                 sock: "/s".into(),
+                ..Default::default()
             },
         )
         .unwrap();

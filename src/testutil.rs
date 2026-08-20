@@ -191,6 +191,7 @@ pub(crate) fn placed(name: &str) {
             home: format!("/boxes/{name}/home"),
             tree: format!("/boxes/{name}/tree"),
             sock: format!("/boxes/{name}/session.sock"),
+            ..Default::default()
         },
     )
     .unwrap();
