@@ -572,16 +572,23 @@ it is persistent, it survives restarts, and it needs no live target.
 
 > **No shared writable path may contain anything another box executes.**
 
-**2 — Cross-box agent messaging, by design.** `~/.claude/sessions` is deliberately shared, the inbox
+**2 — Cross-box agent messaging, by design — and kept.** `~/.claude/sessions` is deliberately shared, the inbox
 sockets live in the sandbox-wide `/run/user/1000/cc-socks/`, and every box's settings are seeded with
 `crossSessionInbound: "accept"` so messages are delivered rather than held for approval. Every box is
-addressable by name. So any box can drive any other box's agent with text of its choosing. That is a
-feature, and it is also a trust fact: **control flows between boxes even though files do not.**
+addressable by name. So any box can drive any other box's agent with text of its choosing.
+
+Decided: this **stays on**, because it is a real feature and boxes are already one trust domain — the
+change is that the architecture states it rather than implying files are the only axis of separation.
+**Control flows between boxes even though files do not.**
 
 **3 — The workshop box.** `SKEIN_BOX_PRIVILEGED=1` skips the entire isolation block and leaves the
 fleet-agent token readable — and that token runs a script as root at fleet scope. It is a per-box
 cockpit toggle, so **one switch grants a box fleet root**, reaching every other box's tokens,
 conversations and the credential helper.
+
+**Kept, deliberately** — it is how skein is developed, in a box that can see the fleet it belongs to.
+So it is the boundary's one intentional escape hatch, and §9.5.8 makes its terms explicit rather than
+leaving them to be discovered.
 
 > **The security boundary is the fleet sandbox. Inside it, boxes are separated by files but not by
 > control.**
@@ -756,6 +763,12 @@ Both are **signals whose subject is a module** (§2.2). No new machinery.
 
 The consequence for scope: the diff pane and its inline comment composer are not ported. Commenting
 back to an agent is an Act against a *box*, which the terminal already is.
+
+**The pull-request queue is kept whole** — decided — and that is consistent rather than in tension
+with the above. Its six actions (approve, request-changes, comment, **merge**, ask, draft) do not need
+skein to render a diff: what they need is to know *what the change is*, which is what this section
+supplies. So the loop is **skein tells you the shape, you act from skein, and the text is one click
+away on GitHub.** Merge is an Operation of class `destructive`, not an Act (§3).
 
 ### 11.2 One queue, many sources
 
@@ -955,8 +968,9 @@ first task of extraction, not a tidy-up afterwards.
 ## 15. Open
 
 - **Per-box subuid isolation** (§9.5.1, second step). Files are covered; control is not (§9.2).
-- **Whether cross-box agent messaging stays on by default.** It is seeded to `accept` in every box,
-  and it is the channel that carries control between boxes.
+- **Narrowing the workshop box** (§9.2.3). Kept as-is for now; whether developing skein needs *full*
+  fleet root, or a named set of capabilities, is a smaller-blast-radius question worth revisiting once
+  the privilege split lands.
 - **The agent-credential proxy** (§9.4). Unbuilt, and the only real defence for the credential that
   matters most.
 - **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the warden's
