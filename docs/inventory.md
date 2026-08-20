@@ -44,7 +44,7 @@ distinct call sites:
 | **every box start** | create the box's cgroup, enable `+memory +pids` | `box-session.sh:86-87, 860-862` |
 | **every box start** | write `memory.max`, `memory.high`, `pids.max` | `:871-873` |
 | **every box start** | move the session into its cgroup | `:877` |
-| **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet.rs:948` → `box-session.sh:990` |
+| **every server start** | write cgroup ceilings for every box — `heal_fleet` shells the launcher's `--ceilings` path, a *different* mechanism from the per-box writes above | `fleet.rs:948` → `box-session.sh:371-378` |
 | cockpit "apply now" | write one box's ceilings with `sudo tee` | `fleet.rs:866-904` |
 | **every box start** | replay the approved-package manifest as root (via `ensure_fleet`, not on server start) | `fleet.rs:1625-1628` |
 | **every box start** | create and chown the fleet root (one caller: `ensure_fleet`) | `fleet.rs:1876` |
@@ -117,8 +117,7 @@ fixtures as writers is the same class of error this document exists to stop.
 
 "Declared state has one writer" is a goal, not a description. And the split into *declared* and
 *recorded* is not exhaustive: the package queue and the git-write queue are **durable, written by an
-untrusted party (a box), and read by the approving side.** That is a third kind — call it
-**requested** — and giving it no rules is what produced the defect in §4.
+untrusted party (a box), and read by the approving side.** That is a distinct kind — **requested** — and giving it no rules is what produced the defect in §4.
 
 ---
 
@@ -254,8 +253,9 @@ what the codebase joins onto the root by name; treat it as a floor, not a census
 
 Three of these must **not** move to a durable volume unchanged:
 
-- **`places/`** holds live pids. The architecture explicitly excludes namespace anchors from the
-  volume, so relocating the root wholesale carries state the design forbids there.
+- **`places/`** holds the box anchors. These **are** volume state (architecture §5, §9.5.1) — but as
+  *declared* state under the cover, stamped with the sandbox generation, so a fleet rebuild discards
+  them wholesale rather than re-entering a recycled pid.
 - **`fleet-agent.token` / `fleet-agent.port`** are instance-scoped. The migration must re-mint them,
   not copy them, or "no machine-global secret" is untrue on day one.
 - **`repos/<id>/work`** is a working checkout, not a mirror. `diff.rs` and `moduledocs.rs` derive it

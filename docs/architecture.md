@@ -33,15 +33,15 @@ Five primitives. Two nouns, one reach, two verbs — and **State has four kinds*
 
 | | idempotent / self-healing | lossy / one-shot |
 |---|---|---|
-| **durable** | State: *declared* | State: *recorded* / *requested* |
+| **durable** | State: *declared* (sole writer, locked) · *artifact* (privileged-written, read-only to the reader) | State: *recorded* (many writers) · *requested* (untrusted writer, never authoritative) |
 | **observed** | Signal: *level* | Signal: *edge* |
 | **acting** | Operation | Act |
 | **reaching** | Source | |
 
 ### 2.1 State — what is written down
 
-Durable, on the volume (§5). Two kinds, with **different rules**, because treating them alike is a
-defect the first draft shipped:
+Durable, on the volume (§5). **Four kinds, with different rules** — treating them alike is a defect
+the first draft shipped, and each rule below is one the code had to learn:
 
 **Declared** — what the user told skein. Repo remotes, box identities, config, branch choices.
 Small, versioned, **sole writer**, guarded by a lock or an owning process.
@@ -332,14 +332,14 @@ outside the fleet, permanently, and that is a boundary rather than a limitation.
 | `credentials/` | declared — protected by the **mount cover**, not by a file mode (§9.5.2) |
 | `boxes/<name>/recorded/` — launch spec, conversation, transcript, notes | recorded |
 | `boxes/<name>/declared/` — `privileged`, `git-scope`, `disk`, `identity` | declared — **never bound into the box** (§9.5.2) |
-| `boxes/<name>/declared/anchor` — `(pid, starttime)` for the box's tmux server (§9.5.1) | declared |
+| `places/<name>` — the box's placement, incl. `(generation, pid, starttime)` (§9.5.1) | declared |
 | `uids` — the box-uid allocation, if per-box uids are in use (§9.5.1) | declared |
 | `boxes/<name>/artifacts/` — `git-tokens/` | approved artifact — bound **read-only** |
 | `boxes/<name>/transitions` — retained signal values and watermarks | recorded |
 | `repos/<id>/mirror` — a bare git mirror | recorded |
 | `repos/<id>/store` — the shared `.claude` every box for that repo reads | recorded, many writers |
 | `<queue>/requests/` — git-write and package requests | **requested** — box-writable, and the only box-writable thing under it |
-| `<queue>/approved` — the artifacts, and the replayed manifest | declared — written by the approving side, under the cover |
+| `<queue>/approved` — the artifacts, and the replayed manifest | declared — written by the approving side, owned by it, under the cover |
 | *(no `audit/` — see below)* | |
 
 The queues are on the volume because they exist *precisely* to outlive the sandbox:
@@ -360,7 +360,10 @@ live where the thing being audited can reach it — so it lives **on the host, w
 `CAP_LINUX_IMMUTABLE`. (For reference, there is no audit log today at all.)
 
 **Not** on the volume: box checkouts (VM-local; measurably faster for build work and reclonable from
-the mirror), namespace anchors (a live pid, meaningless across a restart), caches and build output.
+the mirror), caches and build output. **Not** the anchor: an earlier draft excluded "namespace
+anchors" here and that was wrong, by conflating two restarts — a **sandbox** cycle invalidates an
+anchor, a **skein** restart does not, and skein must still reach a running box afterwards. The anchor
+record is declared state under the cover, stamped with the sandbox generation (§9.5.1).
 
 The test for anything new: *if the fleet were destroyed right now, would losing this hurt?*
 
@@ -719,7 +722,7 @@ cockpit toggle, so **one switch grants a box fleet root**, reaching every other 
 conversations and the credential helper.
 
 **Kept, deliberately** — it is how skein is developed, in a box that can see the fleet it belongs to.
-So it is the boundary's one intentional escape hatch, and §9.5.8 makes its terms explicit rather than
+So it is the boundary's one intentional escape hatch, and §9.5.9 makes its terms explicit rather than
 leaving them to be discovered.
 
 > **The security boundary is the fleet sandbox. Inside it, boxes are separated by files but not by
@@ -750,8 +753,8 @@ is a file under the volume's mount cover (§9.5.2, §9.5.3), owned by skein's ui
 open the socket and get nothing. The mechanism already exists — it was built *because* of that
 incident, and it fails closed when the token cannot be read.
 
-That answers the box→skein direction and **only** that direction. Four things it does not cover, each
-of which needs a requirement rather than an inference:
+That answers the box→skein direction and **only** that direction. Five things it does not cover, each of
+which needs a requirement rather than an inference:
 
 - **the auth-off switch.** `SKEIN_NO_API_AUTH` voids all of this, and the server already prints that
   anything reaching the port drives the fleet, boxes included. It exists for a fleet whose owner has
@@ -817,6 +820,14 @@ other way and a still earlier one claimed the rest waited on the split; neither 
      caller, so an in-process `setns` from the threaded server is impossible regardless of
      credentials.
 
+   ### The objection this overturns
+
+   The launcher already argued against uid separation, and measured it: *"Separate uids were the
+   obvious answer and are the wrong one here, measured rather than assumed… a box running as its own
+   uid would leave the cockpit unable to attach to any box in the fleet."* That objection is correct
+   about a skein that stays itself. It is answered — not waved away — by skein *becoming* the box for
+   the crossing, which is what the next section is.
+
    ### The mechanism
 
    **Every crossing goes through `sudo -u <box uid>`.** skein does not enter a box *as skein*; it
@@ -874,17 +885,32 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    > and writes it to **stdout**; skein records it. The pidfile in the box's tree may remain for the
    > box's own use, and skein must never read it.
 
-   **And it must survive a skein restart, which the channel alone does not.** Boxes outlive skein, so
-   on reconnect the launcher is long gone. The anchor is therefore **declared state**, written by
-   skein at launch into `boxes/<name>/declared/anchor` — never bound into the box (§9.5.2) — and read
-   back from there.
+   Three consequences, each of which the channel alone does not give:
 
-   **A bare pid is not enough**, because pids recycle: a box that dies frees its anchor, and an
-   unrelated process may hold that number by the time skein reconnects. So the record is
-   **`(pid, starttime)`**, and every use re-reads the process's start time and compares. A mismatch
-   means *the box is gone* — never "enter this instead". That is the standard way to make a pid
-   reference unambiguous, and it is the difference between a stale anchor being a dead box and a stale
-   anchor being someone else's namespace.
+   **(a) Adoption must re-launch.** Today `start_box_inner` reads the anchor *unconditionally* —
+   including on the branch that keeps an already-live session, where **no launcher is spawned at
+   all**. "The launcher reports it" never reaches that path, so the confused deputy survives there.
+   Either skein re-launches rather than adopting, or it re-derives the anchor from something it owns.
+   Adopting a session and trusting the box's file for its address is the one thing that must not
+   happen.
+
+   **(b) It must survive a skein restart — and `places/` is where it already lives.** Boxes outlive
+   skein, so on reconnect the launcher is gone; the existing placement record exists for exactly this
+   reason. §5's "namespace anchors are not on the volume" was **wrong**, and it was wrong by
+   conflating two different restarts: a **sandbox** cycle invalidates an anchor, a **skein** restart
+   does not. So `places/` is **declared state under the cover** (§9.5.2), and it carries a
+   **sandbox-generation stamp** — a boot id — so that everything recorded before a sandbox cycle is
+   discarded rather than re-entered.
+
+   **(c) A bare pid is not an identity.** Pids recycle within a generation, so the record is
+   **`(pid, starttime)`** and every use re-reads the start time and compares. A mismatch means *the
+   box is gone* — never "enter this instead". Generation guards the sandbox cycle; start time guards
+   recycling inside one.
+
+   **And the report must come from a binary the box cannot shadow.** It is produced today by an
+   unqualified `tmux` inside a **login shell**, whose PATH includes `~/.local/bin` — which is shared
+   read-write with every box (§9.2.1). So the anchor's integrity would silently depend on R4. Invoke
+   it by **absolute path**, with a fixed PATH.
 
    This has to be settled before R1 is built, because every other part of R1 is downstream of an
    address it trusts.
@@ -894,21 +920,38 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    signal reaches it *without* `nsenter`. So `has-session`, `attach`, `new-session` and `kill-server`
    all become `sudo -u`.
 
+   **One more per-tick reader is uid-dependent, and it is not a crossing.** The disk sweep walks
+   every box tree every 30s, and each box's private HOME is `0700`. Under the split that walk runs as
+   skein over box-owned directories with errors suppressed, so it would **silently under-report**
+   rather than fail — and the code's own comment records that this silence "was invisible for a long
+   time because the row chip stays silent below 80%". Either the sweep runs per box as that box, or
+   boxes report their own usage. It must not stay a suppressed-error walk.
+
    **And liveness moves off the socket.** Today the board's liveness sweep opens every box's
    `session.sock` each tick — which under the split would put the board on the crossing path. It does
    not need to: §6 defines liveness as *the tmux server is alive*, and the anchor **is** that server,
    so the level signal is a `/proc` read. Cheaper than the probe it replaces, and uid-independent.
 
-   **The cgroup prologue does not become a second sudoers policy.** Under `sudo -u` the launcher runs
-   as the box's uid, so its `sudo` cgroup writes would need every box uid to hold root — which is the
-   opposite of the point. Instead **skein pre-creates the box's cgroup and writes its limits as
-   itself**, and the only thing left for the launcher is joining: it must write *its own* pid to
-   `cgroup.procs` so bwrap and tmux inherit membership. So **`cgroup.procs` alone is chowned to the
-   box uid — never the directory.** The control files stay root-owned, which is what keeps §9.5's
-   closing paragraph true: a box can add its own processes to its own cgroup, and cannot change what
-   that cgroup permits. And `nsenter` keeps `--preserve-credentials` (§2.3) — without it `setgroups` fails.
+   **The cgroup prologue moves to skein whole — and the launcher does not join at all.** Under
+   `sudo -u` the launcher runs as the box's uid, so its `sudo` cgroup writes would need every box uid
+   to hold root, which is the opposite of the point.
 
-   **Per-box uids are the stronger form and are *not* free**, contrary to an earlier draft. They
+   An earlier draft proposed chowning `cgroup.procs` to the box uid so the launcher could still join
+   itself. **That does not work**: cgroup-v2 delegation containment requires the writer to have write
+   access to the *common ancestor's* `cgroup.procs` as well as the destination's, and the ancestor is
+   root-owned. The observable result would be the launcher's existing `could-not-join-cgroup` path —
+   every box silently unbounded. Chowning the ancestor instead would let any box move processes
+   between box cgroups, which is worse than the problem.
+
+   **Membership is inherited across `fork`, `exec` and setuid**, so skein writes the pid of the shell
+   that is about to `exec sudo -u <box uid> <launcher>`, and the launcher, bwrap, tmux and the agent
+   all inherit it. No chown, no delegation, no second policy.
+
+   And the prologue moves **whole**: the fleet-scope work in it — the container cgroup and the fleet
+   ceilings — loses root under `sudo -u` too, and the launcher's own comment says what that costs,
+   naming the container cgroup as *"the one thing in the fleet nothing bounds"*. And `nsenter` keeps `--preserve-credentials` (§2.3) — without it `setgroups` fails.
+
+   **Per-box uids are the stronger form and are *not* free.** They
    collide with two things this design keeps: the per-user socket directory that carries cross-box
    messaging (§9.2.2) is `0700` per uid, and the shared toolchains (§9.2.1) are owned by the single
    uid today. They also need a uid allocation record — **declared state on the volume, and §5 must
@@ -940,9 +983,6 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    remains exposed is a denial of service against the control plane — which a supervisor restarts —
    rather than a disclosure.
 
-   **Per-box uids are the stronger form and cost nothing extra here**: `sudo -u` works the same
-   against a range, and it separates boxes from *each other* by uid, which §9.2 shows is the open
-   axis. It needs uid allocation and a sudoers range rather than a single target.
 
 2. **The cover is an inversion, derived from the fleet's mount set.** Not from one root:
    `repo.work` and an adopted `repo.store` are **arbitrary host paths chosen at repo-add time**, so a
@@ -971,7 +1011,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    — write `fleet` and keep the account-wide token and the forwarded ssh-agent.
 
    > **`boxes/<name>/` splits four ways** — `declared/` (never bound in), `recorded/` (bound
-   > read-write), `artifacts/` (bound **read-only**) and `transitions` (recorded). Only binding
+   > read-write), `artifacts/` (bound **read-only**) and `transitions` (recorded, **not bound in** — skein writes it, the box has no use for it). Only binding
    > `recorded/` would remove git push, since the box's credential helper reads its own token out of
    > `artifacts/git-tokens/`.
 3. **skein's control API is a filesystem socket under that cover, owned by skein's uid, never a TCP
@@ -1295,7 +1335,7 @@ trust boundary needs to be able to answer:
 
 | module | owns | depends on |
 |---|---|---|
-| `state` | the volume: declared, requested, recorded; schema, locks | — |
+| `state` | the volume: **declared, requested, artifact, recorded** — and the different rule each carries (sole writer / lock protocol / box-writable / read-only bind); schema; generation stamp | — |
 | `source` | `enter`, `socket`, `file`, `http` | — |
 | `signal` | kinds, freshness, budgets, cadence, gates, fusion | `source`, `state` |
 | `operation` | desired, tri-state check, recipe, doer, DAG, leases | `state`, `signal` |
@@ -1304,8 +1344,18 @@ trust boundary needs to be able to answer:
 | `warden` | the host service: capabilities, approval surface, outcome store, audit log | — (separate binary) |
 | `box` | box identity and lifecycle | `state`, `operation`, `act`, `source`, `signal` |
 | `fleet` | **fleet** lifecycle — create, destroy, resize as their composition | `operation`, `warden-client`, `state` |
-| `server` | cockpit, API, event stream, transitions | everything |
+| `github` | HTTP client, review queue, CODEOWNERS, contract signals, summary cache and its throttle | `state`, `source` |
+| `probes` | the in-box probe scripts and hook merging — installed into every store, and the highest-blast-radius write in the system; owns the probe/binary compatibility contract | `state`, `source` |
+| `api` | HTTP transport, auth, routes, the WebSocket | everything below |
+| `stream` | the **single** event producer and its fan-out (§10.1), and transitions | `signal`, `state` |
+| `cockpit` | the page, its build, and the component library (§11.7) | `api` (over the wire only) |
+| `migrate` | the one-shot: snapshot, carry, rewrite hooks, refuse (see `docs/delivery.md` §4.3) | `state`, `operation`, `box` |
 | `cli` | `skein` | `state`, `operation`, `act`, `signal`, `box`, `fleet`, `warden-client` |
+
+`server` was one row owning "everything", which cannot be decomposed against — it is split into
+`api`, `stream` and `cockpit`, because the single-producer fan-out and the cockpit build are separate
+deliverables with separate owners. `github` and `probes` were absent while `docs/delivery.md`
+schedules both as parallel work.
 
 The `cli` row carries `act` because law §11.4.4 requires every Act to have a CLI form, and
 `warden-client` because first run is `skein doctor` (§11.6) against a fleet that does not exist yet.
@@ -1354,6 +1404,6 @@ first task of extraction, not a tidy-up afterwards.
   matters most.
 - **Multiple fleets on one host.** The volume makes it clean; the cockpit port and the warden's
   addressing both assume one.
-- **API authentication in-fleet** (§9.4 answers the box→skein direction; the four gaps listed there are open). Today it is one shared bearer token, and its own comment says
+- **API authentication in-fleet** (§9.4 answers the box→skein direction; the five gaps listed there are open). Today it is one shared bearer token, and its own comment says
   *"not a login — one shared secret"*. It exists because a box reached the host cockpit. In-fleet it
   matters more, and §9.5.3 changes its shape rather than answering it.

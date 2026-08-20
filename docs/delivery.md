@@ -5,8 +5,8 @@ destroying a working tool on the way.
 
 ## 1. The measurement that should govern the plan
 
-**364 commits since 2026-06-28. 164 are `fix:`, 131 are `feat:`.** Fifty-six percent of the
-*conventional-commit* work is fixing what was already built — 164 of 295; against all 364 it is 45%.
+**376 commits since 2026-06-28. 164 are `fix:`, 131 are `feat:`.** Fifty-six percent of the
+*conventional-commit* work is fixing what was already built — 164 of 295; against all 376 it is 44%.
 Count subjects, not `--grep='^fix'`: `^` anchors at any line start in the body, which inflates it by
 three. The denominator is named because the number invites a challenge that would discredit the rest, and the fix titles are not polish:
 
@@ -47,8 +47,9 @@ to a mount and an environment variable. The work is in four things none of which
   root whole puts `credentials/`, `api-token`, `github-pats/` and `tokens/` inside every box's reach
   on the shared uid. The cover is an **inversion derived per box** — tmpfs the state
   root, bind back what this box needs — not a list of things to hide (architecture §9.5.2).
-- **`places/` holds live pids**, which the architecture excludes from the volume. Relocating the root
-  wholesale carries state the design forbids there.
+- **`places/` holds the box anchors**, which are volume state but **declared** and under the cover,
+  stamped with the sandbox generation (architecture §9.5.1). Moving them without the stamp is how a
+  rebuilt fleet re-enters a recycled pid.
 - **`repos/<id>/work` is a working checkout**, not a mirror, and `diff.rs`, `moduledocs.rs` and
   `codeowners.rs` read it directly. Repointing them is budgeted here, not assumed away.
 - **no lock on `config.json`/`repos.json`.** Adding schema versions without a writer discipline

@@ -229,8 +229,7 @@ host process with display access, which in-fleet skein cannot have. Browse exist
 local repository path, and repositories are remotes now, so its main job is gone with it. The
 remaining fields — the shared-data folder and the SSH key path — become text inputs **with a check
 that reports whether the path resolved**, which satisfies law 1 without a host round-trip. A
-warden-served picker was considered and rejected: a third warden capability for an affordance used
-twice in a fleet's life.
+warden-served picker was considered and rejected: another warden endpoint for an affordance used twice in a fleet's life.
 
 **The host ssh-agent path.** In-fleet skein has no host ssh-agent to load a key into. SSH remotes
 either move to the warden or to HTTPS with injected credentials.
