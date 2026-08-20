@@ -7,6 +7,7 @@
 
 use crate::ai::ai_says_hold;
 use crate::fleet::box_root;
+use crate::kit::{ensure_kit, ensure_store, record_repo_mirror};
 use crate::place::{forget_place, own_sandbox, place_of, shared_record};
 use crate::repos::{
     agent_for_box, branch_from_box, launch_spec, repo_for_box, write_launch_spec_for_agent, Repo,
@@ -14,10 +15,7 @@ use crate::repos::{
 use crate::runtime::*;
 use crate::tracking::sync_revoke_token;
 use crate::util::*;
-use crate::{
-    box_liveness, ensure_kit, ensure_store, locate_registry, parse_registry, record_repo_mirror,
-    store_for_box, valid_name, Liveness,
-};
+use crate::{box_liveness, locate_registry, parse_registry, store_for_box, valid_name, Liveness};
 use chrono::Utc;
 use std::env;
 use std::fs;

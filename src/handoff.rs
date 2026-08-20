@@ -6,11 +6,12 @@
 //! to the destination so its first SessionStart consumes it and no later session picks it up again.
 
 use crate::diff::changed_files;
+use crate::digest::session_digest;
 use crate::repos::agent_for_box;
 use crate::runtime::valid_runtime;
 use crate::signals::current_task;
 use crate::util::write_atomic;
-use crate::{session_digest, store_for_box, valid_name};
+use crate::{store_for_box, valid_name};
 use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};

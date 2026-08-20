@@ -6,13 +6,11 @@
 //! shipping anything for skein.
 
 use crate::config::*;
+use crate::kit::{ensure_kit, ensure_store};
 use crate::runtime::*;
 use crate::tracking::{load_connections, plane_project_id};
 use crate::util::*;
-use crate::{
-    ensure_kit, ensure_store, fleet_boxes, git_branch_for, lookup_dir, registry_entry_for_box,
-    valid_name,
-};
+use crate::{fleet_boxes, git_branch_for, lookup_dir, registry_entry_for_box, valid_name};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;

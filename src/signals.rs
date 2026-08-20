@@ -8,8 +8,9 @@
 //! With no observation present, or a screen the grammar does not recognise, turn state is exactly
 //! the edge signal it always was — and says so, rather than quietly degrading.
 
+use crate::digest::read_journal;
 use crate::util::*;
-use crate::{read_journal, store_for_box, valid_name};
+use crate::{store_for_box, valid_name};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;

@@ -83,7 +83,7 @@ async fn main() {
         eprintln!("skein: turn-state probe not installed ({e}); boxes will show live/stale only");
     }
     // Install skein's own sbx kit (idempotent) so launching a box needs no repo-side kit.
-    if let Err(e) = skein::ensure_kit() {
+    if let Err(e) = skein::kit::ensure_kit() {
         eprintln!("skein: kit not installed ({e}); boxes will fail to provision");
     }
     // Bring an existing fleet sandbox into line with this binary: it keeps the launcher and the
@@ -1060,7 +1060,7 @@ async fn api_session(Path(name): Path<String>) -> Response {
     if !skein::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
     }
-    match tokio::task::spawn_blocking(move || skein::session_digest(&name)).await {
+    match tokio::task::spawn_blocking(move || skein::digest::session_digest(&name)).await {
         Ok(Some(d)) => Json(d).into_response(),
         _ => (StatusCode::NOT_FOUND, "no such box").into_response(),
     }

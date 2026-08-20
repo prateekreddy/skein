@@ -20,12 +20,14 @@ pub mod codeowners;
 pub mod config;
 pub mod contracts;
 pub mod diff;
+pub mod digest;
 pub mod files;
 pub mod fleet;
 pub mod gitgate;
 pub mod github;
 pub mod handoff;
 pub mod health;
+pub mod kit;
 pub mod mailbox;
 pub mod moduledocs;
 pub mod place;
@@ -45,28 +47,22 @@ pub mod tracking;
 pub mod transcript;
 pub mod util;
 
-use crate::config::skein_home;
-use crate::diff::{git_range, read_diffstat_file, DiffStat};
+use crate::diff::{read_diffstat_file, DiffStat};
 use crate::fleet::{box_disk_limit, fleet_disk_usage, fleet_liveness};
 use crate::mailbox::sandboxes_in;
 use crate::place::{fleet_sandbox, placed_boxes, shared_record};
 use crate::repos::{
-    branch_from_box, branch_of, launch_spec_agent, launch_spec_branch, load_repos, repo_for_box,
-    Repo,
+    branch_from_box, launch_spec_agent, launch_spec_branch, load_repos, repo_for_box,
 };
 use crate::runtime::{default_agent, valid_runtime};
 use crate::signals::{
-    classify_message, classify_pane, current_status, current_status_detail, current_task,
-    fuse_status, is_generic_wait, pane_is_fresh, probe_is_stale, read_pane_raw, screen_health,
-    session_signal, status_edge, title_activity, Pause, Screen, TITLE_FRESH_SECS,
+    classify_message, classify_pane, current_status_detail, current_task, fuse_status,
+    is_generic_wait, pane_is_fresh, probe_is_stale, read_pane_raw, screen_health, session_signal,
+    status_edge, title_activity, Pause, Screen, TITLE_FRESH_SECS,
 };
 use crate::tracking::sync_docs_available;
-use crate::util::{
-    ago, bounded_output, clip, first_line, keep_tail, output_with_timeout_why, shorten,
-    write_atomic, Gate,
-};
+use crate::util::{ago, bounded_output, clip, first_line, output_with_timeout_why, shorten, Gate};
 
-use crate::probes::ensure_probe_in;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -946,142 +942,6 @@ fn registry_entry_for_box(name: &str) -> Option<Sandbox> {
         .or_else(|| all_sandboxes().remove(name))
 }
 
-const KIT_SPEC_YAML: &str = include_str!("kit/spec.yaml");
-
-/// The provisioning script, kept as a real file rather than inline in the kit spec.
-///
-/// It has two callers that must not drift: sbx runs it as this kit's startup hook in a `--clone`
-/// sandbox, and [`crate::fleet::provision_script`] runs the same bytes inside a box's namespace in
-/// the shared sandbox. Provisioning is a dozen steps — the store link, the settings merge, the
-/// branch checkout, the handoff restore, shared-home, the agent guide, the Codex hooks, the skills,
-/// the boot report, the sync install — and a second implementation of them for the fleet path would
-/// be a second set of ways for a box to come up looking healthy with no hooks wired.
-pub(crate) const KIT_STARTUP_SH: &str = include_str!("kit/skein-startup.sh");
-
-/// The marker line in the spec that [`kit_spec`] replaces with the script body.
-const KIT_STARTUP_MARKER: &str = "        # @SKEIN_STARTUP_SCRIPT@";
-
-/// The kit spec with the startup script spliced back into its `content:` block.
-///
-/// A YAML block scalar carries its indentation, so the script is re-indented to the eight spaces the
-/// `content: |` level expects — and blank lines stay genuinely blank, because trailing whitespace on
-/// an otherwise empty line would change the block's detected indentation.
-fn kit_spec() -> String {
-    let body: String = KIT_STARTUP_SH
-        .lines()
-        .map(|l| {
-            if l.is_empty() {
-                "\n".to_string()
-            } else {
-                format!("        {l}\n")
-            }
-        })
-        .collect();
-    KIT_SPEC_YAML
-        .lines()
-        .map(|l| {
-            if l.starts_with(KIT_STARTUP_MARKER) {
-                body.clone()
-            } else {
-                format!("{l}\n")
-            }
-        })
-        .collect::<String>()
-}
-
-/// Install skein's own sbx kit into `~/.skein/kit/spec.yaml` so native launch can `--kit` it without
-/// the repo shipping a kit. Embedded via `include_str!`; rewritten each call (idempotent).
-pub fn ensure_kit() -> Result<PathBuf, String> {
-    let kit = skein_home().join("kit");
-    fs::create_dir_all(&kit).map_err(|e| format!("mkdir {}: {e}", kit.display()))?;
-    let spec = kit.join("spec.yaml");
-    fs::write(&spec, kit_spec()).map_err(|e| format!("write {}: {e}", spec.display()))?;
-    Ok(kit)
-}
-
-/// Documents the shared-store layout for the user — written into a fresh store only when absent.
-const STORE_README: &str = include_str!("store/README.md");
-
-/// Provision a repo's shared-data folder at `store` (a `.claude` dir): scaffold the directory
-/// structure (only what's missing — never clobbering data the user already put there), install skein's
-/// own machinery (turn-state probe + the SessionStart bootstrap, mailbox, and a default status line,
-/// all under `skein/bin/`), and wire it into `settings.json`. Idempotent and safe to run on every
-/// launch — an empty folder comes up fully working (memory bridge, mailbox, status line), an
-/// already-populated one is left intact (machinery refreshed, settings merged additively). The user
-/// only optionally fills `memory/` and `skills/` with their own content.
-/// Tell this repo's boxes where its host files are, for the ones that have no `/run/sandbox/source`.
-///
-/// `sbx create --clone` is handed the repo's `work` directory and mounts it read-only at
-/// `/run/sandbox/source`; a box surfaces its gitignored shared paths (`shared-paths.txt`) from
-/// there. A fleet box has no such mount — several boxes share one sandbox, and it was created for
-/// no single repo — so that whole mechanism was inert in the fleet: not dangling links, *nothing*,
-/// including the `CLAUDE.md` an `gadget-demo` box gets its project direction from.
-///
-/// The same directory is reachable, though, because [`crate::fleet::fleet_mounts`] mounts every repo's
-/// `work` at its own host path. Recording it in the store — repo-scoped data, which is exactly what
-/// this is — lets the box find it without skein having to thread it through a session's environment.
-///
-/// Written on every launch, so a repo whose `work` moves is not stuck with the old answer.
-pub fn record_repo_mirror(repo: &Repo) {
-    let work = repo.work.trim();
-    if work.is_empty() {
-        return;
-    }
-    let dir = Path::new(&repo.store).join("skein");
-    if fs::create_dir_all(&dir).is_ok() {
-        let _ = write_atomic(&dir.join("mirror"), &dir, format!("{work}\n").as_bytes());
-    }
-}
-
-pub fn ensure_store(store: &Path) -> Result<(), String> {
-    fs::create_dir_all(store).map_err(|e| format!("mkdir {}: {e}", store.display()))?;
-    // skein-owned runtime (skein/, mailbox/, status/, tasks/) + the user-filled content homes
-    // (memory/, skills/, hooks/). create_dir_all is idempotent, so existing dirs are untouched.
-    for d in [
-        "mailbox",
-        "status",
-        "tasks",
-        "journals",
-        "telemetry",
-        // durable Claude <-> Codex takeover briefs plus one-shot per-runtime pending copies
-        "handoffs",
-        // narrative signal per box (box-session.sh): the headline / fork-detector / digest source
-        "sessions",
-        // per-box hook heartbeats (every probe appends one line per firing) — how the cockpit
-        // distinguishes "hooks broken" from "box quiet"; see hook_health in load_views
-        "hook-log",
-        "skein/launch",
-        "skein/bin",
-        "memory",
-        "skills",
-        "hooks",
-        // RW-surfaced shared paths (shared-paths.txt entries marked `rw`) live here — the store is
-        // a genuinely writable host directory, unlike the RO clone-mode source mirror. See
-        // sandbox-bootstrap.sh's surfacing loop.
-        "shared-rw",
-        // Project-scoped durable user workspace, surfaced as $HOME/shared in every box. Real $HOME
-        // remains private so credentials, caches, and concurrent runtime state cannot collide.
-        "shared-home",
-    ] {
-        let p = store.join(d);
-        fs::create_dir_all(&p).map_err(|e| format!("mkdir {}: {e}", p.display()))?;
-    }
-    // Document the layout so the user knows what they can optionally add — written only if absent.
-    write_if_absent(&store.join("README.md"), STORE_README);
-    ensure_probe_in(store)
-}
-
-/// Write `body` to `path` only when nothing is there yet — so scaffolding never overwrites the user's
-/// own files. Best-effort: a write failure is logged, not fatal.
-fn write_if_absent(path: &Path, body: &str) {
-    if path.exists() {
-        return;
-    }
-    if let Err(e) = fs::write(path, body) {
-        eprintln!("skein: write {}: {e}", path.display());
-    }
-}
-
 /// Look up a box's clone root (the `dir` it registered) by name.
 pub fn lookup_dir(name: &str) -> Option<String> {
     // registry first (no subprocess); else the box's workspace from sbx, for boxes the registry
@@ -1107,183 +967,16 @@ pub fn lookup_dir(name: &str) -> Option<String> {
         .filter(|d| !d.is_empty())
 }
 
-/// Recent commit subjects on the box's branch (newest first) — the agent's own changelog,
-/// a free, accurate "what was done" with no model call. For direct-mode boxes, computed host-side.
-/// For clone-mode boxes, reads the file box-diff.sh wrote. Empty when neither is available.
-pub fn recent_commits(name: &str) -> Vec<String> {
-    // Prefer box-diff.sh's commit file: the box is on the feature branch and knows its own
-    // commits. Host-side git would run against whatever `dir` resolves to on the host — for
-    // clone-mode boxes that's the HOST's checkout (main), which lists the wrong commits.
-    if let Some(path) = store_for_box(name)
-        .map(|s| s.join("diffs").join(format!("{name}.commits")))
-        .filter(|p| p.exists())
-    {
-        if let Ok(s) = fs::read_to_string(&path) {
-            let v: Vec<String> = s
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            if !v.is_empty() {
-                return v;
-            }
-        }
-    }
-    // Fall back to host-side git — useful for direct-mode boxes where the host dir IS the
-    // box's working tree (box-diff.sh may not have run yet on a fresh box).
-    if let Some(dir) = lookup_dir(name) {
-        if let Some(range) = git_range(&dir) {
-            let r = format!("{range}..HEAD");
-            let mut command = Command::new("git");
-            command.args(["-C", &dir, "log", "--format=%s", "-n", "20", &r]);
-            if let Ok(out) = bounded_output(&mut command, "git log", Duration::from_secs(15)) {
-                if out.status.success() {
-                    let v: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                        .lines()
-                        .map(|s| s.to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !v.is_empty() {
-                        return v;
-                    }
-                }
-            }
-        }
-    }
-    vec![]
-}
-
-/// The agent's own turn-end journal (`.skein/journal.md`), if it keeps one — the best "what was
-/// done" source because it's written with full context (see the CLAUDE.md ritual). Returns the tail
-/// (last ~40 lines), capped, or None when the box keeps no journal.
-///
-/// Reads `<store>/journals/<vmid>.md` first — box-journal.sh's Stop-hook copy of the box's own
-/// `.skein/journal.md`, the only way the host can see it for a clone-mode box (a box's private clone
-/// isn't visible to the host at all; `dir` for a repo box is the *shared* host working clone, not the
-/// box's own). Falls back to reading `<dir>/.skein/journal.md` directly for a direct-mode box, where
-/// the host-mounted repo genuinely is the box's own working tree.
-pub fn read_journal(name: &str) -> Option<String> {
-    let from_store = store_for_box(name)
-        .map(|s| s.join("journals").join(format!("{name}.md")))
-        .and_then(|p| fs::read_to_string(p).ok());
-    let dir = lookup_dir(name);
-    let from_dir = dir
-        .as_deref()
-        .and_then(|d| fs::read_to_string(Path::new(d).join(".skein").join("journal.md")).ok());
-    let txt = from_store.or(from_dir)?;
-    let tail: Vec<&str> = txt.lines().rev().take(40).collect();
-    let s: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-    // The tail, because a journal's last entry is the one worth showing. Counted in chars: this was
-    // a byte slice, and a journal long enough to cut with an `…` anywhere in it panicked the thread
-    // doing the cutting — see `keep_tail`.
-    const CAP: usize = 4000;
-    let s = keep_tail(&s, CAP);
-    Some(s).filter(|s| !s.trim().is_empty())
-}
-
-/// A glanceable "what happened here" for one box — the inbox detail view (steps 1–5), assembled
-/// entirely from free sources: the registry state, the host-side diff/commits, the agent's own
-/// journal, and its last reported message. No model tokens spent.
-#[derive(Debug, Default, Serialize)]
-pub struct SessionDigest {
-    pub name: String,
-    pub branch: String,
-    pub state: String,
-    pub tier: u8,
-    pub age: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub diff: Option<DiffStat>,
-    /// the agent's own changelog (recent commit subjects, newest first)
-    pub commits: Vec<String>,
-    /// the agent's turn-end journal, if it keeps `.skein/journal.md`
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub journal: Option<String>,
-    /// the last assistant message (Stop) — the turn's own sign-off
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_message: Option<String>,
-    /// the prompt the agent is blocked on (Notification), if any
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocked_on: Option<String>,
-    /// when the box last reported a narrative signal (RFC3339)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signal_ts: Option<String>,
-    /// why the turn ended — drives the inbox ranking and CTA
-    pub pause: Pause,
-}
-
-/// Assemble the free session digest for a box. Pure reads + a couple of cached `git` calls;
-/// never a model call. Returns None for an unknown box name.
-pub fn session_digest(name: &str) -> Option<SessionDigest> {
-    if !valid_name(name) {
-        return None;
-    }
-    // Registry-independent: dir/branch from sbx + host git, state from sbx liveness + skein's probe,
-    // the registry only a fallback. The box must be known to sbx or the registry (else nothing to show).
-    let reg = registry_entry_for_box(name);
-    let live = box_liveness(name);
-    let dir = lookup_dir(name).unwrap_or_default();
-    if reg.is_none() && live.is_none() && dir.is_empty() {
-        return None;
-    }
-    let branch = branch_of(name).unwrap_or_default();
-    let sb = Sandbox {
-        branch: branch.clone(),
-        dir: dir.clone(),
-        last_seen: reg
-            .as_ref()
-            .map(|r| r.last_seen.clone())
-            .unwrap_or_default(),
-        status: current_status(name)
-            .or_else(|| reg.as_ref().map(|r| r.status.clone()))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default(),
-    };
-    let (state, tier) = sb.state_with(live);
-    let blocked = state == "needs-input";
-
-    let sig = session_signal(name);
-    let last_message = sig
-        .as_ref()
-        .map(|s| s.last_message.clone())
-        .filter(|m| !m.trim().is_empty());
-    let blocked_on = sig
-        .as_ref()
-        .filter(|s| s.kind == "notification")
-        .map(|s| s.prompt.clone())
-        .filter(|p| !p.trim().is_empty());
-    // classify over whichever text we have (the prompt when blocked, else the last message)
-    let class_text = blocked_on
-        .clone()
-        .or_else(|| last_message.clone())
-        .unwrap_or_default();
-    let pause = match tier {
-        3 => Pause::None, // still working — nothing owed
-        _ => classify_message(&class_text, blocked),
-    };
-
-    Some(SessionDigest {
-        name: name.to_string(),
-        branch,
-        state,
-        tier,
-        age: sb.age(),
-        diff: read_diffstat_file(name),
-        commits: recent_commits(name),
-        journal: read_journal(name),
-        last_message,
-        blocked_on,
-        signal_ts: sig.map(|s| s.ts).filter(|t| !t.is_empty()),
-        pause,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{load_config, save_config, Config};
     use crate::place::{forget_place, record_place, PlaceRecord};
 
+    use crate::kit::ensure_store;
     use crate::repos::box_name;
+    use crate::repos::branch_of;
+    use crate::repos::Repo;
     use crate::repos::{
         is_git_url, is_ssh_url, repin_branch, repo_id_from_source, save_repos, set_repo_settings,
         ssh_to_https, write_launch_spec_for_agent, REPOS_CACHE,
@@ -1305,37 +998,6 @@ mod tests {
     use crate::util::sh_quote;
     use crate::util::slug;
     use crate::util::{host_of, pct_decode, safe_component, GATE_MAX_INTERVAL};
-
-    // The provisioning script is one file with two callers — the kit hook and the fleet path — and
-    // the kit's copy is spliced into a YAML block scalar, where indentation IS the syntax. A line
-    // that lands at the wrong depth ends the block early, and the failure is not a parse error: sbx
-    // writes a truncated script, the box comes up with no hooks, and it looks perfectly healthy.
-    #[test]
-    fn the_kit_carries_the_same_provisioning_script_the_fleet_runs() {
-        let spec = kit_spec();
-        assert!(
-            !spec.contains("@SKEIN_STARTUP_SCRIPT@"),
-            "the marker survived, so the kit would install a script that is only a comment"
-        );
-        // Every line of the script, at the block's indentation — including the ones the shell needs
-        // at column 0 and the ones already indented inside it.
-        for line in KIT_STARTUP_SH.lines().filter(|l| !l.is_empty()) {
-            assert!(
-                spec.contains(&format!("\n        {line}\n")),
-                "not spliced at the block's depth: {line:?}"
-            );
-        }
-        // A blank line carrying eight spaces would deepen the block's detected indentation and take
-        // the rest of the script with it.
-        assert!(
-            !spec.contains("\n        \n"),
-            "a blank line was padded, which re-indents everything after it"
-        );
-        assert!(
-            spec.contains("\n  startup:\n"),
-            "the splice must not disturb what follows the block"
-        );
-    }
 
     #[test]
     fn valid_name_guards_paths() {
@@ -2062,85 +1724,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_store_and_kit_provision_layout() {
-        let _g = env_lock();
-        let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
-        let store = home.join("repos").join("x").join("store").join(".claude");
-        ensure_store(&store).unwrap();
-        // the full structure: skein runtime + the user-filled content homes.
-        for d in [
-            "mailbox",
-            "status",
-            "tasks",
-            "journals",
-            "handoffs",
-            "skein/launch",
-            "skein/bin",
-            "memory",
-            "skills",
-            "hooks",
-            "shared-rw",
-            "shared-home",
-        ] {
-            assert!(store.join(d).is_dir(), "missing {d}");
-        }
-        // skein installs all the machinery so an empty store works end-to-end
-        for f in [
-            "skein/bin/box-status.sh",
-            "skein/bin/box-journal.sh",
-            "skein/bin/box-token-usage.sh",
-            "skein/bin/box-codex-task.sh",
-            "skein/bin/box-codex-telemetry.sh",
-            "skein/bin/box-handoff.sh",
-            "skein/bin/sandbox-bootstrap.sh",
-            "skein/bin/shared-home.sh",
-            "skein/bin/agent-guide.sh",
-            "skein/bin/install-codex-hooks.sh",
-            "skein/SHARED-HOME.md",
-            "skein/bin/mailbox.sh",
-            "skein/bin/statusline-command.sh",
-            // Work tracking rides the store, not the kit — that is what lets a box created before
-            // the feature existed still be wired up.
-            "skein/bin/sync-install.sh",
-            "skein/sync/work-tracking.block.md",
-            "skein/sync/work-tracking.memory.md",
-            "skein/sync/work-tracking.skill.md",
-            "skein/sync/work-tracking.organising.md",
-            "skein/sync/work-tracking.troubleshooting.md",
-        ] {
-            assert!(store.join(f).is_file(), "missing {f}");
-        }
-        assert!(store.join("settings.json").is_file());
-        assert!(store.join("skein/codex-hooks.json").is_file());
-        assert!(store.join("skein/probe-revision").is_file());
-        assert!(store.join("skein/runtimes.tsv").is_file());
-        // layout is documented for the user to (optionally) fill
-        assert!(store.join("README.md").is_file());
-        // settings wire the SessionStart bootstrap + a default statusLine
-        let s: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(store.join("settings.json")).unwrap())
-                .unwrap();
-        assert!(s["statusLine"]["command"]
-            .as_str()
-            .unwrap()
-            .contains("statusline-command.sh"));
-        assert_eq!(s["statusLine"]["refreshIntervalMs"], 30_000);
-        assert!(s["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("sandbox-bootstrap.sh"));
-        let kit = ensure_kit().unwrap();
-        assert!(kit.join("spec.yaml").is_file());
-        let kit_text = fs::read_to_string(kit.join("spec.yaml")).unwrap();
-        assert!(
-            !kit_text.contains("${"),
-            "sbx treats dollar-brace shell expansions as kit placeholders"
-        );
-        env::remove_var("SKEIN_HOME");
-    }
-
-    #[test]
     fn shared_home_links_two_private_homes_and_refuses_real_path() {
         let store_tmp = tempdir();
         let store = store_tmp.join("store/.claude");
@@ -2292,37 +1875,6 @@ mod tests {
         let text = twice.to_string();
         assert!(text.contains("hooks/user.sh"));
         assert!(text.contains("box-status.sh"));
-    }
-
-    #[test]
-    fn ensure_store_scaffolds_without_clobbering_user_data() {
-        let _g = env_lock();
-        let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
-        let store = home.join("shared").join(".claude");
-
-        // the user pre-populates the folder with their own data + a custom README.
-        fs::create_dir_all(store.join("memory")).unwrap();
-        fs::write(store.join("memory").join("mine.md"), "user memory").unwrap();
-        fs::write(store.join("README.md"), "MY OWN README").unwrap();
-
-        ensure_store(&store).unwrap();
-
-        // scaffolding added the missing structure + machinery …
-        assert!(store.join("skills").is_dir());
-        assert!(store.join("skein/bin/box-status.sh").is_file());
-        assert!(store.join("skein/bin/sandbox-bootstrap.sh").is_file());
-        // … but never clobbered what the user already put there.
-        assert_eq!(
-            fs::read_to_string(store.join("memory").join("mine.md")).unwrap(),
-            "user memory"
-        );
-        assert_eq!(
-            fs::read_to_string(store.join("README.md")).unwrap(),
-            "MY OWN README",
-            "an existing README is left alone"
-        );
-        env::remove_var("SKEIN_HOME");
     }
 
     // `shared-paths.txt` surfaces a repo's gitignored essentials into a box — `.env`, and for some
@@ -4896,56 +4448,6 @@ mod tests {
         assert_eq!(pct_decode("plain.txt"), "plain.txt");
         assert_eq!(pct_decode("100%"), "100%"); // dangling escape left verbatim
         assert_eq!(pct_decode("a%zz"), "a%zz");
-    }
-
-    #[test]
-    fn read_journal_prefers_store_over_host_dir() {
-        // Simulates the clone-mode bug directly: `dir` (the registered box dir) is the HOST's
-        // shared working clone, which never has the box's own `.skein/journal.md` — only
-        // box-journal.sh's copy in the store does. read_journal must find it there.
-        let _g = env_lock();
-        let dir = tempdir();
-        let work = dir.join("work");
-        fs::create_dir_all(&work).unwrap(); // no .skein/journal.md here — the clone-mode case
-        let reg = dir.join("sandboxes.json");
-        fs::write(
-            &reg,
-            format!(
-                r#"{{"thing-x":{{"branch":"x","dir":"{}","lastSeen":"","status":""}}}}"#,
-                work.display()
-            ),
-        )
-        .unwrap();
-        env::set_var("SKEIN_REGISTRY", &reg);
-        env::remove_var("SKEIN_SHARED");
-
-        // Nothing in the store yet either → None, not a panic.
-        assert_eq!(read_journal("thing-x"), None);
-
-        // box-journal.sh's copy lands in <store>/journals/<name>.md.
-        fs::create_dir_all(dir.join("journals")).unwrap();
-        fs::write(
-            dir.join("journals").join("thing-x.md"),
-            "did: x / next: y / blocked-on: reviewer\n",
-        )
-        .unwrap();
-        assert!(read_journal("thing-x")
-            .unwrap()
-            .contains("blocked-on: reviewer"));
-
-        // Direct-mode compatibility: with no store copy, falls back to the host dir directly.
-        fs::remove_file(dir.join("journals").join("thing-x.md")).unwrap();
-        fs::create_dir_all(work.join(".skein")).unwrap();
-        fs::write(
-            work.join(".skein").join("journal.md"),
-            "did: a / next: b / blocked-on: nothing\n",
-        )
-        .unwrap();
-        assert!(read_journal("thing-x")
-            .unwrap()
-            .contains("blocked-on: nothing"));
-
-        env::remove_var("SKEIN_REGISTRY");
     }
 
     #[test]

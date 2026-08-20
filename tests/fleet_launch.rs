@@ -18,11 +18,12 @@ use skein::fleet::{
     fleet_liveness, forget_fleet_liveness, heal_fleet, install_launcher, provision_script,
     read_anchor, resize_fleet, session_script, snapshot_box, start_box,
 };
+use skein::kit::ensure_store;
 use skein::place::{forget_place, own_sandbox, place_of, record_place, shared_record, PlaceRecord};
 use skein::probes::ensure_probe_in;
 use skein::repos::{branch_of, save_repos, Repo};
 use skein::sandbox::stop_box;
-use skein::{ensure_store, fleet_boxes, Liveness};
+use skein::{fleet_boxes, Liveness};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -12,6 +12,7 @@
 //! new box, is how a takeover would resurrect a configuration nobody chose.
 
 use crate::handoff::prepare_handoff_for;
+use crate::kit::{ensure_kit, ensure_store};
 use crate::place::{fleet_sandbox, place_of, placed_boxes};
 use crate::probes::ensure_probe_in;
 use crate::repos::{agent_for_box, box_name, ensure_gh_secret, load_repos, repo_for_box, Repo};
@@ -21,7 +22,7 @@ use crate::runtime::{
 };
 use crate::sandbox::sbx_guest_output;
 use crate::util::{bounded_output, expand_tilde, slug, write_atomic};
-use crate::{ensure_kit, ensure_store, fleet_boxes, lookup_dir, valid_name};
+use crate::{fleet_boxes, lookup_dir, valid_name};
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -201,7 +202,7 @@ fn copy_tree_additive(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn sanitized_user_hooks(value: &serde_json::Value) -> serde_json::Value {
+fn sanitized_user_hooks(value: &serde_json::Value) -> serde_json::Value {
     let mut hooks = value.as_object().cloned().unwrap_or_default();
     for groups in hooks.values_mut() {
         let Some(groups) = groups.as_array_mut() else {

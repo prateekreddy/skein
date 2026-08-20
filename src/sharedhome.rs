@@ -10,10 +10,11 @@
 //! a reviewer can see that they were considered and refused rather than having to trust that the
 //! filter ran.
 
+use crate::kit::ensure_store;
 use crate::repos::repo_for_box;
 use crate::sandbox::sbx_guest_output;
 use crate::util::sh_quote;
-use crate::{ensure_store, valid_name};
+use crate::valid_name;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;

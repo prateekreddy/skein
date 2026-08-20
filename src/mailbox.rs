@@ -294,7 +294,7 @@ pub fn relay_cross_project_mail() -> Result<(), String> {
 mod tests {
     use super::*;
     #[allow(unused_imports)]
-    use crate::ensure_store;
+    use crate::kit::ensure_store;
     use crate::repos::{save_repos, Repo};
     #[allow(unused_imports)]
     use crate::testutil::*;

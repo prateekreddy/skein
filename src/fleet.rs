@@ -17,6 +17,7 @@
 
 use crate::config::skein_home;
 use crate::config::*;
+use crate::kit::KIT_STARTUP_SH;
 use crate::place::{
     fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
     Place, PlaceRecord,
@@ -27,7 +28,7 @@ use crate::repos::{
     write_launch_spec_for_agent, Repo,
 };
 use crate::util::*;
-use crate::{fleet_boxes, valid_name, KIT_STARTUP_SH};
+use crate::{fleet_boxes, valid_name};
 use chrono::Utc;
 use std::io::IsTerminal;
 use std::time::Duration;
@@ -2721,7 +2722,7 @@ fn start_box_inner(
     ensure_fleet(&sandbox, &fleet_mounts())?;
     // A fleet box has no `/run/sandbox/source`, so this is how it finds the repo's host files to
     // surface `shared-paths.txt` from — `.env`, and the `CLAUDE.md` some repos keep out of git.
-    crate::record_repo_mirror(repo);
+    crate::kit::record_repo_mirror(repo);
 
     // The store is a HOST path used verbatim inside the sandbox, so this is the one precondition
     // worth paying a round-trip for: unreachable, every later step still "succeeds" and the box
