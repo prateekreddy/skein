@@ -671,6 +671,10 @@ pub fn create_env() -> Vec<(String, String)> {
 ///
 /// Deduped against the workspace, and against each other: mounting a path twice is not obviously
 /// harmless, and mounting a *parent* of it is what keeps a later repo from needing a recreate.
+///
+/// And filtered by [`exposes_the_volume`], which is the rule that keeps every credential skein holds
+/// out of every box: the two directories under `~/.skein` that boxes are given are mounted, and the
+/// volume itself is not.
 pub fn fleet_mounts() -> Vec<String> {
     let workspace = fleet_workspace();
     // The box-state parent too: boxes keep their conversation there, on the host, so it survives the
@@ -682,6 +686,16 @@ pub fn fleet_mounts() -> Vec<String> {
             if path.is_empty() {
                 continue;
             }
+            if exposes_the_volume(&path) {
+                eprintln!(
+                    "skein: {} points {path:?} at skein's own volume, so it is not mounted and \
+                     that repo's boxes will not see it — a box given it would read the API token, \
+                     the GitHub credentials and every other box's state. Move it outside {}.",
+                    repo.id,
+                    skein_home().display()
+                );
+                continue;
+            }
             if mounts.iter().any(|m| under(&path, m)) {
                 continue;
             }
@@ -689,6 +703,37 @@ pub fn fleet_mounts() -> Vec<String> {
         }
     }
     mounts
+}
+
+/// Would mounting `path` hand a box skein's own volume?
+///
+/// The volume holds the API token, the GitHub PATs and their token files, the fleet agent's token —
+/// which runs commands as the sandbox in *any* box's namespace — the git grants, the tracker
+/// connections and every box's declared state. Two directories under it are shared with boxes on
+/// purpose: [`fleet_workspace`], because a repo's work clone and store live there, and
+/// [`box_state_root`], because a box writes its own conversation. **Everything else is private**,
+/// and this asks the allow-list question rather than the deny-list one, so a secret written
+/// tomorrow at a path nobody thought to add here is private without anybody adding it.
+///
+/// Three shapes are refused, and all three are reachable with `skein add`, whose `--store` and
+/// local-path arguments are host paths a person types:
+///
+///   * the volume root itself — `--store ~/.skein`;
+///   * anything *containing* it — `--store ~`, or `/`, which mounts the volume as a side effect of
+///     mounting its parent, and would not look like a mount of the volume at all;
+///   * anything inside it that is not under one of the two shared directories — `--store
+///     ~/.skein/github-pats`, which is a mount of exactly the credential files.
+///
+/// Refusing costs that repo's boxes their store, loudly, at provisioning. Mounting it costs the
+/// fleet every credential it has, silently.
+fn exposes_the_volume(path: &str) -> bool {
+    let home = skein_home().to_string_lossy().into_owned();
+    // The root, or an ancestor of it.
+    if under(&home, path) {
+        return true;
+    }
+    // Inside it, and not one of the two directories boxes are given.
+    under(path, &home) && !under(path, &fleet_workspace()) && !under(path, &box_state_root())
 }
 
 /// Is `path` inside `dir` (or `dir` itself)? Textual, because both are host absolute paths skein
@@ -7902,5 +7947,170 @@ b idle 5000000 1048576 4
             "the agent command stays one argument: {script}"
         );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Everything under a repo fixture, as one registered repo whose work and store sit outside the
+    /// volume — the ordinary shape, and the one the property below is measured against.
+    fn repo_at(id: &str, work: &str, store: &str) -> crate::repos::Repo {
+        crate::repos::Repo {
+            id: id.into(),
+            source: work.into(),
+            work: work.into(),
+            store: store.into(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }
+    }
+
+    /// Every path under the volume, files and directories alike.
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            out.push(path.clone());
+            if path.is_dir() && !path.is_symlink() {
+                walk(&path, out);
+            }
+        }
+    }
+
+    /// The volume is private except for the two directories a box is deliberately given.
+    ///
+    /// This is what keeps the API token, the GitHub PATs, the fleet agent's token, the git grants,
+    /// the tracker connections and every box's declared state out of every box: `~/.skein/repos` and
+    /// `~/.skein/boxes` are mounted, and `~/.skein` itself is not. Nothing said so, and the change
+    /// that broke it would have read as a simplification — one mount instead of two.
+    ///
+    /// Stated as an allow-list over a **walk of the whole volume**, rather than as a list of secret
+    /// paths. A deny-list is only as current as the last person to remember it: the file below is
+    /// deliberately not enumerated, so a credential added tomorrow at a path nobody updated here is
+    /// covered on the day it is written.
+    #[test]
+    fn the_volume_is_private_except_the_two_directories_a_box_is_given() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        // Real writers, so the paths are the ones production actually uses.
+        crate::apiauth::token().unwrap();
+        crate::place::ensure_agent_token().unwrap();
+        crate::gitgate::set_write_credential("mine", "my token", &["owner/repo".into()]).unwrap();
+        crate::gitgate::set_credential_token("mine", "ghp_secret").unwrap();
+        crate::tracking::upsert_connection(
+            Some("plane"),
+            "Plane",
+            "https://plane.example.com",
+            Some("plane_secret"),
+        )
+        .unwrap();
+        set_box_privileged("web-main", true).unwrap();
+        crate::place::record_place("web-main", &crate::place::PlaceRecord::default()).unwrap();
+        crate::config::save_config(&crate::config::Config::default()).unwrap();
+
+        // One repo of each shape: managed (work and store under the volume) and adopted in place.
+        let outside = tempdir();
+        std::fs::create_dir_all(outside.join("work")).unwrap();
+        std::fs::create_dir_all(outside.join("store")).unwrap();
+        let managed = skein_home().join("repos").join("managed");
+        std::fs::create_dir_all(managed.join("work")).unwrap();
+        std::fs::create_dir_all(managed.join("store/.claude")).unwrap();
+        crate::repos::save_repos(&[
+            repo_at(
+                "adopted",
+                &outside.join("work").to_string_lossy(),
+                &outside.join("store").to_string_lossy(),
+            ),
+            repo_at(
+                "managed",
+                &managed.join("work").to_string_lossy(),
+                &managed.join("store/.claude").to_string_lossy(),
+            ),
+        ])
+        .unwrap();
+        // And a box's own state, which IS shared with it.
+        std::fs::create_dir_all(box_state("web-main")).unwrap();
+        std::fs::write(box_state("web-main") + "/conversation.jsonl", "{}").unwrap();
+
+        let mounts = fleet_mounts();
+        let shared = [fleet_workspace(), box_state_root()];
+
+        // No mount is the volume root, or holds it.
+        let volume = skein_home();
+        for mount in &mounts {
+            assert!(
+                !volume.starts_with(mount),
+                "{mount} is mounted into the sandbox and contains the volume {}, so every box has \
+                 the API token, the GitHub credentials and every other box's state",
+                volume.display()
+            );
+        }
+
+        // And nothing else under the volume is reachable through any mount.
+        let mut seen = Vec::new();
+        walk(&volume, &mut seen);
+        assert!(
+            seen.len() > 10,
+            "the walk found {} paths, so this test proved nothing",
+            seen.len()
+        );
+        for path in &seen {
+            let Some(mount) = mounts.iter().find(|m| path.starts_with(m)) else {
+                continue;
+            };
+            assert!(
+                shared.iter().any(|s| path.starts_with(s)),
+                "{} is reachable from a box through the mount {mount}, and it is not under {} or \
+                 {} — the two directories boxes are meant to see",
+                path.display(),
+                shared[0],
+                shared[1]
+            );
+        }
+    }
+
+    /// A repo pointed at the volume does not mount the volume.
+    ///
+    /// `skein add <path>` and `--store <path>` take host paths a person types, and three of them
+    /// hand a box everything: the volume itself, a parent of it, and a directory of credentials
+    /// inside it. Refusing costs that repo's boxes their store, at provisioning, out loud. Mounting
+    /// it costs the fleet every credential it holds, silently — so the refusal is not a judgement
+    /// about how likely the typo is.
+    #[test]
+    fn a_repo_pointed_at_the_volume_is_not_mounted() {
+        let _g = env_lock();
+        let parent = tempdir();
+        let home = parent.join("volume");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        let hostile = [
+            skein_home().to_string_lossy().into_owned(),
+            skein_home()
+                .join("github-pats")
+                .to_string_lossy()
+                .into_owned(),
+            skein_home().join("declared").to_string_lossy().into_owned(),
+            parent.to_string_lossy().into_owned(),
+            "/".to_string(),
+        ];
+        crate::repos::save_repos(
+            &hostile
+                .iter()
+                .enumerate()
+                .map(|(i, p)| repo_at(&format!("r{i}"), p, p))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fleet_mounts(),
+            vec![fleet_workspace(), box_state_root()],
+            "a repo pointed at skein's own volume was mounted into every box"
+        );
     }
 }
