@@ -44,6 +44,7 @@ pub mod moduledocs;
 pub mod place;
 pub mod probes;
 pub mod prq;
+pub mod queue;
 pub mod registry;
 pub mod repos;
 pub mod review;

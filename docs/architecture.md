@@ -1401,6 +1401,22 @@ sections with counts, persisted collapse state, and per-group pull and new-box a
 that is decoration; at eight it *is* the board. A flat three-section list is a different product, and
 the first draft's mock-up quietly chose it.
 
+**Rank by what a row is waiting for, never by which subsystem produced it** — and there is a concrete
+trap in this exact merge. A box's turn-state `waiting` means *waiting on you*: the agent asked
+something and stopped. A pull request's `Waiting` lane means *waiting on everyone else*: you have
+already reviewed it and it moves without you. Same word, opposite meanings — and a merge that mapped
+them onto each other because they matched would put the thing you have finished with above the thing
+that is asking you a question. `queue::Need` is the one ladder both are mapped onto, with the
+argument written at each arm.
+
+The tie-break inside a rank is **how long it has waited, longest first**, because the thing that has
+been waiting longest is the thing most likely to have been forgotten. An unknown age sorts *last*:
+"we do not know how long" is the absence of evidence, not evidence of urgency.
+
+**It is not on the board's tick.** The pull-request half comes from the review queue's own
+sixty-second cache, and the merge is a surface's call rather than the board's — which is what keeps
+§10's measured tick cost honest while adding a source to the queue.
+
 ### 11.3 Three states most tools botch
 
 - **Nothing needs you.** Say so, plainly and calmly. A dashboard that looks the same whether or not

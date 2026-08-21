@@ -255,6 +255,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 tier,
                 branch,
                 age: sb.age(),
+                age_secs: sb.age_secs(),
                 dir: shorten(&dir),
                 repo: repo.as_ref().map(|rp| rp.id.clone()).unwrap_or_default(),
                 agent,
@@ -346,6 +347,14 @@ pub struct BoxView {
     pub tier: u8,
     pub branch: String,
     pub age: String,
+    /// The same age in seconds, when it is knowable.
+    ///
+    /// `age` is for reading and this is for comparing. The unified queue orders equally-urgent rows
+    /// by how long they have been waiting, and a string like "2m" cannot be compared with a pull
+    /// request's timestamp — so the number travels beside the words rather than being parsed back
+    /// out of them.
+    #[serde(default)]
+    pub age_secs: Option<i64>,
     pub dir: String,
     /// the registered repo this box belongs to (`<repo>-<branch>`), empty if it matches none.
     /// Lets the cockpit group rows by repo once more than one is managed.

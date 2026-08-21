@@ -179,7 +179,7 @@ depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "heal
 # carry content hashes and neither the count nor the names are known at compile time. `act` since
 # creating a box became something a surface that is not a terminal can ask for — it used to be a
 # query string on the terminal WebSocket, so porting the REST API alone would have lost it.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
 
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
@@ -246,6 +246,13 @@ depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "uti
 
 [current.prq]
 depends_on = ["config", "gitgate", "github", "repos", "review", "util"]
+
+[current.queue]
+# `board` and `prq` because it merges their two lists, `repos` to know which repos have a review
+# queue at all, and nothing else. The merge is here rather than in either of them: a queue that
+# lived inside `board` would put GitHub on the board's tick, and one inside `prq` would make the
+# review side the owner of an ordering that is mostly about boxes.
+depends_on = ["board", "prq", "repos"]
 
 [current.registry]
 depends_on = ["mailbox", "repos", "sbx", "util"]

@@ -199,7 +199,7 @@ impl Sandbox {
         }
     }
 
-    pub(crate) fn age_secs(&self) -> Option<i64> {
+    pub fn age_secs(&self) -> Option<i64> {
         let t = DateTime::parse_from_rfc3339(&self.last_seen).ok()?;
         Some((Utc::now() - t.with_timezone(&Utc)).num_seconds())
     }

@@ -287,6 +287,8 @@ async fn main() {
         .route("/api/boxes/:name/create", post(api_create_box))
         .route("/api/acts/:id", get(api_act))
         .route("/api/acts/:id/stream", get(act_stream))
+        // Everything waiting on you, boxes and pull requests in one ordering.
+        .route("/api/queue", get(api_queue))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -420,6 +422,19 @@ async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
         // A wrong token gets the page and no cookie, rather than a hint that it was wrong.
     }
     (headers, INDEX).into_response()
+}
+
+/// Everything that stopped and is waiting on you, most urgent first.
+///
+/// **Not on the two-second tick.** The pull-request half comes from `prq::queue`'s own 60-second
+/// cache, so a surface rendering this often still reaches GitHub once a minute per repo — but it is
+/// a surface's call rather than the board's, which is what keeps `signal::board_tick` honest.
+async fn api_queue() -> Json<Vec<skein::queue::Row>> {
+    Json(
+        tokio::task::spawn_blocking(skein::queue::who_needs_you)
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 /// Start creating a box, and hand back the act to watch.
