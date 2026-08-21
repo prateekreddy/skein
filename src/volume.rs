@@ -160,9 +160,13 @@ pub fn used_kb(dir: &Path) -> Option<u64> {
 /// on the same command that made the copy — a move that is discovered to be wrong an hour later
 /// should be a matter of unsetting one environment variable.
 ///
-/// What does not travel: nothing under `$SKEIN_HOME` is excluded, because nothing under it is
-/// disposable. Box checkouts are on VM-local disk and reclonable from the mirror, caches and build
-/// output are in the sandbox — none of them is here to skip.
+/// What does not travel, and it is not "nothing": **the instance-scoped secrets are dropped rather
+/// than copied**, and every absolute path recorded under the old volume is rewritten to the new one.
+/// See [`INSTANCE_SCOPED`] and [`repoint`] for why each is not optional.
+///
+/// Everything else travels, because nothing else under `$SKEIN_HOME` is disposable. Box checkouts
+/// are on VM-local disk and reclonable from the mirror, caches and build output are in the sandbox —
+/// none of them is here to skip.
 pub fn migrate(target: &str) -> Result<String, String> {
     // Expanded here rather than by the caller: `skein migrate '~/vol'` quoted past the shell is the
     // same request as the unquoted one, and a directory literally named `~` is nobody's intent.
@@ -264,6 +268,21 @@ pub fn migrate(target: &str) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
+    // **Dropped, not copied.** These are scoped to one installation, and two volumes holding the
+    // same fleet-agent token is exactly the "machine-global secret" the design says skein does not
+    // have — untrue on day one if a migration duplicates one. They are re-minted on the next start,
+    // which is what `ensure_agent_token` and its port sibling already do when they find nothing.
+    //
+    // The port matters as much as the token and for a duller reason: a copied port sends the new
+    // installation's agent at whatever is listening on the old one's.
+    let mut dropped: Vec<&str> = Vec::new();
+    for scoped in INSTANCE_SCOPED {
+        let path = target.join(scoped);
+        if path.exists() && fs::remove_file(&path).is_ok() {
+            dropped.push(scoped);
+        }
+    }
+    let repointed = repoint(&source, &target)?;
     stamp(&target)?;
     // Only now: while this file is there, the target is not an installation.
     fs::remove_file(migrating_path(&target)).map_err(|e| format!("finishing the move: {e}"))?;
@@ -274,15 +293,78 @@ pub fn migrate(target: &str) -> Result<String, String> {
     )?;
 
     Ok(format!(
-        "moved {} to {} ({}).\n\nSet this before running skein again — it is the only thing that \
-         points at a volume:\n  export SKEIN_HOME={}\n\nThe old copy is untouched at {}. Delete it \
-         once a fleet has come up from the new one.",
+        "moved {} to {} ({}).{}{}\n\nSet this before running skein again — it is the only thing \
+         that points at a volume:\n  export SKEIN_HOME={}\n\nThe old copy is untouched at {}. \
+         Delete it once a fleet has come up from the new one.",
         source.display(),
         target.display(),
         human(need),
+        match dropped.as_slice() {
+            [] => String::new(),
+            some => format!(
+                "\n\nNot carried, because they belong to one installation and are made again on \
+                 the next start: {}.",
+                some.join(", ")
+            ),
+        },
+        match repointed {
+            0 => String::new(),
+            n => format!("\n\nRepointed {n} recorded path(s) from the old volume to this one."),
+        },
         target.display(),
         source.display()
     ))
+}
+
+/// Files that belong to *an installation* rather than to the work it holds.
+///
+/// A migration copies the work and re-mints these. Two volumes holding the same fleet-agent token
+/// would make "skein has no machine-global secret" untrue the moment anybody used the feature, and a
+/// copied port aims the new installation's agent at whatever answers on the old one's.
+pub const INSTANCE_SCOPED: &[&str] = &["fleet-agent.token", "fleet-agent.port"];
+
+/// Rewrite the paths a moved installation records about itself.
+///
+/// **The failure this prevents is silent, which is why it is here and not a note.** `repos.json`
+/// holds each repo's store as an *absolute* path under the volume — `~/.skein/repos/<id>/store/…` —
+/// so a copied installation goes on reading and writing the **old** one. It works perfectly, for as
+/// long as the old volume exists, and the new volume's copy of the store quietly stops being the one
+/// anybody uses. Then somebody deletes the old volume, as the report above tells them to.
+///
+/// Only paths **under the old home** are touched. A store somebody deliberately put elsewhere — on
+/// another disk, in a shared location — is not this move's business, and rewriting it would move
+/// their data in a way nobody asked for.
+fn repoint(source: &Path, target: &Path) -> Result<usize, String> {
+    let file = target.join("repos.json");
+    let Ok(raw) = fs::read_to_string(&file) else {
+        return Ok(0);
+    };
+    let old = source.to_string_lossy().to_string();
+    let new = target.to_string_lossy().to_string();
+    let mut repos: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).map_err(|e| format!("reading {}: {e}", file.display()))?;
+    let mut moved = 0usize;
+    for repo in &mut repos {
+        for key in ["store", "source", "source_tree", "work"] {
+            let Some(value) = repo.get(key).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // `starts_with` on the home plus a separator, not on the home alone: a sibling directory
+            // called `~/.skein-old` shares the prefix and is a different installation.
+            let under = value == old || value.starts_with(&format!("{old}/"));
+            if !under {
+                continue;
+            }
+            let rewritten = format!("{new}{}", &value[old.len()..]);
+            repo[key] = serde_json::Value::String(rewritten);
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        let bytes = serde_json::to_vec_pretty(&repos).map_err(|e| e.to_string())?;
+        write_atomic(&file, target, &bytes)?;
+    }
+    Ok(moved)
 }
 
 /// Kilobytes as something a person reads.
@@ -403,6 +485,94 @@ mod tests {
         assert!(free > 0, "a writable filesystem reported no room at all");
         assert_eq!(human(1536), "1.5 MB");
         assert_eq!(human(2 * 1024 * 1024), "2.0 GB");
+    }
+
+    /// An installation's own secrets are re-minted, and its recorded paths follow it.
+    ///
+    /// Two failures that are invisible until they matter. A copied fleet-agent token makes "skein
+    /// has no machine-global secret" untrue the moment two volumes exist, and a copied port aims the
+    /// new installation's agent at whatever answers on the old one's. And `repos.json` records each
+    /// store as an absolute path *under the volume* — copied unchanged, the new installation reads
+    /// and writes the **old** store, works perfectly for as long as the old volume exists, and then
+    /// somebody deletes it, as this command's own report tells them to.
+    #[test]
+    fn a_moved_volume_re_mints_its_own_secrets_and_repoints_its_paths() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        populate(&home);
+        for scoped in INSTANCE_SCOPED {
+            fs::write(home.join(scoped), b"instance-scoped").unwrap();
+        }
+        // Two repos: one whose store is under the volume, one deliberately elsewhere.
+        let outside = tempdir().join("shared-store");
+        fs::write(
+            home.join("repos.json"),
+            serde_json::to_vec_pretty(&serde_json::json!([
+                {
+                    "id": "inside",
+                    "source": "https://example.com/x.git",
+                    "source_tree": "",
+                    "store": home.join("repos/inside/store/.claude").to_string_lossy(),
+                    "agent": "claude",
+                    "plane_project": "", "sync_connection": "",
+                    "review_queue": true, "sync_gateway_url": ""
+                },
+                {
+                    "id": "elsewhere",
+                    "source": "https://example.com/y.git",
+                    "source_tree": "",
+                    "store": outside.to_string_lossy(),
+                    "agent": "claude",
+                    "plane_project": "", "sync_connection": "",
+                    "review_queue": true, "sync_gateway_url": ""
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let elsewhere_dir = tempdir();
+        let target = elsewhere_dir.join("volume");
+        let report = migrate(&target.to_string_lossy()).unwrap();
+
+        for scoped in INSTANCE_SCOPED {
+            assert!(
+                !target.join(scoped).exists(),
+                "{scoped} was copied — two volumes now hold one installation's secret"
+            );
+            // And the original keeps its own: the move deletes nothing on the source side.
+            assert!(
+                home.join(scoped).exists(),
+                "{scoped} was taken from the old volume"
+            );
+        }
+        assert!(
+            report.contains("Not carried") && report.contains("fleet-agent.token"),
+            "the report must say what was left behind: {report}"
+        );
+
+        let moved: Vec<serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(target.join("repos.json")).unwrap()).unwrap();
+        let store = |id: &str| -> String {
+            moved.iter().find(|r| r["id"] == id).unwrap()["store"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert!(
+            store("inside").starts_with(target.to_string_lossy().as_ref()),
+            "a store under the volume still points at the old one: {}",
+            store("inside")
+        );
+        // A store somebody deliberately put elsewhere is not this move's business, and rewriting it
+        // would move their data in a way nobody asked for.
+        assert_eq!(
+            store("elsewhere"),
+            outside.to_string_lossy(),
+            "a store outside the volume was rewritten"
+        );
+        assert!(report.contains("Repointed"), "{report}");
     }
 
     /// Every refusal, and each one names a state somebody can be in for a good reason.
