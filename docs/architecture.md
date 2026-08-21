@@ -1347,6 +1347,14 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    under the cover (SKEIN-4), and the launcher's own report is read by its marker rather than by
    position, so a box echoing a number on login cannot choose the namespace skein enters.
 
+   **The file stays, and "skein must never read it" is now a test rather than a sentence.** It was
+   worth asking whether to delete it — a file in a box-writable root whose only purpose was to tell
+   a privileged process which namespace to enter is not obviously worth keeping — and the answer is
+   that the launcher writes it *for the box*, deliberately, which is somebody else's affordance to
+   remove. What decays is the prohibition: the next person who needs a pid sees an obvious file. So
+   the source is asserted — no read of that path anywhere in `src/`, with the two non-reads named
+   (the helper, and the launch command that hands the path to the launcher).
+
    §8.4 states
    this for approvals; that was too narrow, and the general form sweeps in three more:
 

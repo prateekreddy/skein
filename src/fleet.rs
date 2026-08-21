@@ -6945,6 +6945,56 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// **skein never reads the anchor pidfile**, and this is what makes that a rule rather than a
+    /// sentence in a comment.
+    ///
+    /// The file exists on purpose: the launcher writes it "only for the box to read", and §9.5 R1
+    /// says so in words — *the pidfile in the box's tree may remain for the box's own use, and skein
+    /// must never read it*. It sits under the box's own root, which is bound read-write, so a box
+    /// can put a **sibling tmux server's pid** there; anything of skein's that read it would then
+    /// provision, diff, upload or take over inside a namespace the box chose. That is the confused
+    /// deputy SKEIN-4 closed, and it is closed by *nobody reading*, which is exactly the kind of
+    /// property that decays the first time somebody needs a pid and sees an obvious file.
+    ///
+    /// So the source is the thing asserted. Two uses are allowed and named: the helper itself, and
+    /// the launch command, which passes the path to the launcher so the launcher can write it.
+    #[test]
+    fn nothing_in_skein_reads_the_anchor_pidfile() {
+        let mut offenders: Vec<String> = Vec::new();
+        let mut walk = vec![std::path::PathBuf::from("src")];
+        while let Some(dir) = walk.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                for (n, line) in body.lines().enumerate() {
+                    if !line.contains("box_pidfile") && !line.contains("anchor.pid") {
+                        continue;
+                    }
+                    // Reading is what is forbidden. Naming the path to hand to the launcher, and
+                    // excluding it from an archive, are not reads.
+                    let reads = line.contains("read_to_string")
+                        || line.contains("read(")
+                        || line.contains("cat ");
+                    if reads {
+                        offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "something reads the anchor pidfile, which a box can point at a sibling namespace:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     /// The create does not write through a link somebody planted at the archive's path.
     ///
     /// `tar -cf` follows a symbolic link at its output path, and the output path is inside the box's
