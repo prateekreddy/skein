@@ -33,4 +33,19 @@ spelled_in = ["gitgate", "github", "place", "repos", "warden/serve"]
 #
 # skein's three are what delivery step 3 is retiring: create and destroy move behind the warden,
 # and this list is how that is checked rather than believed.
-spelled_in = ["bin/skein", "repos", "sbx", "warden/doer", "warden/sightings"]
+#
+# The three skein units were invisible until the pattern was corrected: skein does not spawn `sbx`
+# with `Command::new` — it goes through `run_capture_for` and friends — so the checker had been
+# reporting `fleet` as reaching nothing while it spawned the fleet create and the resize's destroy.
+# They are listed so the count can be watched going DOWN as delivery step 3 moves them behind the
+# warden, rather than discovered later.
+spelled_in = [
+  "bin/skein",
+  "bin/skein-server",
+  "fleet",
+  "health",
+  "repos",
+  "sbx",
+  "warden/doer",
+  "warden/sightings",
+]

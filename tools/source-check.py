@@ -52,7 +52,13 @@ SPELLINGS = {
     # Not a Source of its own: `sbx` is how the host reaches the SANDBOX, which is the outer shell
     # of every `enter`. Tracked separately so the two do not get confused when the transport moves
     # in-fleet and `sbx` stops being on the path at all.
-    "sbx": [r'Command::new\("sbx"\)'],
+    #
+    # `\("sbx"` rather than `Command::new("sbx")`, because skein does not spawn it that way. It goes
+    # through `run_capture_for`, `run_attached_env` and friends, and the narrower pattern saw NONE of
+    # them: `fleet` spawns `sbx` six times — including the fleet create and the resize's destroy, the
+    # two most privileged calls in the system — and the checker reported it as reaching nothing. The
+    # program name as the first argument of a call is what "spawning it" looks like here.
+    "sbx": [r'\("sbx"'],
 }
 
 
