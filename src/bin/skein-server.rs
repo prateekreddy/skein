@@ -24,8 +24,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::{Read, Write};
 use std::time::Duration;
-use tokio_stream::wrappers::IntervalStream;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
 
 use skein::cockpit::INDEX;
 // Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
@@ -37,6 +36,11 @@ const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 /// Cap concurrent embedded terminals so a flood of WS connections can't exhaust PTYs / file
 /// descriptors on the host. Each live terminal holds one permit for its whole session.
 static PTY_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(24);
+
+/// Cap live boards for the same reason as the PTY cap: a client that connects and never reads still
+/// holds a channel, and a producer serving a hundred of them is a producer nobody is watching.
+static EVENT_LIMIT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
 
 /// The server takes no subcommands — it is configured entirely by environment ($SKEIN_ADDR et al).
 /// It used to ignore argv outright, so `skein-server doctor` booted the cockpit and swallowed the
@@ -624,9 +628,13 @@ fn is_tailnet_ip(host: &str) -> bool {
     }
 }
 
-/// Snapshot of the fleet. `load_views` is blocking (subprocess `sbx ls` + per-box `git` + journal
-/// reads), so it runs on the blocking pool, never inline on an async worker — see the note on
-/// `api_events` for why blocking a worker here would stall concurrent terminal websockets.
+/// Snapshot of the fleet, on request. `load_views` is blocking, so it runs on the blocking pool and
+/// never inline on an async worker — see `start_producing` for why blocking a worker stalls every
+/// terminal websocket scheduled on it.
+///
+/// Still here after the stream became one producer, and for two reasons: a surface that wants the
+/// picture once should not have to open a stream to get it, and it is what a client re-syncs from
+/// when it is told it has fallen behind.
 async fn api_boxes() -> Json<Vec<BoxView>> {
     let views = tokio::task::spawn_blocking(|| load_views().unwrap_or_default())
         .await
@@ -2349,24 +2357,97 @@ async fn discard_partial(name: &str, path: &str) {
 
 /// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.
 /// (Roadmap: replace polling with a honker subscription so it's push, not poll.)
-async fn api_events() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    // `.then` (async), NOT `.map` (sync): `load_views` shells out to `sbx ls` and a per-box `git`
-    // subprocess plus journal/diff reads — 1-2s of synchronous work for a busy fleet. Running it
-    // inline on the async worker (as `.map` did) blocks that worker for the whole computation every
-    // 2s, and any terminal websocket scheduled on the same worker is starved for that window. That
-    // was the "typing lags only when the box is idle" freeze: mid-stream the output flood masks the
-    // gap, but at rest a lone keystroke's echo waits out the stall. Offload to the blocking pool so
-    // the async runtime stays free to pump the terminal sockets — matching every other blocking
-    // `skein::`/`load_*` call in this file.
-    let stream =
-        IntervalStream::new(tokio::time::interval(Duration::from_secs(2))).then(|_| async {
+async fn api_events() -> Response {
+    // Post-accept and post-auth, like the PTY cap beside it. **Not the whole story**: the auth gate
+    // runs after accept, so a cap here bounds authenticated clients and leaves connection exhaustion
+    // before auth to the accept loop. Written down rather than implied — a box getting a free denial
+    // of the control plane, and therefore of the approval surface, with no credential at all is a
+    // different hazard at a different layer.
+    let Ok(permit) = EVENT_LIMIT.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many live boards open — close one and retry",
+        )
+            .into_response();
+    };
+    // **Subscribe first, then start.** The producer stops when nobody is listening, and a tokio
+    // interval fires immediately — so starting before subscribing means the first tick counts zero
+    // listeners and the producer exits, leaving this client with an opening snapshot and silence
+    // for ever. Found by reading; a test with one client would not have shown it as a race.
+    let (snapshot, rest) = skein::stream::subscribe();
+    start_producing();
+    let following = tokio_stream::wrappers::BroadcastStream::new(rest).map(move |item| {
+        // Held for the life of the stream, so the cap counts open boards rather than requests.
+        let _permit = &permit;
+        match item {
+            Ok(tick) => sse(&tick),
+            // **Told, never silently skipped.** A hole in the stream is worse than a gap you can
+            // see: the board would look current and be wrong. So the client is told how many it
+            // missed, and asks for a fresh snapshot to re-sync from.
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(missed)) => {
+                Ok(Event::default().event("behind").data(missed.to_string()))
+            }
+        }
+    });
+    Sse::new(tokio_stream::once(sse(&snapshot)).chain(following)).into_response()
+}
+
+/// One tick, as the wire carries it.
+///
+/// The event name is the tag inside the payload, so a client switches on one thing rather than two
+/// that can disagree.
+fn sse(tick: &skein::stream::Tick) -> Result<Event, Infallible> {
+    let name = match tick {
+        skein::stream::Tick::Snapshot { .. } => "snapshot",
+        skein::stream::Tick::Changed { .. } => "changed",
+    };
+    Ok(Event::default()
+        .event(name)
+        .data(serde_json::to_string(tick).unwrap_or_else(|_| "{}".into())))
+}
+
+/// The one producer. Started by the first client, stopped when the last one leaves.
+///
+/// **Every client used to run this itself** — five tabs were five fleet snapshots a tick, each
+/// shelling out. A gate cannot fix that: the work was per client by construction. And stopping when
+/// nobody is listening is a property the old shape could not have at all, because there was nobody
+/// to notice.
+fn start_producing() {
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_secs(2));
+        // A tick that is late does not become two ticks in a row. The default policy bursts to catch
+        // up, which for a snapshot means running the most expensive thing skein computes twice with
+        // no gap — at a client that was already slow.
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            if skein::stream::listeners() == 0 {
+                RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                // Double-checked, because the gap between deciding to stop and saying so is a gap a
+                // client can arrive in: it would subscribe, find `RUNNING` still true, start
+                // nothing, and then be left with a producer that had already gone. So look again —
+                // and if somebody else has taken the flag in the meantime, they are producing now
+                // and this one may leave.
+                if skein::stream::listeners() == 0 {
+                    return;
+                }
+                if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+            }
+            // On the blocking pool: `load_views` is 1-2s of synchronous work for a busy fleet, and
+            // running it on an async worker starves every terminal socket scheduled there. That was
+            // the "typing lags only when the box is idle" freeze.
             let views = tokio::task::spawn_blocking(|| load_views().unwrap_or_default())
                 .await
                 .unwrap_or_default();
-            let payload = serde_json::to_string(&views).unwrap_or_else(|_| "[]".into());
-            Ok(Event::default().event("boxes").data(payload))
-        });
-    Sse::new(stream)
+            skein::stream::publish(views);
+        }
+    });
 }
 
 /// Upgrade to a WebSocket that bridges the browser terminal to a PTY.

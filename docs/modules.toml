@@ -179,7 +179,7 @@ depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "heal
 # carry content hashes and neither the count nor the names are known at compile time. `act` since
 # creating a box became something a surface that is not a terminal can ask for — it used to be a
 # query string on the terminal WebSocket, so porting the REST API alone would have lost it.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
 
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
@@ -277,6 +277,13 @@ depends_on = ["kit", "repos", "sandbox", "util"]
 
 [current.signals]
 depends_on = ["digest", "registry", "util"]
+
+[current.stream]
+# `board` for the shape it carries, and nothing else. §14 lists `stream` beside `api` for the same
+# reason it is separate here: the fan-out is a mechanism, and the *policy* — how often, and where a
+# snapshot comes from — belongs to whoever is producing. A stream module that fetched its own would
+# be a second producer, which is the thing it exists to end.
+depends_on = ["board"]
 
 [current.substrate]
 depends_on = ["config", "fleet", "place", "util"]

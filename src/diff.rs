@@ -19,7 +19,7 @@ use std::process::Command;
 use std::time::Duration;
 
 /// Diff summary a box reports for its branch-vs-base work (written by box-diff.sh).
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 pub struct DiffStat {
     #[serde(default)]
     pub files: u32,

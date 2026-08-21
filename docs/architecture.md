@@ -1318,16 +1318,34 @@ The event stream today re-sends the whole fleet every two seconds: no deltas, no
 lag counter, no connection cap, and a missed-tick policy that bursts at a drained slow client. The
 diagnosis is easy and an earlier draft stopped there. The design:
 
-- **one producer, fanned out.** Today there is no broadcast channel at all: **every SSE client
-  independently runs the fleet snapshot on the blocking pool every two seconds.** A per-client bounded
-  channel presupposes a single producer, so that is the first thing to build — and it is the only
-  thing that bounds the `boxes × transitions × clients` budget. The lesson is already paid for:
-  check-then-act once gave every browser tab its own subprocess every tick.
-- **transitions, not snapshots.** §3 already requires server-side transitions; the stream carries
-  them, and a full snapshot only on connect or on request.
-- **a bounded per-client channel with a lag counter.** On overflow the client is told it fell behind
-  and re-syncs from a snapshot — never silently skipped.
-- **a connection cap**, as the PTY path already has.
+- **one producer, fanned out.** ~~Today there is no broadcast channel at all~~ — **done**: every SSE
+  client used to run the fleet snapshot on the blocking pool every two seconds, so five tabs were
+  five snapshots a tick. A gate could not have fixed it; the work was per client by construction.
+  One producer now, **started by the first client and stopped when the last one leaves**, so a server
+  nobody is watching does no work at all — a property the old shape could not have, because there was
+  nobody to notice.
+- **transitions, not snapshots.** Done: a full snapshot on connect, and after that only what moved.
+  `gone` is its own list rather than an absence, because "not in this update" and "no longer there"
+  are different facts and conflating them means re-sending everything to express one. A tick where
+  nothing moved sends **nothing** — which is what lets "nothing needs you" be a state rather than an
+  absence. The comparison is over the serialised form, because a hand-written one stops noticing the
+  newest field silently, and in the direction of showing a stale row.
+
+  **Except the fields derived from the clock**, and the first version left them in: a box's `age`
+  moves every second whether or not anything happened to it, so every box changed on every tick and
+  transitions cost exactly what snapshots did, plus the machinery. It surfaced as a test that hung,
+  because the stream never stopped sending. *Changed* has to mean something happened, not that time
+  passed. The cost is that a row's displayed age stops advancing between real changes, held in check
+  by a full snapshot every thirtieth second — and the right answer is a client that ages its own rows
+  from the observation and the moment it arrived, which is not built.
+- **a bounded per-client channel with a lag counter.** Done: the client is told how many ticks it
+  missed and re-syncs from a snapshot. A hole is worse than a gap you can see — the board would look
+  current and be wrong.
+- **a connection cap**, as the PTY path already has. Done, and **it is post-auth**, like the PTY one.
+  That bounds authenticated clients and leaves pre-auth connection exhaustion to the accept loop:
+  the auth gate runs after accept, so a box still gets a denial of the control plane — and therefore
+  of the approval surface — with no credential. Stated here rather than implied, because a cap that
+  looks like it covers this is worse than one that admits it does not.
 
 ---
 

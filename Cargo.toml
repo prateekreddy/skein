@@ -53,7 +53,9 @@ tokio = { version = "1", features = [
     "process",
     "io-util",
 ] }
-tokio-stream = { version = "0.1", features = ["time"] }
+# `sync` for BroadcastStream: it is what turns a lagged receiver into an item the stream can act
+# on, rather than an error that ends it — which is how a slow client gets TOLD instead of dropped.
+tokio-stream = { version = "0.1", features = ["time", "sync"] }
 # reuse the wheel: wezterm's PTY layer for the embedded terminal (xterm.js handles the browser side)
 portable-pty = "0.8"
 # advisory file locking so registry writes share the same flock discipline as the box hooks

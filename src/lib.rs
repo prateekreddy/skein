@@ -55,6 +55,7 @@ pub mod sharedhome;
 pub mod signal;
 pub mod signals;
 pub mod source;
+pub mod stream;
 pub mod substrate;
 pub mod takeover;
 #[cfg(test)]

@@ -54,6 +54,45 @@ fn http_get(addr: &str, path: &str) -> (u16, String) {
     (status, text)
 }
 
+/// One GET that reads for at most `patience` — for a stream, which never closes.
+fn http_get_for(addr: &str, path: &str, patience: Duration) -> (u16, String) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(patience)).unwrap();
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\r\n")
+            .as_bytes(),
+    )
+    .unwrap();
+    // **Bounded, not read-to-end.** A stream does not end, and a producer that keeps sending keeps
+    // `read_to_end` reading — which is a test that hangs rather than one that fails. Enough bytes
+    // for the headers and the opening event is the whole question here.
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut got = 0;
+    while got < buf.len() {
+        match s.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                got += n;
+                // The opening event has arrived; anything after it is the next tick, and waiting for
+                // one is waiting for the fleet to change.
+                if String::from_utf8_lossy(&buf[..got]).contains("\n\n") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    buf.truncate(got);
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let status = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    (status, text)
+}
+
 /// One POST with a raw body + headers → (status, full raw response).
 fn http_post(addr: &str, path: &str, headers: &str, body: &[u8]) -> (u16, String) {
     let mut s = TcpStream::connect(addr).unwrap();
@@ -188,6 +227,22 @@ fn server_serves_ui_vendor_and_guards_routes() {
     let (st, body) = http_get(&addr, "/api/boxes");
     assert_eq!(st, 200);
     assert!(body.contains("thing-a"));
+
+    // ---- one producer, and the stream opens with a snapshot ----
+    // Every client used to build its own interval and run the whole fleet snapshot itself; five
+    // tabs were five snapshots a tick. The wire proof is the opening event: a client is *given* the
+    // picture rather than computing one, which is only possible when a producer already holds it.
+    let (st, body) = http_get_for(&addr, "/api/events", Duration::from_secs(6));
+    assert_eq!(st, 200);
+    assert!(
+        body.contains("event: snapshot"),
+        "the stream must open with the picture, not with the next change: {}",
+        body.lines().take(12).collect::<Vec<_>>().join(" | ")
+    );
+    assert!(
+        body.contains("\"event\":\"snapshot\""),
+        "the event name and the payload's tag must agree, or a client switches on two things: {body}"
+    );
 
     // ---- creating a box is something a surface that is not a terminal can ask for ----
     // The whole point of the route: before it, creation was `?launch=` on the terminal WebSocket, so

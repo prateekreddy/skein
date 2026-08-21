@@ -6362,7 +6362,28 @@ let es = null;
 function connect() {
   if (es) { try { es.close(); } catch {} }   // don't stack streams on manual reconnect
   es = new EventSource("/api/events");
-  es.addEventListener("boxes", e => { lastTickAt = Date.now(); try { render(JSON.parse(e.data)); } catch {} });
+  // **Transitions, not snapshots.** One producer feeds every open tab now, and after the opening
+  // snapshot it sends only what moved — so a quiet fleet sends nothing at all, which is what lets
+  // "nothing needs you" be a state rather than an absence.
+  //
+  // `gone` is its own list rather than an absence, because "not in this update" and "no longer
+  // there" are different facts and conflating them would mean re-sending everything to express one.
+  const applyTick = tick => {
+    lastTickAt = Date.now();
+    if (tick.event === "snapshot") { render(tick.boxes || []); return; }
+    const by = new Map(boxes.map(b => [b.name, b]));
+    for (const name of (tick.gone || [])) by.delete(name);
+    for (const b of (tick.boxes || [])) by.set(b.name, b);
+    render([...by.values()]);
+  };
+  es.addEventListener("snapshot", e => { try { applyTick(JSON.parse(e.data)); } catch {} });
+  es.addEventListener("changed", e => { try { applyTick(JSON.parse(e.data)); } catch {} });
+  // Told rather than silently skipped: this tab stopped reading long enough to fall behind the
+  // producer, so what it holds may be wrong in ways a delta cannot repair. Ask for the whole thing.
+  es.addEventListener("behind", e => {
+    console.warn(`skein: this board fell ${e.data} ticks behind; re-syncing`);
+    fetch("/api/boxes").then(r => r.json()).then(render).catch(() => {});
+  });
   es.onopen = () => { document.getElementById("live").classList.add("on"); document.getElementById("livetext").textContent = "live"; };
   es.onerror = () => { document.getElementById("live").classList.remove("on"); document.getElementById("livetext").textContent = "reconnecting…"; };
 }

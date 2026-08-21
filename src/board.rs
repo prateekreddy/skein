@@ -339,7 +339,7 @@ pub fn foreign_views() -> Result<Vec<BoxView>, String> {
 }
 
 /// A registry entry enriched for display — what the CLI table and the web API both render.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct BoxView {
     pub name: String,
     pub state: String,
