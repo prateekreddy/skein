@@ -252,7 +252,10 @@ depends_on = ["config", "gitgate", "github", "repos", "review", "util"]
 # queue at all, and nothing else. The merge is here rather than in either of them: a queue that
 # lived inside `board` would put GitHub on the board's tick, and one inside `prq` would make the
 # review side the owner of an ordering that is mostly about boxes.
-depends_on = ["board", "prq", "repos"]
+# `health` because a failing check belongs in the SAME queue as the work: a fleet whose substrate
+# will not install is not a quiet fleet, and putting that somewhere else is how a first run looks
+# like nothing happening.
+depends_on = ["board", "health", "prq", "repos"]
 
 [current.registry]
 depends_on = ["mailbox", "repos", "sbx", "util"]
@@ -283,7 +286,10 @@ depends_on = ["digest", "registry", "util"]
 # reason it is separate here: the fan-out is a mechanism, and the *policy* — how often, and where a
 # snapshot comes from — belongs to whoever is producing. A stream module that fetched its own would
 # be a second producer, which is the thing it exists to end.
-depends_on = ["board"]
+# `config` for where the "last acknowledged" mark lives and `util` for writing it atomically. That
+# mark is on disk and there is one of it, which is the whole of why "since you were away" is not a
+# client-side delta: a mark in a tab dies on reload, and a mark per tab makes two tabs disagree.
+depends_on = ["board", "config", "util"]
 
 [current.substrate]
 depends_on = ["config", "fleet", "place", "util"]

@@ -235,8 +235,16 @@ pub fn creating(box_name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Wait for an act to finish. **Generously**, because this asserts an outcome and not a latency.
+    ///
+    /// The first version waited two seconds, which is less than one of these tests' own `sleep 2`
+    /// and not enough for any of them on a loaded machine: it passed alone and failed in a full
+    /// parallel run, which is the worst way for a budget to be wrong. A wait that is too long costs
+    /// nothing when the act finishes, and a wait that is too short is a test that fails for reasons
+    /// that have nothing to do with what it is about.
     fn settle(id: &str) -> Look {
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
             if let Some(seen) = look(id) {
                 if !matches!(seen.state, State::Running) {
                     return seen;
@@ -293,9 +301,11 @@ mod tests {
     /// A watcher gets what it missed and then the rest, with no gap between the two.
     #[test]
     fn a_watcher_arriving_late_is_not_missing_the_beginning() {
-        begin("act-watch", "echo first; sleep 0.3; echo second").unwrap();
-        // Long enough for the first line and not the second.
-        std::thread::sleep(Duration::from_millis(120));
+        begin("act-watch", "echo first; sleep 1; echo second").unwrap();
+        // Long enough for the first line and not the second. A whole second between them, because
+        // the window has to survive a loaded machine — a race the test itself sets up is a race the
+        // test loses first.
+        std::thread::sleep(Duration::from_millis(250));
         let (so_far, mut rest) = watch("act-watch").expect("watchable");
         assert!(
             so_far.contains("first"),

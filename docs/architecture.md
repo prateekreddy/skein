@@ -1444,6 +1444,28 @@ sixty-second cache, and the merge is a surface's call rather than the board's �
 - **Setup is incomplete.** Failing checks at the top of the same queue — but see §11.5, because the
   cockpit is not where a new user starts.
 
+**They are one value, not three renderings.** `queue::Standing` is `setup-incomplete`, `needs-you`
+or `calm`, derived from the rows the board would draw — so the headline and the list cannot disagree,
+which is what a separate "all clear" banner invites. Calm is not "the busy case with a zero in it":
+a fleet of working boxes is calm, because the machine is busy and nothing is owed.
+
+**Why "you were away" is server-side, stated as the three things a client-side delta cannot do.** A
+mark in a tab's memory dies on reload. A mark per tab makes two tabs disagree. A mark computed from
+"when this tab gained focus" cannot tell a box that finished while you were out from one that
+finished before you opened the tab. All three look like the feature working. So there is **one mark,
+on disk**, and the server answers *what happened since it* from a bounded journal of state changes —
+state, not any field, because a digest of every diffstat and headline is a log, and would be re-read
+as noise on every reload.
+
+Two details that are decisions rather than mechanics. The acknowledgement is stamped **by the
+server**: a client supplying its own timestamp is choosing which moments it will never be shown, and
+a clock a minute fast silently swallows a minute of them. And a mark that cannot be read shows
+**everything** rather than nothing — a digest that silently shows nothing is indistinguishable from a
+quiet night, and only one of those is true.
+
+A box with no previous state has not transitioned, which covers the producer's first tick *and* a box
+that has just been created: it arrived, it did not move.
+
 ### 11.4 The laws
 
 1. **Never report a problem without the action that resolves it.**

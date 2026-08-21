@@ -61,6 +61,13 @@ pub enum Need {
 pub enum Source {
     Box,
     PullRequest,
+    /// A failing health check.
+    ///
+    /// In the **same** queue rather than a panel of its own, because a fleet whose substrate will
+    /// not install is not a quiet fleet — it is a fleet that needs you, and putting that somewhere
+    /// else is how a first run looks like nothing happening. §11.6 makes the same point about the
+    /// first-run surface: the blocked state is the board, not a different page.
+    Setup,
 }
 
 /// One thing waiting on you.
@@ -86,6 +93,50 @@ pub struct Row {
     pub waiting_secs: Option<i64>,
     /// Where a surface sends someone who clicks it.
     pub url: String,
+    /// What would clear it, when the row is something a person fixes rather than answers.
+    ///
+    /// Carried on the row rather than looked up, for the reason `health::unsatisfied` takes it as an
+    /// argument: a fault with no way out cannot be written without noticing, and a fault whose way
+    /// out is on another screen may as well not have one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub fix: String,
+}
+
+/// What the board is, as one value.
+///
+/// **Three states most tools botch** (§11.3), and they are three because they need different words,
+/// not because a count happens to be zero. A dashboard that looks the same whether or not anything
+/// is wrong has failed at its only job — so "nothing needs you" is a state to render, not an empty
+/// list to fall through to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "standing", rename_all = "kebab-case")]
+pub enum Standing {
+    /// Something is not set up, and until it is, the fleet cannot do the thing you came for. First,
+    /// because everything below it is downstream of this being wrong.
+    SetupIncomplete { faults: usize },
+    /// Work has stopped and is waiting on you.
+    NeedsYou { rows: usize },
+    /// Nothing is waiting. **Said, not implied.**
+    Calm,
+}
+
+/// The board's standing, from the queue it would render.
+///
+/// Derived from the rows rather than computed beside them, so the headline and the list cannot
+/// disagree — which is the failure a separate "all clear" banner invites.
+pub fn standing(rows: &[Row]) -> Standing {
+    let faults = rows.iter().filter(|r| r.source == Source::Setup).count();
+    if faults > 0 {
+        return Standing::SetupIncomplete { faults };
+    }
+    match rows
+        .iter()
+        .filter(|r| matches!(r.need, Need::You | Need::YourAttention))
+        .count()
+    {
+        0 => Standing::Calm,
+        rows => Standing::NeedsYou { rows },
+    }
 }
 
 /// A box's rank, which is the tier the board already computed.
@@ -125,20 +176,43 @@ fn need_of_pr(pr: &Pr) -> Need {
 /// which is the point: two rows that need you equally sort by how long they have been ignored, not
 /// by which half of skein produced them.
 pub fn who_needs_you() -> Vec<Row> {
-    let mut rows: Vec<Row> = crate::board::load_views()
-        .unwrap_or_default()
+    // Setup first, and in the same list. A failing check is not a footnote beside the work — it is
+    // the reason there is no work, and it carries the line that clears it.
+    let mut rows: Vec<Row> = crate::health::health_report()
+        .checks()
         .into_iter()
-        .map(|view| Row {
-            source: Source::Box,
-            need: need_of_box(&view),
-            repo: view.repo.clone(),
-            name: view.name.clone(),
-            headline: view.headline.clone().unwrap_or_default(),
-            state: view.state.clone(),
-            waiting_secs: view.age_secs,
-            url: format!("/#box={}", view.name),
+        .filter(|(_, check)| check.is_fault())
+        .map(|(name, check)| Row {
+            source: Source::Setup,
+            need: Need::You,
+            repo: String::new(),
+            name: name.to_string(),
+            headline: check.detail.clone(),
+            state: "unsatisfied".into(),
+            // A check has not been "waiting" — it is simply wrong, and inventing an age for it would
+            // put it in the tie-break against boxes on a number that means nothing.
+            waiting_secs: None,
+            url: "/#health".into(),
+            fix: check.fix.clone(),
         })
         .collect();
+
+    rows.extend(
+        crate::board::load_views()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|view| Row {
+                source: Source::Box,
+                need: need_of_box(&view),
+                repo: view.repo.clone(),
+                name: view.name.clone(),
+                headline: view.headline.clone().unwrap_or_default(),
+                state: view.state.clone(),
+                waiting_secs: view.age_secs,
+                url: format!("/#box={}", view.name),
+                fix: String::new(),
+            }),
+    );
 
     for repo in crate::repos::load_repos() {
         if !repo.review_queue {
@@ -164,6 +238,7 @@ pub fn who_needs_you() -> Vec<Row> {
                 .to_string(),
                 waiting_secs: seconds_since(&pr.updated_at),
                 url: pr.url.clone(),
+                fix: String::new(),
             }
         }));
     }
@@ -207,6 +282,7 @@ mod tests {
             state: String::new(),
             waiting_secs: secs,
             url: String::new(),
+            fix: String::new(),
         }
     }
 
@@ -236,6 +312,7 @@ mod tests {
             state: String::new(),
             waiting_secs: secs,
             url: String::new(),
+            fix: String::new(),
         }
     }
 
@@ -303,6 +380,45 @@ mod tests {
             pull(9, Lane::NeedsYou, Some(500)),
         ]);
         assert_eq!(rows, vec!["#9", "recent", "unknown"]);
+    }
+
+    /// **"Nothing needs you" is a state, not an empty list.**
+    ///
+    /// A dashboard that looks the same whether or not anything is wrong has failed at its only job,
+    /// and the way that happens is the calm case being the absence of the busy one. So it is a value
+    /// a surface has to render on purpose.
+    #[test]
+    fn a_quiet_fleet_says_so_rather_than_showing_nothing() {
+        assert_eq!(standing(&[]), Standing::Calm);
+        // A fleet full of working boxes is calm: the machine is busy and nothing is owed.
+        assert_eq!(
+            standing(&[boxed("working", 3, Some(1)), boxed("quiet", 4, Some(1))]),
+            Standing::Calm
+        );
+        assert_eq!(
+            standing(&[boxed("asking", 0, Some(1)), boxed("working", 3, Some(1))]),
+            Standing::NeedsYou { rows: 1 }
+        );
+    }
+
+    /// Setup outranks everything, because everything below it is downstream of it being wrong.
+    ///
+    /// And it is in the **same** queue: a fleet whose substrate will not install is not a quiet
+    /// fleet, and putting that on another page is how a first run looks like nothing happening.
+    #[test]
+    fn a_failing_check_is_the_headline_and_carries_its_fix() {
+        let mut broken = boxed("asking", 0, Some(1));
+        broken.source = Source::Setup;
+        broken.fix = "skein login claude".into();
+        assert_eq!(
+            standing(&[broken.clone(), boxed("asking", 0, Some(1))]),
+            Standing::SetupIncomplete { faults: 1 },
+            "a fleet that is not set up reported as merely busy"
+        );
+        assert!(
+            !broken.fix.is_empty(),
+            "a fault whose way out is on another screen may as well not have one"
+        );
     }
 
     /// A box's rank is the board's tier, not a second ladder.

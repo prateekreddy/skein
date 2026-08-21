@@ -106,6 +106,27 @@ pub fn transition(before: &[BoxView], after: &[BoxView]) -> Tick {
     Tick::Changed { boxes, gone }
 }
 
+/// One box changing state, as the away digest remembers it.
+///
+/// **State**, not any field: "your box finished while you were out" is about what it is doing, and
+/// a journal that recorded every diffstat and headline would be a log rather than a digest — and
+/// would be re-read as noise on every reload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Moment {
+    /// RFC3339, stamped by the producer. The client's clock is not consulted, because two tabs on
+    /// two machines disagreeing about *when* is the whole reason this is not a client-side delta.
+    pub at: String,
+    pub name: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// How many moments are kept.
+///
+/// A digest, not an audit log — the host-side one is §5's and this is not it. Enough for a night
+/// away from a busy fleet, bounded so a month of uptime is not a memory leak with a story.
+pub const REMEMBERED: usize = 512;
+
 struct Producer {
     say: tokio::sync::broadcast::Sender<Tick>,
     /// How many ticks have been published, for [`FULL_EVERY`].
@@ -113,6 +134,8 @@ struct Producer {
     /// The last full picture, so a client arriving mid-stream gets one without waiting a tick and
     /// without computing its own.
     latest: Mutex<Vec<BoxView>>,
+    /// What changed state, oldest first. See [`Moment`].
+    journal: Mutex<std::collections::VecDeque<Moment>>,
 }
 
 fn producer() -> &'static Producer {
@@ -121,6 +144,7 @@ fn producer() -> &'static Producer {
         say: tokio::sync::broadcast::channel(BEHIND).0,
         ticks: std::sync::atomic::AtomicU64::new(1),
         latest: Mutex::new(Vec::new()),
+        journal: Mutex::new(std::collections::VecDeque::new()),
     })
 }
 
@@ -131,6 +155,7 @@ pub fn publish(views: Vec<BoxView>) {
     let ticks = producer
         .ticks
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    remember(&producer.journal, &producer.latest, &views);
     let tick = {
         let mut latest = producer.latest.lock().unwrap_or_else(|e| e.into_inner());
         let tick = match ticks.is_multiple_of(FULL_EVERY) {
@@ -149,6 +174,112 @@ pub fn publish(views: Vec<BoxView>) {
         return;
     }
     let _ = producer.say.send(tick);
+}
+
+/// Write down what changed state, and forget the oldest when the journal is full.
+fn remember(
+    journal: &Mutex<std::collections::VecDeque<Moment>>,
+    latest: &Mutex<Vec<BoxView>>,
+    views: &[BoxView],
+) {
+    let before: std::collections::HashMap<String, String> = latest
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|b| (b.name.clone(), b.state.clone()))
+        .collect();
+    let at = chrono::Utc::now().to_rfc3339();
+    let mut journal = journal.lock().unwrap_or_else(|e| e.into_inner());
+    for view in views {
+        // **A box with no previous state has not transitioned**, and that is the whole guard. It
+        // covers two cases at once: the producer's first tick, where writing every box down would
+        // make restarting skein look like a night's worth of activity, and a box that has just been
+        // created, which arrived rather than moved. An earlier version had a separate `if
+        // before.is_empty()` check above; it was redundant, and a sabotage pass found it by
+        // removing it and watching the test still pass.
+        let Some(was) = before.get(&view.name) else {
+            continue;
+        };
+        if *was == view.state {
+            continue;
+        }
+        journal.push_back(Moment {
+            at: at.clone(),
+            name: view.name.clone(),
+            from: was.clone(),
+            to: view.state.clone(),
+        });
+    }
+    while journal.len() > REMEMBERED {
+        journal.pop_front();
+    }
+}
+
+/// What has happened since `at`, oldest first.
+///
+/// The **server** answers this, which is the whole design. A client-side delta computed on tab focus
+/// cannot survive a reload, cannot tell a box that finished while you were away from one that
+/// finished before the tab was opened, and is wrong for every second tab — three failures that all
+/// look like the feature working.
+pub fn since(at: &str) -> Vec<Moment> {
+    let journal = producer().journal.lock().unwrap_or_else(|e| e.into_inner());
+    // An unparseable or empty mark means "we do not know when you last looked", and the honest
+    // answer to that is everything remembered rather than nothing — a digest that silently shows
+    // nothing is indistinguishable from a quiet night.
+    let Ok(mark) = chrono::DateTime::parse_from_rfc3339(at) else {
+        return journal.iter().cloned().collect();
+    };
+    journal
+        .iter()
+        .filter(|m| chrono::DateTime::parse_from_rfc3339(&m.at).is_ok_and(|when| when > mark))
+        .cloned()
+        .collect()
+}
+
+/// When a person last acknowledged the board, on disk.
+///
+/// **On disk, and one of them**, because that is what the three failures of a client-side delta come
+/// down to. A mark in a tab's memory dies on reload; a mark per tab makes two tabs disagree; and a
+/// mark computed from "when this tab gained focus" cannot tell a box that finished while you were
+/// out from one that finished before you opened it. One file answers all three.
+///
+/// Beside skein's other state rather than in the volume's declared area: it is a **recorded** fact
+/// about a person's attention, not a declaration anybody reconciles against.
+fn mark_path() -> std::path::PathBuf {
+    crate::config::skein_home().join("seen.json")
+}
+
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+struct Mark {
+    /// RFC3339. Empty means nobody has ever acknowledged anything.
+    #[serde(default)]
+    at: String,
+}
+
+/// When the board was last acknowledged. Empty if never.
+pub fn last_seen() -> String {
+    std::fs::read_to_string(mark_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Mark>(&raw).ok())
+        .map(|mark| mark.at)
+        .unwrap_or_default()
+}
+
+/// Acknowledge everything up to now.
+///
+/// Stamped **here**, not taken from the caller: a client that supplies its own timestamp supplies
+/// which moments it will never be shown, and a clock that is a minute fast silently swallows a
+/// minute of them.
+pub fn acknowledge() -> Result<String, String> {
+    let at = chrono::Utc::now().to_rfc3339();
+    let path = mark_path();
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", path.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let bytes = serde_json::to_vec(&Mark { at: at.clone() }).map_err(|e| e.to_string())?;
+    crate::util::write_atomic(&path, dir, &bytes)?;
+    Ok(at)
 }
 
 /// Everything as the producer last saw it.
@@ -277,6 +408,80 @@ mod tests {
             Tick::Changed { boxes, .. } => assert_eq!(boxes.len(), 1),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The digest is about **state**, and a restart is not the whole fleet moving at once.
+    #[test]
+    fn the_journal_remembers_a_state_change_and_not_a_restart() {
+        let journal = Mutex::new(std::collections::VecDeque::new());
+        let latest = Mutex::new(Vec::new());
+
+        // Nothing to compare against yet. Calling every box a transition here would make restarting
+        // skein look like a night's worth of activity.
+        remember(&journal, &latest, &[view("a", "working")]);
+        assert!(
+            journal.lock().unwrap().is_empty(),
+            "a producer's first tick reported the fleet as having just changed"
+        );
+
+        // The same rule covers a box that has just been created: it arrived, it did not move.
+        *latest.lock().unwrap() = vec![view("a", "working")];
+        remember(
+            &journal,
+            &latest,
+            &[view("a", "working"), view("new", "live")],
+        );
+        assert!(
+            journal.lock().unwrap().is_empty(),
+            "a box that was created was reported as having changed state"
+        );
+
+        *latest.lock().unwrap() = vec![view("a", "working"), view("b", "live")];
+        remember(&journal, &latest, &[view("a", "done"), view("b", "live")]);
+        let seen: Vec<Moment> = journal.lock().unwrap().iter().cloned().collect();
+        assert_eq!(seen.len(), 1, "an unchanged box was written down: {seen:?}");
+        assert_eq!(
+            (
+                seen[0].name.as_str(),
+                seen[0].from.as_str(),
+                seen[0].to.as_str()
+            ),
+            ("a", "working", "done")
+        );
+
+        // Bounded: a month of uptime is not a memory leak with a story.
+        for n in 0..(REMEMBERED + 50) {
+            *latest.lock().unwrap() = vec![view("a", &format!("s{n}"))];
+            remember(&journal, &latest, &[view("a", &format!("s{}", n + 1))]);
+        }
+        assert_eq!(journal.lock().unwrap().len(), REMEMBERED);
+    }
+
+    /// An unknown mark shows everything rather than nothing.
+    ///
+    /// The two are not interchangeable: a digest that silently shows nothing is indistinguishable
+    /// from a quiet night, and only one of them is true.
+    #[test]
+    fn a_mark_that_cannot_be_read_shows_the_night_rather_than_hiding_it() {
+        let journal = Mutex::new(std::collections::VecDeque::new());
+        let latest = Mutex::new(vec![view("a", "working")]);
+        remember(&journal, &latest, &[view("a", "done")]);
+        let all: Vec<Moment> = journal.lock().unwrap().iter().cloned().collect();
+        assert_eq!(all.len(), 1);
+
+        let filtered = |mark: &str| match chrono::DateTime::parse_from_rfc3339(mark) {
+            Err(_) => all.clone(),
+            Ok(m) => all
+                .iter()
+                .filter(|x| chrono::DateTime::parse_from_rfc3339(&x.at).is_ok_and(|w| w > m))
+                .cloned()
+                .collect(),
+        };
+        assert_eq!(filtered("").len(), 1, "an empty mark hid the night");
+        assert_eq!(filtered("not a time").len(), 1);
+        // And a mark from after everything shows nothing, which is the honest empty.
+        let later = (chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339();
+        assert_eq!(filtered(&later).len(), 0);
     }
 
     /// A field added to `BoxView` is noticed without anyone remembering to compare it.

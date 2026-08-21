@@ -293,6 +293,9 @@ async fn main() {
         .route("/api/acts/:id/stream", get(act_stream))
         // Everything waiting on you, boxes and pull requests in one ordering.
         .route("/api/queue", get(api_queue))
+        // What happened while you were out, and the acknowledgement that ends it.
+        .route("/api/away", get(api_away))
+        .route("/api/away/seen", post(api_seen))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -439,6 +442,47 @@ async fn api_queue() -> Json<Vec<skein::queue::Row>> {
             .await
             .unwrap_or_default(),
     )
+}
+
+/// What happened since the board was last acknowledged, and the standing that goes with it.
+///
+/// Answered by the **server**, which is the whole design: a client-side delta computed on tab focus
+/// cannot survive a reload, cannot tell a box that finished while you were away from one that
+/// finished before the tab was opened, and is wrong for every second tab. Three failures that all
+/// look like the feature working.
+async fn api_away() -> Json<serde_json::Value> {
+    let (since, moments, rows) = tokio::task::spawn_blocking(|| {
+        let since = skein::stream::last_seen();
+        let moments = skein::stream::since(&since);
+        (since, moments, skein::queue::who_needs_you())
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({
+        "since": since,
+        "moments": moments,
+        "standing": skein::queue::standing(&rows),
+    }))
+}
+
+/// Acknowledge everything up to now.
+///
+/// The timestamp is the server's. A client that supplied its own would be choosing which moments it
+/// is never shown, and a clock a minute fast would silently swallow a minute of them.
+async fn api_seen() -> Response {
+    match tokio::task::spawn_blocking(skein::stream::acknowledge).await {
+        Ok(Ok(at)) => Json(serde_json::json!({ "at": at })).into_response(),
+        Ok(Err(why)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// Start creating a box, and hand back the act to watch.
