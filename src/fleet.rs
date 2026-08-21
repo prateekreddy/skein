@@ -7495,13 +7495,6 @@ b idle 5000000 4 1048576 1048576
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// The gap between what skein is *configured* for and what the sandbox actually got. sbx fixes
-    /// a sandbox's memory when it is created, so editing Fleet memory without rebuilding leaves the
-    /// config describing a VM that does not exist — and ceilings worked out for a machine twice the
-    /// real size bound nothing at all. Run against the real launcher, with a fake cgroup tree and a
-    /// fake `/proc/meminfo`, because the scaling lives in shell and an assertion about the Rust
-    /// half would prove nothing about it.
-    #[test]
     /// The plumbing is guaranteed memory the kernel may not reclaim, and the number comes from the
     /// plan rather than from a preference.
     ///
@@ -7591,6 +7584,13 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// The gap between what skein is *configured* for and what the sandbox actually got. sbx fixes
+    /// a sandbox's memory when it is created, so editing Fleet memory without rebuilding leaves the
+    /// config describing a VM that does not exist — and ceilings worked out for a machine twice the
+    /// real size bound nothing at all. Run against the real launcher, with a fake cgroup tree and a
+    /// fake `/proc/meminfo`, because the scaling lives in shell and an assertion about the Rust
+    /// half would prove nothing about it.
+    #[test]
     fn ceilings_shrink_to_the_memory_the_sandbox_really_has() {
         let dir = tempdir();
         let root = std::path::Path::new(&dir);
