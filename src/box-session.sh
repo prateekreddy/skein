@@ -223,11 +223,18 @@ request_package() {
   done
   [ "${#packages[@]}" -gt 0 ] || return 2
 
-  command -v jq >/dev/null 2>&1 || return 4
+  # 4 is "could not file", and the caller must not tell anyone to try again — see the shim.
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skein: jq is missing here, so the request could not be recorded." >&2
+    return 4
+  fi
 
   local dir want
   dir="$(substrate_dir)/requests"
-  mkdir -p "$dir" 2>/dev/null || return 4
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "skein: the request could not be recorded — $dir is not writable from inside a box." >&2
+    return 4
+  fi
   # The identity of a request is what it would install, so the same ask from two boxes — or twice
   # from one — is one decision to make rather than a queue that grows every time a stuck agent
   # retries. Sorted, so argument order is not part of that identity.
@@ -322,11 +329,17 @@ request_write() {
     echo "skein: '$repo' is not a repository name (expected owner/name)" >&2
     return 3
   fi
-  command -v jq >/dev/null 2>&1 || return 4
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skein: jq is missing here, so the request could not be recorded." >&2
+    return 4
+  fi
 
   local dir
   dir="$(gitgate_dir)/requests"
-  mkdir -p "$dir" 2>/dev/null || return 4
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "skein: the request could not be recorded — $dir is not writable from inside a box." >&2
+    return 4
+  fi
 
   # One pending ask per box and repo. A stuck agent retrying a push must not grow the queue by one
   # decision per attempt — it is the same decision every time.
@@ -841,12 +854,27 @@ Instead:
   * Install into your own home, which needs no root:
       pip install --user X   ·   cargo install X   ·   npm i -g X (with a user prefix)
       or drop a binary in ~/.local/bin
+WHY
+# 4 is "this WAS an install command and the request could not be filed". The advice below is the
+# whole of what changes, and it is not a detail: the general text tells you to ask by running the
+# install you wanted — which is the command that just failed to file anything. Repeating it would
+# send someone round the same loop for as long as they were willing to try.
+if [ "$rc" = 4 ]; then
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  cat >&2 <<'WHYNOFILE'
+  * A system package belongs in the fleet's substrate, installed once for every box — but skein
+    could NOT file the request from here, so running this again will not file one either. Ask
+    whoever runs this fleet to add it from the cockpit (Substrate).
+WHYNOFILE
+else
+  cat >&2 <<'WHYASK'
   * If it genuinely has to be a system package, it belongs in the fleet's substrate — installed
     once for every box. Ask for it by running the install you wanted:
         sudo apt-get install <package>     sudo npm install -g <package>
     That installs nothing. It files a request for this fleet's owner to approve in the cockpit,
     and once approved the package is there for every box.
-WHY
+WHYASK
+fi
 exit 1
 SHIM
   } > "$root/bin/sudo" || exit 1
@@ -1253,17 +1281,26 @@ case "$name" in '' | *[!A-Za-z0-9._-]* | -*) exec "$skein_git" "$@" ;; esac
 
 # No token. File the ask — `--request-write` collapses repeats, so a retrying agent does not grow
 # the queue — then run the push anyway so GitHub gives its own answer alongside this one.
+filed=1
 if [ -x "$skein_launcher" ]; then
   branch="$("$skein_git" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-  out=$("$skein_launcher" --request-write "$skein_box" "$owner/$name" "pushing $branch" 2>&1) || true
+  out=$("$skein_launcher" --request-write "$skein_box" "$owner/$name" "pushing $branch" 2>&1)
+  filed=$?
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 fi
 cat >&2 <<WHY
 skein: this box holds a GitHub token for its own repository only, so the push below will be
 refused by GitHub. That is deliberate, not a misconfiguration — re-authenticating, switching to
 SSH or editing the remote will not change it.
-Approve the request above in the cockpit and the access appears within a minute.
 WHY
+# "Approve the request above" is only true if there IS a request above. Filing can fail — the queue
+# is read-only from inside a box — and pointing at a request that was never written sends someone
+# to look for it in a cockpit that has nothing to show them.
+if [ "$filed" = 0 ]; then
+  echo "Approve the request above in the cockpit and the access appears within a minute." >&2
+else
+  echo "skein could not file the request from here, so there is nothing in the cockpit to approve — ask whoever runs this fleet for write access to $owner/$name." >&2
+fi
 exec "$skein_git" "$@"
 GITSHIM
     } > "$root/bin/git" || exit 1

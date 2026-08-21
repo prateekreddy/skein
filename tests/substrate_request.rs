@@ -334,3 +334,62 @@ fn what_a_box_writes_is_what_the_host_reads() {
         r.problem()
     );
 }
+
+/// **The live defect**: a queue a box cannot write said a request had been filed.
+///
+/// `/boxes/.skein` is `--ro-bind` in every unprivileged box, and the substrate queue lives under it.
+/// So the write fails with EROFS, `request_package` returns 4 — and the shim's advice for "that was
+/// not an install command" then told the agent to ask for the package **by running the install it
+/// wanted**, which is the command that had just failed to file anything. An agent following that
+/// advice loops for as long as it is willing to try, and the person who could actually approve it
+/// never hears.
+///
+/// The existing tests in this file cannot catch it: they point the fleet root at a writable temp
+/// directory with no bwrap namespace, which is exactly the condition under which the bug does not
+/// happen. So this one makes the queue read-only, which is what a box really sees.
+#[test]
+fn a_queue_a_box_cannot_write_does_not_claim_a_request_was_filed() {
+    if !have("jq") {
+        eprintln!("SKIPPED: no jq, so the filing path cannot run at all");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fleet::new("readonly");
+    // The bind a box actually gets: `.skein` exists and cannot be written into.
+    let skein = f.root.join(".skein");
+    fs::create_dir_all(&skein).unwrap();
+    fs::set_permissions(&skein, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (code, said) = f.ask("web-main", &["apt-get", "install", "ripgrep"]);
+    // Put it back before any assertion, or a failure leaves an unremovable directory behind.
+    let _ = fs::set_permissions(&skein, fs::Permissions::from_mode(0o755));
+
+    assert_eq!(code, 4, "filing must report that it could not file: {said}");
+    assert!(
+        said.contains("could not be recorded"),
+        "the failure must say what went wrong: {said}"
+    );
+    assert!(
+        f.queued().is_empty(),
+        "a request was written into a queue that is supposed to be unwritable"
+    );
+
+    // And the shim's own text, which is where the defect was visible. It must not send anybody
+    // back round the loop by telling them to run the install again.
+    let shim =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/box-session.sh"))
+            .unwrap();
+    let advice = shim
+        .split_once("WHYNOFILE")
+        .expect("the could-not-file advice is gone")
+        .1;
+    let advice = advice.split_once("WHYNOFILE").expect("unterminated").0;
+    assert!(
+        advice.contains("could NOT file") && advice.contains("will not file one either"),
+        "the advice for a failed filing must say it failed: {advice}"
+    );
+    assert!(
+        !advice.contains("Ask for it by running the install you wanted"),
+        "the advice for a failed filing tells the agent to run the command that just failed"
+    );
+}
