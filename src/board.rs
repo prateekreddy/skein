@@ -292,52 +292,6 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
     Ok(views)
 }
 
-/// The sandboxes on this machine that skein did not place, asked when somebody wants to know.
-///
-/// **On demand, and that is the whole point of it being here rather than in `load_views`.** These
-/// rows used to arrive on every board tick, which cost one `sbx ls` every two seconds for every open
-/// browser tab — and they are the one part of the board that is not about skein's own boxes. `sbx
-/// ls` is the right instrument for "what sandboxes are on this machine", including another skein
-/// fleet running beside this one; it is the wrong instrument for "which boxes exist", which the
-/// placement records answer without a subprocess.
-///
-/// Empty is a real answer and so is `Err`: a machine with nothing else on it and a machine that
-/// could not be asked are different, and the caller renders them differently.
-pub fn foreign_views() -> Result<Vec<BoxView>, String> {
-    let fleet = fleet_sandbox();
-    let boxes = fleet_boxes().ok_or_else(|| {
-        crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".to_string())
-    })?;
-    let placed: BTreeSet<String> = match fleet.is_empty() {
-        true => BTreeSet::new(),
-        false => placed_boxes(&fleet).into_iter().map(|(n, _)| n).collect(),
-    };
-    Ok(boxes
-        .into_iter()
-        // The fleet sandbox is skein's own, and a box skein placed is not foreign however `sbx ls`
-        // reports it — a migrated box's old sandbox keeps its name and is still listed.
-        .filter(|b| b.name != fleet && !placed.contains(&b.name))
-        .map(|b| {
-            let (state, tier) = Sandbox {
-                branch: String::new(),
-                dir: b.dir.clone(),
-                last_seen: String::new(),
-                status: String::new(),
-            }
-            .state_with(b.live);
-            BoxView {
-                name: b.name,
-                state,
-                tier,
-                dir: shorten(&b.dir),
-                agent: b.agent,
-                foreign: true,
-                ..Default::default()
-            }
-        })
-        .collect())
-}
-
 /// A registry entry enriched for display — what the CLI table and the web API both render.
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct BoxView {
@@ -533,15 +487,22 @@ mod tests {
             rows.contains(&("demo-task".into(), false)),
             "a box skein placed is the ordinary case and carries no tag: {rows:?}"
         );
-        // Asked for, they are all there — and the fleet sandbox and skein's own boxes are not.
-        let asked = foreign_views().expect("sbx answers here");
-        let names: Vec<&str> = asked.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["old-box"],
-            "the on-demand listing must be the sandboxes skein did not place, and only those"
+        // Asked for, they are there — as *sandboxes*. `docs/parity.md` §7 removes the foreign-box
+        // display; what survives is "what is on this machine", which `machine::sandboxes` answers
+        // and which says of each one whether it is a skein fleet rather than pretending it is a box.
+        let seen = crate::machine::sandboxes().expect("sbx answers here");
+        // In `sbx ls` order, which is the machine's — this is a listing rather than a ranking, and
+        // sorting it would be inventing an opinion about somebody else's sandboxes.
+        let mut names: Vec<&str> = seen.iter().map(|s| s.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["old-box", "skein-fleet"]);
+        let ours = seen.iter().find(|s| s.name == "skein-fleet").unwrap();
+        assert!(ours.ours && ours.skein_fleet);
+        let stranger = seen.iter().find(|s| s.name == "old-box").unwrap();
+        assert!(
+            !stranger.ours && !stranger.skein_fleet,
+            "a sandbox skein never placed a box in was called a skein fleet"
         );
-        assert!(asked.iter().all(|v| v.foreign));
 
         // The flag is only half the feature: a row that carries it and a cockpit that ignores it look
         // identical from here, and that is how a tag silently stops appearing. The cockpit hides
@@ -557,7 +518,7 @@ mod tests {
             "without the filter keyword there is no way to see them at all"
         );
         assert!(
-            page.contains("/api/fleet/foreign"),
+            page.contains("/api/machine/sandboxes"),
             "the rows no longer arrive on the tick, so a cockpit that does not ask for them shows \
              an empty list where a machine's other sandboxes should be"
         );

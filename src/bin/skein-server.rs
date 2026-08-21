@@ -233,7 +233,10 @@ async fn main() {
         .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/fleet/resources", get(api_fleet_resources))
         .route("/api/fleet/load", get(api_fleet_load))
-        .route("/api/fleet/foreign", get(api_fleet_foreign))
+        // What else is on this machine — a question about the MACHINE, asked by a person. Not
+        // "foreign boxes": `docs/parity.md` §7 removes that, and what survives is somebody running
+        // more than one fleet needing to see them.
+        .route("/api/machine/sandboxes", get(api_machine_sandboxes))
         .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
@@ -1840,13 +1843,14 @@ async fn api_fleet_load() -> Json<Vec<skein::fleet::BoxLoad>> {
     )
 }
 
-/// Sandboxes on this machine that skein did not place — asked, not pushed.
+/// Every sandbox on this machine — asked, not pushed.
 ///
-/// It is the one thing on the board that costs a subprocess, so it left the two-second tick and
-/// became a question. A failure is a 503 with the reason rather than an empty list: "nothing else is
-/// here" and "sbx could not be asked" are different answers and the cockpit says so.
-async fn api_fleet_foreign() -> Response {
-    match tokio::task::spawn_blocking(skein::board::foreign_views).await {
+/// It is the one thing that costs a subprocess and nothing waits on it, so it left the two-second
+/// tick and became a question. A failure is a 503 with the reason rather than an empty list:
+/// "nothing else is here" and "sbx could not be asked" are different answers, and a machine with
+/// three fleets on it reporting as empty is the one that matters.
+async fn api_machine_sandboxes() -> Response {
+    match tokio::task::spawn_blocking(skein::machine::sandboxes).await {
         Ok(Ok(rows)) => Json(rows).into_response(),
         Ok(Err(why)) => (
             StatusCode::SERVICE_UNAVAILABLE,

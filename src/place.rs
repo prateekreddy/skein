@@ -248,6 +248,27 @@ pub fn shared_record(name: &str) -> Option<PlaceRecord> {
 /// to account for boxes that are *stopped* too — their checkouts are still VM-local and still hold
 /// unpushed work, and a sandbox that is about to be destroyed cannot be asked about them.
 /// Sorted, so a resize processes them in the same order every time and its log can be followed.
+/// Every sandbox skein has placed a box into.
+///
+/// The question [`placed_boxes`] answers upside down, and it exists for a different one: what makes
+/// another skein's fleet *recognisable as one* rather than merely present in `sbx ls`. A sandbox
+/// nobody has ever placed a box in is somebody else's container; one that has been placed in is a
+/// fleet, whether or not it is this skein's.
+pub fn placed_sandboxes() -> std::collections::HashSet<String> {
+    let dir = skein_home().join("places");
+    fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = name.strip_suffix(".json")?.to_string();
+            read_place_record(&name).map(|record| record.sandbox)
+        })
+        .filter(|sandbox| !sandbox.is_empty())
+        .collect()
+}
+
 pub fn placed_boxes(sandbox: &str) -> Vec<(String, PlaceRecord)> {
     let dir = skein_home().join("places");
     let mut found: Vec<(String, PlaceRecord)> = fs::read_dir(&dir)

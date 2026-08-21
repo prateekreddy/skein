@@ -171,6 +171,17 @@ pub enum Subject {
     Module,
     PullRequest,
     Fleet,
+    /// The host, and everything on it — including fleets that are not this one.
+    ///
+    /// **A fifth, and it is not `Fleet` stretched.** "What fleets are on this machine" is a question
+    /// somebody running more than one asks, and it cannot be about *a* fleet: the answer includes
+    /// ones this skein does not own and could not reach. §2.2's four are all things skein manages;
+    /// this one is the ground they stand on.
+    ///
+    /// Nothing on the board carries it — a machine's other fleets are not the board's business,
+    /// which is exactly why `sbx ls` left the tick. It is here because a subject a signal can have
+    /// and the type cannot name is a subject that arrives as an unclassified call.
+    Machine,
 }
 
 /// How a signal's cost multiplies across a board tick.

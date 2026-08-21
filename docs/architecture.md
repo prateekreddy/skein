@@ -77,7 +77,7 @@ Every signal declares six things. The declaration is part of its definition, not
 
 | | |
 |---|---|
-| **subject** | what it is about — a **box, a module, a pull request, or the fleet**. **Keyed by subject, never by observer.** |
+| **subject** | what it is about — a **box, a module, a pull request, the fleet, or the machine**. **Keyed by subject, never by observer.** |
 | **kind** | `level` or `edge` |
 | **source** | which Source produced it (§2.3) |
 | **observed_at** | freshness is never implicit |
@@ -112,6 +112,14 @@ yet seen.
 And the keying rule is its
 own bug: turn state keyed by box but written by session let any helper process overwrite the agent's
 state, producing seventeen spurious `ended` events in 114 seconds.
+
+**The machine is a fifth subject, and it is not "fleet" stretched.** "What fleets are on this machine"
+is a question somebody running more than one asks, and it cannot be about *a* fleet: the answer
+includes fleets this skein does not own and could not reach. The other four are all things skein
+manages; this one is the ground they stand on. Nothing on the board carries it — a machine's other
+fleets are not the board's business, which is why the sandbox listing left the tick — and it is named
+because a subject a signal can have and the type cannot express is one that arrives as an
+unclassified call.
 
 The subject being open is what lets one mechanism carry things that otherwise need bespoke features:
 a module's standing note and a diff's contract signals are signals *about a module*, and a review

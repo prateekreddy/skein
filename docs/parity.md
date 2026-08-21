@@ -224,6 +224,15 @@ paths at all, so a local-path remote is host-driven only unless the mirror is se
 filter. That feature mitigated skein listing every sandbox on the host; the rewrite does not list
 sandboxes, so the confusion cannot arise.
 
+**Satisfied, and one thing survives it that is not the same thing.** The rows are gone from the
+board's tick, and the server no longer returns sandboxes shaped as boxes — a `BoxView` with an empty
+branch and no signals is what made them read as a fleet full of broken ones. What survives is a
+different question, asked by a person: *what fleets are on this machine*, because somebody running
+more than one needs to see them. `machine::sandboxes` answers it — a name, a run state, and whether
+each is a skein fleet — and says of the run state that "stopped" and "I could not tell" are different,
+as it does of "nothing else is here" and "sbx could not be asked". The old board keeps a `foreign:`
+filter over it until the old board goes; the new one does not carry it.
+
 **`/api/pick-path` and every Browse button — removed, not replaced.** The native host picker needs a
 host process with display access, which in-fleet skein cannot have. Browse existed mainly to pick a
 local repository path, and repositories are remotes now, so its main job is gone with it. The

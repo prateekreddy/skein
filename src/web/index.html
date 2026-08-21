@@ -1546,9 +1546,9 @@ async function askForForeign() {
   if (foreignAsking) return;
   foreignAsking = true;
   try {
-    const r = await fetch("/api/fleet/foreign");
+    const r = await fetch("/api/machine/sandboxes");
     const body = await r.json().catch(() => null);
-    if (r.ok && Array.isArray(body)) { foreignRows = body; foreignError = ""; }
+    if (r.ok && Array.isArray(body)) { foreignRows = body.map(asRow); foreignError = ""; }
     else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }
   } catch (e) {
     foreignRows = [];
@@ -1557,6 +1557,20 @@ async function askForForeign() {
   foreignAsking = false;
   render(boxes);
 }
+// A sandbox drawn in a board built for boxes. The adapter is HERE and not on the server, which is
+// the whole of parity.md §7's point: the server says what a sandbox is — a name, a run state, and
+// whether it is a skein fleet — and does not hand back a box with an empty branch and no signals,
+// which is what made these rows read as a fleet full of broken ones.
+//
+// Ours is excluded: it is not "something else on this machine", it IS this machine's fleet, and its
+// boxes are already the board.
+const asRow = s => ({
+  name: s.name,
+  foreign: true,
+  state: s.running === true ? "live" : s.running === false ? "stale" : "unknown",
+  headline: s.ours ? "this fleet" : s.skein_fleet ? "another skein fleet" : "not skein's",
+  branch: "", repo: "", dir: "", tier: 5,
+});
 // Set the board filter from a link, keeping the input and the state in step — typing it by hand and
 // clicking "show them" have to mean the same thing, and the input is what a person edits next.
 function setFilter(q) {

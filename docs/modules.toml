@@ -179,7 +179,7 @@ depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "heal
 # carry content hashes and neither the count nor the names are known at compile time. `act` since
 # creating a box became something a surface that is not a terminal can ask for — it used to be a
 # query string on the terminal WebSocket, so porting the REST API alone would have lost it.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
 
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
@@ -231,6 +231,13 @@ depends_on = ["ai", "board", "fleet", "gitgate", "github", "registry", "repos", 
 
 [current.kit]
 depends_on = ["config", "probes", "repos", "util"]
+
+[current.machine]
+# `place` for which sandboxes have ever been placed in — what makes another skein's fleet
+# recognisable as one, and where "which fleet is ours" is read from — and `sbx` for the listing.
+# Nothing else: this answers a question about the MACHINE, and a module that also knew about boxes
+# would drift back into being the foreign-box display that parity.md §7 removes.
+depends_on = ["place", "sbx"]
 
 [current.mailbox]
 depends_on = ["registry", "repos", "util"]

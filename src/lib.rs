@@ -39,6 +39,7 @@ pub mod github;
 pub mod handoff;
 pub mod health;
 pub mod kit;
+pub mod machine;
 pub mod mailbox;
 pub mod moduledocs;
 pub mod place;
