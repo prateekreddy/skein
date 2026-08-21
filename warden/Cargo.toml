@@ -1,0 +1,15 @@
+[package]
+name = "skein-warden"
+version = "0.1.0"
+edition = "2021"
+description = "The host service that owns fleet create and destroy"
+license = "MIT OR Apache-2.0"
+
+# Deliberately not a dependency on `skein`. Architecture §14 gives the warden an empty depends-on
+# column and the note "(separate binary)": it runs on the host, outside the fleet, and exists
+# precisely because skein cannot be trusted to authorise its own privileged operations. A shared
+# library is a shared blast radius, so the separation is a crate boundary rather than a convention.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"

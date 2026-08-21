@@ -1,3 +1,9 @@
+# The warden is a workspace member rather than a module or a second `[[bin]]`, because §14 gives it
+# an empty depends-on column: it must not be able to reach into skein's code by accident, and a
+# crate boundary is the only thing that enforces that. CI already runs `--all`.
+[workspace]
+members = ["warden"]
+
 [package]
 name = "skein"
 version = "0.1.0"
