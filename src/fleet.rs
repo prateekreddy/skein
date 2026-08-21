@@ -1009,6 +1009,40 @@ pub fn apply_box_limits() -> Result<Vec<String>, String> {
     Ok(failed)
 }
 
+/// The cgroup one box's processes live in.
+///
+/// `box-session.sh` puts the *session shell* in it before exec'ing bwrap, so the tmux server, the
+/// agent, and every compiler they fork start there and stay there — a process's children begin in
+/// its cgroup and cannot leave by forking.
+pub fn box_cgroup(name: &str) -> String {
+    format!("/sys/fs/cgroup/skein/{name}")
+}
+
+/// Shell that ends every process in a box, reparented or not.
+///
+/// **`tmux kill-server` is not "stop the box".** It reaches the processes in the server's panes and
+/// nothing else, so anything that double-forked away — an agent restarted under `setsid`, a daemon a
+/// build left behind — survives a stop and goes on holding the box's memory and its cgroup. Seen on
+/// a live fleet: a box the operator had closed still had `claude --name <box> --continue` running,
+/// **with PPID 1**, which is the whole diagnosis. It had been reparented out of the tree the kill
+/// walked.
+///
+/// Cgroup membership is exactly the property `kill-server` lacks, which is why the handle was
+/// already there: `cgroup.kill` (v2) SIGKILLs every member, and membership is not something a
+/// process can shed. It is write-only and root-owned, which is fine here — this runs in the sandbox,
+/// where `sudo` works, the same place and for the same reason the ceiling is applied.
+///
+/// **Best-effort, and quiet about it.** A box that never got a cgroup — delegation missing, which
+/// the launcher records as `uncapped no-cgroup-delegation` — must still stop exactly as it did
+/// before, and the `kill-server` before this is that path. Failing loudly here would turn a box that
+/// stops into a box that reports an error while stopping.
+pub fn box_cgroup_kill(name: &str) -> String {
+    format!(
+        "sudo sh -c 'echo 1 > \"$1\"' _ {} 2>/dev/null || true",
+        sh_quote(&format!("{}/cgroup.kill", box_cgroup(name)))
+    )
+}
+
 /// Bring a fleet that already exists into line with the skein that has just started.
 ///
 /// A fleet sandbox is long-lived and skein is not: the sandbox keeps the launcher and the cgroup

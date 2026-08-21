@@ -408,14 +408,12 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
     // — stop an unrelated sandbox that happens to carry the same name. Killing its tmux server ends
     // every process in the box, which frees the namespace, and leaves the tree for a later restart.
     if let Some(rec) = shared_record(name) {
-        let sock = sh_quote(&rec.sock);
-        let script = format!("tmux -S {sock} kill-server 2>/dev/null; rm -f {sock}; exit 0");
         // The tmux server IS this box's liveness, so killing it makes the sweep's picture wrong
         // rather than merely old — and the gate serves its last good answer while it refreshes.
         // Settled by the wrapper above, on this branch and on the one below it: the invalidation
         // used to live here, and the `sbx stop` path underneath returned without one.
         return own_sandbox(&rec.sandbox)
-            .exec(&script, Duration::from_secs(30))
+            .exec(&stop_script(name, &rec.sock), Duration::from_secs(30))
             .map(|_| ());
     }
     let (_out, err, code) = run_shell(&stop_command(name))?;
@@ -423,6 +421,42 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
         return Err(format!("stop failed (exit {code}): {}", err.trim()));
     }
     Ok(())
+}
+
+/// The shell that stops a shared box: end its session, then end whatever outlived it.
+///
+/// Its own function because it is a contract rather than a detail — the two steps answer different
+/// halves of "stop the box", and a test can run it against a scratch cgroup without a sandbox.
+/// `tmux kill-server` ends the processes in the server's panes; `cgroup.kill` ends the ones that
+/// left that tree, which is the half that was missing and the reason a closed box went on holding
+/// its memory. See [`crate::fleet::box_cgroup_kill`].
+///
+/// The socket is unlinked last. It is what `place::liveness_probe` asks about, so removing it before
+/// the processes are gone would make the box read as stopped while it was still running.
+pub(crate) fn stop_script(name: &str, sock: &str) -> String {
+    format!(
+        "tmux -S {sock} kill-server 2>/dev/null; {kill}; rm -f {sock}; exit 0",
+        sock = sh_quote(sock),
+        kill = crate::fleet::box_cgroup_kill(name),
+    )
+}
+
+/// The shell that destroys a shared box: the same ending, and then the box itself.
+///
+/// The cgroup is removed after the tree, and `rmdir` refuses one that still holds processes — which
+/// used to be a race it could simply lose, because nothing had killed them. It is retried briefly
+/// rather than once: `cgroup.kill` signals, and the members are reaped a moment later. Left behind,
+/// every destroyed box accumulates an empty cgroup, and a box later given the same name inherits the
+/// old one's limits instead of the current settings.
+pub(crate) fn destroy_script(name: &str, sock: &str) -> String {
+    format!(
+        "tmux -S {sock} kill-server 2>/dev/null; {kill}; rm -rf {root}; \
+         for _ in 1 2 3 4 5; do sudo rmdir {cgroup} 2>/dev/null && break; sleep 0.2; done; exit 0",
+        sock = sh_quote(sock),
+        kill = crate::fleet::box_cgroup_kill(name),
+        root = sh_quote(&box_root(name)),
+        cgroup = sh_quote(&crate::fleet::box_cgroup(name)),
+    )
 }
 
 /// Delist a box from the cockpit: remove its registry entry and append it to `<store>/history.jsonl`.
@@ -533,18 +567,8 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
         // that shares the box's name would destroy someone else's work. Kill the server, then the
         // tree: the checkout is VM-local, so this is the destructive step `destroy_command`
         // documents, just aimed at the right thing.
-        let sock = sh_quote(&rec.sock);
-        let root = sh_quote(&box_root(name));
-        // The cgroup too, after the server is gone — rmdir refuses one that still holds processes,
-        // which is the right order anyway. Left behind, every destroyed box would accumulate an
-        // empty cgroup, and a box later given the same name would inherit the old one's limits
-        // rather than the current settings.
-        let cgroup = sh_quote(&format!("/sys/fs/cgroup/skein/{name}"));
-        let script = format!(
-            "tmux -S {sock} kill-server 2>/dev/null; rm -rf {root}; \
-             sudo rmdir {cgroup} 2>/dev/null; exit 0"
-        );
-        own_sandbox(&rec.sandbox).exec(&script, Duration::from_secs(120))?;
+        own_sandbox(&rec.sandbox)
+            .exec(&destroy_script(name, &rec.sock), Duration::from_secs(120))?;
         forget_place(name);
         // Same reason as `stop_box`, and worse here: the box is not merely stopped, it is gone, and
         // a sweep serving its last good answer would keep a destroyed box on the board.
@@ -1063,6 +1087,108 @@ mod tests {
             "a box with nothing to continue must still start: {restored}"
         );
         env::remove_var("SKEIN_HOME");
+    }
+
+    /// Run the stop script for real, and watch it reach a process that left the tmux tree.
+    ///
+    /// The cgroup step is pointed at a scratch directory, because **a box cannot make a real
+    /// cgroup** — `sudo` inside one is a user namespace mapping a single uid, and refuses by design.
+    /// So what is proved here is the half a test can prove: the script writes `1` to *this box's*
+    /// `cgroup.kill` and to nothing else. That the write kills every member is the kernel's
+    /// contract, and it is the contract precisely because membership is not something a process can
+    /// shed by forking — which is what `tmux kill-server` could not say.
+    ///
+    /// `sudo` is shimmed to run its argument, the same way the launcher's ceiling test does.
+    #[test]
+    fn stopping_a_box_reaches_the_processes_that_left_its_tmux_tree() {
+        let dir = tempdir();
+        let cg = dir.join("cgroup/skein/thing-x");
+        fs::create_dir_all(&cg).unwrap();
+        fs::write(cg.join("cgroup.kill"), "").unwrap();
+        let sock = dir.join("session.sock");
+        fs::write(&sock, "").unwrap();
+
+        let ran = run_as_root(&stop_script("thing-x", &sock.to_string_lossy()), &dir);
+        assert_eq!(ran, 0, "stopping a box must not fail on the way out");
+        assert_eq!(
+            fs::read_to_string(cg.join("cgroup.kill")).unwrap().trim(),
+            "1",
+            "nothing ended the processes that had been reparented out of the tmux tree"
+        );
+        assert!(
+            !sock.exists(),
+            "the socket is what liveness reads, so a stop has to remove it"
+        );
+
+        // A box with no cgroup at all — delegation missing, which the launcher records as
+        // `uncapped no-cgroup-delegation` — must still stop exactly the way it did before.
+        let bare = tempdir();
+        let bare_sock = bare.join("session.sock");
+        fs::write(&bare_sock, "").unwrap();
+        assert_eq!(
+            run_as_root(
+                &stop_script("thing-x", &bare_sock.to_string_lossy()),
+                &bare
+            ),
+            0,
+            "a box without a cgroup must stop rather than report an error"
+        );
+        assert!(!bare_sock.exists());
+    }
+
+    /// Destroying does the same and then some, and a cgroup that will not go away is not a failure.
+    ///
+    /// The scratch cgroup here holds a real file, so `rmdir` cannot succeed — which is the point:
+    /// the retry gives up and the destroy still reports success, because the box's tree is gone and
+    /// that is what destroying it means. A leftover cgroup is untidy; a destroy that reports failure
+    /// leaves the box on the board.
+    #[test]
+    fn destroying_a_box_ends_it_and_survives_a_cgroup_that_will_not_go() {
+        let _g = env_lock();
+        let dir = tempdir();
+        env::set_var("SKEIN_FLEET_ROOT", dir.join("boxes"));
+        let cg = dir.join("cgroup/skein/thing-x");
+        fs::create_dir_all(&cg).unwrap();
+        fs::write(cg.join("cgroup.kill"), "").unwrap();
+        let tree = std::path::PathBuf::from(crate::fleet::box_root("thing-x"));
+        fs::create_dir_all(tree.join("tree")).unwrap();
+        let sock = dir.join("session.sock");
+        fs::write(&sock, "").unwrap();
+
+        let ran = run_as_root(&destroy_script("thing-x", &sock.to_string_lossy()), &dir);
+        env::remove_var("SKEIN_FLEET_ROOT");
+        assert_eq!(
+            ran, 0,
+            "a cgroup that will not rmdir must not fail the destroy"
+        );
+        assert_eq!(
+            fs::read_to_string(cg.join("cgroup.kill")).unwrap().trim(),
+            "1",
+            "a destroyed box left processes running"
+        );
+        assert!(
+            !tree.exists(),
+            "the box's tree survived its own destruction"
+        );
+    }
+
+    /// Run a launcher-side script with the cgroup root pointed at `root` and `sudo` made harmless.
+    ///
+    /// The path rewrite rather than an environment seam: `/sys/fs/cgroup/skein` is a kernel path,
+    /// not a configurable one, and adding an override to production so a test can run would be a way
+    /// for something else to point the kill somewhere it should not go.
+    fn run_as_root(script: &str, root: &std::path::Path) -> i32 {
+        let harness = format!(
+            "sudo() {{ \"$@\"; }}\n{}\n",
+            script.replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()))
+        );
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&harness)
+            .status()
+            .expect("run the stop script")
+            .code()
+            .unwrap_or(-1)
     }
 
     #[test]
