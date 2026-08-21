@@ -530,6 +530,28 @@ writes, never a field the requester supplies.** The current package queue is a b
 carrying a `state` field; whether that is safe depends entirely on the host re-deriving approval
 rather than trusting the field. It must re-derive.
 
+**The surface is `/dev/tty`, and that choice carries the test for whether anyone is there.** Not
+stdin: `/dev/tty` reaches the person's terminal even when the warden's output is redirected to a log,
+and — the half that matters — it *fails to open when there is no terminal*. A warden started by a
+supervisor therefore has no approval surface, refuses every doer, and says so at startup. There is
+deliberately no configuration that turns that into a yes.
+
+**Approving is typing the operation id, not `y`.** It makes "what you see is what will run" literal,
+because answering requires reading the line; it stops a person clearing a queue of prompts approving
+the wrong one by rhythm; and it is the only confirmation that cannot be given by a keystroke already
+in the buffer. §8.5's flooding is a real risk against a surface where the answer is one character.
+
+**And the request has nowhere to put an approval, or a description.** The wire struct refuses unknown
+fields rather than ignoring them — serde's default would make `{"approved": true}` a field silently
+dropped, which is the same outcome as one that does not exist and a very different message. A
+requester who sends it has misunderstood the boundary and is told so.
+
+**What this does not buy, before the uid split.** Any process running as the same uid can reach the
+warden's file descriptors. Today skein runs as that uid, so today's guarantee is against a *box* —
+not against a compromised skein on the same machine. §9.5.1 is what closes the rest, and it is
+delivery step 4b. This is the strongest form available before it, and it is strictly stronger than a
+flag on a request.
+
 ### 8.2 Requests are at-most-once
 
 A timeout on `destroy-fleet` means exactly "did it happen or not?". The first draft congratulated

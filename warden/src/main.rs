@@ -7,8 +7,9 @@
 //! (§8.2): the outcome store is what makes a retried destroy safe, and the audit log is the only
 //! account of the fleet's privileged operations that skein did not write itself.
 
+use skein_warden::approval::Console;
 use skein_warden::audit::Log;
-use skein_warden::doer::Unattended;
+use skein_warden::doer::{Approver, Unattended};
 use skein_warden::outcome::Store;
 use skein_warden::serve::{bind, Warden};
 use std::sync::Arc;
@@ -39,13 +40,18 @@ fn main() {
     };
     let addr = listener.local_addr().ok();
 
+    // The controlling terminal, if there is one. `/dev/tty` failing to open is not an error to
+    // handle — it is the answer "nobody is here", and a warden with nobody at it refuses every doer
+    // rather than finding some other way to say yes. See `approval.rs`.
+    let (approver, surface): (Box<dyn Approver>, &str) = match Console::at_the_terminal() {
+        Some(console) => (Box::new(console), "this terminal"),
+        None => (Box::new(Unattended), "none"),
+    };
+
     let warden = Arc::new(Warden {
         store: Store::new(home.join("outcomes"), RETENTION),
         log: Log::new(home.join("audit.jsonl")),
-        // Refuses everything, and that is the state of the design rather than a placeholder: §8.1's
-        // approval surface is not built yet, and a warden that ran privileged host commands in the
-        // meantime would be the thing it exists to prevent.
-        approver: Box::new(Unattended),
+        approver,
     });
 
     eprintln!(
@@ -64,9 +70,14 @@ fn main() {
         "skein-warden: state in {} — back this up; it is what makes a retried destroy safe",
         home.display()
     );
-    eprintln!(
-        "skein-warden: no approval surface is built, so every doer refuses. Nothing here can run a \
-         privileged command yet."
-    );
+    match surface {
+        "none" => eprintln!(
+            "skein-warden: no controlling terminal, so there is nobody to approve anything and \
+             every doer refuses. Run it where a person can answer it."
+        ),
+        at => eprintln!(
+            "skein-warden: approvals are asked at {at}, and answered by typing the operation id"
+        ),
+    }
     warden.serve(listener);
 }

@@ -49,7 +49,23 @@ pub struct Warden {
 }
 
 /// What a doer is asked for, on the wire.
+///
+/// **`deny_unknown_fields` is the load-bearing attribute.** §8.1's rule is that approval is a fact
+/// the approving side writes, never a field the requester supplies — and serde's default is to
+/// *ignore* what it does not recognise, which would make `{"approved": true}` a field that is
+/// silently dropped rather than one that does not exist. Those are the same outcome and a very
+/// different message: a requester who sends it has misunderstood the boundary, and being told so is
+/// how they find out.
+///
+/// It also forecloses the other half of §8.4 by construction. There is no field here for display
+/// text, so the warden cannot be handed a description that disagrees with the arguments it will run
+/// — and sending one is an error rather than something quietly ignored.
+///
+/// The cost is a wire that cannot be extended without both ends moving. For this component that is
+/// the right trade: there is one client, and a field the warden does not understand is exactly the
+/// thing it should not accept.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Asked {
     operation: String,
     sandbox: String,
@@ -174,7 +190,18 @@ impl Warden {
         }
         let asked: Asked = match serde_json::from_slice(&request.body) {
             Ok(asked) => asked,
-            Err(e) => return Response::fault(400, &format!("that is not an operation: {e}")),
+            Err(e) => {
+                // Named, because the field somebody is most likely to send is the one whose absence
+                // is the whole design, and "unknown field `approved`" alone does not explain why.
+                let said = e.to_string();
+                let why = match said.contains("approved") || said.contains("approve") {
+                    true => format!(
+                        "this warden has no `approved` field, and adding one to the request would                          not create it: approval is a fact the approving side writes, confirmed by                          a human at the host (architecture §8.1). {said}"
+                    ),
+                    false => format!("that is not an operation: {said}"),
+                };
+                return Response::fault(400, &why);
+            }
         };
         let op = doer::Request {
             operation: asked.operation,
@@ -430,6 +457,118 @@ mod tests {
             counted.0.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a retry put the same question to a person a second time"
+        );
+    }
+
+    /// A requester cannot claim its own approval, and cannot say what a person will be shown.
+    ///
+    /// The done-when of §8.1, at the wire. Both are the same mechanism: there is no field for
+    /// either, and `deny_unknown_fields` makes sending one an error rather than something silently
+    /// dropped — which matters, because "ignored" and "does not exist" look identical from the
+    /// outside and only one of them is a boundary somebody can rely on.
+    #[test]
+    #[cfg(feature = "destroy")]
+    fn a_request_cannot_approve_itself_or_choose_what_a_person_is_shown() {
+        let dir = scratch("claims");
+        let w = warden(&dir);
+
+        let claimed = ask(
+            &w,
+            "POST",
+            "/v1/destroy",
+            r#"{"operation":"op-9","sandbox":"skein-fleet","approved":true}"#,
+        );
+        assert_eq!(claimed.code, 400, "{}", claimed.body);
+        assert!(
+            claimed
+                .body
+                .contains("approval is a fact the approving side writes"),
+            "the refusal has to say why the field does not exist: {}",
+            claimed.body
+        );
+
+        // And the display half: a request that tries to describe itself as something harmless while
+        // carrying the arguments of a destroy. There is nowhere to put the description.
+        let two_faced = ask(
+            &w,
+            "POST",
+            "/v1/destroy",
+            r#"{"operation":"op-10","sandbox":"skein-fleet","display":"a harmless health check"}"#,
+        );
+        assert_eq!(two_faced.code, 400, "{}", two_faced.body);
+        assert!(
+            two_faced.body.contains("unknown field"),
+            "{}",
+            two_faced.body
+        );
+
+        // Nothing was recorded as asked, because nothing parsed as an operation.
+        let log = std::fs::read_to_string(w.log.path()).unwrap_or_default();
+        assert!(!log.contains("op-9") && !log.contains("op-10"), "{log}");
+    }
+
+    /// End to end with a person at the terminal: the same request refused, then approved.
+    ///
+    /// The doer runs `sbx`, which is not here — so the approved case is expected to fail at the
+    /// command, and that is the assertion. `ran` versus `refused at the host` is the difference
+    /// between "the approval was consulted and passed" and "it was never asked".
+    #[test]
+    #[cfg(feature = "destroy")]
+    fn an_approval_at_the_terminal_is_what_lets_a_doer_reach_its_command() {
+        use crate::approval::Console;
+        let dir = scratch("terminal");
+        let refuser = Warden {
+            store: Store::new(dir.join("no"), Duration::from_secs(3600)),
+            log: Log::new(dir.join("no.jsonl")),
+            approver: Box::new(Console::over(
+                Box::new(std::io::Cursor::new(
+                    b"y
+"
+                    .to_vec(),
+                )),
+                Box::new(std::io::sink()),
+            )),
+        };
+        let said_no = ask(
+            &refuser,
+            "POST",
+            "/v1/destroy",
+            r#"{"operation":"op-11","sandbox":"skein-fleet"}"#,
+        );
+        assert_eq!(said_no.code, 409);
+        assert!(
+            said_no.body.contains("refused at the host"),
+            "{}",
+            said_no.body
+        );
+
+        let approver = Warden {
+            store: Store::new(dir.join("yes"), Duration::from_secs(3600)),
+            log: Log::new(dir.join("yes.jsonl")),
+            approver: Box::new(Console::over(
+                Box::new(std::io::Cursor::new(
+                    b"op-12
+"
+                    .to_vec(),
+                )),
+                Box::new(std::io::sink()),
+            )),
+        };
+        let said_yes = ask(
+            &approver,
+            "POST",
+            "/v1/destroy",
+            r#"{"operation":"op-12","sandbox":"skein-fleet"}"#,
+        );
+        assert!(
+            !said_yes.body.contains("refused at the host"),
+            "the approval was not consulted: {}",
+            said_yes.body
+        );
+        assert!(
+            said_yes.body.contains("could not run `sbx`") || said_yes.body.contains("exited"),
+            "an approved operation must reach its command: {}",
+            said_yes.body
         );
     }
 

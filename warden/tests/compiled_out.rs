@@ -123,6 +123,9 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
 
     // And the one it does have is present — refusing for the other reason, which is that nobody can
     // approve it yet. A 404 here would mean the feature split had removed both.
+    // Present, and refusing for the *other* reason: this warden was started by a test with no
+    // controlling terminal, so there is nobody to approve anything. A 404 here would mean the
+    // feature split had removed both doers rather than one.
     assert!(
         created.starts_with("HTTP/1.1 409") && created.contains("no approval surface"),
         "create should be present and unapprovable, not absent: {created}"
