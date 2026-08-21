@@ -362,10 +362,30 @@ async fn main() {
     // connecting is not authenticating, which answers reading and did not answer exhausting.
     let door = skein::knock::doorstep();
     let grace = skein::knock::grace();
+    let mut refused = 0u32;
     loop {
         let (stream, _peer) = match listener.accept().await {
-            Ok(v) => v,
-            Err(_) => continue,
+            Ok(v) => {
+                refused = 0;
+                v
+            }
+            // **Backed off, not retried immediately.** `continue` on an error that persists — the
+            // ordinary one is `EMFILE`, the process out of descriptors — is a tight loop calling
+            // `accept` and failing, which spends the control plane's CPU at exactly the moment it
+            // has none to spare. The condition that causes it is also the condition a flood
+            // produces, so the loop that exists to survive a flood was the loop that would burn on
+            // one.
+            Err(e) => {
+                refused = refused.saturating_add(1);
+                if refused == COMPLAIN_AFTER {
+                    eprintln!(
+                        "skein-server: cannot accept connections ({e}) — {refused} in a row. The \
+                         usual cause is running out of file descriptors; the cockpit keeps trying."
+                    );
+                }
+                tokio::time::sleep(slow_down(refused)).await;
+                continue;
+            }
         };
         let _ = stream.set_nodelay(true);
         let svc = match make.call(()).await {
@@ -404,6 +424,24 @@ async fn main() {
             }
         }));
     }
+}
+
+/// After how many consecutive failures to accept a connection the operator is told.
+///
+/// Not the first: a single `ECONNABORTED` is ordinary — a client that hung up between the handshake
+/// and the accept — and a line of log for it would be noise that teaches people to ignore the line.
+const COMPLAIN_AFTER: u32 = 32;
+
+/// How long to wait after `accept` failed, given how many times in a row it has.
+///
+/// Doubling from a millisecond to a quarter of a second, and no further: the ceiling is what makes
+/// this a **pause rather than a shutdown**. The condition is usually temporary — descriptors come
+/// back when connections close — and a control plane that gave up would need somebody to notice and
+/// restart it, at the moment they are least able to see anything.
+fn slow_down(consecutive: u32) -> Duration {
+    const CEILING: Duration = Duration::from_millis(250);
+    let doubled = Duration::from_millis(1u64 << consecutive.min(8));
+    doubled.min(CEILING)
 }
 
 tokio::task_local! {
@@ -2963,8 +3001,32 @@ async fn terminal_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{origin_ok, refuse_unknown_args};
+    use super::{origin_ok, refuse_unknown_args, slow_down};
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
+    use std::time::Duration;
+
+    /// A control plane that cannot accept must wait, and must not give up.
+    ///
+    /// The failure this replaces is a tight loop: `accept` failing and being retried immediately
+    /// spends the CPU of the process that has just run out of descriptors, and the condition that
+    /// causes it — many connections at once — is the condition the accept loop exists to survive.
+    #[test]
+    fn a_failing_accept_pauses_and_keeps_trying() {
+        // The first failure is nearly free: one aborted connection must not cost a real client a
+        // measurable wait.
+        assert!(slow_down(1) <= Duration::from_millis(2));
+        // It grows.
+        assert!(slow_down(4) > slow_down(2));
+        // And it stops growing, which is what makes this a pause rather than a shutdown: the
+        // descriptors come back when connections close, and nobody has to restart anything.
+        let ceiling = slow_down(8);
+        assert_eq!(slow_down(1_000), ceiling);
+        assert_eq!(slow_down(u32::MAX), ceiling);
+        assert!(
+            ceiling <= Duration::from_millis(250),
+            "a cockpit that waited longer than this would read as hung rather than busy"
+        );
+    }
 
     #[test]
     fn a_cli_subcommand_typed_at_the_server_is_refused_not_swallowed() {

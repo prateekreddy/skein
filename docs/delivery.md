@@ -169,7 +169,7 @@ where it discovers a hole:
 
 | requirement | shape of the work | notes |
 |---|---|---|
-| R3 control API on a covered socket | move the control plane off a TCP port | independent of 4b |
+| ~~R3 control API on a covered socket~~ **dropped, deliberately** | the port stays; §9.5 R3 names what that leaves open | the owner's call: a browser cannot open a socket, and every way of keeping a working URL cost more than the exposure |
 | R4 no shared writable executable path | read-only toolchains with a per-box overlay | **user-visible** — one box's `cargo install` stops reaching the others, and the shared build cache goes. In `docs/parity.md` §7. |
 | ~~R5 warden secret under the cover~~ **done** | the warden mints it, skein reads it, checked before routing | fails closed: a warden that cannot read its own copy refuses everything and says which failure it is |
 | R6 audit log, warden-written, host-side | new: the sink endpoint, and skein reporting into it | never compilable-out |
@@ -186,12 +186,20 @@ item.
 
 | must land before 4c | may follow |
 |---|---|
-| **R3** — the control API is on a TCP port today, and moving in is what makes that reachable from every box. **SKEIN-76, and it carries a product decision**: a browser cannot open a unix socket, so this decides how a person reaches their own cockpit. Four options are costed there; the choice is the owner's, not the code's | R4 (a product decision, and the exposure is unchanged by the move) |
+| ~~**R3**~~ — **decided: the port stays** (SKEIN-76, owner's call). It was never a transport swap — a browser cannot open a filesystem socket, so it decided how a person reaches their own board, and every alternative cost either a proxy the browser then depends on or a tunnel before the first page load. §9.5 R3 records the three residual exposures; the one that mattered is port squatting, which the socket would have closed for free. **Not a gate any more**, so 4c is unblocked | R4 (a product decision, and the exposure is unchanged by the move) |
 | ~~**R5**~~ — **done**: the warden checks a shared secret before it routes, and refuses everything if it cannot read its own copy. 4a supplied the mechanism — a file under the cover is readable by skein and unreachable from every box. The narrow bind still stands beside it; the secret is what survives the bind widening at 4c | R9, R10, R11 |
 | **R6** — skein cannot audit itself once it shares a sandbox with the agents | |
-| **R7, R8** — both are live today and the move puts skein's own state inside their blast radius | |
+| ~~R7~~ — **done**, and not by fixing the comparison: the fleet's login flows **down only**, so there is no field a box asserts that anything trusts | |
+| **R8** — live today, and the move puts skein's own state inside its blast radius. A cluster (the resize archive, `git-tokens/`, `disk`/`identity`, the anchor), not an item | |
 
-So 4c is gated on five, not nine.
+**So 4c is gated on two: R6 and R8.** It was five when this table was written — R3 was decided
+against (the port stays, §9.5 R3), R5 landed, and R7 turned out to be answerable by changing the
+direction credentials flow rather than by trusting a better field.
+
+One thing 4c must carry that is not a requirement of its own: **the cockpit's listening socket is
+opened before any box exists and inherited across restarts.** Keeping the TCP port left port
+squatting open (§9.4), and a port that is never free is what closes it. It belongs here rather than
+in its own item because there is nothing to hang it on until there is a fleet start.
 
 **4c — the move**, with host-driven mode still working one environment variable away. This is where
 the six items in §2 get answered, with a fallback available while answering them.

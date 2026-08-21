@@ -935,6 +935,12 @@ which needs a requirement rather than an inference:
   outlives skein — so **a box that binds the cockpit port before skein starts becomes the cockpit**,
   and the browser hands it the token on the first request. A distinct uid stops SO_REUSEPORT theft
   from a live listener; it does not stop an empty port at sandbox start.
+
+  **This is now the sharpest of the five**, because §9.5 R3 decided to keep the TCP port: the
+  filesystem socket would have closed it as a side effect, and nothing else here does. The answer is
+  that the port is never free — opened once before any box exists and inherited across restarts,
+  rather than re-bound by whoever gets there first — and it belongs to 4c, where a fleet start
+  exists to hang it on.
 - **pre-auth connection exhaustion.** ~~The gate runs after accept, and §10.1's cap is post-auth~~ —
   **closed at the accept loop, where it is the only place it could be closed**: `src/knock.rs`, the
   doorstep, is what a connection is between `accept` and saying who it is. A limit that *refused*
@@ -1225,11 +1231,37 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    > read-write), `artifacts/` (bound **read-only**) and `transitions` (recorded, **not bound in** — skein writes it, the box has no use for it). Only binding
    > `recorded/` would remove git push, since the box's credential helper reads its own token out of
    > `artifacts/git-tokens/`.
-3. **skein's control API is a filesystem socket under that cover, owned by skein's uid, never a TCP
-   port**, and the cockpit's HTTP auth token is a file with the same ownership — skein mints it, so it cannot be
-   root-owned. (An earlier draft said
-   *root-owned*; skein is not root — R1.) Boxes may still *connect* to the cockpit port
-   — shared netns makes that unavoidable — and cannot authenticate.
+3. ~~**skein's control API is a filesystem socket under that cover, owned by skein's uid, never a TCP
+   port**~~ — **decided against, by the owner, and it is a product decision rather than a security
+   one being lost.** The cockpit is a browser page and a browser cannot open a filesystem socket, so
+   this requirement was never a transport swap: it decided how a person reaches their own board.
+   Every way of keeping a URL that works costs something the owner was not willing to spend — a
+   proxy in front of it (the warden growing a second job, and the browser then depending on the
+   warden being up), or a tunnel before the first page load (`ssh -L`, `tailscale serve`), which
+   makes the first thing a new user does a configuration exercise on the one surface §11.6 says must
+   not be one.
+
+   **So the port stays, and what that leaves open is written here rather than left looking closed.**
+   The cockpit's auth token remains a file under the cover, owned by skein's uid — skein mints it,
+   so it cannot be root-owned. (An earlier draft said *root-owned*; skein is not root — R1.) Boxes
+   may still *connect* — shared netns makes that unavoidable — and cannot authenticate.
+
+   Three residual exposures, and the third is the one the socket would have closed outright:
+
+   - **Reachability of the whole HTTP surface.** Every box can open the port and speak HTTP to it. A
+     future bug anywhere in that stack — the router, the parser, a handler reached before the gate —
+     is reachable from every box, where a covered socket would have made it unreachable. This is
+     defence in depth, and the decision spends it deliberately.
+   - **The cost of connecting.** Bounded, not zero: `src/knock.rs` evicts the oldest connection that
+     has not authenticated and closes it after ten seconds, so a flood displaces itself rather than
+     the cockpit. `/api/machine/doorstep` is where a person sees it happening.
+   - **Port squatting, which the token does not answer.** Shared netns plus no-unpublish (§7.4)
+     means a box that binds the cockpit port *before* skein does becomes the cockpit, and the
+     browser hands it the token on the first request. **A covered socket would have closed this**,
+     because a box cannot create a socket at a path it cannot see. Keeping the port keeps it, and
+     the answer has to be that the port is never free for a box to take — the listening socket is
+     opened once, before any box exists, and inherited across restarts rather than re-bound. That
+     is 4c's work, where there is a fleet start to hang it on, and it is not a reason to hold 4c up.
 4. **No shared writable path contains an executable another box runs** (§9.2.1). Either the shared
    toolchains become read-only with a per-box overlay for writes, or they stop being shared.
 
