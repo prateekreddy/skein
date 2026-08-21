@@ -4159,12 +4159,13 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
     };
     LIVENESS_GATE
         .get(fresh, move || {
-            let script = format!(
-                "for d in {root}/*/; do n=${{d%/}}; n=${{n##*/}}; s=\"$d/session.sock\"; \
-                 if [ -S \"$s\" ] && tmux -S \"$s\" has-session 2>/dev/null; then echo \"$n 1\"; \
-                 else echo \"$n 0\"; fi; done",
-                root = fleet_root()
-            );
+            // The anchors skein holds, so the sweep can ask `/proc` about the process it recorded
+            // rather than asking each box's socket whether *something* is listening on it.
+            let anchors: Vec<(String, u32, String, u64)> = crate::place::placed_boxes(&sandbox)
+                .into_iter()
+                .map(|(name, record)| (name, record.ns_pid, record.generation, record.ns_start))
+                .collect();
+            let script = crate::place::liveness_probe(&fleet_root(), &anchors);
             let out = own_sandbox(&sandbox)
                 .exec(&script, Duration::from_secs(15))
                 .ok()?;

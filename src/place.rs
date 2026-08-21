@@ -143,6 +143,63 @@ pub(crate) fn anchor_probe(pid: u32) -> String {
     )
 }
 
+/// The shell that reports which boxes are running — **one exec for the whole fleet**, and an anchor
+/// read rather than a socket probe wherever skein has an anchor it can check.
+///
+/// What this replaces asked each box's tmux socket `has-session`. Two things are wrong with that,
+/// and only one of them is about cost:
+///
+///   * **it answers a different question.** `has-session` says *a* tmux server is listening on that
+///     path. It does not say it is the server skein recorded — and the socket lives under the box's
+///     own root, which is bound read-write into the box.
+///   * **it is a crossing.** Those sockets are `0700`, so under the uid split (architecture §9.5.1)
+///     every tick of the board would need `sudo -u` per box. §6 licenses the anchor read precisely
+///     so the board does not sit on that path.
+///
+/// The anchor answer is `(boot_id, starttime)` against the record, parsed exactly as
+/// [`anchor_probe`] parses it — the same `sed`/`cut`, deliberately, because a sweep that parsed
+/// `/proc` differently from the stamp would disagree with it and boxes would flap between running
+/// and stopped with nothing changing.
+///
+/// **Falls back to the socket** for a box whose record cannot decide it: no record at all, or one
+/// written before the stamp existed, or one from an earlier boot of the sandbox. That direction is
+/// not symmetric — calling a live box stopped invites somebody to start a second one over its work,
+/// while the fallback costs a tmux exec for boxes that have not been restarted since the upgrade.
+pub(crate) fn liveness_probe(root: &str, anchors: &[(String, u32, String, u64)]) -> String {
+    let mut out = String::from(
+        "boot=\"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"\nanswered=\" \"\n",
+    );
+    for (name, pid, generation, start) in anchors {
+        // A record from a different boot, or one with no stamp, decides nothing: leave it to the
+        // socket loop below rather than reporting a pid that names some other process now.
+        if generation.is_empty() || *start == 0 {
+            continue;
+        }
+        out.push_str(&format!(
+            "if [ {gen} = \"$boot\" ]; then \
+               seen=\"$(sed -n 's/.*) //p' /proc/{pid}/stat 2>/dev/null | cut -d' ' -f20)\"; \
+               if [ \"$seen\" = {start} ]; then echo {name} 1; else echo {name} 0; fi; \
+               answered=\"$answered{name_raw} \"; \
+             fi\n",
+            gen = crate::util::sh_quote(generation),
+            start = crate::util::sh_quote(&start.to_string()),
+            name = crate::util::sh_quote(name),
+            name_raw = name,
+        ));
+    }
+    // Every box the anchors could not decide, by the old question. The directory listing is also
+    // what finds a box with no placement record at all.
+    out.push_str(&format!(
+        "for d in {root}/*/; do n=${{d%/}}; n=${{n##*/}}; \
+           case \"$answered\" in *\" $n \"*) continue ;; esac; \
+           s=\"$d/session.sock\"; \
+           if [ -S \"$s\" ] && tmux -S \"$s\" has-session 2>/dev/null; then echo \"$n 1\"; \
+           else echo \"$n 0\"; fi; done\n",
+        root = root,
+    ));
+    out
+}
+
 /// Read what [`anchor_probe`] printed: `(generation, start)`, or `None` if either is missing.
 pub(crate) fn parse_anchor_probe(out: &str) -> Option<(String, u64)> {
     let line = out.lines().rev().find(|l| !l.trim().is_empty())?;
@@ -1948,5 +2005,94 @@ mod tests {
         forget_place("web-main");
         assert!(place_of("web-main").is_none());
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The sweep, run against this machine's real `/proc`.
+    ///
+    /// Four boxes, one per answer the probe has to give, and the process it verifies is this test:
+    /// a live anchor whose start time matches, one whose pid cannot exist, one whose pid is live but
+    /// whose start time is somebody else's, and one whose record predates the stamp and therefore
+    /// falls through to the socket.
+    ///
+    /// Worth running the shell rather than reading it. The start time is cut out of
+    /// `/proc/<pid>/stat` by the same `sed`/`cut` the stamp uses, and the only way to know the two
+    /// agree is to point them both at a process that is really there.
+    #[test]
+    fn the_sweep_verifies_the_anchor_and_falls_back_only_when_it_cannot() {
+        // Exactly as the probe reads it, because agreeing with the probe is the property.
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("a linux /proc");
+        let after = stat.rsplit_once(") ").expect("a stat line").1.to_string();
+        let start: u64 = after
+            .split_whitespace()
+            .nth(19)
+            .and_then(|f| f.parse().ok())
+            .expect("field 22 of /proc/self/stat");
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("a boot id")
+            .trim()
+            .to_string();
+        let me = std::process::id();
+
+        let root = crate::testutil::tempdir();
+        for name in ["live-one", "dead-one", "reused-one", "old-one"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let script = liveness_probe(
+            root.to_string_lossy().as_ref(),
+            &[
+                ("live-one".into(), me, boot.clone(), start),
+                // A pid above the kernel's maximum cannot name anything.
+                ("dead-one".into(), 0x7fff_fffe, boot.clone(), start),
+                // Live pid, somebody else's start time: this is pid reuse, and it must read as gone
+                // rather than as the box that used to be there.
+                ("reused-one".into(), me, boot.clone(), start + 1),
+                // No stamp: undecidable, so the socket answers — and there is no socket here.
+                ("old-one".into(), me, String::new(), 0),
+            ],
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}\n--- script ---\n{script}");
+        let report = String::from_utf8_lossy(&out.stdout).to_string();
+        let verdict = |name: &str| -> String {
+            report
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("nothing said about {name}:\n{report}"))
+                .trim()
+                .to_string()
+        };
+        assert_eq!(verdict("live-one"), "1", "{report}");
+        assert_eq!(verdict("dead-one"), "0", "{report}");
+        assert_eq!(
+            verdict("reused-one"),
+            "0",
+            "a recycled pid was reported as the box that used to hold it:\n{report}"
+        );
+        assert_eq!(
+            verdict("old-one"),
+            "0",
+            "an unstamped record must fall through to the socket, not be decided by the pid:\n{report}"
+        );
+
+        // And a record from an earlier boot decides nothing either — same fallback, different
+        // reason: the pid space was reset, so that number now names some other process.
+        let cycled = liveness_probe(
+            root.to_string_lossy().as_ref(),
+            &[("live-one".into(), me, "not-this-boot".into(), start)],
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&cycled)
+            .output()
+            .unwrap();
+        let report = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            report.contains("live-one 0"),
+            "an anchor from another boot was believed:\n{report}"
+        );
     }
 }
