@@ -161,7 +161,32 @@ pub struct PaneObs {
     /// the visible tail of the pane, oldest line first — never scrollback
     #[serde(default)]
     pub tail: Vec<String>,
+    /// **Which contract the probe that wrote this was working to.** See [`PANE_CONTRACT`].
+    ///
+    /// `box-pane.sh` has written `"contract":1` into every observation since it existed, and this
+    /// struct had no field for it — serde ignores what it does not know, so the marker the probe
+    /// took the trouble to send was read by nothing. A probe from a newer skein could change what
+    /// `tail` or `title_age` mean and this build would parse it as if nothing had happened.
+    ///
+    /// Zero when the probe predates the marker, which is not a fault: the fields all carry serde
+    /// defaults and that shape is exactly what shipped.
+    #[serde(default)]
+    pub contract: u32,
 }
+
+/// The pane-observation contract this build understands.
+///
+/// **Boxes outlive the skein that installed them.** A box keeps whichever probe it was last given,
+/// so a fleet is routinely a mixture — and the direction that hurts is a probe NEWER than the reader,
+/// which is what happens when skein is upgraded and a long-running box is not restarted.
+///
+/// The rule is the launcher's, applied to data instead of to a cgroup ceiling: **an unfamiliar
+/// version is skipped, not evaluated.** There, evaluating an unrecognised word under `set -u`
+/// aborted the shell and took a fleet's boxes down; here, parsing an unfamiliar observation would
+/// be quieter and worse — a state read out of fields that no longer mean what this build thinks.
+/// So a newer observation is treated as no observation, the board falls back to hook edges exactly
+/// as it does for a box with no observer, and [`screen_health`] says which.
+pub const PANE_CONTRACT: u32 = 1;
 
 pub(crate) fn unknown_age() -> i64 {
     -1
@@ -195,10 +220,17 @@ pub(crate) fn pane_is_fresh(obs: &PaneObs) -> bool {
     obs.ts > 0 && Utc::now().timestamp() - obs.ts <= PANE_FRESH_SECS
 }
 
-/// The level observation for a box, or `None` when there is no observer, it died, or its last
-/// sample is too old to trust.
+/// Is this observation one this build knows how to read? See [`PANE_CONTRACT`].
+pub(crate) fn pane_is_readable(obs: &PaneObs) -> bool {
+    obs.contract <= PANE_CONTRACT
+}
+
+/// The level observation for a box, or `None` when there is no observer, it died, its last sample
+/// is too old to trust, or it was written to a contract this build does not know.
 pub fn read_pane(name: &str) -> Option<PaneObs> {
-    read_pane_raw(name).filter(pane_is_fresh)
+    read_pane_raw(name)
+        .filter(pane_is_readable)
+        .filter(pane_is_fresh)
 }
 
 /// Whether the **screen** half of turn-state is contributing for this box, and if not, why.
@@ -214,6 +246,10 @@ pub fn read_pane(name: &str) -> Option<PaneObs> {
 /// * `"unreadable"` — a fresh sample the grammar does not recognise: a TUI change, worth reporting.
 ///   The sample itself is on disk at `<store>/status/<box>.pane.json`.
 /// * `"unsupported"` — this runtime has no screen grammar at all, so hooks only, by design.
+/// * `"newer"` — the probe is writing a contract this skein does not know, so its observations are
+///   skipped rather than parsed as if they meant what they used to. Different fault, different fix
+///   from `unreadable`: that one is a TUI this grammar has not seen, this one is a skein that is
+///   behind its own probe.
 pub fn screen_health(runtime: &str, raw: Option<&PaneObs>, running: bool) -> &'static str {
     if !running {
         return "";
@@ -223,6 +259,9 @@ pub fn screen_health(runtime: &str, raw: Option<&PaneObs>, running: bool) -> &'s
     }
     match raw {
         None => "none",
+        // Before staleness, because a newer contract is a statement about the whole observation:
+        // calling it stale would send somebody to restart an observer that is working perfectly.
+        Some(obs) if !pane_is_readable(obs) => "newer",
         Some(obs) if !pane_is_fresh(obs) => "stale",
         // A dead pane is a real answer ("the agent is gone"), not a failure to read one.
         Some(obs) if classify_pane(runtime, obs) == Screen::Unknown => "unreadable",
@@ -958,6 +997,50 @@ mod tests {
         // …but a dead window needs no grammar, so that still reports across runtimes.
         assert_eq!(classify_pane("gemini", &dead), Screen::Dead);
         assert_eq!(classify_pane("codex", &dead), Screen::Dead);
+    }
+
+    /// **Boxes outlive the skein that installed them**, and the marker that says so was read by
+    /// nothing.
+    ///
+    /// `box-pane.sh` has written `"contract":1` into every observation since it existed. `PaneObs`
+    /// had no field for it, and serde ignores what it does not know — so a probe from a newer skein
+    /// could change what `tail` or `title_age` mean and this build would parse it as though nothing
+    /// had happened, then show a state derived from fields that no longer say what it thinks.
+    ///
+    /// The rule is the launcher's, applied to data: an unfamiliar version is SKIPPED, not
+    /// evaluated. There, evaluating an unrecognised ceiling under `set -u` aborted the shell and
+    /// took a fleet's boxes down. Here it would be quieter and worse.
+    #[test]
+    fn an_observation_from_a_newer_probe_is_skipped_rather_than_parsed() {
+        let at = |contract: u32| PaneObs {
+            contract,
+            ts: Utc::now().timestamp(),
+            tail: vec!["❯ ".into()],
+            ..Default::default()
+        };
+        // What ships today, and what shipped before the marker existed. Both are readable.
+        assert!(pane_is_readable(&at(PANE_CONTRACT)));
+        assert!(
+            pane_is_readable(&at(0)),
+            "a probe older than the marker is not a fault — that shape is what shipped"
+        );
+        assert!(!pane_is_readable(&at(PANE_CONTRACT + 1)));
+
+        // And the row says which, with its own advice: restarting the box reinstalls the probe this
+        // build matches. Calling it `stale` would send somebody to restart an observer that is
+        // working perfectly, and `unreadable` would send them to report a TUI change that has not
+        // happened.
+        assert_eq!(
+            screen_health("claude", Some(&at(PANE_CONTRACT + 1)), true),
+            "newer"
+        );
+        assert_eq!(screen_health("claude", Some(&at(PANE_CONTRACT)), true), "");
+
+        // The probe and the reader agree on the number, which is the whole point of having one.
+        assert!(
+            crate::probes::PROBE_PANE_SH.contains(&format!("\"contract\":{PANE_CONTRACT},")),
+            "the probe writes a contract this build does not claim to understand"
+        );
     }
 
     #[test]

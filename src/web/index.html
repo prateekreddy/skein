@@ -2268,6 +2268,10 @@ const SHALF = {
   stale:       ["screen lost",    "this box's screen observer stopped reporting (its last sample is over 35s old), so turn state has fallen back to hook events alone.", "Reattach the box to restart it."],
   unreadable:  ["screen unread",  "skein does not recognise what is on this box's screen, so turn state has fallen back to hook events alone — usually a change in the agent's TUI.", "The unrecognised sample is saved in the store as <box>.pane.json; worth reporting."],
   unsupported: ["hooks only",     "skein has no screen grammar for this runtime, so turn state uses hook events alone.", "Expected, not a fault."],
+  // Different fault and different fix from `unreadable`: that is a TUI this grammar has not seen,
+  // this is a skein running behind its own probe. Skipping is deliberate — reading an observation
+  // whose fields may have changed meaning is quieter and worse than not reading it.
+  newer:       ["probe ahead",     "this box's screen observer is writing a newer format than this skein reads, so its observations are skipped and turn state has fallen back to hook events alone.", "The box is running a probe from a newer skein — restart the box to reinstall the one this build matches, or update skein."],
 };
 // The fifth case, and the one nothing disclosed: the observer is perfectly healthy and what you are
 // looking at still came from an edge, because a hook event arrived after the last screen sample. It

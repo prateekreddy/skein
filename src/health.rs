@@ -653,24 +653,26 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// One missing tool is one fault, and does not make its dependents look broken too.
+    /// A missing tool is one fault, and does not make its dependents look broken too.
     ///
     /// The property the tri-state bought, pinned so it cannot be lost. `sbx` is how skein reaches
     /// every box, so the intuition is that losing it should light up the whole report — and the
     /// intuition is wrong, which is exactly why this is worth asserting: the other checks are
     /// answered from the host, and the ones that would need the fleet report `unknown` rather than
     /// inventing a fault. Five red cards for one cause is the failure this rules out.
+    ///
+    /// It reads the machine's own PATH rather than blanking it, and that is not laziness. `PATH` is
+    /// process-global and the suite runs in parallel: an earlier version set it to a directory that
+    /// does not exist, and a sibling test that shells out failed while it held it. A test that makes
+    /// other tests fail is worse than one that is only sharp on some machines — and it is sharp
+    /// wherever a tool is genuinely absent, which is every machine without `sbx`.
     #[test]
-    fn one_missing_tool_is_one_fault() {
+    fn a_missing_tool_is_one_fault_and_not_five() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &home);
-        let path = std::env::var("PATH").unwrap_or_default();
-        // Nothing on PATH at all: sbx is certainly gone, and so is everything else, so this also
-        // says that a missing tool is reported once per tool rather than once per consequence.
-        std::env::set_var("PATH", "/nonexistent-bin");
         let report = health_report();
-        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
 
         let faults: Vec<&str> = report
             .checks()
@@ -682,13 +684,18 @@ mod tests {
             faults
                 .iter()
                 .all(|name| ["sbx", "git", "gh"].contains(name)),
-            "a missing tool made something that is not a tool look broken: {faults:?}"
+            "something that is not a tool is reported broken, which on a machine with no fleet \
+             means a check invented a fault out of a question it could not put: {faults:?}"
         );
-        assert!(
-            faults.contains(&"sbx"),
-            "the tool that is actually missing is not reported: {faults:?}"
-        );
-        std::env::remove_var("SKEIN_HOME");
+        // And where a tool IS missing it is named, so this is not passing by finding nothing.
+        for tool in ["sbx", "git"] {
+            if !program_on_path(tool) {
+                assert!(
+                    faults.contains(&tool),
+                    "{tool} is not on this PATH and the report does not say so: {faults:?}"
+                );
+            }
+        }
     }
 
     /// **No fault without a way out.** The parent property, in the only form that can be enforced.

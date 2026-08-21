@@ -51,7 +51,7 @@ const PROBE_STATUS_SH: &str = include_str!("probe/box-status.sh");
 // and it outlives the attach, because the states it exists to catch — a crashed agent, a trust
 // prompt before any session exists, a dialog dismissed with esc — are exactly the ones where no
 // hook will ever fire. Its output is the level half of turn-state (see read_pane/classify_pane).
-const PROBE_PANE_SH: &str = include_str!("probe/box-pane.sh");
+pub(crate) const PROBE_PANE_SH: &str = include_str!("probe/box-pane.sh");
 const PROBE_TASK_SH: &str = include_str!("probe/box-task.sh");
 // box-diff.sh: wired from Stop — writes branch-vs-base patch + shortstat JSON + commit list to
 // <store>/diffs/<vmid>.{patch,json,commits} so the host can show them for clone-mode boxes where
