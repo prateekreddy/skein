@@ -125,6 +125,26 @@ and one read from the host's clone are both reached by `file`. Neither determine
 They were both called `source` until they weren't, and a reader who knew this section read the wrong
 one.
 
+**`sbx exec` is not a Source, and §2.3 is not short one.** The question was real: three of the
+board's signals were reached by `sbx exec <sandbox>`, which reaches the *sandbox* and not a box, and
+§2.3 names nothing for that. Rule 2 says a thing that cannot be composed from the primitives means
+the primitive set is wrong — so it had to be settled rather than assumed. It is settled by §13a,
+which already puts "every `sbx exec` path" and "sandbox listing as the truth about boxes" on the
+delete list and says they survive only until skein moves into the fleet. `sbx exec` is the
+**transport** around a reach. What a signal declares is what the script inside it touches, which is
+the same answer before and after the move: the liveness sweep is `file` and `socket` today, and
+`file` and `socket` when the shell is gone.
+
+The one signal that names no Source is the sandbox listing, and it is the one §13a deletes — nothing
+in §2.3 reaches a sandbox *manager*, and §8.3 has already decided what replaces it (a `Source: http`
+call to the warden). It is not on the board, and a test requires every signal that *is* to name one.
+
+**A signal declares Sources, plural.** The liveness sweep reads `/proc` for every anchored box and
+falls back to each undecided box's socket, so which one answered is per box and per tick. This
+section says "which Source produced it", singular — which is right for an *observation* and wrong for
+a *declaration*. The one that answered belongs beside `observed_at`; the set a signal may use belongs
+in its definition.
+
 **A signal's value is five-valued, not two**: `value | none | stale | unreadable | unsupported`.
 "Could not observe" is not "observed absent", and collapsing them is what drives spurious action.
 `none` — no observer was ever started, so reattach — is not `stale`, which is observations having

@@ -21,9 +21,18 @@
 //! **Every cost carries its basis**, and an empty one fails a test. A cost with no basis is an
 //! assertion wearing a struct.
 //!
-//! Not here, deliberately: **which Source produced a signal** (§2.2's third facet). That is its own
-//! open work, and guessing at it now would put a wrong answer where an absent one is honest — `sbx
-//! exec` is the sandbox shell around a reach, not a reach, and `docs/sources.toml` already says so.
+//! **Which Source produced a signal** (§2.2's third facet) is [`Signal::sources`], and settling it
+//! meant settling whether §2.3 was short a primitive. It was not, and the design already said so:
+//! §13a puts "every `sbx exec` path" and "sandbox listing as the truth about boxes" on the delete
+//! list, and says they survive only until skein moves into the fleet. `sbx exec` is the **transport**
+//! around a reach, not a reach — so the liveness sweep is `file` and `socket` today and will still
+//! be `file` and `socket` when the shell around it is gone.
+//!
+//! It is a **list**, not one Source, and that is not generality for its own sake: the liveness sweep
+//! reads `/proc` for every anchored box and falls back to each undecided box's tmux socket, so which
+//! one answered is per box and per tick. §2.2 says "which Source produced it", singular — right for
+//! an observation, wrong for a declaration. The one that actually answered belongs on the
+//! observation, beside `observed_at`.
 //!
 //! Depends on nothing, like `source`. A budget that had to ask `config` how much it could spend
 //! would be a budget the thing being measured gets to set.
@@ -271,6 +280,42 @@ impl Signal {
             Signal::BoxDiff => "box-diff",
             Signal::BoxDocsUpdate => "box-docs-update",
             Signal::BoxBranchFromHead => "box-branch-from-head",
+        }
+    }
+
+    /// The §2.3 Sources this signal may be produced by.
+    ///
+    /// **`sbx exec` is not among them and never will be.** It is how the host reaches the *sandbox*
+    /// — the outer shell of a reach rather than a reach — which `docs/sources.toml` says outright
+    /// and §13a schedules for deletion. Declaring `Enter` or `File` *for the shell* would put a lie
+    /// in the one place the design is checkable; declaring what the script inside it actually
+    /// touches is the truth both today and after the move.
+    ///
+    /// [`Signal::FleetListing`] is the exception and returns nothing, because nothing in §2.3
+    /// reaches a sandbox *manager*. That is exactly the signal §13a deletes — and §8.3 has already
+    /// decided what replaces it: a `Source: http` call to the warden. A test keeps the exception
+    /// honest by requiring every signal that IS on the board to name one.
+    pub fn sources(self) -> &'static [crate::source::Source] {
+        use crate::source::Source::{File, Socket};
+        match self {
+            // Asks the sandbox manager. No §2.3 Source reaches that, and none should be invented:
+            // when the observation endpoint replaces it (§8.3) this becomes `http`.
+            Signal::FleetListing => &[],
+            // A `du` over the fleet root. The volume, so `file`.
+            Signal::FleetDisk => &[File],
+            // `/proc/<pid>/stat` for every anchored box, then `tmux -S <sock> has-session` for the
+            // ones the anchors could not decide — which is per box and per tick, and is why this
+            // returns two.
+            Signal::FleetLiveness => &[File, Socket],
+            Signal::Registry
+            | Signal::BoxPlacement
+            | Signal::BoxScreen
+            | Signal::BoxStatusEdge
+            | Signal::BoxNarrative
+            | Signal::BoxTask
+            | Signal::BoxDiff
+            | Signal::BoxDocsUpdate
+            | Signal::BoxBranchFromHead => &[File],
         }
     }
 
@@ -527,6 +572,42 @@ mod tests {
         // nothing once the gates are warm.
         assert_eq!(board_tick(50, 50, Gates::Warm).spawns, 0);
         assert_eq!(board_tick(50, 50, Gates::Cold).spawns, 2);
+    }
+
+    /// Every signal the board observes names a Source, and none of them names the transport.
+    ///
+    /// §2.2 requires the facet; §13a is why `sbx exec` is not an answer to it. The one signal with
+    /// no Source is the one §13a deletes, and it is not on the board — which is the whole of the
+    /// exception, and it is checked rather than described.
+    #[test]
+    fn every_signal_on_the_board_says_which_source_produced_it() {
+        for signal in Signal::ON_THE_BOARD {
+            assert!(
+                !signal.sources().is_empty(),
+                "{signal} is on the board and names no Source. If it is reached by `sbx exec`, that \
+                 is the transport — declare what the script inside it touches (§13a)."
+            );
+            for source in signal.sources() {
+                assert!(
+                    crate::source::Source::ALL.contains(source),
+                    "{signal} names a Source §2.3 does not have: {source}"
+                );
+            }
+        }
+        // The exception, stated as a fact rather than a comment: nothing in §2.3 reaches a sandbox
+        // manager, and the signal that does is the one the rewrite removes.
+        assert!(Signal::FleetListing.sources().is_empty());
+        assert!(
+            !Signal::ON_THE_BOARD.contains(&Signal::FleetListing),
+            "the one signal with no Source is back on the board, where the law applies to it"
+        );
+
+        // The liveness sweep composes two, and a declaration that could only hold one would have to
+        // pick — which is how a signal starts describing half of what it does.
+        assert_eq!(
+            Signal::FleetLiveness.sources(),
+            &[crate::source::Source::File, crate::source::Source::Socket]
+        );
     }
 
     /// Nothing on the board tick spends the two budgets that are not counted here, which is why

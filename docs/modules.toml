@@ -292,9 +292,12 @@ depends_on = ["util"]
 depends_on = []
 
 [current.signal]
-# Nothing, for the same reason as `source` and one of its own: a budget that had to ask `config` how
-# much it could spend would be a budget the thing being measured gets to set. Note the name — this
-# is §14's `signal` module, which today holds only the primitive's *declaration* (budgets, costs,
-# cadence). `signals` beside it is the current code that computes observations, and the two meet
-# when that is rewritten against §14.
-depends_on = []
+# `source` and nothing else, which is exactly what §14's destination row says (`signal` depends on
+# `source` and `state`; `state` does not exist yet). A signal declares which Source produced it, so
+# it names §2.3's type rather than a string of its own. Nothing further: a budget that had to ask
+# `config` how much it could spend would be a budget the thing being measured gets to set.
+#
+# Note the name — this is §14's `signal` module, which today holds the primitive's *declaration*
+# (budgets, costs, cadence, sources). `signals` beside it is the current code that computes
+# observations, and the two meet when that is rewritten against §14.
+depends_on = ["source"]
