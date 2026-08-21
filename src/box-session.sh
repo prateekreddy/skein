@@ -967,11 +967,11 @@ if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
   # What the box loses, and each of these was reachable read-write until now:
   #   * every OTHER repo's store — its memory, its mailbox, its skills, its boot records;
   #   * every other repo's work tree on the host;
-  #   * its own repo's work tree read-write. `sandbox-bootstrap.sh` copies out of the source tree
-  #     rather than linking at it, exactly so "a box can still never reach the host checkout" — but skein
-  #     runs `git -C <repo.work>` on the HOST, so a box that could write `.git/config` there had
-  #     `core.fsmonitor` executed as the host user. That was a convention holding a boundary; it is
-  #     a mount option now.
+  #   * its own repo's work tree, at all — not read-write, not read-only. It was bound read-only
+  #     for exactly one thing: the gitignored files `shared-paths.txt` names, which skein copies
+  #     into the store on the host now. Nothing else a box does needs the tree its user works in,
+  #     and a box that cannot see it cannot have `core.fsmonitor` in its `.git/config` executed as
+  #     the host user either.
   #
   # Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox
   # predates this and passes nothing, and the two wrong guesses are not symmetric: covering with
@@ -1002,14 +1002,12 @@ SKEIN_MOUNTS
     # directory is enough to hit that, and the symptom is one box of the pair starting fine.
     [ -n "${SKEIN_BOX_STORE-}" ] && [ -d "$SKEIN_BOX_STORE" ] &&
       binds+=(--bind "$SKEIN_BOX_STORE" "$SKEIN_BOX_STORE")
-    [ -n "${SKEIN_BOX_SOURCE-}" ] && [ -d "$SKEIN_BOX_SOURCE" ] &&
-      binds+=(--ro-bind "$SKEIN_BOX_SOURCE" "$SKEIN_BOX_SOURCE")
   fi
   unset fleet_root_dir state_parent fleet_mount owned skip
 fi
 # Not a box's to pass on: the mount set names every repo on the host, which is the shape of the
 # fleet, and the box has no use for it after this point.
-unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE SKEIN_BOX_SOURCE
+unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE
 
 # --- The fleet agent's token is not a box's to hold ----------------------------------------------
 #

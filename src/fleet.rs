@@ -681,7 +681,13 @@ pub fn fleet_mounts() -> Vec<String> {
     // sandbox rather than only surviving a planned resize.
     let mut mounts = vec![workspace.clone(), box_state_root()];
     for repo in load_repos() {
-        for path in [repo.store.clone(), repo.work.clone()] {
+        // The store, and NOT the checkout. A repo's working tree used to be mounted so that boxes
+        // could clone from it and read the gitignored files `shared-paths.txt` names; they clone
+        // from the mirror now (which is under the workspace above) and the files are copied into
+        // the store on the host ([`crate::kit::seed_shared_paths`]). Nothing left in a box has any
+        // use for the tree its user works in, so it is not in the sandbox at all — which is a
+        // stronger statement than the read-only bind it replaces.
+        for path in [repo.store.clone()] {
             let path = path.trim().to_string();
             if path.is_empty() {
                 continue;
@@ -2657,7 +2663,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // would fail until something reinstalled the script. An old launcher ignores an env var.
         "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} \
-         SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} SKEIN_BOX_SOURCE={source_q} \
+         SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // The mount set the launcher cannot learn for itself, and the two paths out of it this box
@@ -2670,16 +2676,6 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // covered view with nothing bound back rather than an uncovered one.
         mounts_q = sh_quote(&mount_manifest(name)),
         store_q = sh_quote(&repo_for_box(name).map(|r| r.store).unwrap_or_default()),
-        // The repo's SOURCE TREE — the user's own checkout — not its mirror. Read-only, and it is
-        // not a precaution: nothing in a box writes here, but skein runs `git -C <repo.work>` on
-        // the HOST, so a box that could write `.git/config` would get `core.fsmonitor` executed as
-        // the host user.
-        //
-        // A box needs this for one thing only, and it is on its way out: the gitignored files
-        // `shared-paths.txt` names. Those are copied into the store on the host now
-        // ([`crate::kit::seed_shared_paths`]), so this bind is what covers a store seeded before
-        // that existed. Nothing else a box does requires the tree its user works in.
-        source_q = sh_quote(&repo_for_box(name).map(|r| r.work).unwrap_or_default()),
         // Off unless the file says otherwise, and an unreadable answer is off. The two directions
         // are not equal: guessing "privileged" hands one box every other box's credentials, and
         // guessing "not" costs the workshop box a restart after someone flips the switch.
@@ -8160,6 +8156,58 @@ b idle 5000000 1048576 4
             fleet_mounts(),
             vec![fleet_workspace(), box_state_root()],
             "a repo pointed at skein's own volume was mounted into every box"
+        );
+    }
+
+    /// A repo's checkout is not in the sandbox at all — only its store, and its mirror under the
+    /// workspace.
+    ///
+    /// The mount was there for two jobs and has neither left: a box cloned from the checkout (it
+    /// clones from the mirror now) and read the gitignored files `shared-paths.txt` names (skein
+    /// copies those into the store on the host now). Leaving it would have left every box able to
+    /// read the working tree its user is typing in, for nothing.
+    #[test]
+    fn a_repo_puts_its_store_in_the_sandbox_and_not_its_checkout() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        // Adopted in place: work and store both at paths skein did not choose, so neither is
+        // covered by the workspace and each has to be decided on its own.
+        let elsewhere = tempdir();
+        let work = elsewhere.join("code/thing");
+        let store = elsewhere.join("shared/.claude");
+        for d in [&work, &store] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "thing".into(),
+            source: work.to_string_lossy().into_owned(),
+            work: work.to_string_lossy().into_owned(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+
+        let mounts = fleet_mounts();
+        assert!(
+            mounts.iter().any(|m| under(&store.to_string_lossy(), m)),
+            "a box cannot reach its own repo's store: {mounts:?}"
+        );
+        assert!(
+            !mounts.iter().any(|m| under(&work.to_string_lossy(), m)),
+            "the tree its user works in is in the sandbox: {mounts:?}"
+        );
+        // And the mirror, which is what a box actually needs, is reachable — it lives under the
+        // workspace, so this holds without anybody adding a mount for it.
+        let mirror = crate::repos::mirror_path("thing");
+        assert!(
+            mounts.iter().any(|m| under(&mirror.to_string_lossy(), m)),
+            "a box cannot reach the mirror it clones from: {mounts:?}"
         );
     }
 }

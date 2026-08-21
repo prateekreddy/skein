@@ -618,7 +618,7 @@ fn isolation_binds(
     state_parent: &std::path::Path,
     privileged: bool,
 ) -> String {
-    isolation_binds_with(fleet, state_parent, privileged, "", "", "")
+    isolation_binds_with(fleet, state_parent, privileged, "", "")
 }
 
 /// The same, told what the sandbox mounts and which two paths this box owns of it.
@@ -628,7 +628,6 @@ fn isolation_binds_with(
     privileged: bool,
     mounts: &str,
     store: &str,
-    source_tree: &str,
 ) -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
@@ -647,7 +646,7 @@ fn isolation_binds_with(
         .arg("-c")
         .arg(format!(
             "set -uo pipefail; binds=(); root={}; state={}; export SKEIN_FLEET_ROOT={} SKEIN_BOX_PRIVILEGED={} \
-             SKEIN_FLEET_MOUNTS={} SKEIN_BOX_STORE={} SKEIN_BOX_SOURCE={}; \
+             SKEIN_FLEET_MOUNTS={} SKEIN_BOX_STORE={}; \
              {block}; printf '%s\\n' \"${{binds[@]-}}\"",
             fleet.join("web-main").display(),
             state_parent.join("web-main").display(),
@@ -655,7 +654,6 @@ fn isolation_binds_with(
             if privileged { "1" } else { "0" },
             skein::util::sh_quote(mounts),
             skein::util::sh_quote(store),
-            skein::util::sh_quote(source_tree),
         ))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -740,9 +738,10 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
 /// repo's checkout on the host.
 ///
 /// The last of those was the sharpest: skein runs `git -C <repo.work>` on the HOST, so a box that
-/// could write `.git/config` there had `core.fsmonitor` executed as the host user. Its own source tree
-/// comes back read-only for exactly that reason — `sandbox-bootstrap.sh` already copies out of it
-/// rather than linking at it, so nothing loses a capability it was using.
+/// could write `.git/config` there had `core.fsmonitor` executed as the host user. Its own checkout
+/// does not come back at all now, in any form: a box cloned from the checkout and read its
+/// gitignored files, and it does neither — it clones from the repo's mirror, and skein copies those
+/// files into the store on the host. Nothing left in a box has a use for the tree its user works in.
 #[test]
 fn a_box_sees_its_own_repo_and_no_one_elses() {
     let dir = std::env::temp_dir().join(format!("skein-iso-mounts-{}", std::process::id()));
@@ -772,7 +771,6 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
         false,
         &mounts,
         mine_store.to_string_lossy().as_ref(),
-        mine_work.to_string_lossy().as_ref(),
     );
     let has = |a: &str, b: &str| {
         binds
@@ -795,12 +793,8 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
         "the box must get its own repo's store back, read-write: {binds}"
     );
     assert!(
-        has("--ro-bind", mine_work.to_string_lossy().as_ref()),
-        "and its own repo's source tree, read-only: {binds}"
-    );
-    assert!(
-        !has("--bind", mine_work.to_string_lossy().as_ref()),
-        "the source tree was also bound writable, which is the whole hole: {binds}"
+        !binds.contains(mine_work.to_string_lossy().as_ref()),
+        "the box can see the tree its user works in, in any form: {binds}"
     );
     assert!(
         !binds.contains("other"),
@@ -818,7 +812,6 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
         false,
         &format!("{mounts}{}\n", newly.display()),
         mine_store.to_string_lossy().as_ref(),
-        mine_work.to_string_lossy().as_ref(),
     );
     assert!(
         has_pair(&binds, "--tmpfs", newly.to_string_lossy().as_ref()),
@@ -853,7 +846,7 @@ fn covering_the_mounts_does_not_uncover_the_box() {
         states.display(),
         dir.display()
     );
-    let binds = isolation_binds_with(&fleet, &states, false, &mounts, "", "");
+    let binds = isolation_binds_with(&fleet, &states, false, &mounts, "");
 
     let tmpfs_after_bind = |covered: &std::path::Path, bound: &std::path::Path| {
         let lines: Vec<&str> = binds.lines().collect();
