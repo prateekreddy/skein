@@ -221,9 +221,9 @@ pub enum Signal {
     BoxDiff,
     /// Whether the repo's tracker docs are behind the store's copies.
     BoxDocsUpdate,
-    /// The box's branch, asked of git — the fallback when the registry, the launch spec and the
-    /// repo all fail to say.
-    BoxBranchFromGit,
+    /// The box's branch, read from `HEAD` — the fallback when the registry, the launch spec and
+    /// the repo all fail to say.
+    BoxBranchFromHead,
 }
 
 impl Signal {
@@ -244,7 +244,7 @@ impl Signal {
         Signal::BoxTask,
         Signal::BoxDiff,
         Signal::BoxDocsUpdate,
-        Signal::BoxBranchFromGit,
+        Signal::BoxBranchFromHead,
     ];
 
     pub fn name(self) -> &'static str {
@@ -260,7 +260,7 @@ impl Signal {
             Signal::BoxTask => "box-task",
             Signal::BoxDiff => "box-diff",
             Signal::BoxDocsUpdate => "box-docs-update",
-            Signal::BoxBranchFromGit => "box-branch-from-git",
+            Signal::BoxBranchFromHead => "box-branch-from-head",
         }
     }
 
@@ -276,7 +276,7 @@ impl Signal {
             | Signal::BoxTask
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
-            | Signal::BoxBranchFromGit => Subject::Box,
+            | Signal::BoxBranchFromHead => Subject::Box,
         }
     }
 
@@ -296,7 +296,7 @@ impl Signal {
             | Signal::BoxTask
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
-            | Signal::BoxBranchFromGit => Scale::PerBox,
+            | Signal::BoxBranchFromHead => Scale::PerBox,
         }
     }
 
@@ -304,8 +304,9 @@ impl Signal {
     ///
     /// `None` is not "no cadence" — it is **ungated**, which for a per-box signal means the cost is
     /// paid on every tick for every row. That combination is worth being able to see in one place:
-    /// [`Signal::BoxBranchFromGit`] is the only signal on the board that both forks and is ungated,
-    /// and it was invisible until this table existed.
+    /// [`Signal::BoxBranchFromHead`] was the only signal on the board that both forked and was
+    /// ungated, it was invisible until this table existed, and it does not fork any more. Nothing
+    /// on the board is in that quadrant now, and a test keeps it that way.
     pub fn gate(self) -> Option<Duration> {
         match self {
             Signal::FleetListing => Some(Duration::from_millis(1500)),
@@ -319,7 +320,7 @@ impl Signal {
             | Signal::BoxTask
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
-            | Signal::BoxBranchFromGit => None,
+            | Signal::BoxBranchFromHead => None,
         }
     }
 
@@ -330,25 +331,29 @@ impl Signal {
     pub fn cost(self) -> Cost {
         match self {
             Signal::FleetListing => Cost::forks(1, "`sbx ls --json`, src/sbx.rs `fleet_boxes`"),
-            Signal::FleetDisk => Cost::forks(1, "one `sbx exec` du, src/fleet.rs `fleet_disk_usage`"),
+            Signal::FleetDisk => {
+                Cost::forks(1, "one `sbx exec` du, src/fleet.rs `fleet_disk_usage`")
+            }
             Signal::FleetLiveness => {
                 Cost::forks(1, "one `sbx exec` sweep, src/fleet.rs `fleet_liveness`")
             }
             Signal::Registry => Cost::free("one JSON file, src/registry.rs `all_sandboxes`"),
-            Signal::BoxPlacement => Cost::free("one JSON file per box, src/place.rs `placed_boxes`"),
+            Signal::BoxPlacement => {
+                Cost::free("one JSON file per box, src/place.rs `placed_boxes`")
+            }
             Signal::BoxScreen => Cost::free("the observer's file, src/signals.rs `read_pane_raw`"),
             Signal::BoxStatusEdge => Cost::free("the hook's file, src/signals.rs `status_edge`"),
-            Signal::BoxNarrative => Cost::free("the launcher's file, src/signals.rs `session_signal`"),
+            Signal::BoxNarrative => {
+                Cost::free("the launcher's file, src/signals.rs `session_signal`")
+            }
             Signal::BoxTask => Cost::free("the task file, src/signals.rs `current_task`"),
             Signal::BoxDiff => Cost::free("the diffstat file, src/diff.rs `read_diffstat_file`"),
             Signal::BoxDocsUpdate => {
                 Cost::free("two files in the store, src/tracking.rs `sync_docs_available`")
             }
-            Signal::BoxBranchFromGit => Cost::forks(
-                1,
-                "`git rev-parse --abbrev-ref HEAD`, src/sbx.rs `git_branch_for` — reached only when \
-                 the registry, the launch spec and the repo all fail to name the branch, and it has \
-                 no gate",
+            Signal::BoxBranchFromHead => Cost::free(
+                "`.git/HEAD` as a file, src/sbx.rs `git_branch_for` — it forked a `git rev-parse` \
+                 per box per tick until the count in `tests/board_cost.rs` made that visible",
             ),
         }
     }
@@ -377,7 +382,7 @@ pub fn board_tick(boxes: u32, unresolved_branches: u32, gates: Gates) -> Cost {
             continue;
         }
         let times = match (signal, signal.scale()) {
-            (Signal::BoxBranchFromGit, _) => unresolved_branches,
+            (Signal::BoxBranchFromHead, _) => unresolved_branches,
             (_, Scale::PerBox) => boxes,
             (_, Scale::PerPass) => 1,
         };
@@ -482,22 +487,28 @@ mod tests {
         );
     }
 
-    /// And the one exception, which is the reason `unresolved_branches` is a parameter rather than
-    /// an assumption: the branch fallback forks per box and has no gate, so it is paid on every
-    /// tick of every open tab.
+    /// **No signal on the board both forks and is ungated.**
+    ///
+    /// The quadrant that scales badly: a per-box observation with no gate is paid on every tick of
+    /// every open tab, so a fork there is a fork per row per two seconds per browser tab. The branch
+    /// fallback was the one signal in it, and reading `HEAD` as a file instead of asking `git`
+    /// emptied it. `unresolved_branches` stays a parameter of `board_tick` because it is still the
+    /// only per-box signal whose cost is conditional — it is now conditionally *nothing*.
     #[test]
-    fn the_ungated_per_box_fork_is_the_one_that_scales() {
-        assert_eq!(board_tick(12, 12, Gates::Warm).spawns, 12);
-        assert_eq!(board_tick(12, 12, Gates::Cold).spawns, 15);
+    fn nothing_on_the_board_both_forks_and_is_ungated() {
         let ungated_forkers: Vec<Signal> = Signal::ON_THE_BOARD
             .into_iter()
             .filter(|s| s.gate().is_none() && s.cost().spawns > 0)
             .collect();
-        assert_eq!(
-            ungated_forkers,
-            vec![Signal::BoxBranchFromGit],
-            "a second ungated per-box fork joined the board tick — it needs a gate, or a reason"
+        assert!(
+            ungated_forkers.is_empty(),
+            "an ungated per-box fork joined the board tick — it needs a gate, or to stop forking: \
+             {ungated_forkers:?}"
         );
+        // Which is the whole of it: a fifty-box board whose branches nothing can name still forks
+        // nothing once the gates are warm.
+        assert_eq!(board_tick(50, 50, Gates::Warm).spawns, 0);
+        assert_eq!(board_tick(50, 50, Gates::Cold).spawns, 3);
     }
 
     /// Nothing on the board tick spends the two budgets that are not counted here, which is why

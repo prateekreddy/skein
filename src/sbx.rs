@@ -18,7 +18,7 @@ use crate::fleet::fleet_liveness;
 use crate::place::shared_record;
 use crate::registry::registry_entry_for_box;
 use crate::util::valid_name;
-use crate::util::{bounded_output, clip, output_with_timeout_why, Gate};
+use crate::util::{clip, output_with_timeout_why, Gate};
 use std::env;
 use std::process::Command;
 use std::time::Duration;
@@ -299,18 +299,60 @@ fn repo_workspace(ws: &serde_json::Value) -> String {
 
 /// The current branch of the git working tree at `dir`, read host-side — so skein can show a box's
 /// branch without the registry. None if `dir` isn't a repo or HEAD is detached.
+///
+/// **Read from `HEAD`, not asked of git**, and the reason is a measurement. This is the only per-box
+/// signal on the board tick, and it was the only one that forked: `git rev-parse --abbrev-ref HEAD`
+/// per row, every two seconds, for every open browser tab, with no gate to amortise it — twelve
+/// forks a tick for a twelve-box fleet, counted in `tests/board_cost.rs`. `HEAD` is a symref in a
+/// text file, so the fork was never buying anything.
+///
+/// Four shapes, and all four are real:
+///
+/// * `ref: refs/heads/<branch>` — the ordinary case. The branch may contain slashes, so the prefix
+///   is stripped rather than the last component taken.
+/// * a bare object id — a detached HEAD, which is not a branch. `rev-parse --abbrev-ref` printed
+///   `HEAD` here and the caller threw it away; this returns `None` for the same reason.
+/// * `.git` as a **file** holding `gitdir: <path>` — a worktree or a submodule. Followed one level,
+///   which is as deep as git itself goes.
+/// * `dir` **is** the git directory — a bare repo or a mirror, which has `HEAD` and `objects` and no
+///   `.git` at all.
+///
+/// And it searches **upward**, because `git -C` does: the board's `dir` is a checkout root today,
+/// but a subdirectory used to answer, and silently ceasing to would be a regression nothing reports.
 pub(crate) fn git_branch_for(dir: &str) -> Option<String> {
     if dir.is_empty() {
         return None;
     }
-    let mut command = Command::new("git");
-    command.args(["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
-    let out = bounded_output(&mut command, "git branch", Duration::from_secs(5)).ok()?;
-    if !out.status.success() {
-        return None;
+    let mut here: &std::path::Path = std::path::Path::new(dir);
+    loop {
+        if let Some(branch) = branch_at(here) {
+            return Some(branch);
+        }
+        here = here.parent()?;
     }
-    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!b.is_empty() && b != "HEAD").then_some(b)
+}
+
+/// The branch `HEAD` names in the repository at `dir`, if `dir` is one.
+fn branch_at(dir: &std::path::Path) -> Option<String> {
+    let dot = dir.join(".git");
+    // `read_to_string` on a directory fails, which is how the two `.git` shapes tell themselves
+    // apart without a second stat in the common case.
+    let git_dir = match std::fs::read_to_string(&dot) {
+        Ok(text) => {
+            let target = std::path::Path::new(text.trim().strip_prefix("gitdir:")?.trim());
+            match target.is_absolute() {
+                true => target.to_path_buf(),
+                false => dir.join(target),
+            }
+        }
+        Err(_) if dot.is_dir() => dot,
+        // No `.git` here. `dir` may still BE a repository — the shape `repos.rs` calls a mirror.
+        Err(_) if dir.join("objects").is_dir() => dir.to_path_buf(),
+        Err(_) => return None,
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let branch = head.trim().strip_prefix("ref: refs/heads/")?.trim();
+    (!branch.is_empty()).then(|| branch.to_string())
 }
 
 /// Reduce a single `sbx ls --json` document to a flat list of per-box objects, covering an array,
@@ -387,6 +429,102 @@ mod tests {
     use crate::testutil::*;
     use std::env;
     use std::fs;
+
+    /// Every shape of `HEAD` this has to read, against real directories rather than a mock.
+    ///
+    /// Written when the fork became a file read: `git rev-parse` handled all of these and a naive
+    /// `read HEAD` handles two, so the cases that would regress silently are the point of the test.
+    /// Nothing here runs git — the fixtures are the files git writes, which is exactly the claim
+    /// being made.
+    #[test]
+    fn a_branch_is_read_from_head_in_every_shape_a_repo_takes() {
+        let root = tempdir();
+
+        // The ordinary checkout, and a branch with slashes in it: the prefix is stripped rather
+        // than the last component taken, or `feat/auth` reads as `auth`.
+        let plain = root.join("plain");
+        fs::create_dir_all(plain.join(".git")).unwrap();
+        fs::write(plain.join(".git/HEAD"), "ref: refs/heads/feat/auth\n").unwrap();
+        assert_eq!(
+            git_branch_for(plain.to_str().unwrap()).as_deref(),
+            Some("feat/auth")
+        );
+
+        // Upward, because `git -C` does. A subdirectory answered before and must keep answering.
+        let deep = plain.join("src/web");
+        fs::create_dir_all(&deep).unwrap();
+        assert_eq!(
+            git_branch_for(deep.to_str().unwrap()).as_deref(),
+            Some("feat/auth")
+        );
+
+        // Detached: HEAD is an object id, which is not a branch. `rev-parse --abbrev-ref` printed
+        // "HEAD" here and the caller threw it away.
+        let loose = root.join("detached");
+        fs::create_dir_all(loose.join(".git")).unwrap();
+        fs::write(
+            loose.join(".git/HEAD"),
+            "9f1c0a2b3d4e5f60718293a4b5c6d7e8f9012345\n",
+        )
+        .unwrap();
+        assert_eq!(git_branch_for(loose.to_str().unwrap()), None);
+
+        // A worktree or a submodule: `.git` is a FILE pointing at the real directory.
+        let real = root.join("linked-gitdir");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("HEAD"), "ref: refs/heads/wt\n").unwrap();
+        let linked = root.join("worktree");
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", real.to_string_lossy()),
+        )
+        .unwrap();
+        assert_eq!(
+            git_branch_for(linked.to_str().unwrap()).as_deref(),
+            Some("wt")
+        );
+
+        // And the relative form of the same thing, which is what git writes for a submodule.
+        let rel = root.join("submodule");
+        fs::create_dir_all(&rel).unwrap();
+        fs::write(rel.join(".git"), "gitdir: ../linked-gitdir\n").unwrap();
+        assert_eq!(git_branch_for(rel.to_str().unwrap()).as_deref(), Some("wt"));
+
+        // A bare repo or a mirror: no `.git` at all, and `HEAD` sits beside `objects`.
+        let bare = root.join("mirror.git");
+        fs::create_dir_all(bare.join("objects")).unwrap();
+        fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(
+            git_branch_for(bare.to_str().unwrap()).as_deref(),
+            Some("main")
+        );
+
+        // Not a repository, and an empty path. Neither may walk out of the filesystem looking.
+        let bare_dir = root.join("just-a-folder");
+        fs::create_dir_all(&bare_dir).unwrap();
+        assert_eq!(git_branch_for(""), None);
+        // `tempdir()` is not inside a checkout, so nothing above it answers either.
+        assert_eq!(git_branch_for(bare_dir.to_str().unwrap()), None);
+    }
+
+    /// The claim the measurement rests on: reading a branch forks nothing.
+    ///
+    /// Asserted by taking git away. With `PATH` emptied the old implementation could not have
+    /// answered at all, and this one does not notice.
+    #[test]
+    fn reading_a_branch_does_not_need_git_on_the_path() {
+        let _g = env_lock();
+        let root = tempdir();
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/no-git\n").unwrap();
+        let real = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", "");
+        let branch = git_branch_for(repo.to_str().unwrap());
+        env::set_var("PATH", real);
+        assert_eq!(branch.as_deref(), Some("no-git"));
+    }
 
     // The takeover path reaches into the source box for its branch and HEAD, and until now nothing
     // exercised that. The guard is deliberately the *argv*: `Place` is about to change how skein

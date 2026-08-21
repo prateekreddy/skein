@@ -185,10 +185,10 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
         "gated signals must cost nothing inside their window"
     );
 
-    // ---- the exception, and the reason it is a parameter rather than an assumption ----
-    // Nothing but git can name these branches now. That fallback forks per box and has no gate, so
-    // it is paid on every tick of every open tab — the one per-box fork on the board, and it was
-    // invisible until it had to be written down.
+    // ---- and the per-box signal that used to be the exception ----
+    // Nothing on record can name these branches now, so every row falls through to reading `HEAD`.
+    // That was one `git rev-parse` per box per tick with no gate to amortise it — twelve forks
+    // here, on a warm tick, measured before it was fixed. It is a file read now.
     registry(&reg, false);
     let unresolved = tick(&log);
     assert_eq!(
@@ -197,8 +197,9 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
         "with no branch on record a warm tick forked {unresolved}"
     );
     assert_eq!(
-        unresolved, BOXES,
-        "one `git rev-parse` per box per tick, and the gates are still warm"
+        unresolved, 0,
+        "the branch fallback forks again — `HEAD` is a file, and a fork here is paid per row, per \
+         tick, per open browser tab"
     );
 
     std::env::remove_var("SKEIN_REGISTRY");

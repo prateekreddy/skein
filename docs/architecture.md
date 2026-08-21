@@ -1168,10 +1168,13 @@ tally with the sum. A twelve-box fleet forks **three** processes on a cold tick 
 over the fleet root, one liveness sweep — and **the same three at fifty boxes**, because each answers
 for the whole fleet in one call. Warm, inside every gate's window, it forks **nothing**.
 
-The exception is the one worth knowing: **the branch fallback forks per box and has no gate.** When
-the registry, the launch spec and the repo all fail to name a box's branch, `git rev-parse` is asked
-per row, every tick, per open tab — twelve boxes measured at twelve forks on a warm tick. It is the
-only per-box fork on the board and it was invisible until the costs had to be written down.
+The count found one thing, which is what counting is for. **The branch fallback forked per box and
+had no gate**: when the registry, the launch spec and the repo all failed to name a box's branch,
+`git rev-parse` was asked per row, every tick, per open tab — twelve boxes measured at twelve forks
+on a *warm* tick. It was the only per-box fork on the board and invisible until the costs had to be
+written down. `HEAD` is a symref in a text file, so the fork was never buying anything; it is a file
+read now, and the same measurement reports zero. **No signal on the board is both ungated and
+forking**, and `signal.rs` asserts that quadrant stays empty.
 
 A cost declares its **basis** — the file and line, or the measurement — and one with an empty basis
 fails a test. That is the "measured, not asserted" line above, made into something that can fail.
