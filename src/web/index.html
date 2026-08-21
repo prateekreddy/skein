@@ -1427,27 +1427,14 @@
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script src="/vendor/marked.js"></script>
+<!-- The cockpit's pure functions: GROUPS, groupOf, NEEDS_YOU, owedIn, labelOf, matchesFilter,
+     boardRows, wantsForeign, withoutForeignTerm, fmtGB, fmtGb. Built from `cockpit/src` and tested
+     in node — see cockpit/README.md. They live there and not here because a function that cannot be
+     imported cannot be tested except by reimplementing it, and a reimplementation agrees with the
+     code right up until one of them changes. -->
+<script src="/vendor/cockpit.js"></script>
 <script>
 // ---------- model ----------
-const GROUPS = [
-  { key:"error",   label:"error",     match:s => s === "error" },
-  { key:"attn",    label:"needs you", match:s => ["needs-input","needs-decision","blocked"].includes(s) },
-  { key:"waiting", label:"waiting",   match:s => s === "waiting" },
-  { key:"done",    label:"done",      match:s => s === "done" },
-  { key:"working", label:"working",   match:s => ["working","running","live","compacting"].includes(s) },
-  { key:"ended",   label:"ended",     match:s => s === "ended" },
-  { key:"idle",    label:"idle",      match:s => s === "idle" },
-  { key:"stale",   label:"stale",     match:s => s === "stale" || s === "unknown" },
-];
-const groupOf = s => (GROUPS.find(g => g.match(s)) || GROUPS[GROUPS.length-1]).key;
-// What "owed to you" means, in one place. It was written out three times and they disagreed: the
-// tab title and the needs-you navigation counted `waiting`, and both voice paths did not — so the
-// title said "3 need you" while the mouth stayed shut, and "read what needs me" answered "nothing
-// needs you" with boxes visibly waiting on screen. `waiting` is a box that ended its turn and wants
-// your next instruction, which is the most ordinary way a box needs you there is.
-const NEEDS_YOU = ["error", "attn", "waiting"];
-const owedIn = list => list.filter(b => NEEDS_YOU.includes(groupOf(b.state)));
-const labelOf = s => ["needs-input","needs-decision","blocked"].includes(s) ? "decision" : s === "live" ? "active" : s;
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 // coerce to integers — these land in innerHTML, so never interpolate raw box-reported values
 const diffBadge = d => d && (d.files||d.ins||d.del)
@@ -1522,11 +1509,6 @@ const PIN_CAP = 5;
 let pinExpanded = false;
 // Name, branch, repo and the headline — the four things you would actually be looking for. Not
 // state: `/error` should find a box called error, and the group headers already sort by state.
-function matchesFilter(b, q) {
-  if (!q) return true;
-  const hay = `${b.name} ${b.branch || ""} ${b.repo || ""} ${b.headline || ""}`.toLowerCase();
-  return q.split(/\s+/).filter(Boolean).every(t => hay.includes(t));
-}
 // `foreign:` — the one filter term that changes WHICH boxes are eligible rather than narrowing them.
 //
 // A sandbox skein did not place is on the board only because `sbx ls` is authoritative for what
@@ -1534,8 +1516,6 @@ function matchesFilter(b, q) {
 // unrelated `sbx` boxes looked like a fleet full of broken ones: no branch, no signals, no attach.
 // So they are out of the way by default and typing `foreign:` shows exactly them — nothing is
 // hidden without a way back to it, and the way back costs no permanent chrome.
-const FOREIGN_TERM = "foreign:";
-const wantsForeign = q => q.includes(FOREIGN_TERM);
 // **Fetched, not pushed.** These rows used to ride on every 2s tick, which cost one `sbx ls` per
 // tick per open tab — the single most expensive thing the board did, for the one part of it that is
 // not about skein's own boxes. `sbx ls` is the right instrument for "what sandboxes are on this
@@ -1559,23 +1539,6 @@ async function askForForeign() {
   }
   foreignAsking = false;
   render(boxes);
-}
-const withoutForeignTerm = q => q.split(FOREIGN_TERM).join(" ").trim();
-// Which rows the board draws, for a fleet and a filter string. Its own function so the rule has one
-// home: `render` used to do this inline, which meant the only way to test it was to write the same
-// two lines again in the test — and a re-implementation agrees with the code right up until one of
-// them changes.
-//
-// Eligibility first, then the text match over what is left, because `foreign:` answers "which boxes"
-// and the rest answers "which of those".
-function boardRows(all, rawFilter) {
-  const q = (rawFilter || "").trim().toLowerCase();
-  // The board's own rows carry no foreign ones any more, so the fetched list is concatenated in
-  // rather than filtered out of. Kept as one function so the rule still has one home.
-  const pool = wantsForeign(q) ? (foreignRows || []) : all;
-  const eligible = pool.filter(b => wantsForeign(q) ? b.foreign : !b.foreign);
-  const text = withoutForeignTerm(q);
-  return text ? eligible.filter(b => matchesFilter(b, text)) : eligible;
 }
 // Set the board filter from a link, keeping the input and the state in step — typing it by hand and
 // clicking "show them" have to mean the same thing, and the input is what a person edits next.
@@ -1816,7 +1779,9 @@ function render(snapshot) {
   const q = boardFilter.trim().toLowerCase();
   // Asked the moment somebody wants them, and only then.
   if (wantsForeign((boardFilter || "").trim().toLowerCase()) && foreignRows === null) askForForeign();
-  const shown = boardRows(boxes, boardFilter);
+  // `foreignRows` is an argument rather than something the function reaches for: that is what makes
+  // it pure, and what makes it testable in node.
+  const shown = boardRows(boxes, boardFilter, foreignRows);
   const needyAll = shown.filter(b => (b.tier ?? 9) <= NEEDS_TIER);
   const rest  = shown.filter(b => (b.tier ?? 9) >  NEEDS_TIER);
   // A pin holding more than a handful has stopped being a pin. The rest are one click away, and the
@@ -4060,7 +4025,6 @@ function renderLoad(ov, rows) {
     list.append(row);
   }
 }
-const fmtGB = b => b >= 1073741824 ? `${(b/1073741824).toFixed(1)}G` : `${Math.round(b/1048576)}M`;
 
 // ---------- away digest: "while you were gone" (free — client-side fleet delta) ----------
 let awaySnap = null;
@@ -5414,7 +5378,6 @@ function clearIdentityFields() {
 // first option so the common case is still one keystroke.
 // Usage is measured, not enforced: the fleet's disk is one filesystem shared by every box, so this
 // says who is taking the space rather than stopping them. Click to change just this box's allowance.
-function fmtGb(mb) { return mb >= 1024 ? `${(mb/1024).toFixed(1)}G` : `${mb}M`; }
 function diskChip(el, b) {
   const used = b.disk_mb, cap = b.disk_limit_mb;
   if (used == null || !cap || used < cap * 0.8) { el.style.display = "none"; el.textContent = ""; return; }

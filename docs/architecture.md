@@ -1509,6 +1509,30 @@ pure-function testing law (§13) and a reviewed component library; a build makes
 removes the third source of truth. The component library lives in a Claude Design project and is the
 source the cockpit is assembled from.
 
+Begun: `cockpit/src` holds the pure functions as modules, `cockpit/build.mjs` concatenates them into
+the one bundle the page loads, and `node --test` runs over them in CI. **No dependency**, which is
+the point rather than an economy — a build step for leaf functions that needed a package tree would
+cost more trust than it bought, and the cockpit is served from a binary to a browser on the same
+machine for the same reason `xterm` is vendored.
+
+**The build refuses a module with an `import` in it**, and that is the constraint the modules keep
+rather than a limitation of the build: what belongs there is leaf functions — all inputs as
+arguments, no module state, no DOM — which is exactly the set §13's law is about. Making `boardRows`
+pure meant its foreign rows became an argument instead of module state it reached for, which is what
+had made it untestable.
+
+**The bundle is committed and checked.** `cargo build` does not run node, so a build artefact in the
+tree can go stale silently — which here means a cockpit quietly running last week's code. A test
+rebuilds it and compares, and a second asserts the page carries no second copy of what the bundle
+defines: two sources of truth is worse than one, because the page keeps working while the tested copy
+drifts and every node test passes against code nobody runs.
+
+Two kinds of assertion remain in `src/cockpit.rs`, and they are not the same kind. A **wire**
+assertion — the page reads a field the server sends — is about a join between two languages and
+nothing but a string match can make it; those stay. A **logic** assertion is a string match standing
+in for a test, because the function could not be imported; those are what this retires, and the ones
+still there are DOM-coupled.
+
 **Assets are embedded, and overridable from a directory.** A build emits files whose names carry
 content hashes, so neither the count nor the names are known at compile time — which is why there is
 one route over a table generated from a directory rather than a constant and a handler per file.

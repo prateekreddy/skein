@@ -199,6 +199,9 @@ async fn main() {
         .route("/vendor/xterm.css", get(|| asset("xterm.min.css")))
         .route("/vendor/addon-fit.js", get(|| asset("addon-fit.min.js")))
         .route("/vendor/marked.js", get(|| asset("marked.min.js")))
+        // The cockpit's own pure functions, built from `cockpit/src`. Served the same way as the
+        // vendored ones because it is the same kind of thing: bytes the page needs, in the binary.
+        .route("/vendor/cockpit.js", get(|| asset("cockpit.js")))
         // One route, no code per file. This is what a built bundle is served by.
         .route("/assets/*path", get(any_asset))
         .route("/api/boxes/:name/files", get(api_files))
