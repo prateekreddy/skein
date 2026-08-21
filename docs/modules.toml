@@ -169,13 +169,17 @@ depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime
 depends_on = ["runtime", "util"]
 
 [current.diff]
-depends_on = ["answer", "config", "registry", "sandbox", "sbx", "util"]
+# `source` for one word: the diff is computed inside the box, and the answer says so by naming the
+# reach that produced it. §2.2 requires a signal to carry that; §2.3 is where the word is defined.
+depends_on = ["answer", "config", "registry", "sandbox", "sbx", "source", "util"]
 
 [current.digest]
 depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
 
 [current.files]
-depends_on = ["answer", "place", "sandbox", "sbx", "util"]
+# `source` for the same reason as `diff`: a listing says whether it was read by entering the box or
+# off the host's copy, and those are two different §2.3 reaches with two different failure modes.
+depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 
 [current.fleet]
 depends_on = ["attempt", "config", "gitgate", "kit", "place", "repos", "sbx", "substrate", "util"]
@@ -254,6 +258,12 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 # running box leaves it reading a copy nobody writes to any more. Nothing depends on this except
 # the two binaries, so it cannot join the knot however it grows.
 depends_on = ["config", "fleet", "util"]
+
+[current.answer]
+# `source` only. An answer carries two axes — which copy of the fact it is, and how it was reached —
+# and the second is §2.3's type rather than a string this module invents. Nothing else: provenance
+# that had to ask `config` or `fleet` anything would be provenance the subject could shape.
+depends_on = ["source"]
 
 [current.source]
 # Nothing, and that is the rule rather than an accident: reaching a subject is precisely the thing

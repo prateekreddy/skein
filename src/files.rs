@@ -235,7 +235,14 @@ pub fn list_box_files(name: &str, rel: &str) -> Result<Answer<FileListing>, Stri
     }
     if box_liveness(name) == Some(Liveness::Running) {
         match list_files_in_box(name, rel) {
-            Ok(listing) => return Ok(annotate(Answer::from_box(listing))),
+            // Same reach as the diff: `list_files_in_box` runs its `find` inside the box's
+            // namespace, so the listing is `enter` and the host fallback below is `file`.
+            Ok(listing) => {
+                return Ok(annotate(Answer::from_box(
+                    listing,
+                    crate::source::Source::Enter,
+                )))
+            }
             // A refusal by the box (escape, not-a-directory) is an answer; only an inability to ask
             // it falls through to the host clone.
             Err(e) if e.contains("escapes") || e.contains("not a directory") => return Err(e),
@@ -284,7 +291,7 @@ pub fn read_box_file(name: &str, rel: &str) -> Result<(Vec<u8>, bool), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::answer::Source;
+    use crate::answer::Vantage;
     #[allow(unused_imports)]
     use crate::testutil::*;
     #[allow(unused_imports)]
@@ -348,9 +355,12 @@ mod tests {
         };
         let bare = annotate(Answer::from_host(empty(""), ""));
         assert_eq!(bare.note, "this workspace has no files in it");
-        assert_eq!(bare.source, Source::Host, "the fallback still says so");
+        assert_eq!(bare.vantage, Vantage::Host, "the fallback still says so");
         // an empty SUBdirectory is just an empty directory — no alarming note
-        let sub = annotate(Answer::from_box(empty("docs")));
+        let sub = annotate(Answer::from_box(
+            empty("docs"),
+            crate::source::Source::Enter,
+        ));
         assert!(sub.note.is_empty());
         // and a fallback keeps its own explanation, with the emptiness appended
         let fell_back = annotate(Answer::from_host(
@@ -387,8 +397,8 @@ mod tests {
 
         let l = list_box_files("bx", "").unwrap();
         assert_eq!(
-            l.source,
-            Source::Host,
+            l.vantage,
+            Vantage::Host,
             "no sbx here, so this is the host clone and has to say so"
         );
         let names: Vec<&str> = l.value.entries.iter().map(|e| e.name.as_str()).collect();

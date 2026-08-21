@@ -118,6 +118,13 @@ a module's standing note and a diff's contract signals are signals *about a modu
 request is a signal *about a pull request*. Assuming the subject was always a box is what made those
 look like separate machinery.
 
+**`source` and "which copy" are two axes, and one word for both was a bug waiting to happen.** A
+signal reached by `enter` and one reached by `socket` are both *the box*; a value read from the store
+and one read from the host's clone are both reached by `file`. Neither determines the other, so
+`Answer` carries both — `reach` for §2.3's Source and `vantage` for which copy of the fact it is.
+They were both called `source` until they weren't, and a reader who knew this section read the wrong
+one.
+
 **A signal's value is five-valued, not two**: `value | none | stale | unreadable | unsupported`.
 "Could not observe" is not "observed absent", and collapsing them is what drives spurious action.
 `none` — no observer was ever started, so reattach — is not `stale`, which is observations having

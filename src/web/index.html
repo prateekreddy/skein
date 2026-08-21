@@ -3112,7 +3112,7 @@ function renderFiles(name, d, st) {
   }).join("");
   // Which tree answered is not a detail: a clone-mode box's host clone is a different branch, and
   // a listing that doesn't say so is quietly showing you the wrong files.
-  const src = d.source === "host"
+  const src = d.vantage === "host"
     ? `<span class="fsrc host" title="${esc(d.note || "the box could not be asked")}">host clone</span>` : "";
   const empty = d.note && !d.entries.length ? `<div class="fnote">${esc(d.note)}</div>` : `<div class="fent">empty</div>`;
   // The badge sits in the breadcrumb where your eye already is; the banner carries the REASON, and
@@ -3187,21 +3187,28 @@ function loadDiff(name) {
   }).catch(() => { diffpane.innerHTML = `<div class="diff"><div class="note">could not load diff</div></div>`; });
 }
 // One renderer for provenance, used by every pane that shows a value skein read from somewhere.
-// The server sends `source` ("box" | "store" | "host") beside the value; "box" is the only one that
-// describes the box as it is right now, so the other two always say so. Four panes used to each
-// spell this out their own way, and the two that forgot shipped as bugs.
-const SOURCE_LABEL = { store: "last turn end", host: "host clone" };
+// The server sends TWO provenance fields beside the value, and they answer different questions.
+// `vantage` ("box" | "store" | "host") is which COPY of the fact this is — "box" is the only one
+// that describes the box as it is right now, so the other two always say so. `reach` ("enter" |
+// "socket" | "file" | "http") is HOW it was read. Both were once called `source`, which read as one
+// question with three answers and was two questions with different ones.
+//
+// Only `vantage` is rendered: it is the one that changes what you should believe. `reach` rides in
+// the tooltip, because the difference between entering a box and reading a file off the volume is
+// what someone debugging a slow or stale pane needs and nobody else does.
+const VANTAGE_LABEL = { store: "last turn end", host: "host clone" };
 function provenance(a, extra) {
   const bits = (extra || []).slice();
-  if (a && a.source && a.source !== "box") {
+  if (a && a.vantage && a.vantage !== "box") {
     // "written at the last turn end" reassures if that was a minute ago and misleads if it was
     // yesterday, so the age goes in the same breath as the claim.
     const when = a.as_of ? ` (${esc(a.as_of)})` : "";
-    bits.push(esc(a.note || SOURCE_LABEL[a.source] || a.source) + when);
+    bits.push(esc(a.note || VANTAGE_LABEL[a.vantage] || a.vantage) + when);
   }
   if (!bits.length) return "";
-  const stale = a && a.source && a.source !== "box";
-  return `<div class="dbase${stale ? " stale" : ""}">${bits.join(" · ")}</div>`;
+  const stale = a && a.vantage && a.vantage !== "box";
+  const how = a && a.reach ? ` title="reached by ${esc(a.reach)}"` : "";
+  return `<div class="dbase${stale ? " stale" : ""}"${how}>${bits.join(" · ")}</div>`;
 }
 // A diff whose base you can't see is a number you can't act on, so the base rides along with it.
 function diffBanner(d) {

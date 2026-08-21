@@ -13,17 +13,19 @@
 //! `file`×pty are meaningless, and asserting a clean product is an invitation to implement the empty
 //! cells — so the empty cells are refused here rather than left to a reviewer to notice.
 //!
-//! **There is a second `Source` in this crate** and it is a different thing: [`crate::answer::Source`]
-//! is *which copy of a fact* was read — the box, the store it wrote at its last turn end, or the
-//! host's own checkout. This one is *how* something was reached. Neither determines the other:
-//! `Store` and `Host` are both reached by `file`, and `Box` is reached by `enter` or by `socket`
-//! depending on what was asked. §2.2 says a signal carries "which Source produced it (§2.3)" — that
-//! is this type, and today's `Answer` does not carry it.
+//! **There used to be a second `Source` in this crate**, and the shared word hid that the two were
+//! different axes. It is [`crate::answer::Vantage`] now — *which copy of a fact* was read: the box,
+//! the store it wrote at its last turn end, or the host's own checkout. This one is *how* the thing
+//! was reached. Neither determines the other, which is why one name for both was wrong: `Store` and
+//! `Host` are both reached by `file`, and `Box` is reached by `enter` or by `socket` depending on
+//! what was asked. §2.2 says a signal carries "which Source produced it (§2.3)" — that is this type,
+//! and `Answer` carries it beside its vantage.
 //!
 //! **Never privileged.** Reaching a subject is precisely the thing that must not require privilege,
 //! which is why this module depends on nothing: a Source that had to ask `config` where something
 //! lived, or `fleet` who owned it, would be a Source that could be denied.
 
+use serde::Serialize;
 use std::fmt;
 
 /// What a Source can do to the thing it reaches.
@@ -60,7 +62,13 @@ impl fmt::Display for Mode {
 }
 
 /// The four ways anything is reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialised, so it can ride to the cockpit on an [`crate::answer::Answer`]: `enter` is a crossing
+/// that spawns a process and `socket` is a write to a socket, and that difference is what someone
+/// looking at a slow or stale pane is trying to establish. It is in the tooltip rather than the
+/// text — the vantage changes what you should believe, and this changes what you should check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Source {
     /// A box's namespace, via `nsenter`.
     ///

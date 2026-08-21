@@ -117,7 +117,12 @@ pub fn box_diff(name: &str) -> Option<Answer<Diff>> {
                 patch = clip_bytes(&patch, DIFF_CAP).to_string();
                 patch.push_str("\n\n# … diff truncated by skein (too large to render) …\n");
             }
-            return Some(Answer::from_box(Diff { patch, base }));
+            // `sbx_guest_output` goes through `Place::exec`, which for a placed box is an
+            // `nsenter` into its namespace — §2.3's `enter`, and the reason this is on-demand only.
+            return Some(Answer::from_box(
+                Diff { patch, base },
+                crate::source::Source::Enter,
+            ));
         }
     }
     // The box can't be asked — fall back to what it wrote at its last turn end, and say so, so a
