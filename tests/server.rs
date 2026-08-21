@@ -676,6 +676,37 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
         t0.elapsed()
     );
 
+    // And the flood is **visible**, which is the other half of harmless. `knock` keeps the cockpit
+    // answering, and that is exactly what would leave a flood showing up as "the board felt slow
+    // once" with nothing to look at.
+    let (st, seen) = http_get(&addr, "/api/machine/doorstep");
+    assert_eq!(st, 200);
+    let body = seen.split("\r\n\r\n").nth(1).unwrap_or("");
+    let door: serde_json::Value = serde_json::from_str(body.trim()).expect("the doorstep is JSON");
+    assert!(
+        door["turned_away"].as_u64().unwrap_or(0) >= 16,
+        "the evictions are not reachable from outside the process: {body}"
+    );
+    assert_eq!(door["room"].as_u64(), Some(skein::knock::ROOM as u64));
+
+    // Behind the token, like everything that is not a static asset — otherwise the flooder can
+    // watch its own progress, and a defence that reports on itself to whoever is attacking it is
+    // helping. Asked with no credential at all, which is what a box has.
+    let mut bare = TcpStream::connect(&addr).unwrap();
+    bare.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    bare.write_all(
+        format!("GET /api/machine/doorstep HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    )
+    .unwrap();
+    let mut refused = Vec::new();
+    let _ = bare.read_to_end(&mut refused);
+    let refused = String::from_utf8_lossy(&refused).into_owned();
+    assert!(
+        !refused.contains("turned_away"),
+        "an unauthenticated caller was told how the flood is going: {refused}"
+    );
+
     // The second half: a stranger that survived the eviction still does not get to stand there for
     // free. Every one of them is closed once the grace period passes.
     let last = flood.last().expect("the flood is not empty");

@@ -61,6 +61,17 @@ pub fn grace() -> Duration {
     }
 }
 
+/// The one doorstep this process has.
+///
+/// A process-wide value rather than one threaded from `main`, because there is exactly one listener
+/// and the numbers are wanted by a request handler that has no way to be handed it. Two doorsteps
+/// would be worse than none: each would bound its own half of the connections and the count served
+/// would be one of them.
+pub fn doorstep() -> &'static Arc<Doorstep> {
+    static ONE: std::sync::OnceLock<Arc<Doorstep>> = std::sync::OnceLock::new();
+    ONE.get_or_init(|| Doorstep::with_room(ROOM))
+}
+
 /// The room, and the order everyone arrived in.
 pub struct Doorstep {
     room: usize,
@@ -122,10 +133,11 @@ impl Doorstep {
 
     /// How many places have been taken back.
     ///
-    /// Read by the tests today and by nothing else, which is stated rather than dressed up: a
-    /// doorstep that is evicting steadily is either under a flood or too small, and both are things
-    /// somebody wants to know — but there is no health surface to put the number on yet, and a
-    /// counter nobody reads is not a defence.
+    /// Served at `/api/machine/doorstep` and declared as [`crate::signal::Signal::MachineDoorstep`],
+    /// because a doorstep that is evicting steadily means one of two opposite things — something is
+    /// flooding the port, or [`ROOM`] is too small for how the cockpit is really used and honest
+    /// handshakes are being displaced. Bounding the flood is what makes it harmless; that is also
+    /// what would make it invisible, and a counter nobody can read is not a defence.
     pub fn turned_away(&self) -> u64 {
         self.inner.lock().expect("doorstep").ousted
     }

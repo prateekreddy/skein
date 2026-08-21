@@ -243,6 +243,7 @@ async fn main() {
         // "foreign boxes": `docs/parity.md` §7 removes that, and what survives is somebody running
         // more than one fleet needing to see them.
         .route("/api/machine/sandboxes", get(api_machine_sandboxes))
+        .route("/api/machine/doorstep", get(api_machine_doorstep))
         .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
@@ -359,7 +360,7 @@ async fn main() {
     // The doorstep (`skein::knock`): the only place a cap can be **pre**-auth, because everything
     // else in this file has already accepted. See §9.4 — the port is reachable from every box, and
     // connecting is not authenticating, which answers reading and did not answer exhausting.
-    let door = skein::knock::Doorstep::with_room(skein::knock::ROOM);
+    let door = skein::knock::doorstep();
     let grace = skein::knock::grace();
     loop {
         let (stream, _peer) = match listener.accept().await {
@@ -2005,6 +2006,29 @@ async fn api_machine_sandboxes() -> Response {
         )
             .into_response(),
     }
+}
+
+/// How hard the front door is being leaned on — `signal::Signal::MachineDoorstep`.
+///
+/// `knock` makes a flood **harmless** (§9.4) and that is exactly what makes it **invisible**: the
+/// cockpit keeps answering, and the only trace is a counter inside this process. A steady eviction
+/// rate means one of two opposite things — something is flooding the port, or the room is too small
+/// for how the cockpit is really used and honest handshakes are being displaced — and neither can be
+/// told from "the board felt slow once".
+///
+/// Not a log line per eviction, which was the obvious alternative and is the same denial by another
+/// route: a flood would become a log flood. A number that is read when somebody asks costs nothing
+/// however hard the door is pushed.
+///
+/// Behind the token like everything else, so the flooder cannot watch its own progress.
+async fn api_machine_doorstep() -> Json<serde_json::Value> {
+    let door = skein::knock::doorstep();
+    Json(serde_json::json!({
+        "room": skein::knock::ROOM,
+        "knocking": door.knocking(),
+        "turned_away": door.turned_away(),
+        "grace_secs": skein::knock::grace().as_secs(),
+    }))
 }
 
 async fn api_fleet_resources() -> Response {

@@ -273,6 +273,20 @@ pub enum Signal {
     /// The box's branch, read from `HEAD` — the fallback when the registry, the launch spec and
     /// the repo all fail to say.
     BoxBranchFromHead,
+    /// How hard the control plane's front door is being leaned on: how many connections were
+    /// admitted and never authenticated, and how many places were taken back from them.
+    ///
+    /// **A signal about the machine, not about the fleet**, and the distinction is the whole reason
+    /// it is a signal at all. `knock` bounds a flood so it cannot deny the cockpit (§9.4), which
+    /// makes the flood *harmless* and leaves it *invisible* — and a steady eviction rate means one
+    /// of two opposite things: either something is flooding the port, or [`crate::knock::ROOM`] is
+    /// too small for how the cockpit is really used and honest handshakes are being displaced.
+    ///
+    /// It costs nothing: the numbers are already in this process, and the endpoint that serves them
+    /// reads two integers under a lock. That is worth declaring rather than leaving unstated — a
+    /// free signal and an undeclared one look identical from the outside, and only one of them has
+    /// been thought about.
+    MachineDoorstep,
 }
 
 impl Signal {
@@ -312,6 +326,7 @@ impl Signal {
             Signal::BoxDiff => "box-diff",
             Signal::BoxDocsUpdate => "box-docs-update",
             Signal::BoxBranchFromHead => "box-branch-from-head",
+            Signal::MachineDoorstep => "machine-doorstep",
         }
     }
 
@@ -348,6 +363,10 @@ impl Signal {
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
             | Signal::BoxBranchFromHead => &[File],
+            // Nothing. It reaches nothing — the counters are this process's own, and inventing a
+            // Source for reading a variable would put a lie in the one place the design is
+            // checkable, exactly as it would for `FleetListing`.
+            Signal::MachineDoorstep => &[],
         }
     }
 
@@ -364,6 +383,7 @@ impl Signal {
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
             | Signal::BoxBranchFromHead => Subject::Box,
+            Signal::MachineDoorstep => Subject::Machine,
         }
     }
 
@@ -384,6 +404,8 @@ impl Signal {
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
             | Signal::BoxBranchFromHead => Scale::PerBox,
+            // One answer for the whole front door, however many boxes there are.
+            Signal::MachineDoorstep => Scale::PerPass,
         }
     }
 
@@ -410,6 +432,9 @@ impl Signal {
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
             | Signal::BoxBranchFromHead => None,
+            // Ungated on purpose, which is safe only because it forks nothing: a gate exists to
+            // stop two askers becoming two subprocesses, and there is no subprocess here.
+            Signal::MachineDoorstep => None,
         }
     }
 
@@ -447,6 +472,10 @@ impl Signal {
             Signal::BoxBranchFromHead => Cost::free(
                 "`.git/HEAD` as a file, src/sbx.rs `git_branch_for` — it forked a `git rev-parse` \
                  per box per tick until the count in `tests/board_cost.rs` made that visible",
+            ),
+            Signal::MachineDoorstep => Cost::free(
+                "two integers under a lock, src/knock.rs `knocking` and `turned_away` — no \
+                 subprocess, no file, no socket",
             ),
         }
     }
