@@ -269,6 +269,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             sock: box_sock(BOX),
             generation: generation.clone(),
             ns_start,
+            launcher: String::new(),
         },
     )
     .unwrap();
@@ -286,6 +287,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             sock: box_sock(BOX),
             generation,
             ns_start: ns_start + 1,
+            launcher: String::new(),
         },
     )
     .unwrap();
@@ -311,6 +313,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
                 .trim()
                 .to_string(),
             ns_start,
+            launcher: String::new(),
         },
     )
     .unwrap();
@@ -736,6 +739,20 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         placed.home.starts_with('/') && placed.home.len() > 1,
         "a placement with no HOME makes every box command write to /: {:?}",
         placed.home
+    );
+
+    // And which isolation it got. The whole chain, in one assertion, because every link is silent
+    // on its own: `install_launcher` stamps the script it installs, the script reports the stamp it
+    // was given, and `start_box` records what was reported. Break any of them and a box that IS
+    // covered reads as uncovered forever — a restart that never clears the thing asking for it.
+    //
+    // A box keeps the mount namespace it was born with, so this is the only moment the answer
+    // exists; there is nothing on the host to check it against afterwards, which is the whole
+    // reason the value has to travel with the box.
+    assert_eq!(
+        placed.launcher,
+        skein::fleet::launcher_revision(),
+        "the box that this launcher just started does not know which launcher started it"
     );
 
     // The launch spec is how the box, and skein, learn which branch this box is for. Asserting on

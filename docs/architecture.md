@@ -1231,6 +1231,35 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    > read-write), `artifacts/` (bound **read-only**) and `transitions` (recorded, **not bound in** — skein writes it, the box has no use for it). Only binding
    > `recorded/` would remove git push, since the box's credential helper reads its own token out of
    > `artifacts/git-tokens/`.
+
+   **A cover applies at box start, so which boxes have it is a per-box fact the fleet must report.**
+   The inversion is derived and cannot be forgotten *for a box being started* — and that is the only
+   moment it reaches. `install_launcher` rewrites `box-session.sh` in the sandbox at every start and
+   every heal (`src/fleet.rs`; `grep -n 'install_launcher(' src/fleet.rs` gives its four callers — `ensure_fleet`, `heal_fleet`, `apply_box_limits` and `ensure_box_session`), so the
+   copy on disk always describes the **next** box; a box already up keeps the mount namespace it was
+   born with until somebody restarts it, and nothing on the host distinguishes the two.
+
+   Found by looking rather than by reading: a box reporting `SKEIN_BOX_PRIVILEGED` unset — an
+   ordinary box — with `/boxes/` listing every other box and `$SSH_AUTH_SOCK` a live socket. Neither
+   is a code defect. It started the day before the launcher carrying those covers was installed.
+
+   So the launcher stamps its own revision into the bytes `install_launcher` writes, reports it on
+   the channel it already reports the anchor pid on (`SKEIN_LAUNCHER`, beside `SKEIN_ANCHOR`), and
+   the placement record keeps it — the `launcher` field of `places/<name>.json`, declared state under the cover, beside
+   the `(generation, pid, starttime)` of §9.5.1. The board compares it with the running binary's
+   own, which is one file read it already makes and no subprocess (`tests/board_cost.rs` is what
+   holds that). **Stamped, not passed at launch**: a revision skein hands the script says what skein
+   is running, and the question is what the script does — they disagree in exactly the case that
+   matters.
+
+   The revision is derived from the launcher with its comments cut and nothing else cut. Narrower —
+   hashing only the lines carrying a bwrap mount directive — is wrong in the direction that costs a
+   cover: `/run/user` and `/run/secrets` are tmpfs'd for non-privileged boxes only (R11), so a change
+   to *which* boxes are covered moves no `--tmpfs` line at all.
+
+   **Reported, never acted on.** Restarting a box discards whatever its agent had half-finished, and
+   §11 makes the board's job surfacing what needs a person. The line says what a restart buys and
+   what it costs, and leaves the moment to whoever is running the fleet.
 3. ~~**skein's control API is a filesystem socket under that cover, owned by skein's uid, never a TCP
    port**~~ — **decided against, by the owner, and it is a product decision rather than a security
    one being lost.** The cockpit is a browser page and a browser cannot open a filesystem socket, so

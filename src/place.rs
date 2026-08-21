@@ -123,6 +123,21 @@ pub struct PlaceRecord {
     /// Zero in a record written before this existed. Treated as unverifiable, never as a match.
     #[serde(default)]
     pub ns_start: u64,
+    /// Which cover this box was born under — `fleet::launcher_revision` of the `box-session.sh`
+    /// that actually built its namespace, as that script reported it on stdout.
+    ///
+    /// Recorded because it is unreadable afterwards. `install_launcher` refreshes the script in the
+    /// sandbox at every start and every heal, so the copy on disk says what the NEXT box will get
+    /// and says nothing about the ones already running — and a box keeps its namespace for as long
+    /// as it lives. Found the hard way: a box reporting itself ordinary, with `/boxes/` fully
+    /// listed and a live `$SSH_AUTH_SOCK`, because it started the day before the cover did.
+    ///
+    /// Empty where no launcher answered — a record written before this field, a launcher older than
+    /// the line that prints it, or the adoption path, where no launcher runs. All three mean the
+    /// same thing and it is not "current": the honest reading is *unknown*, and unknown is reported
+    /// as an older cover, because the one direction that must never be guessed is this one.
+    #[serde(default)]
+    pub launcher: String,
 }
 
 /// The shell that reports what `pid` actually is right now: `<boot-id> <starttime>`.
@@ -2015,6 +2030,7 @@ mod tests {
                 sock: "/boxes/a b/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();
@@ -2058,6 +2074,7 @@ mod tests {
                 sock: "/boxes/web-main/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();
@@ -2081,6 +2098,7 @@ mod tests {
                 sock: "/s".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();

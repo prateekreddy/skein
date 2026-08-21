@@ -231,6 +231,9 @@
             overflow:hidden; text-overflow:ellipsis; min-width:0; flex:0 1 auto; }
   .dstat { flex:none; white-space:nowrap; }
   .hookwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
+  /* Not clickable, unlike .hookwarn: restarting a box throws away whatever its agent was
+     part-way through, so this says what a restart would buy and leaves the decision alone. */
+  .covwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
   /* disk chip: only speaks when a box is near or over its share of the fleet's one disk. Silent
      below the threshold, because a badge that is always there is a badge nobody reads. */
   .dchip { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10.5px; font-weight:600;
@@ -1625,7 +1628,7 @@ function ensureSection(id, repoId) {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="scopetag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="scopetag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span><span class="covwarn"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -1729,6 +1732,19 @@ function updateRow(el, b, showRepo) {
   hw.title = dark
     ? "this box is running but its probes have never reported — inspect environment health"
     : staleProbe ? "this session predates the installed probe contract — click to restart its agent session" : "";
+  // Which isolation this box actually has. It is invisible from every other angle — an uncovered
+  // box looks exactly like a covered one on this row and from inside itself — and it can only
+  // change by restarting, because the cover is built at box start and the box keeps the namespace
+  // it was born with. No click handler on purpose: a restart costs the agent's unfinished work.
+  const cw = el.querySelector(".covwarn");
+  const older = b.cover === "older";
+  cw.textContent = older ? "⚠ older isolation" : "";
+  cw.style.display = older ? "" : "none";
+  cw.title = older
+    ? "this box started before the isolation skein installs now, and keeps the namespace it was "
+      + "born with until it is restarted — `skein restart " + b.name + "` rebuilds it with the "
+      + "current covers, leaving the checkout and branch alone"
+    : "";
   // inbox headline + pause chip: the ask when a box needs you. When nothing's owed, the headline
   // falls back to the box's current task — so a working tab still shows what it's doing (peripheral
   // awareness). The task also gets its own sub-line when there's a distinct ask above it, so a real
@@ -4696,7 +4712,7 @@ function renderDiagnostics() {
   const CHECKS = [
     ["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "gh"],
     ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
-    ["gitgate", "github scope"], ["ai", "ai enrichment"],
+    ["gitgate", "github scope"], ["cover", "box isolation"], ["ai", "ai enrichment"],
   ];
   // Three states, not two. `unknown` is "skein could not tell", which is neither a pass nor a
   // fault — reporting it as ✗ sent people to reinstall a working tool because `sbx ls` timed out
@@ -6423,7 +6439,10 @@ function loadHealth() {
     }
     // "memory" among them because a fleet with no ceiling has no symptom until the sandbox stops
     // answering — and by then the banner is not what you are looking at.
-    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","gitgate"];
+    // "cover" among them for the reason "memory" is: a box running under an older isolation has no
+    // symptom at all — it looks exactly like every covered box — so if the banner does not say it,
+    // nothing does.
+    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","gitgate","cover"];
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");

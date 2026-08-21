@@ -335,6 +335,7 @@ mod tests {
                 sock: "/boxes/web-main/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();

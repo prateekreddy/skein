@@ -2209,11 +2209,107 @@ pub fn ensure_fleet_root(sandbox: &str) -> Result<(), String> {
         .map_err(|e| format!("preparing the fleet root {root}: {e}"))
 }
 
+/// Whether a box is running under the cover this build of skein installs.
+///
+/// One file read, the same record the board already opens for every row, and no subprocess — which
+/// is the constraint that shaped this. The obvious implementation asks the box, and the board's
+/// cost is measured (`tests/board_cost.rs`); a per-row exec to answer a question whose answer
+/// changes only when somebody upgrades skein would be the most expensive cheap thing on the tick.
+///
+/// [`crate::place::PlaceRecord::launcher`] says why an empty revision reads as *older* rather than
+/// as *unknown*.
+///
+/// Here rather than beside the record it reads, and the module graph is the reason: `place` does
+/// not depend on `fleet` — SKEIN-22 removed the one edge it had — and this comparison needs the
+/// launcher, which is `fleet`'s. A method on `PlaceRecord` would put that edge back to save an
+/// import, and `module-check` said so within a minute of it being written.
+pub fn cover_is_current(record: &crate::place::PlaceRecord) -> bool {
+    !record.launcher.is_empty() && record.launcher == launcher_revision()
+}
+
+/// The line in `box-session.sh` that [`install_launcher`] replaces with [`launcher_revision`].
+const LAUNCHER_REVISION_MARK: &str = "@SKEIN_LAUNCHER_REVISION@";
+
+/// What isolation this build of skein gives a box — content-derived from the launcher's own body.
+///
+/// A box keeps the mount namespace it was born with. `install_launcher` refreshes the script in the
+/// sandbox on every start and every heal, and none of that reaches a box that is already up: it is
+/// covered by whatever `box-session.sh` said on the day it started, until somebody restarts it. So
+/// there has to be a value that travels with the box, and this is it.
+///
+/// **Comments are cut, and nothing else is.** The narrower version — hash only the lines carrying a
+/// bwrap mount directive — was written first and is wrong, for a reason worth keeping: the cover is
+/// not only the binds, it is the conditions around them. `/run/user` and `/run/secrets` are tmpfs'd
+/// for *non-privileged* boxes only, so a change to which boxes get that cover moves no `--tmpfs`
+/// line at all, and a revision over the bind lines would go silent on exactly the class of change
+/// this exists to catch. Coarse in the safe direction: a reworded error message asks somebody to
+/// restart a box that did not need it, which costs a restart; the other direction costs the cover.
+///
+/// Comments are cut because they are the one edit that can never change what a box can reach, and
+/// they are most of this file — the same argument [`crate::probes`]'s `probe_revision` makes for
+/// hashing generated hook wiring rather than the probe scripts' bodies.
+///
+/// Computed once. It is a hash of a compile-time constant, so it cannot change while the process
+/// runs — and the caller is the board, which asks it once per box per tick.
+pub fn launcher_revision() -> String {
+    static REVISION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REVISION
+        .get_or_init(|| {
+            let mut hash = 0xcbf29ce484222325u64;
+            for line in cover_text(BOX_SESSION_SH) {
+                for byte in line.bytes().chain(std::iter::once(b'\n')) {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+            }
+            format!("{hash:016x}")
+        })
+        .clone()
+}
+
+/// The launcher with its comments and blank lines cut — what [`launcher_revision`] hashes.
+///
+/// Whole-line comments only. A `#` mid-line is a comment in shell and is also a character inside
+/// quite ordinary strings here (`#{pid}` is tmux's format language, in the line that reports the
+/// anchor), and a cut that took it would drop the anchor report from the revision.
+fn cover_text(script: &str) -> impl Iterator<Item = &str> {
+    script
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim_start().is_empty() && !line.trim_start().starts_with('#'))
+}
+
+/// The launcher's bytes with the revision of those bytes stamped into them.
+///
+/// Stamped rather than passed at launch, and the difference is the whole mechanism. A revision
+/// skein handed the script on its command line would report what *skein* was running; the question
+/// is what the *script* does, and the two disagree in precisely the case that matters — a sandbox
+/// carrying a launcher older than the binary talking to it.
+fn stamped_launcher() -> String {
+    BOX_SESSION_SH.replace(LAUNCHER_REVISION_MARK, &launcher_revision())
+}
+
+/// The revision the launcher reported on stdout, or empty if it reported none.
+///
+/// Empty is a real answer and not a failure: a launcher old enough to predate this line cannot say
+/// anything, and neither can the adoption path, where no launcher runs at all. Both mean the same
+/// thing — this box's cover is not known to be the current one — and [`crate::place::PlaceRecord`]
+/// stores it as such rather than guessing.
+pub fn launcher_from_launch(out: &str) -> String {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("SKEIN_LAUNCHER "))
+        .next_back()
+        .map(|rev| rev.trim().to_string())
+        .filter(|rev| !rev.is_empty() && rev != LAUNCHER_REVISION_MARK)
+        .unwrap_or_default()
+}
+
 /// Write `box-session.sh` and the provisioning script into the sandbox, over stdin rather than as
 /// arguments — both are large and `sbx exec`'s argv is visible in every process listing on the host.
 pub fn install_launcher(sandbox: &str) -> Result<(), String> {
+    let launcher = stamped_launcher();
     for (path, body) in [
-        (box_session_path(), BOX_SESSION_SH),
+        (box_session_path(), launcher.as_str()),
         (box_provision_path(), KIT_STARTUP_SH),
         (git_credential_helper_path(), GIT_CREDENTIAL_SH),
     ] {
@@ -3218,6 +3314,14 @@ fn start_box_inner(
         }
         None => adopt_anchor(&sandbox, name)?,
     };
+    // Empty on the adoption branch, and correctly so: nothing launched, so nothing reported which
+    // cover this namespace has, and the copy of `box-session.sh` on disk answers a different
+    // question. An adopted box reads as running an older cover until it is restarted, which is the
+    // only claim the evidence supports.
+    let launcher = launched
+        .as_deref()
+        .map(launcher_from_launch)
+        .unwrap_or_default();
     record_place(
         name,
         &PlaceRecord {
@@ -3228,6 +3332,7 @@ fn start_box_inner(
             sock: box_sock(name),
             generation,
             ns_start,
+            launcher,
         },
     )?;
 
@@ -4411,6 +4516,10 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
             ns_pid,
             generation,
             ns_start,
+            // A new namespace, made by the launcher `install_launcher` just refreshed above — so
+            // the record's old cover is as dead as its old pid, and carrying it over would leave a
+            // just-restarted box still asking to be restarted.
+            launcher: launcher_from_launch(&out),
             ..record.clone()
         },
     )?;
@@ -6060,6 +6169,7 @@ b idle 5000000 4 1048576 1048576
                 sock: "/boxes/placed-box/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();
@@ -9334,5 +9444,184 @@ b idle 5000000 4 1048576 1048576
             "the second start was not told the first was under way: {outcomes:?}"
         );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The revision has to answer "would restarting this box change what it can reach", and the
+    /// cheap way to get that wrong is to hash the file. Most of `box-session.sh` is prose — it is
+    /// the file where the reasoning lives — so a hash over its bytes would ask every box in the
+    /// fleet to restart because somebody fixed a typo, and the ask would stop being read.
+    #[test]
+    fn a_comment_is_not_a_reason_to_restart_a_box() {
+        let commented = BOX_SESSION_SH.replace(
+            "set -uo pipefail",
+            "# a sentence somebody added while explaining this\nset -uo pipefail",
+        );
+        assert_ne!(commented, BOX_SESSION_SH, "the edit did not apply");
+        assert_eq!(
+            revision_of(&commented),
+            revision_of(BOX_SESSION_SH),
+            "a comment moved the revision, so a docs edit asks for a fleet restart"
+        );
+    }
+
+    /// The other direction, and the one that costs a cover rather than a restart: anything the
+    /// launcher *runs* has to move it, including the conditions around a bind rather than only the
+    /// binds. `/run` is covered for non-privileged boxes only, so a change to WHICH boxes are
+    /// covered moves no `--tmpfs` line — which is why the revision is not derived from those lines.
+    #[test]
+    fn a_change_to_who_gets_a_cover_moves_the_revision() {
+        let before = revision_of(BOX_SESSION_SH);
+        let widened = BOX_SESSION_SH.replace(
+            "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then",
+            "if true; then",
+        );
+        assert_ne!(widened, BOX_SESSION_SH, "the edit did not apply");
+        assert_ne!(
+            revision_of(&widened),
+            before,
+            "the cover changed for a whole class of boxes and the revision did not notice"
+        );
+    }
+
+    /// What goes into the sandbox carries the revision of what went into the sandbox.
+    ///
+    /// Driven through `install_launcher` against a fake `sbx` that keeps what it is fed, rather
+    /// than against `stamped_launcher` directly — which is the version this test was first written
+    /// as, and it passed with `install_launcher` sending the unstamped constant. A test of the
+    /// stamping function says nothing about whether the installer uses it, and that wiring is the
+    /// entire mechanism: an unstamped launcher in the sandbox reports nothing, and every box it
+    /// starts reads as uncovered forever.
+    ///
+    /// The marker is left in the repo's own copy on purpose — a made-up revision there would be a
+    /// claim — so what is checked is that the installed bytes never carry it.
+    #[test]
+    fn the_installed_launcher_knows_which_launcher_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let kept = home.join("kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nn=$(ls {dir} | wc -l)\ncat > {dir}/$n\n",
+                dir = kept.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        install_launcher("skein-fleet").expect("install the launcher into the fake sandbox");
+
+        std::env::set_var("PATH", &path);
+        let installed = std::fs::read_to_string(kept.join("0")).expect("the launcher was sent");
+        assert!(
+            installed.starts_with("#!/usr/bin/env bash"),
+            "the first thing installed was not the launcher"
+        );
+        assert!(
+            !installed.contains(LAUNCHER_REVISION_MARK),
+            "the launcher went into the sandbox unstamped, so every box it starts reports nothing"
+        );
+        assert!(
+            installed.contains(&format!("launcher_revision=\"{}\"", launcher_revision())),
+            "the stamp did not land on the line the script reads"
+        );
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The marker line and the report have to agree, because nothing later can catch it if they do
+    /// not: a launcher that prints an empty revision is indistinguishable from one too old to print
+    /// anything, and both are reported as an older cover forever.
+    #[test]
+    fn the_launcher_reports_the_stamp_it_was_given() {
+        let installed = stamped_launcher();
+        let stamped: Vec<&str> = installed
+            .lines()
+            .filter(|l| l.trim_start().starts_with("launcher_revision="))
+            .collect();
+        assert_eq!(stamped.len(), 1, "expected one stamp line, got {stamped:?}");
+        assert!(
+            installed.contains("printf \"SKEIN_LAUNCHER %s\\n\" \"$launcher_revision\""),
+            "the launcher does not report the variable it was stamped with"
+        );
+    }
+
+    #[test]
+    fn a_launcher_too_old_to_answer_says_nothing_rather_than_something() {
+        assert_eq!(launcher_from_launch("SKEIN_LAUNCHER abc123\n"), "abc123");
+        assert_eq!(
+            launcher_from_launch("welcome to your box\nSKEIN_LAUNCHER abc123\nSKEIN_ANCHOR 42\n"),
+            "abc123",
+            "the marker was not found past a chatty profile"
+        );
+        assert_eq!(
+            launcher_from_launch("SKEIN_ANCHOR 42\n"),
+            "",
+            "a launcher that predates the report was read as having answered"
+        );
+        assert_eq!(
+            launcher_from_launch(&format!("SKEIN_LAUNCHER {LAUNCHER_REVISION_MARK}\n")),
+            "",
+            "an unstamped launcher's placeholder was taken for a revision, so every box it starts \
+             would compare equal to every other and none of them to the current cover"
+        );
+    }
+
+    /// `launcher_revision` reads one constant, so exercising it against an edited copy needs the
+    /// same arithmetic over a string. Kept beside it rather than made public: the production answer
+    /// is about THE launcher, and a version that takes any script would invite a caller to ask
+    /// about the copy on disk — which is the question this whole mechanism exists because nobody
+    /// can answer.
+    fn revision_of(script: &str) -> String {
+        let mut hash = 0xcbf29ce484222325u64;
+        for line in cover_text(script) {
+            for byte in line.bytes().chain(std::iter::once(b'\n')) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        format!("{hash:016x}")
+    }
+    /// Three answers and only one of them is "current", because the two ways of not knowing are
+    /// both ways of not knowing. A record from before this field and a record from the adoption
+    /// path are equally silent about what covers the box, and reading silence as agreement is how
+    /// the fleet ends up with boxes nobody knows are uncovered — the state SKEIN-88 was filed from.
+    #[test]
+    fn a_box_that_cannot_say_which_cover_it_has_is_not_taken_to_have_the_current_one() {
+        let current = launcher_revision();
+        assert!(
+            cover_is_current(&crate::place::PlaceRecord {
+                launcher: current.clone(),
+                ..Default::default()
+            }),
+            "a box started by this launcher was asked to restart for the cover it already has"
+        );
+        assert!(
+            !cover_is_current(&crate::place::PlaceRecord {
+                launcher: String::new(),
+                ..Default::default()
+            }),
+            "a record that says nothing was read as saying the cover is current"
+        );
+        assert!(
+            !cover_is_current(&crate::place::PlaceRecord {
+                launcher: "0000000000000000".into(),
+                ..Default::default()
+            }),
+            "a box born under a different launcher was called current"
+        );
+        // And the empty case is not empty-equals-empty: a build whose own revision was somehow
+        // blank must not make every silent record agree with it.
+        assert!(
+            !current.is_empty(),
+            "this build has no launcher revision to compare against"
+        );
     }
 }

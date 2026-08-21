@@ -149,6 +149,7 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
                 sock: format!("/boxes/cost-{i}/session.sock"),
                 generation: String::new(),
                 ns_start: 0,
+                launcher: String::new(),
             },
         )
         .expect("place a box");

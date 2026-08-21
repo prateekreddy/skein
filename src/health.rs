@@ -106,7 +106,7 @@ impl HealthCheck {
 impl HealthReport {
     /// Every check in the report, named. One list, so a check added to the struct and forgotten
     /// here shows up as a compile error rather than as a check nothing ever looks at.
-    pub fn checks(&self) -> [(&'static str, &HealthCheck); 9] {
+    pub fn checks(&self) -> [(&'static str, &HealthCheck); 10] {
         let HealthReport {
             registry,
             sbx,
@@ -117,6 +117,7 @@ impl HealthReport {
             ai,
             memory,
             gitgate,
+            cover,
             ..
         } = self;
         [
@@ -129,6 +130,9 @@ impl HealthReport {
             ("ai", ai),
             ("memory", memory),
             ("gitgate", gitgate),
+            // Named for what it is about rather than for the field: this key is what `/v2` puts
+            // on the row, and "isolation" is a word somebody can act on where "cover" is jargon.
+            ("isolation", cover),
         ]
     }
 }
@@ -165,12 +169,25 @@ pub struct HealthReport {
     /// and the server printed them to a detached process's stderr, so the first place anyone
     /// learned of one was a 403 inside a box some minutes later.
     pub gitgate: HealthCheck,
+    /// Whether every running box is under the isolation this skein installs.
+    ///
+    /// The check that cannot be answered by looking at anything on the host: `install_launcher`
+    /// refreshes `box-session.sh` at every start and every heal, so the copy on disk is always
+    /// current and always says nothing about the boxes already running. The answer travels with
+    /// each box instead, in its placement record.
+    pub cover: HealthCheck,
     /// Which agent runtimes have a login every new box will inherit. Empty means `skein login` has
     /// not been run — the single most common way a first run goes quiet, since each box then comes
     /// up sitting at a sign-in prompt doing nothing.
     pub logins: Vec<String>,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
+    /// Running boxes whose mount namespace was built by an older `box-session.sh`.
+    ///
+    /// Named rather than counted because the fix is per box and costs the agent's unfinished work:
+    /// "3 boxes" is not something anybody can act on at the moment they read it.
+    #[serde(default)]
+    pub uncovered_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
     /// How boxes get GitHub credentials, named — or empty when nobody has chosen.
     ///
@@ -179,6 +196,51 @@ pub struct HealthReport {
     /// this field. It used to be unaskable: the account token was seeded by default, so the answer was
     /// always "the account token" and the question would have been noise.
     pub git_credential: String,
+}
+
+/// The isolation line: whether every running box is under the cover this skein installs.
+///
+/// A fault rather than a note, and the argument had two sides. Against: the fix costs whatever the
+/// agent in that box had half-finished, so somebody may reasonably put it off, and a red mark they
+/// cannot clear without losing work is the shape of an alarm people learn to ignore. For, and it
+/// wins: every other thing on this panel is skein failing at something, and this is the fleet being
+/// less isolated than the person running it believes. That belief is exactly what a per-box cover
+/// was built to make safe, and a quiet note is how the gap went unnoticed long enough to be found
+/// by looking at a box rather than by reading the board.
+///
+/// The wording says what a restart BUYS. "Stale" describes a file and leaves the reader to work out
+/// why they should care; the cover is the reason, so the cover is what the sentence names — and it
+/// says what a restart costs too, because this is a decision about somebody's unfinished work
+/// rather than an instruction.
+pub fn cover_health(uncovered: &[String]) -> HealthCheck {
+    match uncovered.is_empty() {
+        true => HealthCheck::satisfied("every running box is under the current isolation"),
+        false => HealthCheck::unsatisfied(
+            format!(
+                "started before the current isolation and still running under the old one: {}",
+                uncovered.join(", ")
+            ),
+            format!(
+                "`skein restart {}` — restarting it rebuilds the box's namespace with the covers \
+                 this skein installs. Its checkout and its branch are untouched; whatever the \
+                 agent was part-way through is not, so pick the moment",
+                uncovered.first().map(String::as_str).unwrap_or("<box>")
+            ),
+        ),
+    }
+}
+
+/// The boxes that line is about: running, and placed by a launcher that is not the current one.
+///
+/// A separate entry point because `skein doctor` prints its lines one at a time rather than from a
+/// report, and the CLI is where somebody looks when the cockpit is the thing that is not running.
+pub fn uncovered_boxes() -> Vec<String> {
+    crate::board::load_views()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|view| view.cover == "older")
+        .map(|view| view.name)
+        .collect()
 }
 
 /// Render [`crate::gitgate::ScopeStatus`] as a health line.
@@ -509,8 +571,16 @@ pub fn health_report() -> HealthReport {
         .map(|view| view.name.clone())
         .collect::<Vec<_>>();
     let stale_boxes = views
-        .into_iter()
+        .iter()
         .filter(|view| view.hook_health == "stale")
+        .map(|view| view.name.clone())
+        .collect::<Vec<_>>();
+    // Boxes still living in the namespace an older `box-session.sh` built for them. See
+    // [`crate::board::BoxView::cover`]: everything skein does about isolation it does at box start,
+    // so a cover that lands in a new release reaches new boxes and no running one.
+    let uncovered_boxes = views
+        .into_iter()
+        .filter(|view| view.cover == "older")
         .map(|view| view.name)
         .collect::<Vec<_>>();
     if !dark_boxes.is_empty() {
@@ -530,12 +600,13 @@ pub fn health_report() -> HealthReport {
     // Deliberately NOT reported here: a box on hook-only turn state (see `screen_health`) is not
     // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment
     // banner would be crying wolf; the caveat belongs on the row and tab it applies to.
+    let cover = cover_health(&uncovered_boxes);
     let gitgate = git_scope_health();
     // A fault, and only a fault. An `Unknown` check must not turn the banner red: telling somebody
     // their fleet is broken because skein could not reach it for two seconds is the false alarm the
     // third state exists to stop. The cockpit reports the unknowns beside the faults, in the mark
     // it already has for "look at this but nothing is wrong".
-    let ok = ![&registry, &sbx, &git, &probes, &mailbox, &gitgate]
+    let ok = ![&registry, &sbx, &git, &probes, &mailbox, &gitgate, &cover]
         .iter()
         .any(|check| check.is_fault())
         && stale_boxes.is_empty();
@@ -551,9 +622,11 @@ pub fn health_report() -> HealthReport {
         ai,
         memory,
         gitgate,
+        cover,
         logins: crate::fleet::signed_in_runtimes(),
         dark_boxes,
         stale_boxes,
+        uncovered_boxes,
         runtimes: supported_runtimes(),
         git_credential: crate::gitgate::box_credential().label(),
     }

@@ -41,6 +41,19 @@
 # rather than a missing flag, which is why it is written down here and asserted in place.rs.
 set -uo pipefail
 
+# Which cover these bytes apply, stamped in by `fleet::install_launcher` before the script is
+# written into the sandbox — `launcher_revision()` in fleet.rs derives it from this file.
+#
+# It is stamped rather than passed on the command line because the two answer different questions.
+# A value skein handed this script at launch would say what SKEIN was running; what anyone needs to
+# know is what the SCRIPT does, and those disagree exactly when it matters — a sandbox still
+# carrying a launcher older than the binary talking to it. A box then keeps that older namespace
+# for as long as it lives, and nothing later can tell, because there is nothing left to read.
+#
+# Unstamped is left as the marker itself rather than substituted for something plausible: this file
+# is also run straight out of the repo by tests, and a made-up revision there would be a claim.
+launcher_revision="@SKEIN_LAUNCHER_REVISION@"
+
 # The ceilings on everything that is not one box — and the ones that actually keep the sandbox
 # answering, because a per-box ceiling cannot bound a sum and does not reach inside Docker.
 #
@@ -1445,6 +1458,11 @@ export SKEIN_STATE="$state"
 # against a PATH that names only root-owned directories, before any box's namespace exists.
 tmux_bin="$(PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v tmux || true)"
 [ -n "$tmux_bin" ] || { echo "skein: no tmux on the sandbox's own PATH, so this box has no session" >&2; exit 1; }
+
+# Reported over the channel skein opened, beside the anchor below and for the same reason: this is
+# the only moment the answer exists. The namespace is about to be made, and afterwards nothing on
+# the host can ask which script made it — so it is said here and recorded in the placement.
+printf "SKEIN_LAUNCHER %s\n" "$launcher_revision"
 
 exec bwrap \
   --dev-bind / / \

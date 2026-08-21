@@ -249,6 +249,9 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             // its own screen (no observer, an observer that stopped, a screen we can't parse), which
             // is invisible unless we say it.
             let screen = screen_health(&agent, raw_pane.as_ref(), live == Some(Liveness::Running));
+            // Read once and asked twice below: whether skein placed this box at all, and which
+            // cover it was placed under.
+            let record = shared_record(&name);
             BoxView {
                 name: name.clone(),
                 state,
@@ -276,7 +279,21 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 // skein owns. This used to be conditional on a fleet being configured, because an
                 // unconfigured host gave every box its own VM and labelling all of them would have
                 // marked the normal case as the odd one. There is no such host now.
-                foreign: shared_record(&name).is_none(),
+                foreign: record.is_none(),
+                // The same record, read once. A box carries the cover the launcher gave it at
+                // start and nothing later changes that, so this is the only place the answer is.
+                //
+                // Only while it is running, and that is not a shortcut: a stopped box has no
+                // namespace to be uncovered in, and starting it runs the current launcher. Saying
+                // "older" of one would be asking somebody to restart a box that is already going to
+                // get the current cover the moment it exists.
+                cover: match live == Some(Liveness::Running) {
+                    false => String::new(),
+                    true => match record.as_ref() {
+                        Some(rec) if crate::fleet::cover_is_current(rec) => String::new(),
+                        Some(_) | None => "older".to_string(),
+                    },
+                },
                 scoped: scopable.then(|| crate::gitgate::box_is_scoped(&name)),
                 disk_mb: usage.get(&name).copied(),
                 disk_limit_mb: usage.get(&name).and(box_disk_limit(&name)),
@@ -366,6 +383,24 @@ pub struct BoxView {
     /// on a machine with other sandboxes look like a fleet full of broken boxes.
     #[serde(default)]
     pub foreign: bool,
+    /// `"older"` when this box was started by a launcher that is not the one skein installs now,
+    /// and empty when it was started by the current one.
+    ///
+    /// A box keeps the mount namespace it was born with, and everything skein does about isolation
+    /// it does in `box-session.sh` at box start. So a launcher that gains a cover — `/run` going
+    /// private, the fleet root going out of sight — reaches new boxes and no running one, and the
+    /// running ones look exactly like the covered ones from every angle. That is what this says.
+    ///
+    /// The whole argument for a cover derived per box is that it cannot be forgotten; a fleet where
+    /// half the boxes predate it is the state the mechanism was meant to make impossible to be in
+    /// unknowingly. This is the part that makes it *known*, and no more: skein must not restart a
+    /// box for it. A restart loses whatever the agent had half-finished, and the board's job is to
+    /// surface what needs a person (architecture §11), not to act on their behalf.
+    ///
+    /// Empty means checked and current, not unchecked — a box with no placement record at all
+    /// reads `"older"`, since nothing said otherwise and this is not a direction to guess in.
+    #[serde(default)]
+    pub cover: String,
     /// Whether this box's GitHub credential is scoped to its own repository — `None` when the fleet
     /// cannot scope at all, so there is no distinction to draw.
     ///
@@ -417,6 +452,7 @@ mod tests {
                 sock: "/boxes/demo-task/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();
@@ -464,6 +500,7 @@ mod tests {
                 sock: "/boxes/demo-task/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();
@@ -646,5 +683,86 @@ mod tests {
 
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
+    }
+
+    /// The gap SKEIN-88 was filed from, closed at the layer a person reads.
+    ///
+    /// A box gets its cover from `box-session.sh` at start and keeps the namespace it was born
+    /// with. `install_launcher` refreshes that script at every start and every heal, so the copy in
+    /// the sandbox always describes the NEXT box — and there is nothing on the host that says which
+    /// running boxes predate it. The placement record is where that answer now lives, and this is
+    /// the walk from the record to the row.
+    #[test]
+    fn a_box_started_under_an_older_launcher_says_so_on_its_row() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("SKEIN_REGISTRY", home.join("sandboxes.json"));
+        fs::write(home.join("sandboxes.json"), "{}").unwrap();
+        env::set_var("SKEIN_LS_CMD", "echo '[{\"name\":\"skein-fleet\"}]'");
+        let mut config = load_config();
+        config.fleet_sandbox = "skein-fleet".into();
+        save_config(&config).unwrap();
+
+        // The liveness sweep, answered: this only applies to a RUNNING box, since a stopped one has
+        // no namespace to be uncovered in and will get the current cover the moment it has one.
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sbx");
+        fs::write(&fake, "#!/bin/sh\necho 'demo-task 1'\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let place = |launcher: &str| PlaceRecord {
+            sandbox: "skein-fleet".into(),
+            ns_pid: 1,
+            home: "/boxes/demo-task/home".into(),
+            tree: "/boxes/demo-task/tree".into(),
+            sock: "/boxes/demo-task/session.sock".into(),
+            generation: "test-boot".into(),
+            ns_start: 1,
+            launcher: launcher.to_string(),
+        };
+        let cover_of = || -> String {
+            crate::fleet::disturbing_liveness(|| ());
+            load_views()
+                .unwrap()
+                .into_iter()
+                .find(|v| v.name == "demo-task")
+                .expect("the placed box is on the board")
+                .cover
+        };
+
+        record_place("demo-task", &place(&crate::fleet::launcher_revision())).unwrap();
+        assert_eq!(
+            cover_of(),
+            "",
+            "a box started by this very launcher was asked to restart for a cover it already has"
+        );
+
+        record_place("demo-task", &place("0000000000000000")).unwrap();
+        assert_eq!(
+            cover_of(),
+            "older",
+            "a box born under a different launcher looked exactly like a covered one — which is \
+             the whole defect: from the row, from inside the box, and from the sandbox, it does"
+        );
+
+        // The case that actually exists in the fleet today: every box placed before the record
+        // carried this field at all. Silence is not agreement.
+        record_place("demo-task", &place("")).unwrap();
+        assert_eq!(
+            cover_of(),
+            "older",
+            "a record too old to name a cover was read as naming the current one"
+        );
+
+        env::set_var("PATH", path);
+        forget_place("demo-task");
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var("SKEIN_REGISTRY");
+        env::remove_var("SKEIN_HOME");
     }
 }

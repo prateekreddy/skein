@@ -727,6 +727,7 @@ mod tests {
                 sock: "/boxes/web-main/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();
@@ -758,6 +759,7 @@ mod tests {
                 sock: "/boxes/web-main-codex/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();
@@ -814,6 +816,7 @@ mod tests {
                 sock: "/boxes/demo-task/session.sock".into(),
                 generation: "test-boot".into(),
                 ns_start: 1,
+                launcher: String::new(),
             },
         )
         .unwrap();

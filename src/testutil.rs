@@ -255,6 +255,7 @@ pub(crate) fn placed(name: &str) {
             // refusal path while claiming to test the thing it refused.
             generation: "test-boot".into(),
             ns_start: 1,
+            launcher: String::new(),
         },
     )
     .unwrap();

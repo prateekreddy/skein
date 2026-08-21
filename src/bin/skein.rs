@@ -484,6 +484,25 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    // Which boxes are running under an older isolation. Its own line because there is no other way
+    // to learn it: `box-session.sh` in the sandbox is refreshed at every start, so the copy on disk
+    // describes the NEXT box and says nothing about the ones already up — and a box keeps the mount
+    // namespace it was born with for as long as it lives. Found by looking at a box that reported
+    // itself ordinary while listing every other box in the fleet.
+    {
+        let uncovered = skein::health::uncovered_boxes();
+        let c = skein::health::cover_health(&uncovered);
+        let mark = match c.level {
+            skein::health::Level::Satisfied => OK,
+            skein::health::Level::Unsatisfied => BAD,
+            skein::health::Level::Unknown => WARN,
+        };
+        println!("{mark} isolation     {}", c.detail);
+        if !c.fix.is_empty() {
+            println!("{DIM}              → {}{RESET}", c.fix);
+        }
+    }
+
     // skein-managed repos + its own kit (the repo-agnostic path).
     let repos = skein::repos::load_repos();
     println!(
