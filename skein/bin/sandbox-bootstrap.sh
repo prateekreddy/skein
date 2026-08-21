@@ -52,21 +52,27 @@ fi
 # in. A legacy box has no SKEIN_BOX and is alone in its VM, where the two are the same name.
 vmid="${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}}"
 vmid="${vmid//\//-}"
-# Where this repo's host files are. `--clone` mode bind-mounts them read-only at
-# /run/sandbox/source; a fleet box has no such mount (one sandbox, many repos), so it reads the path
-# skein recorded in the store — the same directory, reachable because the fleet sandbox mounts every
-# repo's work tree at its own host path. Without this the whole surfacing block below was skipped in
-# a fleet box and nothing said so: no .env, and no CLAUDE.md for a repo that keeps one out of git.
-# $SKEIN_MIRROR names it outright (a runtime that is not sbx, and the seam the tests drive); then
-# the clone-mode bind; then the path skein recorded for this repo. Only the bind is read-only.
-mirror="${SKEIN_MIRROR:-}"
-mirror_is_ro=0
-if [ -z "$mirror" ]; then
+# Where this repo's SOURCE TREE is — the checkout the gitignored files below come from. Not a
+# mirror: a mirror is a remote and carries tracked files only, so the .env and the CLAUDE.md a
+# project keeps out of git exist in no clone of any shape, only in somebody's working tree.
+#
+# `--clone` mode bind-mounts that tree read-only at /run/sandbox/source. A fleet box has no such
+# mount (one sandbox, many repos) and increasingly cannot reach the tree at all — skein copies what
+# the manifest names into the store on the host instead (kit::seed_shared_paths), and the box works
+# from the store. So this is a fallback, and an EMPTY answer is an ordinary state rather than a
+# failure: everything below is gated on the manifest, never on this.
+# $SKEIN_SOURCE names it outright (a runtime that is not sbx, and the seam the tests drive); then
+# the clone-mode bind; then the path skein recorded. Only the bind is read-only. `skein/mirror` is
+# read for stores seeded before the two things had separate names.
+source_tree="${SKEIN_SOURCE:-}"
+source_is_ro=0
+if [ -z "$source_tree" ]; then
   if [ -d /run/sandbox/source ]; then
-    mirror="/run/sandbox/source"
-    mirror_is_ro=1
+    source_tree="/run/sandbox/source"
+    source_is_ro=1
   else
-    mirror="$(sed -n '1p' "$store/skein/mirror" 2>/dev/null || true)"
+    source_tree="$(sed -n '1p' "$store/skein/source" 2>/dev/null || true)"
+    [ -n "$source_tree" ] || source_tree="$(sed -n '1p' "$store/skein/mirror" 2>/dev/null || true)"
   fi
 fi
 
@@ -89,22 +95,22 @@ elif [ ! -s "$boot" ]; then
     "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" >"$boot" 2>/dev/null || true
 fi
 
-# --- surface gitignored shared paths from the RO mirror (clone mode) -----------------------------
+# --- surface gitignored shared paths from the repo's source tree ---------------------------------
 # A clone carries only TRACKED files, so gitignored ones the project needs (CLAUDE.md, .env, …) are
 # absent. Each non-comment line of <store>/shared-paths.txt is a repo-relative path (file or dir),
 # optionally followed by `rw`, to surface into the clone. Repo-agnostic: the manifest is the
 # project's own list. Surfaced paths are added to the clone's .git/info/exclude so a careless
 # `git add -A` can't stage a host-absolute symlink (the tracked .gitignore is never touched).
 #
-# Default (no `rw` suffix) — RO: symlinked straight from the mirror. `/run/sandbox/source` is a
+# Default (no `rw` suffix) — RO: symlinked straight from the source tree. `/run/sandbox/source` is a
 # read-only bind mount (sbx's own doing — no per-file trick makes it writable), so edits fail.
 # `rw` suffix — RW + host-visible + shared: the file is seeded ONCE into the store's shared-rw/
 # (a genuinely writable host directory, same as memory/), then symlinked from THERE instead of the
-# mirror. Edits inside the box persist to that store path and are live across every box on the
+# source tree. Edits inside the box persist to that store path and are live across every box on the
 # repo (last-write-wins, same semantics as the memory bridge below) — just not back to the file's
 # original repo-relative host path, since that path is unreachable read-write from inside a clone.
 manifest="$store/shared-paths.txt"
-if [ -d "$mirror" ] && [ -f "$manifest" ]; then
+if [ -f "$manifest" ]; then
   git_dir="$(git -C "$root" rev-parse --git-dir 2>/dev/null || true)"
   case "$git_dir" in "") ;; /*) ;; *) git_dir="$root/$git_dir" ;; esac
   exclude="${git_dir:+$git_dir/info/exclude}"
@@ -122,19 +128,23 @@ if [ -d "$mirror" ] && [ -f "$manifest" ]; then
     flag="$(printf '%s' "$line" | awk '{print $2}')"
     [ -z "$p" ] && continue
     dst="$root/$p"
-    # Outside --clone mode the mirror is the repo's real work tree, mounted READ-WRITE. An RO entry
+    # Outside --clone mode the source tree is the repo's real work tree, and a box that can see it
+    # at all sees it READ-WRITE. An RO entry
     # symlinked straight at it would let a box silently edit the host's own checkout, which the
     # read-only bind used to make impossible for free. So every entry takes the `rw` shape there:
     # seeded into the store's shared-rw/ and linked from there, so a box can still never reach the
     # host checkout. RO stops meaning "edits fail" and starts meaning "edits do not reach the host".
-    if [ "$flag" = "rw" ] || [ "$mirror_is_ro" = "0" ]; then
+    if [ "$flag" = "rw" ] || [ "$source_is_ro" = "0" ]; then
       rwcopy="$rw_root/$p"
-      if [ ! -e "$rwcopy" ]; then
+      # Usually already there: skein seeds the store from the source tree on the host. This copies
+      # only what the host could not — a box whose store predates that, or a runtime skein did not
+      # start — and does nothing at all when there is no source tree to read.
+      if [ ! -e "$rwcopy" ] && [ -d "$source_tree" ]; then
         mkdir -p "$(dirname "$rwcopy")" 2>/dev/null || true
-        [ -e "$mirror/$p" ] && cp -a "$mirror/$p" "$rwcopy" 2>/dev/null
+        [ -e "$source_tree/$p" ] && cp -a "$source_tree/$p" "$rwcopy" 2>/dev/null
       fi
       [ -e "$rwcopy" ] || continue
-      # self-heal: an existing symlink from before this box was RW-flagged pointed at the RO mirror.
+      # self-heal: an existing symlink from before this box was RW-flagged pointed at the RO source.
       if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$rwcopy" ]; then
         rm -f "$dst"
       fi
@@ -143,7 +153,7 @@ if [ -d "$mirror" ] && [ -f "$manifest" ]; then
         ln -s "$rwcopy" "$dst" 2>/dev/null
       fi
     else
-      src="$mirror/$p"
+      src="$source_tree/$p"
       [ -e "$src" ] || continue
       # self-heal: an existing symlink from before this path was RO-flagged pointed at the rw copy.
       if [ -L "$dst" ] && [ "$(readlink "$dst")" != "$src" ]; then

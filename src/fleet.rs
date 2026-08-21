@@ -2657,7 +2657,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // would fail until something reinstalled the script. An old launcher ignores an env var.
         "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} \
-         SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} SKEIN_BOX_MIRROR={mirror_q} \
+         SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} SKEIN_BOX_SOURCE={source_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // The mount set the launcher cannot learn for itself, and the two paths out of it this box
@@ -2670,13 +2670,16 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // covered view with nothing bound back rather than an uncovered one.
         mounts_q = sh_quote(&mount_manifest(name)),
         store_q = sh_quote(&repo_for_box(name).map(|r| r.store).unwrap_or_default()),
-        // Read-only, and it is not a precaution. `sandbox-bootstrap.sh` reads the mirror to surface
-        // a repo's gitignored files and already copies every one of them into the store rather than
-        // linking at it, precisely so "a box can still never reach the host checkout". Nothing in a
-        // box writes here — but skein runs `git -C <repo.work>` on the HOST, so a box that could
-        // write `.git/config` would get `core.fsmonitor` executed as the host user. The convention
-        // was doing the work; this makes it a mount option.
-        mirror_q = sh_quote(&repo_for_box(name).map(|r| r.work).unwrap_or_default()),
+        // The repo's SOURCE TREE — the user's own checkout — not its mirror. Read-only, and it is
+        // not a precaution: nothing in a box writes here, but skein runs `git -C <repo.work>` on
+        // the HOST, so a box that could write `.git/config` would get `core.fsmonitor` executed as
+        // the host user.
+        //
+        // A box needs this for one thing only, and it is on its way out: the gitignored files
+        // `shared-paths.txt` names. Those are copied into the store on the host now
+        // ([`crate::kit::seed_shared_paths`]), so this bind is what covers a store seeded before
+        // that existed. Nothing else a box does requires the tree its user works in.
+        source_q = sh_quote(&repo_for_box(name).map(|r| r.work).unwrap_or_default()),
         // Off unless the file says otherwise, and an unreadable answer is off. The two directions
         // are not equal: guessing "privileged" hands one box every other box's credentials, and
         // guessing "not" costs the workshop box a restart after someone flips the switch.
@@ -2838,9 +2841,12 @@ fn start_box_inner(
         return Err("no fleet sandbox configured".into());
     }
     ensure_fleet(&sandbox, &fleet_mounts())?;
-    // A fleet box has no `/run/sandbox/source`, so this is how it finds the repo's host files to
-    // surface `shared-paths.txt` from — `.env`, and the `CLAUDE.md` some repos keep out of git.
-    crate::kit::record_repo_mirror(repo);
+    // A fleet box has no `/run/sandbox/source`, so the files a repo keeps out of git — `.env`, and
+    // the `CLAUDE.md` some repos take their direction from — are copied into the store here, on the
+    // host, and the box reads them from the store. The recorded path is the fallback for a box
+    // whose store was seeded before this existed.
+    crate::kit::record_repo_source(repo);
+    crate::kit::seed_shared_paths(repo);
 
     // The store is a HOST path used verbatim inside the sandbox, so this is the one precondition
     // worth paying a round-trip for: unreachable, every later step still "succeeds" and the box

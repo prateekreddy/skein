@@ -7,7 +7,7 @@
 
 use crate::ai::ai_says_hold;
 use crate::fleet::box_root;
-use crate::kit::{ensure_kit, ensure_store, record_repo_mirror};
+use crate::kit::{ensure_kit, ensure_store, record_repo_source, seed_shared_paths};
 use crate::place::{forget_place, own_sandbox, place_of, shared_record};
 use crate::registry::{locate_registry, parse_registry, store_for_box};
 use crate::repos::{
@@ -90,7 +90,10 @@ pub(crate) fn repo_launch_command_as(
     if let Err(e) = ensure_store(Path::new(&repo.store)) {
         eprintln!("skein: ensure_store: {e}");
     }
-    record_repo_mirror(repo);
+    record_repo_source(repo);
+    // On the host, before the box comes up: the gitignored files a repo needs land in the store, so
+    // a box reads them from the store it already has rather than from the user's working tree.
+    seed_shared_paths(repo);
     let agent = agent_override
         .map(str::to_string)
         .or_else(|| env::var("SKEIN_AGENT").ok().filter(|s| !s.is_empty()))

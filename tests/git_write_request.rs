@@ -628,7 +628,7 @@ fn isolation_binds_with(
     privileged: bool,
     mounts: &str,
     store: &str,
-    mirror: &str,
+    source_tree: &str,
 ) -> String {
     let src = fs::read_to_string(script("box-session.sh")).unwrap();
     let lines: Vec<&str> = src.lines().collect();
@@ -647,7 +647,7 @@ fn isolation_binds_with(
         .arg("-c")
         .arg(format!(
             "set -uo pipefail; binds=(); root={}; state={}; export SKEIN_FLEET_ROOT={} SKEIN_BOX_PRIVILEGED={} \
-             SKEIN_FLEET_MOUNTS={} SKEIN_BOX_STORE={} SKEIN_BOX_MIRROR={}; \
+             SKEIN_FLEET_MOUNTS={} SKEIN_BOX_STORE={} SKEIN_BOX_SOURCE={}; \
              {block}; printf '%s\\n' \"${{binds[@]-}}\"",
             fleet.join("web-main").display(),
             state_parent.join("web-main").display(),
@@ -655,7 +655,7 @@ fn isolation_binds_with(
             if privileged { "1" } else { "0" },
             skein::util::sh_quote(mounts),
             skein::util::sh_quote(store),
-            skein::util::sh_quote(mirror),
+            skein::util::sh_quote(source_tree),
         ))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -740,7 +740,7 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
 /// repo's checkout on the host.
 ///
 /// The last of those was the sharpest: skein runs `git -C <repo.work>` on the HOST, so a box that
-/// could write `.git/config` there had `core.fsmonitor` executed as the host user. Its own mirror
+/// could write `.git/config` there had `core.fsmonitor` executed as the host user. Its own source tree
 /// comes back read-only for exactly that reason — `sandbox-bootstrap.sh` already copies out of it
 /// rather than linking at it, so nothing loses a capability it was using.
 #[test]
@@ -796,11 +796,11 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
     );
     assert!(
         has("--ro-bind", mine_work.to_string_lossy().as_ref()),
-        "and its own mirror, read-only: {binds}"
+        "and its own repo's source tree, read-only: {binds}"
     );
     assert!(
         !has("--bind", mine_work.to_string_lossy().as_ref()),
-        "the mirror was also bound writable, which is the whole hole: {binds}"
+        "the source tree was also bound writable, which is the whole hole: {binds}"
     );
     assert!(
         !binds.contains("other"),

@@ -80,27 +80,93 @@ const STORE_README: &str = include_str!("store/README.md");
 /// launch — an empty folder comes up fully working (memory bridge, mailbox, status line), an
 /// already-populated one is left intact (machinery refreshed, settings merged additively). The user
 /// only optionally fills `memory/` and `skills/` with their own content.
-/// Tell this repo's boxes where its host files are, for the ones that have no `/run/sandbox/source`.
+/// Tell this repo's boxes where its **source tree** is, for the ones that have no
+/// `/run/sandbox/source`.
 ///
-/// `sbx create --clone` is handed the repo's `work` directory and mounts it read-only at
-/// `/run/sandbox/source`; a box surfaces its gitignored shared paths (`shared-paths.txt`) from
-/// there. A fleet box has no such mount — several boxes share one sandbox, and it was created for
-/// no single repo — so that whole mechanism was inert in the fleet: not dangling links, *nothing*,
-/// including the `CLAUDE.md` an `gadget-demo` box gets its project direction from.
+/// Called `mirror` until this commit, and the name was the bug in miniature. A mirror is a remote —
+/// `repos/<id>/mirror`, bare, what a box clones from ([`crate::repos::mirror_path`]). This is the
+/// repo's working checkout, and the only thing it is for is the one job a mirror can never do:
+/// **gitignored files**. A clone of any shape carries tracked files only, so the `.env` and the
+/// `CLAUDE.md` a project keeps out of git are absent from every mirror however it is made, and
+/// present only in somebody's checkout. Two different things under one name, and the one that
+/// sounded safer was the one that could not do the job.
 ///
-/// The same directory is reachable, though, because [`crate::fleet::fleet_mounts`] mounts every repo's
-/// `work` at its own host path. Recording it in the store — repo-scoped data, which is exactly what
-/// this is — lets the box find it without skein having to thread it through a session's environment.
+/// `sbx create --clone` is handed the checkout and mounts it read-only at `/run/sandbox/source`. A
+/// fleet box has no such mount — several boxes share one sandbox, and it was created for no single
+/// repo — so that whole mechanism was inert in the fleet: not dangling links, *nothing*, including
+/// the `CLAUDE.md` an `gadget-demo` box gets its project direction from.
 ///
-/// Written on every launch, so a repo whose `work` moves is not stuck with the old answer.
-pub fn record_repo_mirror(repo: &Repo) {
+/// Written on every launch, so a repo whose checkout moves is not stuck with the old answer.
+/// Read as a fallback only: [`seed_shared_paths`] does the copying on the host now, and a box that
+/// cannot see the checkout at all still gets its files.
+pub fn record_repo_source(repo: &Repo) {
     let work = repo.work.trim();
     if work.is_empty() {
         return;
     }
     let dir = Path::new(&repo.store).join("skein");
     if fs::create_dir_all(&dir).is_ok() {
-        let _ = write_atomic(&dir.join("mirror"), &dir, format!("{work}\n").as_bytes());
+        let _ = write_atomic(&dir.join("source"), &dir, format!("{work}\n").as_bytes());
+    }
+}
+
+/// Copy the repo's gitignored shared paths out of its checkout and into the store, on the **host**.
+///
+/// The box used to do this itself, reading the host's checkout through a read-only bind. Same
+/// destination and the same once-only semantics — the copy lands in `<store>/shared-rw/<path>` and
+/// the box symlinks it from there — but the reading end moves to the side that legitimately has the
+/// file. What that buys is the bind: a box needs the host's working tree mounted into the sandbox
+/// *only* for this, and nothing else it does requires it.
+///
+/// **Once, never a refresh.** `shared-rw/` is writable and live across every box of the repo, so a
+/// second copy would overwrite whatever a box put there — an `.env` edited in a box, gone at the
+/// next launch, with nothing to say why. A path that should be re-seeded is deleted from the store
+/// deliberately.
+///
+/// Best-effort, and quiet about the ordinary case: a manifest that names a path this repo does not
+/// have is how a shared manifest works across repos, not an error.
+pub fn seed_shared_paths(repo: &Repo) {
+    let work = Path::new(repo.work.trim());
+    let store = Path::new(repo.store.trim());
+    let Ok(manifest) = fs::read_to_string(store.join("shared-paths.txt")) else {
+        return;
+    };
+    if repo.work.trim().is_empty() || !work.is_dir() {
+        return;
+    }
+    for line in manifest.lines() {
+        // `<path> [rw]`, `#` comments — the same shape the box's own reader parses.
+        let path = line.split('#').next().unwrap_or_default();
+        let Some(path) = path.split_whitespace().next() else {
+            continue;
+        };
+        // A manifest entry is repo-relative, and a path that climbs out of the repo would copy
+        // something the manifest's author did not name into a directory every box of the repo reads.
+        if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
+            continue;
+        }
+        let from = work.join(path);
+        let to = store.join("shared-rw").join(path);
+        if to.exists() || !from.exists() {
+            continue;
+        }
+        let Some(parent) = to.parent() else { continue };
+        if fs::create_dir_all(parent).is_err() {
+            continue;
+        }
+        // `cp -a`, not a read-and-write: an entry may name a directory, and preserving modes
+        // matters for an `.env` that arrives 0600.
+        let copied = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(&from)
+            .arg(&to)
+            .status();
+        if !matches!(copied, Ok(status) if status.success()) {
+            eprintln!(
+                "skein: could not seed {} into {}'s store, so its boxes will not see it",
+                path, repo.id
+            );
+        }
     }
 }
 
@@ -420,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn a_box_with_no_clone_mirror_still_gets_the_repos_shared_paths() {
+    fn a_box_with_no_clone_mount_still_gets_the_repos_shared_paths() {
         use std::os::unix::fs::symlink;
         let _g = env_lock();
         let dir = tempdir();
@@ -435,7 +501,7 @@ mod tests {
         fs::write(work.join("CLAUDE.md"), "# direction\n").unwrap();
         fs::write(store.join("shared-paths.txt"), ".env\nCLAUDE.md\n").unwrap();
         fs::write(
-            store.join("skein").join("mirror"),
+            store.join("skein").join("source"),
             format!("{}\n", work.display()),
         )
         .unwrap();
@@ -456,9 +522,9 @@ mod tests {
             .env("CLAUDE_PROJECT_DIR", &tree)
             .env("HOME", &home)
             .env("SKEIN_BOX", "demo-main")
-            // This box may itself be clone-mode, so name the mirror rather than letting the
+            // This box may itself be clone-mode, so name the source tree rather than letting the
             // script find the harness's own /run/sandbox/source.
-            .env("SKEIN_MIRROR", &work)
+            .env("SKEIN_SOURCE", &work)
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();
@@ -486,6 +552,109 @@ mod tests {
             fs::read_to_string(work.join(".env")).unwrap(),
             "SECRET=from-host\n",
             "a box must never be able to edit the host's own working copy"
+        );
+    }
+
+    /// A box that cannot see the repo's source tree at all still gets its gitignored shared paths.
+    ///
+    /// This is the destination, and the one the old shape could not reach. The box used to read the
+    /// user's working checkout through a read-only bind — which is why that bind exists, and the
+    /// only reason it exists. `seed_shared_paths` moves the reading end to the host, so the box
+    /// works from its store and the tree its user works in need never be mounted.
+    ///
+    /// `$SKEIN_SOURCE` is pointed at a path that does not exist, which is what a box in a fleet
+    /// with no source bind actually sees.
+    #[test]
+    fn a_box_that_cannot_see_the_source_tree_still_gets_its_shared_paths() {
+        use std::os::unix::fs::symlink;
+        let _g = env_lock();
+        let dir = tempdir();
+        let store = dir.join("store").join(".claude");
+        let work = dir.join("work"); // the host checkout — reachable HERE, and not from the box
+        let tree = dir.join("tree"); // the box's own clone
+        ensure_store(&store).unwrap();
+        for d in [&work, &tree] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(work.join(".env"), "SECRET=from-host\n").unwrap();
+        fs::create_dir_all(work.join("config")).unwrap();
+        fs::write(work.join("config").join("local.yaml"), "k: v\n").unwrap();
+        fs::write(
+            store.join("shared-paths.txt"),
+            ".env\nconfig rw\nabsent.txt\n",
+        )
+        .unwrap();
+
+        // The host end: skein copies what the manifest names into the store.
+        let repo = Repo {
+            id: "demo".into(),
+            source: work.to_string_lossy().into_owned(),
+            work: work.to_string_lossy().into_owned(),
+            store: store.to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        };
+        seed_shared_paths(&repo);
+        assert_eq!(
+            fs::read_to_string(store.join("shared-rw").join(".env")).unwrap(),
+            "SECRET=from-host\n"
+        );
+        assert!(store
+            .join("shared-rw")
+            .join("config")
+            .join("local.yaml")
+            .is_file());
+        assert!(
+            !store.join("shared-rw").join("absent.txt").exists(),
+            "a manifest naming a path this repo does not have is how a shared manifest works"
+        );
+
+        // The box end: no source tree in sight.
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .arg(&tree)
+            .status()
+            .unwrap()
+            .success());
+        symlink(&store, tree.join(".claude")).unwrap();
+        let home = dir.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let out = Command::new("bash")
+            .arg(store.join("skein/bin/sandbox-bootstrap.sh"))
+            .env("CLAUDE_PROJECT_DIR", &tree)
+            .env("HOME", &home)
+            .env("SKEIN_BOX", "demo-main")
+            .env("SKEIN_SOURCE", dir.join("no-such-checkout"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        for (name, body) in [
+            (".env", "SECRET=from-host\n"),
+            ("config/local.yaml", "k: v\n"),
+        ] {
+            let dst = tree.join(name);
+            assert_eq!(
+                fs::read_to_string(&dst).unwrap_or_default(),
+                body,
+                "{name} did not reach the box, and no source tree means nothing to fall back on"
+            );
+        }
+        // Through the store, as always — there is nowhere else it could have come from.
+        let target = fs::canonicalize(fs::read_link(tree.join(".env")).unwrap()).unwrap();
+        assert!(target.starts_with(fs::canonicalize(store.join("shared-rw")).unwrap()));
+
+        // And seeding twice does not overwrite what a box has since written.
+        fs::write(tree.join(".env"), "SECRET=edited-in-a-box\n").unwrap();
+        seed_shared_paths(&repo);
+        assert_eq!(
+            fs::read_to_string(store.join("shared-rw").join(".env")).unwrap(),
+            "SECRET=edited-in-a-box\n",
+            "a re-seed threw away what a box had put there"
         );
     }
 }
