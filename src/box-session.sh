@@ -1009,8 +1009,24 @@ if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
   # The state parent is a separate mount (the host's `~/.skein/boxes`), so it needs its own cover.
   # Guarded on the two being different directories: if a fleet ever put box state inside the fleet
   # root, a tmpfs over it here would erase the bind just made above.
+  #
+  # READ-ONLY, and the box loses nothing by it. Architecture §5 divides a box's durable state by who
+  # writes it, and this directory holds two kinds:
+  #
+  #   * **recorded** — `claude-projects/` and `codex-sessions/`, the box's own conversation. Bound
+  #     read-WRITE a hundred lines above, at `$HOME/.claude/projects` and `$HOME/.codex/sessions`,
+  #     which is where the agent actually writes them. Separate mounts of the same directories, so
+  #     read-only here costs nothing there.
+  #   * **artifact** — `git-tokens/`, which the HOST mints and places and this box only ever reads.
+  #     A box that could write it could write itself a token for a repository it was not given.
+  #
+  # Nothing in a box writes here through this path. The launcher's own `mkdir`/`chmod` on the token
+  # directory run before `exec bwrap`, outside this namespace, and the resize archives are written
+  # by the sandbox at fleet scope. Read-only is also what keeps `declared/` gone rather than merely
+  # moved: SKEIN-7 took the four security-deciding files out of this directory, and this makes
+  # putting one back impossible rather than unfashionable.
   if [ -d "$state_parent" ] && [ "$state_parent" != "$fleet_root_dir" ]; then
-    binds+=(--tmpfs "$state_parent" --bind "$state" "$state")
+    binds+=(--tmpfs "$state_parent" --ro-bind "$state" "$state")
   fi
 
   # --- and every OTHER host path the sandbox mounts ----------------------------------------------

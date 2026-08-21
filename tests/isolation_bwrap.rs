@@ -91,7 +91,10 @@ impl Fleet {
             f.fleet_root.join("web-main/tree"),
             f.fleet_root.join("other-main/tree"),
             f.state_parent.join("web-main"),
+            f.state_parent.join("web-main/claude-projects"),
+            f.state_parent.join("web-main/git-tokens"),
             f.state_parent.join("other-main"),
+            f.dir.join("boxhome/.claude/projects"),
             f.repos.join("web/store/.claude/memory"),
             f.repos.join("other/store/.claude/memory"),
             f.elsewhere.join("store/.claude"),
@@ -113,6 +116,18 @@ impl Fleet {
         )
         .unwrap();
         fs::write(f.state_parent.join("web-main/conversation.jsonl"), "{}\n").unwrap();
+        fs::write(
+            f.state_parent
+                .join("web-main/claude-projects/session.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        // The artifact: a token the HOST minted and placed, which this box reads to push.
+        fs::write(
+            f.state_parent.join("web-main/git-tokens/owner%2Frepo"),
+            "ghs_scoped\n",
+        )
+        .unwrap();
         fs::write(f.state_parent.join("other-main/conversation.jsonl"), "{}\n").unwrap();
         f
     }
@@ -150,6 +165,8 @@ for p in "$@"; do
 done
 "#;
         let paths = [
+            self.state_parent.join("web-main/git-tokens/owner%2Frepo"),
+            self.dir.join("boxhome/.claude/projects"),
             self.store(),
             self.repos.join("other/store/.claude"),
             self.elsewhere.join("store/.claude"),
@@ -166,13 +183,30 @@ done
 
         let runner = format!(
             "set -uo pipefail\n\
-             binds=()\n\
+             binds=({record})\n\
              root={root}\n\
              state={state}\n\
              export SKEIN_FLEET_ROOT={fleet} SKEIN_BOX_PRIVILEGED={priv} \
              SKEIN_FLEET_MOUNTS={mounts} SKEIN_BOX_STORE={store}\n\
              {block}\n\
              exec bwrap --dev-bind / / ${{binds[@]+\"${{binds[@]}}\"}} -- /bin/sh -c {probe} skein-probe {paths}\n",
+            // What the launcher has already put in `binds` by the time the isolation block runs:
+            // the box's conversation, bound READ-WRITE at the `$HOME` path the agent writes it
+            // through. Reproduced here because the block's read-only cover of the state directory
+            // is only correct if this bind exists — testing the cover without it would assert that
+            // a box cannot write its own conversation, which would be a bug rather than a property.
+            record = format!(
+                "--bind {} {}",
+                skein::util::sh_quote(
+                    self.state_parent
+                        .join("web-main/claude-projects")
+                        .to_string_lossy()
+                        .as_ref()
+                ),
+                skein::util::sh_quote(
+                    self.dir.join("boxhome/.claude/projects").to_string_lossy().as_ref()
+                ),
+            ),
             root = skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),
             state = skein::util::sh_quote(self.state_parent.join("web-main").to_string_lossy().as_ref()),
             fleet = skein::util::sh_quote(self.fleet_root.to_string_lossy().as_ref()),
@@ -228,10 +262,31 @@ fn a_box_run_under_bwrap_can_reach_its_own_repo_and_no_one_elses() {
         "write",
         "a box lost its own repo's store:\n{report}"
     );
+    // Its own state, READ-ONLY. §5 divides this directory by who writes what: the conversation is
+    // the box's and comes back writable through a separate bind at `$HOME`; the git token is the
+    // host's, minted and placed for this box, and read here.
     assert_eq!(
         verdict(&report, &fleet.state_parent.join("web-main")),
+        "see",
+        "the box's own state directory is writable, so it can rewrite what the host placed there:\n{report}"
+    );
+    // The trap this item exists to avoid: bind only the conversation and every box silently loses
+    // git push, because the credential helper reads its token out of this path.
+    assert_eq!(
+        verdict(
+            &report,
+            &fleet.state_parent.join("web-main/git-tokens/owner%2Frepo")
+        ),
+        "see",
+        "a box cannot read the git token the host placed for it, so it cannot push:\n{report}"
+    );
+    // And the other half of the same rule: the conversation IS writable, through the bind the
+    // launcher makes at `$HOME`. Read-only state that also took this away would be a bug wearing a
+    // security argument.
+    assert_eq!(
+        verdict(&report, &fleet.dir.join("boxhome/.claude/projects")),
         "write",
-        "a box lost the state its conversation lives in:\n{report}"
+        "a box cannot write its own conversation:\n{report}"
     );
     assert_eq!(
         verdict(&report, &fleet.fleet_root.join("web-main")),

@@ -712,9 +712,20 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
         has("--bind", fleet.join("web-main").to_string_lossy().as_ref()),
         "the box must get its own root back: {binds}"
     );
+    // Its own state comes back READ-ONLY: what lives there is the conversation the box writes
+    // through a separate read-write bind at `$HOME`, and the git token the HOST places and the box
+    // only reads. A box that could write this path could write itself a token for a repository it
+    // was never given.
     assert!(
-        has("--bind", states.join("web-main").to_string_lossy().as_ref()),
-        "and its own state: {binds}"
+        has(
+            "--ro-bind",
+            states.join("web-main").to_string_lossy().as_ref()
+        ),
+        "and its own state, read-only: {binds}"
+    );
+    assert!(
+        !has("--bind", states.join("web-main").to_string_lossy().as_ref()),
+        "the box's state came back writable: {binds}"
     );
     assert!(
         has("--ro-bind", fleet.join(".skein").to_string_lossy().as_ref()),
