@@ -269,7 +269,7 @@ pub(crate) fn program_on_path(name: &str) -> bool {
 }
 
 /// Expand a leading `~/` to `$HOME` (ssh-add doesn't do shell tilde expansion when called directly).
-pub(crate) fn expand_tilde(p: &str) -> String {
+pub fn expand_tilde(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = env::var_os("HOME") {
             return Path::new(&home).join(rest).to_string_lossy().into_owned();

@@ -205,6 +205,33 @@ fn server_serves_ui_vendor_and_guards_routes() {
         "the queue no longer sends the standing beside the rows: {body}"
     );
 
+    // What replaces Browse (parity §7): a typed path, and an answer that says what was found. A
+    // link is reported as a link rather than as whatever it points at — the whole job of the line
+    // is to say what is actually there.
+    let (st, found) = http_get(&addr, &format!("/api/path?p={}", "/tmp"));
+    assert_eq!(st, 200);
+    assert!(found.contains("\"kind\":\"folder\""), "{found}");
+    // A link is a link. Reporting what it points at would be a screen saying a folder is there when
+    // what is there is a pointer at one — and it is the same rule §9.5 R8 applies wherever skein
+    // looks at a path somebody else can shape.
+    let linked = std::env::temp_dir().join(format!("skein-linkcheck-{}", std::process::id()));
+    let _ = std::fs::remove_file(&linked);
+    std::os::unix::fs::symlink("/tmp", &linked).unwrap();
+    let (st, through) = http_get(&addr, &format!("/api/path?p={}", linked.display()));
+    assert_eq!(st, 200);
+    assert!(
+        through.contains("\"kind\":\"link\""),
+        "a symbolic link was reported as what it points at: {through}"
+    );
+    let _ = std::fs::remove_file(&linked);
+
+    let (st, missing) = http_get(&addr, "/api/path?p=/definitely/not/here");
+    assert_eq!(st, 200);
+    assert!(
+        missing.contains("\"resolved\":false") && missing.contains("\"kind\":\"missing\""),
+        "a path that is not there must say so rather than erroring: {missing}"
+    );
+
     // The new board, beside the old one. `docs/delivery.md` names treating "ground-up surfaces" and
     // "new topology" as one project as the biggest avoidable risk in the plan, and this route is
     // what keeps them separate — so the test that matters is that BOTH answer.

@@ -54,6 +54,64 @@ mod tests {
     use super::*;
     use crate::board::BoxView;
 
+    /// The browser's box-name rule and skein's are the same rule, checked by running both.
+    ///
+    /// `cockpit/src/naming.mjs` is a **mirror** of `util::slug` and `repos::box_name`, and a mirror
+    /// is a thing that drifts. The alternative was asking the server for the name while somebody
+    /// types, which is a round trip per keystroke to compute a string neither end disagrees about —
+    /// and the alternative to that is a placeholder shaped like a name, which is how you end up with
+    /// a box called `thing-<branch>`.
+    ///
+    /// So it is checked rather than trusted: node evaluates the committed bundle over a list of
+    /// cases and Rust evaluates its own, and they are compared. Skipped where node is absent, like
+    /// the staleness check above.
+    #[test]
+    fn the_browser_names_a_box_the_way_skein_does() {
+        let cases = [
+            "feat/auth",
+            "feat/auth/v2",
+            "user@host~weird",
+            "keep.dots_and-dashes",
+            "/leading/and/trailing/",
+            "a///b",
+            "///",
+            "",
+            "caffè",
+            "日本語",
+            "WIP: try 2",
+            "release/2026.08.21",
+        ];
+        let script = format!(
+            "{BUNDLE}\nconst cases = {};\nconsole.log(cases.map(c => boxNameFor('demo', c)).join('\\n'));",
+            serde_json::to_string(&cases).unwrap()
+        );
+        let ran = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output();
+        let Ok(out) = ran else {
+            eprintln!("skipping: no node on this machine to run the cockpit bundle");
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "the bundle would not run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let theirs: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let ours: Vec<String> = cases
+            .iter()
+            .map(|c| crate::repos::box_name("demo", c))
+            .collect();
+        assert_eq!(
+            theirs, ours,
+            "the browser would create a box under a different name than skein gives it"
+        );
+    }
+
     /// Every name `/v2` reads off the wire, asserted against the value the server actually sends.
     ///
     /// The same reason the joins above exist, and it bites harder here: this page is new, so there
@@ -237,6 +295,55 @@ mod tests {
             "the page re-orders what the server already ranked"
         );
         assert!(BUNDLE.contains("/api/boxes/") && BUNDLE.contains("/api/pr/"));
+    }
+
+    /// Setting up reads and writes the names the server uses, on both surfaces.
+    ///
+    /// This is the first surface `/v2` has that *writes*, and a write that names a field wrongly is
+    /// worse than a read that does: a read renders nothing and a write is accepted, silently
+    /// dropping what it did not spell right — `AddRepoReq` takes `#[serde(default)]` on three of its
+    /// four fields, so `stor` instead of `store` is a repo whose shared-data folder is quietly
+    /// skein's own.
+    #[test]
+    fn the_setup_surface_writes_the_fields_the_server_reads() {
+        // Add a repo: the two fields this surface sends, and the two it reads back.
+        assert!(V2.contains(r#"fetch("/api/repos", {"#));
+        for field in ["source", "store"] {
+            assert!(
+                V2.contains(&format!("{field},")) || V2.contains(&format!("{field}:")),
+                "the add-a-repo form does not send `{field}`"
+            );
+        }
+        assert!(
+            V2.contains("body.repo?.id") && V2.contains("body.warning"),
+            "the answer's repo and warning are not read — a push path that will not work is \
+             exactly what that warning is for"
+        );
+
+        // Make a box: an Act, and read as one.
+        assert!(V2.contains("/create") && V2.contains("JSON.stringify({ branch })"));
+        assert!(
+            V2.contains("answer.status !== 202"),
+            "a create is accepted, not answered — a surface treating 200 as success would report a \
+             box that was never started"
+        );
+        assert!(
+            V2.contains("/api/acts/")
+                && V2.contains("look.state === \"ended\"")
+                && V2.contains("look.code"),
+            "the act's outcome is not read, so a failed create looks like a slow one"
+        );
+
+        // The path check that replaces Browse, and the three answers it distinguishes.
+        assert!(V2.contains("/api/path?p="));
+        assert!(
+            V2.contains("found.resolved") && V2.contains("found.kind"),
+            "the path check's answer is not read"
+        );
+        assert!(
+            !V2.contains("pick-path"),
+            "Browse came back — it needs a host display the in-fleet skein cannot have (parity §7)"
+        );
     }
 
     /// The two live joins: the event names the stream sends, and the frame the PTY parses.

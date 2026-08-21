@@ -279,6 +279,8 @@ async fn main() {
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
         .route("/api/pick-path", post(api_pick_path))
+        // What replaces Browse when there is no host display to open a picker on (parity §7).
+        .route("/api/path", get(api_path))
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/session", get(api_session))
         .route("/api/boxes/:name/statusline", get(api_statusline))
@@ -2203,6 +2205,53 @@ async fn api_pick_path(Json(r): Json<PickPathReq>) -> Json<serde_json::Value> {
         Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     })
+}
+
+/// Does this typed path resolve, and to what?
+///
+/// **The replacement for Browse, and not a smaller version of it.** The native picker needs a host
+/// with display access, which in-fleet skein cannot have, and its main job — choosing a local
+/// repository path — went away when repositories became remotes (`docs/parity.md` §7). What is left
+/// is two fields where somebody types a path, and law 1 says a surface must tell you what it found
+/// rather than accept it silently.
+///
+/// `symlink_metadata`, so a link is reported as a link rather than as whatever it points at. That is
+/// not pedantry on a screen whose whole job is to say what is actually there — and it is the same
+/// rule §9.5 R8 applies everywhere else skein looks at a path somebody else can shape.
+///
+/// It says nothing a caller could not learn by asking the fleet to use the path, and it is behind
+/// the token like everything else.
+async fn api_path(Query(q): Query<HashMap<String, String>>) -> Json<serde_json::Value> {
+    let asked = q.get("p").cloned().unwrap_or_default();
+    let path = skein::util::expand_tilde(asked.trim());
+    if path.is_empty() {
+        return Json(serde_json::json!({ "resolved": false, "kind": "empty", "why": "" }));
+    }
+    let found = tokio::task::spawn_blocking(move || {
+        let p = std::path::PathBuf::from(&path);
+        match std::fs::symlink_metadata(&p) {
+            Err(e) => serde_json::json!({
+                "resolved": false,
+                "kind": "missing",
+                "path": path,
+                "why": format!("{e}"),
+            }),
+            Ok(how) => {
+                let kind = if how.file_type().is_symlink() {
+                    "link"
+                } else if how.is_dir() {
+                    "folder"
+                } else {
+                    "file"
+                };
+                serde_json::json!({ "resolved": true, "kind": kind, "path": path, "why": "" })
+            }
+        }
+    })
+    .await;
+    Json(found.unwrap_or_else(
+        |e| serde_json::json!({ "resolved": false, "kind": "unknown", "why": e.to_string() }),
+    ))
 }
 
 #[derive(Deserialize)]

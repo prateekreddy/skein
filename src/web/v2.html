@@ -57,6 +57,25 @@ main { flex: 1; overflow: auto; padding: 14px 22px 40px; }
 .age { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 .fix { display: block; color: var(--faint); font-size: 12px; margin-top: 4px; }
 .calm { color: var(--faint); padding: 30px 2px; }
+/* Setting up (§11's fifth job): rare, and it must be one action rather than a configuration
+   exercise. Two things live here and nothing else — add a repository, make a box. */
+#setup { display: none; position: fixed; inset: 0; background: var(--bg); overflow: auto; padding: 26px 22px 60px; }
+#setup.open { display: block; }
+#setup h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+#setup section { max-width: 620px; margin-bottom: 30px; }
+#setup label { display: block; margin: 12px 0 4px; color: var(--dim); font-size: 12px; }
+#setup input, #setup select { width: 100%; padding: 8px 10px; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 4px; font: inherit; }
+#setup input:focus, #setup select:focus { outline: none; border-color: var(--cool); }
+#setup button.go { margin-top: 14px; padding: 8px 16px; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--faint); border-radius: 4px; font: inherit; cursor: pointer; }
+#setup button.go:disabled { color: var(--faint); cursor: default; }
+.said { margin-top: 10px; font-size: 12px; color: var(--dim); white-space: pre-wrap; }
+.said.warm { color: var(--warm); }
+.said.done { color: var(--done); }
+.hint { color: var(--faint); font-size: 12px; margin-top: 4px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
 /* The terminal is the whole of "converse" (§11): commenting back to an agent is an Act against a
    box, and the box's terminal already is one. */
 #pane { display: none; position: fixed; inset: 0; background: var(--bg); flex-direction: column; }
@@ -96,10 +115,40 @@ main { flex: 1; overflow: auto; padding: 14px 22px 40px; }
 <body>
 <header>
   <a class="old" href="/">old board</a>
+  <a class="old" href="#" id="opensetup">set up</a>
   <h1 id="title">…</h1>
   <div class="sub" id="sub">asking</div>
 </header>
 <main id="queue"></main>
+
+<div id="setup">
+  <a class="old" href="#" id="closesetup">close · esc</a>
+  <section>
+    <h2>Add a repository</h2>
+    <div class="hint">A URL skein clones, or a path on this machine — a local path is a valid git
+      remote, so it works; what you lose is skein seeing work you have not committed there.</div>
+    <label for="src">Source</label>
+    <input id="src" class="mono" placeholder="https://github.com/owner/name.git  ·  /home/you/code/thing" autocomplete="off">
+    <div class="said" id="srcsaid"></div>
+    <label for="store">Shared-data folder <span class="hint">— optional; skein keeps one under its own home if you leave this empty</span></label>
+    <input id="store" class="mono" placeholder="/home/you/data/thing" autocomplete="off">
+    <div class="said" id="storesaid"></div>
+    <button class="go" id="addrepo">Add it</button>
+    <div class="said" id="addsaid"></div>
+  </section>
+  <section>
+    <h2>Make a box</h2>
+    <div class="hint">One action. The box is made in the background — this page can be closed and
+      what it said is still here when you come back.</div>
+    <label for="repo">Repository</label>
+    <select id="repo"></select>
+    <label for="branch">Branch</label>
+    <input id="branch" class="mono" placeholder="feat/auth" autocomplete="off">
+    <div class="hint">It will be called <span class="mono" id="boxname">—</span></div>
+    <button class="go" id="makebox">Make it</button>
+    <div class="said" id="makesaid"></div>
+  </section>
+</div>
 
 <div id="pane">
   <div id="panebar">
@@ -343,6 +392,183 @@ document.addEventListener("keydown", e => {
   // Only when a terminal is open: escape is a key the agent inside it needs, and taking it always
   // would make the pane impossible to type in.
   if (e.key === "Escape" && pane.classList.contains("open") && e.target === document.body) closeBox();
+});
+
+// ── setting up: add a repository, make a box ────────────────────────────────────────────────────
+//
+// §11's fifth job, and its whole requirement is "one action, no configuration exercise". So this is
+// two forms and nothing else — not a settings screen. `Config` has twenty-four fields and rendering
+// them is one of the things the new board is a reaction to; the rest stay where they are until
+// somebody asks for them.
+const setup = document.getElementById("setup");
+const said = (id, text, tone) => {
+  const el = document.getElementById(id);
+  el.textContent = text || "";
+  el.className = `said${tone ? ` ${tone}` : ""}`;
+};
+
+document.getElementById("opensetup").addEventListener("click", e => {
+  e.preventDefault();
+  setup.classList.add("open");
+  loadRepos();
+  document.getElementById("src").focus();
+});
+document.getElementById("closesetup").addEventListener("click", e => {
+  e.preventDefault();
+  setup.classList.remove("open");
+});
+
+// **What replaces Browse.** The native picker needed a host with display access, which in-fleet
+// skein cannot have — so a path is typed, and the surface says what it found rather than accepting
+// it silently. A link is reported as a link, because the whole job of this line is to say what is
+// actually there.
+async function resolves(path, into) {
+  if (!path.trim()) return said(into, "");
+  try {
+    const answer = await fetch(`/api/path?p=${encodeURIComponent(path.trim())}`);
+    const found = await answer.json();
+    if (found.resolved) {
+      said(into, `found: ${found.kind}`, "done");
+    } else {
+      // Not an error. Most of the time it is a URL in the source field, or a folder that does not
+      // exist yet — both fine, and both worth showing rather than hiding.
+      said(into, found.kind === "missing" ? "nothing there yet" : "", "");
+    }
+  } catch {
+    said(into, "");
+  }
+}
+
+let checking = 0;
+const checkLater = (input, into) => {
+  input.addEventListener("input", () => {
+    clearTimeout(checking);
+    checking = setTimeout(() => resolves(input.value, into), 250);
+  });
+};
+checkLater(document.getElementById("src"), "srcsaid");
+checkLater(document.getElementById("store"), "storesaid");
+
+document.getElementById("addrepo").addEventListener("click", async e => {
+  const button = e.target;
+  const source = document.getElementById("src").value.trim();
+  if (!source) return said("addsaid", "a repository needs a source", "warm");
+  button.disabled = true;
+  said("addsaid", "adding…");
+  try {
+    const answer = await fetch("/api/repos", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source, store: document.getElementById("store").value.trim() }),
+    });
+    const body = await answer.json().catch(() => ({}));
+    if (!answer.ok) {
+      said("addsaid", body.error || (await answer.text?.()) || "it could not be added", "warm");
+    } else {
+      // The warning travels with the answer and is not an error: no origin, or an SSH remote with
+      // no agent key loaded, both mean "this works until you push".
+      const name = body.repo?.id || source;
+      said("addsaid", body.warning ? `Added ${name}.\n${body.warning}` : `Added ${name}.`,
+        body.warning ? "warm" : "done");
+      document.getElementById("src").value = "";
+      document.getElementById("store").value = "";
+      said("srcsaid", "");
+      said("storesaid", "");
+      loadRepos();
+    }
+  } catch (e) {
+    said("addsaid", `it could not be added: ${e}`, "warm");
+  }
+  button.disabled = false;
+});
+
+async function loadRepos() {
+  try {
+    const answer = await fetch("/api/repos");
+    const repos = await answer.json();
+    const select = document.getElementById("repo");
+    const had = select.value;
+    select.innerHTML = (repos || []).map(r =>
+      `<option value="${esc(r.id)}">${esc(r.id)}</option>`).join("");
+    if (had) select.value = had;
+    named();
+  } catch { /* the list stays as it was, which is truer than emptying it */ }
+}
+
+// The real name, computed the way skein computes it — `cockpit/src/naming.mjs`, which `cockpit.rs`
+// checks against `repos::box_name` by running both. A placeholder shaped like a name is how
+// somebody ends up with a box called `repo-<branch>`.
+function named() {
+  const repo = document.getElementById("repo").value;
+  const branch = document.getElementById("branch").value;
+  const el = document.getElementById("boxname");
+  el.textContent = repo && branch.trim() ? boxNameFor(repo, branch.trim()) : "—";
+}
+document.getElementById("branch").addEventListener("input", named);
+document.getElementById("repo").addEventListener("change", named);
+
+document.getElementById("makebox").addEventListener("click", async e => {
+  const button = e.target;
+  const repo = document.getElementById("repo").value;
+  const branch = document.getElementById("branch").value.trim();
+  if (!repo || !branch) return said("makesaid", "a box is a repository and a branch", "warm");
+  const name = boxNameFor(repo, branch);
+  button.disabled = true;
+  said("makesaid", `making ${name}…`);
+  try {
+    const answer = await fetch(`/api/boxes/${encodeURIComponent(name)}/create`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ branch }),
+    });
+    const body = await answer.json().catch(() => ({}));
+    if (answer.status !== 202) {
+      said("makesaid", body.error || `it was not accepted (${answer.status})`, "warm");
+      button.disabled = false;
+      return;
+    }
+    // **An Act, so the work outlives this page.** The answer is an id, not a result; what happened
+    // is readable afterwards by anybody who asks, including a tab opened later. That is the whole
+    // reason creating a box is not a POST that returns 201.
+    watchAct(body.id || name, name);
+  } catch (e) {
+    said("makesaid", `it was not accepted: ${e}`, "warm");
+  }
+  button.disabled = false;
+});
+
+// Polled rather than streamed, deliberately: the stream exists and is the right thing for a
+// terminal, and this is a line of text that changes every few seconds. A poll that stops when the
+// act ends costs less than a connection held open, and it survives a reload — which a stream this
+// page opened does not.
+async function watchAct(id, name) {
+  for (let i = 0; i < 600; i++) {
+    let look;
+    try {
+      const answer = await fetch(`/api/acts/${encodeURIComponent(id)}`);
+      if (!answer.ok) break;
+      look = await answer.json();
+    } catch {
+      break;
+    }
+    const tail = (look.output || "").trim().split("\n").slice(-3).join("\n");
+    if (look.state === "ended") {
+      const ok = look.code === 0;
+      said("makesaid", ok ? `${name} is up.` : `${name} did not come up:\n${tail}`,
+        ok ? "done" : "warm");
+      ask();
+      return;
+    }
+    said("makesaid", `making ${name}…\n${tail}`);
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  said("makesaid", `${name} is still being made — it will appear on the board when it is up.`);
+}
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && setup.classList.contains("open") && e.target === document.body) {
+    setup.classList.remove("open");
+  }
 });
 
 ask();

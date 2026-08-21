@@ -328,7 +328,7 @@ Three verdicts, and the middle one is the load-bearing one:
 |---|---|---|
 | Adopt-in-place → local-path remotes | not a surface question | about where a repo's bytes come from; neither board changes it |
 | Foreign sandbox display | **holds** | `/v2` reads `/api/queue`, whose rows are boxes, pull requests and setup faults (`queue::Source`). There is no sandbox row and no `foreign:` term in the page |
-| `/api/pick-path` and Browse | not yet asked | `/v2` has no settings or add-a-repo surface yet |
+| `/api/pick-path` and Browse | **holds** | `/v2` adds a repository and makes a box, and a path is **typed**: `GET /api/path` says what it found — folder, file, link, or nothing there yet — which is law 1 without a host round-trip. A link is reported as a link. `pick-path` is not referenced by the page, and a test asserts that |
 | The host ssh-agent path | not a surface question | a credential path, not a screen |
 | Transport reporting | **holds** | nothing in `/v2` reads a transport field; there is no readout to port |
 | Every copy rule has a test | not a surface question | `tests/resize_rules.rs`, unchanged by either board |
@@ -343,9 +343,15 @@ Three verdicts, and the middle one is the load-bearing one:
 | Foreign-sandbox *display* goes, the *state* does not | **holds** | `declared = deleted` is fleet state; `/v2` renders no sandbox rows either way |
 
 **What `/v2` is today**: the queue, the three states said in words (`cockpit/src/tone.mjs`), the
-change view (`cockpit/src/change.mjs`, §11.1), and a box's terminal. **What it is not**: settings,
-repo import, the fleet controls. Those are the rows above that read *not yet asked*, and each is one
-item's worth of work rather than a question anybody still has to answer.
+change view (`cockpit/src/change.mjs`, §11.1), a box's terminal, and setting up — add a repository,
+make a box (§11's fifth job, *one action, no configuration exercise*). **What it is not**: the fleet
+controls, and a settings screen — deliberately, since `Config` has twenty-four fields and rendering
+them all is one of the things this board is a reaction to. What is left reads *not yet asked* above,
+and each is one item's worth of work rather than a question anybody still has to answer.
+
+**The box is made as an Act**, which is what that machinery was for: the answer is an id, the work
+outlives the page, and closing the tab loses nothing. A surface that treated the create as a POST
+returning a result would report a box that was never started.
 
 **The cutover is a separate change**, and reversible: `/` is untouched, the route is one line, and
 switching them is editing which constant `index` serves. Nothing in this section is done by that
