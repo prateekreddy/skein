@@ -1415,6 +1415,30 @@ features rather than architecture ones:
 
 Both are **signals whose subject is a module** (§2.2). No new machinery.
 
+Begun: `shape::of_diff` is the join. Contract signals are **file**-scoped and module notes are
+**module**-scoped, and the notes already map changed files to modules — so a signal rolls up to the
+module it is about, by the same longest-match rule (`src/web/x` belongs to `src/web`, not to `src`,
+because that is the module whose note is about it). It is served for a pull request *and* for a box's
+own branch, from one function: the shape of a change does not depend on whether it arrived as a PR or
+as work somebody is still doing.
+
+The mock-up's three classifications are computed — `NEW`, `CHANGED`, `SHRANK`, and `GONE` beside them
+— and **`SHRANK` earns its own word rather than being a negative number**: a module that lost more
+than it gained is usually a deletion or an extraction, and it is the one shape a reviewer reads
+differently.
+
+**The order is what is worth looking at, not what is biggest.** A module carrying a contract signal
+comes first however small its change, because the signal is exactly the structural consequence a
+summary missed — a one-line change that moved a default outranks a thousand-line rename that moved
+nothing. That rule is its own function with its own test, which is how the first version's inverted
+comparison was caught: it had put the rename first, and the end-to-end test could not see it because
+its fixture produced no signals.
+
+**"N call sites" is not built, and that is a decision rather than an omission.** A contract signal
+carries prose — "the default changed" — not a symbol, so there is nothing to search the repository
+for without inventing one, and a confident count about the wrong symbol is worse than no count. It
+needs the scanner to name what moved before the number can be honest.
+
 The consequence for scope: the diff pane and its inline comment composer are not ported. Commenting
 back to an agent is an Act against a *box*, which the terminal already is.
 

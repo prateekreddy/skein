@@ -226,6 +226,10 @@ async fn main() {
             get(api_review_summary),
         )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
+        // The shape of a change: which modules moved and how. The same route shape for both
+        // sources, because the answer is the same question — `?box=` for a box's branch.
+        .route("/api/repos/:id/review/:number/shape", get(api_pr_shape))
+        .route("/api/boxes/:name/shape", get(api_box_shape))
         .route("/api/settings", get(api_settings).post(api_set_settings))
         .route("/api/fleet/plan", get(api_fleet_plan))
         .route("/api/fleet/create", post(api_fleet_create))
@@ -851,6 +855,65 @@ async fn api_review_archive(
 ///
 /// This never fails: a PR that could not be read comes back as an `unread` summary carrying the
 /// reason, because the only sane response to a failure here is to show you the PR anyway.
+/// What a pull request did, by module.
+///
+/// Not a diff renderer, deliberately: §11.1 and the owner both say the value is in *which modules
+/// changed and how the system decomposes*, and if the text is wanted GitHub has it. This is the
+/// first three of four levels — module, its standing note, what this change did to it — with the
+/// files listed so the fourth is a click away.
+async fn api_pr_shape(Path((id, number)): Path<(String, u64)>) -> Response {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    let shaped = tokio::task::spawn_blocking(move || {
+        let slug = skein::prq::repo_slug(&repo).ok_or("this repo has no GitHub remote")?;
+        let diff = skein::prq::pr_diff_text(&slug, number)?;
+        Ok::<_, String>(skein::shape::of_diff(&repo, &diff))
+    })
+    .await;
+    shape_response(shaped)
+}
+
+/// The same, for a box's own branch.
+///
+/// One function short of identical to the pull-request one, and that is the point: the shape of a
+/// change does not depend on whether it arrived as a PR or as a branch somebody is still working on.
+/// A reviewer looking at their own box's work asks exactly the question a reviewer of a PR asks.
+async fn api_box_shape(Path(name): Path<String>) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let shaped = tokio::task::spawn_blocking(move || {
+        let repo =
+            skein::repos::repo_for_box(&name).ok_or("this box belongs to no registered repo")?;
+        let diff = skein::diff::box_diff(&name).ok_or("this box has no diff to shape")?;
+        Ok::<_, String>(skein::shape::of_diff(&repo, &diff.value.patch))
+    })
+    .await;
+    shape_response(shaped)
+}
+
+fn shape_response(
+    shaped: Result<Result<Vec<skein::shape::ModuleChange>, String>, tokio::task::JoinError>,
+) -> Response {
+    match shaped {
+        Ok(Ok(modules)) => Json(modules).into_response(),
+        // A shape that could not be read is an error with the reason, never an empty list: "this
+        // change touched no module skein knows about" and "the diff could not be fetched" send a
+        // person to different places.
+        Ok(Err(why)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 async fn api_review_summary(
     Path((id, number)): Path<(String, u64)>,
     Query(q): Query<HashMap<String, String>>,

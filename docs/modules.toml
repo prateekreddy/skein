@@ -179,7 +179,7 @@ depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "heal
 # carry content hashes and neither the count nor the names are known at compile time. `act` since
 # creating a box became something a surface that is not a terminal can ask for — it used to be a
 # query string on the terminal WebSocket, so porting the REST API alone would have lost it.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
 
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
@@ -281,6 +281,14 @@ depends_on = ["ai", "fleet", "kit", "place", "registry", "repos", "runtime", "sb
 
 [current.sbx]
 depends_on = ["fleet", "place", "registry", "util"]
+
+[current.shape]
+# `contracts` and `moduledocs` because it is the join between them — a contract signal is
+# file-scoped, a module note is module-scoped, and the notes already map files to modules — plus
+# `repos` for the repo it is about. Nothing else, and in particular not `prq` or `review`: the shape
+# of a change is the same whether it arrived as a pull request or as a box's branch, and a module
+# that knew which would have to be asked twice.
+depends_on = ["contracts", "moduledocs", "repos"]
 
 [current.sharedhome]
 depends_on = ["kit", "repos", "sandbox", "util"]
