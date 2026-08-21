@@ -335,17 +335,17 @@ Three verdicts, and the middle one is the load-bearing one:
 | Resize is a root byte copy | not yet asked | `/v2` has no fleet-resize surface yet |
 | The shared toolchain stops being shared | not a surface question | a mount policy |
 | Everything that travels with the diff pane | **holds** | `/v2` has no diff pane, no `d` shortcut, no `Diff:` palette entry, and no attachment target. It was not ported and will not be |
-| The change view needs machinery that does not exist | not yet asked | the machinery now exists — `shape::of_diff`, and `mentions` beside each contract signal — and `/v2` does not render it yet |
+| The change view needs machinery that does not exist | **holds** | the machinery exists (`shape::of_diff`, and `mentions` beside each contract signal) and `/v2` renders it: a queue row opens the module list, in the server's order, with each module's standing note only when it is fresh |
 | The diff pane and its comment composer | **holds** | commenting back to an agent is an Act against a box, and the box's terminal at `/v2` is one |
 | The transcript tab | **holds** | not ported, deliberately; kept in §7 so its removal stays a decision |
 | The CLI stays standalone | not a surface question | settled in architecture §14.1 |
 | The `~/.skein` mount split | not a surface question | a mount inversion, per box |
 | Foreign-sandbox *display* goes, the *state* does not | **holds** | `declared = deleted` is fleet state; `/v2` renders no sandbox rows either way |
 
-**What `/v2` is today**: the queue, the three states said in words (`cockpit/src/tone.mjs`), and a
-box's terminal. **What it is not**: the change view, settings, repo import, the fleet controls. Those
-are the rows above that read *not yet asked*, and each is one item's worth of work rather than a
-question anybody still has to answer.
+**What `/v2` is today**: the queue, the three states said in words (`cockpit/src/tone.mjs`), the
+change view (`cockpit/src/change.mjs`, §11.1), and a box's terminal. **What it is not**: settings,
+repo import, the fleet controls. Those are the rows above that read *not yet asked*, and each is one
+item's worth of work rather than a question anybody still has to answer.
 
 **The cutover is a separate change**, and reversible: `/` is untouched, the route is one line, and
 switching them is editing which constant `index` serves. Nothing in this section is done by that

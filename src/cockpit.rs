@@ -144,6 +144,101 @@ mod tests {
         }
     }
 
+    /// The change view reads every field `shape::of_diff` sends, by the name it sends it under.
+    ///
+    /// Two of these are the ones worth the test on their own. `note_state` decides whether a note is
+    /// shown at all — a stale note reads exactly like a current one, which is why it is not — and
+    /// `mentions` is absent rather than zero when nothing was counted, where a zero would read as
+    /// "nothing uses this".
+    #[test]
+    fn the_change_view_reads_what_the_shape_route_sends() {
+        use crate::contracts::Signal;
+        use crate::shape::{ModuleChange, Movement, Sighted};
+        let module = ModuleChange {
+            path: "src/warden".into(),
+            owners: vec!["@core".into()],
+            movement: Movement::Shrank,
+            added: 12,
+            removed: 80,
+            files: vec!["src/warden/doer.rs".into()],
+            signals: vec![Sighted {
+                signal: Signal {
+                    kind: "interface".into(),
+                    what: "check was removed or renamed".into(),
+                    file: "src/warden/doer.rs".into(),
+                    symbol: "check".into(),
+                },
+                mentions: Some(12),
+            }],
+            note: "the host side of create and destroy".into(),
+            note_state: "fresh".into(),
+        };
+        let wire = serde_json::to_value(&module).unwrap();
+        for field in wire.as_object().unwrap().keys() {
+            // Read by the page, or by the bundle's `noteOf`/`summaryOf` — either is reading it; a
+            // field read by neither is one the server serialises for nobody.
+            assert!(
+                V2.contains(&format!("m.{field}")) || BUNDLE.contains(&format!("m.{field}")),
+                "nothing reads a module's `{field}`"
+            );
+        }
+        let signal = serde_json::to_value(&module.signals[0]).unwrap();
+        assert!(
+            signal.get("mentions").is_some() && signal.get("symbol").is_some(),
+            "the signal lost the two fields the count is built from"
+        );
+        for field in ["symbol", "what"] {
+            assert!(
+                V2.contains(&format!("g.{field}")),
+                "the signal's `{field}` is not rendered"
+            );
+        }
+        assert!(
+            BUNDLE.contains("signal.mentions")
+                || BUNDLE.contains("s.mentions")
+                || BUNDLE.contains(".mentions"),
+            "nothing reads the count"
+        );
+
+        // The four classifications, by the words serde emits. An unrendered one shows as blank
+        // beside a module that moved, which reads as "nothing happened to it".
+        for movement in [
+            Movement::New,
+            Movement::Gone,
+            Movement::Shrank,
+            Movement::Changed,
+        ] {
+            let word = serde_json::to_value(movement)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                !word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase()),
+                "{word} is not the kebab-case word the page uppercases in CSS"
+            );
+        }
+        assert!(
+            V2.contains("text-transform: uppercase"),
+            "the classification is not shouted"
+        );
+
+        // A branch and a pull request reach the same view. The URLs are built in the bundle, so the
+        // page cannot grow a second opinion about which route answers.
+        assert!(
+            V2.contains("shapeUrl("),
+            "the page does not ask for a shape at all"
+        );
+        // The order is the server's. `worth_looking_at` puts a module carrying a contract signal
+        // first however small its change, and a page that sorted would be a second opinion about
+        // attention — the one thing §11.7 says is the scarce resource.
+        assert!(
+            !V2.contains(".sort("),
+            "the page re-orders what the server already ranked"
+        );
+        assert!(BUNDLE.contains("/api/boxes/") && BUNDLE.contains("/api/pr/"));
+    }
+
     /// The two live joins: the event names the stream sends, and the frame the PTY parses.
     #[test]
     fn the_new_board_listens_and_resizes_in_the_words_the_server_uses() {
