@@ -247,6 +247,14 @@ either move to the warden or to HTTPS with injected credentials.
 transport goes; the readout goes with it. This is recorded here because §12.2 of the first draft
 claimed no user-visible feature hid in the deletion list, and this was the counter-example.
 
+**Every rule the copy keeps now has a test.** The carrying machinery had thorough ones — ignored
+files, the size-not-names filter, the three symlink rules, the bundle's own branch — and the two
+rules *around* it had none, though both are in the list of things learned the hard way. A resize that
+loses a login, or a Docker volume it could not ask about, looks exactly like one that worked.
+`tests/resize_rules.rs` asserts both: the refusal on "could not ask" leaves the sandbox undestroyed,
+and the login is read out of the sandbox **before** the destroy rather than after, when there is
+nothing left to read.
+
 **Resize is a root byte copy, and the earlier entry here described an abandoned mechanism.** It
 `tar`s the whole box tree out and back, which is why it demands 1.2× the box size free first. The
 bundle-and-patches reconstruction this page previously demanded is *not* what runs — it has no
