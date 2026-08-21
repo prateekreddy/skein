@@ -1319,6 +1319,29 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    `declared_read` now, and the test that keeps them there is a **source** assertion, because the
    failure is a path rather than a value and a path is a string somebody types.
 
+   **The resize archive — the risk was on the create side, not the restore.** Both halves, quoted
+   rather than described:
+
+   ```
+   create:  sudo rm -f <archive>; \
+            sudo tar -C <box root> --exclude=./anchor.pid --warning=no-file-ignored -cf <archive> .
+   restore: sudo mkdir -p <root>; sudo tar -C <root> -xf <archive>; rm -f <archive>
+   ```
+
+   The **restore** is safe, and measured rather than assumed: GNU tar 1.35, asked for nothing
+   special, refuses a `..` member outright, strips a leading `/` so an absolute member lands *inside*
+   the destination, and will not write through a symlink member — and it exits non-zero, so the
+   `set -e` around it aborts the resize rather than half-restoring a box. That property belongs to
+   tar and to the flags it is given, and `-P` anywhere in the pipeline would end it, so it is pinned
+   by a test that builds an escaping archive by hand and extracts it.
+
+   The **create** was the hole. `tar -cf` follows a symbolic link at its output path, and the output
+   path is inside the box's own state directory — it has to be, since that is the one place mounted
+   into the sandbox that outlives the sandbox. Anything able to plant a link there gets root to write
+   a tar file wherever it points. The cover stops an ordinary box; the workshop box is exempt from
+   the cover **by design**, which is precisely the actor the rule is about. `rm -f` before the create
+   unlinks the link rather than following it.
+
    **The anchor — closed, and confirmed rather than assumed.** `box_pidfile` still exists and the
    launcher still writes it; nothing in skein reads it. The address comes from the placement record
    under the cover (SKEIN-4), and the launcher's own report is read by its marker rather than by

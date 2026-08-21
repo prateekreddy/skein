@@ -3427,7 +3427,15 @@ fn archive_box(fleet: &Place, name: &str, run: &str) -> Result<String, String> {
 /// and the host reading it later — does not need root to touch what root has just written.
 fn archive_script(name: &str, archive: &str) -> String {
     format!(
-        "set -e; mkdir -p {state}; \
+        // **`rm -f` before the create, and it is not tidiness** (§9.5 R8). The archive lands in the
+        // box's own state directory — it has to, because that is the one place mounted into the
+        // sandbox that outlives the sandbox — and `tar -cf` FOLLOWS a symbolic link at its output
+        // path. Anything that can plant one there gets root to write a tar file wherever it points.
+        // The cover stops an ordinary box (its state is bound read-only inside its namespace) and
+        // deliberately does not stop the workshop box, which sees every box's files by design.
+        // `rm -f` unlinks the link rather than following it, so the create always writes a fresh
+        // regular file.
+        "set -e; mkdir -p {state}; sudo rm -f {archive}; \
          sudo tar -C {root} --exclude=./anchor.pid --warning=no-file-ignored -cf {archive} . ; \
          sudo chown \"$(id -u):$(id -g)\" {archive}; \
          du -sm {archive} | cut -f1",
@@ -6934,6 +6942,99 @@ b idle 5000000 4 1048576 1048576
         assert!(
             !script.contains("--exclude=./tmp") && !script.contains("--exclude=./home"),
             "nothing else is excluded — an exact copy is the point: {script}"
+        );
+    }
+
+    /// The create does not write through a link somebody planted at the archive's path.
+    ///
+    /// `tar -cf` follows a symbolic link at its output path, and the output path is inside the box's
+    /// own state directory — it has to be, since that is the one place mounted into the sandbox that
+    /// outlives it. So anything able to plant a link there gets **root** to write a tar file
+    /// wherever it points. The cover stops an ordinary box; the workshop box is exempt from the
+    /// cover by design, which is exactly the actor this has to hold against.
+    #[test]
+    fn the_archive_is_not_written_through_a_link_left_at_its_path() {
+        let _g = env_lock();
+        let archive = box_archive("web-main", "resize-x");
+        let script = archive_script("web-main", &archive);
+        let unlink = format!("sudo rm -f {}", sh_quote(&archive));
+        assert!(
+            script.contains(&unlink),
+            "nothing unlinks the path first: {script}"
+        );
+        assert!(
+            script.find(&unlink) < script.find("tar -C"),
+            "the unlink happens after the archive is written, which is no unlink at all: {script}"
+        );
+    }
+
+    /// What `tar` does with an archive that tries to escape the directory it is extracted into.
+    ///
+    /// **Measured rather than assumed**, and pinned here because the restore is `sudo tar -xf` of an
+    /// archive holding a box's own contents: the property that makes that safe belongs to tar and to
+    /// the flags it is given, and it would vanish the day somebody added `-P`. Three escapes, all of
+    /// them refused by GNU tar 1.35 with no flag asked for: a `..` member, an absolute member, and a
+    /// symlink member with a file written through it.
+    #[test]
+    fn an_archive_cannot_write_outside_the_directory_it_is_extracted_into() {
+        let home = tempdir();
+        let out = home.join("out");
+        let victim = home.join("victim");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        let archive = home.join("escaping.tar");
+
+        // Built by hand with python's tarfile, because `tar` itself will not create these members:
+        // it names them from a tree walk, which is why the archive step is not where this risk is.
+        let built = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                "import tarfile, io\n\
+                 t = tarfile.open({archive:?}, 'w')\n\
+                 for name in ['../../victim/escaped', {absolute:?}]:\n\
+                 \x20   d = b'escaped'\n\
+                 \x20   i = tarfile.TarInfo(name); i.size = len(d)\n\
+                 \x20   t.addfile(i, io.BytesIO(d))\n\
+                 l = tarfile.TarInfo('link'); l.type = tarfile.SYMTYPE; l.linkname = {victim:?}\n\
+                 t.addfile(l)\n\
+                 d = b'through the link'\n\
+                 f = tarfile.TarInfo('link/through'); f.size = len(d)\n\
+                 t.addfile(f, io.BytesIO(d))\n\
+                 t.close()\n",
+                archive = archive.to_string_lossy(),
+                absolute = victim.join("absolute").to_string_lossy(),
+                victim = victim.to_string_lossy(),
+            ))
+            .status();
+        match built {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("skipping: no python3 to build an escaping archive by hand");
+                return;
+            }
+        }
+
+        let extracted = std::process::Command::new("tar")
+            .arg("-C")
+            .arg(&out)
+            .arg("-xf")
+            .arg(&archive)
+            .output()
+            .expect("tar");
+
+        // Nothing outside the destination, which is the whole claim.
+        assert_eq!(
+            std::fs::read_dir(&victim).unwrap().count(),
+            0,
+            "an archive wrote outside the directory it was extracted into: {}",
+            String::from_utf8_lossy(&extracted.stderr)
+        );
+        // And it FAILS rather than half-succeeding quietly — which matters because the restore runs
+        // under `set -e`, so a tampered archive aborts the resize instead of half-restoring a box.
+        assert!(
+            !extracted.status.success(),
+            "tar accepted an escaping archive silently: {}",
+            String::from_utf8_lossy(&extracted.stderr)
         );
     }
 
