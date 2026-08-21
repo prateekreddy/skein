@@ -40,6 +40,27 @@
 use std::fmt;
 use std::time::Duration;
 
+/// A remembered answer that an act can make wrong.
+///
+/// Named here rather than beside the gates, because *which* remembered answers exist is part of what
+/// a signal is (§2.2's cadence and its Gate contract) — while *where* each one is kept is the
+/// fleet's business. An Act says what it disturbs without having to know a gate exists at all, which
+/// is what keeps `act` out of the module that owns them.
+///
+/// The list is exhaustive on purpose: an act that settles the one somebody happened to think of is
+/// the bug this exists to end, and a fifth gate added without a name here cannot be declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remembered {
+    /// Which boxes have a live session.
+    BoxLiveness,
+    /// What sandboxes exist on this machine.
+    SandboxListing,
+    /// How much of the shared disk each box is using.
+    BoxDisk,
+    /// The sandbox's own memory, CPU and disk totals.
+    FleetResources,
+}
+
 /// §10's budgets, each with its own unit and its own enforcement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Budget {

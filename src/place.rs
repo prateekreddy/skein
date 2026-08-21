@@ -702,6 +702,25 @@ pub struct AgentWrite {
     stream: TcpStream,
 }
 
+/// One piece of a chunked body, or nothing at all for an empty piece.
+///
+/// **`None` is the whole point.** A zero-length chunk is how chunked encoding spells "that was the
+/// last one", so an empty piece — which a body stream may well yield mid-upload — would end the
+/// write into the box and truncate the file silently: it arrives, shorter, and nothing says so. An
+/// unacknowledged upload with a silent-truncation mode is a defect, not a design (§2.5).
+///
+/// Its own function so that rule can be tested without a socket, which is why it is here rather than
+/// inline: the guard was correct and unguarded, and removing it broke nothing.
+fn chunk_frame(chunk: &[u8]) -> Option<Vec<u8>> {
+    if chunk.is_empty() {
+        return None;
+    }
+    let mut frame = format!("{:x}\r\n", chunk.len()).into_bytes();
+    frame.extend_from_slice(chunk);
+    frame.extend_from_slice(b"\r\n");
+    Some(frame)
+}
+
 impl AgentWrite {
     /// Open a write, or decline. `None` ⇒ nothing was sent and `sbx exec` is free to do it instead.
     fn begin(place: &Place, script: &str, timeout: Duration) -> Option<Self> {
@@ -740,14 +759,11 @@ impl AgentWrite {
 
     /// Push one piece of the body.
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), String> {
-        // A zero-length chunk is how chunked encoding spells "that was the last one", so an empty
-        // piece — which a body stream may well yield — would truncate the write into the box.
-        if chunk.is_empty() {
+        let Some(frame) = chunk_frame(chunk) else {
             return Ok(());
-        }
-        write!(self.stream, "{:x}\r\n", chunk.len())
-            .and_then(|_| self.stream.write_all(chunk))
-            .and_then(|_| self.stream.write_all(b"\r\n"))
+        };
+        self.stream
+            .write_all(&frame)
             .map_err(|e| format!("fleet agent: writing the body: {e}"))
     }
 
@@ -1296,6 +1312,32 @@ impl Place {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty piece must not end the body, because ending it truncates the file in silence.
+    ///
+    /// A zero-length chunk is how chunked encoding spells "that was the last one". A body stream
+    /// yields one readily — a flush boundary, a keep-alive frame — and forwarding it would close the
+    /// write mid-upload: the file lands in the box, shorter than it should be, and nothing says so.
+    /// The guard was there and nothing tested it: removing it broke no test at all.
+    #[test]
+    fn an_empty_piece_is_not_the_end_of_the_body() {
+        assert_eq!(chunk_frame(b""), None, "an empty piece would end the body");
+        assert_eq!(
+            chunk_frame(b"hello"),
+            Some(b"5\r\nhello\r\n".to_vec()),
+            "the length is hex and the piece is framed by CRLFs"
+        );
+        // Sixteen bytes is `10` in hex, not `16` — decimal here would desynchronise the whole body
+        // and the box would read the next frame's header as content.
+        let sixteen = vec![b'x'; 16];
+        let framed = chunk_frame(&sixteen).unwrap();
+        assert!(
+            framed.starts_with(b"10\r\n"),
+            "the chunk length must be hex: {:?}",
+            String::from_utf8_lossy(&framed[..4])
+        );
+        assert_eq!(framed.len(), 4 + 16 + 2);
+    }
     use crate::testutil::*;
 
     /// A guest that never reads its stdin must time out, not hang for ever.

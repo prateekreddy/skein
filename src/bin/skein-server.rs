@@ -2469,8 +2469,11 @@ async fn discard_partial(name: &str, path: &str) {
     .await;
 }
 
-/// Live fleet stream: re-emits the fleet every 2s as an SSE `boxes` event.
-/// (Roadmap: replace polling with a honker subscription so it's push, not poll.)
+/// Live fleet stream: an opening snapshot, then only what moved.
+///
+/// One producer feeds every client — see `start_producing` — and the transitions come from
+/// `skein::stream`. The roadmap note that used to sit here ("replace polling with a subscription")
+/// is done, and left as a stale comment it would describe the shape this no longer has.
 async fn api_events() -> Response {
     // Post-accept and post-auth, like the PTY cap beside it. **Not the whole story**: the auth gate
     // runs after accept, so a cap here bounds authenticated clients and leaves connection exhaustion

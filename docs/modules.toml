@@ -154,8 +154,10 @@ depends_on = ["config"]
 # of which it needs yet: today an Act is a command line somebody else composed, run in the
 # background, with its transcript kept so a surface that was not watching can still read it. The
 # guard is deliberately `util::valid_name` — the same one box names use, because an act id is
-# derived from the box it is about.
-depends_on = ["util"]
+# derived from the box it is about. And `signal`, for the names of the remembered answers an Act
+# says it disturbs: §14 gives `act` exactly that edge, and it is what lets an Act make the
+# declaration without knowing a gate exists.
+depends_on = ["signal", "util"]
 
 [current.assets]
 # Nothing. It hands out bytes, and the one decision it makes — which directory, resolved once at
@@ -212,6 +214,10 @@ depends_on = [
   "place",
   "repos",
   "sbx",
+  # `signal` for the NAMES of the remembered answers, which are part of what a signal is (§2.2's
+  # cadence and its Gate contract). The gates themselves stay here. Split that way so an Act can
+  # declare what it disturbs without depending on the module that owns them.
+  "signal",
   "substrate",
   "util",
   "warden_client",

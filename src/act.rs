@@ -51,6 +51,92 @@ pub const KEPT: usize = 256 * 1024;
 /// server that has been up for a month does not accumulate every box it ever made.
 pub const RETENTION: Duration = Duration::from_secs(30 * 60);
 
+/// The Acts (§2.5), named — because leaving them unnamed is how they grow *beside* the primitives.
+///
+/// Converse is the second-most-frequent job skein has and had no primitive at all. These have no
+/// `desired` and no `check`: they are streaming, non-idempotent, and **doing them twice is doing
+/// them twice**. Forcing them into Operation makes "ensure, never do" a lie.
+///
+/// Every accessor below is an exhaustive match, so a new Act must say what it disturbs before it
+/// compiles — which is the same discipline `signal::Signal` uses for cost, and for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Act {
+    /// Sending a message to an agent, or answering the question it stopped on.
+    Say,
+    /// Interrupting a turn.
+    Interrupt,
+    /// Putting a file into a box.
+    Upload,
+    /// Attaching a terminal to a box's session.
+    Attach,
+    /// Bringing a box up. The one Act that is also a long-running command, which is why
+    /// [`begin`] exists.
+    StartBox,
+}
+
+impl Act {
+    pub const ALL: [Act; 5] = [
+        Act::Say,
+        Act::Interrupt,
+        Act::Upload,
+        Act::Attach,
+        Act::StartBox,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Act::Say => "say",
+            Act::Interrupt => "interrupt",
+            Act::Upload => "upload",
+            Act::Attach => "attach",
+            Act::StartBox => "start-box",
+        }
+    }
+
+    /// What this Act makes wrong, so the board never serves the value from before it.
+    ///
+    /// **An Act must settle the gate**, and that is not a nicety: a `Gate` serves its last good
+    /// answer while refreshing behind the caller, so an Act whose effect nobody announced leaves the
+    /// person who just did it looking at the state from before they did. Three box acts had exactly
+    /// this bug and nothing caught it.
+    ///
+    /// Answering an agent changes what it is doing, which is a box's liveness-adjacent turn state —
+    /// but that arrives as an *edge* from the box's own hooks rather than from a gate, which is why
+    /// `Say` and `Interrupt` disturb nothing here. Saying so is the point: "nothing" is a
+    /// declaration, and an Act that quietly declared nothing because nobody thought about it is the
+    /// case this list exists to make visible.
+    pub fn disturbs(self) -> &'static [crate::signal::Remembered] {
+        use crate::signal::Remembered::*;
+        match self {
+            // The turn state comes back as an edge from the box, not from a gate skein holds.
+            Act::Say | Act::Interrupt => &[],
+            // A file in the box is bytes on the shared disk.
+            Act::Upload => &[BoxDisk],
+            // Attaching reads; it changes nothing anybody has remembered.
+            Act::Attach => &[],
+            // A box that was not there is there now: the sweep has not seen it, and its tree is new
+            // on the disk.
+            Act::StartBox => &[BoxLiveness, BoxDisk],
+        }
+    }
+
+    /// **Every Act reports an outcome**, and this returns `true` for all of them by construction.
+    ///
+    /// An earlier draft of §2.5 called Acts "unacknowledged", and upload is the counter-example that
+    /// settles it: an empty piece mid-stream is how chunked encoding spells "that was the last one",
+    /// so an unacknowledged upload had a **silent truncation** mode — the file arrived, shorter, and
+    /// nothing said so. That is a defect, not a design. Having no `check` is a different thing from
+    /// having no result.
+    ///
+    /// A function rather than a comment because it is the kind of claim that quietly stops being
+    /// true: a new Act whose result is dropped would have to return `false` here and fail its test.
+    pub fn reports_outcome(self) -> bool {
+        match self {
+            Act::Say | Act::Interrupt | Act::Upload | Act::Attach | Act::StartBox => true,
+        }
+    }
+}
+
 /// What an act is doing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
@@ -330,6 +416,61 @@ mod tests {
             "the rest never arrived: {heard:?}"
         );
         settle("act-watch");
+    }
+
+    /// Every Act says what it makes wrong, and every one reports an outcome.
+    ///
+    /// Two properties that fail silently. An Act that does not settle the gate leaves the person who
+    /// just did the thing looking at the state from before they did it — three box acts had exactly
+    /// that bug and nothing caught it. And an Act that drops its result is the upload defect's
+    /// shape: the file arrives, shorter, and nothing says so.
+    #[test]
+    fn an_act_declares_what_it_disturbs_and_always_reports() {
+        for act in Act::ALL {
+            assert!(
+                act.reports_outcome(),
+                "{} does not report an outcome — having no `check` is a different thing from \
+                 having no result, and an upload that dropped its result truncated silently",
+                act.name()
+            );
+            assert!(!act.name().is_empty());
+        }
+        // The ones that change something a gate remembers say so, and the ones that do not say that
+        // — `&[]` is a declaration here, not an oversight, and the doc on `disturbs` says which is
+        // which and why.
+        assert_eq!(
+            Act::StartBox.disturbs(),
+            &[
+                crate::signal::Remembered::BoxLiveness,
+                crate::signal::Remembered::BoxDisk
+            ]
+        );
+        assert_eq!(
+            Act::Upload.disturbs(),
+            &[crate::signal::Remembered::BoxDisk]
+        );
+        assert!(Act::Attach.disturbs().is_empty(), "attaching reads");
+    }
+
+    /// What is **not** an Act, kept where somebody would otherwise add it.
+    ///
+    /// Both were miscategorised once. Takeover is a privileged snapshot, then an Operation, then a
+    /// paid model call, plus durable rollback state — it creates a *replacement* box on the other
+    /// runtime and keeps the original as the way back. Merging a pull request is an Operation of
+    /// class `destructive`, and Acts have no class field at all.
+    ///
+    /// Asserted by absence, which is the only way to assert it: the list is the whole claim.
+    #[test]
+    fn takeover_and_merge_are_not_acts() {
+        let named: Vec<&str> = Act::ALL.iter().map(|a| a.name()).collect();
+        for operation in ["takeover", "merge", "merge-pr", "resize", "destroy"] {
+            assert!(
+                !named.contains(&operation),
+                "`{operation}` is an Operation — it has a check, or a class, or both, and an Act \
+                 has neither"
+            );
+        }
+        assert_eq!(named.len(), Act::ALL.len());
     }
 
     /// An id that is not one is refused before anything runs.

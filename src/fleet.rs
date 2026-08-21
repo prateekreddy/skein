@@ -4296,22 +4296,13 @@ pub fn forget_fleet_liveness() {
     LIVENESS_GATE.invalidate();
 }
 
-/// A remembered answer an act can make wrong.
+/// A remembered answer an act can make wrong — the names live in [`crate::signal`], the gates here.
 ///
-/// Named rather than implied, because there are four gates and an act that settles the one somebody
-/// happened to think of is the bug this exists to end. `stop_box` disturbs liveness; `resize_fleet`
-/// disturbs all four; and getting the list wrong is now a line in a diff rather than a silence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Remembered {
-    /// Which boxes have a live session — [`fleet_liveness`].
-    BoxLiveness,
-    /// What sandboxes exist on this machine — `sbx ls`, via [`crate::sbx::fleet_boxes`].
-    SandboxListing,
-    /// How much of the shared disk each box is using — [`fleet_disk_usage`].
-    BoxDisk,
-    /// The sandbox's own memory, CPU and disk totals — [`fleet_resources`].
-    FleetResources,
-}
+/// Split that way because they are two different facts. *Which* remembered answers exist is part of
+/// the signal primitive's declaration (§2.2), and an Act declares what it disturbs without having to
+/// know that a gate exists at all; *where* each one is kept is this module's business, and nothing
+/// else's.
+pub use crate::signal::Remembered;
 
 impl Remembered {
     fn forget(self) {
