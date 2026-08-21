@@ -49,6 +49,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod sbx;
 pub mod sharedhome;
+pub mod signal;
 pub mod signals;
 pub mod source;
 pub mod substrate;

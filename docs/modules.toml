@@ -260,3 +260,11 @@ depends_on = ["config", "fleet", "util"]
 # that must not require privilege, so a Source that had to ask `config` where something lived would
 # be a Source that could be denied. §14 says the same with an empty row.
 depends_on = []
+
+[current.signal]
+# Nothing, for the same reason as `source` and one of its own: a budget that had to ask `config` how
+# much it could spend would be a budget the thing being measured gets to set. Note the name — this
+# is §14's `signal` module, which today holds only the primitive's *declaration* (budgets, costs,
+# cadence). `signals` beside it is the current code that computes observations, and the two meet
+# when that is rewritten against §14.
+depends_on = []

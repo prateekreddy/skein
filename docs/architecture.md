@@ -1162,6 +1162,20 @@ Cost is **not one number**. Five budgets, each with its own unit and its own enf
 | volume I/O | writes/s | mounted writes are expensive; the observer shapes its writes for this |
 | delivery | boxes × transitions × clients | the event stream — §10.1 |
 
+**The board tick, measured.** `src/signal.rs` declares what each of the board's twelve signals
+spends, and `tests/board_cost.rs` runs a tick under a `PATH` of counting wrappers and compares the
+tally with the sum. A twelve-box fleet forks **three** processes on a cold tick — `sbx ls`, one `du`
+over the fleet root, one liveness sweep — and **the same three at fifty boxes**, because each answers
+for the whole fleet in one call. Warm, inside every gate's window, it forks **nothing**.
+
+The exception is the one worth knowing: **the branch fallback forks per box and has no gate.** When
+the registry, the launch spec and the repo all fail to name a box's branch, `git rev-parse` is asked
+per row, every tick, per open tab — twelve boxes measured at twelve forks on a warm tick. It is the
+only per-box fork on the board and it was invisible until the costs had to be written down.
+
+A cost declares its **basis** — the file and line, or the measurement — and one with an empty basis
+fails a test. That is the "measured, not asserted" line above, made into something that can fail.
+
 Correcting the first draft: in-fleet mode does **not** make observation cheaper, because host cost was
 already zero by design. What it does is put skein's web server, SSE fan-out, git operations and
 GitHub polling **inside the fleet's memory reservation** — the reservation whose summing is the entire
