@@ -2808,6 +2808,10 @@ pub fn provision_script(name: &str, store: &str) -> String {
 /// re-run would otherwise hand a box someone else's uncommitted work or strand its namespace.
 pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> Result<(), String> {
     let out = start_box_inner(name, repo, branch, agent_command);
+    // Whatever happened, the sweep's picture is now older than the act. On success there is a box
+    // that was not there; on failure there may be a half-started one — and the caller is a person
+    // who just pressed a button and is looking at the row.
+    forget_fleet_liveness();
     // Kept, because the person who needs it is not looking at this terminal. Creating a box from the
     // cockpit runs `skein start` in a PTY; when it fails, that terminal closes, the browser
     // reconnects, and the fresh one has none of the output. What it said instead was "its last start
@@ -4157,12 +4161,23 @@ static LIVENESS_GATE: crate::util::Gate<std::collections::HashMap<String, bool>>
 /// Forget the remembered sweep, so the next caller waits for the truth instead of being handed the
 /// last picture.
 ///
-/// skein already does this internally wherever it changes what the sweep would see — starting a box,
-/// restarting a dead session, resizing the fleet. This exposes it for the one case that is outside
-/// skein: something *else* stopped a box, so the gate is holding an answer that is not merely stale
-/// but wrong, and a warm gate serves that answer immediately while refreshing behind the caller.
-/// That behaviour is deliberate and worth keeping — it is what stops the board blanking on a slow
-/// tick — which is exactly why the caller who knows better has to say so.
+/// Every act that changes what the sweep would see calls this, and **three of them did not**: this
+/// doc claimed "starting a box, restarting a dead session, resizing the fleet" and only the last two
+/// were true. Starting, stopping and destroying a box each change a box's liveness and left the gate
+/// holding the answer from before — a warm gate serves that immediately while refreshing behind the
+/// caller, and its last-good is sticky, so a sweep that then fails serves the pre-act picture until
+/// one succeeds.
+///
+/// That serve-stale behaviour is deliberate and worth keeping — it is what stops the board blanking
+/// on a slow tick — which is exactly why the caller who knows better has to say so. It is also the
+/// one property that couples acting to observing: without it the board shows the value from before
+/// the act, which is the thing anybody who just pressed a button is looking straight at.
+///
+/// Restarting the *agent* inside a box is deliberately not one of these: the tmux server is what
+/// liveness reads, and it survives — the box was running before and is running after.
+///
+/// Public for the case that is outside skein: something *else* stopped a box, so the gate is
+/// holding an answer that is not merely stale but wrong.
 ///
 /// The integration test needs it because `cfg!(test)` is false from `tests/`: the library it links
 /// was built without it, so the "no gate under test" escape inside this module does not apply there,

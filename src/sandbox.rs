@@ -406,9 +406,13 @@ pub fn stop_box(name: &str) -> Result<(), String> {
     if let Some(rec) = shared_record(name) {
         let sock = sh_quote(&rec.sock);
         let script = format!("tmux -S {sock} kill-server 2>/dev/null; rm -f {sock}; exit 0");
-        return own_sandbox(&rec.sandbox)
+        let stopped = own_sandbox(&rec.sandbox)
             .exec(&script, Duration::from_secs(30))
             .map(|_| ());
+        // The tmux server IS this box's liveness, so killing it makes the sweep's picture wrong
+        // rather than merely old — and the gate serves its last good answer while it refreshes.
+        crate::fleet::forget_fleet_liveness();
+        return stopped;
     }
     let (_out, err, code) = run_shell(&stop_command(name))?;
     if code != 0 {
@@ -534,6 +538,9 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
         );
         own_sandbox(&rec.sandbox).exec(&script, Duration::from_secs(120))?;
         forget_place(name);
+        // Same reason as `stop_box`, and worse here: the box is not merely stopped, it is gone, and
+        // a sweep serving its last good answer would keep a destroyed box on the board.
+        crate::fleet::forget_fleet_liveness();
         if let Err(e) = delist_box(name) {
             eprintln!("skein: destroyed {name}, but delisting it failed (harmless): {e}");
         }
