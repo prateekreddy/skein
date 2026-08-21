@@ -78,6 +78,9 @@ struct Asked {
     sandbox: String,
     #[serde(default)]
     args: Vec<String>,
+    /// Environment for the command. Part of what will run, so part of what a person is shown.
+    #[serde(default)]
+    env: Vec<(String, String)>,
 }
 
 /// What the audit sink is told, on the wire.
@@ -214,6 +217,7 @@ impl Warden {
             operation: asked.operation,
             sandbox: asked.sandbox,
             args: asked.args,
+            env: asked.env,
         };
         let _ = self.log.record(&op.operation, "asked", which.name());
 

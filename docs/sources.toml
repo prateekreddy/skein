@@ -22,9 +22,10 @@ spelled_in = ["fleet", "place", "sandbox"]
 spelled_in = []
 
 [http]
-# `warden/serve` is the warden's own listener, not a client: it is the far end of §2.3's "http
-# reaches GitHub, and the warden". Loopback only — see §8.6 for why, and for when that changes.
-spelled_in = ["gitgate", "github", "place", "repos", "warden/serve"]
+# `warden/serve` is the warden's own listener and `warden_client` is the near end: together they
+# are §2.3's "http reaches GitHub, and the warden", and this is the pair that carries fleet create
+# and destroy since delivery step 3. Loopback only — §8.6 says why, and when that changes.
+spelled_in = ["gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and
@@ -37,8 +38,11 @@ spelled_in = ["gitgate", "github", "place", "repos", "warden/serve"]
 # The three skein units were invisible until the pattern was corrected: skein does not spawn `sbx`
 # with `Command::new` — it goes through `run_capture_for` and friends — so the checker had been
 # reporting `fleet` as reaching nothing while it spawned the fleet create and the resize's destroy.
-# They are listed so the count can be watched going DOWN as delivery step 3 moves them behind the
-# warden, rather than discovered later.
+#
+# `fleet` went 5 → 2 when those two moved behind the warden (delivery step 3). What is left is not
+# lifecycle: `sbx ports` reads, and `sbx exec -it` is the interactive login. `bin/skein`'s two are
+# `sbx` in a tool list and `run_sbx`, which is attach — so the count there does not fall with this
+# step, and expecting it to was a mistake in the item.
 spelled_in = [
   "bin/skein",
   "bin/skein-server",

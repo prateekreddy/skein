@@ -150,6 +150,7 @@ mod tests {
             operation: "op-7f3a91".into(),
             sandbox: "skein-fleet".into(),
             args: vec!["--memory".into(), "26g".into()],
+            env: Vec::new(),
         }
     }
 

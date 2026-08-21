@@ -32,7 +32,6 @@ use crate::sbx::fleet_boxes;
 use crate::util::valid_name;
 use crate::util::*;
 use chrono::Utc;
-use std::io::IsTerminal;
 use std::time::Duration;
 
 /// The launcher, embedded so it can be installed into a sandbox that has never seen this repo.
@@ -1043,6 +1042,51 @@ pub fn box_cgroup_kill(name: &str) -> String {
     )
 }
 
+/// Ask the host warden to create the fleet sandbox.
+///
+/// **skein does not run `sbx create` any more**, and that is delivery step 3 rather than a
+/// refactor: create terminates skein — it does not exist before the fleet does — so fleet lifecycle
+/// cannot live inside the fleet, permanently (§8). Routing it through the warden while skein is
+/// still on the host is what exercises both callers before anything moves.
+///
+/// The confirmation moved with it, and moved to a better place. `sbx create` asks before it mounts
+/// host directories, and skein used to answer that itself when it had a terminal and capture it when
+/// it did not — which meant the server created fleets with nobody consulted. Now the question is put
+/// to a person at the warden, on the host, every time (§8.1).
+///
+/// **A warden that cannot be reached does not silently fall back to running it here.** That would
+/// re-open the path this exists to close, and the fallback would be the one taken on exactly the day
+/// something was wrong. It fails with the line to run by hand instead, which is the escape hatch
+/// that does not undermine the rule.
+fn create_through_warden(sandbox: &str, mounts: &[String]) -> Result<(), String> {
+    use crate::warden_client::{by_hand, Answered, Warden};
+    let argv = create_argv(sandbox, mounts);
+    let warden = Warden::configured();
+    // The environment travels as part of the request rather than being set here: it is the warden's
+    // process that runs the command, so a fleet configured for a bigger disk would otherwise be
+    // recreated at sbx's default 20 GB because the variable stayed behind. It is also shown in the
+    // approval — `DOCKER_SANDBOXES_ROOT_SIZE=200g` is most of what that command does.
+    let env = create_env();
+    match warden
+        .create(sandbox, &argv, &env)
+        .map_err(|why| format!("{why}\n  or create it once by hand:\n  {}", by_hand(&argv)))?
+    {
+        Answered::Ran(_) | Answered::Replayed(_) => Ok(()),
+        Answered::Failed(detail) => Err(format!(
+            "creating fleet sandbox {sandbox}: {detail}\n\
+             if nobody was there to approve it, run the warden where a person is — or create it \
+             once by hand:\n  {}",
+            by_hand(&argv)
+        )),
+        // Neither of these is "it did not happen", and a create started over one that may already
+        // exist is how two fleets end up sharing a name.
+        undecided => Err(format!(
+            "creating fleet sandbox {sandbox}: {}",
+            undecided.detail()
+        )),
+    }
+}
+
 /// Bring a fleet that already exists into line with the skein that has just started.
 ///
 /// A fleet sandbox is long-lived and skein is not: the sandbox keeps the launcher and the cgroup
@@ -1465,46 +1509,7 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
                 // blocks the work, and reclaiming while a create is still running is precisely the
                 // second copy this prevents.
                 Duration::from_secs(1800),
-                || {
-                    let argv = create_argv(sandbox, mounts);
-                    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-                    // `sbx create` confirms before it mounts host directories, and creating the fleet
-                    // sandbox mounts several. When a terminal is there, hand it over — the question is for
-                    // the person running the command. When there isn't (the server), capture it, but on a
-                    // budget that fits booting a microVM rather than the 30s action timeout.
-                    let env = create_env();
-                    let failure = if std::io::stdin().is_terminal() {
-                        match run_attached_env("sbx", &args, &env)? {
-                            0 => None,
-                            code => Some(format!("sbx exited {code}")),
-                        }
-                    } else {
-                        let (out, err, code) =
-                            run_capture_for_env("sbx", &args, Duration::from_secs(900), &env)?;
-                        match code {
-                            0 => None,
-                            _ => Some({
-                                let detail = if err.trim().is_empty() { out } else { err };
-                                detail.trim().to_string()
-                            }),
-                        }
-                    };
-                    if let Some(detail) = failure {
-                        // The hand-run line must carry the environment too, or a fleet configured for a
-                        // bigger disk is quietly recreated at the default 20 GB by the very command the
-                        // error told someone to type.
-                        let prefix = env
-                            .iter()
-                            .map(|(k, v)| format!("{k}={} ", sh_quote(v)))
-                            .collect::<String>();
-                        return Err(format!(
-                    "creating fleet sandbox {sandbox}: {detail}\n\
-                     if that was a confirmation you never saw, create it once by hand:\n  {prefix}sbx {}",
-                    args.join(" ")
-                ));
-                    }
-                    Ok(())
-                },
+                || create_through_warden(sandbox, mounts),
             )?;
             if let crate::attempt::Outcome::InFlight(theirs) = outcome {
                 return Err(format!(
@@ -3702,15 +3707,26 @@ pub fn resize_fleet(
     })?;
     // Not the 30s action budget: tearing a microVM down is slower than a status query, and a
     // timeout here is reported as a failed destroy while the destroy carries on regardless.
-    let (out, err, code) =
-        run_capture_for("sbx", &["rm", "-f", &sandbox], Duration::from_secs(300))?;
-    if code != 0 {
-        let detail = if err.trim().is_empty() { out } else { err };
-        return Err(format!(
-            "could not destroy {sandbox}: {} — every box's work is saved in its repo store under \
-             {run}, and `skein start <box>` restores it once the sandbox is rebuilt",
-            detail.trim()
-        ));
+    // Through the warden, for the same reason as the create and one of its own: destroy terminates
+    // skein, so this is the operation that most obviously cannot live inside the thing it destroys.
+    // A person at the host confirms it by typing the operation id (§8.1), which for "destroy every
+    // box's sandbox" is the right amount of friction.
+    match crate::warden_client::Warden::configured().destroy(&sandbox) {
+        Ok(crate::warden_client::Answered::Ran(_))
+        | Ok(crate::warden_client::Answered::Replayed(_)) => {}
+        Ok(other) => {
+            return Err(format!(
+                "could not destroy {sandbox}: {} — every box's work is saved in its repo store \
+                 under {run}, and `skein start <box>` restores it once the sandbox is rebuilt",
+                other.detail()
+            ));
+        }
+        Err(why) => {
+            return Err(format!(
+                "could not destroy {sandbox}: {why}\n  every box's work is already saved in its \
+                 repo store under {run}, so nothing is lost by stopping here"
+            ));
+        }
     }
     // The namespaces died with the sandbox. Forget them before rebuilding, or `place_of` would hand
     // out pids into a VM that no longer exists.
@@ -8439,10 +8455,16 @@ b idle 5000000 1048576 4
     /// two boxes started together both see "absent" and both create — the second one over a sandbox
     /// the first is still building.
     ///
-    /// Genuinely concurrent, and the fake `create` sleeps so the two overlap; a serialised pair
-    /// would pass against no lease at all. The assertion is about what crossed the process
-    /// boundary — exactly one `create` in the argv the fake `sbx` recorded — and about the second
-    /// caller being told what is happening rather than being told the work is owed.
+    /// Genuinely concurrent, and the fake warden's create sleeps so the two overlap; a serialised
+    /// pair would pass against no lease at all. The assertion is about what crossed the process
+    /// boundary — exactly one create reaching the warden — and about the second caller being told
+    /// what is happening rather than being told the work is owed.
+    ///
+    /// Two mechanisms could produce "one create" here and only one of them is under test. The
+    /// warden has an outcome store keyed by operation id and a doorway that admits one at a time
+    /// (§8.2, §8.5), so a *real* warden would collapse these two on its own — and `attempt.rs`'s
+    /// lease would then be untested. The stub deliberately has neither: it counts and answers, so
+    /// what stops the second create is skein's lease and nothing else.
     #[test]
     fn two_box_starts_at_once_create_the_fleet_once() {
         let _g = env_lock();
@@ -8451,23 +8473,42 @@ b idle 5000000 1048576 4
         use std::os::unix::fs::PermissionsExt;
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let log = home.join("argv.log");
         let fake = bin.join("sbx");
-        // `ls` answers with an empty fleet, so every caller sees the sandbox as absent — which is
-        // also what a caller sees while another one is midway through creating it. `create` takes
-        // its time, as the real one does.
-        std::fs::write(
-            &fake,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
-                 case \"$1\" in ls) echo '[]' ;; create) sleep 1 ;; esac\nexit 0\n",
-                log = log.display()
-            ),
-        )
-        .unwrap();
+        // `sbx ls` still answers, because that is how skein decides the sandbox is absent — which is
+        // also what a caller sees while another one is midway through creating it.
+        std::fs::write(&fake, "#!/bin/sh\necho '[]'\nexit 0\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // A warden that counts and takes its time, and does nothing else. See the note above.
+        let creates = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let counted = std::sync::Arc::clone(&creates);
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let counted = std::sync::Arc::clone(&counted);
+                std::thread::spawn(move || {
+                    use std::io::{Read, Write};
+                    let mut raw = [0u8; 4096];
+                    let read = stream.read(&mut raw).unwrap_or(0);
+                    if String::from_utf8_lossy(&raw[..read]).contains("/v1/create") {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    let body = r#"{"state":"ran","ok":true,"said":"made"}"#;
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                });
+            }
+        });
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
 
         let started: Vec<_> = (0..2)
             .map(|_| std::thread::spawn(|| ensure_fleet("skein-fleet", &[])))
@@ -8475,12 +8516,12 @@ b idle 5000000 1048576 4
         let outcomes: Vec<Result<(), String>> =
             started.into_iter().map(|t| t.join().unwrap()).collect();
         std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_WARDEN");
 
-        let asked = std::fs::read_to_string(&log).unwrap_or_default();
-        let creates = asked.lines().filter(|l| l.starts_with("create")).count();
+        let creates = creates.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             creates, 1,
-            "two starts created the fleet {creates} times:\n{asked}"
+            "two starts asked the warden to create the fleet {creates} times"
         );
         // And the one that lost says what is happening. "not there" would send it round again.
         let told: Vec<&String> = outcomes.iter().filter_map(|r| r.as_ref().err()).collect();

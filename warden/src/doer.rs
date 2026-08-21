@@ -31,6 +31,12 @@ pub struct Request {
     pub sandbox: String,
     /// The arguments the warden will pass, already resolved by it. Empty for `destroy`.
     pub args: Vec<String>,
+    /// Environment for the command, as `(name, value)`.
+    ///
+    /// It is part of what will run and is rendered as such: `DOCKER_SANDBOXES_ROOT_SIZE=200g` is the
+    /// difference between a 20 GB fleet and a 200 GB one, and an approval that showed the argv but
+    /// not the environment would be showing most of the command.
+    pub env: Vec<(String, String)>,
 }
 
 /// Whoever decides whether a privileged thing may happen.
@@ -66,12 +72,13 @@ pub fn create(approver: &dyn Approver, request: &Request) -> Result<String, Stri
     // The text a person is shown is built HERE, from the resolved arguments this function will
     // itself execute — not from anything in the request that says how to describe it.
     let what = format!(
-        "`sbx create {} {}`",
+        "`{}sbx create {} {}`",
+        described_env(request),
         request.sandbox,
         request.args.join(" ")
     );
     approver.approve(request, &what)?;
-    run(&argv_create(request))
+    run(&argv_create(request), &request.env)
 }
 
 /// Destroy it.
@@ -79,7 +86,19 @@ pub fn create(approver: &dyn Approver, request: &Request) -> Result<String, Stri
 pub fn destroy(approver: &dyn Approver, request: &Request) -> Result<String, String> {
     let what = format!("`sbx rm -f {}` — THIS DESTROYS THE FLEET", request.sandbox);
     approver.approve(request, &what)?;
-    run(&argv_destroy(request))
+    run(&argv_destroy(request), &request.env)
+}
+
+/// The environment, as it appears in front of the command a person is shown.
+///
+/// Rendered the way it would be typed, so the approval text and the hand-run line a caller is given
+/// on failure are the same string in a different place.
+pub fn described_env(request: &Request) -> String {
+    request
+        .env
+        .iter()
+        .map(|(k, v)| format!("{k}={v} "))
+        .collect()
 }
 
 /// The argv a create will run, as its own function so it is a contract rather than a detail.
@@ -107,9 +126,10 @@ pub fn argv_destroy(request: &Request) -> Vec<String> {
 /// The first version of this function took the program as a parameter and the checker went quiet on
 /// the most privileged reach in the system.
 #[cfg(any(feature = "create", feature = "destroy"))]
-fn run(argv: &[String]) -> Result<String, String> {
+fn run(argv: &[String], env: &[(String, String)]) -> Result<String, String> {
     let out = std::process::Command::new("sbx")
         .args(argv)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .output()
         .map_err(|e| format!("could not run `sbx`: {e}"))?;
     match out.status.success() {
@@ -135,6 +155,7 @@ mod tests {
             operation: "op-1".into(),
             sandbox: "skein-fleet".into(),
             args: vec!["--memory".into(), "26g".into()],
+            env: vec![("DOCKER_SANDBOXES_ROOT_SIZE".into(), "200g".into())],
         }
     }
 
@@ -198,6 +219,7 @@ mod tests {
         let seen = Watcher(std::sync::Mutex::new(Vec::new()));
         let sneaky = Request {
             operation: "op-2".into(),
+            env: Vec::new(),
             // The only place a requester's string reaches the text is the one the warden also
             // executes, so the two cannot disagree.
             sandbox: "skein-fleet".into(),

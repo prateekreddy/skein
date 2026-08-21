@@ -182,7 +182,21 @@ depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
 depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 
 [current.fleet]
-depends_on = ["attempt", "config", "gitgate", "kit", "place", "repos", "sbx", "substrate", "util"]
+# `warden_client` since delivery step 3: fleet create and the resize's destroy no longer run `sbx`
+# here — they are asked of the host warden, which is the whole point of building it before skein
+# moves inside (§8). The `sbx` spellings left in this module are `ports` and the interactive login.
+depends_on = [
+  "attempt",
+  "config",
+  "gitgate",
+  "kit",
+  "place",
+  "repos",
+  "sbx",
+  "substrate",
+  "util",
+  "warden_client",
+]
 
 [current.gitgate]
 depends_on = ["config", "fleet", "place", "repos", "util"]
@@ -264,6 +278,12 @@ depends_on = ["config", "fleet", "util"]
 # and the second is §2.3's type rather than a string this module invents. Nothing else: provenance
 # that had to ask `config` or `fleet` anything would be provenance the subject could shape.
 depends_on = ["source"]
+
+[current.warden_client]
+# §14 calls this `warden-client` and gives it `operation`. `util` for `sh_quote`, which is the
+# hand-run line a person gets when the warden cannot be reached — nothing else, because a client that
+# had to ask `config` or `fleet` anything would be a client the thing it is talking about could shape.
+depends_on = ["util"]
 
 [current.source]
 # Nothing, and that is the rule rather than an accident: reaching a subject is precisely the thing
