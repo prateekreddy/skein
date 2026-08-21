@@ -123,6 +123,7 @@ impl AsRef<std::ffi::OsStr> for TempDir {
 }
 
 pub(crate) fn tempdir() -> TempDir {
+    sweep_stale_runs();
     let d = env::temp_dir().join(format!(
         "skein-test-{}-{}",
         std::process::id(),
@@ -130,6 +131,64 @@ pub(crate) fn tempdir() -> TempDir {
     ));
     fs::create_dir_all(&d).unwrap();
     TempDir(d)
+}
+
+/// How old a leftover has to be before this run treats it as nobody's.
+///
+/// An hour, not a minute: a `cargo test --all` on a loaded machine runs for minutes, and several of
+/// them can overlap on one box. Deleting a directory another process is still using is a worse
+/// failure than leaving one behind, and it would look like a flaky test in a suite this one does not
+/// even know about.
+const STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Is this leftover this crate's, and from a run that is over?
+///
+/// Its own function so both halves can be asserted without arranging a filesystem: the name rule is
+/// what keeps this from touching anything it did not create, and the age rule is what keeps it from
+/// deleting the scratch of a run happening beside it. Getting either wrong is a test suite that
+/// breaks another one, which is the hardest kind of failure to attribute.
+fn nobodys(name: &str, age: std::time::Duration) -> bool {
+    name.starts_with("skein-test-") && age > STALE
+}
+
+/// Remove scratch directories from runs that are over, once per process.
+///
+/// **The guard above is not enough, and this is the measurement rather than a worry.** One run in
+/// this tree leaves about three behind — the doc on [`TempDir`] explains why: a background refresh
+/// outliving the test recreates a path the guard has already removed. Three is nothing; three per
+/// run for a month is not. Measured on this box: **7,933 directories holding 6.9 GB**, on a
+/// filesystem that was then 98% full and failing a resize test for want of 273 MiB.
+///
+/// So the guard cleans up after a test and this cleans up after a *run*, and neither is redundant:
+/// the guard is exact and cannot catch what outlives it, this is approximate and catches whatever
+/// the guard missed however it got there.
+///
+/// Only this crate's own scratch — `skein-test-*` under the temp directory, which nothing but
+/// [`tempdir`] creates — and only what is older than [`STALE`], so a run beside this one is safe.
+fn sweep_stale_runs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(entries) = fs::read_dir(env::temp_dir()) else {
+            return;
+        };
+        let now = std::time::SystemTime::now();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let age = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|at| now.duration_since(at).unwrap_or_default())
+                .unwrap_or_default();
+            if nobodys(name, age) {
+                // Modes first, for the same reason the guard does it: a fixture deliberately at
+                // 000 cannot be removed without being opened, and one of those is what made `du`
+                // exit nonzero and blank the disk figure for every box on the board.
+                reopen(&entry.path());
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    });
 }
 
 /// An RFC3339 timestamp `s` seconds in the past — for ageing a signal without sleeping.
@@ -204,6 +263,34 @@ pub(crate) fn placed(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sweep touches this crate's own leftovers and nothing else, and only once a run is over.
+    ///
+    /// Both halves have a cost if they are wrong, and they are different costs. A name rule that is
+    /// too loose deletes somebody else's data out of a shared temp directory. An age rule that is
+    /// too eager deletes the scratch of a `cargo test` running beside this one, which shows up as a
+    /// flaky failure in a suite this process has never heard of.
+    #[test]
+    fn the_sweep_takes_old_scratch_of_ours_and_nothing_else() {
+        let old = STALE + std::time::Duration::from_secs(1);
+        let fresh = std::time::Duration::from_secs(1);
+        assert!(nobodys("skein-test-1234-0", old));
+        assert!(
+            !nobodys("skein-test-1234-0", fresh),
+            "a run beside this one"
+        );
+        // Named by other things in the same directory — skein's own integration tests among them,
+        // which reuse a fixed name per test and are not this function's to remove.
+        for theirs in [
+            "skein-it-routes-99",
+            "skein-warden-rt-99",
+            "skein-audit-said-99",
+            "systemd-private-whatever",
+            "",
+        ] {
+            assert!(!nobodys(theirs, old), "{theirs} is not ours to delete");
+        }
+    }
 
     /// `reopen` must never chmod through a symlink — including out of the tree it was handed.
     ///
