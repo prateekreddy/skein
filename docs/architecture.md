@@ -1384,9 +1384,22 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 
 9. **The workshop toggle states what it grants.** It is fleet root, and it is the boundary's only
    deliberate in-fleet escape hatch.
-10. **Cross-box messaging renders provenance** (§9.2.2, kept). At minimum, inbound-from-a-box is
-   distinguishable from inbound-from-you — otherwise the one channel that carries control between
-   boxes is also the one with no attribution.
+
+   **Done, and the terms are three rather than two.** The switch and the launcher's per-start banner
+   both name them: it sees every box's files, it acts at fleet scope, and **it holds the fleet agent
+   token** — every ordinary box gets an empty file bound over that path and a privileged one does
+   not. Beside them, the line a person cannot discover by using the box: **the mount cover is off
+   for it**, which is not only its own business — the guards on the git-token directory (R8) and the
+   resize archive both hold *because an ordinary box cannot plant a link where the host writes*, and
+   this is the switch that turns that off.
+
+   Short on purpose: a warning long enough to be skipped is a warning nobody reads. A test asserts
+   the banner keeps naming all four, because wording drifts out of a shell script silently.
+10. ~~**Cross-box messaging renders provenance**~~ **done** (§9.2.2, kept). Inbound-from-a-box is
+   distinguishable from inbound-from-you, and by **which directory a message was found in** rather
+   than by a field its writer fills: the shared store's `mailbox/` is writable from every box, a
+   box's own `inbox/` under its state is bound read-only into it. The delivery says which — `from
+   you`, or the claimed name with the fact that nobody checked it.
 11. **`/run` is covered, or its exposure is stated.** §9.1 notes the cover reaches neither `/run` nor
    the per-user socket directory, and no requirement followed.
 

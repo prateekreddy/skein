@@ -1114,8 +1114,18 @@ unset fleet_token
 #
 # The whole risk of this switch is forgetting which box carries it: a box that can read every other
 # box's credentials must never be one you have to check a settings pane to identify.
+#
+# **Three grants, named** (architecture §9.5 R9). The first two were always said; the third and the
+# line after it were not, and both are things somebody turning this on cannot discover by using it.
+# It holds the fleet agent's token, because the empty file bound over it above is skipped here. And
+# it is exempt from the mount cover — which is not only its own business: the guards on the git
+# token directory and the resize archive both hold *because an ordinary box cannot plant a link
+# where the host writes*, and this switch is what turns that off.
+#
+# Short on purpose. A warning long enough to be skipped is a warning nobody reads, and the reasoning
+# belongs in the architecture rather than on a terminal at every start.
 if [ "${SKEIN_BOX_PRIVILEGED-}" = "1" ]; then
-  echo "skein: $box is the WORKSHOP box — it sees every box's files and can act at fleet scope. Settings → Boxes turns this off." >&2
+  echo "skein: $box is the WORKSHOP box. It sees every box's files, acts at fleet scope, and holds the fleet agent token; the mount cover is off for it. Settings → Boxes turns this off." >&2
 fi
 
 # --- GitHub: one repo to write, everything else to read ------------------------------------------

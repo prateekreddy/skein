@@ -1224,7 +1224,7 @@
       <label class="nb-lbl">workshop box</label>
       <select id="bs-priv">
         <option value="0">No — sees only its own files</option>
-        <option value="1">Yes — sees every box, and can act at fleet scope</option>
+        <option value="1">Yes — sees every box, acts at fleet scope, holds the fleet agent token</option>
       </select>
       <div class="ar-derived" id="bs-priv-note"></div>
       <!-- One-shot actions, not settings: each spends a real round trip, so they are buttons you
@@ -5547,8 +5547,11 @@ function openBoxSettings(name) {
       // both, because debugging skein itself means reading the fleet.
       const pv = document.getElementById("bs-priv");
       pv.value = cur.privileged ? "1" : "0";
+      // The terms, where the switch is (§9.5 R9). The mount cover being off is the one a person
+      // cannot discover by using the box: it is what the guards on the git-token directory and the
+      // resize archive lean on, and this switch turns it off for this box.
       document.getElementById("bs-priv-note").textContent = cur.privileged
-        ? "this box can read every other box's credentials and conversations — keep it to the one you develop skein in"
+        ? "this box reads every other box's credentials and conversations, and the mount cover is off for it — keep it to the one you develop skein in"
         : "applies at this box's next start — a namespace is built when a box comes up";
       // Work tracking: the button says what pressing it would DO, which depends on whether the box
       // already holds a token. Nothing host-side records that, so the panel asked the box.

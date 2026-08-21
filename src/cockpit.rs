@@ -297,6 +297,43 @@ mod tests {
         assert!(BUNDLE.contains("/api/boxes/") && BUNDLE.contains("/api/pr/"));
     }
 
+    /// The workshop switch names what it grants, in the launcher and on the switch alike (§9.5 R9).
+    ///
+    /// The risk of this one is not that somebody turns it on by accident — it is that they turn it
+    /// on for a reason and then forget which box carries it. So the box says what it is at every
+    /// start, and the assertion is that the wording keeps naming the grants rather than drifting
+    /// into "workshop box" and a shrug. Two of the three cannot be discovered by using the box: it
+    /// holds the fleet agent's token, and the mount cover is off for it — which is what the guards
+    /// on the git-token directory and the resize archive lean on.
+    #[test]
+    fn the_workshop_switch_says_what_it_grants() {
+        let launcher = include_str!("box-session.sh");
+        let banner = launcher
+            .lines()
+            .find(|l| l.contains("WORKSHOP box"))
+            .expect("a privileged box announces itself at every start");
+        for term in [
+            "every box's files",
+            "fleet scope",
+            "fleet agent token",
+            "mount cover is off",
+        ] {
+            assert!(
+                banner.contains(term),
+                "the start-up banner no longer names `{term}`: {banner}"
+            );
+        }
+        // And the switch itself, where the decision is actually made.
+        assert!(
+            INDEX.contains("holds the fleet agent token"),
+            "the switch offers a grant it does not name"
+        );
+        assert!(
+            INDEX.contains("the mount cover is off for it"),
+            "the one term a person cannot discover by using the box is not on the switch"
+        );
+    }
+
     /// Setting up reads and writes the names the server uses, on both surfaces.
     ///
     /// This is the first surface `/v2` has that *writes*, and a write that names a field wrongly is
