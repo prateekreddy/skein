@@ -22,6 +22,14 @@ fn main() {
     let cmd = args.first().map(String::as_str).unwrap_or("ls");
     let rest: &[String] = if args.len() > 1 { &args[1..] } else { &[] };
 
+    // Before anything reads or writes the volume. A volume this binary does not understand, or one
+    // that was moved and left an environment variable behind, is a refusal naming the fix — never a
+    // half-read, and never a second empty installation filling up beside the real one.
+    if let Err(e) = skein::volume::ensure_volume() {
+        eprintln!("{DIM}skein:{RESET} {e}");
+        std::process::exit(1);
+    }
+
     let result = match cmd {
         "ls" | "status" => cmd_ls(),
         "add" => match rest.first() {
@@ -34,6 +42,14 @@ fn main() {
             None => Err("usage: skein remove <repo-id>".into()),
         },
         "doctor" => cmd_doctor(),
+        "migrate" => match rest.first() {
+            Some(target) => skein::volume::migrate(target).map(|report| println!("{report}")),
+            None => Err(
+                "usage: skein migrate <directory>   (the volume moves there; nothing is \
+                 deleted)"
+                    .into(),
+            ),
+        },
         "shared" => cmd_shared(rest),
         "start" => match rest.first() {
             Some(name) => cmd_start(name, &rest[1..]),
@@ -112,6 +128,7 @@ skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
 skein doctor          check registry, tools, and the shared sandbox if one is on\n  \
+skein migrate <dir>   copy this installation onto another volume (nothing is deleted)\n  \
 skein version\n  \
 skein help\n\n\
 the web cockpit lives in `skein-server` (run it, open http://127.0.0.1:7878).\n\n\

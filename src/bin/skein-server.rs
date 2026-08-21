@@ -78,6 +78,13 @@ async fn main() {
     // Pick up a local .env so the registry/repo paths needn't be typed each run (real env vars
     // still win; a malformed file is reported, not silently half-applied). See skein::util::load_dotenv.
     skein::util::load_dotenv();
+    // Before the probe install, the kit and the port: those all write to the volume, and a volume
+    // this binary does not understand must be refused rather than written to. `load_dotenv` comes
+    // first because $SKEIN_HOME may be in the .env, and checking the wrong volume proves nothing.
+    if let Err(e) = skein::volume::ensure_volume() {
+        eprintln!("skein-server: {e}");
+        std::process::exit(1);
+    }
     // Install skein's turn-state probe into the shared store (idempotent), so every box reports
     // working/waiting/needs-input + task without the repo shipping hooks. Best-effort.
     if let Err(e) = skein::probes::ensure_probe_all() {

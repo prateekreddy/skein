@@ -150,10 +150,10 @@ depends_on = ["config", "signals", "util"]
 depends_on = ["config"]
 
 [current."bin/skein"]
-depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util"]
+depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
-depends_on = ["ai", "apiauth", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util"]
+depends_on = ["ai", "apiauth", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
 
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
@@ -241,3 +241,9 @@ depends_on = ["config", "repos", "sandbox", "sbx", "util"]
 
 [current.transcript]
 depends_on = ["fleet", "place", "repos", "sandbox", "util"]
+
+[current.volume]
+# `fleet` for one question only — is the sandbox up — because moving the volume out from under a
+# running box leaves it reading a copy nobody writes to any more. Nothing depends on this except
+# the two binaries, so it cannot join the knot however it grows.
+depends_on = ["config", "fleet", "util"]
