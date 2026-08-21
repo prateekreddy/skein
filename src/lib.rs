@@ -22,6 +22,7 @@
 pub mod ai;
 pub mod answer;
 pub mod apiauth;
+pub mod attempt;
 pub mod board;
 pub mod cockpit;
 pub mod codeowners;

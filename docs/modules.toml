@@ -149,6 +149,13 @@ depends_on = ["config", "signals", "util"]
 [current.apiauth]
 depends_on = ["config"]
 
+[current.attempt]
+# `util` alone, for the locked read-modify-write the claim is. NOT `config`: asking it where the
+# volume lives put this module straight into the eighteen-module knot, which `module-check` said out
+# loud the moment it did — so the directory is a parameter and the caller knows where its own state
+# goes. An attempt lease that had to ask another module anything is a lease that module cannot take.
+depends_on = ["util"]
+
 [current."bin/skein"]
 depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
@@ -171,7 +178,7 @@ depends_on = ["diff", "registry", "repos", "sbx", "signals", "util"]
 depends_on = ["answer", "place", "sandbox", "sbx", "util"]
 
 [current.fleet]
-depends_on = ["config", "gitgate", "kit", "place", "repos", "sbx", "substrate", "util"]
+depends_on = ["attempt", "config", "gitgate", "kit", "place", "repos", "sbx", "substrate", "util"]
 
 [current.gitgate]
 depends_on = ["config", "fleet", "place", "repos", "util"]

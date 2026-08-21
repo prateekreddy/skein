@@ -1419,41 +1419,65 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     match fleet_exists(sandbox) {
         Some(true) => {}
         Some(false) => {
-            let argv = create_argv(sandbox, mounts);
-            let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-            // `sbx create` confirms before it mounts host directories, and creating the fleet
-            // sandbox mounts several. When a terminal is there, hand it over — the question is for
-            // the person running the command. When there isn't (the server), capture it, but on a
-            // budget that fits booting a microVM rather than the 30s action timeout.
-            let env = create_env();
-            let failure = if std::io::stdin().is_terminal() {
-                match run_attached_env("sbx", &args, &env)? {
-                    0 => None,
-                    code => Some(format!("sbx exited {code}")),
-                }
-            } else {
-                let (out, err, code) =
-                    run_capture_for_env("sbx", &args, Duration::from_secs(900), &env)?;
-                match code {
-                    0 => None,
-                    _ => Some({
-                        let detail = if err.trim().is_empty() { out } else { err };
-                        detail.trim().to_string()
-                    }),
-                }
-            };
-            if let Some(detail) = failure {
-                // The hand-run line must carry the environment too, or a fleet configured for a
-                // bigger disk is quietly recreated at the default 20 GB by the very command the
-                // error told someone to type.
-                let prefix = env
-                    .iter()
-                    .map(|(k, v)| format!("{k}={} ", sh_quote(v)))
-                    .collect::<String>();
-                return Err(format!(
+            // Under an attempt lease, because the check that brought us here fails for every second
+            // of the minutes the create takes. `ensure_fleet` runs on every box start, so two boxes
+            // started together both see "absent" and both would create — and the second one is
+            // creating over a sandbox the first is still building. `Some(false)` is honest and
+            // insufficient: "not there" and "not there YET" are the same observation without this.
+            let outcome = crate::attempt::attempt(
+                &skein_home().join("attempts"),
+                &format!("create-{sandbox}"),
+                // Longer than the create's own 900s budget: the lease bounds how long a DEAD holder
+                // blocks the work, and reclaiming while a create is still running is precisely the
+                // second copy this prevents.
+                Duration::from_secs(1800),
+                || {
+                    let argv = create_argv(sandbox, mounts);
+                    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+                    // `sbx create` confirms before it mounts host directories, and creating the fleet
+                    // sandbox mounts several. When a terminal is there, hand it over — the question is for
+                    // the person running the command. When there isn't (the server), capture it, but on a
+                    // budget that fits booting a microVM rather than the 30s action timeout.
+                    let env = create_env();
+                    let failure = if std::io::stdin().is_terminal() {
+                        match run_attached_env("sbx", &args, &env)? {
+                            0 => None,
+                            code => Some(format!("sbx exited {code}")),
+                        }
+                    } else {
+                        let (out, err, code) =
+                            run_capture_for_env("sbx", &args, Duration::from_secs(900), &env)?;
+                        match code {
+                            0 => None,
+                            _ => Some({
+                                let detail = if err.trim().is_empty() { out } else { err };
+                                detail.trim().to_string()
+                            }),
+                        }
+                    };
+                    if let Some(detail) = failure {
+                        // The hand-run line must carry the environment too, or a fleet configured for a
+                        // bigger disk is quietly recreated at the default 20 GB by the very command the
+                        // error told someone to type.
+                        let prefix = env
+                            .iter()
+                            .map(|(k, v)| format!("{k}={} ", sh_quote(v)))
+                            .collect::<String>();
+                        return Err(format!(
                     "creating fleet sandbox {sandbox}: {detail}\n\
                      if that was a confirmation you never saw, create it once by hand:\n  {prefix}sbx {}",
                     args.join(" ")
+                ));
+                    }
+                    Ok(())
+                },
+            )?;
+            if let crate::attempt::Outcome::InFlight(theirs) = outcome {
+                return Err(format!(
+                    "the fleet sandbox {sandbox} is already being created — that started {} ago \
+                     and takes a few minutes. Wait for it rather than starting a second one; if it \
+                     never finishes, it is given up on automatically.",
+                    theirs.age()
                 ));
             }
         }
@@ -8336,6 +8360,65 @@ b idle 5000000 1048576 4
         assert!(
             !asked.contains("create"),
             "skein created a fleet on the strength of a question it could not get an answer to:\n{asked}"
+        );
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Two box starts arriving together create the fleet once.
+    ///
+    /// The race the attempt lease exists for, and it is not hypothetical: `ensure_fleet` runs on
+    /// every box start, the check it reads fails for every second of the minutes a create takes, so
+    /// two boxes started together both see "absent" and both create — the second one over a sandbox
+    /// the first is still building.
+    ///
+    /// Genuinely concurrent, and the fake `create` sleeps so the two overlap; a serialised pair
+    /// would pass against no lease at all. The assertion is about what crossed the process
+    /// boundary — exactly one `create` in the argv the fake `sbx` recorded — and about the second
+    /// caller being told what is happening rather than being told the work is owed.
+    #[test]
+    fn two_box_starts_at_once_create_the_fleet_once() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        // `ls` answers with an empty fleet, so every caller sees the sandbox as absent — which is
+        // also what a caller sees while another one is midway through creating it. `create` takes
+        // its time, as the real one does.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 case \"$1\" in ls) echo '[]' ;; create) sleep 1 ;; esac\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        let started: Vec<_> = (0..2)
+            .map(|_| std::thread::spawn(|| ensure_fleet("skein-fleet", &[])))
+            .collect();
+        let outcomes: Vec<Result<(), String>> =
+            started.into_iter().map(|t| t.join().unwrap()).collect();
+        std::env::set_var("PATH", path);
+
+        let asked = std::fs::read_to_string(&log).unwrap_or_default();
+        let creates = asked.lines().filter(|l| l.starts_with("create")).count();
+        assert_eq!(
+            creates, 1,
+            "two starts created the fleet {creates} times:\n{asked}"
+        );
+        // And the one that lost says what is happening. "not there" would send it round again.
+        let told: Vec<&String> = outcomes.iter().filter_map(|r| r.as_ref().err()).collect();
+        assert!(
+            told.iter().any(|why| why.contains("already being created")),
+            "the second start was not told the first was under way: {outcomes:?}"
         );
         std::env::remove_var("SKEIN_HOME");
     }
