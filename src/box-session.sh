@@ -1423,6 +1423,98 @@ GITSHIM
   unset git_real
 fi
 
+# The docker shim: whose container is this?
+#
+# Docker records nothing about which box asked. Every box reaches the same daemon over the same
+# socket at the same uid, and the daemon puts every container under one shared cgroup parent —
+# which is deliberate, and is what makes a box's containers count against the fleet's ceilings.
+# Shared accounting and per-box ownership are different questions, and the second had no answer at
+# all: stopping a box left its containers running, with nothing able to say which they were.
+#
+# So the shim stamps two things onto `run` and `create`, and each reaches a case the other cannot:
+#
+#   * a **label**, which is how the box's stop finds them — `docker rm -f` rather than a signal,
+#     because killing a container's processes leaves the daemon believing it still runs, so the name
+#     stays taken and the volumes stay attached;
+#   * a **cgroup under the box's own name**, still inside the shared parent so the fleet ceiling
+#     above is untouched, which is what the stop can reach when dockerd is the thing that has
+#     stopped answering — and a container that wedged dockerd is one of the ways a box gets here.
+#
+# **The shim is a convention, not a boundary**, exactly as the git shim above is. A box holds the
+# daemon: it can curl the socket directly and ask for anything, `docker compose` composes its own
+# create calls, and neither carries what this stamps. That is stated where it is decided
+# (architecture §9.5 R11) rather than pretended away, and skein's stop names every running container
+# it cannot attribute rather than reporting success over the ones it missed.
+#
+# Never blocks and never refuses: anything that is not `run` or `create`, and any surprise on the
+# path that is, execs the real binary unchanged. An explicit `--cgroup-parent` from the caller wins,
+# because a person who asked for one meant it.
+docker_real=$(command -v docker 2>/dev/null || true)
+[ -n "$docker_real" ] && docker_real=$(readlink -e "$docker_real" 2>/dev/null || true)
+if [ -n "$docker_real" ] && [ -f "$docker_real" ]; then
+  mkdir -p "$root/bin" || exit 1
+  # Same overlap trick as git's: the real binary is bound to a second path FIRST, because binding
+  # the shim over it shadows the very thing the shim has to exec.
+  : >"$root/bin/docker.real" 2>/dev/null || true
+  {
+    printf '#!/bin/sh\n'
+    printf 'skein_box=%q\n' "$box"
+    printf 'skein_docker=%q\n' "$root/bin/docker.real"
+    cat <<'DOCKERSHIM'
+# Find the verb. It is not always $1: `docker -H unix:///…  run` and `docker --context foo run` are
+# ordinary, and both of those options take a separate argument that must not be read as the verb.
+verb=''
+skip=0
+for arg in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$arg" in
+    -H | --host | -c | --context | --config | -l | --log-level) skip=1 ;;
+    -*) ;;
+    *) verb="$arg"; break ;;
+  esac
+done
+case "$verb" in
+  run | create) ;;
+  *) exec "$skein_docker" "$@" ;;
+esac
+
+# The caller's own --cgroup-parent wins. Anything else would be skein quietly overruling a request
+# somebody made on purpose, on a flag whose whole point is placement.
+for arg in "$@"; do
+  case "$arg" in --cgroup-parent | --cgroup-parent=*) exec "$skein_docker" "$@" ;; esac
+done
+
+# Rebuilt rather than prepended to: the stamps have to land AFTER the verb, since docker refuses
+# them as global options, and the verb is not always $1.
+#
+# Rotated rather than accumulated in a variable, because an argument list is not a string: a
+# container command with spaces, quotes or newlines in it is ordinary — `docker run img sh -c "a b"`
+# — and rebuilding through `$(...)` would split it. Take the first off the front, put it on the
+# back, exactly $# times: the order comes back unchanged, with the stamps inserted where the verb
+# passed by.
+placed=0
+seen=0
+count=$#
+while [ "$seen" -lt "$count" ]; do
+  arg="$1"
+  shift
+  set -- "$@" "$arg"
+  if [ "$placed" = 0 ] && [ "$arg" = "$verb" ]; then
+    set -- "$@" --label "skein.box=$skein_box" \
+      --cgroup-parent "/skein/containers/$skein_box"
+    placed=1
+  fi
+  seen=$((seen + 1))
+done
+exec "$skein_docker" "$@"
+DOCKERSHIM
+  } > "$root/bin/docker" || exit 1
+  chmod 755 "$root/bin/docker" || exit 1
+  binds+=(--ro-bind "$docker_real" "$root/bin/docker.real")
+  binds+=(--ro-bind "$root/bin/docker" "$docker_real")
+fi
+unset docker_real
+
 # Who this box is, for everything that runs inside it.
 #
 # The probes record their signals under an identity, and every one of them used to read

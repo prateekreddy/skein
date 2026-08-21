@@ -458,11 +458,14 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
 /// the processes are gone would make the box read as stopped while it was still running.
 pub(crate) fn stop_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
     format!(
-        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; rm -f {sock}; exit 0",
+        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; {containers}; \
+         {orphans}; rm -f {sock}; exit 0",
         look = crate::fleet::namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
         sock = sh_quote(&rec.sock),
         kill = crate::fleet::box_cgroup_kill(name),
         sweep = crate::fleet::namespace_sweep(),
+        containers = crate::fleet::box_containers_kill(name),
+        orphans = crate::fleet::unattributed_containers(),
     )
 }
 
@@ -475,14 +478,17 @@ pub(crate) fn stop_script(name: &str, rec: &crate::place::PlaceRecord) -> String
 /// old one's limits instead of the current settings.
 pub(crate) fn destroy_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
     format!(
-        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; rm -rf {root}; \
-         for _ in 1 2 3 4 5; do sudo rmdir {cgroup} 2>/dev/null && break; sleep 0.2; done; exit 0",
+        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; {containers}; rm -rf {root}; \
+         for _ in 1 2 3 4 5; do sudo rmdir {cgroup} 2>/dev/null && break; sleep 0.2; done; \
+         sudo rmdir {containers_cgroup} 2>/dev/null; exit 0",
         look = crate::fleet::namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
         sock = sh_quote(&rec.sock),
         kill = crate::fleet::box_cgroup_kill(name),
         sweep = crate::fleet::namespace_sweep(),
+        containers = crate::fleet::box_containers_kill(name),
         root = sh_quote(&box_root(name)),
         cgroup = sh_quote(&crate::fleet::box_cgroup(name)),
+        containers_cgroup = sh_quote(&crate::fleet::box_container_cgroup(name)),
     )
 }
 

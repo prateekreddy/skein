@@ -1201,6 +1201,70 @@ pub fn box_cgroup_kill(name: &str) -> String {
     )
 }
 
+/// The label a box's containers carry, and the only thing that says whose they are.
+///
+/// Docker records nothing about which box asked. Every box reaches the same daemon over the same
+/// socket at the same uid, and [`CONTAINER_CGROUP`] is one parent shared by all of them — which is
+/// deliberate, because it is what makes a box's containers count against the fleet's ceilings
+/// (SKEIN-89). Shared accounting and per-box ownership are different questions, and the second one
+/// had no answer at all: stopping a box left its containers running, with nothing anywhere able to
+/// say which they were.
+pub const CONTAINER_LABEL: &str = "skein.box";
+
+/// Where one box's containers live: a child of the shared parent, so the fleet ceiling above still
+/// applies to every box's containers together while each box's are separately reachable.
+pub fn box_container_cgroup(name: &str) -> String {
+    format!("/sys/fs/cgroup{CONTAINER_CGROUP}/{name}")
+}
+
+/// End the containers a box started.
+///
+/// **`docker rm -f`, not a signal**, and that is the whole reason this is separate from
+/// [`namespace_kill`]: killing a container's processes leaves the daemon believing it runs, so the
+/// name stays taken, the volumes stay attached and `docker ps` disagrees with the machine. Removing
+/// it is what a person means by "stop the container".
+///
+/// Then the cgroup, as a backstop for the case the first half cannot cover: a daemon that is not
+/// answering. `docker ps` needs dockerd, and a wedged dockerd is one of the ways a box's container
+/// got out of hand in the first place — so the kill is aimed at the box's own subtree under the
+/// shared parent, which reaches the container's processes with dockerd out of the picture.
+///
+/// Neither half reaches a container the shim never saw. A box holds the daemon (§9.5 R11 says so),
+/// so a container started by talking to the socket directly carries no label and lands in whatever
+/// cgroup it asked for. That is stated rather than closed, and [`unattributed_containers`] is what
+/// keeps it from being silent.
+pub fn box_containers_kill(name: &str) -> String {
+    format!(
+        "if command -v docker >/dev/null 2>&1; then \
+           docker ps -aq --filter {filter} 2>/dev/null | xargs -r docker rm -f >/dev/null 2>&1 || true; \
+         fi; \
+         sudo sh -c 'echo 1 > \"$1\"' _ {kill} 2>/dev/null || true",
+        filter = sh_quote(&format!("label={CONTAINER_LABEL}={name}")),
+        kill = sh_quote(&format!("{}/cgroup.kill", box_container_cgroup(name))),
+    )
+}
+
+/// Running containers no box can be held responsible for, named rather than left unmentioned.
+///
+/// The shim stamps [`CONTAINER_LABEL`] onto `docker run` and `docker create`, and that is a
+/// convention: `docker compose`, a container started by curling the socket, and anything begun
+/// before the shim existed all carry nothing. Those are exactly the containers a stop cannot end,
+/// so a stop that said nothing about them would report success over the thing it missed — which is
+/// the shape of the bug this whole item is about, one layer up.
+pub fn unattributed_containers() -> String {
+    format!(
+        "if command -v docker >/dev/null 2>&1; then \
+           orphans=\"$(docker ps --filter label={label} --format '{{{{.Names}}}}' 2>/dev/null)\"; \
+           all=\"$(docker ps --format '{{{{.Names}}}}' 2>/dev/null)\"; \
+           for c in $all; do \
+             case \" $orphans \" in *\" $c \"*) continue ;; esac; \
+             echo \"skein: container $c belongs to no box skein can name, so stopping a box does not stop it\" >&2; \
+           done; \
+         fi",
+        label = CONTAINER_LABEL,
+    )
+}
+
 /// End every process living in a box's mount namespace — the backstop under `cgroup.kill`.
 ///
 /// **A box IS its namespace.** `box-session.sh` says so where it explains the anchor: box alive ⇔
@@ -9897,6 +9961,154 @@ b idle 5000000 4 1048576 1048576
             boxns("some-other-boot", start),
             "",
             "an anchor from another boot of the sandbox was believed"
+        );
+    }
+
+    /// The docker shim, run for real against a fake `docker` that reports the argv it was given.
+    ///
+    /// Extracted from `box-session.sh` rather than restated: a copy of the shim in a test is a
+    /// second thing to keep in step, and it would go on passing after the real one broke.
+    fn docker_shim_argv(name: &str, args: &[&str]) -> Vec<String> {
+        let dir = crate::testutil::tempdir();
+        let real = dir.join("docker.real");
+        let seen = dir.join("argv");
+        std::fs::write(
+            &real,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > {}\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &real,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+
+        let block = BOX_SESSION_SH
+            .split_once("cat <<'DOCKERSHIM'\n")
+            .and_then(|(_, rest)| rest.split_once("\nDOCKERSHIM"))
+            .map(|(body, _)| body.to_string())
+            .expect("the docker shim block is still in box-session.sh");
+        let shim = dir.join("docker");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nskein_box='{name}'\nskein_docker='{}'\n{block}\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &shim,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+
+        let ran = std::process::Command::new("sh")
+            .arg(&shim)
+            .args(args)
+            .output()
+            .expect("run the docker shim");
+        assert!(
+            ran.status.success(),
+            "the shim failed: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        std::fs::read_to_string(&seen)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A container a box starts says which box started it — the fact nothing recorded.
+    #[test]
+    fn a_container_a_box_starts_carries_the_boxs_name() {
+        let argv = docker_shim_argv("web-feat-x", &["run", "-it", "img", "sh", "-c", "a b"]);
+        assert_eq!(
+            argv,
+            vec![
+                "run",
+                "--label",
+                "skein.box=web-feat-x",
+                "--cgroup-parent",
+                "/skein/containers/web-feat-x",
+                "-it",
+                "img",
+                "sh",
+                "-c",
+                // The container's own command, still one argument. Rebuilding the list through a
+                // string would have split this, and the failure would be a container running the
+                // wrong command rather than an error anybody sees.
+                "a b",
+            ]
+        );
+    }
+
+    /// The verb is not always `$1`, and the options that precede it can take arguments of their own.
+    /// Reading `unix:///var/run/docker.sock` as the verb would stamp nothing and say nothing.
+    #[test]
+    fn the_stamp_finds_the_verb_past_dockers_own_options() {
+        let argv = docker_shim_argv("api-x", &["-H", "unix:///run/docker.sock", "run", "img"]);
+        assert_eq!(
+            argv,
+            vec![
+                "-H",
+                "unix:///run/docker.sock",
+                "run",
+                "--label",
+                "skein.box=api-x",
+                "--cgroup-parent",
+                "/skein/containers/api-x",
+                "img",
+            ]
+        );
+    }
+
+    /// Everything that is not a container being made passes through untouched. The shim is on every
+    /// `docker` call in every box, so the shape matters more than the logic.
+    #[test]
+    fn the_docker_shim_is_out_of_the_way_of_everything_else() {
+        assert_eq!(docker_shim_argv("api-x", &["ps", "-a"]), vec!["ps", "-a"]);
+        assert_eq!(
+            docker_shim_argv("api-x", &["compose", "up", "-d"]),
+            vec!["compose", "up", "-d"],
+            "compose composes its own create calls; stamping its argv would stamp nothing and \
+             claim otherwise"
+        );
+        // A caller who named a cgroup parent meant it. Overruling them would be skein deciding
+        // placement on the one flag whose whole purpose is placement.
+        assert_eq!(
+            docker_shim_argv("api-x", &["run", "--cgroup-parent", "/mine", "img"]),
+            vec!["run", "--cgroup-parent", "/mine", "img"]
+        );
+    }
+
+    /// The stop's two halves, and what each is for.
+    #[test]
+    fn stopping_a_box_removes_its_containers_and_can_still_reach_them_without_the_daemon() {
+        let script = box_containers_kill("web-feat-x");
+        assert!(
+            script.contains("docker rm -f"),
+            "killing a container's processes leaves the daemon believing it runs: {script}"
+        );
+        assert!(
+            script.contains("--filter 'label=skein.box=web-feat-x'"),
+            "the removal is not aimed at this box's containers: {script}"
+        );
+        // The backstop: a wedged dockerd cannot answer `docker ps`, and a container that wedged it
+        // is one of the ways a box gets here.
+        assert!(
+            script.contains("/sys/fs/cgroup/skein/containers/web-feat-x/cgroup.kill"),
+            "nothing reaches the containers when the daemon has stopped answering: {script}"
+        );
+        // And it is a child of the shared parent, so SKEIN-89's fleet ceiling still covers it.
+        assert!(
+            box_container_cgroup("web-feat-x")
+                .starts_with(&format!("/sys/fs/cgroup{CONTAINER_CGROUP}/")),
+            "the box's containers left the parent the fleet's ceiling is on"
         );
     }
 }

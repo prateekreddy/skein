@@ -1488,6 +1488,28 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    capability the design supports, and that is the owner's call rather than this document's. Until
    it is made, this paragraph is the honest version of the boundary.
 
+   **What the supported capability had no answer for: whose container is it.** Docker records
+   nothing about which box asked. Every box reaches the same daemon over the same socket at the same
+   uid, and `CONTAINER_CGROUP` is one parent shared by all of them — deliberate, since it is what
+   makes a box's containers count against the fleet's ceilings. Shared *accounting* and per-box
+   *ownership* are different questions, and the second had no answer at all, which is why stopping a
+   box left its containers running with nothing able to say which they were.
+
+   `box-session.sh` now shims `docker` the way it already shims `git`, stamping `run` and `create`
+   with `--label skein.box=<box>` and `--cgroup-parent /skein/containers/<box>`. Each reaches a case
+   the other cannot: the label is how the stop finds them, and it removes rather than signals,
+   because killing a container's processes leaves the daemon believing it runs; the per-box cgroup —
+   still inside the shared parent, so the fleet ceiling above is untouched — is what the stop can
+   reach when dockerd is the thing that has stopped answering, which a runaway container is one way
+   to cause.
+
+   **A convention, not a boundary**, in exactly the sense the git shim is: *"the shim is the message,
+   not the boundary."* A box holds the daemon. It can curl the socket directly, `docker compose`
+   composes its own create calls, and neither carries what this stamps. So the stop **names every
+   running container it cannot attribute** rather than reporting success over the ones it missed —
+   which is the same discipline as the rest of this section, an exposure stated where closing it is
+   not on offer.
+
 Corrected from an earlier draft: the cgroup control plane is **not** box-writable. Every cgroup write
 in the launcher goes through `sudo` before `bwrap`, and the source is explicit that a write from
 inside a box "is not an option at all" — the userns maps only uid 1000 and cgroupfs is root-owned.
