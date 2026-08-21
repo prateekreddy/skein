@@ -52,6 +52,7 @@ fn main() {
         store: Store::new(home.join("outcomes"), RETENTION),
         log: Log::new(home.join("audit.jsonl")),
         approver,
+        doorway: skein_warden::flooding::Doorway::new(),
     });
 
     eprintln!(

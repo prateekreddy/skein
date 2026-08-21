@@ -710,8 +710,29 @@ Two more that follow, and neither is an implementation detail:
 
 ### 8.5 Flooding
 
-A compromised skein controls *what* is proposed and *when*. One outstanding request at a time, a rate
-limit, and the timeout §11.5 already names.
+A compromised skein controls *what* is proposed and *when*. Every individual operation is confirmed
+by a person, so the attack that survives is **volume**: enough prompts that somebody approves the
+wrong one, or so many that the real one is buried. One outstanding request at a time, a rate limit,
+and the timeout §11.5 already names.
+
+**A second request is refused and told which operation is in front of the person** — not queued and
+not dropped. Queueing is the flood with extra steps; dropping silently leaves a caller unable to tell
+"busy" from "lost", which is the ambiguity §8.2 exists to remove. The slot is a guard that releases
+on every path out, a panic included: forgetting one turns "one at a time" into "one, ever", and it
+would look like a warden that had simply stopped answering.
+
+**The rate limit counts arrivals, not approvals.** A flood of *refused* proposals is the attack, so
+counting only the ones that got through would count nothing while it was happening.
+
+**The reading endpoints are exempt, and this is the part worth getting right.** Fleet observation is
+the check that gates skein's own first run (§8.3). Rate-limiting it into unavailability would let a
+flood achieve by refusal what it could not achieve by approval — skein unable to start at all. The
+audit sink is exempt for the mirror reason: the account of what just happened has to survive the
+thing it is accounting for.
+
+**The timeout is the approval surface's, not the doorway's**, and it is not built. A prompt nobody
+answers holds the one outstanding slot for ever, which is the same denial by another route; the seat
+lock in the console approver is where it belongs.
 
 ### 8.6 Where it listens, and what it is spoken to in
 

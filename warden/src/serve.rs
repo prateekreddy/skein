@@ -31,6 +31,7 @@
 use crate::audit::Log;
 use crate::capability;
 use crate::doer::{self, Approver};
+use crate::flooding::Doorway;
 use crate::outcome::{Outcome, Store};
 use crate::wire::{read_request, Request, Response};
 use serde::Deserialize;
@@ -46,6 +47,12 @@ pub struct Warden {
     pub store: Store,
     pub log: Log,
     pub approver: Box<dyn Approver>,
+    /// One operation in front of a person at a time, and not too many in a minute (§8.5).
+    ///
+    /// **Doers only.** Fleet observation and the audit sink do not pass through it — see the note in
+    /// `flooding.rs` on why rate-limiting the check that gates skein's own first run would let a
+    /// flood win by refusal what it could not win by approval.
+    pub doorway: Doorway,
 }
 
 /// What a doer is asked for, on the wire.
@@ -210,6 +217,17 @@ impl Warden {
         };
         let _ = self.log.record(&op.operation, "asked", which.name());
 
+        // Before anything else that costs a person attention. Held for the whole operation and
+        // released on every path out, including a panic — see `flooding::Turn`.
+        let _turn = match self.doorway.enter(&op.operation) {
+            Ok(turn) => turn,
+            Err(refused) => {
+                let why = refused.why();
+                let _ = self.log.record(&op.operation, "refused", &why);
+                return Response::fault(429, &why);
+            }
+        };
+
         // At-most-once, around the whole of it. The approval is inside, so a retry of an operation a
         // person already refused is answered with the refusal rather than asking them again — which
         // is how approval fatigue is manufactured (§8.5).
@@ -332,6 +350,7 @@ mod tests {
             store: Store::new(dir.join("outcomes"), Duration::from_secs(3600)),
             log: Log::new(dir.join("warden.jsonl")),
             approver: Box::new(Unattended),
+            doorway: Doorway::new(),
         })
     }
 
@@ -349,6 +368,7 @@ mod tests {
     /// comes back over HTTP from a process that has already been built.
     #[test]
     fn a_running_warden_answers_on_loopback_and_says_what_it_can_do() {
+        let _env = crate::env_lock();
         let dir = scratch("live");
         let listener = bind(0).expect("bind loopback");
         let addr = listener.local_addr().unwrap();
@@ -431,6 +451,7 @@ mod tests {
             store: Store::new(dir.join("outcomes"), Duration::from_secs(3600)),
             log: Log::new(dir.join("warden.jsonl")),
             approver: Box::new(CountingRef(Arc::clone(&counted))),
+            doorway: Doorway::new(),
         };
         struct CountingRef(Arc<Counting>);
         impl Approver for CountingRef {
@@ -528,6 +549,7 @@ mod tests {
                 )),
                 Box::new(std::io::sink()),
             )),
+            doorway: Doorway::new(),
         };
         let said_no = ask(
             &refuser,
@@ -553,6 +575,7 @@ mod tests {
                 )),
                 Box::new(std::io::sink()),
             )),
+            doorway: Doorway::new(),
         };
         let said_yes = ask(
             &approver,
@@ -590,6 +613,62 @@ mod tests {
         assert_eq!(entry.what, "approved");
 
         assert_eq!(ask(&w, "POST", "/v1/audit", "not json").code, 400);
+    }
+
+    /// A flood of proposals is refused, and the endpoint that lets skein start is untouched by it.
+    ///
+    /// The subtle half of §8.5 and the reason the doorway is on the doers only: rate-limiting fleet
+    /// observation would let a flood achieve by refusal what it could not achieve by approval — skein
+    /// unable to run the check that gates its own first run. So this floods until the limit bites,
+    /// and then reads.
+    #[test]
+    #[cfg(feature = "create")]
+    fn a_flood_is_refused_and_the_reading_endpoint_still_answers() {
+        let _env = crate::env_lock();
+        let dir = scratch("flood");
+        let w = warden(&dir);
+        std::env::set_var(
+            "SKEIN_WARDEN_LS_CMD",
+            r#"printf '[{"name":"skein-fleet"}]'"#,
+        );
+
+        let mut refusals = Vec::new();
+        for n in 0..(crate::flooding::PER_MINUTE + 4) {
+            let body = format!(r#"{{"operation":"op-flood-{n}","sandbox":"skein-fleet"}}"#);
+            refusals.push(ask(&w, "POST", "/v1/create", &body));
+        }
+        let flooded = refusals
+            .iter()
+            .filter(|r| r.code == 429 && r.body.contains("more than"))
+            .count();
+        assert!(
+            flooded >= 4,
+            "the rate limit never bit: {:?}",
+            refusals.iter().map(|r| r.code).collect::<Vec<_>>()
+        );
+
+        // And the check skein starts on is answerable throughout.
+        let seen = ask(&w, "GET", "/v1/fleet", "");
+        std::env::remove_var("SKEIN_WARDEN_LS_CMD");
+        assert_eq!(
+            seen.code, 200,
+            "a flood of proposals made skein unable to start: {}",
+            seen.body
+        );
+        assert!(seen.body.contains("skein-fleet"), "{}", seen.body);
+
+        // The audit sink too — the account of what just happened must survive the thing it is
+        // accounting for.
+        assert_eq!(
+            ask(
+                &w,
+                "POST",
+                "/v1/audit",
+                r#"{"what":"noticed a flood","reported_by":"skein"}"#
+            )
+            .code,
+            200
+        );
     }
 
     /// Everything else is a 404 or a 405, and neither is a doer that quietly does nothing.

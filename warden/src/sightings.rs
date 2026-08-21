@@ -189,6 +189,7 @@ mod tests {
     /// The command is a seam, so what is tested is the parse of what `sbx` really prints.
     #[test]
     fn the_listing_comes_from_the_command_it_is_told_to_run() {
+        let _env = crate::env_lock();
         std::env::set_var(
             "SKEIN_WARDEN_LS_CMD",
             r#"printf '[{"name":"skein-fleet"}]'"#,
