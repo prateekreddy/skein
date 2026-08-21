@@ -22,7 +22,7 @@ use skein::kit::ensure_store;
 use skein::place::{forget_place, own_sandbox, place_of, record_place, shared_record, PlaceRecord};
 use skein::probes::ensure_probe_in;
 use skein::repos::{branch_of, save_repos, Repo};
-use skein::sandbox::stop_box;
+use skein::sandbox::{destroy_box, stop_box};
 use skein::sbx::{fleet_boxes, Liveness};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -707,7 +707,27 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     config.fleet_sandbox = FLEET.into();
     save_config(&config).expect("turn the fleet on");
 
+    // ---- the gate, warmed before the act, so the act has something wrong to settle ----
+    // Read once here and once after each of the three acts below, with no `forget_fleet_liveness()`
+    // in between. That is the whole test: the gate serves its last good answer while it refreshes
+    // behind the caller, so the only thing that can make the second read agree with the fleet is the
+    // act having invalidated it. This is also the only place the check can live — `cfg!(test)` is
+    // false for the library these tests link, so the gate is real here and disabled in unit tests.
+    assert_eq!(
+        fleet_liveness().get(name).copied(),
+        None,
+        "nothing is placed under this name yet, so the warm answer must not mention it"
+    );
+
     start_box(name, &repo, "feat/smoke", "exec sleep 300").expect("start the box");
+
+    // Remove `start_box`'s settle and this reads back the map from before the launch — no entry at
+    // all for a box that is up and whose row the person who pressed the button is looking at.
+    assert_eq!(
+        fleet_liveness().get(name).copied(),
+        Some(true),
+        "starting a box must settle the liveness gate, or the board serves the pre-start picture"
+    );
 
     // The placement must carry a real HOME: `Place::wrap` exports it, and an empty one sends every
     // `$HOME/…` path in provisioning to the filesystem root.
@@ -855,11 +875,41 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "the box's own login was overwritten with the fleet's older one: {kept}"
     );
 
-    let _ = stop_box(name);
-    forget_place(name);
-    let _ = Command::new("sudo")
-        .args(["rmdir", &format!("/sys/fs/cgroup/skein/{name}")])
-        .status();
+    // ---- stopping and destroying settle the gate too, and this is also the teardown ----
+    // Waited out through `/proc` rather than by polling `fleet_liveness`: every extra read is a
+    // chance for the refresh running behind an earlier one to land, which would hide exactly the
+    // staleness under test. One act, one read.
+    let anchor = shared_record(name).expect("the box is placed").ns_pid;
+    stop_box(name).expect("stop the box");
+    for _ in 0..40 {
+        if !Path::new(&format!("/proc/{anchor}")).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !Path::new(&format!("/proc/{anchor}")).exists(),
+        "killing the server must end the box"
+    );
+    assert_eq!(
+        fleet_liveness().get(name).copied(),
+        Some(false),
+        "stopping a box must settle the liveness gate, or the board keeps it running"
+    );
+
+    // The same rule with a worse failure: the box is not stopped but gone, and a gate serving its
+    // last good answer leaves a destroyed box on the board for anyone to click.
+    destroy_box(name).expect("destroy the box");
+    assert_eq!(
+        fleet_liveness().get(name).copied(),
+        None,
+        "destroying a box must settle the liveness gate, or the board keeps a box that is gone"
+    );
+    assert!(
+        shared_record(name).is_none(),
+        "a destroyed box is unplaced, so nothing can be sent into what used to be its namespace"
+    );
+
     std::env::set_var("HOME", real_home);
     std::env::remove_var("SKEIN_LS_CMD");
     let _ = fs::remove_dir_all(&root);

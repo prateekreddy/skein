@@ -2807,11 +2807,10 @@ pub fn provision_script(name: &str, store: &str) -> String {
 /// a tree that already exists and `box-session.sh` refuses a second server, because both are how a
 /// re-run would otherwise hand a box someone else's uncommitted work or strand its namespace.
 pub fn start_box(name: &str, repo: &Repo, branch: &str, agent_command: &str) -> Result<(), String> {
-    let out = start_box_inner(name, repo, branch, agent_command);
     // Whatever happened, the sweep's picture is now older than the act. On success there is a box
     // that was not there; on failure there may be a half-started one — and the caller is a person
     // who just pressed a button and is looking at the row.
-    forget_fleet_liveness();
+    let out = disturbing_liveness(|| start_box_inner(name, repo, branch, agent_command));
     // Kept, because the person who needs it is not looking at this terminal. Creating a box from the
     // cockpit runs `skein start` in a PTY; when it fails, that terminal closes, the browser
     // reconnects, and the fresh one has none of the output. What it said instead was "its last start
@@ -4161,12 +4160,9 @@ static LIVENESS_GATE: crate::util::Gate<std::collections::HashMap<String, bool>>
 /// Forget the remembered sweep, so the next caller waits for the truth instead of being handed the
 /// last picture.
 ///
-/// Every act that changes what the sweep would see calls this, and **three of them did not**: this
-/// doc claimed "starting a box, restarting a dead session, resizing the fleet" and only the last two
-/// were true. Starting, stopping and destroying a box each change a box's liveness and left the gate
-/// holding the answer from before — a warm gate serves that immediately while refreshing behind the
-/// caller, and its last-good is sticky, so a sweep that then fails serves the pre-act picture until
-/// one succeeds.
+/// Every act that changes what the sweep would see goes through [`disturbing_liveness`] rather than
+/// calling this at the end of its own body — see the note there for why the end of an act turned out
+/// not to be one place.
 ///
 /// That serve-stale behaviour is deliberate and worth keeping — it is what stops the board blanking
 /// on a slow tick — which is exactly why the caller who knows better has to say so. It is also the
@@ -4184,6 +4180,29 @@ static LIVENESS_GATE: crate::util::Gate<std::collections::HashMap<String, bool>>
 /// and one test was being served the previous test's fleet.
 pub fn forget_fleet_liveness() {
     LIVENESS_GATE.invalidate();
+}
+
+/// Run an act that changes a box's liveness, and settle the gate however the act ends.
+///
+/// A wrapper rather than a line at the end of each act, because **the end of an act is not one
+/// place**. Every one of the three sites had a return the invalidation sat after: `stop_box` left by
+/// two branches and only the shared one said anything, `destroy_box` by three, and `start_box`
+/// carries a `?` on nearly every line of its inner half. A guard that settles on `Drop` is passed
+/// through by all of them — early return, `?`, and a panic alike — so there is no path left to
+/// forget, and adding a fourth branch to any of these acts cannot reintroduce the bug.
+///
+/// Deliberately settles on failure too. A half-run act is the case where the remembered answer is
+/// *most* likely wrong: a start that died after its session came up leaves a box the sweep has never
+/// seen, and the gate would keep saying so.
+pub fn disturbing_liveness<T>(act: impl FnOnce() -> T) -> T {
+    struct Settle;
+    impl Drop for Settle {
+        fn drop(&mut self) {
+            LIVENESS_GATE.invalidate();
+        }
+    }
+    let _settle = Settle;
+    act()
 }
 
 pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {

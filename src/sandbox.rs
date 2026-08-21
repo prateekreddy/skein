@@ -397,6 +397,10 @@ pub fn stop_command(name: &str) -> String {
 /// Stop a box: run `stop_command` to halt the running sandbox. The box stays listed (it goes stale
 /// until resumed) — this only frees the compute, it does not delist or destroy.
 pub fn stop_box(name: &str) -> Result<(), String> {
+    crate::fleet::disturbing_liveness(|| stop_box_inner(name))
+}
+
+fn stop_box_inner(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
@@ -406,13 +410,13 @@ pub fn stop_box(name: &str) -> Result<(), String> {
     if let Some(rec) = shared_record(name) {
         let sock = sh_quote(&rec.sock);
         let script = format!("tmux -S {sock} kill-server 2>/dev/null; rm -f {sock}; exit 0");
-        let stopped = own_sandbox(&rec.sandbox)
-            .exec(&script, Duration::from_secs(30))
-            .map(|_| ());
         // The tmux server IS this box's liveness, so killing it makes the sweep's picture wrong
         // rather than merely old — and the gate serves its last good answer while it refreshes.
-        crate::fleet::forget_fleet_liveness();
-        return stopped;
+        // Settled by the wrapper above, on this branch and on the one below it: the invalidation
+        // used to live here, and the `sbx stop` path underneath returned without one.
+        return own_sandbox(&rec.sandbox)
+            .exec(&script, Duration::from_secs(30))
+            .map(|_| ());
     }
     let (_out, err, code) = run_shell(&stop_command(name))?;
     if code != 0 {
@@ -511,6 +515,10 @@ pub fn destroy_command(name: &str) -> String {
 /// succeed before we delist, so a failed `sbx rm` leaves the box on the board to retry rather than
 /// orphaning a still-running sandbox you can no longer see. Destructive — see `destroy_command`.
 pub fn destroy_box(name: &str) -> Result<(), String> {
+    crate::fleet::disturbing_liveness(|| destroy_box_inner(name))
+}
+
+fn destroy_box_inner(name: &str) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
     }
@@ -540,7 +548,6 @@ pub fn destroy_box(name: &str) -> Result<(), String> {
         forget_place(name);
         // Same reason as `stop_box`, and worse here: the box is not merely stopped, it is gone, and
         // a sweep serving its last good answer would keep a destroyed box on the board.
-        crate::fleet::forget_fleet_liveness();
         if let Err(e) = delist_box(name) {
             eprintln!("skein: destroyed {name}, but delisting it failed (harmless): {e}");
         }
