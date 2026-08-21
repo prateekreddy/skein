@@ -297,6 +297,25 @@ mod tests {
         assert!(BUNDLE.contains("/api/boxes/") && BUNDLE.contains("/api/pr/"));
     }
 
+    /// The CPU controller is delegated wherever a weight is written, or the weight lands nowhere.
+    ///
+    /// `cpu.weight` on a child exists only if the parent handed the controller down, and a write to
+    /// a file that does not exist is silently nothing — so a delegation that stopped mentioning
+    /// `+cpu` would leave containers weighing whatever the default is, with the launcher looking
+    /// like it had set them.
+    #[test]
+    fn the_cpu_controller_reaches_the_cgroup_whose_weight_is_set() {
+        let launcher = include_str!("box-session.sh");
+        assert!(
+            launcher.contains(r#"echo "+memory +pids +cpu" > "$1/cgroup.subtree_control""#),
+            "the cpu controller is not delegated, so `cpu.weight` has nowhere to land"
+        );
+        assert!(
+            launcher.contains("/sys/fs/cgroup/skein/containers/cpu.weight"),
+            "nothing weighs the containers against the boxes"
+        );
+    }
+
     /// The launcher covers the two shared `/run` directories, and says why it leaves the third.
     ///
     /// Every cover in that script is about a path skein chose; `/run` is not one, and everything

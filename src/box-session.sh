@@ -84,7 +84,11 @@ ensure_container_cgroup() {
   # would place containers in a cgroup that cannot hold a limit.
   for c in /sys/fs/cgroup/skein /sys/fs/cgroup/skein/containers; do
     sudo mkdir -p "$c" 2>/dev/null || return 0
-    sudo sh -c 'echo "+memory +pids" > "$1/cgroup.subtree_control"' _ "$c" 2>/dev/null || true
+    # `+cpu` too, and it has to be delegated for the same reason the others do: `cpu.weight` on a
+    # child only exists if the parent handed the controller down. Best-effort like the rest — a
+    # kernel or a sandbox without the controller is a fleet with no CPU shares, not a fleet that
+    # will not start.
+    sudo sh -c 'echo "+memory +pids +cpu" > "$1/cgroup.subtree_control"' _ "$c" 2>/dev/null || true
   done
 }
 
@@ -126,6 +130,22 @@ apply_fleet_ceilings() {
     [ -n "$scale" ] && mib=$(( mib * actual / planned ))
     sudo sh -c 'echo "$1" > "$2"' _ "${mib}M" "$dir/memory.min" 2>/dev/null || true
   done
+
+  # What a container is worth against a box when both want the machine (architecture §9.5).
+  #
+  # **A weight, not a cap.** A `cpu.max` would idle cores while a container waits, which is the waste
+  # the paragraph below rejects for boxes and rejects here for the same reason: when nothing else
+  # wants the machine, a container should have all of it. A weight costs nothing while the machine
+  # is quiet and decides who yields when it is not.
+  #
+  # **Half a box, and that is a judgement rather than a derivation.** Boxes weigh 100 each; a box is
+  # somebody waiting at a terminal, and a container is work that box started and can wait a little
+  # longer for. It is hard-coded here rather than sent from the host because it is a statement about
+  # what things are worth, not a share of a machine's size — the numbers that scale with the sandbox
+  # arrive in the spec above.
+  if [ -d /sys/fs/cgroup/skein/containers ]; then
+    sudo sh -c 'echo "$1" > "$2"' _ 50 /sys/fs/cgroup/skein/containers/cpu.weight 2>/dev/null || true
+  fi
 
   for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
     case "$pair" in total=*) continue ;; esac
@@ -937,6 +957,13 @@ rm -f "$sock"
 # while a box waits, which is the waste this design exists to end. Memory cannot be shared that way:
 # two boxes wanting 20G do not each get 13 slowly, they hit the wall and the kernel starts killing
 # processes — as readily another box's agent as the guilty one.
+#
+# **Containers are the one exception, and it is a weight rather than a cap.** Every word above is
+# right about boxes and none of it transfers: nobody waits at a terminal for a container the way
+# somebody waits for an agent, and the daemon a container depends on is not in its weight class — a
+# container saturating every core makes dockerd miss its own deadlines, which reads as a crash with
+# nothing having died. So `skein/containers` weighs half a box (see `apply_fleet_ceilings`), which
+# costs nothing while the machine is quiet and decides who yields when it is not.
 if [ -n "$limits" ]; then
   cgroup_root="/sys/fs/cgroup/skein"
   cg="$cgroup_root/$box"

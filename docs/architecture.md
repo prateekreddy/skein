@@ -1319,6 +1319,16 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    `declared_read` now, and the test that keeps them there is a **source** assertion, because the
    failure is a path rather than a value and a path is a string somebody types.
 
+   **A container is bounded, and weighed against a box.** `skein/containers` had no ceiling of its
+   own and weighed exactly what a box weighs, so one container's overshoot stalled every box —
+   `high 5551` on the live fleet — and one container's `-j64` starved the daemon it depends on.
+   It now carries a memory ceiling at the fraction a box gets (a **ceiling**, not the reservation
+   `MemoryPlan` argues against: it withholds nothing while containers are idle) and a `cpu.weight`
+   of half a box. A weight rather than a cap, for the reason the launcher gives about boxes: a cap
+   idles cores while somebody waits, and a weight costs nothing until the machine is contended.
+   Half a box is a judgement, not a derivation — a box is somebody at a terminal, a container is
+   work that box started and can wait a little longer for.
+
    **The Docker daemon is guaranteed memory and shielded from the killer.** `/docker` is uncapped by
    decision — §9.5's memory plan says "what stays behind in `/docker` is the sandbox itself, which
    nothing caps and nothing should" — and was **unprotected by omission**, which is a different

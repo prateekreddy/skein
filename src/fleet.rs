@@ -7715,6 +7715,13 @@ b idle 5000000 4 1048576 1048576
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(read("skein/containers", "memory.high"), "10063M");
+        // And the CPU share, which is a weight rather than a cap: a cap would idle cores while a
+        // container waits, and half a box is what it is worth when both want the machine.
+        assert_eq!(
+            read("skein/containers", "cpu.weight"),
+            "50",
+            "containers weigh the same as a box, so one can starve the daemon they depend on"
+        );
         // The boxes' own ceiling is untouched by it.
         assert_eq!(read("skein", "memory.max"), "15975M");
         assert!(
