@@ -14,9 +14,6 @@
 //! matching line wins, not the most specific one — so the file is scanned in order and the final
 //! match kept.
 
-use std::fs;
-use std::path::Path;
-
 /// One parsed CODEOWNERS line: a path pattern and the owners it assigns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
@@ -40,14 +37,19 @@ pub struct CodeOwners {
 /// The three locations GitHub honours, in the order it checks them.
 const LOCATIONS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
-/// Load a repo's CODEOWNERS from a working clone, or `None` when it has none.
+/// Load a repo's CODEOWNERS, or `None` when it has none.
+///
+/// Takes a **reader** rather than a directory: `read(<repo-relative path>) -> Option<String>`. The
+/// file used to be found by walking somebody's working checkout, and a checkout is the wrong place
+/// to ask — it has whatever branch that person is on and whatever they have not committed. It comes
+/// out of the repo's mirror now ([`crate::repos::Tree::read`]), and this module stays ignorant of
+/// where bytes come from, which is also what lets its tests hand it a map.
 ///
 /// `None` is a first-class, expected answer — see the module docs. Callers must treat it as "do not
 /// narrow", never as "you own nothing".
-pub fn load(work: &Path) -> Option<CodeOwners> {
+pub fn load(read: impl Fn(&str) -> Option<String>) -> Option<CodeOwners> {
     for rel in LOCATIONS {
-        let path = work.join(rel);
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Some(text) = read(rel) else {
             continue;
         };
         let mut co = parse(&text);

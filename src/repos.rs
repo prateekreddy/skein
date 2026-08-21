@@ -380,6 +380,99 @@ pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
     }
 }
 
+/// A repo's files, read out of its **mirror** rather than off somebody's disk.
+///
+/// Three host-side features — the diff, the module notes and CODEOWNERS — read `repo.work`
+/// directly, which is a working checkout: it has a branch somebody chose, edits nobody committed,
+/// and in-fleet it is not reachable at all. What they actually want is "this repo, as committed",
+/// and that is what a mirror holds.
+///
+/// `HEAD` is the ref, and it is the right one without asking anybody: a `--mirror` clone takes the
+/// origin's `HEAD`, so this is the remote's own default branch rather than whatever the person at
+/// the keyboard has checked out.
+///
+/// Reading through git rather than off disk changes one thing worth saying: uncommitted work is
+/// invisible. For a note about what a module *is*, and for the ownership rules a repo has agreed
+/// on, that is the answer that was wanted anyway.
+pub struct Tree {
+    mirror: PathBuf,
+}
+
+impl Tree {
+    /// The repo's tree, or `None` when there is no mirror to read and one cannot be made.
+    pub fn open(repo: &Repo) -> Option<Tree> {
+        let mirror = ensure_mirror(repo)
+            .map_err(|why| eprintln!("skein: reading {}: {why}", repo.id))
+            .ok()?;
+        // A mirror of a repository with no commits at all answers nothing, and every call below
+        // would fail one at a time rather than once here.
+        let probe = Tree {
+            mirror: mirror.clone(),
+        };
+        probe.git(&["rev-parse", "--verify", "HEAD"])?;
+        Some(Tree { mirror })
+    }
+
+    fn git(&self, args: &[&str]) -> Option<String> {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&self.mirror).args(args);
+        let out = bounded_output(&mut command, "git", Duration::from_secs(30)).ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    /// One file's contents, or `None` if the tree has no such file.
+    pub fn read(&self, path: &str) -> Option<String> {
+        self.git(&["show", &format!("HEAD:{path}")])
+    }
+
+    /// Every file under `prefix` (the whole tree when it is empty), repo-relative.
+    pub fn files(&self, prefix: &str) -> Vec<String> {
+        let mut args = vec!["ls-tree", "-r", "--name-only", "-z", "HEAD"];
+        if !prefix.is_empty() {
+            args.push("--");
+            args.push(prefix);
+        }
+        // NUL-separated: a path with a newline in it is legal in git and would otherwise split into
+        // two files that do not exist.
+        self.git(&args)
+            .unwrap_or_default()
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The directories directly under the tree's root.
+    pub fn top_level_dirs(&self) -> Vec<String> {
+        self.git(&["ls-tree", "--name-only", "-z", "-d", "HEAD"])
+            .unwrap_or_default()
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(|p| p.trim_end_matches('/').to_string())
+            .collect()
+    }
+
+    /// Is there a directory at this path?
+    pub fn is_dir(&self, path: &str) -> bool {
+        let path = path.trim_matches('/');
+        !path.is_empty()
+            && self
+                .git(&["ls-tree", "-d", "--name-only", "HEAD", path])
+                .map(|out| !out.trim().is_empty())
+                .unwrap_or(false)
+    }
+
+    /// The commit that last touched `path`, or empty when git cannot answer.
+    pub fn last_commit(&self, path: &str) -> String {
+        self.git(&["log", "-1", "--format=%H", "HEAD", "--", path])
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+}
+
 /// A heads-up about a managed repo's push path, surfaced by `skein add` + the cockpit so it's known
 /// up-front (not an error — both cases are workable). Two cases warn: a repo with **no `origin`
 /// remote** (common when adopting a local folder never pushed) — a box can't push or open a PR until

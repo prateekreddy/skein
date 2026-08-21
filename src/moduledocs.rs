@@ -40,7 +40,7 @@ use crate::repos::Repo;
 use crate::util::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// One part of a repo worth describing on its own.
@@ -102,9 +102,11 @@ const MODULE_BYTES: usize = 120_000;
 
 /// The modules of a repo: CODEOWNERS directories when it has them, else top-level directories.
 pub fn modules(repo: &Repo) -> Vec<Module> {
-    let work = Path::new(&repo.work);
+    let Some(tree) = crate::repos::Tree::open(repo) else {
+        return Vec::new();
+    };
     let mut out: Vec<Module> = Vec::new();
-    if let Some(co) = codeowners::load(work) {
+    if let Some(co) = codeowners::load(|p| tree.read(p)) {
         for rule in &co.rules {
             // Only patterns that name a real directory. A CODEOWNERS line like `*.md` is a perfectly
             // good ownership rule and a meaningless thing to write a note about.
@@ -112,7 +114,7 @@ pub fn modules(repo: &Repo) -> Vec<Module> {
             if candidate.is_empty() || candidate.contains('*') || candidate.contains('?') {
                 continue;
             }
-            if !work.join(candidate).is_dir() {
+            if !tree.is_dir(candidate) {
                 continue;
             }
             if let Some(existing) = out.iter_mut().find(|m| m.path == candidate) {
@@ -127,7 +129,7 @@ pub fn modules(repo: &Repo) -> Vec<Module> {
         }
     }
     if out.is_empty() {
-        out = top_level_dirs(work)
+        out = top_level_dirs(&tree)
             .into_iter()
             .map(|path| Module {
                 path,
@@ -140,14 +142,10 @@ pub fn modules(repo: &Repo) -> Vec<Module> {
     out
 }
 
-fn top_level_dirs(work: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(work) else {
-        return Vec::new();
-    };
-    let mut dirs: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter_map(|e| e.file_name().into_string().ok())
+fn top_level_dirs(tree: &crate::repos::Tree) -> Vec<String> {
+    let mut dirs: Vec<String> = tree
+        .top_level_dirs()
+        .into_iter()
         .filter(|name| !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()))
         .collect();
     dirs.sort();
@@ -180,15 +178,9 @@ fn doc_path(repo_id: &str, module: &str) -> PathBuf {
 /// Empty when git cannot answer — which is treated as *stale* everywhere below, because a note whose
 /// freshness cannot be established is exactly a note that should not be trusted.
 pub fn current_sha(repo: &Repo, module: &str) -> String {
-    run_capture_for(
-        "git",
-        &["-C", &repo.work, "log", "-1", "--format=%H", "--", module],
-        Duration::from_secs(15),
-    )
-    .ok()
-    .filter(|(_, _, code)| *code == 0)
-    .map(|(out, _, _)| out.trim().to_string())
-    .unwrap_or_default()
+    crate::repos::Tree::open(repo)
+        .map(|tree| tree.last_commit(module))
+        .unwrap_or_default()
 }
 
 /// Read a stored note, whether or not it is still true.
@@ -234,22 +226,24 @@ pub fn status(repo: &Repo) -> Vec<Status> {
 ///
 /// Shallow files before deep ones because a module's top level is where its entry points and its
 /// intent live; if the budget runs out it should run out in the leaves.
-fn read_module(work: &Path, module: &str) -> (String, bool) {
-    let root = work.join(module);
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect(&root, &mut files, 0);
-    files.sort_by_key(|p| (p.components().count(), p.clone()));
+fn read_module(tree: &crate::repos::Tree, module: &str) -> (String, bool) {
+    let mut files = collect(tree, module);
+    files.sort_by_key(|p| (p.split('/').count(), p.clone()));
     let mut body = String::new();
     let mut cut = false;
-    for f in files {
+    for rel in files {
         if body.len() >= MODULE_BYTES {
             cut = true;
             break;
         }
-        let Ok(text) = fs::read_to_string(&f) else {
-            continue; // binary or unreadable — not source
+        let Some(text) = tree.read(&rel) else {
+            continue; // gone between the listing and the read
         };
-        let rel = f.strip_prefix(work).unwrap_or(&f).display().to_string();
+        // Binary content is not prose a note should be written from, and git hands it over as
+        // readily as source.
+        if text.contains('\0') {
+            continue;
+        }
         let room = MODULE_BYTES.saturating_sub(body.len());
         if text.len() > room {
             cut = true;
@@ -263,29 +257,25 @@ fn read_module(work: &Path, module: &str) -> (String, bool) {
     (body, cut)
 }
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 6 || out.len() > 400 {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.filter_map(|e| e.ok()) {
-        let path = e.path();
-        let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
-            continue;
-        }
-        match e.file_type() {
-            Ok(t) if t.is_dir() => collect(&path, out, depth + 1),
-            // A megabyte of anything is not prose a note should be written from, and reading it
-            // only to throw it away is the expensive half.
-            Ok(t) if t.is_file() && e.metadata().map(|m| m.len() < 400_000).unwrap_or(false) => {
-                out.push(path)
-            }
-            _ => {}
-        }
-    }
+/// The files under one module worth reading, repo-relative.
+///
+/// One `ls-tree` instead of a directory walk. The depth and count bounds the walk carried stay —
+/// they were never about the cost of walking, they are about how much of a module is worth handing
+/// to a model. The per-file size bound goes: a listing does not carry sizes, and asking git for one
+/// per file to decide whether to ask git for the file is the expensive half done twice. The total
+/// is bounded by [`MODULE_BYTES`] either way.
+fn collect(tree: &crate::repos::Tree, module: &str) -> Vec<String> {
+    tree.files(module)
+        .into_iter()
+        .filter(|path| {
+            let rel = path.strip_prefix(module).unwrap_or(path).trim_matches('/');
+            rel.split('/').count() <= 6
+                && !path
+                    .split('/')
+                    .any(|part| part.starts_with('.') || SKIP_DIRS.contains(&part))
+        })
+        .take(400)
+        .collect()
 }
 
 /// Write (or rewrite) the note for one module.
@@ -302,7 +292,10 @@ pub fn write(repo: &Repo, module: &str) -> Result<Doc, String> {
     if !modules(repo).iter().any(|m| m.path == module) {
         return Err(format!("{module:?} is not one of this repo's modules"));
     }
-    let (body, cut) = read_module(Path::new(&repo.work), module);
+    let Some(tree) = crate::repos::Tree::open(repo) else {
+        return Err(format!("{} has no mirror to read", repo.id));
+    };
+    let (body, cut) = read_module(&tree, module);
     if body.trim().is_empty() {
         return Err(format!("nothing readable under {module:?}"));
     }
@@ -391,17 +384,68 @@ pub fn fresh_notes(repo: &Repo, paths: &[String]) -> Vec<Doc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only: the fixture writes into a working checkout on disk, which nothing outside the
+    // tests does any more.
+    use std::path::Path;
 
-    fn fixture() -> (crate::testutil::TempDir, Repo) {
+    /// A repo whose modules are read the way production reads them: out of its mirror.
+    ///
+    /// Which means the fixture is a real git repository and everything a test wants visible has to
+    /// be **committed**. That is not test ceremony, it is the change: what a note is written from is
+    /// what the repo has agreed on, not what is lying about in somebody's working tree. `docs/` also
+    /// needs a file in it now — git has no empty directories, so a directory nobody committed
+    /// anything to was never a module in the first place, and only a disk walk ever thought so.
+    struct Fixture {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _home: crate::testutil::TempDir,
+        _dir: crate::testutil::TempDir,
+        repo: Repo,
+    }
+
+    impl Fixture {
+        /// Commit what the test has written, and bring the mirror up to date.
+        fn publish(&self) {
+            let work = Path::new(&self.repo.work);
+            git(work, &["add", "-A"]);
+            git(work, &["commit", "-q", "-m", "change"]);
+            crate::repos::fetch_mirror(&self.repo).unwrap();
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    fn fixture() -> Fixture {
+        let guard = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
         let dir = crate::testutil::tempdir();
         let work = (dir.as_ref() as &Path).join("work");
         fs::create_dir_all(work.join("src").join("web")).unwrap();
         fs::create_dir_all(work.join("docs")).unwrap();
         fs::create_dir_all(work.join("node_modules")).unwrap();
         fs::write(work.join("src").join("a.rs"), "fn a() {}").unwrap();
+        fs::write(work.join("src").join("web").join("i.html"), "<p>").unwrap();
+        fs::write(work.join("docs").join("d.md"), "# d").unwrap();
+        fs::write(work.join("node_modules").join("v.js"), "vendor").unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "one"]);
         let repo = Repo {
             id: "r".into(),
-            source: "https://github.com/a/b".into(),
+            // Adopted in place, not a URL: the mirror's origin is then this checkout, so
+            // `publish()` fetches from a path on disk instead of reaching for the network.
+            source: work.display().to_string(),
             work: work.display().to_string(),
             store: String::new(),
             agent: "claude".into(),
@@ -410,13 +454,20 @@ mod tests {
             review_queue: true,
             sync_gateway_url: String::new(),
         };
-        (dir, repo)
+        crate::repos::ensure_mirror(&repo).unwrap();
+        Fixture {
+            _guard: guard,
+            _home: home,
+            _dir: dir,
+            repo,
+        }
     }
 
     #[test]
     fn without_codeowners_the_modules_are_the_top_level_directories() {
-        let (_d, repo) = fixture();
-        let paths: Vec<String> = modules(&repo).into_iter().map(|m| m.path).collect();
+        let f = fixture();
+        let repo = &f.repo;
+        let paths: Vec<String> = modules(repo).into_iter().map(|m| m.path).collect();
         assert_eq!(
             paths,
             vec!["docs", "src"],
@@ -426,7 +477,8 @@ mod tests {
 
     #[test]
     fn codeowners_directories_become_the_modules_and_carry_their_owners() {
-        let (_d, repo) = fixture();
+        let f = fixture();
+        let repo = &f.repo;
         let gh = Path::new(&repo.work).join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(
@@ -434,7 +486,8 @@ mod tests {
             "src/ @me\nsrc/web/ @you\n*.md @nobody\n",
         )
         .unwrap();
-        let mods = modules(&repo);
+        f.publish();
+        let mods = modules(repo);
         let paths: Vec<String> = mods.iter().map(|m| m.path.clone()).collect();
         assert_eq!(paths, vec!["src", "src/web"], "a glob is not a module");
         assert_eq!(mods[1].owners, vec!["@you"]);
@@ -442,13 +495,15 @@ mod tests {
 
     #[test]
     fn a_codeowners_pattern_naming_no_directory_is_not_a_module() {
-        let (_d, repo) = fixture();
+        let f = fixture();
+        let repo = &f.repo;
         let gh = Path::new(&repo.work).join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(gh.join("CODEOWNERS"), "does/not/exist/ @me\n").unwrap();
+        f.publish();
         // Falls back rather than returning an empty list: no modules would silently mean no context.
         assert_eq!(
-            modules(&repo)
+            modules(repo)
                 .into_iter()
                 .map(|m| m.path)
                 .collect::<Vec<_>>(),
@@ -458,51 +513,54 @@ mod tests {
 
     #[test]
     fn a_changed_path_belongs_to_its_most_specific_module() {
-        let (_d, repo) = fixture();
+        let f = fixture();
+        let repo = &f.repo;
         let gh = Path::new(&repo.work).join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(gh.join("CODEOWNERS"), "src/ @me\nsrc/web/ @you\n").unwrap();
+        f.publish();
         assert_eq!(
-            touched(&repo, &["src/web/index.html".to_string()]),
+            touched(repo, &["src/web/index.html".to_string()]),
             vec!["src/web"]
         );
-        assert_eq!(touched(&repo, &["src/a.rs".to_string()]), vec!["src"]);
-        assert!(touched(&repo, &["README.md".to_string()]).is_empty());
+        assert_eq!(touched(repo, &["src/a.rs".to_string()]), vec!["src"]);
+        assert!(touched(repo, &["README.md".to_string()]).is_empty());
     }
 
     #[test]
     fn a_note_whose_module_has_moved_is_not_fresh() {
-        let (_d, repo) = fixture();
+        let f = fixture();
+        let repo = &f.repo;
         let doc = Doc {
             path: "src".into(),
             sha: "0000000000000000000000000000000000000000".into(),
             text: "notes".into(),
             written: "2026-01-01T00:00:00Z".into(),
         };
-        // The fixture is not a git repo, so `git log` cannot answer — which must read as stale, not
-        // as fresh. Failing the other way would trust every note forever on a clone git cannot see.
-        assert!(!is_fresh(&repo, &doc));
+        // A note stamped with a commit that is not what last touched the module reads as stale.
+        // Failing the other way would trust every note forever on a repo git cannot answer about,
+        // which is the same wrong answer arrived at more quietly.
+        assert!(!is_fresh(repo, &doc));
     }
 
     #[test]
     fn a_note_with_no_recorded_commit_is_never_fresh() {
-        let (_d, repo) = fixture();
+        let f = fixture();
+        let repo = &f.repo;
         let doc = Doc {
             path: "src".into(),
             sha: String::new(),
             text: "notes".into(),
             written: String::new(),
         };
-        assert!(!is_fresh(&repo, &doc));
+        assert!(!is_fresh(repo, &doc));
     }
 
     #[test]
     fn status_reports_a_module_with_no_note_as_absent() {
-        let (_d, repo) = fixture();
-        let _home = crate::testutil::env_lock();
-        let home = crate::testutil::tempdir();
-        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
-        let st = status(&repo);
+        let f = fixture();
+        let repo = &f.repo;
+        let st = status(repo);
         assert!(st.iter().all(|s| s.state == "absent"), "{st:?}");
     }
 
@@ -514,18 +572,22 @@ mod tests {
 
     #[test]
     fn reading_a_module_skips_vendor_directories() {
-        let (_d, repo) = fixture();
+        let f = fixture();
+        let repo = &f.repo;
         let work = Path::new(&repo.work);
         fs::write(work.join("node_modules").join("big.js"), "junk").unwrap();
-        let (body, _) = read_module(work, "src");
+        f.publish();
+        let tree = crate::repos::Tree::open(repo).unwrap();
+        let (body, _) = read_module(&tree, "src");
         assert!(body.contains("fn a()"));
         assert!(!body.contains("junk"));
     }
 
     #[test]
     fn writing_a_note_for_an_unknown_module_is_refused() {
-        let (_d, repo) = fixture();
-        let err = write(&repo, "nope").unwrap_err();
+        let f = fixture();
+        let repo = &f.repo;
+        let err = write(repo, "nope").unwrap_err();
         assert!(err.contains("not one of this repo's modules"), "{err}");
     }
 }

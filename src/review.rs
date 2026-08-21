@@ -183,7 +183,9 @@ fn changed_paths(slug: &str, number: u64) -> Vec<String> {
 /// narrowing available", because that is what it is. Callers must not read an empty `yours` as
 /// "none of this is yours".
 pub fn ownership(repo: &Repo, identities: &[String], paths: &[String]) -> (Vec<String>, usize) {
-    let Some(co) = codeowners::load(std::path::Path::new(&repo.work)) else {
+    let Some(co) =
+        crate::repos::Tree::open(repo).and_then(|tree| codeowners::load(|p| tree.read(p)))
+    else {
         return (Vec::new(), 0);
     };
     let (mine, theirs) = co.partition(paths, identities);
