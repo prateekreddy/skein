@@ -17,6 +17,10 @@ default-run = "skein"
 # Principle: compose, don't reinvent. Standard wheels only — serde/chrono for the core,
 # axum/tokio for the server. The rich frontend (Svelte) is added when we need the diff
 # viewer; the v0 web UI is a zero-build dark page served from src/web/index.html.
+# Generates the asset table from `src/web/vendor/` — see build.rs for why a directory rather than a
+# constant per file.
+build = "build.rs"
+
 [lib]
 name = "skein"
 path = "src/lib.rs"

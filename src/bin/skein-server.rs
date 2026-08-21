@@ -29,11 +29,9 @@ use tokio_stream::{Stream, StreamExt};
 
 use skein::cockpit::INDEX;
 // Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
-const XTERM_JS: &str = include_str!("../web/vendor/xterm.min.js");
-const XTERM_CSS: &str = include_str!("../web/vendor/xterm.min.css");
-const FIT_JS: &str = include_str!("../web/vendor/addon-fit.min.js");
-// marked.js renders repo markdown in the Files tab — the "read the docs without leaving skein" bit.
-const MARKED_JS: &str = include_str!("../web/vendor/marked.min.js");
+// They are no longer four constants and four handlers — `skein::assets` generates the table from the
+// directory, because a build step emits files whose names carry content hashes and neither the count
+// nor the names are known here. The four URLs are unchanged; only the code behind them is.
 const DEFAULT_ADDR: &str = "127.0.0.1:7878";
 
 /// Cap concurrent embedded terminals so a flood of WS connections can't exhaust PTYs / file
@@ -193,10 +191,12 @@ async fn main() {
         .unwrap_or_else(|| DEFAULT_ADDR.into());
     let app = Router::new()
         .route("/", get(index))
-        .route("/vendor/xterm.js", get(vendor_xterm_js))
-        .route("/vendor/xterm.css", get(vendor_xterm_css))
-        .route("/vendor/addon-fit.js", get(vendor_fit_js))
-        .route("/vendor/marked.js", get(vendor_marked_js))
+        .route("/vendor/xterm.js", get(|| asset("xterm.min.js")))
+        .route("/vendor/xterm.css", get(|| asset("xterm.min.css")))
+        .route("/vendor/addon-fit.js", get(|| asset("addon-fit.min.js")))
+        .route("/vendor/marked.js", get(|| asset("marked.min.js")))
+        // One route, no code per file. This is what a built bundle is served by.
+        .route("/assets/*path", get(any_asset))
         .route("/api/boxes/:name/files", get(api_files))
         .route("/api/boxes/:name/file", get(api_file))
         .route("/api/boxes", get(api_boxes))
@@ -417,20 +417,29 @@ async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
     (headers, INDEX).into_response()
 }
 
-async fn vendor_xterm_js() -> Response {
-    static_asset(XTERM_JS, "application/javascript; charset=utf-8")
+/// One asset by name, or a 404 that says nothing about why.
+///
+/// "No such asset" and "that path may not name one" are the same answer on purpose: a caller probing
+/// for the difference learns nothing, and there is nothing a person can do with the distinction that
+/// a 404 does not already tell them.
+async fn asset(name: &str) -> Response {
+    match skein::assets::get(name) {
+        Some(a) => (
+            [
+                (axum::http::header::CONTENT_TYPE, a.content_type),
+                (axum::http::header::CACHE_CONTROL, a.cache),
+            ],
+            a.bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
-async fn vendor_fit_js() -> Response {
-    static_asset(FIT_JS, "application/javascript; charset=utf-8")
-}
-async fn vendor_marked_js() -> Response {
-    static_asset(MARKED_JS, "application/javascript; charset=utf-8")
-}
-async fn vendor_xterm_css() -> Response {
-    static_asset(XTERM_CSS, "text/css; charset=utf-8")
-}
-fn static_asset(body: &'static str, ct: &'static str) -> Response {
-    ([(axum::http::header::CONTENT_TYPE, ct)], body).into_response()
+
+/// The route a built bundle is served by. The path is a name relative to the asset root and never a
+/// path this process joins onto anything a caller chose — see `skein::assets`.
+async fn any_asset(Path(path): Path<String>) -> Response {
+    asset(&path).await
 }
 
 /// Origin guard for the terminal upgrade. Browsers always send `Origin` on a WebSocket handshake

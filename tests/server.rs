@@ -146,9 +146,44 @@ fn server_serves_ui_vendor_and_guards_routes() {
     );
     assert!(body.contains("</html>"), "UI must not be truncated");
 
-    let (st, body) = http_get(&addr, "/vendor/xterm.js");
+    // The four vendor URLs are unchanged — the code behind them moved to the generated table, and
+    // "unchanged" is the whole claim of that move.
+    for (path, ct) in [
+        ("/vendor/xterm.js", "application/javascript"),
+        ("/vendor/xterm.css", "text/css"),
+        ("/vendor/addon-fit.js", "application/javascript"),
+        ("/vendor/marked.js", "application/javascript"),
+    ] {
+        let (st, body) = http_get(&addr, path);
+        assert_eq!(st, 200, "{path}");
+        assert!(body.contains(ct), "{path} is served as the wrong type");
+    }
+
+    // One route for a directory of built files, with no code per file. Reached by the name it has
+    // in the table, since there is no bundle yet.
+    let (st, body) = http_get(&addr, "/assets/xterm.min.js");
     assert_eq!(st, 200);
     assert!(body.contains("application/javascript"));
+    assert!(
+        body.to_ascii_lowercase()
+            .contains("cache-control: no-store"),
+        "an asset whose name carries no hash must not be cached: {}",
+        body.lines().take(8).collect::<Vec<_>>().join(" | ")
+    );
+
+    // And a path that climbs is a 404 rather than a file. The server never joins a caller's path
+    // onto anything; this is the end-to-end proof of that.
+    for climbing in [
+        "/assets/../Cargo.toml",
+        "/assets/a/../../Cargo.toml",
+        "/assets/nothing-here.js",
+    ] {
+        let (st, _) = http_get(&addr, climbing);
+        assert!(
+            st == 404 || st == 301 || st == 400,
+            "{climbing} answered {st}"
+        );
+    }
 
     let (st, body) = http_get(&addr, "/api/boxes");
     assert_eq!(st, 200);

@@ -1438,6 +1438,26 @@ pure-function testing law (§13) and a reviewed component library; a build makes
 removes the third source of truth. The component library lives in a Claude Design project and is the
 source the cockpit is assembled from.
 
+**Assets are embedded, and overridable from a directory.** A build emits files whose names carry
+content hashes, so neither the count nor the names are known at compile time — which is why there is
+one route over a table generated from a directory rather than a constant and a handler per file.
+Embedded is the default because skein is one binary that cannot be half-upgraded, and a cockpit
+whose scripts came from somewhere else is one that can talk to an API that has moved.
+`$SKEIN_COCKPIT_ASSETS` overrides it, because most of what a build step buys during development is
+that changing a stylesheet is a reload rather than a `cargo build`. It **overrides rather than
+replaces**: a directory holding one file is a developer editing one file.
+
+The root is resolved **once, at startup, and canonicalised**, and every candidate is canonicalised
+again after joining. The hazard is precise — a root taken per request from anything a caller sends is
+a way to serve a box's files through skein's own authenticated origin — and the check has to be on
+the resolved path, because a symlink inside the directory passes every test done on the request.
+A path that climbs is refused rather than sanitised: stripping `..` turns a check into a
+transformation, and a transformation is something somebody later finds a way through.
+
+Two cache rules: a name carrying a content hash is `immutable` for a year, and everything else is
+`no-store`, for the same reason the document is. The conservative one is the default, because an
+asset wrongly cached for a year is a cockpit that restarting the server cannot fix.
+
 ---
 
 ## 12. Rules that keep it clean

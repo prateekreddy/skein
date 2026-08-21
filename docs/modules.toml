@@ -149,6 +149,12 @@ depends_on = ["config", "signals", "util"]
 [current.apiauth]
 depends_on = ["config"]
 
+[current.assets]
+# Nothing. It hands out bytes, and the one decision it makes — which directory, resolved once at
+# startup — is read from the environment rather than asked of `config`, so that an asset root cannot
+# be changed by anything that can change a config file mid-run.
+depends_on = []
+
 [current.attempt]
 # `util` alone, for the locked read-modify-write the claim is. NOT `config`: asking it where the
 # volume lives put this module straight into the eighteen-module knot, which `module-check` said out
@@ -160,7 +166,10 @@ depends_on = ["util"]
 depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
-depends_on = ["ai", "apiauth", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+# `assets` since the cockpit gained one route for a directory of built files: the four vendored
+# scripts stopped being four constants and four handlers, because a build step emits names that
+# carry content hashes and neither the count nor the names are known at compile time.
+depends_on = ["ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "mailbox", "moduledocs", "place", "probes", "prq", "repos", "review", "runtime", "sandbox", "sbx", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
 
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
