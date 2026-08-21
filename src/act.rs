@@ -47,6 +47,14 @@ use std::time::{Duration, Instant};
 /// one cannot take the process down with it.
 pub const KEPT: usize = 256 * 1024;
 
+/// How long the transcript may still be arriving after the command itself has exited.
+///
+/// The child's exit closes its ends of the pipes, so in the ordinary case the pumps see EOF within
+/// microseconds and this is never waited on at all. It exists for the case that is not ordinary — a
+/// command that leaves a grandchild holding stdout — where the choice is between an act that never
+/// ends and a transcript that is short. Two seconds buys the first without risking the second.
+const DRAIN: Duration = Duration::from_secs(2);
+
 /// How long a finished act stays readable. A person who reloads a browser gets their answer; a
 /// server that has been up for a month does not accumulate every box it ever made.
 pub const RETENTION: Duration = Duration::from_secs(30 * 60);
@@ -226,6 +234,12 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
 
     // stdout and stderr both, on their own threads, into one transcript — because a create's errors
     // and its progress are one story and interleaving them is how it reads on a terminal.
+    //
+    // Counted, because the state must not say `Ended` before they are done. A caller that reads the
+    // transcript once, when the state flips, is the case this whole shape exists for — the browser
+    // that reloads mid-create — and a create that failed on its last line of stderr would report
+    // ended with the reason missing. It surfaced as a test that failed about one full run in ten.
+    let draining = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let out = child.stdout.take();
     let err = child.stderr.take();
     for stream in [
@@ -236,6 +250,8 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
     .flatten()
     {
         let act = std::sync::Arc::clone(&act);
+        draining.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let left = std::sync::Arc::clone(&draining);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
@@ -243,6 +259,7 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
                 act.append(&line);
                 line.clear();
             }
+            left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
 
@@ -255,6 +272,22 @@ pub fn begin(id: &str, command: &str) -> Result<Look, String> {
             // Killed by a signal. `-1` rather than a pretend success, because "it stopped and nobody
             // knows why" is a real answer and a zero here would be a lie.
             .unwrap_or(-1);
+        // **Drained before declared, and bounded.** Waiting unconditionally is right for every
+        // ordinary act and hangs on a pathological one: a command that leaves something holding its
+        // stdout never reaches EOF, and the act would stay `Running` for ever with the cockpit
+        // showing a create that never finishes. So the pumps get a deadline, and if they miss it the
+        // transcript says so rather than being quietly short.
+        let deadline = Instant::now() + DRAIN;
+        while draining.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            if Instant::now() >= deadline {
+                waiting.append(
+                    "… the command ended with something still holding its output open; what \
+                     follows was not captured …\n",
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         *waiting.state.lock().unwrap_or_else(|e| e.into_inner()) = State::Ended { code };
         // A watcher blocked on the stream has to learn that there will be no more, and a closed
         // channel is the only signal that cannot be mistaken for a slow act.
@@ -339,6 +372,76 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("{id} never finished");
+    }
+
+    /// The transcript is whole at the moment the state says it ended.
+    ///
+    /// The case this whole shape exists for is a caller that reads **once**, when the state flips —
+    /// `/v2`'s create watcher does exactly that, and the browser reloading mid-create is the story
+    /// in the doc above. The pumps run on their own threads, so an act that declared itself ended
+    /// while they were still draining would hand that caller a create whose failure is missing its
+    /// last line. It surfaced as a flake: one full parallel run in ten.
+    ///
+    /// A burst on stderr immediately before exiting, because stderr is the pipe that carries the
+    /// reason and the one most likely to still be in flight.
+    #[test]
+    fn what_it_said_is_all_there_the_moment_it_says_it_ended() {
+        // Enough that the pump cannot possibly be finished when the child exits: the pipe holds
+        // 64 KiB, so a burst larger than that is still in flight at the moment `wait()` returns.
+        // Two hundred lines was not enough — the sabotage that removes the drain passed against it,
+        // which made the test a description of the fix rather than a check on it.
+        let lines = 20_000;
+        begin(
+            "act-drain",
+            &format!(
+                "i=0; while [ $i -lt {lines} ]; do echo line-$i >&2; i=$((i+1)); done; exit 7"
+            ),
+        )
+        .unwrap();
+        // Polled tightly, so the first sighting of `Ended` is the one asserted on rather than a
+        // later one that had time to catch up.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let done = loop {
+            let seen = look("act-drain").expect("registered");
+            if !matches!(seen.state, State::Running) {
+                break seen;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "act-drain never finished"
+            );
+        };
+        assert_eq!(done.state, State::Ended { code: 7 });
+        let got = done
+            .output
+            .lines()
+            .filter(|l| l.starts_with("line-"))
+            .count();
+        assert_eq!(
+            got,
+            lines,
+            "it declared itself ended with {} of {lines} lines still to come",
+            lines - got
+        );
+    }
+
+    /// An act whose output somebody else is holding open still ends.
+    ///
+    /// The other side of the drain, and the reason it is bounded: a command that leaves a grandchild
+    /// with the pipe never reaches EOF, and waiting for it would leave a create showing `running`
+    /// for ever. It ends, and the transcript says what it could not capture rather than being
+    /// quietly short.
+    #[test]
+    fn an_act_whose_pipe_is_held_open_still_ends() {
+        // `sh` exits at once; the background `sleep` inherits stdout and keeps the pipe open.
+        begin("act-held", "sleep 30 & echo started; exit 0").unwrap();
+        let done = settle("act-held");
+        assert_eq!(done.state, State::Ended { code: 0 });
+        assert!(
+            done.output.contains("still holding its output open"),
+            "a truncated transcript said nothing about being truncated: {:?}",
+            done.output
+        );
     }
 
     /// It runs, it says what it said, and it is still readable after it has ended.
