@@ -887,6 +887,17 @@ pub fn box_limits() -> String {
 /// [`CONTAINER_CGROUP`] — `skein/containers`, a child of the boxes' own parent — and what stays
 /// behind in `/docker` is the sandbox itself, which nothing caps and nothing should.
 ///
+/// **A ceiling on `skein/containers` is not the reservation this argues against**, and the
+/// difference is worth being exact about because the two look alike written down. A reservation is
+/// memory *withheld from the boxes* so that Docker can have it — it idles real memory every hour no
+/// container runs, which is why a third set aside for Docker was removed. A ceiling withholds
+/// nothing: when no container is running the boxes have the whole share, and when one is running it
+/// bounds what that one can take. What it buys is where an overshoot lands. Under one shared
+/// ceiling a runaway container stalls every box — measured, `high 5551` on this fleet — and at the
+/// hard limit the kill is chosen by badness across the whole workload, as readily a box's agent as
+/// the container that caused it. Under its own, the container throttles itself and dies in its own
+/// cgroup.
+///
 /// That is what makes `skein` the one ceiling *and* a real one. It is sized to the whole workload,
 /// and once dockerd has been pointed inside it, the whole workload is what it actually holds:
 /// boxes and containers under one limit, taken first-come, with an overshoot killed in whichever
@@ -914,8 +925,20 @@ pub fn fleet_limits() -> String {
     // check it. sbx fixes a sandbox's memory when it is created, so editing Fleet memory without
     // rebuilding leaves this describing a VM that does not exist — and a ceiling worked out for a
     // machine twice the real size is not a ceiling. The launcher scales by what it actually finds.
+    // `skein/containers` is bounded as one more box-sized claimant, at the same fractions a box
+    // gets. **This is a ceiling, not the reservation the plan argues against** — see [`MemoryPlan`]:
+    // a reservation withholds memory from the boxes whether or not a container is running, while a
+    // ceiling withholds nothing when containers are idle and bounds them when they are not. The
+    // measurement that made the case: `skein`'s `memory.events` on the live fleet read `high 5551`,
+    // which is one container's overshoot stalling every box, five and a half thousand times.
+    //
+    // The name carries the slash because the cgroup is nested; the launcher builds the path from it
+    // and splits the *value* on `/`, so the two never meet.
+    let containers = memory_plan()
+        .map(|p| ceiling(p.boxes * 70 / 100))
+        .unwrap_or_else(|| "max/max".into());
     format!(
-        "total={}M,skein={},docker=max/max",
+        "total={}M,skein={},skein/containers={containers},docker=max/max",
         plan.boxes + plan.plumbing + plan.reserve,
         ceiling(plan.boxes),
     )
@@ -7495,6 +7518,67 @@ b idle 5000000 4 1048576 1048576
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// A runaway container throttles itself instead of every box.
+    ///
+    /// `skein/containers` had no ceiling of its own, so containers were bounded only by the shared
+    /// one they sit inside — and the live fleet's `memory.events` read `high 5551`, which is one
+    /// container's overshoot stalling every box, five and a half thousand times. Under its own
+    /// ceiling the container throttles itself and, past the hard limit, dies in its own cgroup
+    /// rather than handing the kernel a choice across the whole workload.
+    ///
+    /// **A ceiling is not the reservation `MemoryPlan` argues against.** A reservation withholds
+    /// memory from the boxes whether or not a container is running; this withholds nothing when
+    /// containers are idle, which is the assertion below.
+    #[test]
+    fn containers_are_bounded_as_one_more_box_sized_claimant() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let plan = memory_plan().expect("a plan");
+        let spec = fleet_limits();
+        std::env::remove_var("SKEIN_HOME");
+
+        let pair = spec
+            .split(',')
+            .find(|p| p.starts_with("skein/containers="))
+            .unwrap_or_else(|| panic!("containers have no ceiling: {spec}"));
+        let value = pair.trim_start_matches("skein/containers=");
+        let (max, high) = value.split_once('/').expect("max/high");
+        let max: u64 = max.trim_end_matches('M').parse().expect("a size");
+        let high: u64 = high.trim_end_matches('M').parse().expect("a size");
+
+        // The same fraction a box gets, because that is what "one more claimant" means.
+        assert_eq!(
+            max,
+            plan.boxes * 70 / 100,
+            "containers are not sized like a box"
+        );
+        // `high` below `max`, for the reason it is below per box: an overshoot should be slow
+        // before it is fatal.
+        assert!(
+            high < max,
+            "the soft limit is not below the hard one: {value}"
+        );
+        // **Nothing is withheld.** The boxes' own ceiling is untouched by the containers' one, which
+        // is the whole difference between this and the reservation `MemoryPlan` removed.
+        assert!(
+            spec.contains(&format!("skein={}M/", plan.boxes)),
+            "the boxes' share shrank to make room for the containers': {spec}"
+        );
+        // And the nesting travels in the NAME rather than the value, so the launcher's `max/high`
+        // split still sees two halves.
+        assert_eq!(
+            value.matches('/').count(),
+            1,
+            "the value grew a third field: {value}"
+        );
+    }
+
     /// The plumbing is guaranteed memory the kernel may not reclaim, and the number comes from the
     /// plan rather than from a preference.
     ///
@@ -7581,6 +7665,61 @@ b idle 5000000 4 1048576 1048576
             read("skein", "memory.min"),
             "",
             "the boxes were promised memory nobody meant"
+        );
+    }
+
+    /// The launcher writes the nested ceiling to the nested cgroup, not to one named after it.
+    ///
+    /// `skein/containers=…` carries a slash in the *name*, and the launcher builds a path from the
+    /// name and splits the *value* on `/`. If those two ever met, the ceiling would land on a
+    /// cgroup called `containers` at the root — a directory that does not exist, so the write would
+    /// vanish and the containers would stay unbounded with nothing said.
+    #[test]
+    fn a_nested_ceiling_lands_on_the_nested_cgroup() {
+        let dir = tempdir();
+        let root = std::path::Path::new(&dir);
+        for cgroup in ["skein", "skein/containers", "docker"] {
+            std::fs::create_dir_all(root.join("cgroup").join(cgroup)).unwrap();
+        }
+        std::fs::write(root.join("meminfo"), "MemTotal:       27262976 kB\n").unwrap();
+        let harness = format!(
+            "sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+             {body}\n\
+             fleet_limits='total=26624M,skein=15975M/14377M,skein/containers=11182M/10063M,docker=max/max'\n\
+             apply_fleet_ceilings\n",
+            body = BOX_SESSION_SH
+                .lines()
+                .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()))
+                .replace("/proc/meminfo", &root.join("meminfo").to_string_lossy())
+                + "\n}",
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&harness)
+            .output()
+            .expect("run the launcher's ceiling logic");
+        let read = |cgroup: &str, file: &str| -> String {
+            std::fs::read_to_string(root.join("cgroup").join(cgroup).join(file))
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            read("skein/containers", "memory.max"),
+            "11182M",
+            "the containers' ceiling did not reach their cgroup: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(read("skein/containers", "memory.high"), "10063M");
+        // The boxes' own ceiling is untouched by it.
+        assert_eq!(read("skein", "memory.max"), "15975M");
+        assert!(
+            !root.join("cgroup/containers").exists(),
+            "a cgroup was created at the root from the name's second half"
         );
     }
 
