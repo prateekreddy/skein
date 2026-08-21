@@ -190,11 +190,16 @@ item.
 | ~~**R5**~~ — **done**: the warden checks a shared secret before it routes, and refuses everything if it cannot read its own copy. 4a supplied the mechanism — a file under the cover is readable by skein and unreachable from every box. The narrow bind still stands beside it; the secret is what survives the bind widening at 4c | R9, R10, R11 |
 | **R6** — skein cannot audit itself once it shares a sandbox with the agents | |
 | ~~R7~~ — **done**, and not by fixing the comparison: the fleet's login flows **down only**, so there is no field a box asserts that anything trusts | |
-| **R8** — live today, and the move puts skein's own state inside its blast radius. A cluster (the resize archive, `git-tokens/`, `disk`/`identity`, the anchor), not an item | |
+| ~~**R8**~~ — **done** (SKEIN-79 and its three children). Four sites, and the plan was wrong about which were open: the resize *restore* was already safe and its **create** was not; `git-tokens` was safe where the token is written and not where the directory is made; the settings were closed in the library and open in the cockpit's panel; the anchor was closed and is now a test rather than a sentence | |
 
-**So 4c is gated on two: R6 and R8.** It was five when this table was written — R3 was decided
-against (the port stays, §9.5 R3), R5 landed, and R7 turned out to be answerable by changing the
-direction credentials flow rather than by trusting a better field.
+**So 4c is gated on nothing.** R6 and R8 both landed; R3 was decided against and R5 before them.
+What remains before the move is the move — and the one thing it must carry that is not a
+requirement of its own is SKEIN-77, the listening socket opened before any box exists.
+
+~~**So 4c is gated on two: R6 and R8.**~~ It was five when this table was written, then two, and is
+now **none** — R3 was decided against (the port stays, §9.5 R3), R5 landed, R7 turned out to be
+answerable by changing the direction credentials flow rather than by trusting a better field, and R6
+and R8 are done.
 
 One thing 4c must carry that is not a requirement of its own: **the cockpit's listening socket is
 opened before any box exists and inherited across restarts.** Keeping the TCP port left port
