@@ -635,14 +635,46 @@ PY
 command -v python3 >/dev/null 2>&1 \
   || echo "skein: no python3 here, so logins cannot be shared between boxes; each will need its own" >&2
 
+# WHICH WAY A LOGIN MOVES, and why it is not symmetric.
+#
+# It used to be: whichever file claims the later expiry wins, in either direction. The expiry is a
+# number inside the file, and the box side of that file is a box's to write. So a box writes a
+# credentials file with a far-future expiry and a token of its choosing, wins the comparison, is
+# copied UP into the fleet's canonical copy, and every box started afterwards seeds from it. No
+# signature, no second opinion, fleet-wide propagation, from one line of JSON. Theft of this
+# credential is obvious; poisoning it is not, and poisoning is the worse of the two.
+#
+# The comparison cannot be fixed by comparing something else. A box legitimately holds the refresh
+# token, so anything it can produce honestly it can also produce dishonestly, and no field in a file
+# a box writes is evidence about that file.
+#
+# So the DIRECTION carries the rule instead:
+#
+#   * the fleet already holds a login  ->  it flows DOWN only. A box takes it when it is better, and
+#     keeps its own when its own is better. Nothing a box holds can replace the fleet's copy.
+#   * the fleet holds no login at all  ->  a box's login heals it. There is nothing to poison: the
+#     alternative is every box logged out, and any login is better than none.
+#
+# What this costs, stated rather than discovered: a token refreshed inside a box no longer improves
+# the fleet's copy, so the canonical login ages until somebody runs `skein login`. That is a
+# recoverable inconvenience, announced below. A poisoned fleet-wide credential is neither.
 for rel in ".claude/.credentials.json" ".codex/auth.json"; do
   mine="$home/$rel"; canon="$HOME/$rel"
   mine_life="$(login_life "$mine")" || mine_life=""
   canon_life="$(login_life "$canon")" || canon_life=""
-  if [ -n "$mine_life" ] && { [ -z "$canon_life" ] || better_login "$mine_life" "$canon_life" "$mine" "$canon"; }; then
-    merge_login "$mine" "$canon"
-  elif [ -n "$canon_life" ] && { [ -z "$mine_life" ] || better_login "$canon_life" "$mine_life" "$canon" "$mine"; }; then
+  if [ -n "$canon_life" ] && [ -n "$mine_life" ]; then
+    if better_login "$canon_life" "$mine_life" "$canon" "$mine"; then
+      merge_login "$canon" "$mine"
+    else
+      # Its own is the better one and it keeps it — but it stays here. Said out loud, because a box
+      # whose login silently does not reach the fleet looks like a fleet that has stopped sharing.
+      echo "skein: ${SKEIN_BOX:-this box} has a longer-lived $rel than the fleet's, and a box cannot write the fleet's copy; run \`skein login\` on the host to share one" >&2
+    fi
+  elif [ -n "$canon_life" ]; then
     merge_login "$canon" "$mine"
+  elif [ -n "$mine_life" ]; then
+    # The vacuum case, and the only way up. Nothing is displaced, because there is nothing there.
+    merge_login "$mine" "$canon"
   fi
 done
 

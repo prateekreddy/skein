@@ -762,8 +762,9 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // such box was then unreachable, and what a user saw first was an nsenter error about a pid.
     let before = shared_record(name).unwrap().ns_pid;
     let place = own_sandbox(FLEET);
-    // A re-login inside the box, made just before the session dies: it is newer than the sandbox's
-    // copy, so the restart must carry it back — otherwise a rotated token means one login per box.
+    // A re-login inside the box, made just before the session dies. It is newer than the sandbox's
+    // copy and it STAYS HERE: the file a box writes is not evidence about itself, and a box that
+    // could improve the fleet's copy could also poison it. See the launcher's direction rule.
     let box_cred = PathBuf::from(format!("{}/home/.claude/.credentials.json", box_root(name)));
     let seeded = fs::read_to_string(&box_cred).unwrap_or_default();
     assert!(
@@ -823,18 +824,20 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         "the anchor is a new process, so the placement must name it — a stale pid addresses nothing"
     );
 
-    // ---- one login, reused by every box, in whichever direction it was made ----
-    // Seeding alone answers "log in once" only for a box that has never run. A re-login inside a
-    // box must reach the next box too, or a rotated token quietly means one login per box.
+    // ---- one login, seeded down, and never written back up ----
+    // The fleet's copy is what every box is seeded from, so a box that could write it could hand
+    // every later box a credential of its choosing — and the expiry it would win on is a number
+    // inside a file the box writes. So the flow is one-way here: the box keeps its re-login and the
+    // fleet's copy is untouched, whatever the two files claim about themselves.
     let reconciled =
         fs::read_to_string(sandbox_home.join(".claude/.credentials.json")).unwrap_or_default();
     assert!(
-        reconciled.contains("RELOGIN"),
-        "a login made inside a box must become the seed for the next one: {reconciled}"
+        reconciled.contains("SEEDED") && !reconciled.contains("RELOGIN"),
+        "a box wrote the copy every later box is seeded from: {reconciled}"
     );
-    // The other half, and the one that fails silently: the login travelled, and nothing else did.
-    // Copying the file whole would have handed the sandbox this box's per-repo grant and destroyed
-    // the sandbox's own — surfacing much later as an MCP server asking to be authorised again.
+    // Nothing else travelled either, and this half fails silently. Copying the file whole would
+    // have handed the sandbox this box's per-repo grant and destroyed the sandbox's own —
+    // surfacing much later as an MCP server asking to be authorised again.
     assert!(
         reconciled.contains("GRANT-SHARED"),
         "the sandbox's own MCP grant was destroyed by a login sync: {reconciled}"
@@ -842,6 +845,14 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     assert!(
         !reconciled.contains("GRANT-MINE"),
         "one box's per-repo MCP grant escaped into the shared copy: {reconciled}"
+    );
+    // And the box was not handed the fleet's older copy over its own newer one either: it keeps
+    // what it has. Losing a working login to a stale one is the failure this rule replaced, not
+    // one it is allowed to reintroduce.
+    let kept = fs::read_to_string(&box_cred).unwrap_or_default();
+    assert!(
+        kept.contains("RELOGIN"),
+        "the box's own login was overwritten with the fleet's older one: {kept}"
     );
 
     let _ = stop_box(name);

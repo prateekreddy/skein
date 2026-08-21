@@ -137,7 +137,7 @@ where it discovers a hole:
 | R4 no shared writable executable path | read-only toolchains with a per-box overlay | **user-visible** — one box's `cargo install` stops reaching the others, and the shared build cache goes. In `docs/parity.md` §7. |
 | R5 warden secret under the cover | falls out of 4a | |
 | R6 audit log, warden-written, host-side | new: the sink endpoint, and skein reporting into it | never compilable-out |
-| R7 credentials never win on self-asserted freshness | replace the expiry comparison | small, and it closes fleet-wide credential poisoning |
+| R7 credentials never win on self-asserted freshness | ~~replace the expiry comparison~~ — **done**: the comparison could not be fixed, the *direction* was | The expiry is a field inside a file a box writes, and a box legitimately holds the refresh token — so nothing it can produce honestly it cannot also produce dishonestly, and no field in that file is evidence about it. The fleet's login now flows **down only**; a box's reaches the fleet solely when the fleet has none, where there is nothing to poison. Cost, stated: a token refreshed in a box no longer improves the fleet's copy, which ages until `skein login`. |
 | R8 no privileged actor follows a box-influenced path | the resize archive, `git-tokens/`, `disk`/`identity`, and the anchor | the largest of the nine; several distinct sites |
 | R9 workshop toggle states its terms | wording plus a per-start banner | already half-built |
 | R10 cross-box messaging renders provenance | inbound-from-a-box distinguishable from inbound-from-you | §9.2.2 is kept, so this is the mitigation |

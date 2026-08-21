@@ -1128,6 +1128,15 @@ Two defences exist and neither is built: a proxy that injects it outside the box
 **per-box logins** — which the launcher already falls back to when `python3` is absent, so the path
 is not hypothetical.
 
+One thing that *was* built, because it was worse than unscopable — it was **forgeable**. The login
+used to flow both ways, with the winner chosen by the `expiresAt` inside the file, so a box that
+wrote itself a credential dated far in the future had it copied up into the fleet's canonical copy
+and seeded into every box started afterwards. The comparison could not be repaired by comparing
+something else: a box legitimately holds the refresh token, so anything it can produce honestly it
+can produce dishonestly, and no field in a file a box writes is evidence about that file. The
+direction carries the rule now — the fleet's login flows **down** only, and a box's reaches the
+fleet only when the fleet has none, where there is nothing to displace.
+
 ## 10. Budgets
 
 **skein must never be expensive enough to disturb development on the machine it runs on.** Measured,

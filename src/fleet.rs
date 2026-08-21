@@ -4784,17 +4784,21 @@ b idle 5000000 1048576 4
         );
     }
 
-    /// mtime says when a file was written; `expiresAt` says which credential is better.
+    /// The fleet's login flows DOWN into a box, and a box's never flows up over it.
     ///
-    /// They come apart exactly where it costs: a box that starts rewrites its own copy, so it holds
-    /// the newer mtime whether or not its token is the older one — and recency then replaces a valid
-    /// login with a stale one. Found in the live fleet as boxes sitting on tokens that had expired
-    /// days earlier while other boxes held good ones.
+    /// Two rules in one test because they are one rule seen from two sides.
     ///
-    /// Ordering by expiry can only ever prefer the longer-lived credential, so unlike recency it
-    /// cannot lose a working login. That is the property here, driven both directions.
+    /// **Down**: mtime says when a file was written; `expiresAt` says which credential is better,
+    /// and they come apart exactly where it costs — a box that starts rewrites its own copy, so it
+    /// holds the newer mtime whether or not its token is the older one. Found in the live fleet as
+    /// boxes sitting on tokens that had expired days earlier while other boxes held good ones.
+    ///
+    /// **Up**: nothing. The expiry is a number inside the file and the box side of that file is a
+    /// box's to write, so it is not evidence about itself — see
+    /// [`Self::a_box_cannot_poison_the_fleets_login_with_an_expiry_it_made_up`]. What a box holds
+    /// stays where it is, and the box keeps it rather than being handed something worse.
     #[test]
-    fn the_longer_lived_login_wins_however_recently_the_other_was_written() {
+    fn the_fleets_login_reaches_a_box_and_a_boxs_never_reaches_the_fleet() {
         let dir = tempdir();
         let root = dir.as_ref() as &std::path::Path;
         let cred = |tok: &str, exp: i64| {
@@ -4805,17 +4809,78 @@ b idle 5000000 1048576 4
         let live = cred("sk-live", 1_900_000_000_000);
         let stale = cred("sk-stale", 1_700_000_000_000);
 
-        let (box_side, sandbox_side) = credential_sync(root, Some(&live), Some(&stale), "sandbox");
-        assert!(
-            box_side.contains("sk-live") && sandbox_side.contains("sk-live"),
-            "a newer *write* of an expired token beat a live login:\nbox {box_side}\nsandbox {sandbox_side}"
-        );
-
+        // Down: the fleet's longer-lived login reaches the box despite the box's newer write.
         let (box_side, sandbox_side) = credential_sync(root, Some(&stale), Some(&live), "box");
         assert!(
-            box_side.contains("sk-live") && sandbox_side.contains("sk-live"),
-            "same loss in the other direction:\nbox {box_side}\nsandbox {sandbox_side}"
+            box_side.contains("sk-live"),
+            "a newer *write* of an expired token beat a live login:\nbox {box_side}"
         );
+        assert!(
+            sandbox_side.contains("sk-live"),
+            "the fleet's own copy was disturbed by a sync that had nothing to give it:\n{sandbox_side}"
+        );
+
+        // Up: it does not. The box keeps the better one; the fleet keeps what it had.
+        let (box_side, sandbox_side) = credential_sync(root, Some(&live), Some(&stale), "sandbox");
+        assert!(
+            box_side.contains("sk-live"),
+            "the box was handed the worse of the two:\nbox {box_side}"
+        );
+        assert!(
+            sandbox_side.contains("sk-stale"),
+            "a box wrote the fleet's login:\nsandbox {sandbox_side}"
+        );
+    }
+
+    /// A box cannot take the fleet's login by claiming a better one.
+    ///
+    /// The attack in full, and it needed one line of JSON: a box writes its own credentials file
+    /// with an expiry far in the future and a token of its choosing. Under expiry-wins that file was
+    /// better than the fleet's by definition, so it was copied UP into the canonical copy — and
+    /// every box started afterwards seeded from it. No signature, no second opinion, fleet-wide.
+    ///
+    /// It cannot be fixed by comparing a different field. A box legitimately holds the refresh
+    /// token, so anything it can produce honestly it can produce dishonestly; no field in a file a
+    /// box writes is evidence about that file. The direction carries the rule instead.
+    #[test]
+    fn a_box_cannot_poison_the_fleets_login_with_an_expiry_it_made_up() {
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        let real = r#"{"claudeAiOauth":{"accessToken":"sk-real","refreshToken":"r","expiresAt":1750000000000}}"#;
+        // Year 10000, and a token the box chose.
+        let forged = r#"{"claudeAiOauth":{"accessToken":"sk-attacker","refreshToken":"r","expiresAt":253402300799000}}"#;
+
+        let (_, sandbox_side) = credential_sync(root, Some(forged), Some(real), "box");
+        assert!(
+            sandbox_side.contains("sk-real"),
+            "a box replaced the fleet's login with one it made up:\n{sandbox_side}"
+        );
+        assert!(
+            !sandbox_side.contains("sk-attacker"),
+            "the forged token reached the copy every later box seeds from:\n{sandbox_side}"
+        );
+    }
+
+    /// A box's login still heals a fleet that has none.
+    ///
+    /// The one direction that stays open, and it is open because there is nothing there to poison:
+    /// the alternative is every box logged out, and any login is better than none. It is also what
+    /// keeps the launcher's own fallback honest — log in inside one box, and a fleet with no
+    /// canonical copy gets one.
+    #[test]
+    fn a_login_from_a_box_still_heals_a_fleet_that_has_none() {
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        let login = r#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r","expiresAt":1900000000000}}"#;
+        let husk = r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}"#;
+
+        for fleet_has in [None, Some(husk)] {
+            let (_, sandbox_side) = credential_sync(root, Some(login), fleet_has, "sandbox");
+            assert!(
+                sandbox_side.contains("sk-live"),
+                "a fleet with no login of its own was left without one:\n{sandbox_side}"
+            );
+        }
     }
 
     /// The host's copy of the fleet login is the last resort, so a husk must never reach it.
