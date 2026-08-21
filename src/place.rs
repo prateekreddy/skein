@@ -609,6 +609,32 @@ fn agent_connect(port: u16, timeout: Duration) -> Result<TcpStream, String> {
 /// chunking or content negotiation. A client crate would bring an async runtime into a synchronous
 /// call path that runs on tokio worker threads, which is a deadlock to reason about in exchange for
 /// features this wire has none of.
+/// What the in-sandbox agent says about the machine: the Docker watchdog, and the kernel's memory
+/// pressure counters.
+///
+/// **Its own connection rather than the pooled one.** `agent_post` holds a keep-alive socket for
+/// `/exec`, and this is asked rarely — a surface, not a tick — so borrowing that socket to send a
+/// different shape of request would risk the pool for no gain.
+///
+/// `None` when there is no agent, when it is older than the endpoint, or when it will not answer.
+/// All three mean the same thing to a caller: no numbers this time. A fleet without an agent is not
+/// a fleet with a problem, and reporting one would be inventing news.
+pub fn agent_machine() -> Option<serde_json::Value> {
+    let (port, token) = agent_target()?;
+    let mut stream = agent_connect(port, AGENT_CONNECT).ok()?;
+    let request = format!(
+        "GET /machine HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let reply = read_reply(&mut stream).ok()?;
+    // 404 is an agent from before this endpoint existed, which `AGENT_PROTOCOL` already handles by
+    // replacing it — so this is the window between the two, not an error to report.
+    (reply.status == 200)
+        .then(|| serde_json::from_slice(&reply.out).ok())
+        .flatten()
+}
+
 fn agent_exchange(stream: &mut TcpStream, token: &str, body: &[u8]) -> Result<AgentReply, String> {
     let head = format!(
         "POST /exec HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Skein-Token: {token}\r\n\

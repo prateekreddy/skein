@@ -244,6 +244,7 @@ async fn main() {
         // more than one fleet needing to see them.
         .route("/api/machine/sandboxes", get(api_machine_sandboxes))
         .route("/api/machine/doorstep", get(api_machine_doorstep))
+        .route("/api/machine/pressure", get(api_machine_pressure))
         .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
@@ -2064,6 +2065,33 @@ async fn api_machine_doorstep() -> Json<serde_json::Value> {
         "turned_away": door.turned_away(),
         "grace_secs": skein::knock::grace().as_secs(),
     }))
+}
+
+/// How hard the fleet is being squeezed — `signal::Signal::MachinePressure`.
+///
+/// The counters live in the sandbox and are read by the agent, so this is one HTTP call and no
+/// subprocess on either side. Asked when somebody wants it, never on a tick.
+///
+/// A rate rather than a total, because everything the kernel keeps here is monotonic since boot: a
+/// raw `98305` says the same enormous thing for ever and never says whether it is happening now.
+async fn api_machine_pressure() -> Response {
+    match tokio::task::spawn_blocking(skein::fleet::pressure).await {
+        Ok(Some(p)) => Json(p).into_response(),
+        // No agent to ask is not a fleet under pressure, and answering zero would be inventing
+        // news. 503 with the reason, so a surface can say "not known" rather than "fine".
+        Ok(None) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "no fleet agent answered, so the kernel's pressure counters could not be read"
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 async fn api_fleet_resources() -> Response {

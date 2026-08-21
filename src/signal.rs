@@ -287,6 +287,19 @@ pub enum Signal {
     /// free signal and an undeclared one look identical from the outside, and only one of them has
     /// been thought about.
     MachineDoorstep,
+    /// How hard the fleet is being squeezed: the kernel's own memory-pressure counters, and what
+    /// the Docker watchdog has had to do.
+    ///
+    /// **A fact about the machine, and the reason the last one could not be diagnosed.** When a
+    /// container took the daemon down, `oom_kill` read 0 everywhere afterwards — the evidence went
+    /// with the restart that recovered it — while `memory.events` carried tens of thousands of
+    /// throttles nobody had ever looked at. A number that is only readable after somebody thinks to
+    /// look is a number that is read after the second occurrence, never the first.
+    ///
+    /// Free of subprocesses and **not** free of everything: the counters are files, read by the
+    /// in-sandbox agent, and this is one HTTP call to it. That is the whole reason it can be asked
+    /// by a surface without the board's tick paying for it.
+    MachinePressure,
 }
 
 impl Signal {
@@ -327,6 +340,7 @@ impl Signal {
             Signal::BoxDocsUpdate => "box-docs-update",
             Signal::BoxBranchFromHead => "box-branch-from-head",
             Signal::MachineDoorstep => "machine-doorstep",
+            Signal::MachinePressure => "machine-pressure",
         }
     }
 
@@ -367,6 +381,9 @@ impl Signal {
             // Source for reading a variable would put a lie in the one place the design is
             // checkable, exactly as it would for `FleetListing`.
             Signal::MachineDoorstep => &[],
+            // The agent, over HTTP. §2.3 names it: `http` reaches "GitHub, and the warden" — and
+            // the fleet agent, which is the same shape of reach into the sandbox.
+            Signal::MachinePressure => &[crate::source::Source::Http],
         }
     }
 
@@ -383,7 +400,7 @@ impl Signal {
             | Signal::BoxDiff
             | Signal::BoxDocsUpdate
             | Signal::BoxBranchFromHead => Subject::Box,
-            Signal::MachineDoorstep => Subject::Machine,
+            Signal::MachineDoorstep | Signal::MachinePressure => Subject::Machine,
         }
     }
 
@@ -405,7 +422,7 @@ impl Signal {
             | Signal::BoxDocsUpdate
             | Signal::BoxBranchFromHead => Scale::PerBox,
             // One answer for the whole front door, however many boxes there are.
-            Signal::MachineDoorstep => Scale::PerPass,
+            Signal::MachineDoorstep | Signal::MachinePressure => Scale::PerPass,
         }
     }
 
@@ -435,6 +452,9 @@ impl Signal {
             // Ungated on purpose, which is safe only because it forks nothing: a gate exists to
             // stop two askers becoming two subprocesses, and there is no subprocess here.
             Signal::MachineDoorstep => None,
+            // Ungated here and rate-limited by its own shape instead: two readings are what make a
+            // rate, so asking twice in quick succession answers about a few seconds and says so.
+            Signal::MachinePressure => None,
         }
     }
 
@@ -472,6 +492,10 @@ impl Signal {
             Signal::BoxBranchFromHead => Cost::free(
                 "`.git/HEAD` as a file, src/sbx.rs `git_branch_for` — it forked a `git rev-parse` \
                  per box per tick until the count in `tests/board_cost.rs` made that visible",
+            ),
+            Signal::MachinePressure => Cost::free(
+                "one HTTP call to the in-sandbox agent, which reads `/sys/fs/cgroup/*/memory.events` \
+                 and `/proc/vmstat` — files, no subprocess on either side",
             ),
             Signal::MachineDoorstep => Cost::free(
                 "two integers under a lock, src/knock.rs `knocking` and `turned_away` — no \

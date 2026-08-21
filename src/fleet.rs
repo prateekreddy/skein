@@ -944,6 +944,106 @@ pub fn fleet_limits() -> String {
     )
 }
 
+/// How hard the fleet is being squeezed, as a rate rather than a total.
+///
+/// **A counter is not a number a person can act on.** Everything the kernel keeps here is monotonic
+/// since boot: `memory.events`' `high` on this fleet read 5,551 one hour and 98,305 the next, and
+/// shown raw it says the same enormous thing for ever while telling nobody whether it is happening
+/// *now*. So two readings are kept and what is reported is the difference over the time between
+/// them.
+///
+/// **The baseline is in memory, and lost on restart.** A file would survive it, and would then have
+/// to distinguish a counter that went backwards because the sandbox rebooted from one that went
+/// backwards because the file is stale — for a number that re-establishes itself within a minute of
+/// asking twice. The cost is stated rather than paid: after a skein restart the first answer has no
+/// rate, and says so.
+///
+/// It costs no subprocess: the agent reads `/sys/fs/cgroup` and `/proc/vmstat`, which are files, and
+/// this is one HTTP call to it. That is what keeps it off the board's tick — see
+/// `tests/board_cost.rs`, which measures the forks a tick makes.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct Pressure {
+    /// Times the whole workload was throttled at its ceiling, per minute, since the last reading.
+    pub throttled_per_min: f64,
+    /// The same for containers alone — which is a runaway container rather than a busy fleet.
+    pub containers_throttled_per_min: f64,
+    /// Anything the kernel killed for memory, anywhere in the VM, since the last reading. Not a
+    /// rate: one is already too many, and the number is what says how bad it got.
+    pub killed: u64,
+    /// How many times the watchdog has had to restart the Docker daemon.
+    pub docker_restarts: u64,
+    /// `false` on the first answer after a restart, when there is nothing to have changed since.
+    pub rated: bool,
+}
+
+/// The previous reading, so a rate can be worked out from the next one.
+static LAST_PRESSURE: std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>> =
+    std::sync::Mutex::new(None);
+
+/// Ask the fleet how hard it is being squeezed. `None` when there is no agent to ask.
+pub fn pressure() -> Option<Pressure> {
+    let now = crate::place::agent_machine()?;
+    let mut held = LAST_PRESSURE.lock().unwrap_or_else(|e| e.into_inner());
+    let out = rate_between(
+        held.as_ref()
+            .map(|(when, before)| (when.elapsed(), before.clone())),
+        &now,
+    );
+    *held = Some((std::time::Instant::now(), now));
+    Some(out)
+}
+
+/// How much a since-boot counter moved between two readings.
+///
+/// **A counter that went backwards is a sandbox that rebooted**, not a negative rate — and what it
+/// reads now is, exactly, everything that has happened since skein last looked. Subtracting anyway
+/// would report zero for a fleet that had just been killed and restarted, which is the one moment
+/// the number matters most.
+fn grew_by(then: u64, read: u64) -> u64 {
+    match read < then {
+        true => read,
+        false => read - then,
+    }
+}
+
+/// The arithmetic, with the clock and the agent taken out of it.
+///
+/// Its own function because the two cases that are not arithmetic — a first reading, and a counter
+/// that went backwards — cannot be reached from a test that has to arrange a real sandbox reboot.
+fn rate_between(
+    before: Option<(Duration, serde_json::Value)>,
+    now: &serde_json::Value,
+) -> Pressure {
+    let restarts = now["docker"]["restarts"].as_u64().unwrap_or(0);
+    match before {
+        None => Pressure {
+            docker_restarts: restarts,
+            ..Default::default()
+        },
+        Some((elapsed, before)) => {
+            let minutes = (elapsed.as_secs_f64() / 60.0).max(1.0 / 60.0);
+            let since = |what: &str, field: &str| -> u64 {
+                let then = before["pressure"][what][field].as_u64().unwrap_or(0);
+                let read = now["pressure"][what][field].as_u64().unwrap_or(0);
+                grew_by(then, read)
+            };
+            Pressure {
+                throttled_per_min: since("skein", "high") as f64 / minutes,
+                containers_throttled_per_min: since("skein/containers", "high") as f64 / minutes,
+                killed: since("skein", "oom_kill")
+                    + since("skein/containers", "oom_kill")
+                    + since("docker", "oom_kill")
+                    + grew_by(
+                        before["pressure"]["vmstat_oom_kill"].as_u64().unwrap_or(0),
+                        now["pressure"]["vmstat_oom_kill"].as_u64().unwrap_or(0),
+                    ),
+                docker_restarts: restarts,
+                rated: true,
+            }
+        }
+    }
+}
+
 /// What the sandbox's own plumbing is **guaranteed**, as the `key=value,…` spec the launcher applies
 /// to `memory.min`.
 ///
@@ -7516,6 +7616,64 @@ b idle 5000000 4 1048576 1048576
             );
         }
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A counter is not a rate, and the difference is what a person can act on.
+    ///
+    /// Everything the kernel keeps here is monotonic since boot: this fleet's `high` read 5,551 one
+    /// hour and 98,305 the next. Shown raw it says the same enormous thing for ever and never says
+    /// whether it is happening *now*.
+    ///
+    /// Two readings and the time between them, with two cases that are not arithmetic: the **first**
+    /// answer after a restart has nothing to have changed since and says so rather than reporting
+    /// zero, and a counter that went **backwards** is a sandbox that rebooted rather than a negative
+    /// rate — everything since its boot is what has happened since skein last looked.
+    #[test]
+    fn pressure_is_reported_as_a_rate_and_survives_a_sandbox_reboot() {
+        let reading = |high: u64, kills: u64, restarts: u64| {
+            serde_json::json!({
+                "docker": { "restarts": restarts },
+                "pressure": {
+                    "skein": { "high": high, "oom_kill": kills },
+                    "skein/containers": { "high": 0, "oom_kill": 0 },
+                    "docker": { "oom_kill": 0 },
+                    "vmstat_oom_kill": 0,
+                }
+            })
+        };
+        // The first answer: nothing to compare against, and it does not pretend otherwise.
+        let first = rate_between(None, &reading(5551, 0, 0));
+        assert!(
+            !first.rated,
+            "a first reading reported a rate it could not have"
+        );
+        assert_eq!(first.throttled_per_min, 0.0);
+        assert_eq!(
+            first.docker_restarts, 0,
+            "the count is a total, not a delta"
+        );
+
+        // A minute later, ninety thousand more throttles: about 1,500 a minute, not 98,305.
+        let second = rate_between(
+            Some((Duration::from_secs(60), reading(5551, 0, 0))),
+            &reading(95_551, 0, 2),
+        );
+        assert!(second.rated);
+        assert_eq!(second.throttled_per_min.round(), 90_000.0);
+        assert_eq!(second.docker_restarts, 2);
+
+        // The sandbox rebooted: the counter is lower than it was. Everything it now reads has
+        // happened since skein last looked, which is the only honest reading of it.
+        let after = rate_between(
+            Some((Duration::from_secs(60), reading(95_551, 4, 2))),
+            &reading(120, 1, 0),
+        );
+        assert_eq!(
+            after.throttled_per_min.round(),
+            120.0,
+            "a reboot read as a negative rate"
+        );
+        assert_eq!(after.killed, 1, "the kills since the reboot were lost");
     }
 
     /// A runaway container throttles itself instead of every box.

@@ -133,6 +133,13 @@ impl HealthReport {
     }
 }
 
+/// Throttles a minute above which the fleet is worth mentioning as busy.
+///
+/// A handful is ordinary — a build briefly overshooting and the kernel reclaiming, which is what
+/// `memory.high` is for. Sixty a minute is one a second, sustained, which is the shape that gets
+/// remembered as "it felt slow" and never reported.
+const THROTTLE_NOTICEABLE: f64 = 60.0;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthReport {
     pub ok: bool,
@@ -248,14 +255,52 @@ pub fn health_report() -> HealthReport {
     // Every box shares one sandbox, so there is always a division to report. This used to have a
     // "one sandbox per box — nothing to divide" arm for a fleet whose name was cleared; that model is
     // gone, and with it the only way to reach it.
+    // How the memory is divided, and — the part that used to be missing — whether the division is
+    // actually being *hit*. A plan is a claim about what should happen; the kernel's counters are
+    // what did. The fleet had been throttling ninety thousand times an hour and the only place that
+    // showed was a file nobody read.
+    let squeeze = crate::fleet::pressure();
     let memory = match crate::fleet::memory_plan() {
-        Some(plan) => HealthCheck::satisfied(format!(
-            "{} across all boxes and the containers they start, {} for the sandbox's own daemons, \
-             {} kept back for the VM's services and the kernel",
-            gib(plan.boxes),
-            gib(plan.plumbing),
-            gib(plan.reserve)
-        )),
+        Some(plan) => {
+            let divided = format!(
+                "{} across all boxes and the containers they start, {} for the sandbox's own \
+                 daemons, {} kept back for the VM's services and the kernel",
+                gib(plan.boxes),
+                gib(plan.plumbing),
+                gib(plan.reserve)
+            );
+            match squeeze {
+                // Something was killed for memory. **A fault, not a note**: whatever it was did not
+                // finish, and the fix is a real one rather than advice to watch it.
+                Some(p) if p.killed > 0 => HealthCheck::unsatisfied(
+                    format!(
+                        "{divided}. The kernel has killed {} process(es) for memory since skein \
+                         last looked{}",
+                        p.killed,
+                        match p.docker_restarts {
+                            0 => String::new(),
+                            n => format!(", and the Docker daemon has been restarted {n} time(s)"),
+                        }
+                    ),
+                    "give the fleet more memory (Settings → Fleet), or stop a box you are not \
+                     using — `skein ls` shows what is holding it",
+                ),
+                // Sustained throttling is not a kill and is not nothing: it is every box getting
+                // slower together, which is exactly what gets remembered as "skein felt slow" and
+                // never reported. Said, and not raised to a fault, because the fleet is working.
+                Some(p) if p.rated && p.throttled_per_min > THROTTLE_NOTICEABLE => {
+                    HealthCheck::satisfied(format!(
+                        "{divided}. It is at that ceiling now — {:.0} throttles a minute{}",
+                        p.throttled_per_min,
+                        match p.containers_throttled_per_min > THROTTLE_NOTICEABLE {
+                            true => ", mostly from containers a box started",
+                            false => "",
+                        }
+                    ))
+                }
+                _ => HealthCheck::satisfied(divided),
+            }
+        }
         // A fleet whose total is unset has no ceiling anywhere: not per box, not on the boxes
         // together, not on Docker. One build can then reach the VM's memory, and with no swap the
         // kernel's global OOM killer picks a victim by badness rather than by blame.

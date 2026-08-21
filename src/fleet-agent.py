@@ -146,7 +146,12 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return self._fail(403, "bad token")
             watch = getattr(self, "docker", None)
-            body = json.dumps({"docker": watch.snapshot() if watch else None}).encode()
+            body = json.dumps(
+                {
+                    "docker": watch.snapshot() if watch else None,
+                    "pressure": counters(),
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -341,6 +346,52 @@ class Handler(BaseHTTPRequestHandler):
             base64.b64encode(b"".join(collected)[:MAX_STDERR]).decode("ascii"),
         )
         self.end_headers()
+
+
+# The cgroups whose pressure is worth reporting, and what each one being squeezed would mean.
+#
+#   skein             the whole workload's ceiling: the boxes and the containers they start
+#   skein/containers  a runaway container, once it has a ceiling of its own to hit
+#   docker            the daemon itself, which is uncapped — so only its kills matter here
+WATCHED = ("skein", "skein/containers", "docker")
+
+
+def counters(cgroup="/sys/fs/cgroup", vmstat="/proc/vmstat"):
+    """What the kernel says about memory pressure, read straight out of the filesystem.
+
+    **Free, and that is the property that matters.** These are file reads with no subprocess, which
+    is what lets skein ask for them without the board's tick paying for it — see
+    `tests/board_cost.rs`, which measures exactly that.
+
+    Everything here is a counter **since this boot**. Nothing is interpreted: a rate is the host's
+    business, because only the host knows when it last looked.
+    """
+    out = {}
+    for name in WATCHED:
+        here = {}
+        base = os.path.join(cgroup, name)
+        try:
+            for line in open(os.path.join(base, "memory.events")):
+                key, _, value = line.partition(" ")
+                here[key] = int(value)
+        except (OSError, ValueError):
+            continue  # a fleet without this cgroup is not a fleet with a problem to report
+        for field in ("memory.current", "memory.max"):
+            try:
+                here[field] = open(os.path.join(base, field)).read().strip()
+            except OSError:
+                pass
+        out[name] = here
+    # The kernel's own tally, which is what says whether anything was killed OUTSIDE the cgroups
+    # skein wrote — the case that took the daemon down and left no trace in any of them.
+    try:
+        for line in open(vmstat):
+            if line.startswith("oom_kill "):
+                out["vmstat_oom_kill"] = int(line.split()[1])
+                break
+    except (OSError, ValueError):
+        pass
+    return out
 
 
 def dockerd_pid(proc="/proc"):
