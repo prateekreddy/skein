@@ -38,18 +38,28 @@ That single move invalidates six things at once, of which the first draft admitt
 
 Each step is independently valuable and independently revertible.
 
-**1 — The durable volume, on the current codebase.** The highest-value idea in the architecture and it
-needs no rewrite. `$SKEIN_HOME` is **already** a single relocatable root, so the move itself is close
-to a mount and an environment variable. The work is in four things none of which is the move:
+**1 — The durable volume, on the current codebase. Done.** The highest-value idea in the architecture
+and it needs no rewrite. `$SKEIN_HOME` is **already** a single relocatable root, so the move itself is
+close to a mount and an environment variable. The work is in four things none of which is the move —
+all four below, plus `skein migrate` and a `VERSION` (`5b49362`), which refuses a volume it does not
+understand rather than half-reading it. **What no test here can establish** is the step's own claim:
+that a fleet can be destroyed, recreated and remounted with nothing lost. That needs a live fleet.
 
 - **the mount split.** The API token is safe today *because* `~/.skein/repos` and `~/.skein/boxes` are
   bind-mounted into boxes while `~/.skein` itself is not — "checked, not assumed". Mounting a volume
   root whole puts `credentials/`, `api-token`, `github-pats/` and `tokens/` inside every box's reach
   on the shared uid. The cover is an **inversion derived per box** — tmpfs the state
   root, bind back what this box needs — not a list of things to hide (architecture §9.5.2).
+  **Done** (`d676d51`, `0158d51`, `9d0dc98`, `0b93ab6`): the cover is derived per box; declared state
+  is not under any mount at all; the volume root and its credentials are stated as a property over a
+  *walk of the whole volume*, so a secret written tomorrow at a path nobody listed is private without
+  anybody listing it; and a repo pointed at the volume (`skein add --store ~/.skein`, or `/`) is
+  refused rather than mounted. The host's working checkout left the sandbox entirely.
 - **`places/` holds the box anchors**, which are volume state but **declared** and under the cover,
   stamped with the sandbox generation (architecture §9.5.1). Moving them without the stamp is how a
-  rebuilt fleet re-enters a recycled pid.
+  rebuilt fleet re-enters a recycled pid. **Done**: the record carries `(generation, pid, starttime)`
+  and a crossing is refused when any of the three disagrees — the generation guards a sandbox cycle,
+  `starttime` guards pid reuse within one.
 - **`repos/<id>/work` is a working checkout**, not a mirror, and `diff.rs`, `moduledocs.rs` and
   `codeowners.rs` read it directly. Repointing them is budgeted here, not assumed away.
   **Done** (`f8056a7`, `2644f99`, `04c10d9`, `0b93ab6`): `repos/<id>/mirror` is a bare mirror and is
@@ -58,9 +68,14 @@ to a mount and an environment variable. The work is in four things none of which
   trap this bullet does not name, and the one that cost the most to see: **a mirror can never supply
   a gitignored file**, so `shared-paths.txt` — the `.env` and the `CLAUDE.md` a project keeps out of
   git — is not a mirror question at all. Those come from the repo's *source tree*, which is now
-  copied into the store on the host, and the checkout is no longer mounted into the sandbox.
+  copied into the store on the host, and the checkout is no longer mounted into the sandbox. A repo
+  registered from a URL has no source tree at all (`5300c56`), so `repos/<id>/` holds a mirror and a
+  store and nothing else.
 - **no lock on `config.json`/`repos.json`.** Adding schema versions without a writer discipline
-  versions the corruption.
+  versions the corruption. **Done** (`48c375d`): the read moved *inside* the lock —
+  `update_config`/`update_repos` — because an atomic write makes each write whole and does nothing
+  about two writers. The test that proves it has to **count**: a version where each thread writes its
+  own distinct field passes against the unlocked code, which is how the first one did.
 
 A caveat on schema versions: per-box status and pane JSON are written by **shell probes generated from
 the binary**, so versioning those couples probe version to volume schema to binary version. That is
