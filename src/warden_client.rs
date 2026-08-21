@@ -40,6 +40,11 @@ use std::time::Duration;
 /// Where the warden listens. Loopback, and §8.6 says why.
 pub const DEFAULT_PORT: u16 = 7879;
 
+/// The header the shared secret travels in. Spelled here rather than imported: this crate does not
+/// depend on the warden's, deliberately (`tools/module-check.py` asserts it), so the two ends agree
+/// by a constant each and by the roundtrip test that would fail if they stopped.
+pub const SECRET_HEADER: &str = "x-skein-warden";
+
 /// How long to wait for a reply. Longer than a create takes, because the person at the host has to
 /// read the prompt and type an id before the work even starts.
 const REPLY: Duration = Duration::from_secs(1800);
@@ -93,6 +98,30 @@ pub struct Warden {
     port: u16,
 }
 
+/// Where the shared secret is (§9.5 R5), derived the same way on both sides.
+///
+/// **Not read from `config`.** The rule this module keeps — and `docs/modules.toml` states — is that
+/// a client which had to ask `config` or `fleet` anything is a client the thing it is talking about
+/// could shape. So the path comes from the environment, exactly as the address does: the warden's
+/// own home (`$SKEIN_WARDEN_HOME`, or `$HOME/.skein/warden`), which is what `warden/src/main.rs`
+/// uses, and the file in it the warden mints.
+///
+/// **skein only reads.** One minter — the warden, which owns the directory — because two would each
+/// write a different value and the mismatch would look exactly like an intruder, which is the
+/// loudest possible failure for the most boring possible cause.
+fn secret() -> String {
+    let home = std::env::var("SKEIN_WARDEN_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                .join(".skein/warden")
+        });
+    std::fs::read_to_string(home.join("secret"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// What the observation endpoint reports.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Sighting {
@@ -134,10 +163,24 @@ impl Warden {
     }
 
     /// What the warden can see, and what it says it can do.
+    ///
+    /// **The status code is read.** Every field of [`Sighting`] has a serde default, so a refusal —
+    /// `{"error": "…"}` — parses perfectly into a listing of no sandboxes and no capabilities. A
+    /// caller would then be told the host is running nothing, which is the same shape as a working
+    /// answer and the opposite of the truth. Found by pointing this at a warden that did not
+    /// recognise the caller.
     pub fn look(&self) -> Result<Sighting, String> {
-        let body = self.send("GET", "/v1/fleet", "")?;
-        serde_json::from_str(&body.1)
-            .map_err(|e| format!("the warden's listing was unreadable: {e}"))
+        let (code, said) = self.send("GET", "/v1/fleet", "")?;
+        if code != 200 {
+            let why = serde_json::from_str::<serde_json::Value>(&said)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(str::to_string))
+                .unwrap_or_else(|| said.chars().take(200).collect());
+            return Err(format!(
+                "the warden refused to say what it can see ({code}): {why}"
+            ));
+        }
+        serde_json::from_str(&said).map_err(|e| format!("the warden's listing was unreadable: {e}"))
     }
 
     /// Ask for the fleet sandbox to be created.
@@ -205,10 +248,17 @@ impl Warden {
         })?;
         stream.set_read_timeout(Some(REPLY)).ok();
         stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
+        // Presented on every request, including the two that only report: after 4c the bind is not
+        // the boundary any more, and "it only tells you things" is how an endpoint ends up outside
+        // a check. Sent even when it is empty — the warden's refusal then names the file, which is
+        // the thing an operator can act on, and a client that stayed silent instead would report
+        // the warden as unreachable.
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+             {}: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.host,
+            SECRET_HEADER,
+            secret(),
             body.len()
         );
         stream

@@ -43,6 +43,12 @@ pub struct Request {
     /// body, where they are one parse rather than two.
     pub path: String,
     pub body: Vec<u8>,
+    /// What the caller presented as the shared secret, or empty.
+    ///
+    /// The one header the warden reads that is not part of the framing, and it is a field rather
+    /// than a headers map on purpose: a map invites the next reader to route on a header, and this
+    /// component's whole argument is that it does one small thing. See [`crate::secret`].
+    pub secret: String,
 }
 
 /// What to send back. `code` and a JSON body; the warden speaks nothing else.
@@ -175,6 +181,10 @@ pub fn read_request(stream: &mut impl Read) -> Result<Request, Response> {
         method: method.to_string(),
         path: target.split(['?', '#']).next().unwrap_or("").to_string(),
         body,
+        secret: headers
+            .get(crate::secret::HEADER)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 

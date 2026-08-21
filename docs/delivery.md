@@ -171,7 +171,7 @@ where it discovers a hole:
 |---|---|---|
 | R3 control API on a covered socket | move the control plane off a TCP port | independent of 4b |
 | R4 no shared writable executable path | read-only toolchains with a per-box overlay | **user-visible** — one box's `cargo install` stops reaching the others, and the shared build cache goes. In `docs/parity.md` §7. |
-| R5 warden secret under the cover | falls out of 4a | |
+| ~~R5 warden secret under the cover~~ **done** | the warden mints it, skein reads it, checked before routing | fails closed: a warden that cannot read its own copy refuses everything and says which failure it is |
 | R6 audit log, warden-written, host-side | new: the sink endpoint, and skein reporting into it | never compilable-out |
 | R7 credentials never win on self-asserted freshness | ~~replace the expiry comparison~~ — **done**: the comparison could not be fixed, the *direction* was | The expiry is a field inside a file a box writes, and a box legitimately holds the refresh token — so nothing it can produce honestly it cannot also produce dishonestly, and no field in that file is evidence about it. The fleet's login now flows **down only**; a box's reaches the fleet solely when the fleet has none, where there is nothing to poison. Cost, stated: a token refreshed in a box no longer improves the fleet's copy, which ages until `skein login`. |
 | R8 no privileged actor follows a box-influenced path | the resize archive, `git-tokens/`, `disk`/`identity`, and the anchor | the largest of the nine; several distinct sites |
@@ -187,7 +187,7 @@ item.
 | must land before 4c | may follow |
 |---|---|
 | **R3** — the control API is on a TCP port today, and moving in is what makes that reachable from every box. **SKEIN-76, and it carries a product decision**: a browser cannot open a unix socket, so this decides how a person reaches their own cockpit. Four options are costed there; the choice is the owner's, not the code's | R4 (a product decision, and the exposure is unchanged by the move) |
-| **R5** — the warden cannot tell skein from a box without it, and after the move it must. **SKEIN-75**, and 4a supplied the mechanism: a file under the cover is readable by skein and unreachable from every box | R9, R10, R11 |
+| ~~**R5**~~ — **done**: the warden checks a shared secret before it routes, and refuses everything if it cannot read its own copy. 4a supplied the mechanism — a file under the cover is readable by skein and unreachable from every box. The narrow bind still stands beside it; the secret is what survives the bind widening at 4c | R9, R10, R11 |
 | **R6** — skein cannot audit itself once it shares a sandbox with the agents | |
 | **R7, R8** — both are live today and the move puts skein's own state inside their blast radius | |
 

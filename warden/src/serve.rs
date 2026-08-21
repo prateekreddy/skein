@@ -23,10 +23,12 @@
 //! between "this warden will not" and "this warden cannot" is the whole of §8.3, and a client that
 //! is told the wrong one retries the wrong thing.
 //!
-//! **Nothing here authenticates.** Connecting is not authenticating (§9.4), and the warden's answer
-//! to "who is asking" is not a header — it is a human at the host confirming the operation (§8.1).
-//! Until that surface exists, [`crate::doer::Unattended`] refuses every doer, so the endpoints are
-//! reachable, honest about themselves, and unable to do anything.
+//! **Who is asking is answered twice, and the two answers are different questions.** A doer runs
+//! because a human at the host confirmed it (§8.1) — that has not changed and is not a header. What
+//! a header now answers is whether the caller is skein at all: [`crate::secret`] is checked before
+//! anything is routed, so the two reporting endpoints are not readable by whoever can open the port
+//! and §8.5's doorway cannot be spent by somebody who was never going to be approved. The narrow
+//! bind still stands beside it; the secret is what survives the bind widening at 4c.
 
 use crate::audit::Log;
 use crate::capability;
@@ -53,6 +55,8 @@ pub struct Warden {
     /// `flooding.rs` on why rate-limiting the check that gates skein's own first run would let a
     /// flood win by refusal what it could not win by approval.
     pub doorway: Doorway,
+    /// What tells skein from anybody else who can open the port (§9.5 R5).
+    pub secret: crate::secret::Secret,
 }
 
 /// What a doer is asked for, on the wire.
@@ -121,6 +125,29 @@ impl Warden {
 
     /// The four endpoints.
     pub fn route(&self, request: &Request) -> Response {
+        // **Before the path is even looked at.** Putting it here rather than per endpoint is the
+        // same argument the cockpit's gate makes: an endpoint added later is guarded on the day it
+        // is added, rather than on the day somebody remembers.
+        if self.secret.missing() {
+            // Fails closed, and says which failure it is. "I cannot check" and "you are wrong" send
+            // whoever is reading to completely different places, and the first is the one an
+            // operator can fix.
+            return Response::fault(
+                503,
+                &format!(
+                    "this warden has no secret to check against ({}), so it refuses everything — \
+                     it mints one at start when that path is writable",
+                    self.secret.where_().display()
+                ),
+            );
+        }
+        if !self.secret.matches(&request.secret) {
+            return Response::fault(
+                401,
+                "this warden does not know who is asking — skein presents the secret from under \
+                 the mount cover, and nothing else can read it (architecture §9.5 R5)",
+            );
+        }
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/v1/fleet") => self.fleet(),
             ("POST", "/v1/audit") => self.audit(request),
@@ -355,15 +382,104 @@ mod tests {
             log: Log::new(dir.join("warden.jsonl")),
             approver: Box::new(Unattended),
             doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(dir),
         })
     }
 
+    /// The secret this warden minted, so a test can present it. Read from disk rather than kept in
+    /// a variable, because reading it is what skein does.
+    fn held_by(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("secret")).unwrap_or_default()
+    }
+
     fn ask(warden: &Warden, method: &str, path: &str, body: &str) -> Response {
+        asked_with(
+            warden,
+            method,
+            path,
+            body,
+            &held_by(warden.secret.where_().parent().unwrap()),
+        )
+    }
+
+    fn asked_with(warden: &Warden, method: &str, path: &str, body: &str, secret: &str) -> Response {
         warden.route(&Request {
             method: method.into(),
             path: path.into(),
             body: body.as_bytes().to_vec(),
+            secret: secret.into(),
         })
+    }
+
+    /// Every endpoint, including the two that only report, refuses a caller it cannot recognise.
+    ///
+    /// The narrow bind is the boundary today; this is what survives it widening at 4c, when skein is
+    /// inside the sandbox and reaches the warden by the same address a box would. The reporting
+    /// endpoints are in the test on purpose: "it only tells you things" is how an endpoint ends up
+    /// outside a check, and what `/v1/fleet` tells you is what this host is running.
+    #[test]
+    fn a_caller_it_cannot_recognise_gets_nothing_at_all() {
+        let dir = scratch("unknown");
+        let warden = warden(&dir);
+        let known = held_by(warden.secret.where_().parent().unwrap());
+        for (method, path, body) in [
+            ("GET", "/v1/fleet", ""),
+            ("POST", "/v1/audit", r#"{"what":"x","reported_by":"skein"}"#),
+            ("POST", "/v1/create", r#"{"operation":"o","sandbox":"s"}"#),
+            ("POST", "/v1/destroy", r#"{"operation":"o","sandbox":"s"}"#),
+            // Not an endpoint at all: it must answer 401 rather than 404, or the refusal maps the
+            // surface for whoever is guessing.
+            ("GET", "/v1/anything", ""),
+        ] {
+            for offered in ["", "not-the-secret", &format!("{known}x")] {
+                let said = asked_with(&warden, method, path, body, offered);
+                assert_eq!(
+                    said.code, 401,
+                    "{method} {path} answered {} to a caller holding {offered:?}",
+                    said.code
+                );
+            }
+        }
+        // And the doorway is not spent by any of that: a caller that was never going to be approved
+        // must not be able to use up the one operation a person can be asked about (§8.5).
+        let said = ask(
+            &warden,
+            "POST",
+            "/v1/create",
+            r#"{"operation":"o","sandbox":"s"}"#,
+        );
+        assert_ne!(
+            said.code, 429,
+            "the refused callers spent the doorway, so a flood wins by refusal what it could not \
+             win by approval: {}",
+            said.body
+        );
+    }
+
+    /// A warden that cannot read its own copy refuses everything, and says which failure it is.
+    #[test]
+    fn a_warden_with_no_secret_refuses_everyone_rather_than_letting_everyone_through() {
+        let dir = scratch("blind");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A home that cannot hold a file: `kept_in` can neither read nor mint.
+        let blind = dir.join("wall");
+        std::fs::write(&blind, "not a directory").unwrap();
+        let warden = Warden {
+            store: Store::new(dir.join("outcomes"), Duration::from_secs(3600)),
+            log: Log::new(dir.join("warden.jsonl")),
+            approver: Box::new(Unattended),
+            doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(&blind.join("home")),
+        };
+        assert!(warden.secret.missing());
+        let said = asked_with(&warden, "GET", "/v1/fleet", "", "");
+        assert_eq!(said.code, 503, "{}", said.body);
+        assert!(
+            said.body.contains("no secret to check against"),
+            "the operator is told the caller was wrong, when the truth is that this warden cannot \
+             check: {}",
+            said.body
+        );
     }
 
     /// The four endpoints, over a real socket, and the capability list the running warden reports.
@@ -384,11 +500,26 @@ mod tests {
             "SKEIN_WARDEN_LS_CMD",
             r#"printf '[{"name":"skein-fleet"}]'"#,
         );
+        // Minted here so the caller below can present it — which is exactly what skein does: read
+        // the file the warden owns, out of a directory no box's mount view reaches.
+        let secret = held_by(
+            crate::secret::Secret::kept_in(&dir)
+                .where_()
+                .parent()
+                .unwrap(),
+        );
+        assert!(!secret.is_empty());
         std::thread::spawn(move || warden(&dir).serve(listener));
 
         let mut stream = TcpStream::connect(addr).expect("connect");
         stream
-            .write_all(b"GET /v1/fleet HTTP/1.1\r\nHost: x\r\n\r\n")
+            .write_all(
+                format!(
+                    "GET /v1/fleet HTTP/1.1\r\nHost: x\r\n{}: {secret}\r\n\r\n",
+                    crate::secret::HEADER
+                )
+                .as_bytes(),
+            )
             .unwrap();
         let mut said = String::new();
         stream.read_to_string(&mut said).unwrap();
@@ -456,6 +587,7 @@ mod tests {
             log: Log::new(dir.join("warden.jsonl")),
             approver: Box::new(CountingRef(Arc::clone(&counted))),
             doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(&dir),
         };
         struct CountingRef(Arc<Counting>);
         impl Approver for CountingRef {
@@ -554,6 +686,7 @@ mod tests {
                 Box::new(std::io::sink()),
             )),
             doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(&dir),
         };
         let said_no = ask(
             &refuser,
@@ -580,6 +713,7 @@ mod tests {
                 Box::new(std::io::sink()),
             )),
             doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(&dir),
         };
         let said_yes = ask(
             &approver,

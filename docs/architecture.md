@@ -791,6 +791,15 @@ has to change, and §9.5 is where it gets decided — widening the bind now woul
 uid") before anything needed it, while the mechanism that makes it safe is step 4a's shared secret.
 **Bind narrow; let the move be the thing that opens it, deliberately.**
 
+**And the secret now exists** (`warden/src/secret.rs`, §9.5 R5). It is checked before anything is
+routed, so the two reporting endpoints are not readable by whoever can open the port and §8.5's
+doorway cannot be spent by a caller who was never going to be approved. It proves possession of a
+file and nothing more — **a doer still runs because a person at the host said so** (§8.1), and the
+narrow bind still stands beside it. What it buys is that the bind can widen at 4c without the
+exposure above arriving with it. A warden that cannot read its own copy refuses everything and says
+so, because the alternative is "no secret" quietly meaning "no checking" — a failure that would
+arrive by a file being deleted rather than by anybody deciding anything.
+
 **A hand-written HTTP subset, and this is the one place that trade is made.** skein's rule is
 "compose, don't reinvent — standard wheels only", and it is right for skein. The warden is the
 exception because of what it is *for*: it exists to be the thing a compromised skein has to get past,

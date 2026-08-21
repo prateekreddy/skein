@@ -25,11 +25,15 @@ fn have(tool: &str) -> bool {
 }
 
 /// One request, one reply, connection closed — the only shape this warden speaks.
-fn ask(port: u16, method: &str, path: &str, body: &str) -> String {
+fn ask(port: u16, method: &str, path: &str, body: &str, secret: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the warden");
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    // The secret goes on every request, because the warden checks before it routes — including on
+    // the endpoint this test exists to find missing. A 401 and a 404 would be indistinguishable to
+    // an assertion looking for "no such endpoint".
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: x\r\nx-skein-warden: {secret}\r\n\
+         Content-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(request.as_bytes()).expect("write");
@@ -87,18 +91,25 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let listing = ask(port, "GET", "/v1/fleet", "");
+    // Minted by the warden at start, in the home it was given. skein reads the same file.
+    let secret = std::fs::read_to_string(home.join("secret"))
+        .expect("the warden mints its secret at start")
+        .trim()
+        .to_string();
+    let listing = ask(port, "GET", "/v1/fleet", "", &secret);
     let destroyed = ask(
         port,
         "POST",
         "/v1/destroy",
         r#"{"operation":"op-x","sandbox":"skein-fleet"}"#,
+        &secret,
     );
     let created = ask(
         port,
         "POST",
         "/v1/create",
         r#"{"operation":"op-y","sandbox":"skein-fleet"}"#,
+        &secret,
     );
     let _ = child.kill();
     let _ = child.wait();

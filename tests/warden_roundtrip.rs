@@ -44,22 +44,67 @@ fn recording_sbx(dir: &Path, log: &Path) {
 }
 
 /// Read from the pty until `want` appears, or give up.
+///
+/// **The reading happens on its own thread, and the deadline is on the channel.** The obvious
+/// version — loop on `reader.read()` while checking a deadline — checks the clock only *between*
+/// reads, and a read on a pty whose child is alive and quiet never returns. So the deadline was
+/// unreachable in exactly the case it exists for: the warden refusing instead of prompting. It cost
+/// twenty minutes of a hung suite to notice, which is the argument for the thread rather than a
+/// preference for it.
 fn wait_for(reader: &mut Box<dyn Read + Send>, seen: &mut String, want: &str) -> bool {
+    use std::sync::mpsc;
     let deadline = Instant::now() + Duration::from_secs(30);
-    let mut buf = [0u8; 1024];
-    while Instant::now() < deadline {
-        match reader.read(&mut buf) {
-            Ok(0) => return false,
-            Ok(n) => {
-                seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    // The reader is borrowed for the life of this call, and the thread it is handed to outlives it
+    // only in the failing case — where the process is about to end anyway.
+    let taken = std::mem::replace(reader, Box::new(std::io::empty()));
+    std::thread::spawn(move || {
+        let mut taken = taken;
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = taken.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                return;
+            }
+        }
+    });
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        match rx.recv_timeout(left) {
+            Ok(chunk) => {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
                 if seen.contains(want) {
+                    // What is left unread stays on the pty for the next call, which is why the
+                    // reader is handed back rather than dropped.
+                    *reader = Box::new(Draining { rx });
                     return true;
                 }
             }
             Err(_) => return false,
         }
     }
-    false
+}
+
+/// The rest of the pty, once a reading thread owns it: what the thread has already taken, delivered
+/// in the order it arrived. Without this, a second `wait_for` would read from a pty another thread
+/// is also reading, and the two would split the output between them.
+struct Draining {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl Read for Draining {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        match self.rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(chunk) => {
+                let n = chunk.len().min(out.len());
+                out[..n].copy_from_slice(&chunk[..n]);
+                Ok(n)
+            }
+            Err(_) => Ok(0),
+        }
+    }
 }
 
 #[test]
@@ -121,6 +166,13 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     );
 
     // ---- skein's side: the same call `ensure_fleet` makes ----
+    //
+    // The secret is read from the warden's home, so skein has to be looking at the same one — which
+    // is the join this test now covers. `warden_client` takes the path from the environment rather
+    // than from `config`, deliberately: a client that had to ask `config` anything is a client the
+    // thing it is talking about could shape. This test is alone in its file, so setting it here
+    // races nothing.
+    std::env::set_var("SKEIN_WARDEN_HOME", root.join("state"));
     let warden = skein::warden_client::Warden::at("127.0.0.1", port);
     let argv: Vec<String> = vec!["create".into(), "--name".into(), "skein-fleet".into()];
     let env: Vec<(String, String)> = vec![("DOCKER_SANDBOXES_ROOT_SIZE".into(), "200g".into())];
@@ -173,6 +225,18 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
         "a retry was treated as new work: {again:?}"
     );
 
+    // And the other half: a caller that cannot read the secret is refused, on the endpoint that
+    // only reports. After 4c the narrow bind stops being the boundary, and this is what replaces it
+    // — so the test is over the same socket the approved create just went through.
+    std::env::set_var("SKEIN_WARDEN_HOME", root.join("nowhere"));
+    let stranger = skein::warden_client::Warden::at("127.0.0.1", port).look();
+    std::env::remove_var("SKEIN_WARDEN_HOME");
+    let refusal = stranger.err().unwrap_or_default();
+    assert!(
+        refusal.contains("does not know who is asking") || refusal.contains("unreadable"),
+        "a caller holding no secret was answered anyway: {refusal}"
+    );
+
     let _ = child.kill();
     let ran = std::fs::read_to_string(&log).unwrap_or_default();
     let creates = ran.lines().filter(|l| l.starts_with("argv create")).count();
@@ -184,5 +248,6 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
         ran.contains("disk 200g"),
         "the environment did not reach the command:\n{ran}"
     );
+
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -53,6 +53,7 @@ fn main() {
         log: Log::new(home.join("audit.jsonl")),
         approver,
         doorway: skein_warden::flooding::Doorway::new(),
+        secret: skein_warden::secret::Secret::kept_in(&home),
     });
 
     eprintln!(
@@ -71,6 +72,20 @@ fn main() {
         "skein-warden: state in {} — back this up; it is what makes a retried destroy safe",
         home.display()
     );
+    // Said at start, because the two failures look identical from a client: a warden that refuses
+    // everything and a warden nobody is talking to both read as "the warden is not working".
+    match warden.secret.missing() {
+        true => eprintln!(
+            "skein-warden: NO SECRET at {} — it could not be read or minted, so every request is \
+             refused. Fix the path and restart.",
+            warden.secret.where_().display()
+        ),
+        false => eprintln!(
+            "skein-warden: skein is recognised by the secret at {} — nothing outside the mount \
+             cover can read it",
+            warden.secret.where_().display()
+        ),
+    }
     match surface {
         "none" => eprintln!(
             "skein-warden: no controlling terminal, so there is nobody to approve anything and \

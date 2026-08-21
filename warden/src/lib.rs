@@ -14,6 +14,7 @@ pub mod capability;
 pub mod doer;
 pub mod flooding;
 pub mod outcome;
+pub mod secret;
 pub mod serve;
 pub mod sightings;
 pub mod wire;
