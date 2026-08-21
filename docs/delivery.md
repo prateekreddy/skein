@@ -177,7 +177,7 @@ where it discovers a hole:
 | R8 no privileged actor follows a box-influenced path | the resize archive, `git-tokens/`, `disk`/`identity`, and the anchor | the largest of the nine; several distinct sites |
 | ~~R9 workshop toggle states its terms~~ **done** | the switch and the per-start banner name the same grants — every box's files, fleet scope, the fleet agent token — and say the mount cover is off for it | the last of those is the one a person cannot discover by using the box, and it is what R8's two guards lean on |
 | ~~R10 cross-box messaging renders provenance~~ **done** | two directories, not a field: the shared store's `mailbox/` is writable from every box, a box's own `inbox/` under its state is bound read-only into it | §9.2.2 is kept, so this is the mitigation. A box's message still arrives — it arrives *saying* it is a box's |
-| R11 `/run` covered, or its exposure stated | decide which | the per-user socket directory is the live case |
+| ~~R11 `/run` covered, or its exposure stated~~ **both** | `/run/user/<uid>` and `/run/secrets` are private tmpfs per box; `$SSH_AUTH_SOCK` was already covered | `/run/docker.sock` is left reachable **deliberately** — skein configures the daemon for box workloads — and §9.5 R11 states what that grants, because it bounds the mount cover and the R8 guards alike |
 
 R5, R7 and R9 are small. R4 is a product decision as much as a security one. R8 is a cluster, not an
 item.

@@ -297,6 +297,46 @@ mod tests {
         assert!(BUNDLE.contains("/api/boxes/") && BUNDLE.contains("/api/pr/"));
     }
 
+    /// The launcher covers the two shared `/run` directories, and says why it leaves the third.
+    ///
+    /// Every cover in that script is about a path skein chose; `/run` is not one, and everything
+    /// under it is shared because every box is the same uid. `/run/user/<uid>` is empty today, which
+    /// is exactly when closing it costs nothing, and `/run/secrets` is world-writable.
+    ///
+    /// `/run/docker.sock` is deliberately **not** covered — skein points the sandbox's dockerd at
+    /// the workload cgroup so containers a box starts are accounted for — and the assertion is that
+    /// the script keeps *saying* so, because an unexplained gap in a list of covers reads as an
+    /// oversight and gets closed by whoever notices it next.
+    #[test]
+    fn the_launcher_covers_what_run_shares_and_names_what_it_does_not() {
+        let launcher = include_str!("box-session.sh");
+        assert!(
+            launcher.contains(r#"binds+=(--tmpfs "$run_user")"#),
+            "the per-user runtime directory is shared by every box and is not covered"
+        );
+        assert!(
+            launcher.contains("binds+=(--tmpfs /run/secrets)"),
+            "/run/secrets is world-writable and shared by every box"
+        );
+        // Under a privileged check, like every other cover — the workshop box is the escape hatch,
+        // and it is the one box that has to keep reaching the fleet. Found by walking back from the
+        // cover to the nearest guard, because the script has several and splitting on the first one
+        // asserts something about a different block.
+        let at = launcher.find("run_user=").expect("checked above");
+        let guard = launcher[..at]
+            .rfind("SKEIN_BOX_PRIVILEGED")
+            .expect("the cover is not under any privileged check at all");
+        assert!(
+            launcher[guard..at].contains("!= \"1\""),
+            "the /run covers are under the wrong side of the privileged check, so the workshop box \
+             gets them and every ordinary box does not"
+        );
+        assert!(
+            launcher.contains("/run/docker.sock` — **deliberately left reachable**"),
+            "the one thing under /run that is left open no longer says that it is on purpose"
+        );
+    }
+
     /// The workshop switch names what it grants, in the launcher and on the switch alike (§9.5 R9).
     ///
     /// The risk of this one is not that somebody turns it on by accident — it is that they turn it

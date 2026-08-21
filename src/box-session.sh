@@ -1103,6 +1103,26 @@ unset SKEIN_FLEET_MOUNTS SKEIN_BOX_STORE
 # Covered for every box except a deliberately privileged one — the workshop box, which exists to
 # debug and extend skein itself and is useless without fleet reach. That is a per-box decision its
 # owner makes in the cockpit, never a default and never inferred.
+# --- /run: what the cover never reached (architecture §9.5 R11) ---------------------------------
+#
+# Every cover above is about paths skein chose. `/run` is not one of them, and three things live
+# there that every box shares because every box is the same uid:
+#
+#   * `/run/user/<uid>` — the per-user runtime directory, one for the whole sandbox. Empty today,
+#     which is exactly when to close it: a private tmpfs costs nothing now and stops it becoming a
+#     channel the first time something puts a socket in it.
+#   * `/run/secrets` — world-writable and sticky. Same treatment, same reason.
+#   * `/run/docker.sock` — **deliberately left reachable**, and §9.5 R11 says why: skein points the
+#     sandbox's dockerd at the workload cgroup precisely so containers a box starts are accounted
+#     for. Covering it would remove a capability the design supports. What it grants — a container
+#     in this sandbox, as root, with any bind mount — is written down there rather than here.
+if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
+  run_user="/run/user/$(id -u 2>/dev/null || echo 0)"
+  [ -d "$run_user" ] && binds+=(--tmpfs "$run_user")
+  [ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)
+  unset run_user
+fi
+
 : >"$root/no-fleet-token" 2>/dev/null || true
 fleet_token="${SKEIN_FLEET_ROOT:-/boxes}/.skein/fleet-agent.token"
 if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ] && [ -f "$fleet_token" ] && [ -f "$root/no-fleet-token" ]; then

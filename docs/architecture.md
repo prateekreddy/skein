@@ -1400,8 +1400,33 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    than by a field its writer fills: the shared store's `mailbox/` is writable from every box, a
    box's own `inbox/` under its state is bound read-only into it. The delivery says which — `from
    you`, or the claimed name with the fact that nobody checked it.
-11. **`/run` is covered, or its exposure is stated.** §9.1 notes the cover reaches neither `/run` nor
-   the per-user socket directory, and no requirement followed.
+11. **`/run` is covered, or its exposure is stated.** ~~§9.1 notes the cover reaches neither `/run`
+   nor the per-user socket directory, and no requirement followed.~~ **Both, and the split is the
+   answer.** Read from inside a box (`ls -la /run`, `id`; no socket was connected to, and none needs
+   to be for the modes to say this):
+
+   | path | mode | reachable by an ordinary box | now |
+   |---|---|---|---|
+   | `/run/user/<uid>` | `drwx------ agent:agent` | yes — **one directory for every box**, since every box is the same uid | private tmpfs per box |
+   | `/run/secrets` | `drwxrwxrwt` | yes, world-writable | private tmpfs per box |
+   | `/run/ssh-agent.sock` | `srw-rw-rw-` | **already covered** — the launcher binds a regular file over `$SSH_AUTH_SOCK`, so `connect()` fails on a thing that is not a socket | unchanged |
+   | `/run/docker.sock` | `srw-rw----` `nobody:nogroup` | yes — a box's supplementary groups include `65534(nogroup)` | **left reachable, deliberately** |
+
+   The first two cost nothing to close: one is empty today, which is exactly when to close it, and
+   the other is a world-writable directory nothing skein ships uses.
+
+   **The last one is a product decision, not an oversight, and it is stated here because it bounds
+   everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload
+   cgroup *so that containers a box starts are accounted for* — running containers from a box is a
+   supported thing. What that grants is a container in this sandbox, **as root, with any bind mount
+   it asks for**: out of the box's bwrap namespace and into the sandbox, which is every other box's
+   files, the fleet root and the volume. So the mount cover (§9.5 R2) is careful, derived per box,
+   and **bounded by a socket in a directory it never touches** — and the R8 guards that rest on "an
+   ordinary box cannot plant a link where the host writes" are bounded by it too.
+   
+   Covering it would be one line beside the two above. It is not taken here because it removes a
+   capability the design supports, and that is the owner's call rather than this document's. Until
+   it is made, this paragraph is the honest version of the boundary.
 
 Corrected from an earlier draft: the cgroup control plane is **not** box-writable. Every cgroup write
 in the launcher goes through `sudo` before `bwrap`, and the source is explicit that a write from
