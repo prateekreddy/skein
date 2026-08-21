@@ -124,21 +124,36 @@ against a *box* rather than against a compromised skein on the same machine (§8
 **4 — The mount cover, then the uid split, then move in.** In that order, and the first two are gates
 rather than follow-ups (architecture §9.5).
 
-**4a — the cover.** `tmpfs` the state root and bind back what a box needs, *derived per box*. This is
-most of the value and the cheapest part: it closes a box reading skein's credentials, token and
-declared state, and it supplies the secret that lets the warden tell skein from a box. It also closes
-the one that is live today and that nothing in the current cover reaches — `~/.skein/repos` is mounted
-into the sandbox uncovered, so every box has read-write access to every repo's store and to the host's
-own working checkouts, and skein runs `git -C <repo.work>` **on the host**.
+**4a — the cover. Done** (`b842087`, `7706043`) — SKEIN-3. `tmpfs` the state root and bind back what
+a box needs, *derived per box*: `src/box-session.sh` covers the fleet root and the box-state parent,
+then binds back this box's own root and its own state read-only, and — the part a rule over
+`~/.skein` could never have reached — covers **every host path the sandbox mounts** and binds back
+only the two this box is entitled to. An inversion rather than a hide-list, so a mount skein starts
+making later is covered the day it appears with nobody remembering to add it.
+
+What that closed, and each was reachable read-write until it landed: every other repo's store, every
+other repo's work tree on the host, and this box's own work tree at all. `~/.skein/repos` had been
+mounted into the sandbox uncovered.
 
 **4b — the uid split.** skein on its own uid, boxes on theirs, every crossing through
 `sudo -u <box uid>` — for the launcher and for `nsenter` alike. Do not attempt this as "skein runs as
 root" (no user namespace is created at all) or as "skein runs as another uid" (every `setns` is
 EPERM); architecture §9.5.1 has the derivation.
 
-**Do not start 4b until the anchor moves.** skein crosses to `/proc/<anchor>/ns/user`, and the anchor
-is currently read from a file inside the box's own writable root — so a box picks the namespace skein
-lands in. Everything else in 4b is downstream of an address it trusts. Budget the sudoers policy as the security-critical
+~~**Do not start 4b until the anchor moves.**~~ **The anchor has moved** (`b222e57`, `960983a`) —
+SKEIN-4. It had been read from a file inside the box's own writable root, so a box picked the
+namespace skein landed in; a placed box is addressed by its record now, under the cover, and the
+record names the box's tmux server with the sandbox boot it belongs to. Everything else in 4b was
+downstream of an address it trusts, and now there is one.
+
+**What 4b waits on instead, and it is not a smaller thing: 4c.** The split is skein-on-one-uid and
+boxes-on-another, and today skein's control plane runs on the *host* while crossings go through `sbx
+exec`, which is the sandbox's root. There is no uid to split from until skein is a process inside the
+sandbox. Building the `sudo -u` plumbing before that means writing it for a deployment that does not
+exist and cannot be exercised — so SKEIN-35 stays unclaimed until 4c, and the two gates below are the
+work that gets there.
+
+Budget the sudoers policy as the security-critical
 artifact it is, and one extra `exec` per crossing. Crossings are launch, attach, upload, diff, takeover **and the
 tmux control operations** — the socket is a crossing too, and its sockets are `0700` per box. The
 board stays off that path only because liveness moves from probing each socket to reading the anchor
@@ -171,8 +186,8 @@ item.
 
 | must land before 4c | may follow |
 |---|---|
-| **R3** — the control API is on a TCP port today, and moving in is what makes that reachable from every box | R4 (a product decision, and the exposure is unchanged by the move) |
-| **R5** — the warden cannot tell skein from a box without it, and after the move it must | R9, R10, R11 |
+| **R3** — the control API is on a TCP port today, and moving in is what makes that reachable from every box. **SKEIN-76, and it carries a product decision**: a browser cannot open a unix socket, so this decides how a person reaches their own cockpit. Four options are costed there; the choice is the owner's, not the code's | R4 (a product decision, and the exposure is unchanged by the move) |
+| **R5** — the warden cannot tell skein from a box without it, and after the move it must. **SKEIN-75**, and 4a supplied the mechanism: a file under the cover is readable by skein and unreachable from every box | R9, R10, R11 |
 | **R6** — skein cannot audit itself once it shares a sandbox with the agents | |
 | **R7, R8** — both are live today and the move puts skein's own state inside their blast radius | |
 
