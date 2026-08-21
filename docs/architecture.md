@@ -100,6 +100,15 @@ the fresher observation winning. What makes it honest is **provenance, rendered*
 `screen lost`, `screen unread`. A runtime with no screen grammar runs on edges by design, and the
 display says so. The law is about disclosure, not grounding.
 
+The third case had no disclosure at all until it was given one, and its absence is instructive: the
+other two are visible *because the observer is broken*, so the screen-health flag names them for
+free. A newer edge wins with the observer perfectly healthy — the flag is empty precisely because
+the screen is being read — so the row showed an edge-derived state and said nothing anywhere.
+`fuse_status` returns a provenance of its own now (`StatusFrom::EdgeAheadOfScreen`) and the row
+carries an `unconfirmed` caveat, which clears when the next sample confirms or corrects it. It is
+not a fault: showing the event at once is the whole point of the rule. It is a state nothing had
+yet seen.
+
 And the keying rule is its
 own bug: turn state keyed by box but written by session let any helper process overwrite the agent's
 state, producing seventeen spurious `ended` events in 114 seconds.

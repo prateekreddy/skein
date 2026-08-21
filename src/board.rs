@@ -121,7 +121,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             let level = pane
                 .as_ref()
                 .map(|obs| (classify_pane(&agent, obs), obs.ts));
-            let (fused, blocked_kind) = fuse_status(status_edge(&name), level.clone());
+            let (fused, blocked_kind, status_from) = fuse_status(status_edge(&name), level.clone());
             let sb = Sandbox {
                 branch: branch.clone(),
                 dir: dir.clone(),
@@ -254,6 +254,7 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 blocked_kind: blocked_kind.to_string(),
                 hook_health,
                 screen_health: screen.to_string(),
+                status_from: status_from.key().to_string(),
                 // Two file reads against the repo's store — no box is woken to answer this, which is
                 // what makes it affordable on a signal computed for every row on every snapshot.
                 docs_update: repo
@@ -319,6 +320,10 @@ pub struct BoxView {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hook_health: String,
     /// the *other* half's health — whether this box's own screen is being read, and if not why:
+    /// Where the displayed state came from: `screen`, `edge`, or `edge-ahead`. See
+    /// [`crate::signals::StatusFrom`] — the last one is a healthy observer whose reading lost to a
+    /// newer edge, which nothing disclosed before it existed.
+    pub status_from: String,
     /// "" | "none" | "stale" | "unreadable" | "unsupported". See [`screen_health`]. Without it,
     /// falling back to hook-only turn state looks exactly like everything working.
     #[serde(default, skip_serializing_if = "String::is_empty")]

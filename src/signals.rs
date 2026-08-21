@@ -517,8 +517,39 @@ pub(crate) fn title_has_attention(title: &str) -> bool {
     title.to_lowercase().contains("action required")
 }
 
-/// Fold the level observation into the edge status. Returns the effective status key plus the
-/// blocking kind when there is one.
+/// Where a fused status came from — architecture §2.2's rule that **no displayed state may rest on
+/// an edge alone without saying so**.
+///
+/// An edge-triggered latch with incomplete edge coverage cannot recover: a state nobody clears is
+/// shown for ever, which is the twenty-minute answered-decision bug. Three of the fusion rules
+/// display an edge with no level behind it, and each is right — showing nothing would be worse.
+/// What makes them honest is that the row says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFrom {
+    /// A level observation decided it. The screen is being read and it is what you are looking at.
+    Screen,
+    /// The edge alone: there is no usable level observation (rules 1 and 4). The row already says
+    /// so through [`screen_health`], which names *why* the screen is not contributing.
+    Edge,
+    /// **Rule 3, and the gap this enum was added to close.** There IS a fresh, readable level
+    /// observation, and an edge newer than it led anyway. `screen_health` is empty here — the
+    /// observer is perfectly healthy — so nothing said that what is displayed came from an edge,
+    /// and the next sample either confirms it or silently corrects it.
+    EdgeAheadOfScreen,
+}
+
+impl StatusFrom {
+    pub fn key(self) -> &'static str {
+        match self {
+            StatusFrom::Screen => "screen",
+            StatusFrom::Edge => "edge",
+            StatusFrom::EdgeAheadOfScreen => "edge-ahead",
+        }
+    }
+}
+
+/// Fold the level observation into the edge status. Returns the effective status key, the blocking
+/// kind when there is one, and **where the answer came from**.
 ///
 /// The four rules (docs/turn-state.md §4.3), in order:
 ///   1. no level observation ⇒ the edge, unchanged — older boxes behave exactly as before;
@@ -527,12 +558,16 @@ pub(crate) fn title_has_attention(title: &str) -> bool {
 ///   3. edges lead: an edge newer than the sample wins, so a Notification shows instantly and the
 ///      next sample confirms or corrects it;
 ///   4. `Unknown` defers to the edge rather than guessing.
+///
+/// The provenance is not decoration. Rules 1, 3 and 4 all display a state no level observation
+/// supports, and only rules 1 and 4 were visible — `screen_health` names them because the observer
+/// is absent or unreadable. Rule 3 fires with a *healthy* observer, so nothing disclosed it at all.
 pub(crate) fn fuse_status(
     edge: Option<(String, i64)>,
     level: Option<(Screen, i64)>,
-) -> (Option<String>, &'static str) {
+) -> (Option<String>, &'static str, StatusFrom) {
     let (screen, level_ts) = match level {
-        None => return (edge.map(|(s, _)| s), ""), // rule 1
+        None => return (edge.map(|(s, _)| s), "", StatusFrom::Edge), // rule 1
         Some(pair) => pair,
     };
     let edge_leads = edge.as_ref().is_some_and(|(_, ts)| *ts > level_ts + 1);
@@ -542,16 +577,19 @@ pub(crate) fn fuse_status(
         "blocked" | "needs-input" | "needs-decision" | "error" | "ended" | "done" | "waiting"
     );
     match screen {
-        Screen::Unknown => (edge.map(|(s, _)| s), ""), // rule 4
-        // An edge that arrived *after* the sample is the fresher truth (rule 3).
-        _ if edge_leads && edge_is_outcome => (edge.map(|(s, _)| s), ""),
-        Screen::Blocked(kind) => (Some("blocked".into()), kind.key()),
-        Screen::Busy => (Some("working".into()), ""),
-        Screen::Waiting => (Some("waiting".into()), ""),
-        Screen::Error(_) => (Some("error".into()), ""),
+        Screen::Unknown => (edge.map(|(s, _)| s), "", StatusFrom::Edge), // rule 4
+        // An edge that arrived *after* the sample is the fresher truth (rule 3) — and this is the
+        // one case where the screen is healthy and still not what is shown.
+        _ if edge_leads && edge_is_outcome => {
+            (edge.map(|(s, _)| s), "", StatusFrom::EdgeAheadOfScreen)
+        }
+        Screen::Blocked(kind) => (Some("blocked".into()), kind.key(), StatusFrom::Screen),
+        Screen::Busy => (Some("working".into()), "", StatusFrom::Screen),
+        Screen::Waiting => (Some("waiting".into()), "", StatusFrom::Screen),
+        Screen::Error(_) => (Some("error".into()), "", StatusFrom::Screen),
         // `done` is a human-set outcome, not something a screen can contradict.
-        Screen::Dead if edge_status == "done" => (Some("done".into()), ""),
-        Screen::Dead => (Some("ended".into()), ""),
+        Screen::Dead if edge_status == "done" => (Some("done".into()), "", StatusFrom::Screen),
+        Screen::Dead => (Some("ended".into()), "", StatusFrom::Screen),
     }
 }
 
@@ -1277,13 +1315,77 @@ mod tests {
         );
     }
 
+    /// **No displayed state rests on an edge alone without saying so.** The law, as a matrix.
+    ///
+    /// Three of the four fusion rules can display a state no level observation supports, and each
+    /// is right — showing nothing would be worse than showing an edge. What makes them honest is
+    /// that the row says which, and rule 3 said nothing at all until `StatusFrom` existed: it fires
+    /// with a healthy observer, so `screen_health` is empty and the badge renders nothing.
+    ///
+    /// Every case here is one where an edge is what you see. If one of them ever reports
+    /// `StatusFrom::Screen`, the board is claiming an observation it does not have.
+    #[test]
+    fn every_state_that_rests_on_an_edge_says_so() {
+        let edge = |ts: i64| Some(("blocked".to_string(), ts));
+        struct Case {
+            what: &'static str,
+            level: Option<(Screen, i64)>,
+            edge: Option<(String, i64)>,
+            want: StatusFrom,
+        }
+        let case = |what, level, edge, want| Case {
+            what,
+            level,
+            edge,
+            want,
+        };
+        let cases = [
+            // Rule 1 — no observation at all. Disclosed by `screen_health` as "none"/"stale".
+            case("no observation", None, edge(10), StatusFrom::Edge),
+            // Rule 4 — a sample the grammar does not recognise. Disclosed as "unreadable".
+            case(
+                "unreadable screen",
+                Some((Screen::Unknown, 10)),
+                edge(5),
+                StatusFrom::Edge,
+            ),
+            // Rule 3 — a fresh, READABLE screen, beaten by a newer edge. Nothing else discloses it.
+            case(
+                "edge newer than a healthy screen",
+                Some((Screen::Waiting, 100)),
+                edge(200),
+                StatusFrom::EdgeAheadOfScreen,
+            ),
+            // And the case that is NOT edge-led, so the matrix cannot pass by always saying "edge".
+            case(
+                "the screen decided",
+                Some((Screen::Waiting, 200)),
+                edge(100),
+                StatusFrom::Screen,
+            ),
+        ];
+        for Case {
+            what,
+            level,
+            edge,
+            want,
+        } in cases
+        {
+            let (_, _, from) = fuse_status(edge, level);
+            assert_eq!(from, want, "{what}");
+        }
+    }
+
     #[test]
     fn fuse_status_clears_an_edge_that_nothing_ever_cleared() {
         // The bug, as recorded in this box's own hook-log: `blocked` written at 13:27, nothing until
         // Stop at 13:47. A screen observation taken at 13:30 showing a composer ends it.
         let edge = Some(("blocked".to_string(), 1000));
         let level = Some((Screen::Waiting, 1180));
-        assert_eq!(fuse_status(edge, level), (Some("waiting".into()), ""));
+        assert_eq!(
+            fuse_status(edge, level),
+            (Some("waiting".into()), "", StatusFrom::Screen)
+        );
     }
 
     #[test]
@@ -1291,14 +1393,17 @@ mod tests {
         // A Notification fires 5s after the last sample: show it at once (latency), don't wait.
         let edge = Some(("blocked".to_string(), 1205));
         let level = Some((Screen::Waiting, 1200));
+        // Rule 3: the screen is fresh and readable, and the edge led anyway. The provenance is
+        // the whole point — nothing else on the row says the state came from an edge, because the
+        // observer is perfectly healthy.
         assert_eq!(
             fuse_status(edge.clone(), level),
-            (Some("blocked".into()), "")
+            (Some("blocked".into()), "", StatusFrom::EdgeAheadOfScreen)
         );
         // The next sample sees the dialog and names which kind it is.
         assert_eq!(
             fuse_status(edge, Some((Screen::Blocked(Blocked::Permission), 1210))),
-            (Some("blocked".into()), "permission")
+            (Some("blocked".into()), "permission", StatusFrom::Screen)
         );
     }
 
@@ -1307,28 +1412,28 @@ mod tests {
         for status in ["blocked", "working", "waiting", "error", "ended"] {
             assert_eq!(
                 fuse_status(Some((status.to_string(), 10)), None),
-                (Some(status.to_string()), "")
+                (Some(status.to_string()), "", StatusFrom::Edge)
             );
         }
         // An unreadable screen defers too, rather than inventing a state.
         assert_eq!(
             fuse_status(Some(("blocked".into(), 10)), Some((Screen::Unknown, 99))),
-            (Some("blocked".into()), "")
+            (Some("blocked".into()), "", StatusFrom::Edge)
         );
         // No edge and no observation: nothing claimed, so liveness decides downstream.
-        assert_eq!(fuse_status(None, None), (None, ""));
+        assert_eq!(fuse_status(None, None), (None, "", StatusFrom::Edge));
     }
 
     #[test]
     fn fuse_status_reports_a_crashed_agent_but_keeps_a_human_set_outcome() {
         assert_eq!(
             fuse_status(Some(("working".into(), 10)), Some((Screen::Dead, 20))),
-            (Some("ended".into()), "")
+            (Some("ended".into()), "", StatusFrom::Screen)
         );
         // `done` is a human's verdict on the work, not a claim about the process.
         assert_eq!(
             fuse_status(Some(("done".into(), 10)), Some((Screen::Dead, 20))),
-            (Some("done".into()), "")
+            (Some("done".into()), "", StatusFrom::Screen)
         );
     }
 

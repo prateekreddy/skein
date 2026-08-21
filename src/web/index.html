@@ -1677,7 +1677,8 @@ function updateRow(el, b, showRepo) {
   // The state pill, plus a `◐` when only half the signal produced it (hook edges, no screen). One
   // glyph rather than a sentence: on a fleet of older boxes this is true of every row, and it is a
   // caveat on how the state was derived, not a problem with the box.
-  const pill = el.querySelector(".pill"), half = SHALF[b.screen_health];
+  const pill = el.querySelector(".pill"),
+        half = SHALF[b.screen_health] || (b.status_from === "edge-ahead" ? EDGE_AHEAD : null);
   const pillHtml = esc(labelOf(b.state)) + (half ? ` <i class="hdot"></i>` : "");
   if (pill.dataset.html !== pillHtml) { pill.dataset.html = pillHtml; pill.innerHTML = pillHtml; }
   pill.title = half ? `${half[0]} — ${half[1]}\n\n${half[2]}` : "";
@@ -2268,9 +2269,15 @@ const SHALF = {
   unreadable:  ["screen unread",  "skein does not recognise what is on this box's screen, so turn state has fallen back to hook events alone — usually a change in the agent's TUI.", "The unrecognised sample is saved in the store as <box>.pane.json; worth reporting."],
   unsupported: ["hooks only",     "skein has no screen grammar for this runtime, so turn state uses hook events alone.", "Expected, not a fault."],
 };
+// The fifth case, and the one nothing disclosed: the observer is perfectly healthy and what you are
+// looking at still came from an edge, because a hook event arrived after the last screen sample. It
+// is not a fault — showing the event at once is why edges lead — but the state has not been
+// confirmed by anything that can see the screen, and the next sample may correct it.
+const EDGE_AHEAD = ["unconfirmed", "a hook event arrived after the last screen reading, so this state is the event's and not the screen's — shown at once for latency. The next screen sample confirms or corrects it, usually within ten seconds.", "Nothing to do; it settles on its own."];
 function screenBadge(b, isShell) {
   // A shell tab has no agent screen to read, so the caveat would be meaningless there.
-  const h = !isShell && SHALF[b.screen_health];
+  const h = !isShell && (SHALF[b.screen_health]
+    || (b.status_from === "edge-ahead" ? EDGE_AHEAD : null));
   if (!h) return "";
   return `<span class="scrw" title="${esc(h[1] + "\n\n" + h[2])}"><i class="hdot"></i>${esc(h[0])}</span>`;
 }
@@ -2907,7 +2914,9 @@ function renderTabs() {
     if (t.className !== cls) t.className = cls;
     const what = s.kind === "shell" ? `${s.box} — shell` : `${s.box} — ${s.runtime || "agent"}`;
     // Half-signal caveat, so it's visible per tab rather than only in the tab you happen to open.
-    const half = s.kind === "shell" ? null : SHALF[(boxes.find(x => x.name === s.box) || {}).screen_health];
+    const row = boxes.find(x => x.name === s.box) || {};
+    const half = s.kind === "shell" ? null
+      : (SHALF[row.screen_health] || (row.status_from === "edge-ahead" ? EDGE_AHEAD : null));
     const title = (s.dead ? `${what} — disconnected · click to reconnect` : what)
       + (half ? `\n\n${half[0]} — ${half[1]}` : "")
       + `\ndrag to reorder · ⌥1–⌥9 to switch · ? for all shortcuts`;

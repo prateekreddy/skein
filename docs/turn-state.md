@@ -137,6 +137,12 @@ with four rules that between them kill the whole bug class:
 3. **Freshest wins, edges lead.** An edge newer than the last level sample is displayed
    immediately (latency win); the next level sample confirms or corrects it. Answering in the
    cockpit (O5) instantly clears attention optimistically, because skein *delivered* the answer.
+   **And it says so.** This rule shows a state no level observation supports, with a perfectly
+   healthy observer — so unlike rules 1 and 4, nothing else on the row discloses it: the screen
+   health flag is empty precisely because the screen is being read. `fuse_status` returns
+   `StatusFrom::EdgeAheadOfScreen` and the row carries an `unconfirmed` caveat until the next
+   sample settles it. No displayed state may rest on an edge alone without saying so, and this was
+   the one that did.
 4. **`unknown` is a value.** An unparsed pane reports `unknown` + a health flag, never a guess.
 
 Note what this deletes: the sub-agent counter (the dialog's presence is the truth, so "is it
