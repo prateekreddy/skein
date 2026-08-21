@@ -226,6 +226,7 @@ async fn main() {
         .route("/api/fleet/limits", post(api_fleet_limits))
         .route("/api/fleet/resources", get(api_fleet_resources))
         .route("/api/fleet/load", get(api_fleet_load))
+        .route("/api/fleet/foreign", get(api_fleet_foreign))
         .route("/api/fleet/transport", get(api_fleet_transport))
         .route("/api/fleet/substrate", get(api_substrate))
         .route("/api/fleet/substrate/:id", post(api_substrate_decide))
@@ -1643,6 +1644,27 @@ async fn api_fleet_load() -> Json<Vec<skein::fleet::BoxLoad>> {
             .await
             .unwrap_or_default(),
     )
+}
+
+/// Sandboxes on this machine that skein did not place — asked, not pushed.
+///
+/// It is the one thing on the board that costs a subprocess, so it left the two-second tick and
+/// became a question. A failure is a 503 with the reason rather than an empty list: "nothing else is
+/// here" and "sbx could not be asked" are different answers and the cockpit says so.
+async fn api_fleet_foreign() -> Response {
+    match tokio::task::spawn_blocking(skein::board::foreign_views).await {
+        Ok(Ok(rows)) => Json(rows).into_response(),
+        Ok(Err(why)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 async fn api_fleet_resources() -> Response {

@@ -1536,6 +1536,30 @@ function matchesFilter(b, q) {
 // hidden without a way back to it, and the way back costs no permanent chrome.
 const FOREIGN_TERM = "foreign:";
 const wantsForeign = q => q.includes(FOREIGN_TERM);
+// **Fetched, not pushed.** These rows used to ride on every 2s tick, which cost one `sbx ls` per
+// tick per open tab — the single most expensive thing the board did, for the one part of it that is
+// not about skein's own boxes. `sbx ls` is the right instrument for "what sandboxes are on this
+// machine" and the wrong one for "which boxes exist", so it became a question somebody asks.
+//
+// `null` means never asked, `[]` means asked and there is nothing, and `foreignError` means asked
+// and could not be told. All three render differently, because "no other sandboxes" and "sbx did not
+// answer" are different answers and collapsing them is how a board lies quietly.
+let foreignRows = null, foreignError = "", foreignAsking = false;
+async function askForForeign() {
+  if (foreignAsking) return;
+  foreignAsking = true;
+  try {
+    const r = await fetch("/api/fleet/foreign");
+    const body = await r.json().catch(() => null);
+    if (r.ok && Array.isArray(body)) { foreignRows = body; foreignError = ""; }
+    else { foreignRows = []; foreignError = (body && body.error) || `sbx could not be asked (${r.status})`; }
+  } catch (e) {
+    foreignRows = [];
+    foreignError = String(e);
+  }
+  foreignAsking = false;
+  render(boxes);
+}
 const withoutForeignTerm = q => q.split(FOREIGN_TERM).join(" ").trim();
 // Which rows the board draws, for a fleet and a filter string. Its own function so the rule has one
 // home: `render` used to do this inline, which meant the only way to test it was to write the same
@@ -1546,13 +1570,21 @@ const withoutForeignTerm = q => q.split(FOREIGN_TERM).join(" ").trim();
 // and the rest answers "which of those".
 function boardRows(all, rawFilter) {
   const q = (rawFilter || "").trim().toLowerCase();
-  const eligible = all.filter(b => wantsForeign(q) ? b.foreign : !b.foreign);
+  // The board's own rows carry no foreign ones any more, so the fetched list is concatenated in
+  // rather than filtered out of. Kept as one function so the rule still has one home.
+  const pool = wantsForeign(q) ? (foreignRows || []) : all;
+  const eligible = pool.filter(b => wantsForeign(q) ? b.foreign : !b.foreign);
   const text = withoutForeignTerm(q);
   return text ? eligible.filter(b => matchesFilter(b, text)) : eligible;
 }
 // Set the board filter from a link, keeping the input and the state in step — typing it by hand and
 // clicking "show them" have to mean the same thing, and the input is what a person edits next.
 function setFilter(q) {
+  // Entering foreign mode re-asks: the answer is a snapshot of the machine, and one taken when the
+  // tab was opened an hour ago is not what somebody typing `foreign:` now is asking about.
+  if (wantsForeign((q || "").toLowerCase()) && !wantsForeign((boardFilter || "").toLowerCase())) {
+    foreignRows = null;
+  }
   boardFilter = q;
   const el = document.getElementById("ffilter");
   if (el) el.value = q;
@@ -1782,6 +1814,8 @@ function render(snapshot) {
   // away digest all still speak for the whole fleet. A filter that also silenced the announcements
   // would be a way to hide a box that needs you and never hear about it.
   const q = boardFilter.trim().toLowerCase();
+  // Asked the moment somebody wants them, and only then.
+  if (wantsForeign((boardFilter || "").trim().toLowerCase()) && foreignRows === null) askForForeign();
   const shown = boardRows(boxes, boardFilter);
   const needyAll = shown.filter(b => (b.tier ?? 9) <= NEEDS_TIER);
   const rest  = shown.filter(b => (b.tier ?? 9) >  NEEDS_TIER);

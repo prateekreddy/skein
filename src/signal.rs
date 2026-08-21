@@ -199,7 +199,15 @@ pub enum Gates {
 /// [`Signal::ON_THE_BOARD`] is caught by `tests/board_cost.rs`, which counts the real thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
-    /// Which boxes exist: `sbx ls --json`.
+    /// What sandboxes are on this machine: `sbx ls --json`.
+    ///
+    /// **Not on the board any more.** It rode on every tick as the source of record for which boxes
+    /// exist, which was true in the per-VM model and false in this one: a box is not a sandbox, and
+    /// `sbx ls` has never heard of one. The placement records answer that question without a
+    /// subprocess, so the listing became what it is actually good for — what *sandboxes* are here,
+    /// including another skein fleet running beside this one — and that is a question somebody asks.
+    ///
+    /// Kept as a variant so its cost is still declared: it did not become free, it became rare.
     FleetListing,
     /// Every box's disk use, from one `du` over the fleet root.
     FleetDisk,
@@ -232,8 +240,10 @@ impl Signal {
     /// Kept in step with reality by measurement rather than by care: `tests/board_cost.rs` forks a
     /// counted tick and compares it with [`board_tick`], so a signal that forks and is missing from
     /// this list makes the sum wrong and the test says so.
-    pub const ON_THE_BOARD: [Signal; 12] = [
-        Signal::FleetListing,
+    ///
+    /// [`Signal::FleetListing`] is deliberately **not** here. It is a real signal with a real cost;
+    /// it is simply not one a board tick observes any more.
+    pub const ON_THE_BOARD: [Signal; 11] = [
         Signal::FleetDisk,
         Signal::FleetLiveness,
         Signal::Registry,
@@ -309,6 +319,8 @@ impl Signal {
     /// on the board is in that quadrant now, and a test keeps it that way.
     pub fn gate(self) -> Option<Duration> {
         match self {
+            // Gated still, because two people asking at once should not be two subprocesses — but
+            // nothing asks on a schedule any more, so the gate is a courtesy rather than a budget.
             Signal::FleetListing => Some(Duration::from_millis(1500)),
             Signal::FleetLiveness => Some(Duration::from_millis(1500)),
             Signal::FleetDisk => Some(Duration::from_secs(30)),
@@ -330,7 +342,11 @@ impl Signal {
     /// measured ones — `tests/board_cost.rs` runs a tick with a counting `PATH` and compares.
     pub fn cost(self) -> Cost {
         match self {
-            Signal::FleetListing => Cost::forks(1, "`sbx ls --json`, src/sbx.rs `fleet_boxes`"),
+            Signal::FleetListing => Cost::forks(
+                1,
+                "`sbx ls --json`, src/sbx.rs `fleet_boxes` — asked by `board::foreign_views` when \
+                 somebody wants it, and by nothing on a tick",
+            ),
             Signal::FleetDisk => {
                 Cost::forks(1, "one `sbx exec` du, src/fleet.rs `fleet_disk_usage`")
             }
@@ -477,8 +493,10 @@ mod tests {
             "a fifty-box board forks more than a one-box board, which is the budget with teeth"
         );
         assert_eq!(
-            one.spawns, 3,
-            "the cold tick's three: listing, disk, liveness"
+            one.spawns, 2,
+            "the cold tick's two: the disk walk and the liveness sweep. It was three until `sbx ls` \
+             left the tick — that one answers \"what sandboxes are on this machine\", which is a \
+             question somebody asks rather than one the board asks thirty times a minute."
         );
         assert_eq!(
             board_tick(50, 0, Gates::Warm).spawns,
@@ -508,7 +526,7 @@ mod tests {
         // Which is the whole of it: a fifty-box board whose branches nothing can name still forks
         // nothing once the gates are warm.
         assert_eq!(board_tick(50, 50, Gates::Warm).spawns, 0);
-        assert_eq!(board_tick(50, 50, Gates::Cold).spawns, 3);
+        assert_eq!(board_tick(50, 50, Gates::Cold).spawns, 2);
     }
 
     /// Nothing on the board tick spends the two budgets that are not counted here, which is why

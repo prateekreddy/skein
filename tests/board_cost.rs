@@ -171,7 +171,12 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
     );
     // The number itself, spelled out: a twelve-box fleet costs the same three as a one-box one,
     // because the listing, the disk walk and the liveness sweep each answer for the whole fleet.
-    assert_eq!(cold, 3, "the cold tick's three: listing, disk, liveness");
+    assert_eq!(
+        cold, 2,
+        "the cold tick's two: the disk walk and the liveness sweep. `sbx ls` used to be a third — \
+         it answered \"which boxes exist\", which the placement records answer for free, and it now \
+         answers \"what sandboxes are on this machine\" only when somebody asks."
+    );
 
     // ---- warm: within every gate's window, and the fleet costs nothing ----
     let warm = tick(&log);

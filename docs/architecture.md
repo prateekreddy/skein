@@ -1247,11 +1247,18 @@ Cost is **not one number**. Five budgets, each with its own unit and its own enf
 | volume I/O | writes/s | mounted writes are expensive; the observer shapes its writes for this |
 | delivery | boxes × transitions × clients | the event stream — §10.1 |
 
-**The board tick, measured.** `src/signal.rs` declares what each of the board's twelve signals
+**The board tick, measured.** `src/signal.rs` declares what each of the board's eleven signals
 spends, and `tests/board_cost.rs` runs a tick under a `PATH` of counting wrappers and compares the
-tally with the sum. A twelve-box fleet forks **three** processes on a cold tick — `sbx ls`, one `du`
-over the fleet root, one liveness sweep — and **the same three at fifty boxes**, because each answers
-for the whole fleet in one call. Warm, inside every gate's window, it forks **nothing**.
+tally with the sum. A twelve-box fleet forks **two** processes on a cold tick — one `du` over the
+fleet root, one liveness sweep — and **the same two at fifty boxes**, because each answers for the
+whole fleet in one call. Warm, inside every gate's window, it forks **nothing**.
+
+It was three. `sbx ls` rode on every tick as the source of record for which boxes exist, which was
+true in the per-VM model and false in this one: **a box is not a sandbox**, and `sbx ls` has never
+heard of one. The placement records answer that question for nothing, so the listing became what it
+is actually good for — *what sandboxes are on this machine*, another skein fleet beside this one
+included — and that is a question somebody asks. It is `board::foreign_views` and
+`GET /api/fleet/foreign` now, and the cockpit fetches it when the `foreign:` filter is typed.
 
 The count found one thing, which is what counting is for. **The branch fallback forked per box and
 had no gate**: when the registry, the launch spec and the repo all failed to name a box's branch,

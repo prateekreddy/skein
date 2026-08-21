@@ -99,11 +99,24 @@ fn server_serves_ui_vendor_and_guards_routes() {
     )
     .unwrap();
 
+    // A placement, because that is what makes a box a box. `fleet_sandbox` defaults to
+    // `skein-fleet`, so this host is in the fleet model — where the placement records are the
+    // register and a registry entry alone is a box skein never placed. The board stopped asking
+    // `sbx ls` on every tick, and this is the other side of that: it no longer needs to.
+    let home = token_home("routes");
+    let places = std::path::PathBuf::from(&home).join("places");
+    std::fs::create_dir_all(&places).unwrap();
+    std::fs::write(
+        places.join("thing-a.json"),
+        r#"{"sandbox":"skein-fleet","ns_pid":1,"home":"/boxes/thing-a/home","tree":"/boxes/thing-a/tree","sock":"/boxes/thing-a/session.sock"}"#,
+    )
+    .unwrap();
+
     let addr = format!("127.0.0.1:{}", free_port());
     let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
         .env("SKEIN_ADDR", &addr)
         .env("SKEIN_REGISTRY", &reg)
-        .env("SKEIN_HOME", token_home("routes"))
+        .env("SKEIN_HOME", &home)
         .env_remove("SKEIN_SHARED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -32,12 +32,20 @@ use std::path::Path;
 
 /// The fleet, enriched and sorted "who needs me first" (tier asc, then name).
 pub fn load_views() -> Result<Vec<BoxView>, String> {
-    // Fleet source of record: sbx itself (`sbx ls`). The registry only *enriches* — it carries the
-    // one datum sbx can't (the agent turn-state) — and serves as a fallback when sbx can't be
-    // consulted or a box is direct-mode (no sbx). Everything else (which boxes exist, their dir,
-    // branch, run-state, diff) comes from sbx + host git, so a box no longer has to register itself
-    // to be seen. See docs/self-sufficient.md.
-    let sbx = fleet_boxes();
+    // **Which boxes exist is a question the placements answer, and `sbx ls` cannot.** In the fleet
+    // model a box is not a sandbox — `sbx ls` has never heard of one — so the listing survived here
+    // only to serve the per-VM model that is being retired, at the cost of one subprocess every two
+    // seconds for every open browser tab. It is the most expensive thing a board tick did.
+    //
+    // So it is asked only where it is still the source of record: a host with no fleet configured.
+    // With one, `placed_boxes` is the register, and `sbx ls` becomes what it should always have
+    // been — something a person asks when they want to know what sandboxes are on this machine.
+    let fleet = fleet_sandbox();
+    let in_fleet = !fleet.is_empty();
+    let sbx = match in_fleet {
+        true => None,
+        false => fleet_boxes(),
+    };
     let reg = all_sandboxes();
     // skein-server may run *inside* one box; that box is provably up, so keep it live even when sbx
     // can't confirm it. Set $SKEIN_SELF to override the detected vmid.
@@ -46,30 +54,30 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
         .ok()
         .filter(|s| !s.is_empty());
 
-    // sbx (`sbx ls`) is authoritative for which boxes *exist*; the registry only enriches them. We
-    // fall back to the registry to populate the board *only* when sbx can't be consulted (None) — so a
-    // destroyed box whose registry entry lingers (e.g. a delist that failed on a corrupt registry) no
-    // longer shows up as a stale phantom once sbx confirms it's gone.
+    // Whichever register applies. In the fleet the placement records ARE it — a box exists because
+    // skein placed it — and a registry entry for a destroyed box must not resurrect one, which is
+    // why the registry is not consulted for existence here at all.
     let mut names: BTreeSet<String> = BTreeSet::new();
-    match &sbx {
-        Some(v) => {
-            names.extend(v.iter().map(|b| b.name.clone()));
-            // keep the self-box even if sbx didn't list it (skein may be running inside it).
-            if let Some(self_name) = &self_box {
-                names.insert(self_name.clone());
-            }
-        }
-        None => names.extend(reg.keys().cloned()),
-    }
-    // Boxes in the shared sandbox are not sandboxes, so `sbx ls` has never heard of them — without
-    // this the entire fleet is invisible on the board while running perfectly. Their placement
-    // records are the register. The sandbox itself is *not* a box: it would otherwise appear as one,
-    // permanently stale, with no repo and no branch.
-    let fleet = fleet_sandbox();
-    if !fleet.is_empty() {
-        names.remove(&fleet);
+    if in_fleet {
         names.extend(placed_boxes(&fleet).into_iter().map(|(name, _)| name));
+    } else {
+        // The per-VM model, unchanged and on its way out. sbx is authoritative for which boxes
+        // exist; the registry populates the board only when sbx cannot be consulted, so a destroyed
+        // box whose registry entry lingers no longer shows up as a phantom once sbx confirms it is
+        // gone.
+        match &sbx {
+            Some(v) => names.extend(v.iter().map(|b| b.name.clone())),
+            None => names.extend(reg.keys().cloned()),
+        }
     }
+    // skein-server may run inside one box, which is provably up whatever any register says.
+    if let Some(self_name) = &self_box {
+        names.insert(self_name.clone());
+    }
+    // Last, and after the self-box: the sandbox that hosts the boxes is not one of them, and it
+    // would otherwise appear as a box that is permanently stale with no repo and no branch. skein
+    // running *in* the fleet sandbox is the case that reaches this by the other route.
+    names.remove(&fleet);
     // Hoisted: this reads the config and the stored-credential list, and `load_views` runs on every
     // 2s tick for every box. Asked once per pass rather than once per box per pass.
     let scopable = crate::gitgate::can_issue_write_tokens();
@@ -149,7 +157,10 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             // Cold-start fallback has no authoritative existence/liveness signal. Old outcome files
             // must not resurrect destroyed boxes in "needs you": once the registry heartbeat is
             // stale (or absent), show the record as stale regardless of its sticky error/wait state.
-            if sbx.is_none()
+            // Only on the per-VM path. In the fleet, liveness comes from the sweep and a box with
+            // no recent heartbeat is a box that is not talking, not a box that is gone.
+            if !in_fleet
+                && sbx.is_none()
                 && self_box.as_deref() != Some(name.as_str())
                 && sb.age_secs().is_none_or(|seconds| seconds >= 30 * 60)
             {
@@ -280,6 +291,52 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
     Ok(views)
 }
 
+/// The sandboxes on this machine that skein did not place, asked when somebody wants to know.
+///
+/// **On demand, and that is the whole point of it being here rather than in `load_views`.** These
+/// rows used to arrive on every board tick, which cost one `sbx ls` every two seconds for every open
+/// browser tab — and they are the one part of the board that is not about skein's own boxes. `sbx
+/// ls` is the right instrument for "what sandboxes are on this machine", including another skein
+/// fleet running beside this one; it is the wrong instrument for "which boxes exist", which the
+/// placement records answer without a subprocess.
+///
+/// Empty is a real answer and so is `Err`: a machine with nothing else on it and a machine that
+/// could not be asked are different, and the caller renders them differently.
+pub fn foreign_views() -> Result<Vec<BoxView>, String> {
+    let fleet = fleet_sandbox();
+    let boxes = fleet_boxes().ok_or_else(|| {
+        crate::sbx::fleet_failure().unwrap_or_else(|| "sbx did not answer".to_string())
+    })?;
+    let placed: BTreeSet<String> = match fleet.is_empty() {
+        true => BTreeSet::new(),
+        false => placed_boxes(&fleet).into_iter().map(|(n, _)| n).collect(),
+    };
+    Ok(boxes
+        .into_iter()
+        // The fleet sandbox is skein's own, and a box skein placed is not foreign however `sbx ls`
+        // reports it — a migrated box's old sandbox keeps its name and is still listed.
+        .filter(|b| b.name != fleet && !placed.contains(&b.name))
+        .map(|b| {
+            let (state, tier) = Sandbox {
+                branch: String::new(),
+                dir: b.dir.clone(),
+                last_seen: String::new(),
+                status: String::new(),
+            }
+            .state_with(b.live);
+            BoxView {
+                name: b.name,
+                state,
+                tier,
+                dir: shorten(&b.dir),
+                agent: b.agent,
+                foreign: true,
+                ..Default::default()
+            }
+        })
+        .collect())
+}
+
 /// A registry entry enriched for display — what the CLI table and the web API both render.
 #[derive(Debug, Default, Serialize)]
 pub struct BoxView {
@@ -367,7 +424,7 @@ pub struct BoxView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{load_config, save_config};
+    use crate::config::{load_config, save_config, Config};
     use crate::place::{forget_place, record_place, PlaceRecord};
     use crate::repos::REPOS_CACHE;
     use crate::testutil::*;
@@ -456,18 +513,31 @@ mod tests {
                 .collect()
         };
         let rows = tagged();
+        // **The board tick no longer carries them**, which is the point: they cost one `sbx ls`
+        // every two seconds per open tab, for the one part of the board that is not about skein's
+        // own boxes.
         assert!(
-            rows.contains(&("old-box".into(), true)),
-            "a sandbox skein did not place is not one of its boxes: {rows:?}"
+            !rows.iter().any(|(name, _)| name == "old-box"),
+            "a sandbox skein did not place rode in on the tick: {rows:?}"
         );
         assert!(
             rows.contains(&("demo-task".into(), false)),
             "a box skein placed is the ordinary case and carries no tag: {rows:?}"
         );
+        // Asked for, they are all there — and the fleet sandbox and skein's own boxes are not.
+        let asked = foreign_views().expect("sbx answers here");
+        let names: Vec<&str> = asked.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["old-box"],
+            "the on-demand listing must be the sandboxes skein did not place, and only those"
+        );
+        assert!(asked.iter().all(|v| v.foreign));
 
         // The flag is only half the feature: a row that carries it and a cockpit that ignores it look
-        // identical from here, and that is how a tag silently stops appearing. The cockpit both hides
-        // these rows by default and reveals them on `foreign:`, so it has to read the flag twice.
+        // identical from here, and that is how a tag silently stops appearing. The cockpit hides
+        // these rows by default, reveals them on `foreign:`, and — since they stopped arriving on
+        // the tick — has to go and ask for them.
         let page = include_str!("web/index.html");
         assert!(
             page.contains("b.foreign"),
@@ -476,6 +546,11 @@ mod tests {
         assert!(
             page.contains("foreign:"),
             "without the filter keyword there is no way to see them at all"
+        );
+        assert!(
+            page.contains("/api/fleet/foreign"),
+            "the rows no longer arrive on the tick, so a cockpit that does not ask for them shows \
+             an empty list where a machine's other sandboxes should be"
         );
 
         forget_place("demo-task");
@@ -489,6 +564,15 @@ mod tests {
     fn load_views_promotes_only_the_self_box_when_quiet() {
         let _g = env_lock();
         let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        // No fleet, explicitly. `fleet_sandbox` DEFAULTS to `skein-fleet`, so a config nobody
+        // wrote still puts a host in the fleet model — which is the whole reason `sbx ls` stopped
+        // being asked on the tick. This test is about the other path, and has to say so.
+        save_config(&Config {
+            fleet_sandbox: String::new(),
+            ..load_config()
+        })
+        .unwrap();
         let reg = dir.join("sandboxes.json");
         fs::write(
             &reg,
@@ -522,6 +606,15 @@ mod tests {
     fn load_views_drops_registry_only_boxes_when_sbx_is_authoritative() {
         let _g = env_lock();
         let dir = tempdir();
+        env::set_var("SKEIN_HOME", &dir);
+        // No fleet, explicitly. `fleet_sandbox` DEFAULTS to `skein-fleet`, so a config nobody
+        // wrote still puts a host in the fleet model — which is the whole reason `sbx ls` stopped
+        // being asked on the tick. This test is about the other path, and has to say so.
+        save_config(&Config {
+            fleet_sandbox: String::new(),
+            ..load_config()
+        })
+        .unwrap();
         let reg = dir.join("sandboxes.json");
         // Registry remembers two boxes, but sbx only lists one — the other was destroyed and its
         // registry entry lingered (e.g. a delist that failed on a corrupt registry).
