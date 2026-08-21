@@ -1295,7 +1295,21 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    timeouts are its own rather than a doer's, since an audit sink that could hold a box destroy open
    for half an hour would be a reason to stop auditing.
 7. **Credentials are compared on evidence skein controls, never on a field the file asserts** (§9.3).
-8. **No privileged actor reads, writes, chowns or follows a path a box can influence.** §8.4 states
+8. **No privileged actor reads, writes, chowns or follows a path a box can influence.**
+
+   **Site by site, because "influence" means something different at each**, and a helper that
+   pretended otherwise would hide the case it did not cover. `git-tokens/` is done and it was half
+   closed already: the host mints a write credential and places it at
+   `<box state>/git-tokens/<repo>`, and the *write* was never the hole — `write_secret` renames into
+   place, and `rename` replaces a symbolic link at the destination rather than following one. The
+   **directory** was: `create_dir_all` follows a link, so a `git-tokens` pointing elsewhere is a
+   directory the host creates through and drops a live token into. It is refused now, and the
+   refusal names the path rather than repairing it — an ordinary box cannot make that link (the
+   cover binds its state read-only in its own namespace), so finding one means something is wrong.
+   The guard sits **before** the unscoped-box path, because that path does not write, it *deletes*
+   every file in the directory: the dangerous half of this site is the half that looks like cleanup.
+
+   §8.4 states
    this for approvals; that was too narrow, and the general form sweeps in three more:
 
    - **the resize archive** is parked in the box-writable state directory, created with root `tar`

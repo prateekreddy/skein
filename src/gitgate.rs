@@ -1305,6 +1305,32 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     let mut withdrawn: Vec<String> = Vec::new();
     let dir = std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-tokens");
 
+    // **Not through a link** (§9.5 R8). `create_dir_all` follows a symlink at this path, and so
+    // does the one inside `write_secret` — so a `git-tokens` that is a link to somewhere else is a
+    // directory the host creates through and places credentials in. The write itself is already
+    // safe: `write_secret` renames into place, and `rename` replaces a link rather than following
+    // it. The directory was the half that was not.
+    //
+    // An ordinary box cannot make one — 4a binds its state read-only in its own namespace — which
+    // is exactly why finding one means something is wrong rather than something is missing, and why
+    // this refuses and names the path instead of repairing it. A privileged box may see every box's
+    // files, deliberately; the resize archive and anything that ever wrote outside the cover are
+    // the other ways.
+    //
+    // **Before the scoped check, not after.** The unscoped path does not write — it DELETES, every
+    // file in the directory — and through a link that is skein emptying a directory somebody else
+    // chose. The dangerous half of this site is the half that looks like cleanup.
+    if let Ok(how) = std::fs::symlink_metadata(&dir) {
+        if how.file_type().is_symlink() {
+            return vec![format!(
+                "{}: this box's token directory is a symbolic link, so placing a credential in it \
+                 would write somewhere skein did not choose. Nothing was written. Remove the link \
+                 and let {box_name} start again.",
+                dir.display()
+            )];
+        }
+    }
+
     // A box that is no longer scoped keeps nothing. This ran *before* the pruning below and returned,
     // so un-scoping a box left every token it had been given sitting in its state directory. For an
     // App token that self-heals within the hour; a stored PAT is returned verbatim by [`mint_token`]
@@ -1631,6 +1657,58 @@ fn curl_json(args: &[&str], jwt: &str) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token directory that is a symbolic link stops the placement, rather than redirecting it.
+    ///
+    /// The rule is §9.5 R8: no privileged actor follows a path a box can influence. The host mints
+    /// a write credential and places it at `<box state>/git-tokens/<repo>`, and `create_dir_all`
+    /// follows a link at that path — so a `git-tokens` pointing somewhere else is a directory the
+    /// host would create through and drop a live token into.
+    ///
+    /// **The refusal is the fix, not a repair.** An ordinary box cannot make this link — 4a binds
+    /// its own state read-only inside its namespace — so finding one means something is wrong, and
+    /// the honest response to "something is wrong here" is to stop and say where, not to delete
+    /// somebody's link and carry on.
+    #[test]
+    fn a_token_directory_that_is_a_link_is_refused_rather_than_followed() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+
+        // Somewhere the token must not land: a directory outside the box entirely.
+        let elsewhere = home.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let state = std::path::PathBuf::from(crate::fleet::box_state("web-main"));
+        std::fs::create_dir_all(&state).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, state.join("git-tokens")).unwrap();
+
+        // Something the link points at, so the *deletion* half is visible. This box is not scoped,
+        // which is the path that empties the directory rather than filling it — and emptying one
+        // through a link is skein deleting files somebody else chose.
+        std::fs::write(elsewhere.join("not-skeins"), b"someone else's file").unwrap();
+
+        let problems = refresh_tokens("web-main");
+        std::env::remove_var("SKEIN_HOME");
+
+        assert!(
+            problems.iter().any(|p| p.contains("symbolic link")),
+            "a linked token directory was not refused: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("git-tokens")),
+            "the refusal does not name the path somebody has to go and look at: {problems:?}"
+        );
+        assert!(
+            elsewhere.join("not-skeins").exists(),
+            "skein deleted through the link — the unscoped path empties the directory, and that is \
+             the half of this site that looks like cleanup"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).unwrap().count(),
+            1,
+            "the host wrote through the link, into a directory it did not choose"
+        );
+    }
 
     /// The grant that gets recorded is the one that was on screen — box included.
     ///
