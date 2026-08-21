@@ -2338,9 +2338,25 @@ pub struct BoxLoad {
     /// it started — which is a fine way to rank yesterday's builds and no way at all to find what is
     /// busy now.
     pub cores: f64,
-    /// `memory.current` — everything the box is charged for, including page cache it could give
-    /// back. `anon` is what the fleet gauge stacks, because that is the part an OOM turns on.
-    pub mem: u64,
+    /// **Anonymous memory: the part the kernel cannot reclaim its way out of**, and therefore the
+    /// part that ends in an OOM kill.
+    ///
+    /// This used to be `memory.current`, which the fleet gauge had already stopped using for the
+    /// same reason — `current` counts page cache, and a box that read a large repository an hour ago
+    /// is charged for every byte of it until something else wants the memory. Measured on this
+    /// fleet: a box showed `memory.current` at 1.87 GiB while its largest process held ~515 MB. An
+    /// operator asked why a box they had closed was "using 15 GB"; the box was indeed still running
+    /// (fixed separately), and the number was still not what it looked like.
+    ///
+    /// The two license different actions — "this box is why the fleet is slow" against "this box is
+    /// fine and the kernel is doing its job" — so they are two fields rather than one.
+    pub mem_anon: u64,
+    /// Page cache and the rest: charged to the box, reclaimable under pressure.
+    ///
+    /// Kept rather than dropped, because it answers the question the headline provokes: a box whose
+    /// anonymous memory is small and whose total is huge has been reading files, and somebody
+    /// looking at a gauge deserves to be told that rather than left to wonder.
+    pub mem_cache: u64,
     pub pids: u64,
     /// MiB on the fleet's shared disk, and this box's share of it. Merged in from
     /// [`fleet_disk_usage`] rather than measured here: counting bytes means walking the tree, which
@@ -2387,16 +2403,24 @@ const BOX_LOAD_INTERVAL_US: f64 = 500_000.0;
 ///
 /// `usage_usec` is cumulative, so the pair is the whole point — and both are taken in one shell so
 /// the interval is the sandbox's own clock rather than a round trip that might stall between them.
+/// **Every field goes through `n()`, and that is not tidiness.** `printf` with an empty command
+/// substitution emits two spaces where a value should be, and the parser splits on whitespace — so a
+/// cgroup that could not answer for `anon` would shift `memory.current` into its place and report a
+/// box's page cache as memory it is holding. Caught by the test for exactly that case. A field that
+/// is always a number cannot shift.
 const BOX_LOAD_SCRIPT: &str = "\
+n() { v=$(cat \"$1\" 2>/dev/null); echo \"${v:-0}\"; }; \
+k() { v=$(awk -v k=\"$2\" '$1==k{print $2}' \"$1\" 2>/dev/null); echo \"${v:-0}\"; }; \
 cd /sys/fs/cgroup/skein 2>/dev/null || exit 0; \
 for d in */; do n=${d%/}; \
-  printf 'a %s %s\\n' \"$n\" \"$(awk '/^usage_usec/{print $2}' \"$d/cpu.stat\" 2>/dev/null)\"; done; \
+  printf 'a %s %s\\n' \"$n\" \"$(k \"$d/cpu.stat\" usage_usec)\"; done; \
 sleep 0.5; \
 for d in */; do n=${d%/}; \
-  printf 'b %s %s %s %s\\n' \"$n\" \
-    \"$(awk '/^usage_usec/{print $2}' \"$d/cpu.stat\" 2>/dev/null)\" \
-    \"$(cat \"$d/memory.current\" 2>/dev/null)\" \
-    \"$(cat \"$d/pids.current\" 2>/dev/null)\"; done";
+  printf 'b %s %s %s %s %s\\n' \"$n\" \
+    \"$(k \"$d/cpu.stat\" usage_usec)\" \
+    \"$(n \"$d/pids.current\")\" \
+    \"$(k \"$d/memory.stat\" anon)\" \
+    \"$(n \"$d/memory.current\")\"; done";
 
 /// Turn the script's two passes into a rate per box. Its own function so the arithmetic is testable
 /// without a sandbox — the parser is only correct against exactly the output above.
@@ -2411,8 +2435,13 @@ fn parse_box_loads(out: &str, interval_us: f64) -> Vec<BoxLoad> {
                     first.insert(f[1], v);
                 }
             }
-            Some(&"b") if f.len() >= 5 => {
+            Some(&"b") if f.len() >= 6 => {
                 let (name, used) = (f[1], f[2].parse::<u64>().unwrap_or(0));
+                // `anon` and the total, and the cache is the difference rather than a third read:
+                // `memory.stat` has half a dozen reclaimable classes and summing the ones anybody
+                // remembers is how a figure quietly stops adding up.
+                let anon: u64 = f[4].parse().unwrap_or(0);
+                let current: u64 = f[5].parse().unwrap_or(0);
                 // A box that appeared between the two passes has no baseline. Reporting it at zero
                 // is honest — it has been observed for no time at all — and beats inventing a rate
                 // from a total that has been accumulating since it started.
@@ -2420,8 +2449,9 @@ fn parse_box_loads(out: &str, interval_us: f64) -> Vec<BoxLoad> {
                 loads.push(BoxLoad {
                     name: name.to_string(),
                     cores: (used.saturating_sub(before) as f64 / interval_us).max(0.0),
-                    mem: f[3].parse().unwrap_or(0),
-                    pids: f[4].parse().unwrap_or(0),
+                    mem_anon: anon,
+                    mem_cache: current.saturating_sub(anon),
+                    pids: f[3].parse().unwrap_or(0),
                     // Filled by `box_loads` from the disk gate; the parser only sees the cgroup
                     // sample, which carries no notion of bytes on disk.
                     ..Default::default()
@@ -4624,21 +4654,147 @@ mod tests {
     #[test]
     fn a_boxs_cpu_is_the_difference_between_two_samples() {
         // Half a second of wall clock; `busy` burns two full cores in it, `idle` none.
+        // `b <name> <usage_usec> <pids> <anon> <memory.current>`. `busy` is charged 4 GiB and only
+        // 1 GiB of it is anonymous — a box that has been compiling, which is the shape that made an
+        // operator ask why a box was "using 15 GB".
         let out = "\
 a busy 1000000
 a idle 5000000
-b busy 2000000 4294967296 312
-b idle 5000000 1048576 4
+b busy 2000000 312 1073741824 4294967296
+b idle 5000000 4 1048576 1048576
 ";
         let loads = parse_box_loads(out, 500_000.0);
         assert_eq!(loads.len(), 2);
         // Sorted by what you opened this to find out.
         assert_eq!(loads[0].name, "busy");
         assert_eq!(loads[0].cores, 2.0);
-        assert_eq!(loads[0].mem, 4_294_967_296);
         assert_eq!(loads[0].pids, 312);
         assert_eq!(loads[1].name, "idle");
         assert_eq!(loads[1].cores, 0.0);
+    }
+
+    /// The parser against the script's real output, on real cgroups.
+    ///
+    /// Every other test here feeds `parse_box_loads` a string somebody typed, and the doc on it says
+    /// it "is only correct against exactly the output above" — which nothing checked. The two drift
+    /// the moment a field is added, and the failure is silent: fields shift and a box's page cache
+    /// is reported as memory it holds. That is not hypothetical; it happened while this was written.
+    ///
+    /// Skipped where there are no box cgroups to sample, which is most machines — and it runs here,
+    /// inside a fleet, where `/sys/fs/cgroup/skein` has one directory per box.
+    #[test]
+    fn the_load_script_and_its_parser_agree_on_real_cgroups() {
+        if !std::path::Path::new("/sys/fs/cgroup/skein").is_dir() {
+            eprintln!("skipping: no box cgroups on this machine to sample");
+            return;
+        }
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(BOX_LOAD_SCRIPT)
+            .output()
+            .expect("run the load script");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let loads = parse_box_loads(&text, BOX_LOAD_INTERVAL_US);
+        assert!(
+            !loads.is_empty(),
+            "the script produced nothing the parser recognised:\n{text}"
+        );
+        for load in &loads {
+            assert!(!load.name.is_empty(), "a box with no name: {text}");
+            // Every `b` line has six fields, so nothing shifted — which is what the `${v:-0}`
+            // substitution buys and what a missing `memory.stat` would otherwise cost.
+            let line = text
+                .lines()
+                .find(|l| l.starts_with(&format!("b {} ", load.name)))
+                .unwrap_or_else(|| panic!("no sample line for {}: {text}", load.name));
+            assert_eq!(
+                line.split_whitespace().count(),
+                6,
+                "a sample line is not six fields, so the parser is reading one out of step: {line}"
+            );
+            // The relationship that makes the split meaningful: `anon` is part of the charge, never
+            // more than it. If this ever inverts, the two fields have been read in the wrong order.
+            assert!(
+                load.mem_anon <= load.mem_anon + load.mem_cache,
+                "{} holds more than it is charged: {line}",
+                load.name
+            );
+        }
+    }
+
+    /// And the cockpit renders the one that means something.
+    ///
+    /// A field that is split in the API and rendered as the old total in the page is the same bug
+    /// with an extra step, and it is invisible from the Rust side — which is exactly how a figure
+    /// stops meaning what its name says.
+    #[test]
+    fn the_cockpit_shows_what_a_box_holds_rather_than_what_it_is_charged() {
+        let page = include_str!("web/index.html");
+        assert!(
+            page.contains("r.mem_anon"),
+            "the page still renders the charge, which counts page cache"
+        );
+        assert!(
+            !page.contains("fmtGB(r.mem)"),
+            "the old total is still on screen somewhere"
+        );
+        assert!(
+            page.contains("r.mem_cache"),
+            "the cache is not shown at all, so a box whose two figures differ by an order of \
+             magnitude explains itself to nobody"
+        );
+    }
+
+    /// The headline is the memory a box cannot give back, and the rest is shown as what it is.
+    ///
+    /// The two are not interchangeable and this is where they stop being one number. A box charged
+    /// 4 GiB of which 1 GiB is anonymous is a box holding 1 GiB — the other three are page cache the
+    /// kernel hands back the moment anything asks. Reported as one figure, the same box reads as
+    /// four times the problem it is, and the fleet gauge already stopped doing that for exactly this
+    /// reason (see `FleetResources`).
+    #[test]
+    fn a_boxs_memory_is_what_it_holds_and_what_it_is_merely_charged_for() {
+        let loads = parse_box_loads("b busy 0 9 1073741824 4294967296\n", 500_000.0);
+        assert_eq!(loads[0].mem_anon, 1_073_741_824, "the part an OOM turns on");
+        assert_eq!(
+            loads[0].mem_cache,
+            3 * 1_073_741_824,
+            "the part the kernel reclaims, reported separately rather than added to the headline"
+        );
+
+        // A cgroup that answers for `memory.current` and not for `anon` — an older kernel, or a
+        // read that raced a box being destroyed. Zero anonymous and the whole charge as cache is
+        // wrong in the safe direction: it under-reports a box's hold rather than inventing one.
+        let partial = parse_box_loads("b odd 0 9 0 4294967296\n", 500_000.0);
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].mem_anon, 0);
+        assert_eq!(partial[0].mem_cache, 4_294_967_296);
+
+        // And the shape that made this a real bug rather than a hypothetical: a missing value left
+        // an empty field, `split_whitespace` closed the gap, and `memory.current` slid into `anon` —
+        // reporting a box's page cache as memory it was holding. The script substitutes zero, so
+        // the line can never be short, and a line that IS short is not read as a box.
+        // **Every** substitution in the sample line goes through a helper, not just one of them.
+        // The first version of this asserted the helper merely existed, which passed while the
+        // `anon` read was reverted to a bare `awk` — the exact shift it was written to prevent.
+        // The helpers themselves read directly, of course — it is the *sampling loops* that must
+        // not, so the check starts after the definitions.
+        let sampling = BOX_LOAD_SCRIPT
+            .split_once("cd /sys/fs/cgroup/skein")
+            .expect("the script still samples the box cgroups")
+            .1;
+        for bare in ["$(cat ", "$(awk "] {
+            assert!(
+                !sampling.contains(bare),
+                "`{bare}` reads a field directly, and an empty result shifts every field after it \
+                 — put it behind `n` or `k`, which substitute zero"
+            );
+        }
+        assert!(BOX_LOAD_SCRIPT.contains("${v:-0}"));
+        assert!(
+            parse_box_loads("b odd 0 9 4294967296\n", 500_000.0).is_empty(),
+            "a short line must be dropped rather than read one field out of step"
+        );
     }
 
     /// A box that appears between the two passes has no baseline, and must not be handed one.
@@ -4648,7 +4804,7 @@ b idle 5000000 1048576 4
     /// exactly the box that just started doing nothing.
     #[test]
     fn a_box_that_arrives_mid_measurement_is_reported_at_zero() {
-        let loads = parse_box_loads("b newcomer 900000000 1048576 3\n", 500_000.0);
+        let loads = parse_box_loads("b newcomer 900000000 3 1048576 1048576\n", 500_000.0);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].cores, 0.0, "not 1800 cores");
     }

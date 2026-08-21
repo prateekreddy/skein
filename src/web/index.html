@@ -4050,7 +4050,10 @@ function renderLoad(ov, rows) {
     row.className = "lrow" + (r.cores >= top && r.cores > 1 ? " hot" : "");
     row.innerHTML = `<span class="nm">${esc(isBox ? r.name : r.name + " (docker)")}</span>`
       + `<span class="bar"><i style="width:${Math.round(Math.min(1, r.cores/top)*100)}%"></i></span>`
-      + `<span class="fig"><b>${r.cores.toFixed(1)}</b> cpu · ${fmtGB(r.mem)} · ${r.pids|0}p`
+      // `mem_anon`, not the total the box is charged. The rest is page cache the kernel hands back
+      // on demand, and adding it to the headline makes a box that read a big repository look like a
+      // box that is holding one — four times over, measured.
+      + `<span class="fig"><b>${r.cores.toFixed(1)}</b> cpu · ${fmtGB(r.mem_anon)} · ${r.pids|0}p`
       + (r.disk_mb ? ` · ${fmtGb(r.disk_mb)} disk` : "") + `</span>`;
     if (isBox) row.addEventListener("click", () => { ov.classList.remove("open"); select(r.name); });
     else row.style.cursor = "default";
@@ -5473,7 +5476,13 @@ function resourceRows(name) {
   const disk = used == null ? "—" : cap ? `${fmtGb(used)} / ${fmtGb(cap)}` : fmtGb(used);
   return `<div class="rp-n">${esc(name)}</div>`
     + `<div class="rp-r ${diskCls}"><span>disk</span><span>${disk}</span></div>`
-    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem) : "…"}</span></div>`
+    + `<div class="rp-r"><span>memory</span><span>${r ? fmtGB(r.mem_anon) : "…"}</span></div>`
+    // The question the headline provokes, answered in the same panel: a box whose memory looks
+    // small and whose charge is large has been reading files, and saying so is cheaper than
+    // leaving somebody to wonder why the two disagree. Hidden when there is nothing to explain.
+    + (r && r.mem_cache > (r.mem_anon || 0)
+        ? `<div class="rp-r sub" title="page cache — files this box has read or written. The kernel hands it back the moment anything else needs it, so it is not memory the box is holding."><span>· cache</span><span>${fmtGB(r.mem_cache)}</span></div>`
+        : "")
     + `<div class="rp-r"><span>cpu</span><span>${r ? r.cores.toFixed(1) + " cores" : "…"}</span></div>`
     + `<div class="rp-r"><span>processes</span><span>${r ? (r.pids | 0) : "…"}</span></div>`
     + `<div class="rp-w">disk is measured, not enforced — one filesystem serves every box</div>`;
