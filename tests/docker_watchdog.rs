@@ -164,6 +164,58 @@ print(len(w.spawned), w.slept[0], w.slept[-1] > w.slept[0], w.slept[-1] <= agent
 }
 
 #[test]
+fn the_daemon_is_shielded_from_the_global_killer_on_every_pass() {
+    // Per process, so it has to be re-applied: a restarted dockerd is a new pid, and a shield that
+    // does not survive the restart it exists for is not one. `-500` rather than `-1000`, because an
+    // OOM-immune daemon on a sandbox with nothing left to kill is a wedged machine.
+    let said = drive(
+        r#"
+w = World([9, 9], argv=["/usr/bin/dockerd"])
+seen = []
+watch = agent.DockerWatch(find=w.find, argv_of=w.argv_of, spawn=w.spawn, sleep=w.sleep, log=w.log,
+                          kin=lambda names: [11, 12] if "dockerd" in names else [],
+                          shield=lambda pid: seen.append(pid) or True)
+watch.look()
+watch.look()
+print(seen, watch.shielded, agent.DOCKER_OOM_SCORE, sorted(agent.DOCKER_PROCESSES), sep="|")
+"#,
+    );
+    if said == "SKIP" {
+        return;
+    }
+    assert_eq!(
+        said, "[11, 12, 11, 12]|2|-500|['containerd', 'dockerd']",
+        "the shield is not re-applied, or it covers the wrong processes"
+    );
+}
+
+/// Reading it back is the point: a refused write and a successful one look the same through a shell.
+#[test]
+fn a_shield_that_did_not_take_is_reported_as_not_taken() {
+    let said = drive(
+        r#"
+import os, tempfile
+d = tempfile.mkdtemp()
+os.makedirs(os.path.join(d, "7"))
+# Present and readable, but its value never changes — which is what a refused write looks like.
+open(os.path.join(d, "7", "oom_score_adj"), "w").write("0")
+os.chmod(os.path.join(d, "7", "oom_score_adj"), 0o444)
+took = agent.shield(7, score=-500, proc=d)
+# And a process that is gone between the listing and the write.
+missing = agent.shield(99999, score=-500, proc=d)
+print(took, missing, sep="|")
+"#,
+    );
+    if said == "SKIP" {
+        return;
+    }
+    assert_eq!(
+        said, "False|False",
+        "a shield that did not take was reported as taken"
+    );
+}
+
+#[test]
 fn what_the_host_can_read_is_a_fact_rather_than_a_diagnosis() {
     let said = drive(
         r#"
@@ -178,7 +230,7 @@ print(sorted(snap.keys()), snap["argv_known"], snap["restarts"], sep="|")
         return;
     }
     assert_eq!(
-        said, "['argv_known', 'last_restart', 'note', 'pid', 'restarts']|True|0",
+        said, "['argv_known', 'last_restart', 'note', 'pid', 'restarts', 'shielded']|True|0",
         "the snapshot the host reads changed shape"
     );
 }

@@ -921,6 +921,41 @@ pub fn fleet_limits() -> String {
     )
 }
 
+/// What the sandbox's own plumbing is **guaranteed**, as the `key=value,…` spec the launcher applies
+/// to `memory.min`.
+///
+/// **Uncapped and unprotected are different things, and only the first was a decision.** `/docker`
+/// is deliberately without a ceiling — see [`MemoryPlan`], "what stays behind in `/docker` is the
+/// sandbox itself, which nothing caps and nothing should". Nothing followed from that about
+/// *protection*, so the kernel reclaims dockerd's working set like anywhere else, and when the VM
+/// runs short — the boxes' ceiling plus an uncapped `/docker` is about the whole of a sandbox with
+/// no swap — the global killer picks by badness, where a daemon holding many containers scores well.
+///
+/// `memory.min` is a hard guarantee: memory under it is never reclaimed, and a process in that
+/// cgroup is not what the kernel reaches for first. **Half the plumbing share**, and the halving is
+/// the point: `memory.min` is taken from everybody else, so a promise larger than the budget it
+/// comes from turns this fix into the next problem. Measured on a live fleet, dockerd and containerd
+/// hold 319 MiB of *anonymous* memory against a 512 MiB plumbing share — the rest is page cache and
+/// slab, which is exactly what should still be reclaimable.
+///
+/// Its own variable rather than a third field on `docker=max/max`: that spec is `max/high`, split on
+/// one `/`, and a launcher older than this skein reads whatever it is given. A ceiling it cannot
+/// parse it skips loudly; a *grammar* it cannot parse it would misread as a ceiling. A new name is
+/// invisible to an old launcher, which is the failure mode worth having.
+pub fn fleet_guarantees() -> String {
+    let Some(plan) = memory_plan() else {
+        return String::new();
+    };
+    // Nothing at all rather than a token guarantee: below this the promise is not worth the
+    // arithmetic, and `memory.min` on a cgroup that cannot hold its own working set inside it is a
+    // number that reads as protection and is not one.
+    let min = plan.plumbing / 2;
+    if min < 128 {
+        return String::new();
+    }
+    format!("docker={min}M")
+}
+
 /// Why a box has no memory ceiling, or `None` when it has one.
 ///
 /// Read from the file `box-session.sh` leaves behind rather than from its stderr: skein keeps a
@@ -971,8 +1006,9 @@ pub fn apply_box_limits() -> Result<Vec<String>, String> {
     // built before `--ceilings` existed gets the copy that has it.
     install_launcher(&sandbox)?;
     let ceilings = format!(
-        "SKEIN_FLEET_LIMITS={} {} --ceilings",
+        "SKEIN_FLEET_LIMITS={} SKEIN_FLEET_GUARANTEES={} {} --ceilings",
         sh_quote(&fleet_limits()),
+        sh_quote(&fleet_guarantees()),
         sh_quote(&box_session_path())
     );
     if fleet.exec(&ceilings, Duration::from_secs(30)).is_err() {
@@ -1157,8 +1193,9 @@ pub fn heal_fleet() -> Result<(), String> {
     // the launcher rather than written from here: these numbers are a share of the *configured*
     // fleet size, and only the sandbox knows what it really got (see `fleet_limits`).
     let ceilings = format!(
-        "SKEIN_FLEET_LIMITS={} {} --ceilings",
+        "SKEIN_FLEET_LIMITS={} SKEIN_FLEET_GUARANTEES={} {} --ceilings",
         sh_quote(&fleet_limits()),
+        sh_quote(&fleet_guarantees()),
         sh_quote(&box_session_path())
     );
     own_sandbox(&sandbox)
@@ -2777,7 +2814,8 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // ceilings above, and it is not a stylistic one: a launcher already installed in a running
         // sandbox would read an eighth positional as part of the command, and every box restart
         // would fail until something reinstalled the script. An old launcher ignores an env var.
-        "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
+        "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_FLEET_GUARANTEES={guard_q} \
+         SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
          SKEIN_BOX_PRIVILEGED={priv_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
@@ -2809,6 +2847,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         state_q = sh_quote(&box_state(name)),
         limits_q = sh_quote(&box_limits()),
         fleet_q = sh_quote(&fleet_limits()),
+        guard_q = sh_quote(&fleet_guarantees()),
         cmd_q = sh_quote(agent_command),
     )
 }
@@ -7463,6 +7502,95 @@ b idle 5000000 4 1048576 1048576
     /// fake `/proc/meminfo`, because the scaling lives in shell and an assertion about the Rust
     /// half would prove nothing about it.
     #[test]
+    /// The plumbing is guaranteed memory the kernel may not reclaim, and the number comes from the
+    /// plan rather than from a preference.
+    ///
+    /// `/docker` is uncapped **by decision** and was unprotected **by omission**, and the two are
+    /// not the same thing. `memory.min` is what says "do not reclaim this and do not reach for it
+    /// first" — which is the difference between a daemon that survives a container's overshoot and
+    /// one the global killer picks because it is the biggest thing in sight.
+    ///
+    /// Half the plumbing share, and the halving is the assertion: `memory.min` is taken from
+    /// everybody else, so a promise larger than the budget it comes from would turn this into the
+    /// next problem.
+    #[test]
+    fn the_plumbing_is_guaranteed_half_of_what_the_plan_set_aside_for_it() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        save_config(&Config {
+            fleet_memory: "26g".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let plan = memory_plan().expect("a plan");
+        let said = fleet_guarantees();
+        std::env::remove_var("SKEIN_HOME");
+        assert_eq!(
+            said,
+            format!("docker={}M", plan.plumbing / 2),
+            "the guarantee is not half the plumbing share"
+        );
+        assert!(
+            plan.plumbing / 2 < plan.plumbing,
+            "a guarantee the size of the whole share leaves the rest of the plumbing nothing"
+        );
+    }
+
+    /// And the launcher writes it, on the same cgroup and under the same rules as a ceiling.
+    #[test]
+    fn a_guarantee_is_written_to_memory_min_and_scaled_like_a_ceiling() {
+        let dir = tempdir();
+        let root = std::path::Path::new(&dir);
+        for cgroup in ["skein", "docker"] {
+            std::fs::create_dir_all(root.join("cgroup").join(cgroup)).unwrap();
+        }
+        // Half the size skein was configured for, so the scaling applies to the guarantee exactly as
+        // it does to the ceilings — a promise worked out for a machine twice the real size is not a
+        // promise, it is an over-commitment.
+        std::fs::write(root.join("meminfo"), "MemTotal:       13631488 kB\n").unwrap();
+        let harness = format!(
+            "sudo() {{ shift 4; sh -c 'echo \"$1\" > \"$2\"' _ \"$1\" \"$2\"; }}\n\
+             {body}\n\
+             fleet_limits='total=26624M,skein=15975M/14377M,docker=max/max'\n\
+             SKEIN_FLEET_GUARANTEES='docker=256M'\n\
+             apply_fleet_ceilings\n",
+            body = BOX_SESSION_SH
+                .lines()
+                .skip_while(|l| !l.starts_with("apply_fleet_ceilings() {"))
+                .take_while(|l| *l != "}")
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()))
+                .replace("/proc/meminfo", &root.join("meminfo").to_string_lossy())
+                + "\n}",
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&harness)
+            .output()
+            .expect("run the launcher's ceiling logic");
+        let read = |cgroup: &str, file: &str| -> String {
+            std::fs::read_to_string(root.join("cgroup").join(cgroup).join(file))
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            read("docker", "memory.min"),
+            "128M",
+            "half a sandbox gets half the guarantee: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // And nothing is promised to the workload: a guarantee there would be taken from the
+        // plumbing it exists to protect.
+        assert_eq!(
+            read("skein", "memory.min"),
+            "",
+            "the boxes were promised memory nobody meant"
+        );
+    }
+
     fn ceilings_shrink_to_the_memory_the_sandbox_really_has() {
         let dir = tempdir();
         let root = std::path::Path::new(&dir);

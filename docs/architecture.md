@@ -1319,6 +1319,14 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    `declared_read` now, and the test that keeps them there is a **source** assertion, because the
    failure is a path rather than a value and a path is a string somebody types.
 
+   **The Docker daemon is guaranteed memory and shielded from the killer.** `/docker` is uncapped by
+   decision — §9.5's memory plan says "what stays behind in `/docker` is the sandbox itself, which
+   nothing caps and nothing should" — and was **unprotected by omission**, which is a different
+   thing. It now carries a `memory.min` of half the plumbing share (never reclaimed, and not what
+   the kernel reaches for first), and dockerd and containerd carry `oom_score_adj -500`, re-applied
+   on every watchdog pass because a restarted daemon is a new pid. Not `-1000`: an OOM-immune daemon
+   on a sandbox with nothing left to kill is a wedged machine rather than a survivable one.
+
    **The resize archive — the risk was on the create side, not the restore.** Both halves, quoted
    rather than described:
 

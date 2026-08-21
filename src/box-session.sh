@@ -101,6 +101,32 @@ apply_fleet_ceilings() {
     scale="yes"
     echo "skein: this sandbox has ${actual}M, not the ${planned}M skein is configured for; scaling the shared ceilings to fit" >&2
   fi
+  # What the plumbing is GUARANTEED, before the ceilings are narrowed. `memory.min` is a promise
+  # that memory under it is never reclaimed, which is the difference between a daemon the kernel
+  # leaves alone and one it reaches for first — see `fleet_guarantees()` for why it is half the
+  # plumbing share rather than all of it.
+  #
+  # Its own variable rather than a third field on `docker=max/max`: that spec is `max/high` split on
+  # one `/`, and a launcher older than the skein driving it reads whatever it is handed. A ceiling it
+  # cannot parse it skips loudly; a *grammar* it cannot parse it would misread as a ceiling. A name
+  # an old launcher has never heard of is simply not read, which is the failure mode worth having.
+  for pair in $(printf '%s' "${SKEIN_FLEET_GUARANTEES-}" | tr ',' ' '); do
+    dir="/sys/fs/cgroup/${pair%%=*}"
+    want="${pair#*=}"
+    # Same rule as the ceilings below: only ever write over a cgroup that already exists. Creating
+    # `docker` would hand dockerd a cgroup it did not make and expects to own.
+    [ -d "$dir" ] || continue
+    case "${want%M}" in
+      "" | *[!0-9]*)
+        echo "skein: ignoring the guarantee on ${dir##*/}: '$want' is not a size this launcher understands" >&2
+        continue
+        ;;
+    esac
+    mib="${want%M}"
+    [ -n "$scale" ] && mib=$(( mib * actual / planned ))
+    sudo sh -c 'echo "$1" > "$2"' _ "${mib}M" "$dir/memory.min" 2>/dev/null || true
+  done
+
   for pair in $(printf '%s' "$fleet_limits" | tr ',' ' '); do
     case "$pair" in total=*) continue ;; esac
     dir="/sys/fs/cgroup/${pair%%=*}"

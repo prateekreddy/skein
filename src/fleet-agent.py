@@ -78,6 +78,18 @@ DOCKER_GRACE = 20.0
 # the grace, capped, so a broken dockerd costs one attempt every five minutes rather than a busy
 # loop on a sandbox that is already unwell.
 DOCKER_BACKOFF_MAX = 300.0
+# What the daemon's processes are worth to the global OOM killer, relative to everything else.
+#
+# **Not `-1000`.** That makes a process OOM-immune, and an immune dockerd on a sandbox with nothing
+# left to kill is a wedged machine rather than a survivable one. `-500` halves its badness: the
+# kernel looks at the container that caused the pressure first, and only comes back here if there is
+# genuinely nothing else — which is the honest ordering.
+#
+# Per process, so it is re-applied on every pass rather than set once: a restarted dockerd is a new
+# pid, and a guarantee that does not survive the restart it exists for is not one.
+DOCKER_OOM_SCORE = -500
+# The daemon is two processes, and killing either one ends the same way.
+DOCKER_PROCESSES = ("dockerd", "containerd")
 
 
 def _argv(req):
@@ -354,6 +366,60 @@ def dockerd_pid(proc="/proc"):
     return None
 
 
+def pids_named(names, proc="/proc"):
+    """Every pid whose `comm` is one of `names`."""
+    found = []
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, entry, "comm")) as f:
+                if f.read().strip() in names:
+                    found.append(int(entry))
+        except OSError:
+            continue
+    return found
+
+
+def shield(pid, score=DOCKER_OOM_SCORE, proc="/proc"):
+    """Make the global OOM killer look elsewhere first. `True` if it now reads what was asked.
+
+    Lowering `oom_score_adj` needs privilege, so this falls back to `sudo` exactly as the restart
+    does — and reads the value back rather than trusting the write, because the failure is silent:
+    a refused write and a successful one both return without complaint through a shell.
+    """
+    path = os.path.join(proc, str(pid), "oom_score_adj")
+    try:
+        with open(path) as f:
+            if int(f.read().strip()) <= score:
+                return True  # already shielded, by us or by whoever started it
+    except (OSError, ValueError):
+        return False
+    try:
+        with open(path, "w") as f:
+            f.write(str(score))
+    except OSError:
+        try:
+            subprocess.run(
+                ["sudo", "-n", "sh", "-c", f'echo {score} > {path}'],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except Exception:  # noqa: BLE001 — a shield that cannot be raised is reported, not fatal
+            return False
+    try:
+        with open(path) as f:
+            return int(f.read().strip()) <= score
+    except (OSError, ValueError):
+        return False
+
+
 def dockerd_argv(pid, proc="/proc"):
     """The command line dockerd was started with, while there is still a dockerd to ask.
 
@@ -380,13 +446,16 @@ class DockerWatch:
     """
 
     def __init__(self, find=dockerd_pid, argv_of=dockerd_argv, spawn=None, now=time.time,
-                 sleep=time.sleep, log=None):
+                 sleep=time.sleep, log=None, kin=pids_named, shield=shield):
         self._find = find
         self._argv_of = argv_of
         self._spawn = spawn or self._start
         self._now = now
         self._sleep = sleep
         self._log = log or (lambda line: print(line, flush=True))
+        self._kin = kin
+        self._shield = shield
+        self.shielded = 0
         self.argv = None
         self.restarts = 0
         self.last_restart = ""
@@ -416,6 +485,7 @@ class DockerWatch:
             "restarts": self.restarts,
             "last_restart": self.last_restart,
             "argv_known": bool(self.argv),
+            "shielded": self.shielded,
             "note": self.note,
         }
 
@@ -431,6 +501,10 @@ class DockerWatch:
             self.note = "watching"
             self.backoff = DOCKER_GRACE
             self._complained = False
+            # Every pass, not once. A restarted daemon is a new pid, and a shield that does not
+            # survive the restart it exists for is not one. Cheap: two `/proc` reads that return
+            # early once the value is already what was asked for.
+            self.shielded = sum(1 for p in self._kin(DOCKER_PROCESSES) if self._shield(p))
             return "alive"
 
         if not self.argv:
