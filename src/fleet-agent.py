@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # there, so "is it up" and "does it speak what I am about to send" are separate questions — and the
 # second one has to be answerable *before* a gigabyte goes down the wire, since there is no way back
 # once it has. Bump this whenever an endpoint or its framing changes.
-PROTOCOL = 2
+PROTOCOL = 3
 
 # Bigger than any script skein sends, small enough that a stray POST cannot exhaust the sandbox.
 MAX_BODY = 1 << 20
@@ -56,6 +56,28 @@ MAX_WRITE = 1 << 30
 # a header a proxy refuses would lose the error text that is the whole point of returning it.
 MAX_STDERR = 8192
 DEFAULT_TIMEOUT = 30.0
+
+# ── the Docker daemon's watchdog ──────────────────────────────────────────────────────────────────
+#
+# `dockerd` runs as pid 16 with pid 1 for a parent and **nothing supervising it**. A container that
+# takes the sandbox to its memory ceiling can get the daemon killed, and when that happens it stays
+# dead until somebody rebuilds the fleet — which is a restart of everything to recover one process.
+#
+# This is the same shape as the `while true` loop that supervises *this* agent, one layer in: the
+# thing that must come back is watched by something that is already here for availability reasons.
+#
+# It deliberately does not diagnose. Why the daemon died is the pressure counters' business; this
+# only makes its death a blip.
+DOCKER_POLL = 5.0
+# How long to wait, after noticing it is gone, before doing anything. `PPID 1` does not say whether
+# init spawned dockerd or merely reaped it, so there may be a supervisor here that this one has
+# never seen — and **two dockerds is a worse failure than none**. Long enough for anything else to
+# win the race, short enough that a fleet is not stuck for a minute.
+DOCKER_GRACE = 20.0
+# A daemon that will not start must not be respawned every twenty seconds for ever. Doubling from
+# the grace, capped, so a broken dockerd costs one attempt every five minutes rather than a busy
+# loop on a sandbox that is already unwell.
+DOCKER_BACKOFF_MAX = 300.0
 
 
 def _argv(req):
@@ -106,6 +128,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        # What the host can ask about the machine itself. Behind the token, unlike `/health`: this is
+        # fleet state rather than "is anybody there".
+        if self.path == "/machine":
+            if not self._authed():
+                return self._fail(403, "bad token")
+            watch = getattr(self, "docker", None)
+            body = json.dumps({"docker": watch.snapshot() if watch else None}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         # Unauthenticated on purpose and answers nothing but its own name: this is what the host
         # probes to decide whether the agent is worth using, and that decision must not depend on
         # the token being current.
@@ -296,6 +331,153 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+def dockerd_pid(proc="/proc"):
+    """The running dockerd's pid, or `None`.
+
+    Read from `/proc` rather than from `/run/docker.pid`, because the pidfile is exactly what a
+    crash leaves behind: a number naming a process that is gone, or worse, one since reused. `comm`
+    is the kernel's own answer to "what is this process", and it cannot be argued with.
+    """
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, entry, "comm")) as f:
+                if f.read().strip() == "dockerd":
+                    return int(entry)
+        except OSError:
+            continue  # it exited between the listing and the read, which is ordinary
+    return None
+
+
+def dockerd_argv(pid, proc="/proc"):
+    """The command line dockerd was started with, while there is still a dockerd to ask.
+
+    This is the whole reason the watchdog polls rather than waiting to be told: `/proc/<pid>/cmdline`
+    is readable now and gone the moment it matters. Remembering it while the daemon is healthy is
+    what makes bringing it back an option — and not remembering it is a fact to report rather than a
+    reason to guess at a command line.
+    """
+    try:
+        with open(os.path.join(proc, str(pid), "cmdline"), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+    return argv or None
+
+
+class DockerWatch:
+    """Watch the daemon, remember how it was started, and bring it back when nothing else does.
+
+    Every collaborator is injected so the behaviour can be driven in a test: finding the daemon,
+    reading its argv, spawning it, the clock and the sleep. What is left in `look()` is the decision,
+    which is the part worth asserting.
+    """
+
+    def __init__(self, find=dockerd_pid, argv_of=dockerd_argv, spawn=None, now=time.time,
+                 sleep=time.sleep, log=None):
+        self._find = find
+        self._argv_of = argv_of
+        self._spawn = spawn or self._start
+        self._now = now
+        self._sleep = sleep
+        self._log = log or (lambda line: print(line, flush=True))
+        self.argv = None
+        self.restarts = 0
+        self.last_restart = ""
+        self.note = "watching"
+        self.backoff = DOCKER_GRACE
+        self._complained = False
+
+    def _start(self, argv):
+        """Spawn it detached, so it outlives this agent exactly as the original did.
+
+        `sudo` only when this agent is not already root — dockerd needs root, and asking for it when
+        it is already held would fail on a sandbox with no sudo rather than work.
+        """
+        command = list(argv) if os.geteuid() == 0 else ["sudo", "-n", *argv]
+        subprocess.Popen(  # noqa: S603 — the argv is the daemon's own, read from /proc
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def snapshot(self):
+        """What the host can read. Small on purpose — this is a fact, not a diagnosis."""
+        return {
+            "pid": self._find(),
+            "restarts": self.restarts,
+            "last_restart": self.last_restart,
+            "argv_known": bool(self.argv),
+            "note": self.note,
+        }
+
+    def look(self):
+        """One pass. Returns the word for what it did, which is what a test asserts on."""
+        pid = self._find()
+        if pid:
+            # Refreshed rather than remembered once: if something else restarts dockerd with
+            # different arguments, the truth is whatever is running now.
+            argv = self._argv_of(pid)
+            if argv:
+                self.argv = argv
+            self.note = "watching"
+            self.backoff = DOCKER_GRACE
+            self._complained = False
+            return "alive"
+
+        if not self.argv:
+            # Nothing to bring back. Said once, because a line every five seconds is noise and the
+            # condition does not change on its own.
+            if not self._complained:
+                self._complained = True
+                self._log(
+                    "skein-fleet-agent: dockerd is not running and this agent never saw it, so it "
+                    "has no command line to restart it with. Rebuild or restart the fleet."
+                )
+            self.note = "gone, and no command line was ever seen"
+            return "unknown"
+
+        # The grace. Anything else that supervises this daemon gets to win, because two dockerds is
+        # a worse failure than none — and a `PPID 1` says nothing about whether such a thing exists.
+        self._sleep(self.backoff)
+        if self._find():
+            self.note = "something else restarted it"
+            return "recovered"
+
+        try:
+            self._spawn(self.argv)
+        except Exception as e:  # noqa: BLE001 — a watchdog that dies of a failed restart is no watchdog
+            self.note = f"restart failed: {e}"
+            self._log(f"skein-fleet-agent: could not restart dockerd: {e}")
+            self.backoff = min(self.backoff * 2, DOCKER_BACKOFF_MAX)
+            return "failed"
+
+        self.restarts += 1
+        self.last_restart = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._now()))
+        self.note = "restarted by this agent"
+        self._log(f"skein-fleet-agent: dockerd was gone; restarted it ({self.restarts} so far)")
+        # Backed off even on success: a daemon that starts and dies immediately would otherwise be
+        # respawned every grace period for ever, which is the busy loop this exists to avoid.
+        self.backoff = min(self.backoff * 2, DOCKER_BACKOFF_MAX)
+        return "restarted"
+
+    def forever(self):
+        while True:
+            try:
+                self.look()
+            except Exception as e:  # noqa: BLE001
+                self._log(f"skein-fleet-agent: the docker watchdog stumbled: {e}")
+            self._sleep(DOCKER_POLL)
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit("usage: fleet-agent.py <port> <token-file>")
@@ -315,6 +497,11 @@ def main():
     # the host cockpit — and it is inside the stated boundary, which puts no wall between boxes. The
     # token is what stands between reaching the port and using it, so it stays the only guard that
     # matters and must never be weakened to compensate for the bind address.
+    # The watchdog before the server, so a daemon that is already down is noticed while the agent is
+    # still starting rather than after the first request that needed it.
+    Handler.docker = DockerWatch()
+    threading.Thread(target=Handler.docker.forever, daemon=True).start()
+
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     print(f"skein-fleet-agent {PROTOCOL} listening on 0.0.0.0:{port}", flush=True)

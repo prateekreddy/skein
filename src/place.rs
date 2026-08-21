@@ -398,7 +398,9 @@ pub fn ensure_agent_token() -> Result<String, String> {
 /// lost nothing, while one that does not know `/write` would refuse *after* the whole body had been
 /// sent — and the body cannot be sent twice, because for an upload it came off a network socket
 /// that has already been drained.
-pub const AGENT_PROTOCOL: u32 = 2;
+/// **3** since the agent grew `/machine` and the Docker watchdog behind it: an agent an older skein
+/// left running answers 2, has no watchdog, and `heal_fleet_agent` replaces it on that number alone.
+pub const AGENT_PROTOCOL: u32 = 3;
 
 /// The largest body skein will push through the agent. Above it, `sbx exec -i`, which has no
 /// ceiling at all.
