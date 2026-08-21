@@ -257,7 +257,11 @@ depends_on = ["config", "probes", "repos", "util"]
 depends_on = ["place", "sbx"]
 
 [current.mailbox]
-depends_on = ["registry", "repos", "util"]
+# `fleet` for one path: `box_state`, which is where a box's own inbox lives. §9.5 R10's whole
+# mechanism is *which directory* a message was found in — the shared store's mailbox is writable
+# from inside every box, and the state directory is bound read-only into one — so the module that
+# reads mail has to be able to name the second.
+depends_on = ["fleet", "registry", "repos", "util"]
 
 [current.moduledocs]
 depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]

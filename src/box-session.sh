@@ -1342,6 +1342,13 @@ fi
 # own name from a path without guessing at a layout.
 export SKEIN_BOX="$box"
 
+# Where the host writes what only the host may write. The state directory is bound READ-ONLY into
+# this namespace, which is what makes it useful here: a message skein puts in `$SKEIN_STATE/inbox`
+# is one no box can have written, and that is the whole of how "from you" is told apart from "from
+# another box" (architecture §9.5 R10). The shared store's `mailbox/` stays writable and stays where
+# box-to-box messages go.
+export SKEIN_STATE="$state"
+
 # --dev-bind / / keeps the sandbox's own filesystem visible (the repo, the toolchains, the store
 # mount) and then binds the box's private directories over the two paths that must not be shared.
 # No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has

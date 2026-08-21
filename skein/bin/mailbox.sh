@@ -37,6 +37,20 @@ command -v jq >/dev/null 2>&1 || {
 }
 box="$here/mailbox"
 mkdir -p "$box"
+# Where the OWNER's messages are, and the reason there are two directories rather than one.
+#
+# `$box` above is in the shared store: every box can write it, so a message found there is one any
+# box could have written — including one that filled in `from: "skein"`, which needs no script and
+# no trickery, just a file. `$own` is under this box's state directory, which the launcher binds
+# READ-ONLY into this namespace: nothing in here can put a message there, so anything found there
+# was put there by skein (architecture §9.5 R10).
+#
+# So provenance is not a field. It is which directory the message was read out of.
+own="${SKEIN_STATE:-}/inbox"
+# The owner's inbox cannot be written from in here, which is the point — so "already delivered" is
+# remembered in this box's own HOME instead. Private per box: another box cannot silence the owner
+# by marking its messages seen, and a box tampering with its own only repeats or misses its own mail.
+seen_file="${HOME:-/tmp}/.skein-mail-seen"
 # The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
 # signal on it makes every box write one file and the board see none of them report.
 # SKEIN_BOX is exported by box-session.sh, the only thing that knows which box a process is
@@ -127,7 +141,9 @@ case "$cmd" in
         tmp="$(mktemp "$box/.mail-seen.XXXXXX" 2>/dev/null)" || exit 1
         jq --arg v "$vmid" '.seenBy = ((.seenBy // []) + [$v] | unique)' "$f" >"$tmp" 2>/dev/null \
           && mv "$tmp" "$f" || { rm -f "$tmp"; exit 1; }
-        jq -r '"  • [\(.kind // "note")] from \(.from // "?") on \(.branch // "?"): \(.body // "")"' "$f" 2>/dev/null
+        # **The name is shown with the fact that nobody checked it.** A name rendered as a name is
+        # how one box speaks as another — or as you.
+        jq -r '"  • [\(.kind // "note")] from \(.from // "?") (a box; this name is not checked) on \(.branch // "?"): \(.body // "")"' "$f" 2>/dev/null
       } 8>"$f.lock")" || { rm -f "$f.lock" 2>/dev/null || true; continue; }
       rm -f "$f.lock" 2>/dev/null || true
       if [ "$found" -eq 0 ] && [ "$cmd" = "inbox" ]; then
@@ -141,6 +157,32 @@ case "$cmd" in
 "
       fi
     done
+    # And the owner's, from the directory no box can write. Read after the shared ones so that a
+    # flood of box mail cannot push them off a screen — they are last, which is where the eye ends.
+    if [ -d "$own" ]; then
+      for f in "$own"/*.json; do
+        [ -e "$f" ] || break
+        id="$(basename "$f")"
+        # Delivered-once is remembered here rather than in the file, because the file is read-only
+        # to this box by design. `grep -Fx` so an id is matched whole and not as a prefix.
+        grep -Fxq "$id" "$seen_file" 2>/dev/null && continue
+        jq -e --arg v "$vmid" '
+          ((.to // "broadcast") as $to | $to == "broadcast" or $to == "all-projects" or $to == $v)
+        ' "$f" >/dev/null 2>&1 || continue
+        line="$(jq -r '"  • [\(.kind // "note")] from you: \(.body // "")"' "$f" 2>/dev/null)" || continue
+        printf '%s\n' "$id" >> "$seen_file" 2>/dev/null || true
+        if [ "$found" -eq 0 ] && [ "$cmd" = "inbox" ]; then
+          echo "[mailbox] unread hand-off for $vmid:"
+        fi
+        found=$((found+1))
+        if [ "$cmd" = "inbox" ]; then
+          printf '%s\n' "$line"
+        else
+          out="$out$line
+"
+        fi
+      done
+    fi
     prune_seen 30 0
     if [ "$cmd" = "stop-check" ] && [ "$found" -gt 0 ]; then
       {

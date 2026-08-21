@@ -1355,6 +1355,15 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    the source is asserted — no read of that path anywhere in `src/`, with the two non-reads named
    (the helper, and the launch command that hands the path to the launcher).
 
+   **And the same rule, one layer up: `mailbox` (§9.5 R10).** A message's `from` is a field its
+   writer fills in, and the shared store's `mailbox/` is writable from inside every box — so
+   `{"from":"skein"}` there needs no script and no trickery, only a file. Provenance is therefore
+   **which directory it was found in**: the owner's messages go to a box's own `inbox/` under its
+   state directory, which the launcher binds read-only into the box, and nothing inside a box can
+   put a message there. The delivery hook says so in the words the agent reads — `from you`, or the
+   claimed name *with the fact that nobody checked it*. A box's message still arrives, because
+   §9.2.2 is kept deliberately; it arrives saying what it is.
+
    §8.4 states
    this for approvals; that was too narrow, and the general form sweeps in three more:
 
