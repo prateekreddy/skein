@@ -189,7 +189,11 @@ async fn main() {
     // like `SKEIN_ADDR=<tailnet-ip>:7878`. The terminal's origin guard already trusts `*.ts.net` and
     // tailnet IPs, so either the `tailscale serve` hostname or a raw off-loopback bind works with no
     // per-host config; the tailnet is the auth boundary in both cases (see README "Remote access").
-    let addr = std::env::var("SKEIN_ADDR")
+    // Mutable because a socket that was handed in is already bound, and to somewhere: the address
+    // printed below has to be the one a browser can reach, not the one this process would have
+    // chosen. `$SKEIN_ADDR` decides where to bind; an inherited descriptor decides nothing and
+    // reports.
+    let mut addr = std::env::var("SKEIN_ADDR")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_ADDR.into());
@@ -323,9 +327,38 @@ async fn main() {
     // list a reader can check against the router above.
     let app = app.layer(axum::middleware::from_fn(gate));
 
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("skein-server: cannot bind {addr}: {e}"));
+    // The socket, and who opened it. `skein::doorway` says why this is not simply a bind: one
+    // network namespace plus a port mapping that outlives skein means a box that binds the
+    // cockpit's port *first* becomes the cockpit, and the browser hands it the fleet's token on the
+    // first request (architecture §9.4). A socket opened before any box exists and inherited across
+    // restarts is the only thing that closes it, since the token cannot.
+    let listener = match skein::doorway::inherited() {
+        Ok(Some(handed)) => {
+            let bound = handed
+                .local_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| addr.clone());
+            addr = bound;
+            tokio::net::TcpListener::from_std(handed)
+                .unwrap_or_else(|e| panic!("skein-server: the socket passed in is unusable: {e}"))
+        }
+        // Nobody passed one. Whether that is a normal start or a broken one is a deployment
+        // question, not this line's — see `doorway::inherited_only`.
+        Ok(None) if skein::doorway::inherited_only() => {
+            eprintln!("{}", skein::doorway::missing());
+            std::process::exit(1);
+        }
+        Ok(None) => tokio::net::TcpListener::bind(&addr)
+            .await
+            .unwrap_or_else(|e| panic!("skein-server: cannot bind {addr}: {e}")),
+        // A caller that meant to pass a socket and got it wrong. Binding here would be the race
+        // this exists to close, run by the one process that was supposed to have closed it — so it
+        // is refused whichever mode this is, and the reason names the descriptor.
+        Err(why) => {
+            eprintln!("skein-server: {why}");
+            std::process::exit(1);
+        }
+    };
     match skein::apiauth::disabled() {
         true => println!(
             "skein-server → http://{addr}\n  \
@@ -366,10 +399,17 @@ async fn main() {
     let door = skein::knock::doorstep();
     let grace = skein::knock::grace();
     let mut refused = 0u32;
+    // Whether this listener has ever worked. It is the one thing that tells a wrong descriptor
+    // apart from a full one: `EMFILE` happens to a server that has been serving, and waiting it out
+    // is right; a socket that is not a listening socket fails identically and forever, and waiting
+    // that out is a process that is up, quiet, and will never answer. `doorway::adopt` catches the
+    // two cases the standard library can see; this catches the rest without having to name them.
+    let mut ever_served = false;
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(v) => {
                 refused = 0;
+                ever_served = true;
                 v
             }
             // **Backed off, not retried immediately.** `continue` on an error that persists — the
@@ -385,6 +425,16 @@ async fn main() {
                         "skein-server: cannot accept connections ({e}) — {refused} in a row. The \
                          usual cause is running out of file descriptors; the cockpit keeps trying."
                     );
+                }
+                if !ever_served && refused >= GIVE_UP {
+                    eprintln!(
+                        "skein-server: {refused} consecutive accept failures ({e}) and not one \
+                         connection ever served, so this socket is not one anybody can arrive on. \
+                         If it was passed in, whatever passed it passed the wrong descriptor; if it \
+                         was bound here, the port was taken between the bind and now. Exiting \
+                         rather than sitting up and quiet, which is indistinguishable from working."
+                    );
+                    std::process::exit(1);
                 }
                 tokio::time::sleep(slow_down(refused)).await;
                 continue;
@@ -434,6 +484,15 @@ async fn main() {
 /// Not the first: a single `ECONNABORTED` is ordinary — a client that hung up between the handshake
 /// and the accept — and a line of log for it would be noise that teaches people to ignore the line.
 const COMPLAIN_AFTER: u32 = 32;
+
+/// After how many consecutive failures a server that has **never** served anything stops trying.
+///
+/// Twice [`COMPLAIN_AFTER`], so the line above is always printed before this one — a process that
+/// exited without first saying why would be the same silence in a different shape. At
+/// [`slow_down`]'s ceiling that is a handful of seconds, which is long enough for a transient
+/// `EMFILE` at startup to pass and short enough that nobody is waiting on a page that will never
+/// load.
+const GIVE_UP: u32 = 64;
 
 /// How long to wait after `accept` failed, given how many times in a row it has.
 ///

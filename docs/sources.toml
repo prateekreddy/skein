@@ -25,7 +25,14 @@ spelled_in = []
 # `warden/serve` is the warden's own listener and `warden_client` is the near end: together they
 # are §2.3's "http reaches GitHub, and the warden", and this is the pair that carries fleet create
 # and destroy since delivery step 3. Loopback only — §8.6 says why, and when that changes.
-spelled_in = ["gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
+#
+# `doorway` is the odd one and worth saying so rather than letting the list imply otherwise: it
+# spells `TcpStream` and reaches **nothing**. The type is used to ask a descriptor somebody handed
+# in whether it has a peer — a listening socket has none, so an answer is the proof it is the wrong
+# end of a connection. It opens nothing, connects nowhere, and the only thing it can do with the
+# descriptor is refuse it. Listed because the checker matches the spelling, and a spelling exempted
+# by hand is how the next real reach gets exempted with it.
+spelled_in = ["doorway", "gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and

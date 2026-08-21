@@ -749,3 +749,133 @@ fn a_flood_that_never_authenticates_cannot_hold_the_door() {
     );
     drop(flood);
 }
+
+/// The socket is opened before skein and handed to it, and skein serves on **that** one.
+///
+/// architecture §9.4: one network namespace and a port mapping that outlives skein means a box that
+/// binds the cockpit's port before skein does becomes the cockpit, and the browser hands it the
+/// fleet's token on the first request. The token cannot answer that — the only answer is that the
+/// port is never free, which means skein takes a socket somebody else opened rather than racing for
+/// one. This is the taking half; the in-fleet start that does the opening is 4c.
+///
+/// Driven through `python3` because the descriptor has to survive `exec` with `CLOEXEC` cleared and
+/// land on fd 3, and the standard library exposes neither `dup2` nor a way to clear that flag. What
+/// it stands in for is the process manager, which does exactly this and no more.
+#[test]
+fn the_server_serves_on_a_socket_it_was_handed_rather_than_one_it_bound() {
+    if Command::new("python3")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("skipping: no python3 to stand in for the process manager");
+        return;
+    }
+    let home = token_home("handover");
+    let where_port = home.join("port");
+    // Binds, puts the listener on fd 3 with CLOEXEC cleared, writes the port it got, and execs the
+    // server. `LISTEN_PID` is left out deliberately: it is the older half of the convention and is
+    // accepted, and setting it would mean predicting a pid this side of the fork.
+    let handover = r#"
+import os, socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+s.listen(64)
+open(sys.argv[1], "w").write(str(s.getsockname()[1]))
+os.set_inheritable(s.fileno(), True)
+if s.fileno() != 3:
+    os.dup2(s.fileno(), 3, inheritable=True)
+os.environ["LISTEN_FDS"] = "1"
+os.execv(sys.argv[2], sys.argv[2:])
+"#;
+    let child = Command::new("python3")
+        .args(["-c", handover])
+        .arg(&where_port)
+        .arg(env!("CARGO_BIN_EXE_skein-server"))
+        // Somewhere it could never have bound by itself, so a pass cannot be a bind that happened to
+        // work: the address served below is read back from the socket python opened.
+        .env("SKEIN_ADDR", "127.0.0.1:1")
+        .env("SKEIN_HOME", &home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+
+    let start = Instant::now();
+    let addr = loop {
+        if let Ok(port) = std::fs::read_to_string(&where_port) {
+            let addr = format!("127.0.0.1:{}", port.trim());
+            if TcpStream::connect(&addr).is_ok() {
+                break addr;
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "the server never served on the socket it was handed"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let (st, _) = http_get(&addr, "/api/health");
+    assert_eq!(
+        st, 200,
+        "the handed-in socket accepted a connection but the server behind it did not answer"
+    );
+}
+
+/// A start that was told the socket comes from outside, and got none, stops.
+///
+/// The two modes want opposite answers and the difference has to be *said*. Host-driven there is
+/// nobody upstream to open a socket, so binding is the only way to start. In the fleet a missing
+/// descriptor means the start sequence did not do its job — and binding anyway runs the very race
+/// this closes, from the one process that was supposed to have closed it.
+#[test]
+fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind() {
+    let home = token_home("inherited-only");
+    let addr = format!("127.0.0.1:{}", free_port());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &home)
+        .env("SKEIN_LISTEN_INHERITED_ONLY", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Waited for rather than read to the end. A server that ignored the setting and bound is a
+    // server that never exits, so `output()` here would *hang* instead of failing — which is a
+    // failure a person has to interpret from a stuck run. Written the other way round the first
+    // time, and the sabotage took two minutes to say what this says in five seconds.
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait().unwrap() {
+            Some(status) => break status,
+            None if start.elapsed() > Duration::from_secs(10) => {
+                let _ = child.kill();
+                panic!("the server stayed up, so it bound a port it was told not to bind");
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    assert!(
+        !status.success(),
+        "the server exited cleanly rather than refusing"
+    );
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let why = stderr;
+    assert!(why.contains("LISTEN_FDS=1"), "{why}");
+    assert!(why.contains("SKEIN_LISTEN_INHERITED_ONLY"), "{why}");
+    // And it really did not bind — otherwise the refusal is a message printed over a live socket.
+    assert!(
+        TcpListener::bind(&addr).is_ok(),
+        "the port is still held, so the refusal happened after the bind"
+    );
+}

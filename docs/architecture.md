@@ -936,11 +936,24 @@ which needs a requirement rather than an inference:
   and the browser hands it the token on the first request. A distinct uid stops SO_REUSEPORT theft
   from a live listener; it does not stop an empty port at sandbox start.
 
-  **This is now the sharpest of the five**, because §9.5 R3 decided to keep the TCP port: the
-  filesystem socket would have closed it as a side effect, and nothing else here does. The answer is
-  that the port is never free — opened once before any box exists and inherited across restarts,
-  rather than re-bound by whoever gets there first — and it belongs to 4c, where a fleet start
-  exists to hang it on.
+  **The sharpest of the five**, because §9.5 R3 decided to keep the TCP port: the filesystem socket
+  would have closed it as a side effect, and nothing else here does. The answer is that the port is
+  never free — opened once before any box exists and inherited across restarts, rather than re-bound
+  by whoever gets there first.
+
+  **Half of that exists** (`src/doorway.rs`). skein-server takes a listening socket it was handed
+  over the `LISTEN_FDS`/`LISTEN_PID` convention and serves on it, and refuses a descriptor that
+  cannot be a door — not a socket, or the wrong end of a connection — rather than entering an accept
+  loop that fails forever and cannot tell that from `EMFILE`. `SKEIN_LISTEN_INHERITED_ONLY=1` makes
+  a *missing* descriptor a startup failure instead of a bind, because the two deployments want
+  opposite answers there and the difference has to be said: host-driven, nobody upstream can open a
+  socket and binding is the only way to start; in-fleet, a missing one means the start sequence did
+  not do its job, and binding anyway runs this race from the one process that was meant to close it.
+
+  **The other half is 4c**: something has to open that socket before the first box exists, and there
+  is no in-fleet start to do it yet. Until then this bullet reads *takeable but taken from a
+  narrower window* rather than closed — skein still binds on the host-driven path, which is where it
+  runs today.
 - **pre-auth connection exhaustion.** ~~The gate runs after accept, and §10.1's cap is post-auth~~ —
   **closed at the accept loop, where it is the only place it could be closed**: `src/knock.rs`, the
   doorstep, is what a connection is between `accept` and saying who it is. A limit that *refused*
