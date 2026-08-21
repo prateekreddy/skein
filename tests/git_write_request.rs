@@ -737,7 +737,7 @@ fn a_box_sees_its_own_directories_and_no_other_boxs() {
 /// reaches. Until this, a box could read every other repo's memory and mailbox, and write every
 /// repo's checkout on the host.
 ///
-/// The last of those was the sharpest: skein runs `git -C <repo.work>` on the HOST, so a box that
+/// The last of those was the sharpest: skein runs `git -C <repo.source_tree>` on the HOST, so a box that
 /// could write `.git/config` there had `core.fsmonitor` executed as the host user. Its own checkout
 /// does not come back at all now, in any form: a box cloned from the checkout and read its
 /// gitignored files, and it does neither — it clones from the repo's mirror, and skein copies those

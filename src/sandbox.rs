@@ -829,7 +829,7 @@ mod tests {
         let repo = Repo {
             id: "thing".into(),
             source: "s".into(),
-            work: "/work/thing".into(),
+            source_tree: "/work/thing".into(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -876,7 +876,7 @@ mod tests {
         let repo = Repo {
             id: "skein".into(),
             source: "s".into(),
-            work: "/work/skein".into(),
+            source_tree: "/work/skein".into(),
             store: home.join("store/.claude").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -954,7 +954,7 @@ mod tests {
         save_repos(&[Repo {
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
-            work: home.join("repos/web/work").to_string_lossy().into(),
+            source_tree: home.join("repos/web/work").to_string_lossy().into(),
             store: home
                 .join("repos/web/store/.claude")
                 .to_string_lossy()
@@ -1007,7 +1007,7 @@ mod tests {
         let repo = Repo {
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
-            work: home.join("repos/web/work").to_string_lossy().into(),
+            source_tree: home.join("repos/web/work").to_string_lossy().into(),
             store: home
                 .join("repos/web/store/.claude")
                 .to_string_lossy()

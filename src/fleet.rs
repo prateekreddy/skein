@@ -1885,7 +1885,7 @@ fn ssh_hosts() -> Vec<String> {
         .flat_map(|repo| {
             [
                 repo.source.clone(),
-                remote_origin_url(&repo.work).unwrap_or_default(),
+                remote_origin_url(&repo.source_tree).unwrap_or_default(),
             ]
         })
         .filter(|url| is_ssh_url(url))
@@ -2002,19 +2002,21 @@ pub fn install_launcher(sandbox: &str) -> Result<(), String> {
 /// Refuses rather than reuses when the tree is already populated: a box root left behind by a
 /// previous box of the same name would otherwise silently give the new one someone else's work.
 ///
-/// `upstream` repairs the one case where cloning and pushing want different sources. A repo adopted
-/// in place has no URL, so the clone comes from the host's own checkout ([`clone_source`]) — and
-/// `git clone <path>` sets `origin` to that path, discarding the URL the host clone pushes to. The
-/// box then depends on the host for something it should never need it for: skein *validates* the
-/// host clone's origin ([`crate::repos::remote_warning`] warns when there isn't one, precisely because "a
-/// box can't push or open a PR until one exists") and then provisions a box pointing somewhere else
-/// entirely. Pushing worked anyway until a box shared the host's checked-out branch, at which point
-/// git refused with a message about `receive.denyCurrentBranch` — a remote-side policy error for
-/// what is really a mis-pointed remote.
+/// `upstream` repairs the case where cloning and pushing want different sources, which is now
+/// **every** repo rather than only an adopted one. The clone comes from the repo's mirror
+/// ([`clone_source`]), a path on the volume — and `git clone <path>` sets `origin` to that path, so
+/// a box left unrepaired would push into skein's own mirror instead of the repository it came from.
 ///
-/// So: clone locally, which is fast and carries the host's unpushed commits, then point `origin` at
-/// the URL and keep the path as `local`. Nothing is lost and the box pushes where every other box
-/// does. Empty when the source is already a URL, or when the host clone has no origin to inherit.
+/// That was already the shape of the bug when the clone source was the host's checkout: pushing
+/// appeared to work until a box shared the checked-out branch, at which point git refused with
+/// `receive.denyCurrentBranch` — a remote-side policy error for what is really a mis-pointed
+/// remote. A bare mirror does not even refuse; it accepts the push, into a repository nobody pulls
+/// from.
+///
+/// So: clone locally, which is fast and carries commits that have not reached the remote, then
+/// point `origin` at where the repo actually lives ([`crate::repos::repo_origin_url`]) and keep the
+/// mirror as `local`. Empty only for a repo with no upstream anywhere — an adopted checkout with no
+/// origin — where the mirror is the only thing there is to push to.
 pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &str) -> String {
     let root = box_root(name);
     let tree = format!("{root}/tree");
@@ -2040,15 +2042,16 @@ pub fn clone_script(name: &str, url: &str, base: &str, branch: &str, upstream: &
         )
     };
     // Best-effort, and deliberately not under `set -e`: a box whose remote could not be re-pointed
-    // is a box that pushes to the host clone, which is where it would have pushed anyway. Failing
-    // the whole clone over it would turn a working box into no box.
+    // pushes to the mirror it cloned from, which is recoverable — the commits are on the volume and
+    // can be pushed on from there. Failing the whole clone over it would turn a working box into
+    // no box.
     let remotes = if upstream.is_empty() {
         String::new()
     } else {
         format!(
             "; git remote add local {url_q} 2>/dev/null || true; \
              git remote set-url origin {up_q} || \
-             echo 'skein: could not point origin at {upstream}; this box pushes to the host clone' >&2",
+             echo 'skein: could not point origin at {upstream}; this box pushes to the mirror' >&2",
             up_q = sh_quote(upstream),
         )
     };
@@ -2533,23 +2536,29 @@ pub fn set_box_disk_limit(name: &str, limit: Option<&str>) -> Result<(), String>
     declared_write(name, "disk", limit.as_bytes())
 }
 
-/// Who a box commits as: its own choice, else the configured default, else the host clone's.
+/// Who a box commits as: its own choice, else the configured default, else this host's git config.
 ///
 /// Three sources because each answers a different question. A box set at creation is working on
 /// someone else's behalf — a shared machine, a different identity per client. The setting is the
-/// answer for everything else. And falling back to the host clone means an untouched skein commits
-/// as you without anyone configuring anything, because `git -C <work> config user.name` resolves
-/// through the host's global gitconfig.
+/// answer for everything else. And falling back to this host's git config means an untouched skein
+/// commits as you without anyone configuring anything.
 pub fn box_identity(name: &str, repo: &Repo) -> (String, String) {
     let config = load_config();
+    // A repo adopted in place may have a per-repo identity set in its own `.git/config`, so ask
+    // there when there is a checkout to ask. A URL repo has none — and never had one worth asking:
+    // the second checkout skein used to clone was skein's, and the only identity it could answer
+    // with was the host's global one, which is what `git config --get` returns here directly.
     let from_host = |key: &str| -> String {
-        std::process::Command::new("git")
-            .args(["-C", &repo.work, "config", "--get", key])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
+        let mut command = std::process::Command::new("git");
+        match repo.source_tree.trim() {
+            "" => command.args(["config", "--get", key]),
+            tree => command.args(["-C", tree, "config", "--get", key]),
+        }
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
     };
     let pick = |own: Option<String>, configured: &str, key: &str| -> String {
         own.filter(|v| !v.trim().is_empty())
@@ -2606,7 +2615,7 @@ fn identity_script(name: &str, email: &str) -> String {
     steps.join("; ")
 }
 
-/// Point an existing box's `origin` at the repo's remote, if it is still the host clone.
+/// Point an existing box's `origin` at the repo's remote, if it is still where it cloned from.
 ///
 /// The clone-time version of this ([`clone_script`]) only helps boxes cloned after it landed. This
 /// is the same repair for the ones already on disk, and it runs on every start because there is no
@@ -2621,7 +2630,7 @@ pub fn origin_repair_script(name: &str, source: &str, upstream: &str) -> String 
          [ \"$cur\" = {src_q} ] || exit 0; \
          git remote add local {src_q} 2>/dev/null || true; \
          git remote set-url origin {up_q} && \
-         echo 'skein: {name} pushed at the host clone; origin now points at {upstream}' >&2",
+         echo 'skein: {name} pushed at what it cloned from; origin now points at {upstream}' >&2",
         tree_q = sh_quote(&format!("{}/tree", box_root(name))),
         src_q = sh_quote(source),
         up_q = sh_quote(upstream),
@@ -2668,7 +2677,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         launcher = sh_quote(&box_session_path()),
         // The mount set the launcher cannot learn for itself, and the two paths out of it this box
         // is entitled to. The launcher covers every mount and binds these back — an inversion, not
-        // a list of things to hide, because `repo.work` and an adopted `repo.store` are arbitrary
+        // a list of things to hide, because `repo.source_tree` and an adopted `repo.store` are arbitrary
         // host paths chosen at repo-add time and no rule written over one root reaches
         // `/home/you/code/thing`.
         //
@@ -2889,14 +2898,11 @@ fn start_box_inner(
     // Every repo needs this now, not only an adopted one: the clone comes from the mirror, so
     // `git clone` sets `origin` to a path on the volume, and a box that pushed there would push
     // into skein's own mirror instead of the repo it came from.
-    let upstream = match crate::repos::is_git_url(&repo.source) {
-        true => repo.source.trim().to_string(),
-        false => remote_origin_url(&repo.work).unwrap_or_default(),
-    };
+    let upstream = crate::repos::repo_origin_url(repo).unwrap_or_default();
     if has_tree {
         eprintln!("skein: {name} already has a checkout; keeping it");
         // Every box cloned before origin was re-pointed still pushes at the host, and they are not
-        // going to be re-cloned to fix it. Guarded on origin still *being* the host clone, so a box
+        // going to be re-cloned to fix it. Guarded on origin still *being* what it cloned from, so a box
         // whose remote someone set deliberately keeps it.
         if !upstream.is_empty() {
             let _ = fleet.exec(
@@ -3750,7 +3756,7 @@ pub(crate) fn clone_source(repo: &Repo) -> String {
             );
             match is_git_url(&repo.source) {
                 true => repo.source.clone(),
-                false => repo.work.clone(),
+                false => repo.source_tree.clone(),
             }
         }
     }
@@ -3772,7 +3778,7 @@ pub(crate) fn clone_source(repo: &Repo) -> String {
 /// at all, and `main` is never assumed.
 pub fn base_branch(repo: &Repo) -> String {
     let git = |args: &[&str]| -> Option<String> {
-        let mut argv = vec!["-C", repo.work.as_str()];
+        let mut argv = vec!["-C", repo.source_tree.as_str()];
         argv.extend_from_slice(args);
         let (out, _, code) = run_capture("git", &argv).ok()?;
         let out = out.trim().to_string();
@@ -7305,7 +7311,7 @@ b idle 5000000 1048576 4
             id: "adopted".into(),
             // Adopted in place: the source is the checkout, not a URL.
             source: work.to_string_lossy().into_owned(),
-            work: work.to_string_lossy().into_owned(),
+            source_tree: work.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -7354,7 +7360,7 @@ b idle 5000000 1048576 4
         let repo = Repo {
             id: "web".into(),
             source: work.to_string_lossy().into_owned(),
-            work: work.to_string_lossy().into_owned(),
+            source_tree: work.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -7826,7 +7832,7 @@ b idle 5000000 1048576 4
         let repo = Repo {
             id: "bridge".into(),
             source: String::new(),
-            work: String::new(),
+            source_tree: String::new(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -7905,7 +7911,7 @@ b idle 5000000 1048576 4
         let repo = Repo {
             id: "bridge".into(),
             source: origin.to_string_lossy().into_owned(),
-            work: origin.to_string_lossy().into_owned(),
+            source_tree: origin.to_string_lossy().into_owned(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -8000,7 +8006,7 @@ b idle 5000000 1048576 4
         crate::repos::Repo {
             id: id.into(),
             source: work.into(),
-            work: work.into(),
+            source_tree: work.into(),
             store: store.into(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -8183,7 +8189,7 @@ b idle 5000000 1048576 4
         crate::repos::save_repos(&[crate::repos::Repo {
             id: "thing".into(),
             source: work.to_string_lossy().into_owned(),
-            work: work.to_string_lossy().into_owned(),
+            source_tree: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),

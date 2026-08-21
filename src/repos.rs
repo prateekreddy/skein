@@ -21,14 +21,29 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-/// One managed repo. `work` is the host clone (for host-side git/diff + as the `sbx run` workspace);
-/// `store` is the host `.claude` skein provisions and mounts into every box for that repo.
+/// One managed repo: a **mirror** on the volume, a **store** every box of it reads, and — only when
+/// it was adopted from a local path — the **source tree** it was adopted from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     pub id: String,
     pub source: String, // git URL or local path the repo was added from
-    pub work: String,   // host working clone
-    pub store: String,  // host shared `.claude` store
+    /// The user's own checkout, for a repo adopted from a local path. **Empty for a repo
+    /// registered from a URL**, and that emptiness is the point of the field's name.
+    ///
+    /// It was called `work` and it meant two different things depending on how the repo was
+    /// registered: somebody's working tree in one case, and a second full checkout skein cloned
+    /// onto the volume and then never worked in, in the other. Every reader had to know which it
+    /// was holding, and none of them said so.
+    ///
+    /// A URL repo has no source tree because it does not need one. What skein asks a repo — what
+    /// does it contain, what is its origin, what is its default branch — the mirror answers, and
+    /// answers about the committed state rather than about whatever is checked out. The one
+    /// question only a checkout can answer is what a project keeps **out** of git
+    /// ([`crate::kit::seed_shared_paths`]), and a repo cloned from a URL has never had those files
+    /// anywhere: they were never committed, so no clone of it ever carried them.
+    #[serde(default, alias = "work")]
+    pub source_tree: String,
+    pub store: String, // host shared `.claude` store
     #[serde(default = "default_agent")]
     pub agent: String, // runtime adapter id (see `supported_runtimes`)
     /// The Plane project this repo's work is tracked in — a project URL or a bare uuid, kept
@@ -262,7 +277,25 @@ pub(crate) fn is_ssh_url(s: &str) -> bool {
     s.starts_with("git@") || s.starts_with("ssh://")
 }
 
-/// The `origin` URL of the clone at `work`, if any.
+/// Where this repo lives **upstream** — the repository a box pushes to.
+///
+/// Deliberately not the mirror's `origin`, and the difference is the whole reason this function
+/// exists. A mirror's origin is where the *mirror* fetches from, which for an adopted repo is the
+/// checkout on this machine. That is the right answer to "where does the mirror get its commits"
+/// and the wrong answer to "where does this repo live", and reading one for the other tells a box
+/// to push into a path on the host.
+///
+/// So: the URL for a repo registered from one, and the checkout's own `origin` for a repo adopted
+/// from a path. Being adopted says nothing about whether a repo has a remote — skein's own is
+/// adopted in place and its origin is `git@github.com:owner/name`.
+pub fn repo_origin_url(repo: &Repo) -> Option<String> {
+    match repo.source_tree.trim() {
+        "" => is_git_url(&repo.source).then(|| repo.source.trim().to_string()),
+        tree => remote_origin_url(tree),
+    }
+}
+
+/// The `origin` URL of the git directory at `dir`, if any. Works on a bare mirror and on a checkout.
 pub(crate) fn remote_origin_url(work: &str) -> Option<String> {
     let mut command = Command::new("git");
     command.args(["-C", work, "remote", "get-url", "origin"]);
@@ -319,9 +352,14 @@ pub fn ensure_mirror(repo: &Repo) -> Result<PathBuf, String> {
     if mirror_is_made(&mirror) {
         return Ok(mirror);
     }
-    let from = repo.work.trim();
+    // The checkout when there is one — already fetched, so this is a local copy rather than a
+    // second trip over the network — and the URL when there is not.
+    let from = match repo.source_tree.trim() {
+        "" => repo.source.trim(),
+        tree => tree,
+    };
     if from.is_empty() {
-        return Err(format!("{} has no checkout to mirror", repo.id));
+        return Err(format!("{} has nothing to mirror from", repo.id));
     }
     // A half-made mirror from an interrupted clone: git refuses to clone into a non-empty directory,
     // so it would fail here for ever. Nothing in it is anybody's only copy — it is objects that
@@ -382,7 +420,7 @@ pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
 
 /// A repo's files, read out of its **mirror** rather than off somebody's disk.
 ///
-/// Three host-side features — the diff, the module notes and CODEOWNERS — read `repo.work`
+/// Three host-side features — the diff, the module notes and CODEOWNERS — read `repo.source_tree`
 /// directly, which is a working checkout: it has a branch somebody chose, edits nobody committed,
 /// and in-fleet it is not reachable at all. What they actually want is "this repo, as committed",
 /// and that is what a mirror holds.
@@ -479,8 +517,16 @@ impl Tree {
 /// one exists; and an **SSH `origin`** — in-box push then leans on the host SSH agent (sbx forwards
 /// `SSH_AUTH_SOCK`), so it works only when that agent has the key loaded, else switch to HTTPS.
 /// `None` for an HTTPS origin (the no-setup happy path; a URL clone always lands here).
-pub fn remote_warning(work: &str) -> Option<String> {
-    let Some(url) = remote_origin_url(work) else {
+pub fn remote_warning(repo: &Repo) -> Option<String> {
+    // Where the advice is typed matters, so it names the place the person can actually change: the
+    // checkout for an adopted repo, and the mirror for a URL repo — which has no checkout, and
+    // whose origin is the URL it was registered with anyway.
+    let where_to_fix = match repo.source_tree.trim() {
+        "" => mirror_path(&repo.id).to_string_lossy().into_owned(),
+        tree => tree.to_string(),
+    };
+    let work = &where_to_fix;
+    let Some(url) = repo_origin_url(repo) else {
         return Some(format!(
             "this repo has no `origin` remote — a box can't push or open a PR until one exists. Add it on the host:  git -C {work} remote add origin <url>  (HTTPS needs no setup)."
         ));
@@ -574,36 +620,26 @@ pub fn add_repo(
         None => home.join("repos").join(&id).join("store").join(".claude"),
     };
 
-    let work = if is_git_url(source) {
-        // Clone the URL into skein's managed area.
-        let work = home.join("repos").join(&id).join("work");
-        if work.join(".git").is_dir() {
-            // already cloned — leave it (the user can pull); just (re)register.
-        } else {
-            // An SSH URL needs a key in the host agent for the clone itself; load it first.
+    // The source tree, and **only** for a repo adopted from a local path. A URL repo used to get a
+    // second full checkout on the volume here, cloned from the network and then never worked in;
+    // the mirror below is what a URL repo gets instead, and it is the thing boxes and skein both
+    // read. See [`Repo::source_tree`].
+    let source_tree = match is_git_url(source) {
+        true => {
+            // An SSH URL needs a key in the host agent for the clone the mirror is about to make.
             if is_ssh_url(source) {
                 let _ = ensure_ssh_key();
             }
-            fs::create_dir_all(work.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
-            let mut command = Command::new("git");
-            command.args(["clone", source]).arg(&work);
-            let out = bounded_output(&mut command, "git clone", Duration::from_secs(300))?;
-            if !out.status.success() {
-                return Err(format!(
-                    "git clone failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
+            PathBuf::new()
+        }
+        false => {
+            let p = PathBuf::from(expand_tilde(source));
+            let p = p.canonicalize().unwrap_or(p);
+            if !p.join(".git").exists() {
+                return Err(format!("{} is not a git repo", p.display()));
             }
+            p
         }
-        work
-    } else {
-        // Local path: use it in place.
-        let p = PathBuf::from(source);
-        let p = p.canonicalize().unwrap_or(p);
-        if !p.join(".git").exists() {
-            return Err(format!("{} is not a git repo", p.display()));
-        }
-        p
     };
 
     ensure_kit()?;
@@ -613,7 +649,7 @@ pub fn add_repo(
     let repo = Repo {
         id: id.clone(),
         source: source.to_string(),
-        work: work.to_string_lossy().into_owned(),
+        source_tree: source_tree.to_string_lossy().into_owned(),
         store: store.to_string_lossy().into_owned(),
         agent: agent
             .map(|s| s.to_string())
@@ -630,8 +666,9 @@ pub fn add_repo(
         sync_gateway_url: String::new(),
     };
     // Before registering it: a repo whose boxes cannot clone is a repo that looks added and does
-    // not work, and the failure would surface later as a box that never starts. Local — the mirror
-    // is made from the checkout above, not from the network.
+    // not work, and the failure would surface later as a box that never starts. For an adopted repo
+    // this is a local copy of the checkout above; for a URL repo it is the one clone that happens,
+    // where there used to be two.
     ensure_mirror(&repo)?;
     update_repos(|repos| {
         repos.retain(|r| r.id != id); // replace any existing entry with the same id
@@ -641,54 +678,61 @@ pub fn add_repo(
     })
 }
 
-/// Pull the latest code into a managed repo's working clone (`git -C <work> pull --ff-only`), so the
-/// next box branches from current upstream. Fast-forward-only on purpose: skein never merges or
-/// rebases on the user's behalf, so a diverged or dirty clone fails loudly rather than silently
-/// rewriting their tree. Returns git's own summary on success. `None` repo id ⇒ error.
+/// Bring a repo up to date: **the mirror always, and the checkout when there is one.**
 ///
-/// How much this matters depends on how the repo was registered, and the difference is worth knowing:
+/// The mirror is what every box clones from, so advancing it is the part that changes what a new box
+/// starts with. That is the whole of the job for a repo registered from a URL, which has no checkout
+/// on this machine at all.
 ///
-/// * **Registered from a URL** — boxes clone from the remote, so this only keeps the host clone's
-///   `origin/HEAD` current, which is where [`crate::fleet::base_branch`] reads the base from.
-/// * **Adopted in place** (a path, no URL) — there is no remote for a box to clone from, so
-///   `fleet::clone_source` hands boxes the host clone itself. Its freshness *is* what a new
-///   box starts from, and a stale clone means every new box starts stale with nothing to say so.
+/// For a repo adopted from a local path there is a second step, and it is somebody else's tree:
+/// `git -C <source_tree> pull --ff-only`, fast-forward only on purpose, because skein never merges
+/// or rebases on a person's behalf — a diverged or dirty tree fails loudly rather than being
+/// silently rewritten. The mirror has already taken that tree's commits across by then, so the
+/// failure costs the boxes nothing, and the message says so rather than reading as a failed pull.
 ///
-/// Which is why this did not go away when boxes stopped cloning from the host: for adopted repos it
-/// became more load-bearing, not less.
+/// An adopted repo with **no remote of its own** is not an error and used to be refused as one: the
+/// mirror has just been updated from the checkout, which is everything a box needs.
 pub fn pull_repo(id: &str) -> Result<String, String> {
     let repo = load_repos()
         .into_iter()
         .find(|r| r.id == id)
         .ok_or_else(|| format!("no repo with id {id:?}"))?;
-    if remote_origin_url(&repo.work).is_none() {
-        return Err("this repo has no `origin` remote to pull from".into());
+    // The mirror first, and it always has somewhere to fetch from: a URL repo's mirror fetches from
+    // the URL, an adopted repo's from the checkout it was made from. For a URL repo that is the
+    // whole of the job — there is no checkout, and the mirror is what every box clones from.
+    fetch_mirror(&repo)?;
+    let Some(tree) = Some(repo.source_tree.trim()).filter(|t| !t.is_empty()) else {
+        return Ok("Mirror updated.".into());
+    };
+    // An adopted repo with no remote of its own is not an error, and it used to be refused as one.
+    // The mirror has just taken its new commits across, which is the whole of what a box needs.
+    if remote_origin_url(tree).is_none() {
+        return Ok(format!(
+            "Mirror updated from {tree}. That checkout has no `origin` remote, so there is nothing \
+             further to pull into it."
+        ));
     }
+    // And the checkout, for an adopted repo — the user's own, which is why this is fast-forward
+    // only: skein never merges or rebases on somebody's behalf, so a diverged or dirty tree fails
+    // loudly rather than being silently rewritten.
     let mut command = Command::new("git");
-    command.args(["-C", &repo.work, "pull", "--ff-only"]);
+    command.args(["-C", tree, "pull", "--ff-only"]);
     let out = bounded_output(&mut command, "git pull", Duration::from_secs(120))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.trim();
-        return Err(if err.is_empty() {
-            "git pull failed (the clone may have diverged or have local changes)".into()
-        } else {
-            err.to_string()
-        });
+        return Err(format!(
+            "the mirror is current; your checkout at {tree} is not: {}",
+            match err.is_empty() {
+                true => "git pull failed (it may have diverged or have local changes)",
+                false => err,
+            }
+        ));
     }
     let summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // And the mirror, which is what boxes actually clone from. Pulling the checkout and leaving the
-    // mirror behind would make this command look like it had done its job while every new box kept
-    // starting from where the mirror last was.
-    let mirrored = fetch_mirror(&repo);
-    let summary = if summary.is_empty() {
-        "Already up to date.".to_string()
-    } else {
-        summary
-    };
-    Ok(match mirrored {
-        Ok(()) => summary,
-        Err(why) => format!("{summary}\n\nthe checkout is current, but its mirror is not: {why}"),
+    Ok(match summary.is_empty() {
+        true => "Already up to date.".to_string(),
+        false => summary,
     })
 }
 
@@ -940,7 +984,7 @@ mod tests {
                             repos.push(Repo {
                                 id: format!("{who}{n}"),
                                 source: String::new(),
-                                work: String::new(),
+                                source_tree: String::new(),
                                 store: String::new(),
                                 agent: "claude".into(),
                                 plane_project: String::new(),
@@ -1062,7 +1106,7 @@ mod tests {
             Repo {
                 id: "web".into(),
                 source: "s".into(),
-                work: "/w".into(),
+                source_tree: "/w".into(),
                 store: "/s".into(),
                 agent: "claude".into(),
                 plane_project: String::new(),
@@ -1073,7 +1117,7 @@ mod tests {
             Repo {
                 id: "web-api".into(),
                 source: "s".into(),
-                work: "/w".into(),
+                source_tree: "/w".into(),
                 store: "/s".into(),
                 agent: "claude".into(),
                 plane_project: String::new(),
@@ -1104,7 +1148,7 @@ mod tests {
         let repos = vec![Repo {
             id: "thing".into(),
             source: "s".into(),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: store.to_string_lossy().to_string(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1169,7 +1213,7 @@ mod tests {
         save_repos(&[Repo {
             id: "web".into(),
             source: "/src/web".into(),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1326,6 +1370,146 @@ mod tests {
         assert!(!mirror_is_made(&mirror));
         ensure_mirror(&repo).unwrap();
         assert!(mirror_is_made(&mirror));
+
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A repo registered from a URL gets a mirror and no checkout.
+    ///
+    /// It used to get both: `git clone <url>` into `repos/<id>/work`, a full working tree on the
+    /// volume that nothing in a box could see and skein only read for host-side conveniences —
+    /// every one of which the mirror answers, and answers about the committed state rather than
+    /// about whatever branch that clone happened to be left on.
+    ///
+    /// The URL here is a bare repository on disk, because a path ending in `.git` IS a git URL and
+    /// git is content to clone one. That is the same code path a `https://` source takes, without
+    /// a test that needs the network to pass.
+    #[test]
+    fn a_repo_added_from_a_url_gets_a_mirror_and_no_checkout() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let elsewhere = tempdir();
+        let checkout = elsewhere.join("built-from");
+        origin_repo(&checkout);
+        let upstream = elsewhere.join("upstream.git");
+        git(
+            &elsewhere,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &checkout.to_string_lossy(),
+                &upstream.to_string_lossy(),
+            ],
+        );
+        assert!(
+            is_git_url(&upstream.to_string_lossy()),
+            "the fixture is not exercising the URL path"
+        );
+
+        let repo = add_repo(
+            &upstream.to_string_lossy(),
+            Some("proj"),
+            Some("claude"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            repo.source_tree, "",
+            "a URL repo has no checkout on this machine"
+        );
+        assert!(
+            !skein_home().join("repos/proj/work").exists(),
+            "the volume still carries a working tree skein never works in"
+        );
+        let mirror = mirror_path("proj");
+        assert!(mirror_is_made(&mirror));
+        assert_eq!(git(&mirror, &["config", "--get", "core.bare"]), "true");
+        assert_eq!(
+            crate::fleet::clone_source(&repo),
+            mirror.to_string_lossy(),
+            "a box must still have somewhere to clone from"
+        );
+        // The mirror fetches from the URL, and that is also where a box pushes — for a URL repo the
+        // two questions have the same answer, which is exactly why they had to be separated for the
+        // adopted case below.
+        assert_eq!(
+            remote_origin_url(&mirror.to_string_lossy()).unwrap(),
+            upstream.to_string_lossy()
+        );
+        assert_eq!(
+            repo_origin_url(&repo).unwrap(),
+            upstream.to_string_lossy(),
+            "a box would push somewhere other than the repository it came from"
+        );
+
+        // A commit made upstream reaches the mirror, with no checkout in between.
+        git(&checkout, &["checkout", "-q", "-b", "later"]);
+        git(
+            &elsewhere,
+            &[
+                "-C",
+                &upstream.to_string_lossy(),
+                "fetch",
+                "-q",
+                &checkout.to_string_lossy(),
+                "later:later",
+            ],
+        );
+        fetch_mirror(&repo).unwrap();
+        assert!(git(&mirror, &["branch", "--list", "later"]).contains("later"));
+
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The two "where does this repo live" questions do not have the same answer for an adopted
+    /// repo, and reading one for the other tells a box to push into a path on the host.
+    ///
+    /// The mirror's `origin` is where the MIRROR fetches from — the checkout, for an adopted repo.
+    /// `repo_origin_url` is where the REPO lives, which is that checkout's own origin. skein's own
+    /// repository is this case: adopted in place, with a GitHub remote.
+    #[test]
+    fn where_the_mirror_fetches_from_is_not_where_a_box_pushes() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let checkout = tempdir();
+        origin_repo(&checkout);
+        git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme/skein.git",
+            ],
+        );
+        let repo = add_repo(
+            &checkout.to_string_lossy(),
+            Some("skein"),
+            Some("claude"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            remote_origin_url(&mirror_path("skein").to_string_lossy()).unwrap(),
+            checkout.to_string_lossy(),
+            "the mirror must fetch from the checkout it was made from"
+        );
+        assert_eq!(
+            repo_origin_url(&repo).unwrap(),
+            "git@github.com:acme/skein.git",
+            "a box must push to the repository, not into skein's own mirror"
+        );
 
         std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");

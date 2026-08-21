@@ -150,9 +150,17 @@ fn cmd_add(source: &str, opts: &[String]) -> Result<(), String> {
     let repo = skein::repos::add_repo(source, id.as_deref(), agent.as_deref(), store.as_deref())?;
     println!("{BOLD}added{RESET} {CYAN}{}{RESET}", repo.id);
     println!("  {DIM}source{RESET}  {}", repo.source);
-    println!("  {DIM}work  {RESET}  {}", repo.work);
+    println!(
+        "  {DIM}mirror{RESET}  {}",
+        skein::repos::mirror_path(&repo.id).display()
+    );
     println!("  {DIM}store {RESET}  {}", repo.store);
-    if let Some(w) = skein::repos::remote_warning(&repo.work) {
+    // Only when there is one. A repo registered from a URL has no checkout on this machine, and a
+    // blank line labelled `tree` would read as one skein failed to make.
+    if !repo.source_tree.trim().is_empty() {
+        println!("  {DIM}tree  {RESET}  {}", repo.source_tree);
+    }
+    if let Some(w) = skein::repos::remote_warning(&repo) {
         println!("\n\x1b[33m!\x1b[0m {w}");
     }
     println!(
@@ -248,9 +256,12 @@ fn cmd_remove(id: &str) -> Result<(), String> {
         "{BOLD}removed{RESET} {CYAN}{}{RESET} {DIM}(unregistered){RESET}",
         repo.id
     );
+    // The mirror and the store are skein's; a source tree, if there is one, is the user's own
+    // checkout and was never skein's to make or to delete.
     println!(
         "  {DIM}files left on disk — delete if you're sure:{RESET}\n    {}\n    {}",
-        repo.work, repo.store
+        skein::repos::mirror_path(&repo.id).display(),
+        repo.store
     );
     Ok(())
 }
@@ -262,9 +273,18 @@ fn cmd_repos() -> Result<(), String> {
         return Ok(());
     }
     for r in &repos {
+        // A repo says where it came from, and — when it was adopted rather than cloned — where the
+        // checkout it was adopted from still is. A URL repo has no second line to print, which is
+        // the visible half of it no longer having a second checkout.
         println!(
-            "{BOLD}{CYAN}{}{RESET}  {DIM}{}{RESET}\n  {} {DIM}({}){RESET}",
-            r.id, r.agent, r.source, r.work
+            "{BOLD}{CYAN}{}{RESET}  {DIM}{}{RESET}\n  {}{}",
+            r.id,
+            r.agent,
+            r.source,
+            match r.source_tree.trim() {
+                "" => String::new(),
+                tree => format!(" {DIM}(adopted from {tree}){RESET}"),
+            }
         );
     }
     println!("\n{DIM}{} repos{RESET}", repos.len());

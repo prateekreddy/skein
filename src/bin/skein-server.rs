@@ -1205,7 +1205,7 @@ async fn api_add_repo(Json(r): Json<AddRepoReq>) -> Response {
     match res {
         Ok(Ok(repo)) => {
             // Warn up-front if the push path is shaky (no origin, or SSH without a loaded key).
-            let warning = skein::repos::remote_warning(&repo.work);
+            let warning = skein::repos::remote_warning(&repo);
             // The repository this maps to, now that there is a clone to ask. The dialog cannot know
             // it while you are still typing a *path* — only adopting it reveals the origin — so this
             // is what lets a write token offered in the dialog be stored against the right repo.

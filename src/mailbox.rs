@@ -410,7 +410,7 @@ mod tests {
             Repo {
                 id: "a".into(),
                 source: "a".into(),
-                work: "a".into(),
+                source_tree: "a".into(),
                 store: store_a.to_string_lossy().into_owned(),
                 agent: "claude".into(),
                 plane_project: String::new(),
@@ -421,7 +421,7 @@ mod tests {
             Repo {
                 id: "b".into(),
                 source: "b".into(),
-                work: "b".into(),
+                source_tree: "b".into(),
                 store: store_b.to_string_lossy().into_owned(),
                 agent: "claude".into(),
                 plane_project: String::new(),

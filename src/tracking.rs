@@ -920,7 +920,7 @@ mod tests {
         save_repos(&[Repo {
             id: "web".into(),
             source: "/src/web".into(),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -983,7 +983,7 @@ mod tests {
         save_repos(&[Repo {
             id: "web".into(),
             source: "/src/web".into(),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1055,7 +1055,7 @@ mod tests {
         save_repos(&[Repo {
             id: "stray".into(),
             source: "/s".into(),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1092,7 +1092,7 @@ mod tests {
         let repo = |id: &str, gw: &str| Repo {
             id: id.into(),
             source: format!("/src/{id}"),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1177,7 +1177,7 @@ mod tests {
         save_repos(&[Repo {
             id: "web".into(),
             source: "/src/web".into(),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -1885,7 +1885,7 @@ mod tests {
         let repo = Repo {
             id: "r1".into(),
             source: "s".into(),
-            work: "/w".into(),
+            source_tree: "/w".into(),
             store: store.display().to_string(),
             agent: "claude".into(),
             plane_project: String::new(),

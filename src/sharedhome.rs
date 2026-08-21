@@ -216,7 +216,7 @@ mod tests {
         save_repos(&[Repo {
             id: "demo".into(),
             source: work.to_string_lossy().into_owned(),
-            work: work.to_string_lossy().into_owned(),
+            source_tree: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),
             agent: "codex".into(),
             plane_project: String::new(),

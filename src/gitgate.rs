@@ -559,7 +559,7 @@ pub fn set_box_scope(box_name: &str, scope: Option<&str>) -> Result<(), String> 
 /// nowhere to push.
 pub fn repo_slug(repo: &crate::repos::Repo) -> Option<String> {
     slug_from_url(&repo.source).or_else(|| {
-        crate::repos::remote_origin_url(&repo.work)
+        crate::repos::repo_origin_url(repo)
             .as_deref()
             .and_then(slug_from_url)
     })
@@ -1953,7 +1953,7 @@ mod tests {
         crate::repos::save_repos(&[crate::repos::Repo {
             id: name.into(),
             source: format!("https://github.com/{slug}.git"),
-            work: String::new(),
+            source_tree: String::new(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),

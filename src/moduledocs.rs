@@ -405,7 +405,7 @@ mod tests {
     impl Fixture {
         /// Commit what the test has written, and bring the mirror up to date.
         fn publish(&self) {
-            let work = Path::new(&self.repo.work);
+            let work = Path::new(&self.repo.source_tree);
             git(work, &["add", "-A"]);
             git(work, &["commit", "-q", "-m", "change"]);
             crate::repos::fetch_mirror(&self.repo).unwrap();
@@ -446,7 +446,7 @@ mod tests {
             // Adopted in place, not a URL: the mirror's origin is then this checkout, so
             // `publish()` fetches from a path on disk instead of reaching for the network.
             source: work.display().to_string(),
-            work: work.display().to_string(),
+            source_tree: work.display().to_string(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),
@@ -479,7 +479,7 @@ mod tests {
     fn codeowners_directories_become_the_modules_and_carry_their_owners() {
         let f = fixture();
         let repo = &f.repo;
-        let gh = Path::new(&repo.work).join(".github");
+        let gh = Path::new(&repo.source_tree).join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(
             gh.join("CODEOWNERS"),
@@ -497,7 +497,7 @@ mod tests {
     fn a_codeowners_pattern_naming_no_directory_is_not_a_module() {
         let f = fixture();
         let repo = &f.repo;
-        let gh = Path::new(&repo.work).join(".github");
+        let gh = Path::new(&repo.source_tree).join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(gh.join("CODEOWNERS"), "does/not/exist/ @me\n").unwrap();
         f.publish();
@@ -515,7 +515,7 @@ mod tests {
     fn a_changed_path_belongs_to_its_most_specific_module() {
         let f = fixture();
         let repo = &f.repo;
-        let gh = Path::new(&repo.work).join(".github");
+        let gh = Path::new(&repo.source_tree).join(".github");
         fs::create_dir_all(&gh).unwrap();
         fs::write(gh.join("CODEOWNERS"), "src/ @me\nsrc/web/ @you\n").unwrap();
         f.publish();
@@ -574,7 +574,7 @@ mod tests {
     fn reading_a_module_skips_vendor_directories() {
         let f = fixture();
         let repo = &f.repo;
-        let work = Path::new(&repo.work);
+        let work = Path::new(&repo.source_tree);
         fs::write(work.join("node_modules").join("big.js"), "junk").unwrap();
         f.publish();
         let tree = crate::repos::Tree::open(repo).unwrap();

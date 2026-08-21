@@ -256,7 +256,7 @@ mod tests {
         let repo = Repo {
             id: "demo".into(),
             source: work.display().to_string(),
-            work: work.display().to_string(),
+            source_tree: work.display().to_string(),
             store: store.display().to_string(),
             agent: "claude".into(),
             plane_project: String::new(),

@@ -100,7 +100,7 @@ const STORE_README: &str = include_str!("store/README.md");
 /// Read as a fallback only: [`seed_shared_paths`] does the copying on the host now, and a box that
 /// cannot see the checkout at all still gets its files.
 pub fn record_repo_source(repo: &Repo) {
-    let work = repo.work.trim();
+    let work = repo.source_tree.trim();
     if work.is_empty() {
         return;
     }
@@ -126,12 +126,12 @@ pub fn record_repo_source(repo: &Repo) {
 /// Best-effort, and quiet about the ordinary case: a manifest that names a path this repo does not
 /// have is how a shared manifest works across repos, not an error.
 pub fn seed_shared_paths(repo: &Repo) {
-    let work = Path::new(repo.work.trim());
+    let work = Path::new(repo.source_tree.trim());
     let store = Path::new(repo.store.trim());
     let Ok(manifest) = fs::read_to_string(store.join("shared-paths.txt")) else {
         return;
     };
-    if repo.work.trim().is_empty() || !work.is_dir() {
+    if repo.source_tree.trim().is_empty() || !work.is_dir() {
         return;
     }
     for line in manifest.lines() {
@@ -589,7 +589,7 @@ mod tests {
         let repo = Repo {
             id: "demo".into(),
             source: work.to_string_lossy().into_owned(),
-            work: work.to_string_lossy().into_owned(),
+            source_tree: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),

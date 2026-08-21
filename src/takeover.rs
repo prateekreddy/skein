@@ -60,8 +60,16 @@ fn takeover_repo(name: &str) -> Option<Repo> {
     let wanted = PathBuf::from(expand_tilde(&dir));
     let wanted = wanted.canonicalize().unwrap_or(wanted);
     load_repos().into_iter().find(|repo| {
-        let work = PathBuf::from(&repo.work);
-        work.canonicalize().unwrap_or(work) == wanted
+        // Only a repo adopted from a local path can match: a box whose workspace IS the host
+        // checkout is what this resolves, and a repo registered from a URL has no checkout on this
+        // machine to be anybody's workspace.
+        match repo.source_tree.trim() {
+            "" => false,
+            tree => {
+                let tree = PathBuf::from(tree);
+                tree.canonicalize().unwrap_or(tree) == wanted
+            }
+        }
     })
 }
 
@@ -497,7 +505,7 @@ mod tests {
         save_repos(&[Repo {
             id: "web".into(),
             source: "/src/web".into(),
-            work: home.join("work").to_string_lossy().into_owned(),
+            source_tree: home.join("work").to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
             agent: "claude".into(),
             plane_project: String::new(),

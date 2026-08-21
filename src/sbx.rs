@@ -588,7 +588,7 @@ mod tests {
         let repo = Repo {
             id: "web".into(),
             source: String::new(),
-            work: String::new(),
+            source_tree: String::new(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),

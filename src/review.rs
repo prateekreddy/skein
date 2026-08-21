@@ -730,7 +730,7 @@ mod tests {
         let repo = Repo {
             id: "r".into(),
             source: "https://github.com/a/b".into(),
-            work: "/nonexistent-path-for-this-test".into(),
+            source_tree: "/nonexistent-path-for-this-test".into(),
             store: String::new(),
             agent: "claude".into(),
             plane_project: String::new(),

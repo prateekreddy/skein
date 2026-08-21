@@ -117,7 +117,7 @@ fn repo(id: &str) -> skein::repos::Repo {
     skein::repos::Repo {
         id: id.into(),
         source: "https://github.com/acme/thing.git".into(),
-        work: "/nonexistent".into(),
+        source_tree: "/nonexistent".into(),
         store: "/nonexistent".into(),
         agent: "claude".into(),
         plane_project: String::new(),
