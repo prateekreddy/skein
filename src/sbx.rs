@@ -53,6 +53,20 @@ pub struct SbxBox {
 /// struggling daemon recover instead of being re-asked every 1.5s forever.
 static FLEET_GATE: Gate<Vec<SbxBox>> = Gate::new();
 
+/// Forget the remembered listing, so the next caller waits for the truth.
+///
+/// The same property [`crate::fleet::forget_fleet_liveness`] exists for, on the other gate: a `Gate`
+/// serves its last good answer while it refreshes behind the caller, which is what stops a slow
+/// `sbx` blanking the board — and is exactly why an act that changes the answer has to say so.
+///
+/// It matters *more* since the listing left the board tick. A remembered answer that was two seconds
+/// old and about to be refreshed anyway is now one that nothing refreshes: `sbx ls` is asked when a
+/// person asks, and a person asking what sandboxes are on this machine right after destroying one is
+/// the case this is for.
+pub fn forget_fleet_boxes() {
+    FLEET_GATE.invalidate();
+}
+
 /// How often skein is willing to spawn `sbx ls` while it is answering.
 const FLEET_FRESH: Duration = Duration::from_millis(1500);
 

@@ -549,7 +549,15 @@ pub fn destroy_command(name: &str) -> String {
 /// succeed before we delist, so a failed `sbx rm` leaves the box on the board to retry rather than
 /// orphaning a still-running sandbox you can no longer see. Destructive — see `destroy_command`.
 pub fn destroy_box(name: &str) -> Result<(), String> {
-    crate::fleet::disturbing_liveness(|| destroy_box_inner(name))
+    // Its disk as well as its liveness: the tree is gone, so the `du` figures now attribute space to
+    // a box that is not there and hide the room that just came back.
+    crate::fleet::disturbing(
+        &[
+            crate::fleet::Remembered::BoxLiveness,
+            crate::fleet::Remembered::BoxDisk,
+        ],
+        || destroy_box_inner(name),
+    )
 }
 
 fn destroy_box_inner(name: &str) -> Result<(), String> {

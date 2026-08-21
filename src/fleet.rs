@@ -1509,7 +1509,21 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
                 // blocks the work, and reclaiming while a create is still running is precisely the
                 // second copy this prevents.
                 Duration::from_secs(1800),
-                || create_through_warden(sandbox, mounts),
+                || {
+                    // A sandbox that did not exist a moment ago makes four remembered answers
+                    // wrong at once: it is not in the listing, no sweep has seen its boxes, no `du`
+                    // has walked its disk, and its memory and CPU totals are the previous
+                    // sandbox's or nobody's.
+                    disturbing(
+                        &[
+                            Remembered::SandboxListing,
+                            Remembered::BoxLiveness,
+                            Remembered::BoxDisk,
+                            Remembered::FleetResources,
+                        ],
+                        || create_through_warden(sandbox, mounts),
+                    )
+                },
             )?;
             if let crate::attempt::Outcome::InFlight(theirs) = outcome {
                 return Err(format!(
@@ -3637,6 +3651,26 @@ pub fn resize_fleet(
     disk: &str,
     drop_docker: bool,
 ) -> Result<Vec<String>, String> {
+    // Everything, and around the whole of it rather than around the destroy: a resize that fails
+    // halfway leaves the sandbox in a state none of the four gates has seen, and a caller reading a
+    // remembered answer then is reading a picture of a fleet that no longer exists.
+    disturbing(
+        &[
+            Remembered::SandboxListing,
+            Remembered::BoxLiveness,
+            Remembered::BoxDisk,
+            Remembered::FleetResources,
+        ],
+        || resize_fleet_inner(memory, cpus, disk, drop_docker),
+    )
+}
+
+fn resize_fleet_inner(
+    memory: &str,
+    cpus: &str,
+    disk: &str,
+    drop_docker: bool,
+) -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured; nothing to resize".into());
@@ -4262,6 +4296,53 @@ pub fn forget_fleet_liveness() {
     LIVENESS_GATE.invalidate();
 }
 
+/// A remembered answer an act can make wrong.
+///
+/// Named rather than implied, because there are four gates and an act that settles the one somebody
+/// happened to think of is the bug this exists to end. `stop_box` disturbs liveness; `resize_fleet`
+/// disturbs all four; and getting the list wrong is now a line in a diff rather than a silence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remembered {
+    /// Which boxes have a live session — [`fleet_liveness`].
+    BoxLiveness,
+    /// What sandboxes exist on this machine — `sbx ls`, via [`crate::sbx::fleet_boxes`].
+    SandboxListing,
+    /// How much of the shared disk each box is using — [`fleet_disk_usage`].
+    BoxDisk,
+    /// The sandbox's own memory, CPU and disk totals — [`fleet_resources`].
+    FleetResources,
+}
+
+impl Remembered {
+    fn forget(self) {
+        match self {
+            Remembered::BoxLiveness => LIVENESS_GATE.invalidate(),
+            Remembered::SandboxListing => crate::sbx::forget_fleet_boxes(),
+            Remembered::BoxDisk => DISK_GATE.invalidate(),
+            Remembered::FleetResources => RESOURCE_GATE.invalidate(),
+        }
+    }
+}
+
+/// Run an act, and settle everything it makes wrong however it ends.
+///
+/// The general form of [`disturbing_liveness`], and the reason it is general: two wrappers is the
+/// shape that lets a third gate be forgotten. An act says what it disturbs, in one place, and the
+/// guard settles all of it on `Drop` — so early return, `?` and a panic are all covered, and adding
+/// a branch to an act cannot reintroduce the bug.
+pub fn disturbing<T>(what: &[Remembered], act: impl FnOnce() -> T) -> T {
+    struct Settle<'a>(&'a [Remembered]);
+    impl Drop for Settle<'_> {
+        fn drop(&mut self) {
+            for remembered in self.0 {
+                remembered.forget();
+            }
+        }
+    }
+    let _settle = Settle(what);
+    act()
+}
+
 /// Run an act that changes a box's liveness, and settle the gate however the act ends.
 ///
 /// A wrapper rather than a line at the end of each act, because **the end of an act is not one
@@ -4275,14 +4356,7 @@ pub fn forget_fleet_liveness() {
 /// *most* likely wrong: a start that died after its session came up leaves a box the sweep has never
 /// seen, and the gate would keep saying so.
 pub fn disturbing_liveness<T>(act: impl FnOnce() -> T) -> T {
-    struct Settle;
-    impl Drop for Settle {
-        fn drop(&mut self) {
-            LIVENESS_GATE.invalidate();
-        }
-    }
-    let _settle = Settle;
-    act()
+    disturbing(&[Remembered::BoxLiveness], act)
 }
 
 pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
