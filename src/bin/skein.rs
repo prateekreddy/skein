@@ -471,7 +471,11 @@ fn cmd_doctor() -> Result<(), String> {
     // server's stderr.
     {
         let g = skein::health::health_report_gitgate();
-        let mark = if g.ok { OK } else { BAD };
+        let mark = match g.level {
+            skein::health::Level::Satisfied => OK,
+            skein::health::Level::Unsatisfied => BAD,
+            skein::health::Level::Unknown => WARN,
+        };
         println!("{mark} git scope     {}", g.detail);
     }
 

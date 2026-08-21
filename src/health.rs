@@ -12,10 +12,73 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+/// What a check answered. **Three states, and the third is the point.**
+///
+/// A binary check makes "the daemon is wedged" and "the fleet is absent" indistinguishable, and
+/// anything that reconciles answers that ambiguity by doing the work again — creating a fleet that
+/// already exists. The codebase already knew this in one place and said so:
+/// [`crate::fleet::fleet_exists`] returns `Option<bool>` with exactly this comment. This is that
+/// knowledge, everywhere a check is made.
+///
+/// **`Unknown` may never drive a doer.** It may only be reported. Whatever would act on
+/// `Unsatisfied` must do nothing at all on `Unknown` — the honest response to "I could not tell" is
+/// to say so and wait, never to guess in the direction that happens to be cheap to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// Checked, and it holds.
+    Satisfied,
+    /// Checked, and it does not. This is the only state that is a fault.
+    Unsatisfied,
+    /// Could not be checked. Not a fault, and not a pass either.
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthCheck {
-    pub ok: bool,
+    pub level: Level,
+    /// What is true, and — when it is not satisfied — what would fix it. The second half is not
+    /// decoration: skein can only be blocked in a way it can explain if the check that found the
+    /// block also carries the way out.
     pub detail: String,
+}
+
+impl HealthCheck {
+    pub fn satisfied(detail: impl Into<String>) -> HealthCheck {
+        HealthCheck {
+            level: Level::Satisfied,
+            detail: detail.into(),
+        }
+    }
+
+    /// A fault, and `detail` must say what would clear it.
+    pub fn unsatisfied(detail: impl Into<String>) -> HealthCheck {
+        HealthCheck {
+            level: Level::Unsatisfied,
+            detail: detail.into(),
+        }
+    }
+
+    /// Could not be answered — `detail` says why it could not, not what is wrong.
+    pub fn unknown(detail: impl Into<String>) -> HealthCheck {
+        HealthCheck {
+            level: Level::Unknown,
+            detail: detail.into(),
+        }
+    }
+
+    /// From a plain condition, for the checks that genuinely cannot fail to answer.
+    pub fn from(ok: bool, detail: impl Into<String>) -> HealthCheck {
+        match ok {
+            true => HealthCheck::satisfied(detail),
+            false => HealthCheck::unsatisfied(detail),
+        }
+    }
+
+    /// Is this a fault? `Unknown` is not one — see [`Level`].
+    pub fn is_fault(&self) -> bool {
+        self.level == Level::Unsatisfied
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,20 +142,20 @@ fn git_scope_health() -> HealthCheck {
     };
     match crate::gitgate::scope_status() {
         Off => HealthCheck {
-            ok: true,
+            level: Level::Satisfied,
             detail: format!(
                 "off — {unscoped_holds}. Settings → scope each box's access to its own repo"
             ),
         },
         NotConfigured => HealthCheck {
-            ok: true,
+            level: Level::Satisfied,
             detail: format!(
                 "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App or a \
                  per-repo token to scope them"
             ),
         },
         Unusable { why, refused } => HealthCheck {
-            ok: false,
+            level: Level::Unsatisfied,
             detail: format!(
                 "ON but nothing is scoped, so {unscoped_holds}: \
                  {why}.{} Add a GitHub App or a per-repo token under Settings → GitHub & keys.",
@@ -103,7 +166,7 @@ fn git_scope_health() -> HealthCheck {
             ),
         },
         Active { app, tokens } => HealthCheck {
-            ok: true,
+            level: Level::Satisfied,
             detail: format!(
                 "on — boxes write only their own repo.{}{}",
                 match app.is_empty() {
@@ -129,7 +192,7 @@ pub fn health_report_gitgate() -> HealthCheck {
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
 pub fn health_report() -> HealthReport {
     let ai = HealthCheck {
-        ok: true,
+        level: Level::Satisfied,
         detail: if !crate::ai::ai_enabled() {
             "off — Settings → Boxes turns it on: a one-line summary for boxes with no \
              journal, and a second opinion before Continue N resumes anything"
@@ -148,7 +211,7 @@ pub fn health_report() -> HealthReport {
     // gone, and with it the only way to reach it.
     let memory = match crate::fleet::memory_plan() {
         Some(plan) => HealthCheck {
-            ok: true,
+            level: Level::Satisfied,
             detail: format!(
                 "{} across all boxes and the containers they start, {} for the sandbox's own \
                  daemons, {} kept back for the VM's services and the kernel",
@@ -161,9 +224,10 @@ pub fn health_report() -> HealthReport {
         // together, not on Docker. One build can then reach the VM's memory, and with no swap the
         // kernel's global OOM killer picks a victim by badness rather than by blame.
         None => HealthCheck {
-            ok: false,
+            level: Level::Unsatisfied,
             detail: "no memory ceiling anywhere: Settings → Fleet memory names no size, so one \
-                     box's build can take the sandbox down with it"
+                     box's build can take the sandbox down with it. Settings → Fleet → memory, or \
+                     `skein resize <size>`"
                 .into(),
         },
     };
@@ -186,22 +250,22 @@ pub fn health_report() -> HealthReport {
         .is_some_and(|v| !v.is_empty());
     let registry = match load_registry() {
         Ok((boxes, path)) => HealthCheck {
-            ok: true,
+            level: Level::Satisfied,
             detail: format!("{} ({} boxes)", path.display(), boxes.len()),
         },
         Err(error) if repos_registered => HealthCheck {
-            ok: true,
+            level: Level::Satisfied,
             detail: format!(
                 "not in use — {} repos are managed directly ({error})",
                 crate::repos::load_repos().len()
             ),
         },
         Err(error) if !registry_named => HealthCheck {
-            ok: true,
+            level: Level::Satisfied,
             detail: format!("not in use — add a repository with `skein add <url>` ({error})"),
         },
         Err(error) => HealthCheck {
-            ok: false,
+            level: Level::Unsatisfied,
             detail: format!(
                 "{error}. It is named by $SKEIN_REGISTRY or $SKEIN_SHARED — unset it, or point \
                  it at a readable file."
@@ -210,27 +274,44 @@ pub fn health_report() -> HealthReport {
     };
     let fleet = fleet_boxes();
     let fleet_degraded = fleet_degraded();
-    let sbx = HealthCheck {
-        ok: program_on_path("sbx") && fleet.is_some() && !fleet_degraded,
-        detail: match &fleet {
-            Some(boxes) if fleet_degraded => format!(
-                "`sbx ls` temporarily unavailable; showing last successful snapshot ({} boxes)",
-                boxes.len()
-            ),
-            Some(boxes) => format!("available ({} boxes)", boxes.len()),
-            // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what
-            // this said, and it is four different faults wearing one coat — the reader's next move
-            // is different for each, and for the PATH one their own shell will contradict it.
-            None => crate::sbx::fleet_failure()
+    // Three answers, and this is the check that most needed them. `sbx` missing from PATH is a
+    // fault with a fix. A listing that timed out is NOT a fault — it is skein unable to ask, and
+    // reporting it as "sbx is broken" sent people to reinstall a working tool. The snapshot case is
+    // the same shape one step further on: skein is answering from a picture it took a moment ago,
+    // which is neither current nor wrong.
+    let sbx = match (program_on_path("sbx"), &fleet, fleet_degraded) {
+        (false, _, _) => HealthCheck::unsatisfied(
+            "`sbx` is not on PATH — it is how skein reaches the fleet. Install Docker Sandboxes, \
+             or put `sbx` on the PATH the server was started with",
+        ),
+        (true, Some(boxes), true) => HealthCheck::unknown(format!(
+            "`sbx ls` did not answer just now; showing the last successful snapshot ({} boxes)",
+            boxes.len()
+        )),
+        (true, Some(boxes), false) => {
+            HealthCheck::satisfied(format!("available ({} boxes)", boxes.len()))
+        }
+        // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what this
+        // said, and it is four different faults wearing one coat — the reader's next move is
+        // different for each. Unknown rather than a fault: sbx is installed and did not answer,
+        // which is a question skein could not put, not an answer it got.
+        (true, None, _) => HealthCheck::unknown(
+            crate::sbx::fleet_failure()
                 .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
-        },
+        ),
     };
     let tool = |name: &str, required: bool| HealthCheck {
-        ok: program_on_path(name) || !required,
+        level: match (program_on_path(name), required) {
+            (true, _) => Level::Satisfied,
+            (false, true) => Level::Unsatisfied,
+            (false, false) => Level::Satisfied,
+        },
         detail: if program_on_path(name) {
             "available".into()
         } else if required {
-            "not found on PATH".into()
+            format!(
+                "not found on PATH — install {name}, or start the server from a shell that has it"
+            )
         } else {
             "not found (optional)".into()
         },
@@ -241,7 +322,10 @@ pub fn health_report() -> HealthReport {
     // the API with a token skein already has. curl is what carries that, and gitgate has always
     // needed it to mint App tokens.
     let gh = HealthCheck {
-        ok: crate::github::have_curl(),
+        level: match crate::github::have_curl() {
+            true => Level::Satisfied,
+            false => Level::Unsatisfied,
+        },
         detail: match crate::github::have_curl() {
             true => "available".into(),
             false => "curl is not installed — skein reads GitHub with it (pull requests, diffs, \
@@ -319,7 +403,10 @@ pub fn health_report() -> HealthReport {
         }
     }
     let mut probes = HealthCheck {
-        ok: probe_errors.is_empty(),
+        level: match probe_errors.is_empty() {
+            true => Level::Satisfied,
+            false => Level::Unsatisfied,
+        },
         detail: if probe_errors.is_empty() {
             format!("installed for {} managed repos", repos.len())
         } else {
@@ -327,7 +414,10 @@ pub fn health_report() -> HealthReport {
         },
     };
     let mailbox = HealthCheck {
-        ok: mailbox_errors.is_empty(),
+        level: match mailbox_errors.is_empty() {
+            true => Level::Satisfied,
+            false => Level::Unsatisfied,
+        },
         detail: if mailbox_errors.is_empty() {
             "shared stores and required jq available in reporting boxes".into()
         } else {
@@ -346,7 +436,7 @@ pub fn health_report() -> HealthReport {
         .map(|view| view.name)
         .collect::<Vec<_>>();
     if !dark_boxes.is_empty() {
-        probes.ok = false;
+        probes.level = Level::Unsatisfied;
         probes.detail.push_str(&format!(
             "; no signals from running boxes: {}",
             dark_boxes.join(", ")
@@ -356,12 +446,13 @@ pub fn health_report() -> HealthReport {
     // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment
     // banner would be crying wolf; the caveat belongs on the row and tab it applies to.
     let gitgate = git_scope_health();
-    let ok = registry.ok
-        && sbx.ok
-        && git.ok
-        && probes.ok
-        && mailbox.ok
-        && gitgate.ok
+    // A fault, and only a fault. An `Unknown` check must not turn the banner red: telling somebody
+    // their fleet is broken because skein could not reach it for two seconds is the false alarm the
+    // third state exists to stop. The cockpit reports the unknowns beside the faults, in the mark
+    // it already has for "look at this but nothing is wrong".
+    let ok = ![&registry, &sbx, &git, &probes, &mailbox, &gitgate]
+        .iter()
+        .any(|check| check.is_fault())
         && stale_boxes.is_empty();
     HealthReport {
         ok,
@@ -438,5 +529,59 @@ pub(crate) fn linux_picker_argv(folder: bool) -> Vec<(&'static str, Vec<&'static
             ("zenity", vec!["--file-selection"]),
             ("kdialog", vec!["--getopenfilename", "."]),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three states, and what each one is allowed to cause.
+    ///
+    /// `Unknown` is the whole point of the type: a check that could not be answered is not a pass
+    /// and not a fault, and treating it as either is a bug with a name. As a fault it cries wolf —
+    /// telling somebody `sbx` is broken because a listing timed out once sends them to reinstall a
+    /// working tool. As a pass it is worse: whatever would have acted on `Unsatisfied` does nothing,
+    /// silently, and the thing that was actually wrong is never reported.
+    #[test]
+    fn only_a_fault_is_a_fault() {
+        assert!(HealthCheck::unsatisfied("x").is_fault());
+        assert!(!HealthCheck::satisfied("x").is_fault());
+        assert!(
+            !HealthCheck::unknown("x").is_fault(),
+            "a question skein could not put is not an answer it got"
+        );
+        // `from` is for the checks that genuinely cannot fail to answer, and it must never produce
+        // the third state by accident.
+        assert_eq!(HealthCheck::from(true, "x").level, Level::Satisfied);
+        assert_eq!(HealthCheck::from(false, "x").level, Level::Unsatisfied);
+    }
+
+    /// The three states reach the cockpit under the names it renders.
+    ///
+    /// The page switches on this string. A rename here that the page does not follow shows every
+    /// check as unknown, which is the one failure mode that looks like a working screen.
+    #[test]
+    fn the_wire_names_are_the_names_the_page_switches_on() {
+        let page = include_str!("web/index.html");
+        for (level, name) in [
+            (Level::Satisfied, "satisfied"),
+            (Level::Unsatisfied, "unsatisfied"),
+            (Level::Unknown, "unknown"),
+        ] {
+            let json = serde_json::to_string(&HealthCheck {
+                level,
+                detail: String::new(),
+            })
+            .unwrap();
+            assert!(
+                json.contains(&format!("\"level\":\"{name}\"")),
+                "{level:?} does not serialise as {name}: {json}"
+            );
+            assert!(
+                page.contains(&format!("{name}:")) || page.contains(&format!("\"{name}\"")),
+                "the cockpit does not mention the `{name}` level at all"
+            );
+        }
     }
 }

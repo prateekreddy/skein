@@ -8282,4 +8282,61 @@ b idle 5000000 1048576 4
             "a box cannot reach the mirror it clones from: {mounts:?}"
         );
     }
+
+    /// `unknown` may never drive a doer — checked, because the code already gets it right and
+    /// nothing said so.
+    ///
+    /// A binary check makes "the daemon is wedged" and "the fleet is absent" indistinguishable, and
+    /// the reconciler answers that ambiguity by creating a fleet that already exists — over a
+    /// sandbox with every box's work on it. `fleet_exists` returns `Option<bool>` for exactly this
+    /// reason, and this is the assertion that the `None` arm stays a refusal rather than becoming a
+    /// third way of saying "no".
+    ///
+    /// The `sbx` here answers `ls` with a failure and records everything it is handed, so the
+    /// assertion is about what crossed the process boundary: not one `create`, and a sentence that
+    /// says skein could not tell.
+    #[test]
+    fn a_fleet_skein_cannot_see_is_not_a_fleet_it_creates() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 case \"$1\" in ls) echo 'the daemon is not responding' >&2; exit 1 ;; esac\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        // The documented seam, so the listing fails the way it does in production — the fake `sbx`
+        // above is what would answer a `create`, and the point is that it is never asked to.
+        std::env::set_var(
+            "SKEIN_LS_CMD",
+            "echo 'the daemon is not responding' >&2; exit 1",
+        );
+
+        let why = ensure_fleet("skein-fleet", &[]).unwrap_err();
+        std::env::remove_var("SKEIN_LS_CMD");
+        std::env::set_var("PATH", path);
+
+        assert!(
+            why.contains("cannot tell"),
+            "an unanswerable check must say it could not tell, not what it guessed: {why}"
+        );
+        let asked = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !asked.contains("create"),
+            "skein created a fleet on the strength of a question it could not get an answer to:\n{asked}"
+        );
+        std::env::remove_var("SKEIN_HOME");
+    }
 }

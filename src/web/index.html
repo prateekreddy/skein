@@ -1024,6 +1024,9 @@
             padding:8px 2px; border-bottom:1px solid color-mix(in srgb,var(--line) 55%,transparent); }
   .dg-mark { font-weight:700; color:var(--done); }
   .dg-row.bad .dg-mark { color:var(--attn); }
+  /* Unknown is not a fault and must not read as one: the waiting colour, which this UI already
+     uses for "something is pending an answer" rather than "something is wrong". */
+  .dg-row.warn .dg-mark { color:var(--waiting); }
   .dg-name { font-family:var(--mono); font-size:11px; color:var(--text-2); }
   .dg-detail { font-size:12.5px; color:var(--text); line-height:1.55; user-select:text; }
   .dg-foot { margin-top:14px; font-size:12px; color:var(--faint); }
@@ -4632,12 +4635,19 @@ function renderDiagnostics() {
     ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
     ["gitgate", "github scope"], ["ai", "ai enrichment"],
   ];
-  const rows = CHECKS.filter(([k]) => h[k]).map(([k, label]) => `
-    <div class="dg-row ${h[k].ok ? "ok" : "bad"}">
-      <span class="dg-mark">${h[k].ok ? "✓" : "✗"}</span>
+  // Three states, not two. `unknown` is "skein could not tell", which is neither a pass nor a
+  // fault — reporting it as ✗ sent people to reinstall a working tool because `sbx ls` timed out
+  // once. It gets the ! this panel already uses for "look at this, nothing is broken".
+  const MARK = { satisfied: ["ok", "✓"], unsatisfied: ["bad", "✗"], unknown: ["warn", "!"] };
+  const rows = CHECKS.filter(([k]) => h[k]).map(([k, label]) => {
+    const [cls, mark] = MARK[h[k].level] || MARK.unknown;
+    return `
+    <div class="dg-row ${cls}">
+      <span class="dg-mark">${mark}</span>
       <span class="dg-name">${label}</span>
       <span class="dg-detail">${esc(h[k].detail || "")}</span>
-    </div>`).join("");
+    </div>`;
+  }).join("");
   const list = (names, what) => names?.length
     ? `<div class="dg-row bad"><span class="dg-mark">!</span><span class="dg-name">${what}</span>
        <span class="dg-detail">${esc(names.join(", "))}</span></div>` : "";
@@ -4648,7 +4658,9 @@ function renderDiagnostics() {
        bwrap, tmux and the fleet's mounts from inside the sandbox.</div>`;
   const pill = document.getElementById("set-diagn");
   if (pill) {
-    const bad = CHECKS.filter(([k]) => h[k] && !h[k].ok).length;
+    // The pill counts FAULTS. An unknown is visible in the list above and does not add a number
+    // to a badge that people read as "things I must fix".
+    const bad = CHECKS.filter(([k]) => h[k] && h[k].level === "unsatisfied").length;
     pill.textContent = bad || "";
   }
 }
@@ -6301,7 +6313,10 @@ function loadHealth() {
     }
     // "memory" among them because a fleet with no ceiling has no symptom until the sandbox stops
     // answering — and by then the banner is not what you are looking at.
-    const failed = ["registry","sbx","git","probes","mailbox","memory","gitgate"].filter(key => !health[key]?.ok);
+    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","gitgate"];
+    const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
+    // Reported, never counted as a fault: these are the ones skein could not answer.
+    const unsure = CHECKED.filter(key => health[key]?.level === "unknown");
     const stale = health.stale_boxes?.length || 0, dark = health.dark_boxes?.length || 0;
     // The banner used to read `environment: registry, sbx` — two nouns, no verb, no consequence,
     // with every actual detail hidden in a `title` tooltip that cannot be copied, read on a phone,
@@ -6314,6 +6329,7 @@ function loadHealth() {
       : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}`;
     banner.title = [
       ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}`),
+      ...unsure.map(key => `${key}: could not be checked — ${health[key]?.detail || "no reason given"}`),
       ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
       ...(stale ? [`stale sessions: ${health.stale_boxes.join(", ")}`] : [])
     ].join("\n");

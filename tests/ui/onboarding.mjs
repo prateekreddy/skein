@@ -153,14 +153,16 @@ await check("a machine with nothing on it shows the first-run checklist", async 
 // them installing something they already have.
 await check("it says sbx is answering, because it is", async () => {
   const h = await (await fetch(`http://127.0.0.1:${port}/api/health`, { headers: authHeader() })).json();
-  if (!h.sbx?.ok) throw new Error(`health says sbx is unusable on a machine where it answers: ${JSON.stringify(h.sbx)}`);
+  // `satisfied` specifically, not "not a fault": `unknown` here would mean sbx did not answer,
+  // and the point of this step is that it did.
+  if (h.sbx?.level !== "satisfied") throw new Error(`health says sbx is unusable on a machine where it answers: ${JSON.stringify(h.sbx)}`);
 });
 
 // A first run has no `sandboxes.json` and no `$SKEIN_REGISTRY`. That is not a fault, and reporting
 // it as one used to be the first thing anyone saw.
 await check("an absent legacy registry is not reported as a fault", async () => {
   const h = await (await fetch(`http://127.0.0.1:${port}/api/health`, { headers: authHeader() })).json();
-  if (h.registry?.ok === false)
+  if (h.registry?.level === "unsatisfied")
     throw new Error(`a fresh install is told its registry is broken: ${h.registry.detail}`);
 });
 

@@ -490,7 +490,7 @@ await check("AI enrichment is a visible setting, not folklore in an env var", as
   if (cfg.ai_enrichment !== true) throw new Error("the toggle didn't persist");
   const h = await page.evaluate(() => fetch("/api/health").then(r => r.json()));
   if (!/^on/.test(h.ai.detail)) throw new Error(`doctor should now say it's on, got "${h.ai.detail}"`);
-  if (h.ai.ok !== true) throw new Error("opt-in-and-off is not a fault, so this must never report unhealthy");
+  if (h.ai.level !== "satisfied") throw new Error(`opt-in-and-off is not a fault, so this must never report unhealthy: ${h.ai.level}`);
   // Save closed the dialog — put the pane back where the following checks expect it.
   await page.click('header .kbtn[aria-label^="Settings"]');
   await settle();

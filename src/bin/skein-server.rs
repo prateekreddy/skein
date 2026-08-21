@@ -1119,47 +1119,25 @@ async fn api_health() -> Json<skein::health::HealthReport> {
     Json(
         tokio::task::spawn_blocking(skein::health::health_report)
             .await
+            // Every check UNKNOWN, and none of them a fault. The health task falling over says
+            // nothing about whether sbx is installed or whether scoping is configured — a red line
+            // for each would blame seven subsystems for one panic somewhere else entirely, which is
+            // what this used to do with `ok: false`. `ok: false` on the report itself stays, so the
+            // cockpit still says something is wrong; it is now the report that is broken rather
+            // than everything it was asked about.
             .unwrap_or_else(|error| skein::health::HealthReport {
                 ok: false,
-                registry: skein::health::HealthCheck {
-                    ok: false,
-                    detail: error.to_string(),
-                },
-                sbx: skein::health::HealthCheck {
-                    ok: false,
-                    detail: "health task failed".into(),
-                },
-                git: skein::health::HealthCheck {
-                    ok: false,
-                    detail: "health task failed".into(),
-                },
-                gh: skein::health::HealthCheck {
-                    ok: false,
-                    detail: "health task failed".into(),
-                },
-                ai: skein::health::HealthCheck {
-                    ok: true,
-                    detail: "health task failed".into(),
-                },
-                probes: skein::health::HealthCheck {
-                    ok: false,
-                    detail: "health task failed".into(),
-                },
-                mailbox: skein::health::HealthCheck {
-                    ok: false,
-                    detail: "health task failed".into(),
-                },
-                memory: skein::health::HealthCheck {
-                    ok: true,
-                    detail: "health task failed".into(),
-                },
-                // `ok: true` like the other opt-in checks: the health task falling over says
-                // nothing about whether scoping is configured, and a red line here would blame
-                // GitHub for a panic somewhere else entirely.
-                gitgate: skein::health::HealthCheck {
-                    ok: true,
-                    detail: "health task failed".into(),
-                },
+                registry: skein::health::HealthCheck::unknown(format!(
+                    "the health check itself failed: {error}"
+                )),
+                sbx: skein::health::HealthCheck::unknown("the health check itself failed"),
+                git: skein::health::HealthCheck::unknown("the health check itself failed"),
+                gh: skein::health::HealthCheck::unknown("the health check itself failed"),
+                ai: skein::health::HealthCheck::unknown("the health check itself failed"),
+                probes: skein::health::HealthCheck::unknown("the health check itself failed"),
+                mailbox: skein::health::HealthCheck::unknown("the health check itself failed"),
+                memory: skein::health::HealthCheck::unknown("the health check itself failed"),
+                gitgate: skein::health::HealthCheck::unknown("the health check itself failed"),
                 logins: Vec::new(),
                 dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
