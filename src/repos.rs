@@ -502,6 +502,49 @@ impl Tree {
                 .unwrap_or(false)
     }
 
+    /// How many **lines of the tree mention** a symbol.
+    ///
+    /// Deliberately not "call sites", and the difference is the whole honesty of the number: `git
+    /// grep` cannot tell a call from a comment, a string, an unrelated field of the same name, or
+    /// the declaration itself. What it can say is how widely the word appears, which is a real
+    /// measure of how far a change reaches and is not a claim about calls. §11.1's mock-up says
+    /// "call sites"; this says mentions, because that is what can be derived rather than asserted.
+    ///
+    /// Whole words only (`-w`) and a fixed string (`-F`), so `check` does not match `checked` and a
+    /// symbol containing regex punctuation is not a pattern. Short symbols are refused outright: a
+    /// two-character name matches everything and the count would be noise wearing a number.
+    ///
+    /// `None` means *nothing was counted* — the tree could not be searched, or the symbol was not
+    /// worth searching for. It never means zero. A caller must render the two differently: "0
+    /// mentions" reads as "nothing uses this", which is the opposite of "we did not look".
+    pub fn mentions(&self, symbol: &str) -> Option<usize> {
+        let symbol = symbol.trim();
+        if symbol.len() < 3 || symbol.chars().any(|c| c.is_whitespace()) {
+            return None;
+        }
+        // Its own invocation rather than `git()`, because here a **failure exit is an answer**:
+        // `git grep` exits 1 when it matched nothing, and `git()` reports that as "no output" —
+        // indistinguishable from a tree it could not read. Anything above 1 is a real error.
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&self.mirror)
+            .args(["grep", "-I", "-F", "-w", "-c", "-e", symbol, "HEAD"]);
+        let out = bounded_output(&mut command, "git grep", Duration::from_secs(30)).ok()?;
+        match out.status.code() {
+            Some(0) => {}
+            Some(1) => return Some(0),
+            _ => return None,
+        }
+        // `HEAD:path/to/file:7` — the count is after the last colon, and a path may contain one.
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| l.rsplit(':').next()?.trim().parse::<usize>().ok())
+                .sum(),
+        )
+    }
+
     /// The commit that last touched `path`, or empty when git cannot answer.
     pub fn last_commit(&self, path: &str) -> String {
         self.git(&["log", "-1", "--format=%H", "HEAD", "--", path])

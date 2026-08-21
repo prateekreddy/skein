@@ -1417,7 +1417,7 @@ web-main · warden owns fleet lifecycle           3 modules · +412 −180
   ▸ operation     CHANGED  checks become tri-state; doers optional
   ▸ fleet         SHRANK   lifecycle moved out
 
-  ⚠ operation::check changed shape — 12 call sites
+  ⚠ operation::check changed shape — 12 mentions
 ```
 
 Each row opens: the module's **standing note** (what it is for), then what this change did to it, then
@@ -1431,6 +1431,15 @@ features rather than architecture ones:
   exactly the artifact this job needs, and it already exists.
 - **contract signals**, a mechanical scanner over the diff that escalates a change the model called
   boring. That is what fills the `⚠` line: the structural consequence a summary would miss.
+
+  The mock-up above said **call sites**, and the number is **mentions** — lines of the base tree that
+  name the symbol. The scanner now records the symbol it matched (`contracts::Signal::symbol`), which
+  is what made any count possible at all; what `git grep` can then answer is how many lines name it,
+  not how many of them are calls, because it cannot tell a call from a comment or a string. A
+  reviewer who trusts "12 call sites" and finds four is worse off than one who was told what was
+  counted. A signal whose detector could not name a symbol — a deleted file, a rename — shows **no
+  count**, never a zero: "0 mentions" reads as "nothing uses this", which is the opposite of "we did
+  not look".
 
 Both are **signals whose subject is a module** (§2.2). No new machinery.
 

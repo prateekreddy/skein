@@ -28,10 +28,18 @@
 //! # What is not free
 //!
 //! Per-module line counts and the movement classification are computed here, from the diff, and cost
-//! nothing beyond parsing it. **"N call sites" is not here** and is not an oversight: a contract
-//! signal carries prose — "the default changed" — not a symbol, so there is nothing to search the
-//! repository for without inventing one. Naming a symbol that was never identified would be a
-//! confident number about the wrong thing.
+//! nothing beyond parsing it. **The count beside a signal is not free and is not "call sites".**
+//!
+//! A contract signal now carries the `symbol` its scanner matched, so there is something to search
+//! the repository for — that was the missing half, and until it existed any number here would have
+//! been about a symbol nobody identified. What the search can answer is how often the word appears
+//! in the tree: `git grep` cannot tell a call from a comment, a string, or the declaration itself.
+//! So the number is **mentions** — lines of the tree that name it — said in those words. §11.1's mock-up says "call sites"; this is the
+//! honest version of it, and the difference is not pedantry — a reviewer who trusts "12 call sites"
+//! and finds four is worse off than one who was told what was counted.
+//!
+//! One fork per **distinct** symbol, on a view somebody asked for. Never on a tick: nothing on the
+//! board's path reaches [`of_diff`], and `tests/board_cost.rs` is what keeps that true.
 
 use crate::contracts::Signal;
 use crate::repos::Repo;
@@ -66,7 +74,7 @@ pub struct ModuleChange {
     /// The files in this module the change touched, repo-relative.
     pub files: Vec<String>,
     /// Contract signals found in those files, rolled up from where they were found.
-    pub signals: Vec<Signal>,
+    pub signals: Vec<Sighted>,
     /// The module's standing note, **only when it is fresh**.
     ///
     /// A stale note is skipped rather than shown: a description of code that has since changed is
@@ -76,6 +84,22 @@ pub struct ModuleChange {
     /// `fresh` | `stale` | `absent` — said, because "no note" and "a note nobody trusts" are
     /// different states and only one of them is worth offering to write.
     pub note_state: String,
+}
+
+/// A contract signal, and how widely the thing it names is mentioned.
+///
+/// The signal is flattened, so what a client already reads — `kind`, `what`, `file` — is unchanged
+/// and this is one optional field beside it.
+///
+/// `mentions` is **absent rather than zero** when the symbol could not be named or the tree could
+/// not be searched. "0 mentions" reads as "nothing uses this", which is the opposite of "we did not
+/// look", and a signal about a deleted file has no symbol by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Sighted {
+    #[serde(flatten)]
+    pub signal: Signal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<usize>,
 }
 
 /// One file's line movement, and whether it arrived or left.
@@ -134,6 +158,41 @@ pub fn files_in(diff: &str) -> Vec<FileChange> {
     out
 }
 
+/// Fill in how widely each named symbol is mentioned in the repository.
+///
+/// Separate from [`of_diff`] because it is the only part of the shape that leaves the process, and
+/// the boundary is worth being able to see: everything above is arithmetic over a diff, and this is
+/// `git grep` against the mirror. It is also what makes the rest testable without a repository.
+///
+/// The tree is opened **only if something has a symbol**, so a change with no named signals costs
+/// nothing at all.
+fn count_mentions(repo: &Repo, by_module: &mut std::collections::BTreeMap<String, ModuleChange>) {
+    let named = || {
+        by_module
+            .values()
+            .flat_map(|m| m.signals.iter())
+            .filter(|s| !s.signal.symbol.is_empty())
+    };
+    if named().next().is_none() {
+        return;
+    }
+    let Some(tree) = crate::repos::Tree::open(repo) else {
+        return;
+    };
+    let mut counted: std::collections::BTreeMap<String, Option<usize>> = Default::default();
+    let symbols: std::collections::BTreeSet<String> =
+        named().map(|s| s.signal.symbol.clone()).collect();
+    for symbol in symbols {
+        let found = tree.mentions(&symbol);
+        counted.insert(symbol, found);
+    }
+    for module in by_module.values_mut() {
+        for sighted in module.signals.iter_mut() {
+            sighted.mentions = counted.get(&sighted.signal.symbol).copied().flatten();
+        }
+    }
+}
+
 /// The shape of a change, one entry per module it touched.
 ///
 /// Ordered by **what is worth looking at**, not by size: a module carrying a contract signal comes
@@ -181,10 +240,18 @@ pub fn of_diff(repo: &Repo, diff: &str) -> Vec<ModuleChange> {
     for signal in signals {
         if let Some(module) = owner_of(&signal.file) {
             if let Some(entry) = by_module.get_mut(&module.path) {
-                entry.signals.push(signal);
+                entry.signals.push(Sighted {
+                    signal,
+                    mentions: None,
+                });
             }
         }
     }
+
+    // The count, once — and only for signals that survived the roll-up, since a signal in a file no
+    // module owns is never rendered and counting it would be a fork for nothing. One search per
+    // *distinct* symbol: a rename that trips two detectors on the same name is one question.
+    count_mentions(repo, &mut by_module);
 
     // The classification, once the module's files are all in.
     for entry in by_module.values_mut() {
@@ -388,6 +455,118 @@ new file mode 100644
         assert!(web.note.is_empty());
     }
 
+    /// The count beside a signal, and the two ways it must not lie.
+    ///
+    /// A symbol that was named is counted against the mirror — the base the change is measured
+    /// from, which is where "how far does this reach" is answered. A signal with no symbol carries
+    /// **no count at all**, and the serialised form must not contain the field: `"mentions": 0`
+    /// reads as "nothing uses this", which is the opposite of "we did not look", and it is the more
+    /// dangerous of the two because it is the reassuring one.
+    #[test]
+    fn a_named_symbol_is_counted_and_an_unnamed_one_is_not() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let seed = home.join("seed");
+        let mirror = home.join("repos/demo/mirror");
+        let git = "git -c user.email=t@example.com -c user.name=test -c init.defaultBranch=main";
+        // `check` is mentioned on four lines and `checked` on one — the near-miss is the point of
+        // the word boundary, and without it the count silently absorbs every longer name.
+        let script = format!(
+            "set -e; git init --bare -q -b main {m}; {git} init -q {s}; cd {s}; mkdir -p src; \
+             printf 'pub fn check(a: u8) {{}}\\n' > src/api.rs; \
+             printf 'check(1);\\ncheck(2);\\n// check again\\nchecked(3);\\n' > src/uses.rs; \
+             echo x > src/old.rs; \
+             {git} add -A; {git} commit -qm seed; {git} push -q {m} main",
+            m = mirror.display(),
+            s = seed.display(),
+            git = git
+        );
+        let made = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(&script)
+            .output()
+            .expect("bash");
+        assert!(
+            made.status.success(),
+            "could not build the fixture repo: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let repo = Repo {
+            id: "demo".into(),
+            source: seed.to_string_lossy().into_owned(),
+            source_tree: seed.to_string_lossy().into_owned(),
+            store: home.join("store").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: false,
+            sync_gateway_url: String::new(),
+        };
+
+        // One signal that can name what it matched, one that cannot.
+        let diff = "\
+diff --git a/src/api.rs b/src/api.rs
+--- a/src/api.rs
++++ b/src/api.rs
+@@
+-pub fn check(a: u8) {}
++let addr = env::var(\"SKEIN_NEW_THING\");
+diff --git a/src/old.rs b/src/old.rs
+deleted file mode 100644
+";
+        let shaped = of_diff(&repo, diff);
+        std::env::remove_var("SKEIN_HOME");
+
+        let module = shaped
+            .iter()
+            .find(|m| m.path == "src")
+            .expect("the change is under src");
+        let removed = module
+            .signals
+            .iter()
+            .find(|s| s.signal.symbol == "check")
+            .expect("the removed declaration was named");
+        assert_eq!(
+            removed.mentions,
+            Some(4),
+            "four lines mention `check`; `checked(3)` is not one of them"
+        );
+
+        // Counted, and the count is zero: nothing in the base tree names it, because the change is
+        // what introduces it. This is the case that makes the distinction load-bearing — zero and
+        // absent are different answers, and a scheme that could not tell them apart would have to
+        // pick one and be wrong about the other.
+        let fresh = module
+            .signals
+            .iter()
+            .find(|s| s.signal.symbol == "SKEIN_NEW_THING")
+            .expect("a new environment variable is a signal");
+        assert_eq!(fresh.mentions, Some(0));
+        assert!(
+            serde_json::to_string(fresh)
+                .unwrap()
+                .contains("\"mentions\":0"),
+            "a real zero is rendered; it is only an *uncounted* signal that shows nothing"
+        );
+
+        let deleted = module
+            .signals
+            .iter()
+            .find(|s| s.signal.symbol.is_empty())
+            .expect("a deleted file signals with no symbol");
+        assert_eq!(deleted.mentions, None);
+        let json = serde_json::to_string(deleted).unwrap();
+        assert!(
+            !json.contains("mentions"),
+            "an uncounted signal must render without a count, not with a zero: {json}"
+        );
+        assert!(
+            json.contains("\"kind\"") && json.contains("\"file\""),
+            "flattening must leave what a client already reads untouched: {json}"
+        );
+    }
+
     /// A one-line change that moved a contract outranks a thousand-line rename that moved nothing.
     ///
     /// The rule is about attention, not size, and it is the whole reason contract signals are in
@@ -403,10 +582,14 @@ new file mode 100644
             removed,
             files: Vec::new(),
             signals: (0..signals)
-                .map(|_| Signal {
-                    kind: "default-changed".into(),
-                    what: "the default moved".into(),
-                    file: format!("{path}/x.rs"),
+                .map(|_| Sighted {
+                    signal: Signal {
+                        kind: "default-changed".into(),
+                        what: "the default moved".into(),
+                        file: format!("{path}/x.rs"),
+                        symbol: "TIMEOUT".into(),
+                    },
+                    mentions: None,
                 })
                 .collect(),
             note: String::new(),

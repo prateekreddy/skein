@@ -30,6 +30,18 @@ pub struct Signal {
     pub what: String,
     /// The repo-relative file it was found in.
     pub file: String,
+    /// The name the scanner matched on — the constant, the environment variable, the removed
+    /// declaration — or empty where the detector genuinely cannot name one.
+    ///
+    /// `what` is prose, which is the right shape for reading and the wrong shape for searching:
+    /// "the default changed" cannot be grepped for. This is the same fact in the shape a search
+    /// takes, and it is what lets [`crate::shape`] say how widely the thing that moved is mentioned.
+    ///
+    /// **Empty is a real answer and must not be faked.** A deleted file and a rename are facts about
+    /// a path, not about a symbol; inventing one so every signal has a count would produce a
+    /// confident number about the wrong thing, which is worse than no number at all.
+    #[serde(default)]
+    pub symbol: String,
 }
 
 /// Everything the scanners found, capped and deduplicated.
@@ -68,11 +80,14 @@ pub fn scan(diff: &str) -> Vec<Signal> {
             flush(&file, &mut removed, &mut added, &mut out);
             file = path_from_git_header(rest);
         } else if line.starts_with("deleted file mode") {
+            // No symbol: a deleted file is a fact about a path. `shape` will show it without a
+            // count rather than with a zero.
             push(
                 &mut out,
                 "architecture",
                 format!("{file} was deleted"),
                 &file,
+                "",
             );
         } else if let Some(to) = line.strip_prefix("rename to ") {
             push(
@@ -80,6 +95,7 @@ pub fn scan(diff: &str) -> Vec<Signal> {
                 "architecture",
                 format!("{file} was renamed to {}", to.trim()),
                 &file,
+                "",
             );
         } else if let Some(rest) = line.strip_prefix("+++ ") {
             // A `+++ b/path` header names the file too, and some diffs have nothing else: `git
@@ -108,11 +124,12 @@ pub fn scan(diff: &str) -> Vec<Signal> {
     out
 }
 
-fn push(out: &mut Vec<Signal>, kind: &str, what: String, file: &str) {
+fn push(out: &mut Vec<Signal>, kind: &str, what: String, file: &str, symbol: &str) {
     let signal = Signal {
         kind: kind.to_string(),
         what,
         file: file.to_string(),
+        symbol: symbol.to_string(),
     };
     if !out.contains(&signal) {
         out.push(signal);
@@ -196,9 +213,27 @@ fn defaults(file: &str, removed: &[String], added: &[String], out: &mut Vec<Sign
             } else {
                 format!("{key}: {old} → {new}")
             };
-            push(out, kind, what, file);
+            push(out, kind, what, file, &identifier_in(&key));
         }
     }
+}
+
+/// The searchable name inside an assignment's left-hand side.
+///
+/// `key` is whatever was written to the left of the `=`, and in a typed language that is a
+/// declaration rather than a name: `const TIMEOUT: u64` is the key, `TIMEOUT` is the thing anybody
+/// would search the repository for. Everything up to the first `:` is the declaration, its last
+/// word is the name, and quotes come off because a JSON or YAML key wears them.
+///
+/// Empty when nothing identifier-shaped is left, which is the honest answer for a left-hand side
+/// like `a[0]` — a signal with no symbol shows no count.
+fn identifier_in(key: &str) -> String {
+    let head = key.split(':').next().unwrap_or(key);
+    let last = head.split_whitespace().next_back().unwrap_or("");
+    last.trim_matches(['"', '\''])
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
 }
 
 /// Split `NAME = value` / `name: value` into its two halves, normalised.
@@ -293,6 +328,7 @@ fn touches_env(file: &str, line: &str, out: &mut Vec<Signal>) {
             "interface",
             format!("environment variable {name}"),
             file,
+            &name,
         );
     }
 }
@@ -324,7 +360,9 @@ fn touches_route(file: &str, line: &str, out: &mut Vec<Signal>) {
         return;
     }
     if let Some(p) = quoted_path(line) {
-        push(out, "interface", format!("route {p}"), file);
+        // The path itself: it is a literal string in every client that calls it, so it searches
+        // exactly as well as an identifier does.
+        push(out, "interface", format!("route {p}"), file, &p);
     }
 }
 
@@ -364,6 +402,7 @@ fn public_removed(file: &str, line: &str, out: &mut Vec<Signal>) {
             "interface",
             format!("{name} was removed or renamed"),
             file,
+            &name,
         );
     }
 }
@@ -415,6 +454,69 @@ mod tests {
 
     fn kinds(diff: &str) -> Vec<(String, String)> {
         scan(diff).into_iter().map(|s| (s.kind, s.what)).collect()
+    }
+
+    /// Every signal that *can* name what it matched does, and the ones that cannot say nothing.
+    ///
+    /// `what` is prose and stays prose — it is what a person reads. The symbol is the same fact in
+    /// the shape a search takes, and without it a count beside a signal would be a number about
+    /// something nobody identified. The second half of this test is the part worth keeping: a
+    /// deleted file and a rename are facts about a *path*, and giving them a symbol so that every
+    /// signal has a count is exactly the dishonesty the field exists to avoid.
+    #[test]
+    fn a_signal_names_the_thing_it_matched_or_names_nothing() {
+        let named = |diff: &str| -> Vec<(String, String)> {
+            scan(diff).into_iter().map(|s| (s.what, s.symbol)).collect()
+        };
+
+        let defaults = named("diff --git a/src/a.rs b/src/a.rs\n@@\n-const TIMEOUT: u64 = 30\n+const TIMEOUT: u64 = 5\n");
+        assert_eq!(
+            defaults,
+            vec![(
+                // The prose keeps the whole left-hand side, because that is what the line said.
+                // The symbol is the part of it a search can use.
+                "const TIMEOUT: u64: 30 → 5".to_string(),
+                "TIMEOUT".to_string()
+            )]
+        );
+
+        let env =
+            named("diff --git a/src/a.rs b/src/a.rs\n@@\n+let v = env::var(\"SKEIN_ADDR\");\n");
+        assert_eq!(
+            env,
+            vec![(
+                "environment variable SKEIN_ADDR".to_string(),
+                "SKEIN_ADDR".to_string()
+            )]
+        );
+
+        let route =
+            named("diff --git a/src/a.rs b/src/a.rs\n@@\n-    .route(\"/api/boxes\", get(x))\n");
+        assert_eq!(
+            route,
+            vec![("route /api/boxes".to_string(), "/api/boxes".to_string())]
+        );
+
+        let removed = named("diff --git a/src/a.rs b/src/a.rs\n@@\n-pub fn check(a: u8) {}\n");
+        assert_eq!(
+            removed,
+            vec![(
+                "check was removed or renamed".to_string(),
+                "check".to_string()
+            )]
+        );
+
+        let gone = named("diff --git a/src/old.rs b/src/old.rs\ndeleted file mode 100644\n");
+        assert_eq!(gone.len(), 1);
+        assert!(
+            gone[0].1.is_empty(),
+            "a deleted file is a fact about a path — inventing a symbol for it would put a \
+             confident count beside the wrong thing"
+        );
+
+        let renamed =
+            named("diff --git a/src/a.rs b/src/b.rs\nrename from src/a.rs\nrename to src/b.rs\n");
+        assert!(renamed.iter().all(|(_, symbol)| symbol.is_empty()));
     }
 
     #[test]
