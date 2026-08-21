@@ -9,7 +9,22 @@ license = "MIT OR Apache-2.0"
 # column and the note "(separate binary)": it runs on the host, outside the fleet, and exists
 # precisely because skein cannot be trusted to authorise its own privileged operations. A shared
 # library is a shared blast radius, so the separation is a crate boundary rather than a convention.
+[lib]
+name = "skein_warden"
+path = "src/lib.rs"
+
+[[bin]]
+name = "skein-warden"
+path = "src/main.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
+
+# One feature per doer, and both in the default set. §8.3: only the DOER is removable, and a warden
+# that could not destroy could not resize either — resize is destroy + create (§7.3).
+[features]
+default = ["create", "destroy"]
+create = []
+destroy = []

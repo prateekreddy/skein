@@ -691,6 +691,41 @@ Two more that follow, and neither is an implementation detail:
 A compromised skein controls *what* is proposed and *when*. One outstanding request at a time, a rate
 limit, and the timeout §11.5 already names.
 
+### 8.6 Where it listens, and what it is spoken to in
+
+Left open by every earlier draft; decided here, and both halves have a reason rather than a
+preference.
+
+**Loopback, and nothing else.** A box reaches the host through the gateway address — the bridge IP
+that `host.docker.internal` resolves to — not through `127.0.0.1`, so a loopback listener answers
+host processes and nothing inside the sandbox. That is exactly the arrangement delivery step 3 wants:
+skein is still on the host, and both callers are exercised before anything moves. Step 4 is when this
+has to change, and §9.5 is where it gets decided — widening the bind now would create the exposure
+§9.4 describes ("reach to the warden over the gateway, indistinguishable from skein by address or
+uid") before anything needed it, while the mechanism that makes it safe is step 4a's shared secret.
+**Bind narrow; let the move be the thing that opens it, deliberately.**
+
+**A hand-written HTTP subset, and this is the one place that trade is made.** skein's rule is
+"compose, don't reinvent — standard wheels only", and it is right for skein. The warden is the
+exception because of what it is *for*: it exists to be the thing a compromised skein has to get past,
+so its dependency list is part of its argument, and `axum` would bring tokio, hyper, tower and their
+tree into the one process on the host that runs privileged commands. What is needed is one method,
+one path, a `Content-Length` body under a cap, from one client, on loopback.
+
+The subset is strict, and each restriction removes a class of bug rather than a feature: **one
+request per connection** (no keep-alive, no pipelining — which makes request smuggling impossible by
+construction rather than by two length rules agreeing), **`Content-Length` only** (`Transfer-Encoding`
+refused outright), **a duplicate `Content-Length` refused** rather than first-or-last winning, and
+caps on the request line, the headers and the body, all read through a bounded reader.
+
+**A doer that was not built answers 404, not 403.** "This warden cannot" and "this warden will not"
+are different facts, and a client told the wrong one retries the wrong thing.
+
+**`state` and `ok` are two fields on every reply**, because they are two questions: `state` is what
+the *warden* did — ran it, answered from the record, cannot say — and `ok` is what the *operation*
+did. Collapsing them makes a replayed failure indistinguishable from a fresh one, which is the whole
+of §8.2 lost in a rendering decision.
+
 ## 9. The trust model
 
 Rewritten twice. The first draft asserted a namespace escape was "the only way through", which was

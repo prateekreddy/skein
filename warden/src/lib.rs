@@ -8,4 +8,10 @@
 //! and the note "(separate binary)", and the reason is the whole point of the component: the warden
 //! is what a compromised skein has to get past. A shared library is a shared blast radius.
 
+pub mod audit;
+pub mod capability;
+pub mod doer;
 pub mod outcome;
+pub mod serve;
+pub mod sightings;
+pub mod wire;
