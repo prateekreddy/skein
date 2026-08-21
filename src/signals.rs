@@ -1376,6 +1376,139 @@ mod tests {
         }
     }
 
+    /// **Recovery**, case by case — the property the fusion rules exist for.
+    ///
+    /// The bug class is precise: *an edge-triggered latch with incomplete edge coverage cannot
+    /// recover, and a state nobody clears is shown for ever.* So the cases worth enumerating are not
+    /// the ones where the edges arrive correctly — they are the ones where an edge is missing, late,
+    /// unknown or impossible, and the question each asks is the same: **does the next level sample
+    /// clear it, or does it latch?**
+    ///
+    /// Each case names what it is a case OF, because a table of inputs and outputs with no names is
+    /// a list of things somebody once observed rather than a statement about the system.
+    #[test]
+    fn a_state_nobody_cleared_is_cleared_by_the_next_level_sample() {
+        struct Case {
+            /// What went wrong upstream — the reason this edge is the way it is.
+            what: &'static str,
+            edge: Option<(String, i64)>,
+            /// The level sample that arrives afterwards, and must settle it.
+            level: Option<(Screen, i64)>,
+            recovers_to: Option<&'static str>,
+        }
+        let blocked = |ts: i64| Some(("blocked".to_string(), ts));
+        let cases = [
+            Case {
+                // A Notification fired and the Stop that would clear it never did — the turn ended
+                // in a way the hook did not see. This is the twenty-minute bug in one line.
+                what: "a hook that never fired",
+                edge: blocked(1000),
+                level: Some((Screen::Waiting, 1200)),
+                recovers_to: Some("waiting"),
+            },
+            Case {
+                // The box died between the event and the write, so the edge is the last thing
+                // anyone said about it and the screen is now a shell prompt.
+                what: "a process that died after the event",
+                edge: blocked(1000),
+                level: Some((Screen::Dead, 1200)),
+                recovers_to: Some("ended"),
+            },
+            Case {
+                // Two writers, and the older one landed last. The level sample is newer than both,
+                // so it decides — which is what makes ordering a non-problem rather than a fix.
+                what: "an edge that arrived out of order",
+                edge: blocked(900),
+                level: Some((Screen::Busy, 1200)),
+                recovers_to: Some("working"),
+            },
+            Case {
+                // A probe from a newer skein, or a typo in a hook: a status string this build has
+                // no meaning for. It must not be treated as an outcome that outranks the screen.
+                what: "an edge whose status is not one skein knows",
+                edge: Some(("marinating".to_string(), 1300)),
+                level: Some((Screen::Waiting, 1200)),
+                recovers_to: Some("waiting"),
+            },
+            Case {
+                // Clock skew between host and guest. `pane_is_fresh` tolerates a future-dated
+                // sample on purpose — dropping it would silently disable the whole level layer —
+                // and fusion must too, or skew becomes a latch.
+                what: "a level sample from a clock that runs fast",
+                edge: blocked(1000),
+                level: Some((Screen::Waiting, 9_999_999_999)),
+                recovers_to: Some("waiting"),
+            },
+            Case {
+                // Nothing to recover from and nothing to recover with: liveness decides downstream,
+                // and fusion must not invent a state to fill the gap.
+                what: "no edge and no sample at all",
+                edge: None,
+                level: None,
+                recovers_to: None,
+            },
+        ];
+        for Case {
+            what,
+            edge,
+            level,
+            recovers_to,
+        } in cases
+        {
+            let (state, _, _) = fuse_status(edge.clone(), level);
+            assert_eq!(
+                state.as_deref(),
+                recovers_to,
+                "{what}: the state did not settle where the level sample says it should"
+            );
+            // And the latch itself: with NO level sample the edge is still shown, which is right —
+            // it is the only thing anyone has said. The pairing is the point. A rule that cleared
+            // it here would throw away the only signal on a box with no observer at all.
+            if let Some((status, _)) = &edge {
+                let (latched, _, from) = fuse_status(edge.clone(), None);
+                assert_eq!(
+                    latched.as_deref(),
+                    Some(status.as_str()),
+                    "{what}: the edge was discarded when it was the only thing there was"
+                );
+                assert_eq!(
+                    from,
+                    StatusFrom::Edge,
+                    "{what}: an edge shown alone must say that is what it is"
+                );
+            }
+        }
+    }
+
+    /// An edge and a sample in the same second: the sample decides.
+    ///
+    /// The tie-break is `>` with a second of slack (`ts > level_ts + 1`), and it leans towards the
+    /// screen on purpose. Hook and observer clocks are not the same clock, and the screen is
+    /// re-readable while the edge is lossy — so when they are indistinguishable in time, the one
+    /// that can correct itself next second should win.
+    #[test]
+    fn an_edge_and_a_sample_in_the_same_second_let_the_sample_decide() {
+        for skew in [-1, 0, 1] {
+            let (state, _, from) = fuse_status(
+                Some(("blocked".to_string(), 1200 + skew)),
+                Some((Screen::Waiting, 1200)),
+            );
+            assert_eq!(
+                state.as_deref(),
+                Some("waiting"),
+                "an edge {skew}s from the sample outranked it"
+            );
+            assert_eq!(from, StatusFrom::Screen);
+        }
+        // Two seconds ahead is a genuinely later event, and leads.
+        let (state, _, from) = fuse_status(
+            Some(("blocked".to_string(), 1202)),
+            Some((Screen::Waiting, 1200)),
+        );
+        assert_eq!(state.as_deref(), Some("blocked"));
+        assert_eq!(from, StatusFrom::EdgeAheadOfScreen);
+    }
+
     #[test]
     fn fuse_status_clears_an_edge_that_nothing_ever_cleared() {
         // The bug, as recorded in this box's own hook-log: `blocked` written at 13:27, nothing until
