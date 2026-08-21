@@ -71,7 +71,7 @@ pub fn create(approver: &dyn Approver, request: &Request) -> Result<String, Stri
         request.args.join(" ")
     );
     approver.approve(request, &what)?;
-    run("sbx", &argv_create(request))
+    run(&argv_create(request))
 }
 
 /// Destroy it.
@@ -79,7 +79,7 @@ pub fn create(approver: &dyn Approver, request: &Request) -> Result<String, Stri
 pub fn destroy(approver: &dyn Approver, request: &Request) -> Result<String, String> {
     let what = format!("`sbx rm -f {}` — THIS DESTROYS THE FLEET", request.sandbox);
     approver.approve(request, &what)?;
-    run("sbx", &argv_destroy(request))
+    run(&argv_destroy(request))
 }
 
 /// The argv a create will run, as its own function so it is a contract rather than a detail.
@@ -99,16 +99,23 @@ pub fn argv_destroy(request: &Request) -> Vec<String> {
     vec!["rm".to_string(), "-f".into(), request.sandbox.clone()]
 }
 
+/// Run `sbx`.
+///
+/// The program is spelled here as a literal rather than passed in, and that is not a style
+/// preference: `tools/source-check.py` finds a reach by looking for `Command::new("sbx")`, and a
+/// `Command::new(program)` with the name arriving as an argument is a crossing the law cannot see.
+/// The first version of this function took the program as a parameter and the checker went quiet on
+/// the most privileged reach in the system.
 #[cfg(any(feature = "create", feature = "destroy"))]
-fn run(program: &str, argv: &[String]) -> Result<String, String> {
-    let out = std::process::Command::new(program)
+fn run(argv: &[String]) -> Result<String, String> {
+    let out = std::process::Command::new("sbx")
         .args(argv)
         .output()
-        .map_err(|e| format!("could not run `{program}`: {e}"))?;
+        .map_err(|e| format!("could not run `sbx`: {e}"))?;
     match out.status.success() {
         true => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
         false => Err(format!(
-            "`{program} {}` exited {}: {}",
+            "`sbx {}` exited {}: {}",
             argv.join(" "),
             out.status
                 .code()

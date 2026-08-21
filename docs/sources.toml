@@ -7,6 +7,10 @@
 #
 # architecture.md §2.3 is the design; `src/source.rs` is the taxonomy, and its own test
 # checks itself against §2.3.
+#
+# Two crates are read. `warden/…` units are the host service (§8), which is deliberately not
+# part of skein — and is the one component whose reaches matter most, because it is the
+# process that runs `sbx create` and `sbx rm`.
 
 [enter]
 spelled_in = ["place"]
@@ -18,7 +22,15 @@ spelled_in = ["fleet", "place", "sandbox"]
 spelled_in = []
 
 [http]
-spelled_in = ["gitgate", "github", "place", "repos"]
+# `warden/serve` is the warden's own listener, not a client: it is the far end of §2.3's "http
+# reaches GitHub, and the warden". Loopback only — see §8.6 for why, and for when that changes.
+spelled_in = ["gitgate", "github", "place", "repos", "warden/serve"]
 
 [sbx]
-spelled_in = ["bin/skein", "repos", "sbx"]
+# The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and
+# `sbx rm -f` are spelled, and nothing reaches them without a human at the host approving the
+# operation (§8.1). `warden/sightings` is the read-only listing, which decides nothing.
+#
+# skein's three are what delivery step 3 is retiring: create and destroy move behind the warden,
+# and this list is how that is checked rather than believed.
+spelled_in = ["bin/skein", "repos", "sbx", "warden/doer", "warden/sightings"]

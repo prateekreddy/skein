@@ -15,6 +15,9 @@ fixture that spells `nsenter` in an assertion is describing the code, not reachi
 is brace-matched rather than "everything after the marker" because the cheap version stops reading
 at the test module and every item below it becomes invisible.
 
+Both crates are read: `src/` and `warden/src/`. The warden runs the privileged commands, so a
+checker that stopped at skein would be silent about the reaches that matter most.
+
   python3 tools/source-check.py           check
   python3 tools/source-check.py --update  rewrite the allow-list from the code
   python3 tools/source-check.py --show    print where each Source is spelled
@@ -24,6 +27,11 @@ import os, re, sys, collections, tomllib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
+# The warden is a separate crate (architecture §14, "separate binary"), and it is the ONE component
+# whose reaches matter most: it is the process on the host that runs `sbx create` and `sbx rm`. A
+# checker that stopped at `src/` would go quiet exactly there, which is the condition it exists to
+# end. Its units are prefixed so `warden/doer` and `doer` can never be confused for each other.
+WARDEN = os.path.join(ROOT, "warden", "src")
 SPEC = os.path.join(ROOT, "docs", "sources.toml")
 
 # How each Source is spelled in Rust. Deliberately the PRIMITIVE, not the wrapper: `place.exec()` is
@@ -84,6 +92,10 @@ def units():
     for f in sorted(os.listdir(binaries)):
         if f.endswith(".rs"):
             yield "bin/" + f[:-3], os.path.join(binaries, f)
+    if os.path.isdir(WARDEN):
+        for f in sorted(os.listdir(WARDEN)):
+            if f.endswith(".rs"):
+                yield "warden/" + f[:-3], os.path.join(WARDEN, f)
 
 
 def read_reaches():

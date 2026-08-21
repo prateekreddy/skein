@@ -15,7 +15,11 @@ that were not there — `gitgate -> apiauth` because both used the word `token`.
 2. **No growing knot.** The strongly-connected components are recorded with their members. A module
    joining one, or a new one forming, fails — because a cycle is the one structural fault that is
    cheap to add and expensive to remove, and today's is already 18 modules wide.
-3. **The destination table is consistent with itself.** `[destination.*]` is architecture.md §14.
+3. **The warden stays a separate crate.** §14 gives it an empty depends-on column and the note
+   "(separate binary)" — it is what a compromised skein has to get past, so a shared library would be
+   a shared blast radius. That boundary is enforced by nothing except nobody having written the
+   dependency, so this checks the manifest and the source both.
+4. **The destination table is consistent with itself.** `[destination.*]` is architecture.md §14.
    Every dependency it names must be a module it declares, and the graph must be acyclic. §14 is a
    design nobody can run yet; this is the only way it can be wrong out loud rather than quietly.
 
@@ -258,6 +262,46 @@ def show(edges, title):
         print("%s\t%s\t%d" % (consumer, provider, n))
 
 
+def check_warden_is_separate(complain):
+    """§14 gives the `warden` module an empty depends-on column and the note "(separate binary)".
+
+    Everything else in this file is about edges *within* one crate. This one is the opposite claim
+    and needs its own check, because a crate boundary is enforced by nothing except nobody having
+    written the dependency — and the moment someone does, the warden is sharing a blast radius with
+    the component it exists to be independent of.
+
+    Read off the manifest and off the source, because either alone can be defeated: a `[dependencies]`
+    entry with no `use` is still a linked crate, and a `use skein::` with no entry does not build but
+    says what somebody meant.
+    """
+    manifest = os.path.join(ROOT, "warden", "Cargo.toml")
+    if not os.path.exists(manifest):
+        return
+    text = open(manifest, encoding="utf-8").read()
+    body = text.split("[dependencies]", 1)[-1]
+    for line in body.splitlines():
+        name = line.split("=")[0].strip()
+        if name in ("skein", "skein-warden"):
+            complain(
+                "`warden/Cargo.toml` depends on `%s`" % name,
+                "architecture §14 gives the warden an empty depends-on column: it is what a "
+                "compromised skein has to get past, and a shared library is a shared blast radius",
+            )
+    src = os.path.join(ROOT, "warden", "src")
+    if not os.path.isdir(src):
+        return
+    for f in sorted(os.listdir(src)):
+        if not f.endswith(".rs"):
+            continue
+        code = uncommented(open(os.path.join(src, f), encoding="utf-8").read())
+        if re.search(r"\bskein::", code):
+            complain(
+                "`warden/src/%s` names `skein::`" % f,
+                "the warden must not reach into skein's code — see §14 and the crate note in "
+                "warden/src/lib.rs",
+            )
+
+
 def main():
     code, tests = read_edges()
     if "--update" in sys.argv:
@@ -279,6 +323,7 @@ def main():
     check_destination(spec, complain)
     check_current(spec, code, complain)
     check_cycles(spec, code, complain)
+    check_warden_is_separate(complain)
 
     if problems:
         for what, rule in problems:
