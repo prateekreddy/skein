@@ -167,6 +167,14 @@ pub fn used_kb(dir: &Path) -> Option<u64> {
 /// Everything else travels, because nothing else under `$SKEIN_HOME` is disposable. Box checkouts
 /// are on VM-local disk and reclonable from the mirror, caches and build output are in the sandbox —
 /// none of them is here to skip.
+///
+/// **A store's contents travel bit-for-bit, and that is correct — established, not assumed.** The
+/// worry is a path baked *inside* a store, where a stale entry sits beside a working one and the box
+/// comes up fine while announcing a failure at every start. Nothing written today does that: every
+/// hook command is `$CLAUDE_PROJECT_DIR/.claude/skein/bin/...`, resolved inside the box, and
+/// `a_store_holds_no_path_into_the_volume_it_was_written_on` builds a store and searches it, so that
+/// stays true rather than being a claim about the writers. The exception is the two markers a store
+/// can be old enough to hold — see [`markers`] — and those are rewritten with the rest.
 pub fn migrate(target: &str) -> Result<String, String> {
     // Expanded here rather than by the caller: `skein migrate '~/vol'` quoted past the shell is the
     // same request as the unquoted one, and a directory literally named `~` is nobody's intent.
@@ -364,7 +372,53 @@ fn repoint(source: &Path, target: &Path) -> Result<usize, String> {
         let bytes = serde_json::to_vec_pretty(&repos).map_err(|e| e.to_string())?;
         write_atomic(&file, target, &bytes)?;
     }
-    Ok(moved)
+    // After the rewrite above, so the store paths it reads are the ones on **this** volume. Reading
+    // the file from disk again would have been worse than redundant: when nothing needed rewriting,
+    // the stores still name the old home, and "fixing" a marker there would write into the volume
+    // this command promises not to touch.
+    Ok(moved + markers(&old, &new, &repos))
+}
+
+/// The same rewrite, for the two path markers a store can be *old enough* to hold.
+///
+/// Nothing skein writes today puts a volume path inside a store — every hook command is
+/// `$CLAUDE_PROJECT_DIR/.claude/skein/bin/…`, resolved inside the box, and
+/// `a_store_holds_no_path_into_the_volume_it_was_written_on` is what keeps that true. But
+/// `sandbox-bootstrap.sh` still *reads* `skein/source` and `skein/mirror`, "for stores seeded before
+/// the two things had separate names", and `skein/mirror` named a path under the volume. A store
+/// that old travels bit-for-bit — correctly, for its contents — and then a box in the new
+/// installation works from a mirror in the **old** one.
+///
+/// Bounded to the store directories the repo list names, and to a single line whose content is under
+/// the old home. A marker pointing somewhere else is somebody's deliberate choice, exactly as in
+/// [`repoint`].
+fn markers(old: &str, new: &str, repos: &[serde_json::Value]) -> usize {
+    let mut moved = 0usize;
+    for repo in repos {
+        let Some(store) = repo.get("store").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Only stores on the new volume. One outside it is shared with the old installation, and one
+        // still naming the old home is the old installation's own — neither is this move's to edit.
+        if !store.starts_with(&format!("{new}/")) {
+            continue;
+        }
+        for name in ["skein/source", "skein/mirror"] {
+            let file = Path::new(store).join(name);
+            let Ok(body) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let line = body.lines().next().unwrap_or("").trim().to_string();
+            if line.is_empty() || !(line == old || line.starts_with(&format!("{old}/"))) {
+                continue;
+            }
+            let rewritten = format!("{new}{}\n", &line[old.len()..]);
+            if fs::write(&file, rewritten).is_ok() {
+                moved += 1;
+            }
+        }
+    }
+    moved
 }
 
 /// Kilobytes as something a person reads.
@@ -380,6 +434,66 @@ fn human(kb: u64) -> String {
 mod tests {
     use super::*;
     use crate::testutil::{env_lock, tempdir};
+
+    /// Every file a fresh store is built with, so a path into the volume cannot hide in one.
+    fn every_file(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match path.is_dir() {
+                true => every_file(&path, out),
+                false => out.push(path),
+            }
+        }
+    }
+
+    /// The other half of a move, and the one that would have broken quietly.
+    ///
+    /// `repos.json` records where each store is, and [`repoint`] rewrites those. This asks the
+    /// opposite question: can a store hold a path back into the volume it was written on? If it can,
+    /// a moved installation reads the OLD volume from inside a store that travelled correctly — and
+    /// a hook command is the worst case, because a stale entry sits *beside* the working one, so the
+    /// box comes up fine and announces a hook failure at every start, which reads as noise.
+    ///
+    /// Established by building a store and searching it, rather than by reading the writers and
+    /// concluding: the writers are `kit::ensure_store` and `probes::ensure_probe_in` between them,
+    /// and a claim about what they emit is exactly the kind that drifts. This is why no rewriter was
+    /// written — every hook command is `$CLAUDE_PROJECT_DIR/.claude/skein/bin/…`, resolved inside
+    /// the box at run time, and the only absolute path in the whole store is the one this test
+    /// would catch if somebody added it.
+    #[test]
+    fn a_store_holds_no_path_into_the_volume_it_was_written_on() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let store = home.join("repos/demo/store/.claude");
+        let made = crate::kit::ensure_store(&store);
+        std::env::remove_var("SKEIN_HOME");
+        made.expect("a store is built");
+
+        let volume = home.to_string_lossy().into_owned();
+        let mut files = Vec::new();
+        every_file(&store, &mut files);
+        assert!(
+            files.len() > 10,
+            "the store came up nearly empty: {files:?}"
+        );
+        let mut naming: Vec<String> = Vec::new();
+        for file in &files {
+            let Ok(body) = fs::read(file) else { continue };
+            if String::from_utf8_lossy(&body).contains(&volume) {
+                naming.push(file.strip_prefix(&store).unwrap().display().to_string());
+            }
+        }
+        assert!(
+            naming.is_empty(),
+            "these files name the volume they were written on, so a moved installation would read \
+             the old one from inside a store that travelled correctly: {naming:?}\n\
+             a path a box needs belongs under $CLAUDE_PROJECT_DIR, which is resolved inside the box"
+        );
+    }
 
     /// A populated volume: enough shapes that a copy which skipped one would be caught.
     fn populate(home: &Path) {
@@ -532,6 +646,32 @@ mod tests {
         )
         .unwrap();
 
+        // A store old enough to hold the marker `sandbox-bootstrap.sh` still reads "for stores
+        // seeded before the two things had separate names". It names the mirror under this volume,
+        // and travelling bit-for-bit is exactly what makes it wrong afterwards.
+        let legacy = home.join("repos/inside/store/.claude/skein");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("mirror"),
+            format!("{}\n", home.join("repos/inside/mirror").display()),
+        )
+        .unwrap();
+        // And one that points somewhere else entirely, which is somebody's deliberate choice.
+        // A sibling that SHARES the volume's prefix: `~/.skein-old` beside `~/.skein` is a
+        // different installation, and a prefix test without the separator would move it.
+        let kept = std::path::PathBuf::from(format!("{}-elsewhere", home.display()))
+            .join("their-own-checkout");
+        fs::write(legacy.join("source"), format!("{}\n", kept.display())).unwrap();
+        // A store outside the volume, whose marker names the OLD volume: it is shared with the
+        // installation being left behind, so editing it would reach into what this move must not
+        // touch.
+        fs::create_dir_all(outside.join("skein")).unwrap();
+        fs::write(
+            outside.join("skein/mirror"),
+            format!("{}\n", home.join("repos/elsewhere/mirror").display()),
+        )
+        .unwrap();
+
         let elsewhere_dir = tempdir();
         let target = elsewhere_dir.join("volume");
         let report = migrate(&target.to_string_lossy()).unwrap();
@@ -573,6 +713,28 @@ mod tests {
             "a store outside the volume was rewritten"
         );
         assert!(report.contains("Repointed"), "{report}");
+
+        // The legacy markers: the one that named this volume now names the new one, the one that
+        // named somewhere else is untouched, and the store outside the volume was never opened.
+        let moved_marker =
+            fs::read_to_string(target.join("repos/inside/store/.claude/skein/mirror")).unwrap();
+        assert_eq!(
+            moved_marker.trim(),
+            target.join("repos/inside/mirror").to_string_lossy(),
+            "a box in the new installation would work from a mirror in the old one"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("repos/inside/store/.claude/skein/source"))
+                .unwrap()
+                .trim(),
+            kept.to_string_lossy(),
+            "a marker pointing outside the volume is somebody's deliberate choice"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("skein/mirror")).unwrap().trim(),
+            home.join("repos/elsewhere/mirror").to_string_lossy(),
+            "a store shared with the old installation was written to by a move that promises not to"
+        );
     }
 
     /// Every refusal, and each one names a state somebody can be in for a good reason.
