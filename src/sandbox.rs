@@ -436,7 +436,7 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
         // Settled by the wrapper above, on this branch and on the one below it: the invalidation
         // used to live here, and the `sbx stop` path underneath returned without one.
         return own_sandbox(&rec.sandbox)
-            .exec(&stop_script(name, &rec.sock), Duration::from_secs(30))
+            .exec(&stop_script(name, &rec), Duration::from_secs(30))
             .map(|_| ());
     }
     let (_out, err, code) = run_shell(&stop_command(name))?;
@@ -456,11 +456,13 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
 ///
 /// The socket is unlinked last. It is what `place::liveness_probe` asks about, so removing it before
 /// the processes are gone would make the box read as stopped while it was still running.
-pub(crate) fn stop_script(name: &str, sock: &str) -> String {
+pub(crate) fn stop_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
     format!(
-        "tmux -S {sock} kill-server 2>/dev/null; {kill}; rm -f {sock}; exit 0",
-        sock = sh_quote(sock),
+        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; rm -f {sock}; exit 0",
+        look = crate::fleet::namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
+        sock = sh_quote(&rec.sock),
         kill = crate::fleet::box_cgroup_kill(name),
+        sweep = crate::fleet::namespace_sweep(),
     )
 }
 
@@ -471,12 +473,14 @@ pub(crate) fn stop_script(name: &str, sock: &str) -> String {
 /// rather than once: `cgroup.kill` signals, and the members are reaped a moment later. Left behind,
 /// every destroyed box accumulates an empty cgroup, and a box later given the same name inherits the
 /// old one's limits instead of the current settings.
-pub(crate) fn destroy_script(name: &str, sock: &str) -> String {
+pub(crate) fn destroy_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
     format!(
-        "tmux -S {sock} kill-server 2>/dev/null; {kill}; rm -rf {root}; \
+        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; rm -rf {root}; \
          for _ in 1 2 3 4 5; do sudo rmdir {cgroup} 2>/dev/null && break; sleep 0.2; done; exit 0",
-        sock = sh_quote(sock),
+        look = crate::fleet::namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
+        sock = sh_quote(&rec.sock),
         kill = crate::fleet::box_cgroup_kill(name),
+        sweep = crate::fleet::namespace_sweep(),
         root = sh_quote(&box_root(name)),
         cgroup = sh_quote(&crate::fleet::box_cgroup(name)),
     )
@@ -612,8 +616,7 @@ fn destroy_box_inner(name: &str) -> Result<(), String> {
         // that shares the box's name would destroy someone else's work. Kill the server, then the
         // tree: the checkout is VM-local, so this is the destructive step `destroy_command`
         // documents, just aimed at the right thing.
-        own_sandbox(&rec.sandbox)
-            .exec(&destroy_script(name, &rec.sock), Duration::from_secs(120))?;
+        own_sandbox(&rec.sandbox).exec(&destroy_script(name, &rec), Duration::from_secs(120))?;
         forget_place(name);
         // Same reason as `stop_box`, and worse here: the box is not merely stopped, it is gone, and
         // a sweep serving its last good answer would keep a destroyed box on the board.
@@ -807,6 +810,17 @@ pub(crate) fn agent_attach_argv(
 
 /// Stop one runtime's persistent tmux process without touching the sandbox or another provider's
 /// native session. Reattaching recreates it through that adapter's native resume command.
+///
+/// **Its scope is the agent's session and nothing else, deliberately.** This and [`stop_box`] read
+/// like the same act and are not: the box keeps running here, and everything else in it keeps
+/// running with it — the box's own shell, another runtime's session, and whatever the agent left in
+/// the background. A `kill-session` that also swept the box's mount namespace would take a dev
+/// server somebody deliberately left up, on a button whose label is "restart the agent".
+///
+/// The other act has a name now: `skein restart <box>` stops the box — every process in it — and
+/// starts it again, which is also what rebuilds its isolation from the current launcher. So the two
+/// are distinguishable by what the person asked for rather than by what a signal happens to reach,
+/// which is what they were not when this only ever ended the pane's process group.
 pub fn restart_agent_session(name: &str, runtime: Option<&str>) -> Result<(), String> {
     if !valid_name(name) {
         return Err("invalid box name".into());
@@ -1134,6 +1148,20 @@ mod tests {
         env::remove_var("SKEIN_HOME");
     }
 
+    /// A placement standing only for its socket — the anchor deliberately unverifiable, so the
+    /// namespace sweep skips itself and what is left under test is the cgroup half.
+    ///
+    /// Empty `generation` is not a shortcut: it is the shape of every record written before the
+    /// stamp existed, and [`crate::fleet::namespace_kill`] treats it as "cannot be checked", which
+    /// is the only safe reading. A test that handed it a *verifiable* anchor would be a test that
+    /// sweeps this machine's own namespace.
+    fn placed_at(sock: &std::path::Path) -> crate::place::PlaceRecord {
+        crate::place::PlaceRecord {
+            sock: sock.to_string_lossy().into_owned(),
+            ..Default::default()
+        }
+    }
+
     /// Run the stop script for real, and watch it reach a process that left the tmux tree.
     ///
     /// The cgroup step is pointed at a scratch directory, because **a box cannot make a real
@@ -1153,7 +1181,7 @@ mod tests {
         let sock = dir.join("session.sock");
         fs::write(&sock, "").unwrap();
 
-        let ran = run_as_root(&stop_script("thing-x", &sock.to_string_lossy()), &dir);
+        let ran = run_as_root(&stop_script("thing-x", &placed_at(&sock)), &dir);
         assert_eq!(ran, 0, "stopping a box must not fail on the way out");
         assert_eq!(
             fs::read_to_string(cg.join("cgroup.kill")).unwrap().trim(),
@@ -1171,10 +1199,7 @@ mod tests {
         let bare_sock = bare.join("session.sock");
         fs::write(&bare_sock, "").unwrap();
         assert_eq!(
-            run_as_root(
-                &stop_script("thing-x", &bare_sock.to_string_lossy()),
-                &bare
-            ),
+            run_as_root(&stop_script("thing-x", &placed_at(&bare_sock)), &bare),
             0,
             "a box without a cgroup must stop rather than report an error"
         );
@@ -1200,7 +1225,7 @@ mod tests {
         let sock = dir.join("session.sock");
         fs::write(&sock, "").unwrap();
 
-        let ran = run_as_root(&destroy_script("thing-x", &sock.to_string_lossy()), &dir);
+        let ran = run_as_root(&destroy_script("thing-x", &placed_at(&sock)), &dir);
         env::remove_var("SKEIN_FLEET_ROOT");
         assert_eq!(
             ran, 0,

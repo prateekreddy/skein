@@ -58,6 +58,18 @@ fn main() {
                     .into(),
             ),
         },
+        "stop" => match rest.first() {
+            Some(name) => cmd_stop(name),
+            None => Err("usage: skein stop <box>   (the box's work stays on disk)".into()),
+        },
+        "restart" => match rest.first() {
+            Some(name) => cmd_restart(name, &rest[1..]),
+            None => Err(
+                "usage: skein restart <box> [--branch <branch>] [--agent <runtime>] [--attach]"
+                    .into(),
+            ),
+        },
+        "pull" => cmd_pull(rest.first().map(String::as_str)),
         "login" => cmd_login(rest.first().map(String::as_str)),
         "resize" => {
             // `--disk` rather than a third positional: disk is the one of the three that is usually
@@ -121,6 +133,9 @@ skein add <url|path>  register a repo (clones a URL; adopts a path in place)\n  
 skein repos           list registered repos\n  \
 skein remove <id>     unregister a repo (files left on disk)\n  \
 skein start <box>     bring a box up inside the shared sandbox (see fleet_sandbox)\n  \
+skein stop <box>      end every process in the box; its checkout and branch stay\n  \
+skein restart <box>   stop then start — rebuilds the box's isolation from this skein\n  \
+skein pull [<repo>]   refresh the mirror boxes clone from (every repo if none named)\n  \
 skein login <runtime> authenticate once in the shared sandbox; every box inherits it\n  \
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
                       (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
@@ -776,6 +791,88 @@ fn have(prog: &str) -> bool {
 /// of round-trips into the sandbox, each consuming the previous one's side effects: the anchor pid
 /// does not exist until the session runs, and provisioning has to go through the placement that pid
 /// produces. `skein attach` then behaves exactly as it always has.
+/// `skein pull [<repo-id>]` — refresh the mirror boxes clone from.
+///
+/// A verb because skein already told people to run it: `ensure_mirror`'s failure says
+/// "`skein pull <id>` makes one", and until now that printed `unknown command`. The mirror is what
+/// a new box clones from, so a repo without one falls back to the network or to the host checkout —
+/// slower for a URL repo, and unreachable for an adopted one whose checkout is no longer mounted.
+///
+/// Every repo when none is named, because "the mirrors are stale" is the usual shape of the problem
+/// and naming them one at a time is a chore. Failures are collected rather than fatal: one
+/// unreachable remote must not stop the others being refreshed, and the point of running this is
+/// usually the others.
+fn cmd_pull(id: Option<&str>) -> Result<(), String> {
+    let repos = skein::repos::load_repos();
+    let wanted: Vec<_> = match id {
+        Some(id) => repos.iter().filter(|r| r.id == id).collect(),
+        None => repos.iter().collect(),
+    };
+    if wanted.is_empty() {
+        return Err(match id {
+            Some(id) => format!("no registered repo {id:?} — `skein repos` to check"),
+            None => "no repos are registered — `skein add <git-url|path>` first".into(),
+        });
+    }
+    // The doctor's marks, local to it — borrowed here rather than hoisted, because a listing that
+    // is going to grow a third state is not the reason to make three constants global.
+    const OK: &str = "\x1b[32m✓\x1b[0m";
+    const BAD: &str = "\x1b[31m✗\x1b[0m";
+    let mut failures = Vec::new();
+    for repo in wanted {
+        match skein::repos::fetch_mirror(repo) {
+            Ok(()) => println!("{OK} {} {DIM}mirror refreshed{RESET}", repo.id),
+            Err(why) => {
+                println!("{BAD} {} {DIM}{why}{RESET}", repo.id);
+                failures.push(repo.id.clone());
+            }
+        }
+    }
+    match failures.is_empty() {
+        true => Ok(()),
+        false => Err(format!(
+            "could not refresh {} — a box created now clones from the remote, or from the host \
+             checkout for an adopted repo",
+            failures.join(", ")
+        )),
+    }
+}
+
+/// `skein stop <box>` — end the box, keep its work.
+///
+/// A verb rather than a cockpit-only button, because the place people are told to stop a box is
+/// `skein doctor`, and doctor is what somebody runs when the cockpit is the thing that is not
+/// answering. Three of doctor's own fix lines named `skein restart <box>` while neither verb
+/// existed, so the only thing said to a person looking at a fault was a command that printed
+/// `unknown command`.
+fn cmd_stop(name: &str) -> Result<(), String> {
+    eprintln!("{DIM}skein:{RESET} stopping {name}…");
+    skein::sandbox::stop_box(name)?;
+    eprintln!(
+        "{DIM}skein:{RESET} {name} is stopped — its checkout, branch and conversation are untouched"
+    );
+    Ok(())
+}
+
+/// `skein restart <box>` — stop it and start it again.
+///
+/// **Stop, not "restart the agent".** Those are different acts and this is the bigger one: it ends
+/// every process in the box, rebuilds its mount namespace from the launcher this skein installs,
+/// and re-applies the ceilings. That is what makes it the answer to a box running under an older
+/// cover, and it is why the fix lines say what it costs — whatever the agent was part-way through
+/// does not survive. Restarting only the agent's session is a different thing and stays where it
+/// is, on the cockpit's row.
+///
+/// The stop is best-effort, deliberately: a box whose session is already gone must still be
+/// startable, and refusing here would leave the one case people most want this for — a box that is
+/// half-dead — with nothing to run.
+fn cmd_restart(name: &str, opts: &[String]) -> Result<(), String> {
+    if let Err(why) = skein::sandbox::stop_box(name) {
+        eprintln!("{DIM}skein:{RESET} {name} did not stop cleanly ({why}); starting it anyway");
+    }
+    cmd_start(name, opts)
+}
+
 fn cmd_start(name: &str, opts: &[String]) -> Result<(), String> {
     let out = start_the_box(name, opts);
     // The cockpit runs this in a PTY that closes when it returns, and the browser then reconnects

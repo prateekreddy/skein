@@ -1201,6 +1201,79 @@ pub fn box_cgroup_kill(name: &str) -> String {
     )
 }
 
+/// End every process living in a box's mount namespace — the backstop under `cgroup.kill`.
+///
+/// **A box IS its namespace.** `box-session.sh` says so where it explains the anchor: box alive ⇔
+/// tmux server alive ⇔ namespace joinable. Membership of it is the one property a process cannot
+/// shed by forking, by leaving the tmux tree, or by being started before whatever ceiling skein
+/// meant to apply — which is exactly the set `tmux kill-server` misses and `cgroup.kill` misses
+/// whenever the cgroup was never made.
+///
+/// It is not a replacement for [`box_cgroup_kill`], and both run. The cgroup is the better tool
+/// where it exists: one write, atomic, no window in which something forks away. This is what
+/// answers the three ways `box-session.sh` fails to make one — no limits computed, no delegation in
+/// the sandbox, or the join itself failing — each of which leaves the kill writing to a path that
+/// is not there, where `2>/dev/null || true` turns it into silence. That silence is the reported
+/// bug: a box stops, and what it started keeps running.
+///
+/// # The two guards, and why neither is optional
+///
+/// A pid is a name inside one boot and pids recycle inside one. If this swept the namespace of
+/// whatever now holds `ns_pid`, and that were an ordinary sandbox process, the namespace would be
+/// **the sandbox's own** — and the sweep would kill init, dockerd, the fleet agent and every other
+/// box. So:
+///
+///   * `(generation, ns_start)` must match, exactly as [`crate::place::Place::guard`] spends them
+///     immediately before a crossing, and parsed the same way as [`crate::place::anchor_probe`] —
+///     the field after the last `) `, because a process's own name can contain spaces and brackets.
+///   * **the namespace must not be the killer's own.** Cheap, absolute, and independent of the
+///     first: whatever else has gone wrong, a sweep that would end the process running it is not a
+///     box being stopped. This is the one that makes the catastrophic case impossible rather than
+///     unlikely.
+///
+/// Read **before** anything is killed. The anchor is the first thing `tmux kill-server` ends, and a
+/// namespace looked up afterwards is a dead pid and an empty answer.
+///
+/// `TERM` then `KILL`, with a pause between: a build, a database, an editor with unsaved state all
+/// have something to do on the way out, and a stop that only ever `KILL`s is a stop people learn to
+/// route around.
+pub fn namespace_kill(ns_pid: u32, generation: &str, ns_start: u64) -> String {
+    format!(
+        "boxns=\"\"; \
+         mine=\"$(readlink /proc/self/ns/mnt 2>/dev/null)\"; \
+         boot=\"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"; \
+         seen=\"$(sed -n 's/.*) //p' /proc/{pid}/stat 2>/dev/null | cut -d' ' -f20)\"; \
+         if [ -n \"{gen}\" ] && [ \"$boot\" = {gen} ] && [ \"$seen\" = {start} ]; then \
+           boxns=\"$(readlink /proc/{pid}/ns/mnt 2>/dev/null)\"; \
+         fi; \
+         [ -n \"$boxns\" ] && [ \"$boxns\" = \"$mine\" ] && boxns=\"\"",
+        pid = ns_pid,
+        gen = sh_quote(generation),
+        start = sh_quote(&ns_start.to_string()),
+    )
+}
+
+/// The sweep itself, run after the namespace has been captured by [`namespace_kill`].
+///
+/// Split from the capture because the capture has to happen *before* `tmux kill-server` and the
+/// sweep after it — the anchor is the first thing that dies, and a namespace read afterwards is an
+/// empty string. Two calls in one script rather than one, and the shell variable between them is
+/// what carries the answer across the killing.
+pub fn namespace_sweep() -> String {
+    "if [ -n \"$boxns\" ]; then \
+       for sig in TERM KILL; do \
+         left=\"\"; \
+         for entry in /proc/[0-9]*; do \
+           [ \"$(readlink \"$entry/ns/mnt\" 2>/dev/null)\" = \"$boxns\" ] || continue; \
+           kill -$sig \"${entry##*/}\" 2>/dev/null && left=1; \
+         done; \
+         [ -n \"$left\" ] || break; \
+         [ \"$sig\" = TERM ] && sleep 2; \
+       done; \
+     fi"
+    .to_string()
+}
+
 /// Ask the host warden to create the fleet sandbox.
 ///
 /// **skein does not run `sbx create` any more**, and that is delivery step 3 rather than a
@@ -9622,6 +9695,208 @@ b idle 5000000 4 1048576 1048576
         assert!(
             !current.is_empty(),
             "this build has no launcher revision to compare against"
+        );
+    }
+
+    /// Read `(boot_id, starttime)` for a live pid, exactly as `anchor_probe` does.
+    fn stamp_of(pid: u32) -> (String, u64) {
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let start = stat
+            .rsplit_once(") ")
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+            .and_then(|f| f.parse().ok())
+            .unwrap_or(0);
+        (boot.trim().to_string(), start)
+    }
+
+    fn alive(pid: u32) -> bool {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    /// The reported bug, reproduced and then closed: a process that left the box's tmux tree.
+    ///
+    /// `setsid` is the reparenting, and it is the honest stand-in for what people actually do —
+    /// `npm run dev &`, a watcher, `nohup`, anything an agent starts and walks away from. It is
+    /// gone from tmux's tree the moment it exists, so `kill-server` cannot see it, and if the box
+    /// never got a cgroup then `cgroup.kill` writes to a path that is not there and says nothing.
+    /// What is left is the namespace, which is the one thing the process cannot leave.
+    #[test]
+    fn a_stop_reaches_what_walked_out_of_the_tmux_tree() {
+        if std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: no bwrap here, so there is no namespace to be a box");
+            return;
+        }
+        let dir = crate::testutil::tempdir();
+        let anchor_at = dir.join("anchor");
+        let strayed_at = dir.join("strayed");
+        // A namespace with two processes in it: one that would be the tmux server, and one that
+        // reparented away from it. No `--unshare-pid`, for the reason `box-session.sh` gives — the
+        // anchor has to be the pid skein sees from outside.
+        let mut boxlike = std::process::Command::new("bwrap")
+            // The root, and nothing else bound over it. A private `/tmp` is what a real box gets and
+            // it is wrong here: the two pid files are written by absolute path, and binding over
+            // `/tmp` made those paths resolve to nothing inside the namespace — so the fixture
+            // never reported, and the test hung instead of failing.
+            .args(["--dev-bind", "/", "/", "--"])
+            .arg("bash")
+            .arg("-c")
+            .arg(format!(
+                // The strayed process reports its OWN pid. `$!` names the `setsid` wrapper, whose
+                // fork is the thing that actually reparents — so the first version of this recorded
+                // the anchor's child and the premise assertion below caught it, which is what that
+                // assertion is for.
+                // A minute, not five. On the passing path the sweep is what ends both of these,
+                // and on a failing one nothing does — Rust runs no cleanup through a panic — so the
+                // number is how long a failed run litters the machine with sleeping processes.
+                "setsid bash -c 'echo $$ > {strayed}; exec sleep 60' </dev/null >/dev/null 2>&1 & \
+                 echo $$ > {anchor}; sleep 60",
+                strayed = strayed_at.display(),
+                anchor = anchor_at.display(),
+            ))
+            // Both nulled, and it is not tidiness. A spawned child inherits this process's stdout,
+            // and the strayed process is by construction one that outlives its parent — so an
+            // inherited pipe is held open by a process nothing is waiting for, and `cargo test`
+            // appears to hang long after the test itself has finished. Diagnosed the slow way.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start a box-like namespace");
+
+        let read = |at: &std::path::Path| -> u32 {
+            for _ in 0..100 {
+                if let Ok(text) = std::fs::read_to_string(at) {
+                    if let Ok(pid) = text.trim().parse() {
+                        return pid;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            panic!("the box-like namespace never reported {}", at.display());
+        };
+        let anchor = read(&anchor_at);
+        let strayed = read(&strayed_at);
+        assert!(alive(anchor) && alive(strayed), "the fixture never started");
+        // The premise, checked rather than assumed, or this test would pass against `kill-server`
+        // alone. And checked on the **session**, not the parent: what puts a process beyond tmux is
+        // leaving its session, which is what `setsid` does and what `npm run dev &` inside a box
+        // amounts to. The parent can stay exactly where it was — the first version of this asserted
+        // on `ppid` and failed, correctly, because `setsid` execs in place when the caller is not
+        // already a process-group leader.
+        let field = |pid: u32, at: usize| -> String {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .unwrap_or_default()
+                .rsplit_once(") ")
+                .and_then(|(_, rest)| rest.split_whitespace().nth(at).map(str::to_string))
+                .unwrap_or_default()
+        };
+        assert_ne!(
+            field(strayed, 3),
+            field(anchor, 3),
+            "the strayed process is still in the anchor's session, so tmux would have reached it \
+             and this proves nothing"
+        );
+
+        let (generation, start) = stamp_of(anchor);
+        let script = format!(
+            "{look}; {sweep}",
+            look = namespace_kill(anchor, &generation, start),
+            sweep = namespace_sweep(),
+        );
+        let ran = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run the sweep");
+        assert!(
+            ran.status.success(),
+            "the sweep failed: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+
+        for _ in 0..100 {
+            if !alive(anchor) && !alive(strayed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !alive(anchor),
+            "the box's own anchor survived being stopped"
+        );
+        assert!(
+            !alive(strayed),
+            "the process that left the tmux tree is still running — which is the whole report"
+        );
+        let _ = boxlike.kill();
+        let _ = boxlike.wait();
+    }
+
+    /// The guard that makes the catastrophic case impossible rather than unlikely.
+    ///
+    /// Pids recycle. If the anchor's number were taken by an ordinary sandbox process, its mount
+    /// namespace is **the sandbox's own** — and a sweep over that ends init, dockerd, the fleet
+    /// agent and every other box, on a `stop` of one. The comparison against the killer's own
+    /// namespace costs one `readlink` and is independent of every other check, which is why it is
+    /// there as well as the stamp rather than instead of it.
+    ///
+    /// Deliberately checks that `$boxns` comes out **empty** rather than running the sweep: a test
+    /// that ran it to prove the point would be a test that killed the test runner if it were wrong.
+    #[test]
+    fn a_stop_never_sweeps_the_namespace_it_is_running_in() {
+        let me = std::process::id();
+        let (generation, start) = stamp_of(me);
+        assert!(start > 0, "this process has no readable start time");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "{look}; printf '%s' \"$boxns\"",
+                look = namespace_kill(me, &generation, start)
+            ))
+            .output()
+            .expect("run the lookup");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "the stop was about to sweep its own mount namespace, which is the sandbox's — every \
+             box, dockerd and init included"
+        );
+    }
+
+    /// An anchor that cannot be verified decides nothing, in the same direction `place` refuses in.
+    ///
+    /// Every record written before the stamp existed has an empty generation, and a pid whose start
+    /// time disagrees is a pid that was reused. Both mean "this number no longer names the box", and
+    /// sweeping on either would end whatever holds the number now.
+    #[test]
+    fn an_anchor_that_does_not_check_out_is_not_swept() {
+        let me = std::process::id();
+        let (generation, start) = stamp_of(me);
+        let boxns = |gen: &str, start: u64| -> String {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "{look}; printf '%s' \"$boxns\"",
+                    look = namespace_kill(me, gen, start)
+                ))
+                .output()
+                .expect("run the lookup");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert_eq!(boxns("", start), "", "a record with no stamp was believed");
+        assert_eq!(
+            boxns(&generation, start + 1),
+            "",
+            "a pid whose start time disagrees was believed, so a recycled pid is swept"
+        );
+        assert_eq!(
+            boxns("some-other-boot", start),
+            "",
+            "an anchor from another boot of the sandbox was believed"
         );
     }
 }
