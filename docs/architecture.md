@@ -1309,6 +1309,21 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    The guard sits **before** the unscoped-box path, because that path does not write, it *deletes*
    every file in the directory: the dangerous half of this site is the half that looks like cleanup.
 
+   **`disk`, `identity`, `privileged`, `git-scope` — closed in the library and open in the panel,
+   which is not what "closed" was supposed to mean.** SKEIN-7 moved the four security-deciding files
+   to `declared/`, which is host-only and never in `fleet_mounts`, and `declared_read` refuses a
+   value left at the old path rather than migrating it. Every *enforced* read goes through it. But
+   the cockpit's per-box panel read `git-scope` and `disk` **straight out of `box_state`**, which a
+   box writes: it could not promote itself, and it could tell you its own setting was something
+   else — and the next thing anybody does with a settings panel is press Save. Both read through
+   `declared_read` now, and the test that keeps them there is a **source** assertion, because the
+   failure is a path rather than a value and a path is a string somebody types.
+
+   **The anchor — closed, and confirmed rather than assumed.** `box_pidfile` still exists and the
+   launcher still writes it; nothing in skein reads it. The address comes from the placement record
+   under the cover (SKEIN-4), and the launcher's own report is read by its marker rather than by
+   position, so a box echoing a number on login cannot choose the namespace skein enters.
+
    §8.4 states
    this for approvals; that was too narrow, and the general form sweeps in three more:
 

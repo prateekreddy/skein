@@ -1189,23 +1189,18 @@ async fn api_box_settings(Path(name): Path<String>) -> Response {
         // The box's own answer, "" when it inherits — same grammar as tracking above. `effective`
         // is what it will actually come up with, which is not derivable in the page: it depends on
         // the fleet default *and* on whether a write token can be issued at all.
-        "git_scope": std::fs::read_to_string(
-            std::path::Path::new(&skein::fleet::box_state(&name)).join("git-scope"),
-        )
-        .unwrap_or_default()
-        .trim()
-        .to_string(),
+        // **Through `declared_read`, not out of the box's own directory** (§9.5 R8). These two were
+        // read straight from `box_state`, which a box writes — so a box could not change what was
+        // *enforced* (the effective values below come from `declared/`) but could change what this
+        // panel told you its setting was. The next thing a person does with a settings panel is
+        // press Save, which would have made the box's answer the declared one.
+        "git_scope": skein::fleet::declared_read(&name, "git-scope").unwrap_or_default().trim().to_string(),
         "effective_git_scope": if skein::gitgate::box_is_scoped(&name) { "repo" } else { "fleet" },
         "git_scope_available": skein::gitgate::can_issue_write_tokens(),
         // The workshop box sees every box's files and can act at fleet scope. Reported per box so
         // the cockpit can say which one carries it without anyone opening a settings pane to check.
         "privileged": skein::fleet::box_is_privileged(&name),
-        "own_disk": std::fs::read_to_string(
-            std::path::Path::new(&skein::fleet::box_state(&name)).join("disk"),
-        )
-        .unwrap_or_default()
-        .trim()
-        .to_string(),
+        "own_disk": skein::fleet::declared_read(&name, "disk").unwrap_or_default().trim().to_string(),
         // and what is actually in force
         "effective_connection": skein::tracking::connection_for_box(&name).map(|c| c.label).unwrap_or_default(),
         "effective_git_name": git_name,
@@ -3004,6 +2999,33 @@ mod tests {
     use super::{origin_ok, refuse_unknown_args, slow_down};
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
     use std::time::Duration;
+
+    /// No security-deciding setting is read out of the directory a box writes (§9.5 R8).
+    ///
+    /// A source assertion, because that is what this is about: the failure is not a wrong value, it
+    /// is a *path*, and a path is a string somebody types. Two of these were reading `git-scope` and
+    /// `disk` straight from `box_state` — the enforced values were always read from `declared/`, so
+    /// a box could not promote itself, but it could tell this panel that its own setting was
+    /// something else. The next thing anybody does with a settings panel is press Save.
+    ///
+    /// `declared_read` is the only way in, and it also warns about a value left at the old path
+    /// rather than believing it.
+    #[test]
+    fn a_boxs_own_directory_is_not_where_its_settings_are_read_from() {
+        let me = include_str!("skein-server.rs");
+        for flag in ["privileged", "git-scope", "disk", "identity"] {
+            let out_of_the_box = format!("box_state(&name)).join(\"{flag}\")");
+            assert!(
+                !me.contains(&out_of_the_box),
+                "`{flag}` is read out of the box's own directory, which the box writes"
+            );
+        }
+        assert!(
+            me.contains("declared_read(&name, \"git-scope\")")
+                && me.contains("declared_read(&name, \"disk\")"),
+            "the settings panel stopped reading these through `declared_read`"
+        );
+    }
 
     /// A control plane that cannot accept must wait, and must not give up.
     ///

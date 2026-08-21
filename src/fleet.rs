@@ -551,7 +551,7 @@ static SAID_ABANDONED: std::sync::Mutex<Option<std::collections::BTreeSet<String
 /// would carry the vulnerability across: any box could have written any of those files at any point
 /// before this existed, so a value found there proves nothing about who chose it. The cost of
 /// ignoring is that someone re-ticks a setting; the cost of trusting is the workshop box.
-pub(crate) fn declared_read(name: &str, flag: &str) -> Option<String> {
+pub fn declared_read(name: &str, flag: &str) -> Option<String> {
     if !crate::util::valid_name(name) {
         return None;
     }
