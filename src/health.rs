@@ -369,6 +369,19 @@ pub fn health_report() -> HealthReport {
     let mut mailbox_errors = Vec::new();
     for repo in &repos {
         let store = Path::new(&repo.store);
+        // ONE cause, one line. A store that was never made is not eight missing probes and a
+        // missing mailbox — it is a repo that never finished being added, and listing its
+        // consequences separately buries the one fact that would fix all of them. Nine complaints
+        // across two checks was the measured shape.
+        if !store.is_dir() {
+            probe_errors.push(format!(
+                "{}: its store does not exist at {} — nothing is installed there because there is \
+                 no there",
+                repo.id,
+                store.display()
+            ));
+            continue;
+        }
         for relative in [
             "skein/probe-revision",
             "skein/runtimes.tsv",
@@ -430,8 +443,8 @@ pub fn health_report() -> HealthReport {
         true => HealthCheck::satisfied(format!("installed for {} managed repos", repos.len())),
         false => HealthCheck::unsatisfied(
             probe_errors.join("; "),
-            "restart the server, which reinstalls the probes into every repo's store; a box that \
-             is missing tmux or jq needs `skein restart <box>` after that",
+            "restart the server, which recreates every repo's store and reinstalls the probes into \
+             it; a box that is missing tmux or jq needs `skein restart <box>` after that",
         ),
     };
     let mailbox = match mailbox_errors.is_empty() {
@@ -590,6 +603,92 @@ mod tests {
         let destructive = HealthCheck::unsatisfied("x", "do y").destroys();
         assert!(destructive.destructive && destructive.is_fault());
         assert!(!HealthCheck::unsatisfied("x", "do y").destructive);
+    }
+
+    /// One cause, one line — measured, because the alternative is nine.
+    ///
+    /// A repo whose store does not exist produced eight "missing" complaints from the probe check
+    /// and one from the mailbox check: nine symptoms of a repo that never finished being added, and
+    /// no way for a reader to see that they were one thing. Every one of them clears when the store
+    /// is made, and none of them is separately actionable.
+    #[test]
+    fn a_repo_with_no_store_is_one_fault_and_not_nine() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+        // A repo registered against a store nobody made — `skein add` interrupted, or a volume
+        // mounted somewhere else since.
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "orphan".into(),
+            source: "https://github.com/a/b".into(),
+            source_tree: String::new(),
+            store: home.join("gone/.claude").to_string_lossy().into_owned(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        }])
+        .unwrap();
+
+        let report = health_report();
+        let complaints = report.probes.detail.matches(';').count() + 1;
+        assert_eq!(
+            complaints, 1,
+            "one missing store produced {complaints} complaints: {}",
+            report.probes.detail
+        );
+        assert!(
+            report.probes.detail.contains("its store does not exist"),
+            "the one complaint must name the cause rather than a symptom: {}",
+            report.probes.detail
+        );
+        assert!(
+            !report.mailbox.is_fault(),
+            "the mailbox check repeated the same cause: {}",
+            report.mailbox.detail
+        );
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// One missing tool is one fault, and does not make its dependents look broken too.
+    ///
+    /// The property the tri-state bought, pinned so it cannot be lost. `sbx` is how skein reaches
+    /// every box, so the intuition is that losing it should light up the whole report — and the
+    /// intuition is wrong, which is exactly why this is worth asserting: the other checks are
+    /// answered from the host, and the ones that would need the fleet report `unknown` rather than
+    /// inventing a fault. Five red cards for one cause is the failure this rules out.
+    #[test]
+    fn one_missing_tool_is_one_fault() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let path = std::env::var("PATH").unwrap_or_default();
+        // Nothing on PATH at all: sbx is certainly gone, and so is everything else, so this also
+        // says that a missing tool is reported once per tool rather than once per consequence.
+        std::env::set_var("PATH", "/nonexistent-bin");
+        let report = health_report();
+        std::env::set_var("PATH", path);
+
+        let faults: Vec<&str> = report
+            .checks()
+            .into_iter()
+            .filter(|(_, check)| check.is_fault())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            faults
+                .iter()
+                .all(|name| ["sbx", "git", "gh"].contains(name)),
+            "a missing tool made something that is not a tool look broken: {faults:?}"
+        );
+        assert!(
+            faults.contains(&"sbx"),
+            "the tool that is actually missing is not reported: {faults:?}"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// **No fault without a way out.** The parent property, in the only form that can be enforced.
