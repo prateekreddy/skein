@@ -181,6 +181,21 @@ done
             .map(|p| skein::util::sh_quote(p.to_string_lossy().as_ref()))
             .collect();
 
+        let record_bind = format!(
+            "--bind {} {}",
+            skein::util::sh_quote(
+                self.state_parent
+                    .join("web-main/claude-projects")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            skein::util::sh_quote(
+                self.dir
+                    .join("boxhome/.claude/projects")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+        );
         let runner = format!(
             "set -uo pipefail\n\
              binds=({record})\n\
@@ -195,18 +210,7 @@ done
             // through. Reproduced here because the block's read-only cover of the state directory
             // is only correct if this bind exists — testing the cover without it would assert that
             // a box cannot write its own conversation, which would be a bug rather than a property.
-            record = format!(
-                "--bind {} {}",
-                skein::util::sh_quote(
-                    self.state_parent
-                        .join("web-main/claude-projects")
-                        .to_string_lossy()
-                        .as_ref()
-                ),
-                skein::util::sh_quote(
-                    self.dir.join("boxhome/.claude/projects").to_string_lossy().as_ref()
-                ),
-            ),
+            record = record_bind,
             root = skein::util::sh_quote(self.fleet_root.join("web-main").to_string_lossy().as_ref()),
             state = skein::util::sh_quote(self.state_parent.join("web-main").to_string_lossy().as_ref()),
             fleet = skein::util::sh_quote(self.fleet_root.to_string_lossy().as_ref()),
