@@ -477,6 +477,11 @@ fn cmd_doctor() -> Result<(), String> {
             skein::health::Level::Unknown => WARN,
         };
         println!("{mark} git scope     {}", g.detail);
+        // The way out, on its own line and indented under the fault it clears. A diagnostic that
+        // names a problem and not its remedy has handed over the half nobody can act on.
+        if !g.fix.is_empty() {
+            println!("{DIM}              → {}{RESET}", g.fix);
+        }
     }
 
     // skein-managed repos + its own kit (the repo-agnostic path).

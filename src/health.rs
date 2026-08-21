@@ -37,10 +37,27 @@ pub enum Level {
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthCheck {
     pub level: Level,
-    /// What is true, and — when it is not satisfied — what would fix it. The second half is not
-    /// decoration: skein can only be blocked in a way it can explain if the check that found the
-    /// block also carries the way out.
+    /// What is true. The diagnosis, and only the diagnosis.
     pub detail: String,
+    /// **What would clear it** — architecture §2.4's `recipe`, and the reason the parent property
+    /// holds at all: skein can only be blocked in a way it can explain if the check that found the
+    /// block carries the way out with it.
+    ///
+    /// A command where there is one, so it can be copied rather than transcribed. Prose where the
+    /// answer is a place in the UI rather than a command, because "Settings → Fleet → memory" is
+    /// the honest recipe for a setting and inventing a CLI for it would not be.
+    ///
+    /// Empty for a satisfied or unknown check — there is nothing to fix, and nothing known to be
+    /// wrong. **Never empty for an unsatisfied one**, which the tests enforce rather than trust.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub fix: String,
+    /// Would running the fix destroy something? §2.4's `destructive` class.
+    ///
+    /// A destructive recipe is **printed and never run**. Nothing auto-drives one however
+    /// unsatisfied its check is, because the cost of being wrong is not a wasted minute — it is a
+    /// sandbox with every box's unpushed work on it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub destructive: bool,
 }
 
 impl HealthCheck {
@@ -48,14 +65,19 @@ impl HealthCheck {
         HealthCheck {
             level: Level::Satisfied,
             detail: detail.into(),
+            fix: String::new(),
+            destructive: false,
         }
     }
 
-    /// A fault, and `detail` must say what would clear it.
-    pub fn unsatisfied(detail: impl Into<String>) -> HealthCheck {
+    /// A fault, and what would clear it. Both, always — the second argument exists so that a fault
+    /// with no way out cannot be written without noticing.
+    pub fn unsatisfied(detail: impl Into<String>, fix: impl Into<String>) -> HealthCheck {
         HealthCheck {
             level: Level::Unsatisfied,
             detail: detail.into(),
+            fix: fix.into(),
+            destructive: false,
         }
     }
 
@@ -64,20 +86,50 @@ impl HealthCheck {
         HealthCheck {
             level: Level::Unknown,
             detail: detail.into(),
+            fix: String::new(),
+            destructive: false,
         }
     }
 
-    /// From a plain condition, for the checks that genuinely cannot fail to answer.
-    pub fn from(ok: bool, detail: impl Into<String>) -> HealthCheck {
-        match ok {
-            true => HealthCheck::satisfied(detail),
-            false => HealthCheck::unsatisfied(detail),
-        }
+    /// Mark the fix as one that destroys something, so nothing drives it.
+    pub fn destroys(mut self) -> HealthCheck {
+        self.destructive = true;
+        self
     }
 
     /// Is this a fault? `Unknown` is not one — see [`Level`].
     pub fn is_fault(&self) -> bool {
         self.level == Level::Unsatisfied
+    }
+}
+
+impl HealthReport {
+    /// Every check in the report, named. One list, so a check added to the struct and forgotten
+    /// here shows up as a compile error rather than as a check nothing ever looks at.
+    pub fn checks(&self) -> [(&'static str, &HealthCheck); 9] {
+        let HealthReport {
+            registry,
+            sbx,
+            git,
+            gh,
+            probes,
+            mailbox,
+            ai,
+            memory,
+            gitgate,
+            ..
+        } = self;
+        [
+            ("registry", registry),
+            ("sbx", sbx),
+            ("git", git),
+            ("gh", gh),
+            ("probes", probes),
+            ("mailbox", mailbox),
+            ("ai", ai),
+            ("memory", memory),
+            ("gitgate", gitgate),
+        ]
     }
 }
 
@@ -141,44 +193,34 @@ fn git_scope_health() -> HealthCheck {
         other => format!("every box holds {}", other.label()),
     };
     match crate::gitgate::scope_status() {
-        Off => HealthCheck {
-            level: Level::Satisfied,
-            detail: format!(
-                "off — {unscoped_holds}. Settings → scope each box's access to its own repo"
-            ),
-        },
-        NotConfigured => HealthCheck {
-            level: Level::Satisfied,
-            detail: format!(
-                "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App or a \
-                 per-repo token to scope them"
-            ),
-        },
-        Unusable { why, refused } => HealthCheck {
-            level: Level::Unsatisfied,
-            detail: format!(
-                "ON but nothing is scoped, so {unscoped_holds}: \
-                 {why}.{} Add a GitHub App or a per-repo token under Settings → GitHub & keys.",
+        Off => HealthCheck::satisfied(format!(
+            "off — {unscoped_holds}. Settings → scope each box's access to its own repo"
+        )),
+        NotConfigured => HealthCheck::satisfied(format!(
+            "not set up — {unscoped_holds}. Settings → GitHub & keys → add a GitHub App or a \
+             per-repo token to scope them"
+        )),
+        Unusable { why, refused } => HealthCheck::unsatisfied(
+            format!(
+                "ON but nothing is scoped, so {unscoped_holds}: {why}.{}",
                 match refused.is_empty() {
                     true => String::new(),
                     false => format!(" Stored tokens refused — {}.", refused.join("; ")),
                 }
             ),
-        },
-        Active { app, tokens } => HealthCheck {
-            level: Level::Satisfied,
-            detail: format!(
-                "on — boxes write only their own repo.{}{}",
-                match app.is_empty() {
-                    true => String::new(),
-                    false => format!(" App {app}"),
-                },
-                match tokens {
-                    0 => String::new(),
-                    n => format!(" {n} stored repo token(s)"),
-                }
-            ),
-        },
+            "Settings → GitHub & keys → add a GitHub App, or a per-repo token for each repo in use",
+        ),
+        Active { app, tokens } => HealthCheck::satisfied(format!(
+            "on — boxes write only their own repo.{}{}",
+            match app.is_empty() {
+                true => String::new(),
+                false => format!(" App {app}"),
+            },
+            match tokens {
+                0 => String::new(),
+                n => format!(" {n} stored repo token(s)"),
+            }
+        )),
     }
 }
 
@@ -191,18 +233,15 @@ pub fn health_report_gitgate() -> HealthCheck {
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
 pub fn health_report() -> HealthReport {
-    let ai = HealthCheck {
-        level: Level::Satisfied,
-        detail: if !crate::ai::ai_enabled() {
-            "off — Settings → Boxes turns it on: a one-line summary for boxes with no \
-             journal, and a second opinion before Continue N resumes anything"
-                .into()
-        } else if !program_on_path("claude") {
-            "on, but `claude` is not on PATH — every call falls back to the free signals".into()
-        } else {
-            "on — rationed Haiku over your subscription, on demand and cached per turn-end".into()
-        },
-    };
+    let ai = HealthCheck::satisfied(if !crate::ai::ai_enabled() {
+        "off — Settings → Boxes turns it on: a one-line summary for boxes with no journal, and a \
+         second opinion before Continue N resumes anything"
+            .to_string()
+    } else if !program_on_path("claude") {
+        "on, but `claude` is not on PATH — every call falls back to the free signals".to_string()
+    } else {
+        "on — rationed Haiku over your subscription, on demand and cached per turn-end".to_string()
+    });
     // Named in GiB rather than MiB: these are numbers a person compares against how much memory the
     // Mac has, and 15975 does not read as "about sixteen gigabytes" at a glance.
     let gib = |mib: u64| format!("{:.1}G", mib as f64 / 1024.0);
@@ -210,26 +249,27 @@ pub fn health_report() -> HealthReport {
     // "one sandbox per box — nothing to divide" arm for a fleet whose name was cleared; that model is
     // gone, and with it the only way to reach it.
     let memory = match crate::fleet::memory_plan() {
-        Some(plan) => HealthCheck {
-            level: Level::Satisfied,
-            detail: format!(
-                "{} across all boxes and the containers they start, {} for the sandbox's own \
-                 daemons, {} kept back for the VM's services and the kernel",
-                gib(plan.boxes),
-                gib(plan.plumbing),
-                gib(plan.reserve)
-            ),
-        },
+        Some(plan) => HealthCheck::satisfied(format!(
+            "{} across all boxes and the containers they start, {} for the sandbox's own daemons, \
+             {} kept back for the VM's services and the kernel",
+            gib(plan.boxes),
+            gib(plan.plumbing),
+            gib(plan.reserve)
+        )),
         // A fleet whose total is unset has no ceiling anywhere: not per box, not on the boxes
         // together, not on Docker. One build can then reach the VM's memory, and with no swap the
         // kernel's global OOM killer picks a victim by badness rather than by blame.
-        None => HealthCheck {
-            level: Level::Unsatisfied,
-            detail: "no memory ceiling anywhere: Settings → Fleet memory names no size, so one \
-                     box's build can take the sandbox down with it. Settings → Fleet → memory, or \
-                     `skein resize <size>`"
-                .into(),
-        },
+        // The fix REBUILDS the sandbox — sbx has no resize, so changing the size means a new
+        // sandbox — which is why it is marked destructive even though `skein resize` carries every
+        // box across. Nothing may drive this on its own.
+        None => HealthCheck::unsatisfied(
+            "no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \
+             One build can reach the VM's memory, and with no swap the kernel picks a victim by \
+             badness rather than by blame",
+            "skein resize 26g   (or Settings → Fleet → memory; it rebuilds the sandbox and carries \
+             every box's work across)",
+        )
+        .destroys(),
     };
     // The legacy single-repo registry. Managed repos are the supported path and the board does not
     // read this at all — it aggregates per-repo stores via `all_stores` — so a fleet with repos
@@ -249,28 +289,21 @@ pub fn health_report() -> HealthReport {
         .or_else(|| std::env::var_os("SKEIN_SHARED"))
         .is_some_and(|v| !v.is_empty());
     let registry = match load_registry() {
-        Ok((boxes, path)) => HealthCheck {
-            level: Level::Satisfied,
-            detail: format!("{} ({} boxes)", path.display(), boxes.len()),
-        },
-        Err(error) if repos_registered => HealthCheck {
-            level: Level::Satisfied,
-            detail: format!(
-                "not in use — {} repos are managed directly ({error})",
-                crate::repos::load_repos().len()
-            ),
-        },
-        Err(error) if !registry_named => HealthCheck {
-            level: Level::Satisfied,
-            detail: format!("not in use — add a repository with `skein add <url>` ({error})"),
-        },
-        Err(error) => HealthCheck {
-            level: Level::Unsatisfied,
-            detail: format!(
-                "{error}. It is named by $SKEIN_REGISTRY or $SKEIN_SHARED — unset it, or point \
-                 it at a readable file."
-            ),
-        },
+        Ok((boxes, path)) => {
+            HealthCheck::satisfied(format!("{} ({} boxes)", path.display(), boxes.len()))
+        }
+        Err(error) if repos_registered => HealthCheck::satisfied(format!(
+            "not in use — {} repos are managed directly ({error})",
+            crate::repos::load_repos().len()
+        )),
+        Err(error) if !registry_named => HealthCheck::satisfied(format!(
+            "not in use — add a repository with `skein add <url>` ({error})"
+        )),
+        Err(error) => HealthCheck::unsatisfied(
+            error.to_string(),
+            "it is named by $SKEIN_REGISTRY or $SKEIN_SHARED — unset whichever is set, or point \
+             it at a readable file",
+        ),
     };
     let fleet = fleet_boxes();
     let fleet_degraded = fleet_degraded();
@@ -281,8 +314,9 @@ pub fn health_report() -> HealthReport {
     // which is neither current nor wrong.
     let sbx = match (program_on_path("sbx"), &fleet, fleet_degraded) {
         (false, _, _) => HealthCheck::unsatisfied(
-            "`sbx` is not on PATH — it is how skein reaches the fleet. Install Docker Sandboxes, \
-             or put `sbx` on the PATH the server was started with",
+            "`sbx` is not on PATH, and it is how skein reaches the fleet — no box can be created, \
+             started or entered without it",
+            "install Docker Sandboxes, or start the server from a shell whose PATH has `sbx` on it",
         ),
         (true, Some(boxes), true) => HealthCheck::unknown(format!(
             "`sbx ls` did not answer just now; showing the last successful snapshot ({} boxes)",
@@ -300,38 +334,28 @@ pub fn health_report() -> HealthReport {
                 .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
         ),
     };
-    let tool = |name: &str, required: bool| HealthCheck {
-        level: match (program_on_path(name), required) {
-            (true, _) => Level::Satisfied,
-            (false, true) => Level::Unsatisfied,
-            (false, false) => Level::Satisfied,
-        },
-        detail: if program_on_path(name) {
-            "available".into()
-        } else if required {
-            format!(
-                "not found on PATH — install {name}, or start the server from a shell that has it"
-            )
-        } else {
-            "not found (optional)".into()
-        },
+    let tool = |name: &str, required: bool| match (program_on_path(name), required) {
+        (true, _) => HealthCheck::satisfied("available"),
+        (false, true) => HealthCheck::unsatisfied(
+            format!("`{name}` is not on PATH, and skein needs it"),
+            format!("install {name}, or start the server from a shell whose PATH has it"),
+        ),
+        // Optional means optional: absent is a correct state, so it is not a fault and there is
+        // nothing to fix.
+        (false, false) => HealthCheck::satisfied("not found (optional)"),
     };
     let git = tool("git", true);
     // What actually reads GitHub. It used to be `gh`, which made a third-party CLI a hard
     // requirement of a default-on feature and dragged its keyring in with it; the queue now talks to
     // the API with a token skein already has. curl is what carries that, and gitgate has always
     // needed it to mint App tokens.
-    let gh = HealthCheck {
-        level: match crate::github::have_curl() {
-            true => Level::Satisfied,
-            false => Level::Unsatisfied,
-        },
-        detail: match crate::github::have_curl() {
-            true => "available".into(),
-            false => "curl is not installed — skein reads GitHub with it (pull requests, diffs, \
-                      merges, and minting App tokens)"
-                .into(),
-        },
+    let gh = match crate::github::have_curl() {
+        true => HealthCheck::satisfied("available"),
+        false => HealthCheck::unsatisfied(
+            "curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \
+             and minting App tokens",
+            "install curl",
+        ),
     };
 
     let repos = load_repos();
@@ -402,27 +426,23 @@ pub fn health_report() -> HealthReport {
             }
         }
     }
-    let mut probes = HealthCheck {
-        level: match probe_errors.is_empty() {
-            true => Level::Satisfied,
-            false => Level::Unsatisfied,
-        },
-        detail: if probe_errors.is_empty() {
-            format!("installed for {} managed repos", repos.len())
-        } else {
-            probe_errors.join("; ")
-        },
+    let mut probes = match probe_errors.is_empty() {
+        true => HealthCheck::satisfied(format!("installed for {} managed repos", repos.len())),
+        false => HealthCheck::unsatisfied(
+            probe_errors.join("; "),
+            "restart the server, which reinstalls the probes into every repo's store; a box that \
+             is missing tmux or jq needs `skein restart <box>` after that",
+        ),
     };
-    let mailbox = HealthCheck {
-        level: match mailbox_errors.is_empty() {
-            true => Level::Satisfied,
-            false => Level::Unsatisfied,
-        },
-        detail: if mailbox_errors.is_empty() {
-            "shared stores and required jq available in reporting boxes".into()
-        } else {
-            mailbox_errors.join("; ")
-        },
+    let mailbox = match mailbox_errors.is_empty() {
+        true => {
+            HealthCheck::satisfied("shared stores and required jq available in reporting boxes")
+        }
+        false => HealthCheck::unsatisfied(
+            mailbox_errors.join("; "),
+            "a missing mailbox directory is created by restarting the server; a box missing jq \
+             needs `skein restart <box>`, which reprovisions it",
+        ),
     };
     let views = load_views().unwrap_or_default();
     let dark_boxes = views
@@ -441,6 +461,13 @@ pub fn health_report() -> HealthReport {
             "; no signals from running boxes: {}",
             dark_boxes.join(", ")
         ));
+        // The check may already have carried a fix for a missing probe file; this reason has its
+        // own, and a fault must never be left with an empty one.
+        probes.fix = format!(
+            "`skein restart {}` — a box whose probes have never reported was started before they \
+             were installed",
+            dark_boxes.first().map(String::as_str).unwrap_or("<box>")
+        );
     }
     // Deliberately NOT reported here: a box on hook-only turn state (see `screen_health`) is not
     // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment
@@ -454,6 +481,7 @@ pub fn health_report() -> HealthReport {
         .iter()
         .any(|check| check.is_fault())
         && stale_boxes.is_empty();
+
     HealthReport {
         ok,
         registry,
@@ -545,16 +573,49 @@ mod tests {
     /// silently, and the thing that was actually wrong is never reported.
     #[test]
     fn only_a_fault_is_a_fault() {
-        assert!(HealthCheck::unsatisfied("x").is_fault());
+        assert!(HealthCheck::unsatisfied("x", "do y").is_fault());
         assert!(!HealthCheck::satisfied("x").is_fault());
         assert!(
             !HealthCheck::unknown("x").is_fault(),
             "a question skein could not put is not an answer it got"
         );
-        // `from` is for the checks that genuinely cannot fail to answer, and it must never produce
-        // the third state by accident.
-        assert_eq!(HealthCheck::from(true, "x").level, Level::Satisfied);
-        assert_eq!(HealthCheck::from(false, "x").level, Level::Unsatisfied);
+        // Only a fault carries a way out. A satisfied check has nothing to fix, and an unknown one
+        // has nothing KNOWN to fix — offering a remedy for a question skein could not put is how a
+        // diagnostic sends somebody to change a working setting.
+        assert!(HealthCheck::satisfied("x").fix.is_empty());
+        assert!(HealthCheck::unknown("x").fix.is_empty());
+        assert_eq!(HealthCheck::unsatisfied("x", "do y").fix, "do y");
+        // Destructive is off unless said, and saying it does not change the level: a destructive
+        // fix is still the fix, it just may not be driven.
+        let destructive = HealthCheck::unsatisfied("x", "do y").destroys();
+        assert!(destructive.destructive && destructive.is_fault());
+        assert!(!HealthCheck::unsatisfied("x", "do y").destructive);
+    }
+
+    /// **No fault without a way out.** The parent property, in the only form that can be enforced.
+    ///
+    /// A recipe written by hand per check is right where somebody thought of it, and absent where
+    /// they did not — and the check that nobody thought about is the one somebody is staring at.
+    /// This walks the real report on this machine, so a check added later with no fix fails here
+    /// rather than in front of a person who is stuck.
+    #[test]
+    fn every_fault_says_what_would_fix_it() {
+        let report = health_report();
+        for (name, check) in report.checks() {
+            if check.is_fault() {
+                assert!(
+                    !check.fix.trim().is_empty(),
+                    "`{name}` is a fault with no way out: {}",
+                    check.detail
+                );
+            } else {
+                assert!(
+                    check.fix.is_empty(),
+                    "`{name}` is not a fault and offers a fix anyway: {}",
+                    check.fix
+                );
+            }
+        }
     }
 
     /// The three states reach the cockpit under the names it renders.
@@ -572,6 +633,8 @@ mod tests {
             let json = serde_json::to_string(&HealthCheck {
                 level,
                 detail: String::new(),
+                fix: String::new(),
+                destructive: false,
             })
             .unwrap();
             assert!(

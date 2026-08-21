@@ -1027,6 +1027,13 @@
   /* Unknown is not a fault and must not read as one: the waiting colour, which this UI already
      uses for "something is pending an answer" rather than "something is wrong". */
   .dg-row.warn .dg-mark { color:var(--waiting); }
+  .dg-fix { margin-top:5px; font-size:12px; color:var(--text-2); user-select:text; }
+  .dg-fix code { font-family:var(--mono); font-size:11.5px; color:var(--text);
+                 background:color-mix(in srgb,var(--line) 45%,transparent); padding:1px 5px;
+                 border-radius:4px; }
+  /* A destructive recipe is printed and never run — the label is what makes that visible rather
+     than a property only the code knows. */
+  .dg-danger { color:var(--attn); font-size:11px; }
   .dg-name { font-family:var(--mono); font-size:11px; color:var(--text-2); }
   .dg-detail { font-size:12.5px; color:var(--text); line-height:1.55; user-select:text; }
   .dg-foot { margin-top:14px; font-size:12px; color:var(--faint); }
@@ -4641,11 +4648,17 @@ function renderDiagnostics() {
   const MARK = { satisfied: ["ok", "✓"], unsatisfied: ["bad", "✗"], unknown: ["warn", "!"] };
   const rows = CHECKS.filter(([k]) => h[k]).map(([k, label]) => {
     const [cls, mark] = MARK[h[k].level] || MARK.unknown;
+    // The way out, under the fault it clears, and selectable: it is usually a command, and a
+    // command you cannot copy is a command you retype wrongly.
+    const fix = h[k].fix
+      ? `<div class="dg-fix">→ <code>${esc(h[k].fix)}</code>${h[k].destructive
+          ? ` <span class="dg-danger">rebuilds the sandbox — run it yourself</span>` : ""}</div>`
+      : "";
     return `
     <div class="dg-row ${cls}">
       <span class="dg-mark">${mark}</span>
       <span class="dg-name">${label}</span>
-      <span class="dg-detail">${esc(h[k].detail || "")}</span>
+      <span class="dg-detail">${esc(h[k].detail || "")}${fix}</span>
     </div>`;
   }).join("");
   const list = (names, what) => names?.length
@@ -6328,7 +6341,7 @@ function loadHealth() {
       ? `${failed[0]}: ${first}${extra}`
       : `environment: probe updates${dark ? ` · ${dark} dark` : ""}${stale ? ` · ${stale} stale` : ""}`;
     banner.title = [
-      ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}`),
+      ...failed.map(key => `${key}: ${health[key]?.detail || "unhealthy"}${health[key]?.fix ? ` → ${health[key].fix}` : ""}`),
       ...unsure.map(key => `${key}: could not be checked — ${health[key]?.detail || "no reason given"}`),
       ...(dark ? [`no signals: ${health.dark_boxes.join(", ")}`] : []),
       ...(stale ? [`stale sessions: ${health.stale_boxes.join(", ")}`] : [])
