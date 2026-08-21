@@ -23,3 +23,6 @@ jobs:
       # The module graph. Rust cannot express "this module may not depend on that one", so the rule
       # architecture.md §14 is built on has no compiler behind it — this is the compiler.
       - run: python3 tools/module-check.py
+      # The Source law (§2.3): nothing reaches anything except through a declared Source. Same
+      # reason and same shape — a law nothing checks is a paragraph.
+      - run: python3 tools/source-check.py

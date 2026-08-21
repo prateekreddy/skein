@@ -247,3 +247,9 @@ depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 # running box leaves it reading a copy nobody writes to any more. Nothing depends on this except
 # the two binaries, so it cannot join the knot however it grows.
 depends_on = ["config", "fleet", "util"]
+
+[current.source]
+# Nothing, and that is the rule rather than an accident: reaching a subject is precisely the thing
+# that must not require privilege, so a Source that had to ask `config` where something lived would
+# be a Source that could be denied. §14 says the same with an empty row.
+depends_on = []

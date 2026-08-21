@@ -17,6 +17,13 @@
 use serde::Serialize;
 
 /// Where a value came from. Ordered by how much it can be trusted to describe *now*.
+///
+/// **Not [`crate::source::Source`], and the two must not be conflated.** This one is *which copy of
+/// the fact* was read; that one is *how the thing was reached*. They are different axes, and the
+/// mapping is many-to-one in both directions: `Store` and `Host` are both reached by `file`, and
+/// `Box` is reached by `enter` or by `socket` depending on what was asked. Architecture §2.2 says a
+/// signal carries "which Source produced it (§2.3)", which this field does **not** answer — it
+/// answers a coarser question that happens to share the word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
