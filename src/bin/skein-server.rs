@@ -354,6 +354,11 @@ async fn main() {
     use hyper_util::service::TowerToHyperService;
     use tower::Service;
     let mut make = app.into_make_service();
+    // The doorstep (`skein::knock`): the only place a cap can be **pre**-auth, because everything
+    // else in this file has already accepted. See §9.4 — the port is reachable from every box, and
+    // connecting is not authenticating, which answers reading and did not answer exhausting.
+    let door = skein::knock::Doorstep::with_room(skein::knock::ROOM);
+    let grace = skein::knock::grace();
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(v) => v,
@@ -364,13 +369,48 @@ async fn main() {
             Ok(s) => s,
             Err(e) => match e {}, // IntoMakeService is Infallible — this arm is unreachable
         };
-        tokio::spawn(async move {
+        // Admitted, never refused: over the limit this evicts the oldest connection that still has
+        // not authenticated, which is why a flood displaces itself instead of the next arrival.
+        let knock = std::sync::Arc::new(door.admit());
+        let mine = knock.clone();
+        tokio::spawn(KNOCK.scope(knock, async move {
             let io = TokioIo::new(stream);
-            let _ = ConnBuilder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(io, TowerToHyperService::new(svc))
-                .await;
-        });
+            // The builder is bound rather than chained: the connection borrows it, so a temporary
+            // would be dropped at the end of the statement that created the future.
+            let builder = ConnBuilder::new(TokioExecutor::new());
+            let conn = builder.serve_connection_with_upgrades(io, TowerToHyperService::new(svc));
+            tokio::pin!(conn);
+            let deadline = tokio::time::sleep(grace);
+            tokio::pin!(deadline);
+            // Two ways this connection ends early, and one loop because the deadline has to be
+            // *disarmed* rather than obeyed: a proven connection outlives the grace period by
+            // definition — a terminal or an event stream is open for hours — so the timer firing on
+            // one is a no-op and not a close.
+            let mut watching = true;
+            loop {
+                tokio::select! {
+                    _ = &mut conn => break,
+                    _ = mine.ousted() => break,
+                    _ = &mut deadline, if watching => {
+                        watching = false;
+                        if !mine.proven() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
     }
+}
+
+tokio::task_local! {
+    /// The connection the request being served arrived on.
+    ///
+    /// A task-local rather than a request extension because the service is built per connection by
+    /// `IntoMakeService` and every request on it is polled inside this task — so the connection is
+    /// already the scope, and threading a layer through the router to say so would add a wrapper
+    /// per route to carry a fact the task already has.
+    static KNOCK: std::sync::Arc<skein::knock::Knock>;
 }
 
 /// Paths served without the fleet's token.
@@ -391,7 +431,14 @@ fn open_to_all(path: &str) -> bool {
 /// This is the answer to a box reaching `host.docker.internal:7878` — see [`skein::apiauth`] for
 /// what that allowed and why a secret rather than a peer-address rule.
 async fn gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    if open_to_all(request.uri().path()) || skein::apiauth::authorised(request.headers()) {
+    if skein::apiauth::authorised(request.headers()) {
+        // The one place a connection stops being a stranger. Deliberately keyed on the credential
+        // and not on being served: `open_to_all` would otherwise promote anything that can spell
+        // `GET /`, which is every flooder, and the doorstep would bound nothing.
+        let _ = KNOCK.try_with(|knock| knock.prove());
+        return next.run(request).await;
+    }
+    if open_to_all(request.uri().path()) {
         return next.run(request).await;
     }
     skein::apiauth::refusal().into_response()

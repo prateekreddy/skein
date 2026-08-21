@@ -542,3 +542,104 @@ fn the_repo_list_names_the_repository_the_host_will_mint_for() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A box gets a free denial of the control plane if connections cost nothing until they
+/// authenticate — architecture §9.4, "pre-auth connection exhaustion". The port is reachable from
+/// every box (one network namespace) and both existing caps are inside handlers, so they count only
+/// clients that already presented a credential.
+///
+/// Two properties, and the second is the one worth stating: a flood is **bounded**, so it cannot
+/// climb to the file-descriptor limit; and it does not stop an authenticated client being served,
+/// because the doorstep evicts the oldest stranger rather than refusing the newest arrival. A cap
+/// that refused would satisfy the first and fail the second, which is why the test asserts both.
+#[test]
+fn a_flood_that_never_authenticates_cannot_hold_the_door() {
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", token_home("flood"))
+        // Two seconds instead of ten: the deadline is the same mechanism at either length, and the
+        // default would make this test spend most of its life waiting for a clock.
+        .env("SKEIN_DOORSTEP_GRACE", "2")
+        .env_remove("SKEIN_REGISTRY")
+        .env_remove("SKEIN_SHARED")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Sockets that connect and say nothing at all — no request line, no credential. This is the
+    // whole of the attack: it needs no token, because §9.4's answer is that connecting is not
+    // authenticating, and that answers reading rather than exhausting.
+    let room = skein::knock::ROOM;
+    let flood: Vec<TcpStream> = (0..room + 16)
+        .map(|_| {
+            let s = TcpStream::connect(&addr).expect("the port accepts");
+            // Well under the two-second grace, deliberately. The deadline closes every stranger
+            // eventually, so a patient read proves nothing about eviction: a room that evicts
+            // nobody would pass it. What is being asserted here is that these were closed
+            // **immediately, by the arrivals after them**.
+            s.set_read_timeout(Some(Duration::from_millis(700)))
+                .unwrap();
+            s
+        })
+        .collect();
+
+    // The oldest are gone: at the limit, an arrival takes the place of the stranger that has been
+    // standing longest. Read returns end-of-stream on a socket the server closed.
+    let mut closed = 0;
+    for held in flood.iter().take(16) {
+        let mut byte = [0u8; 1];
+        if matches!((&mut &*held).read(&mut byte), Ok(0)) {
+            closed += 1;
+        }
+    }
+    assert_eq!(
+        closed,
+        16,
+        "the first 16 of {} connections should have been evicted by the arrivals after them — a \
+         flood that is not bounded reaches the file-descriptor limit and the cockpit stops \
+         answering",
+        flood.len()
+    );
+
+    // And the point of evicting rather than refusing: the client that *will* authenticate arrives
+    // into a room that is full, and is served anyway.
+    let t0 = Instant::now();
+    let (st, _) = http_get(&addr, "/api/boxes");
+    assert_eq!(
+        st, 200,
+        "an authenticated request was refused while a flood held the door — a cap that refuses \
+         when full lets the flooder decide who gets in"
+    );
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "an authenticated request waited {:?} behind the flood",
+        t0.elapsed()
+    );
+
+    // The second half: a stranger that survived the eviction still does not get to stand there for
+    // free. Every one of them is closed once the grace period passes.
+    let last = flood.last().expect("the flood is not empty");
+    last.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut byte = [0u8; 1];
+    let deadline = Instant::now();
+    let ended = matches!((&mut &*last).read(&mut byte), Ok(0));
+    assert!(
+        ended,
+        "a connection that never presented a credential was still open after {:?} — the grace \
+         deadline is what makes a slot cost a reconnection instead of nothing",
+        deadline.elapsed()
+    );
+    drop(flood);
+}

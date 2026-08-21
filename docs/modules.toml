@@ -181,7 +181,16 @@ depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "heal
 # carry content hashes and neither the count nor the names are known at compile time. `act` since
 # creating a box became something a surface that is not a terminal can ask for — it used to be a
 # query string on the terminal WebSocket, so porting the REST API alone would have lost it.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+# `knock` because the accept loop is the only place a cap can be pre-auth — everything else in this
+# binary, `apiauth` included, has already accepted. It is one edge from the one file that holds a
+# socket before anybody has said who they are.
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+
+[current.knock]
+# Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
+# addresses or requests, which is what lets it be tested without one. Keeping this row empty is the
+# claim — a pre-auth guard that had to reach for state would be a guard with something to exhaust.
+depends_on = []
 
 [current.board]
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]

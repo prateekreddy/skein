@@ -926,8 +926,26 @@ which needs a requirement rather than an inference:
   outlives skein — so **a box that binds the cockpit port before skein starts becomes the cockpit**,
   and the browser hands it the token on the first request. A distinct uid stops SO_REUSEPORT theft
   from a live listener; it does not stop an empty port at sandbox start.
-- **pre-auth connection exhaustion.** The gate runs after accept, and §10.1's cap is post-auth. A box
-  gets a free denial of the control plane, and therefore of the approval surface, with no credential.
+- **pre-auth connection exhaustion.** ~~The gate runs after accept, and §10.1's cap is post-auth~~ —
+  **closed at the accept loop, where it is the only place it could be closed**: `src/knock.rs`, the
+  doorstep, is what a connection is between `accept` and saying who it is. A limit that *refused*
+  when full would have converted exhaustion into denial and called it a fix — the flooder still
+  decides who gets in, because the honest client arrives to a full room — so an arrival is always
+  admitted and the **oldest connection that still has not authenticated** leaves instead. The
+  asymmetry is the mechanism: proving takes one request and removes you from the doorstep, so a
+  flood displaces itself and never the client that is about to authenticate. A grace deadline is the
+  other half, and the cheaper one: a socket that has not presented a credential in ten seconds is
+  not a cockpit, so a held slot costs a reconnection rather than nothing.
+
+  **What is not closed, and why it cannot be here.** The usual answer is a per-source allowance, and
+  skein has none to give: in-fleet every box shares skein's network namespace, so a box's peer
+  address *is* skein's own and there is nothing to key on. That is answerable only after requirement
+  1 below — a connection attributable to a uid — and until then a flooder and the cockpit are
+  indistinguishable at the moment a connection arrives. Two consequences follow and are written down
+  rather than left to be discovered: a fast enough flood can make an honest client's *handshake*
+  race for a place (bounded, because the honest one wins it in the time of one request and the
+  flooder never leaves the doorstep by proving); and the deadline is a wall clock, not a price, so
+  it bounds how long a slot is held and not how many are attempted.
 - **box-authored content rendered inside the authenticated cockpit.** The file viewer parses markdown
   from a box's tree into the page. Raw HTML is escaped, but the link renderer is not overridden, so a
   `javascript:` href survives — and one click in a rendered README is same-origin script with the
@@ -1359,10 +1377,11 @@ diagnosis is easy and an earlier draft stopped there. The design:
   missed and re-syncs from a snapshot. A hole is worse than a gap you can see — the board would look
   current and be wrong.
 - **a connection cap**, as the PTY path already has. Done, and **it is post-auth**, like the PTY one.
-  That bounds authenticated clients and leaves pre-auth connection exhaustion to the accept loop:
-  the auth gate runs after accept, so a box still gets a denial of the control plane — and therefore
-  of the approval surface — with no credential. Stated here rather than implied, because a cap that
-  looks like it covers this is worse than one that admits it does not.
+  That bounds authenticated clients and says nothing about the connections before them — which is
+  stated here rather than implied, because a cap that looks like it covers that is worse than one
+  that admits it does not. The pre-auth half is a **different mechanism in a different place**, not
+  a bigger number here: it is at the accept loop, it evicts rather than refuses, and §9.4 is where
+  it and its remaining hole are written down.
 
 ---
 
