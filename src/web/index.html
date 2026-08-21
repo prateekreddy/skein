@@ -1441,6 +1441,23 @@ const diffBadge = d => d && (d.files||d.ins||d.del)
   ? `<span class="pos">+${d.ins|0}</span> <span class="neg">−${d.del|0}</span>${d.files?` · ${d.files|0}f`:""}` : "";
 
 let boxes = [], order = [], sel = null, prevState = {};
+// When each row was last *observed*, by name. The server sends `age_secs` — the age at the moment
+// of the observation — and this is the other half of the sum: how long ago that was. Set when a row
+// arrives, so a row that has not changed keeps the moment it was last seen rather than being
+// treated as fresh on every re-render.
+const receivedAt = new Map();
+// Re-read the two numbers already on the row and rewrite one string. No traffic, no layout beyond
+// the text, and it runs whether or not the stream is saying anything — which is the case it exists
+// for.
+function tickAges() {
+  for (const el of document.querySelectorAll(".age")) {
+    const raw = el.dataset.secs;
+    const secs = raw === "" || raw === undefined ? null : Number(raw);
+    const seen = Number(el.dataset.seen || Date.now());
+    el.textContent = ageNow(secs, Date.now() - seen);
+  }
+}
+setInterval(tickAges, 1000);
 let runtimes = [];
 const runtimeInfo = id => runtimes.find(runtime => runtime.id === id) || runtimes[0] || { id:id || "", label:id || "Agent" };
 const runtimeLabel = id => runtimeInfo(id).label;
@@ -1677,7 +1694,15 @@ function updateRow(el, b, showRepo) {
   const pillHtml = esc(labelOf(b.state)) + (half ? ` <i class="hdot"></i>` : "");
   if (pill.dataset.html !== pillHtml) { pill.dataset.html = pillHtml; pill.innerHTML = pillHtml; }
   pill.title = half ? `${half[0]} — ${half[1]}\n\n${half[2]}` : "";
-  el.querySelector(".age").textContent = b.age;
+  // Aged from the observation rather than from the string the server formatted. The stream no
+  // longer re-sends a box that only got older — a box's age moves every second whether or not
+  // anything happened to it — so a server-formatted string would freeze between real changes and a
+  // fleet quiet for ten minutes would say "2m ago" for ever. `.dataset` carries the two numbers the
+  // timer needs, so ageing a row costs no traffic and no re-render of anything else.
+  const age = el.querySelector(".age");
+  age.dataset.secs = b.age_secs === null || b.age_secs === undefined ? "" : String(b.age_secs);
+  age.dataset.seen = String(receivedAt.get(b.name) || Date.now());
+  age.textContent = ageNow(b.age_secs, Date.now() - (receivedAt.get(b.name) || Date.now()));
   el.querySelector(".chev").textContent = wired ? "▣" : "›";
   el.querySelector(".dstat").innerHTML = diffBadge(b.diff);
   // hook-health: a Running box whose probes have NEVER reported has dark hooks — every other
@@ -6333,10 +6358,17 @@ function connect() {
   // there" are different facts and conflating them would mean re-sending everything to express one.
   const applyTick = tick => {
     lastTickAt = Date.now();
-    if (tick.event === "snapshot") { render(tick.boxes || []); return; }
+    if (tick.event === "snapshot") {
+      const now = Date.now();
+      for (const b of (tick.boxes || [])) receivedAt.set(b.name, now);
+      render(tick.boxes || []);
+      return;
+    }
     const by = new Map(boxes.map(b => [b.name, b]));
-    for (const name of (tick.gone || [])) by.delete(name);
-    for (const b of (tick.boxes || [])) by.set(b.name, b);
+    for (const name of (tick.gone || [])) { by.delete(name); receivedAt.delete(name); }
+    // Only the rows that ARRIVED get a new moment. A row the update did not mention keeps the one
+    // it had, which is what makes its age keep advancing rather than resetting on every tick.
+    for (const b of (tick.boxes || [])) { by.set(b.name, b); receivedAt.set(b.name, Date.now()); }
     render([...by.values()]);
   };
   es.addEventListener("snapshot", e => { try { applyTick(JSON.parse(e.data)); } catch {} });

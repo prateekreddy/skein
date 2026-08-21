@@ -1335,9 +1335,18 @@ diagnosis is easy and an earlier draft stopped there. The design:
   moves every second whether or not anything happened to it, so every box changed on every tick and
   transitions cost exactly what snapshots did, plus the machinery. It surfaced as a test that hung,
   because the stream never stopped sending. *Changed* has to mean something happened, not that time
-  passed. The cost is that a row's displayed age stops advancing between real changes, held in check
-  by a full snapshot every thirtieth second — and the right answer is a client that ages its own rows
-  from the observation and the moment it arrived, which is not built.
+  passed.
+
+  The cost was a displayed age that froze between real changes, and **the client ages its own rows**
+  now: the server sends `age_secs` — the age at the moment of the observation — and the client knows
+  when it received it, so the age is the sum, recomputed on a timer that costs no traffic at all. One
+  formatter, in the language the person reads it in, tested in node. A row whose update did not
+  mention it keeps the moment it was last seen, which is what makes its age keep advancing rather
+  than resetting every tick.
+
+  The periodic full snapshot survives for a different reason and is far rarer: a client whose applied
+  deltas have drifted has no way to notice on its own, and a quiet fleet gives it nothing to correct
+  against.
 - **a bounded per-client channel with a lag counter.** Done: the client is told how many ticks it
   missed and re-syncs from a snapshot. A hole is worse than a gap you can see — the board would look
   current and be wrong.

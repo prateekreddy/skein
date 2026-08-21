@@ -66,6 +66,34 @@ mod tests {
         );
     }
 
+    /// A row ages itself, from the observation rather than from a string the server formatted.
+    ///
+    /// The stream stopped re-sending a box that only got older, so a page rendering `b.age` would
+    /// freeze between real changes and a fleet quiet for ten minutes would say "2m ago" for ever.
+    /// This is a wire assertion in both directions: the page must read the field the server sends
+    /// (`age_secs`), and must not read the one it no longer maintains.
+    #[test]
+    fn the_page_ages_a_row_rather_than_reading_a_frozen_string() {
+        assert!(
+            INDEX.contains("b.age_secs"),
+            "the page does not read the observation's age, so it cannot age the row itself"
+        );
+        assert!(
+            !INDEX.contains(".textContent = b.age;"),
+            "the page still renders the server's formatted string, which no longer advances"
+        );
+        assert!(
+            INDEX.contains("setInterval(tickAges"),
+            "nothing advances the ages, so they move only when something else changes"
+        );
+        // The other half of the sum: a row's age is what it was when observed plus how long ago
+        // that was, so the page has to remember when each row arrived.
+        assert!(
+            INDEX.contains("receivedAt.set("),
+            "the page does not remember when a row arrived, so it has nothing to add to age_secs"
+        );
+    }
+
     /// The page loads the bundle, and does not carry its own copy of what is in it.
     ///
     /// Two sources of truth is worse than one: the page would keep working while the tested copy
@@ -82,6 +110,7 @@ mod tests {
             "const fmtGB =",
             "const groupOf =",
             "const NEEDS_YOU =",
+            "function ago(",
         ] {
             assert!(
                 !INDEX.contains(gone),
@@ -96,6 +125,8 @@ mod tests {
             "const fmtGB =",
             "const groupOf =",
             "const NEEDS_YOU =",
+            "function ago(",
+            "function ageNow(",
         ] {
             assert!(
                 BUNDLE.contains(defined),

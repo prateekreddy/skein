@@ -38,13 +38,17 @@ pub const BEHIND: usize = 8;
 
 /// Send the whole picture every this many ticks, whatever changed.
 ///
-/// Because change detection ignores the clock-derived fields (see [`transition`]), a row's displayed
-/// age would otherwise stop advancing until something real happened to it — and "last seen 2m ago"
-/// frozen at 2m is a worse lie than a slightly stale board. Fifteen ticks is thirty seconds.
+/// **Not for ages any more.** It was fifteen ticks — thirty seconds — because change detection
+/// ignores the clock-derived fields, so a row's displayed age would otherwise freeze until something
+/// real happened to it. The client ages its own rows now, from `age_secs` and the moment it received
+/// them, so that reason is gone.
 ///
-/// A floor rather than the mechanism. The right answer is a client that ages its own rows, and this
-/// holds the line until there is one.
-pub const FULL_EVERY: u64 = 15;
+/// What is left is a re-sync floor, and it is far rarer: a client whose applied deltas have drifted
+/// from the producer — a dropped event the browser never surfaced, a bug in applying one — has no
+/// way to notice on its own, and a quiet fleet gives it nothing to correct against. Ten minutes is
+/// long enough to be nearly free and short enough that nobody stares at a wrong board for an
+/// afternoon.
+pub const FULL_EVERY: u64 = 300;
 
 /// What the stream carries.
 #[derive(Debug, Clone, PartialEq, Serialize)]
