@@ -16,12 +16,15 @@
 //! join between two languages, and nothing but a string match can make it. Those stay, and belong
 //! here.
 //!
-//! A **logic** assertion — "voice and alerts are independent switches", "the keyboard shortcut does
-//! not fire in a text field" — is a string match standing in for a test, because the function could
-//! not be imported. Those are the ones `cockpit/src` exists to retire: five pure functions moved
-//! there and are tested in node. The ones left are DOM-coupled (they speak, notify, or read an
-//! event), so retiring them means giving them a shape that takes its inputs as arguments — real
-//! work, written down rather than half-done.
+//! A **logic** assertion — "voice and alerts are independent switches", "the keyboard shortcut does not
+//! fire in a text field" — was a string match standing in for a test, because the function could not
+//! be imported. Those are retired: the decisions live in `cockpit/src` and are asserted by *calling*
+//! them. What is left of them here is the **join** — that the page still asks — which is the same
+//! kind of assertion as the wire ones and is made the same way.
+//!
+//! The split that made it possible is worth stating, because it is what "not pure" actually meant:
+//! deciding *what should happen* takes its inputs as arguments and returns a value; doing it needs a
+//! mouth, a notification permission, and a focused element. Only the first half moved.
 //!
 //! The vendored scripts stay in the binary: they are bytes to hand out, and no join runs through
 //! them.
@@ -185,15 +188,16 @@ mod tests {
             page.contains("b.headline") && page.contains("forSpeech"),
             "the cockpit no longer speaks the box's own words"
         );
-        // The property, not its spelling: both channels are now driven by one announcer, so what
-        // matters is that each still consults its OWN switch there and the two are never conjoined.
+        // **The switch is no longer asserted here.** It used to be two string matches looking for
+        // the shape of the code — `if (voiceOn) say(` and the absence of `voiceOn && alertsOn` —
+        // which is a test of the source text rather than of the behaviour. The decision is
+        // `announcementsFor` in `cockpit/src/announce.mjs` now, and `cockpit/test/announce.test.mjs`
+        // asserts the property by *calling* it: voice on with alerts off still speaks, and alerts on
+        // with voice off stays silent. What is left in the page is the speaking and the notifying,
+        // which cannot be tested without a mouth.
         assert!(
-            page.contains("if (voiceOn) say(") && page.contains("if (alertsOn) {"),
-            "voice lost its own switch — gated on alerts, it dies wherever notifications were refused"
-        );
-        assert!(
-            !page.contains("voiceOn && alertsOn") && !page.contains("alertsOn && voiceOn"),
-            "the two channels were tied together; refusing notifications must not take speech with it"
+            page.contains("announcementsFor("),
+            "the page decides for itself again, so the independence of the two switches is untested"
         );
     }
 
@@ -233,11 +237,16 @@ mod tests {
             page.contains("AltRight"),
             "the ear has no push-to-talk key, so it can only be reached from the board"
         );
-        // The fleet keymap must still hand every key to a terminal — the ear works *because* that
-        // guard is there, and removing it would be a far worse regression than losing the ear.
+        // **The typing guard is no longer asserted here.** It used to be a match on
+        // `if (inTerm || inField) return;` — the shape of the code standing in for the behaviour.
+        // The decision is `shortcutFor` in `cockpit/src/keys.mjs` now, and
+        // `cockpit/test/keys.test.mjs` asserts it by *calling* it, for every key the board
+        // dispatches: each one fires with focus nowhere and returns nothing with focus in a field or
+        // a terminal. What is left here is the join — the page must still ask.
         assert!(
-            page.contains("if (inTerm || inField) return;"),
-            "the fleet keymap stopped yielding to a focused terminal"
+            page.contains("shortcutFor(e, { inTerm, inField })"),
+            "the fleet keymap decides for itself again, so nothing tests that it yields to a \
+             focused terminal — and the ear works only because that guard is there"
         );
     }
 

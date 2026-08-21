@@ -3823,7 +3823,6 @@ function owedSentence(need) {
 // ONCE PER BOX is about the fact that you heard it. A debt is news exactly once; after that it is
 // something you already know and have decided about. Parking a box because there is no more work for
 // it is a normal thing to do, and a voice that will not let you is worse than no voice.
-const OWED_GRACE_MS = 20000;
 const OWED_SETTLE_MS = 12000;
 let awaySince = 0, spokenOwed = new Set(), stateSince = {};
 
@@ -3882,27 +3881,24 @@ function announceStandingDebt(snapshot, away, speakingAlready) {
   if (!away) { awaySince = 0; return; }
   if (!awaySince) awaySince = Date.now();
   forgetSettledDebts(snapshot);
-  // Nothing to announce *with*: keep the bookkeeping running but leave the backlog intact, so
-  // turning a channel on tells you what you missed instead of starting from silence.
-  if (!voiceOn && !alertsOn) return;
-  if (Date.now() - awaySince < OWED_GRACE_MS) return;
   // Once per box, not once per change to the set. Keyed on the owed *set*, this re-read the whole
   // list every time any box entered or left it — so the boxes that had been waiting all along were
   // named again in every sentence, which is the other half of saying the same thing over and over.
   const fresh = owed.filter(b => !spokenOwed.has(b.name));
-  if (!fresh.length) return;
-  // A `done` sentence is being read on this same tick. Let it stand alone and say this on the next
-  // one — deferred, not credited: taking the credit here would silence these boxes permanently.
-  if (speakingAlready) return;
+  // **The decision is `announcementsFor`, tested in node.** What is left here is the doing: this
+  // function speaks and notifies, so it cannot be tested without a mouth — and the rule it carries
+  // (voice and alerts are independent switches; they were once one condition, and turning alerts
+  // off silenced the voice) is a rule worth asserting by calling rather than by reading.
+  const plan = announcementsFor(fresh, {
+    voiceOn, alertsOn, awayForMs: Date.now() - awaySince, speakingAlready,
+  });
+  // Nothing was announced, so nothing is credited: the backlog stays intact and turning a channel
+  // on tells you what you missed instead of starting from silence.
+  if (!plan.notes.length && !plan.say) return;
   for (const b of fresh) spokenOwed.add(b.name);
-  if (alertsOn) {
-    // Past a couple, a count is all you can act on — and six banners stacked on a lock screen is the
-    // same nag wearing a different hat.
-    if (fresh.length <= 2) for (const b of fresh) pushNote(`${b.name} ${noteFor(b, groupOf(b.state))}`, b.name);
-    else pushNote(`${fresh.length} boxes need you`, "skein-owed");
-    beep();
-  }
-  if (voiceOn) say(owedSentence(fresh));
+  for (const n of plan.notes) pushNote(n.body, n.tag);
+  if (plan.beep) beep();
+  if (plan.say) say(plan.say);
 }
 
 // Read the inbox on demand — the same sentence the mouth would have spoken, for when you *are*
@@ -6054,26 +6050,31 @@ document.addEventListener("keydown", e => {
   // to the fleet keymap from an open dialog moves the selection behind it.
   if (settingsModal().classList.contains("open")) { if (e.key === "Escape") closeSettings(); return; }
   // When focus is in a live terminal or any text field, let it own every key — including Esc, which
-  // the agent (claude/vim/less/fzf) needs. This guard MUST precede the Esc handler below.
+  // the agent (claude/vim/less/fzf) needs. **The decision is `shortcutFor`, tested in node**: what
+  // is DOM-shaped is knowing where the focus is, and that is what is passed in.
   const inTerm = view.mode === "term" && activeSession()?.host.contains(document.activeElement);
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
-  if (inTerm || inField) return;
-  // Esc returns focus to the fleet for keyboard nav — it never closes/kills a session (that was a
-  // footgun: one keypress destroyed the agent session). Close explicitly via the tab ✕ / "close all".
-  if (e.key === "Escape") { e.preventDefault(); document.activeElement?.blur?.(); return; }
-  switch (e.key) {
-    case "j": case "ArrowDown": e.preventDefault(); move(1); break;
-    case "k": case "ArrowUp":   e.preventDefault(); move(-1); break;
-    case "Enter": case "o": if (sel) { e.preventDefault(); openTerminal(sel); } break;
-    case "d": if (sel) { e.preventDefault(); openDiff(sel); } break;
-    case "?": e.preventDefault(); openSettings("keys"); break;
+  // Which key means what is `shortcutFor`, one table, tested in node. This switch does the thing;
+  // it does not decide it, and it no longer re-reads `e.key` — a keymap in two places is one place
+  // a key can be forgotten.
+  const action = shortcutFor(e, { inTerm, inField });
+  if (!action) return;
+  switch (action) {
+    // Esc returns focus to the fleet for keyboard nav — it never closes/kills a session (that was a
+    // footgun: one keypress destroyed the agent session). Close explicitly via the tab ✕.
+    case "deselect": e.preventDefault(); document.activeElement?.blur?.(); break;
+    case "next": e.preventDefault(); move(1); break;
+    case "previous": e.preventDefault(); move(-1); break;
+    case "open": if (sel) { e.preventDefault(); openTerminal(sel); } break;
+    case "diff": if (sel) { e.preventDefault(); openDiff(sel); } break;
+    case "keys": e.preventDefault(); openSettings("keys"); break;
     // `/` is the one binding a fleet product cannot do without past a dozen boxes, and it was the
     // last thing on the previous audit's still-unfixed list.
-    case "/": e.preventDefault(); openFilter(); break;
-    case "]": e.preventDefault(); nextNeedsYou(); break;
-    case "L": case "l": e.preventDefault(); showLoad(); break;
-    case "[": e.preventDefault(); cycleSession(-1); break;
-    case "}": e.preventDefault(); cycleSession(1); break;
+    case "filter": e.preventDefault(); openFilter(); break;
+    case "next-needs-you": e.preventDefault(); nextNeedsYou(); break;
+    case "load": e.preventDefault(); showLoad(); break;
+    case "previous-session": e.preventDefault(); cycleSession(-1); break;
+    case "next-session": e.preventDefault(); cycleSession(1); break;
   }
 });
 function cycleSession(d) {
