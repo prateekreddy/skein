@@ -99,6 +99,27 @@ rather than needing work of its own.
 
 **3 — Build the warden, and route create/destroy through it from *host* skein.** Both callers
 exercised before anything moves — which was the whole argument for having a warden.
+**Done** (`9fac057`, `2c158fe`, `fd0b98d`, `7b04907`, `6d6b4e6`): a separate `warden/` crate with an
+outcome store, four endpoints (two doers behind Cargo features, two reporting endpoints with no
+feature at all), a `/dev/tty` approval surface, and §8.5's doorway. `ensure_fleet`'s create and
+`resize_fleet`'s destroy go through `warden_client`; `tools/source-check.py` shows `fleet`'s `sbx`
+spellings down from five to two, and the two left are `ports` and the interactive login.
+
+**This is an operational change and not only an internal one: a host with no warden running cannot
+create or resize a fleet.** Deliberately — an unreachable warden does not fall back to running `sbx`
+here, because that fallback would be taken on exactly the day something was wrong. The failure names
+the fix and gives the line to run by hand.
+
+Three things this step found that the plan did not have. The **create environment** was going to be
+lost in the move (`DOCKER_SANDBOXES_ROOT_SIZE` is the difference between a 20 GB fleet and a 200 GB
+one), so it travels with the request and is rendered in the approval. The **Source law could not see
+any of it**: skein spawns `sbx` through `run_capture_for`, not `Command::new`, so the checker had
+been reporting `fleet` as reaching nothing while it ran the fleet create — fixed in `f455ab1`. And
+`bin/skein`'s `sbx` spelling does **not** go away with this step, because it is `attach`.
+
+What step 3 does not close, stated where it will be looked for: before the uid split (4b), any
+process at the host uid can reach the warden's file descriptors, so today's approval guarantee is
+against a *box* rather than against a compromised skein on the same machine (§8.1).
 
 **4 — The mount cover, then the uid split, then move in.** In that order, and the first two are gates
 rather than follow-ups (architecture §9.5).
