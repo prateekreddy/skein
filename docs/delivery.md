@@ -52,6 +52,13 @@ to a mount and an environment variable. The work is in four things none of which
   rebuilt fleet re-enters a recycled pid.
 - **`repos/<id>/work` is a working checkout**, not a mirror, and `diff.rs`, `moduledocs.rs` and
   `codeowners.rs` read it directly. Repointing them is budgeted here, not assumed away.
+  **Done** (`f8056a7`, `2644f99`, `04c10d9`, `0b93ab6`): `repos/<id>/mirror` is a bare mirror and is
+  what boxes clone from; `codeowners` takes a reader and `moduledocs` reads `repos::Tree`
+  (`git show HEAD:<path>`); `diff` had already stopped, when box diffs moved inside the box. The
+  trap this bullet does not name, and the one that cost the most to see: **a mirror can never supply
+  a gitignored file**, so `shared-paths.txt` — the `.env` and the `CLAUDE.md` a project keeps out of
+  git — is not a mirror question at all. Those come from the repo's *source tree*, which is now
+  copied into the store on the host, and the checkout is no longer mounted into the sandbox.
 - **no lock on `config.json`/`repos.json`.** Adding schema versions without a writer discipline
   versions the corruption.
 

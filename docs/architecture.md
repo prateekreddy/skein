@@ -403,7 +403,10 @@ Two consequences to state rather than discover:
   two deployments.
 - **Three host-side features read the working checkout directly** — `diff`, `moduledocs`,
   `codeowners`. They repoint at the mirror. That is a refactor, not a deletion, and it is budgeted
-  in `docs/delivery.md`.
+  in `docs/delivery.md`. Done, and one thing had to be separated to do it: the files a repo keeps
+  **out of git** are not in any mirror, so `shared-paths.txt` reads the repo's *source tree*, which
+  is a different thing from its mirror and is now copied into the store on the host rather than
+  mounted into the box.
 
 ---
 
