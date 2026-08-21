@@ -388,10 +388,19 @@ mod tests {
     #[test]
     fn a_watcher_arriving_late_is_not_missing_the_beginning() {
         begin("act-watch", "echo first; sleep 1; echo second").unwrap();
-        // Long enough for the first line and not the second. A whole second between them, because
-        // the window has to survive a loaded machine — a race the test itself sets up is a race the
-        // test loses first.
-        std::thread::sleep(Duration::from_millis(250));
+        // **Waited for, not slept through.** A fixed pause has to be long enough for the first line
+        // on a loaded machine and short enough to be inside the second's window, and on a machine
+        // busy enough it is neither — which showed up as this test failing about one run in three
+        // while the code it tests was fine. Polling for the thing the test is waiting on has no such
+        // window: it is as fast as the machine and as patient as it needs to be.
+        let began = std::time::Instant::now();
+        while !look("act-watch").is_some_and(|l| l.output.contains("first")) {
+            assert!(
+                began.elapsed() < Duration::from_millis(900),
+                "the act produced nothing in almost the whole gap before its second line"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let (so_far, mut rest) = watch("act-watch").expect("watchable");
         assert!(
             so_far.contains("first"),

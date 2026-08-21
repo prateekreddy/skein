@@ -454,6 +454,16 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
 pub fn replace_box(source: &str, target_runtime: &str) -> Result<Replacement, String> {
     let replacement = prepare_replacement(source, target_runtime)?;
     launch_replacement(&replacement)?;
+    // Into the log skein does not own (§9.5 R6). A takeover hands one agent the work, the branch and
+    // the credentials of another, which is the kind of thing somebody reconstructing a week later
+    // needs to be able to find — and this is skein's own act rather than one the warden ran.
+    // Reported only when it succeeded: a refusal spends nothing and changes nothing, and the
+    // failures here are refusals (`prepare_replacement` returns before anything moves).
+    crate::warden_client::reported(
+        &format!("takeover-{source}"),
+        "handed a box to another agent",
+        &format!("{source} → {target_runtime}"),
+    );
     Ok(replacement)
 }
 

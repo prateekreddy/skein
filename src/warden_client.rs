@@ -49,6 +49,20 @@ pub const SECRET_HEADER: &str = "x-skein-warden";
 /// read the prompt and type an id before the work even starts.
 const REPLY: Duration = Duration::from_secs(1800);
 
+/// The same, for an audit entry — which nobody types anything for.
+///
+/// **Its own number, and the difference is the point.** An entry reported on the doer's timeout
+/// would let an unresponsive warden hold a box destroy open for half an hour, and the log exists to
+/// record what skein did, not to become a way of stopping it.
+const AUDIT_REPLY: Duration = Duration::from_secs(5);
+
+/// How long to wait for the connection itself.
+///
+/// `TcpStream::connect` has no timeout of its own: an address that accepts nothing and refuses
+/// nothing — a firewall that drops — hangs until the kernel gives up, minutes later. Every call here
+/// is to a process on the same machine, so seconds is generous.
+const CONNECT: Duration = Duration::from_secs(5);
+
 /// What came back, in the terms a caller has to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answered {
@@ -211,7 +225,16 @@ impl Warden {
             "reported_by": "skein",
         })
         .to_string();
-        self.send("POST", "/v1/audit", &body).map(|_| ())
+        let (code, said) = self.send_within("POST", "/v1/audit", &body, AUDIT_REPLY)?;
+        match code {
+            200 => Ok(()),
+            // The code is read here for the same reason `look` reads it: `{"error": …}` is a
+            // perfectly well-formed reply, and a caller that ignored the number would report a
+            // refusal as a recorded entry.
+            other => Err(format!(
+                "the warden did not record it ({other}): {said:.200}"
+            )),
+        }
     }
 
     fn doer(
@@ -238,7 +261,30 @@ impl Warden {
 
     /// One request, one reply, connection closed — the only shape the warden speaks (§8.6).
     fn send(&self, method: &str, path: &str, body: &str) -> Result<(u16, String), String> {
-        let mut stream = TcpStream::connect((self.host.as_str(), self.port)).map_err(|e| {
+        self.send_within(method, path, body, REPLY)
+    }
+
+    /// Connect, with a timeout — see [`CONNECT`].
+    fn connect(&self) -> std::io::Result<TcpStream> {
+        use std::net::ToSocketAddrs;
+        let mut last = std::io::Error::other("no address to try");
+        for addr in (self.host.as_str(), self.port).to_socket_addrs()? {
+            match TcpStream::connect_timeout(&addr, CONNECT) {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
+    fn send_within(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+        reply: Duration,
+    ) -> Result<(u16, String), String> {
+        let mut stream = self.connect().map_err(|e| {
             format!(
                 "the host warden is not answering on {}:{} ({e}). Fleet create and destroy go \
                  through it — start it with `skein-warden`, somewhere a person can approve what it \
@@ -246,7 +292,7 @@ impl Warden {
                 self.host, self.port
             )
         })?;
-        stream.set_read_timeout(Some(REPLY)).ok();
+        stream.set_read_timeout(Some(reply)).ok();
         stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
         // Presented on every request, including the two that only report: after 4c the bind is not
         // the boundary any more, and "it only tells you things" is how an endpoint ends up outside
@@ -275,6 +321,29 @@ impl Warden {
             .ok_or_else(|| format!("the warden answered something that is not HTTP: {raw:.120}"))?;
         let said = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
         Ok((code, said.to_string()))
+    }
+}
+
+/// Report something skein did, into a log skein does not own (§9.5 R6).
+///
+/// **After the fact, carrying the outcome.** An entry written before and an entry written after are
+/// different claims, and only one of them can be checked: "skein destroyed this box" is settled by
+/// the box being gone, while "skein is about to" is settled by nothing. The cost is stated rather
+/// than hidden — a crash between the act and this call leaves no line, and the acts reported here
+/// are ones whose result is visible elsewhere.
+///
+/// **It cannot fail what it records.** Nothing is returned, a failure goes to stderr, and the
+/// timeouts are the short ones: an audit sink that could stop a box being destroyed would be a
+/// reason to stop auditing (`record`'s own note). The line names the warden, because a fleet whose
+/// acts are going unrecorded is something an operator wants to find out from the operation rather
+/// than from an empty log later.
+///
+/// Not spawned. A thread per entry would report acts in whatever order the scheduler ran them, and
+/// the warden stamps its own arrival time — so the log's order would stop being the order things
+/// happened, which is most of what makes it able to settle an argument.
+pub fn reported(operation: &str, what: &str, detail: &str) {
+    if let Err(e) = Warden::configured().record(operation, what, detail) {
+        eprintln!("skein: {what} was not recorded in the host audit log ({e}) — it still happened");
     }
 }
 

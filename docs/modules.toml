@@ -233,7 +233,9 @@ depends_on = [
 ]
 
 [current.gitgate]
-depends_on = ["config", "fleet", "place", "repos", "util"]
+# `warden_client` for the same reason as `sandbox`: a credential arriving at a box or being taken
+# away from it is what §9.5 R6 exists to make permanent, and this is where that happens.
+depends_on = ["config", "fleet", "place", "repos", "util", "warden_client"]
 
 [current.github]
 depends_on = ["util"]
@@ -292,7 +294,10 @@ depends_on = ["ai", "codeowners", "config", "contracts", "moduledocs", "prq", "r
 depends_on = ["repos", "util"]
 
 [current.sandbox]
-depends_on = ["ai", "fleet", "kit", "place", "registry", "repos", "runtime", "sbx", "tracking", "util"]
+# `warden_client` for one call and not for a doer: destroying a box is the most consequential thing
+# skein does WITHOUT asking the warden to do it, and §9.5 R6 says the record of it belongs in a log
+# skein does not own. The edge carries an audit entry, never a decision.
+depends_on = ["ai", "fleet", "kit", "place", "registry", "repos", "runtime", "sbx", "tracking", "util", "warden_client"]
 
 [current.sbx]
 depends_on = ["fleet", "place", "registry", "util"]
@@ -325,7 +330,9 @@ depends_on = ["board", "config", "util"]
 depends_on = ["config", "fleet", "place", "util"]
 
 [current.takeover]
-depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", "sandbox", "sbx", "util"]
+# `warden_client` for an audit entry and nothing else (§9.5 R6): a takeover hands one agent another
+# agent's work, branch and credentials, which is a fact that belongs in a log skein cannot edit.
+depends_on = ["fleet", "handoff", "kit", "place", "probes", "repos", "runtime", "sandbox", "sbx", "util", "warden_client"]
 
 [current.testutil]
 depends_on = ["place", "registry"]

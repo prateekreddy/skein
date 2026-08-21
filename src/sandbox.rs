@@ -574,13 +574,27 @@ pub fn destroy_command(name: &str) -> String {
 pub fn destroy_box(name: &str) -> Result<(), String> {
     // Its disk as well as its liveness: the tree is gone, so the `du` figures now attribute space to
     // a box that is not there and hide the room that just came back.
-    crate::fleet::disturbing(
+    let gone = crate::fleet::disturbing(
         &[
             crate::fleet::Remembered::BoxLiveness,
             crate::fleet::Remembered::BoxDisk,
         ],
         || destroy_box_inner(name),
-    )
+    );
+    // Into the log skein does not own (§9.5 R6). This is the most consequential thing skein does
+    // without asking the warden to do it — a box and every uncommitted thing in it — and the whole
+    // point of a host-side log is that a skein which later goes wrong cannot edit the line saying
+    // what it did. Reported after, with the outcome, because "it was destroyed" can be checked
+    // against a box that is gone and "it is about to be" can be checked against nothing.
+    crate::warden_client::reported(
+        &format!("destroy-box-{name}"),
+        "destroyed a box",
+        &match &gone {
+            Ok(()) => format!("{name} and its checkout are gone"),
+            Err(why) => format!("{name} was not destroyed: {why}"),
+        },
+    );
+    gone
 }
 
 fn destroy_box_inner(name: &str) -> Result<(), String> {

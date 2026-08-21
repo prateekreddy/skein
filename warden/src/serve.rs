@@ -97,6 +97,10 @@ struct Told {
     detail: String,
     /// Who is claiming this. Recorded as a claim — this endpoint cannot check one, and pretending
     /// otherwise would put a false attribution in the one log that is supposed to settle arguments.
+    ///
+    /// **It is a narrower claim than it was.** Since §9.5 R5, the caller held the shared secret, so
+    /// the field says "whoever holds skein's secret says this is skein" rather than "whoever could
+    /// open the port". That is worth the sentence: it is not a check, and it is no longer nothing.
     reported_by: String,
 }
 

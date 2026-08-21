@@ -1278,6 +1278,22 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 6. **The audit log is written by the warden, on the host, on a path no box's mount view includes.**
    "Append-only" is unenforceable on a path a uid-1000 box can reach — there is no `chattr +a`
    without `CAP_LINUX_IMMUTABLE`.
+
+   **The sink existed and nothing reported into it**, which is the same as not having one with the
+   reassurance of the code being present. skein now reports the acts it takes *without* asking the
+   warden to take them — **a box destroyed, a push credential granted or withdrawn, a box handed to
+   another agent** — after the fact and carrying the outcome, because "it was destroyed" can be
+   checked against a box that is gone and "it is about to be" can be checked against nothing.
+
+   What is deliberately **not** logged, so an empty stretch is not read as silence: the fleet
+   lifecycle, which the warden records itself because it runs it; a token *rotation*, which happens
+   on a cadence and would be a line an hour per box; and starting or stopping a box, which is
+   reversible and visible on the board. And the cost of reporting after: a crash between the act and
+   the entry leaves no line, which is why the acts chosen are ones whose result is visible elsewhere.
+
+   It cannot fail what it records — nothing is returned, the failure goes to stderr, and the
+   timeouts are its own rather than a doer's, since an audit sink that could hold a box destroy open
+   for half an hour would be a reason to stop auditing.
 7. **Credentials are compared on evidence skein controls, never on a field the file asserts** (§9.3).
 8. **No privileged actor reads, writes, chowns or follows a path a box can influence.** §8.4 states
    this for approvals; that was too narrow, and the general form sweeps in three more:

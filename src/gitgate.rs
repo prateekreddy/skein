@@ -1297,6 +1297,12 @@ fn discard_tokens(dir: &std::path::Path) -> Result<(), String> {
 /// avoid causing.
 pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     let mut problems = Vec::new();
+    // What changed about what this box can reach, for the host audit log (§9.5 R6). **Changes
+    // only**: this runs on a cadence and rewrites every token as it rotates, so reporting each
+    // write would be a line a minute per box and a log nobody reads. A credential arriving and a
+    // credential being taken away are the two things worth a permanent record.
+    let mut granted: Vec<String> = Vec::new();
+    let mut withdrawn: Vec<String> = Vec::new();
     let dir = std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-tokens");
 
     // A box that is no longer scoped keeps nothing. This ran *before* the pruning below and returned,
@@ -1305,8 +1311,16 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     // and expires when its owner said it would, which may be next year. "Stop scoping this box" has
     // to mean the credentials go, not that they stop being refreshed.
     if !box_is_scoped(box_name) {
+        // Everything goes, which is the largest withdrawal there is — so it is reported, and only
+        // when there was something to take: an unscoped box is refreshed on every pass and has no
+        // tokens on all but the first.
+        let had = std::fs::read_dir(&dir)
+            .map(|e| e.flatten().count())
+            .unwrap_or(0);
         if let Err(e) = discard_tokens(&dir) {
             problems.push(e);
+        } else if had > 0 {
+            report(box_name, &[], &["every repository".to_string()]);
         }
         return problems;
     }
@@ -1336,8 +1350,10 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let slug = name.replace("%2F", "/");
-            if !want.iter().any(|w| same_repo(w, &slug)) {
-                let _ = std::fs::remove_file(entry.path());
+            if !want.iter().any(|w| same_repo(w, &slug))
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                withdrawn.push(slug.clone());
             }
         }
     }
@@ -1350,12 +1366,16 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
 
     for slug in &want {
         let path = std::path::PathBuf::from(token_file(box_name, slug));
+        // Whether this box already had a credential for this repo. A token is rewritten on every
+        // refresh — App tokens last an hour — so writing one is not an event. Being given one for a
+        // repo it did not have is.
+        let had = path.exists();
         match mint_token(slug) {
-            Ok(token) => {
-                if let Err(e) = write(&path, &token) {
-                    problems.push(format!("{slug}: {e}"));
-                }
-            }
+            Ok(token) => match write(&path, &token) {
+                Err(e) => problems.push(format!("{slug}: {e}")),
+                Ok(()) if !had => granted.push(slug.clone()),
+                Ok(()) => {}
+            },
             // The old token goes when a new one cannot be had, and this is the whole of revocation
             // for a stored PAT. Forgetting a credential leaves the repo still *wanted* — it is the
             // box's own — so the prune above does not touch it, and leaving the file because the
@@ -1369,9 +1389,12 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
             Err(e) => {
                 problems.push(format!("{slug}: {e}"));
                 match std::fs::remove_file(&path) {
-                    Ok(()) => problems.push(format!(
-                        "{slug}: the token this box was holding has been withdrawn"
-                    )),
+                    Ok(()) => {
+                        withdrawn.push(slug.clone());
+                        problems.push(format!(
+                            "{slug}: the token this box was holding has been withdrawn"
+                        ))
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => {
                         problems.push(format!("{slug}: could not withdraw the old token: {e}"))
@@ -1423,7 +1446,29 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
             }
         }
     }
+    report(box_name, &granted, &withdrawn);
     problems
+}
+
+/// What changed about what a box can push to, into the log skein does not own (§9.5 R6).
+///
+/// **Silent when nothing changed**, which is most refreshes: a rotation is not an event, and a log
+/// that recorded one per box per hour would be a log nobody reads at the moment they need to.
+///
+/// Reported after the files moved, so the entry describes what is on disk rather than what was
+/// intended. Two entries rather than one when both happened, because "granted" and "withdrawn" are
+/// answers to different questions and somebody grepping for one should not have to parse the other.
+fn report(box_name: &str, granted: &[String], withdrawn: &[String]) {
+    for (what, which) in [("granted", granted), ("withdrew", withdrawn)] {
+        if which.is_empty() {
+            continue;
+        }
+        crate::warden_client::reported(
+            &format!("git-tokens-{box_name}"),
+            &format!("{what} a box push credentials"),
+            &format!("{box_name}: {}", which.join(", ")),
+        );
+    }
 }
 
 /// Every account or org this App is installed on, as `(installation id, owner login)`.
