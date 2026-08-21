@@ -36,6 +36,23 @@ pub fn launch_command(name: &str, branch: &str) -> String {
 /// remains the default; the cockpit uses this seam when the New box dialog explicitly selects
 /// Claude or Codex.
 pub fn launch_command_with_agent(name: &str, branch: &str, agent: Option<&str>) -> String {
+    launch_command_as(name, branch, agent, Attach::Yes)
+}
+
+/// Whether the launch ends by attaching to the box's agent session.
+///
+/// `Yes` is a terminal creating a box: the person is watching, and when it comes up they are already
+/// in it. `No` is any surface that is not a terminal — it wants the box created and will attach
+/// separately, or not at all. The difference is one flag on the command and it is the whole of what
+/// made box creation reachable only from a WebSocket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    Yes,
+    No,
+}
+
+/// The command that creates a box, attaching or not.
+pub fn launch_command_as(name: &str, branch: &str, agent: Option<&str>, attach: Attach) -> String {
     if let Ok(t) = env::var("SKEIN_LAUNCH_CMD") {
         if !t.is_empty() {
             return t
@@ -43,7 +60,7 @@ pub fn launch_command_with_agent(name: &str, branch: &str, agent: Option<&str>) 
                 .replace("{name}", &sh_quote(name));
         }
     }
-    native_launch_command(name, branch, agent)
+    native_launch_command(name, branch, agent, attach)
 }
 
 /// skein's own launch command, used when `$SKEIN_LAUNCH_CMD` is unset.
@@ -60,9 +77,10 @@ pub(crate) fn native_launch_command(
     name: &str,
     branch: &str,
     agent_override: Option<&str>,
+    attach: Attach,
 ) -> String {
     match repo_for_box(name) {
-        Some(repo) => repo_launch_command_as(name, &repo, branch, agent_override),
+        Some(repo) => repo_launch_command_as(name, &repo, branch, agent_override, attach),
         None => format!(
             "echo 'skein: {} belongs to no registered repo, so there is nothing to create it from. \
              Register one with: skein add <git-url|path>' >&2; exit 1",
@@ -76,6 +94,7 @@ pub(crate) fn repo_launch_command_as(
     repo: &Repo,
     branch: &str,
     agent_override: Option<&str>,
+    attach: Attach,
 ) -> String {
     // The real branch (may contain `/`, e.g. feat/auth) comes from the caller; the box *name* is its
     // slug. Fall back to the name's slug only if the caller didn't pass one (e.g. a bare relaunch).
@@ -112,11 +131,15 @@ pub(crate) fn repo_launch_command_as(
     // string is built before `skein start` has created one. Precomputed, it addressed a sandbox named
     // after the box — `ERROR: no sandbox named …` the moment the box came up perfectly.
     format!(
-        "{} start {} --branch {} --agent {} --attach",
+        "{} start {} --branch {} --agent {}{}",
         skein_exe(),
         sh_quote(name),
         sh_quote(&branch),
         sh_quote(&agent),
+        match attach {
+            Attach::Yes => " --attach",
+            Attach::No => "",
+        },
     )
 }
 
@@ -884,7 +907,7 @@ mod tests {
             sync_gateway_url: String::new(),
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
-        let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None);
+        let cmd = repo_launch_command_as("thing-feat-auth", &repo, "feat/auth", None, Attach::Yes);
         // `skein start`, not `sbx create`: a box is assembled inside the shared sandbox by a sequence
         // of round-trips, which no single shell line can express. The attach happens after the box
         // exists, because its argv names a placement that does not exist yet when this string is built.
@@ -934,7 +957,7 @@ mod tests {
         // update, the hook-trust bypass, no `resume --last` on a first start — is
         // `initial_attach_argv_as`'s business and is asserted there. This string used to contain both,
         // because `sbx create … && sbx exec …` was one line; it is now `skein start --attach`.
-        let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"));
+        let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"), Attach::Yes);
         assert!(
             cmd.contains("--agent 'codex'"),
             "the runtime override has to reach the launcher: {cmd}"

@@ -282,6 +282,11 @@ async fn main() {
             // cap is disabled here and enforced per-upload by UPLOAD_CAP as the bytes go past.
             post(api_upload).layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        // Creating a box, for a surface that is not a terminal. The WebSocket path below still
+        // works and still creates — this is beside it, not instead of it.
+        .route("/api/boxes/:name/create", post(api_create_box))
+        .route("/api/acts/:id", get(api_act))
+        .route("/api/acts/:id/stream", get(act_stream))
         .route("/api/events", get(api_events))
         .route("/api/boxes/:name/terminal", get(terminal));
 
@@ -415,6 +420,116 @@ async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
         // A wrong token gets the page and no cookie, rather than a hint that it was wrong.
     }
     (headers, INDEX).into_response()
+}
+
+/// Start creating a box, and hand back the act to watch.
+///
+/// **Not a POST that returns 201.** Creating a box is minutes of clone, substrate and provisioning,
+/// and §2.5 is explicit that an Act is streaming and unacknowledged — so what a caller gets is the
+/// identity of something running, which it can watch, poll, or come back to after its stream has
+/// closed. That last one is the property a plain POST would lose and the reason
+/// `fleet::remember_start_failure` had to exist.
+async fn api_create_box(Path(name): Path<String>, Json(body): Json<CreateBox>) -> Response {
+    if !skein::util::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
+    }
+    let branch = body.branch.trim().to_string();
+    if branch.is_empty() {
+        return (StatusCode::BAD_REQUEST, "a box is created on a branch").into_response();
+    }
+    let agent = body.agent.filter(|a| skein::runtime::valid_runtime(a));
+    let id = skein::act::creating(&name);
+    // `Attach::No`: the terminal path ends by attaching because a person is already looking at it.
+    // A surface that is not a terminal wants the box made and will attach separately, or not at all
+    // — and an attach with nobody on the other end is a tmux session talking to a closed pipe.
+    let command = tokio::task::spawn_blocking(move || {
+        skein::sandbox::launch_command_as(
+            &name,
+            &branch,
+            agent.as_deref(),
+            skein::sandbox::Attach::No,
+        )
+    })
+    .await
+    .unwrap_or_default();
+    match skein::act::begin(&id, &command) {
+        Ok(look) => (StatusCode::ACCEPTED, Json(look)).into_response(),
+        // 409, because the thing that stops a second create is that one is already running — which
+        // is a conflict rather than a bad request, and the message says which act to watch.
+        Err(why) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateBox {
+    branch: String,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// What an act is doing, and everything it has said. Readable after it has ended, which is the
+/// whole point.
+async fn api_act(Path(id): Path<String>) -> Response {
+    match skein::act::look(&id) {
+        Some(look) => Json(look).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no such act — it may have finished longer ago than the warden keeps them"
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// Follow an act: what it has already said, then the rest as it arrives.
+///
+/// Both from one call, because taking them separately loses whatever the act said in between — for
+/// a create, the line that mattered.
+async fn act_stream(
+    ws: WebSocketUpgrade,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin stream blocked").into_response();
+    }
+    let Some((so_far, rest)) = skein::act::watch(&id) else {
+        return (StatusCode::NOT_FOUND, "no such act").into_response();
+    };
+    ws.on_upgrade(move |mut socket| async move {
+        if !so_far.is_empty() && socket.send(Message::Text(so_far)).await.is_err() {
+            return;
+        }
+        let mut rest = rest;
+        loop {
+            match rest.recv().await {
+                // The empty chunk the act sends when it ends. A closed socket is the only signal a
+                // watcher cannot mistake for a slow act.
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(chunk) => {
+                    if socket.send(Message::Text(chunk)).await.is_err() {
+                        return;
+                    }
+                }
+                // Lagged: this watcher fell behind the buffer. Told, never silently skipped —
+                // §10.1's rule, and the alternative is a transcript with a hole nobody can see.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    let _ = socket
+                        .send(Message::Text(format!(
+                            "\r\n… {missed} lines were dropped because this window fell behind …\r\n"
+                        )))
+                        .await;
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = socket.close().await;
+    })
 }
 
 /// One asset by name, or a 404 that says nothing about why.

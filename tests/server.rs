@@ -189,6 +189,47 @@ fn server_serves_ui_vendor_and_guards_routes() {
     assert_eq!(st, 200);
     assert!(body.contains("thing-a"));
 
+    // ---- creating a box is something a surface that is not a terminal can ask for ----
+    // The whole point of the route: before it, creation was `?launch=` on the terminal WebSocket, so
+    // porting the REST API alone would have lost it. `thing-a` belongs to no registered repo, so
+    // the act starts and then fails saying so — which is exactly the case that has to stay readable
+    // after the stream closes, and the reason this is an Act rather than a POST returning 201.
+    let (st, body) = http_post(
+        &addr,
+        "/api/boxes/thing-a/create",
+        "Content-Type: application/json\r\n",
+        br#"{"branch":"feat/x"}"#,
+    );
+    assert_eq!(
+        st, 202,
+        "creating a box must be accepted, not answered: {body}"
+    );
+    assert!(body.contains("create-thing-a"), "{body}");
+
+    // Readable afterwards, by a caller that never watched anything.
+    let mut settled = String::new();
+    for _ in 0..200 {
+        let (st, body) = http_get(&addr, "/api/acts/create-thing-a");
+        assert_eq!(st, 200);
+        if body.contains("\"state\":\"ended\"") {
+            settled = body;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        settled.contains("no registered repo"),
+        "a failed create must still say why once nobody is watching: {settled}"
+    );
+    assert!(
+        settled.contains("\"code\":1"),
+        "the exit code is the answer: {settled}"
+    );
+
+    // A second ask while one runs is a conflict, and an act nobody started is a 404.
+    let (st, _) = http_get(&addr, "/api/acts/never-started");
+    assert_eq!(st, 404);
+
     let (st, _) = http_get(&addr, "/api/boxes/x..y/diff");
     assert_eq!(st, 400, "path-traversal name must be rejected");
 

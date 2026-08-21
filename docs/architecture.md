@@ -268,6 +268,21 @@ unnamed makes them grow *beside* the primitives, which is the debt §12.8 exists
 **An Act emits an edge signal as a side effect** — skein knows it delivered the keystroke, and that
 knowledge is what makes an optimistic state clear correct.
 
+**An Act outlives its watchers, and that is what makes it a primitive rather than a stream.** Box
+creation was the case that proved it: it lived inside the terminal WebSocket that watched it, so a
+surface that never opened a terminal could not create a box at all, and a browser that reloaded
+mid-create reconnected to a closed terminal and found nothing. (`fleet::remember_start_failure`
+exists because of exactly that, and keeps the *reason*; an Act keeps the transcript.)
+
+So: begin it, watch it, poll it, or come back after its stream has closed. Many watchers, one run —
+§10.1's "one producer, fanned out", and the same lesson as check-then-act giving every browser tab
+its own subprocess. A watcher that falls behind is **told** rather than silently skipped. The
+transcript is bounded and says where it dropped, because an act that prints a gigabyte is a build
+with a broken progress bar and a cockpit that dies of it is worse than one showing the last megabyte.
+
+And the guard cannot be "check whether it is needed", because an Act has no check: **an id already
+running is refused**, and the caller is handed the one that is running.
+
 ### 2.6 Reconciliation
 
 Not a cube — `desired` is meaningful only when `declared = present`, so calling it an orthogonal

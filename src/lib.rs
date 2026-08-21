@@ -19,6 +19,7 @@
 //
 // What is below the modules is `use`, not `pub use`, and the distinction is the whole point: those
 // are what THIS file's own body needs, not a surface anyone else reaches through.
+pub mod act;
 pub mod ai;
 pub mod answer;
 pub mod apiauth;
