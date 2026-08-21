@@ -33,6 +33,13 @@
 /// bytes are the page.
 pub const INDEX: &str = include_str!("web/index.html");
 
+/// The new board (§11), served at `/v2` beside the old one.
+///
+/// Its own file rather than a mode of [`INDEX`]: the two are meant to diverge, and a flag inside one
+/// document would make every change to the old board a change to the new one. `docs/parity.md` §7 is
+/// the gate that decides when `/` becomes this, and until then both are shipped.
+pub const V2: &str = include_str!("web/v2.html");
+
 /// The cockpit's pure functions, built from `cockpit/src` by `cockpit/build.mjs`.
 ///
 /// Embedded like the vendored scripts, because it is the same kind of thing: bytes the page needs.
@@ -46,6 +53,145 @@ pub const BUNDLE: &str = include_str!("web/vendor/cockpit.js");
 mod tests {
     use super::*;
     use crate::board::BoxView;
+
+    /// Every name `/v2` reads off the wire, asserted against the value the server actually sends.
+    ///
+    /// The same reason the joins above exist, and it bites harder here: this page is new, so there
+    /// is no fleet of users to notice that a row never appears. Rename a field on either side and
+    /// the board renders `undefined` in a corner, or renders nothing and looks calm — which is the
+    /// one thing it must never do by accident.
+    #[test]
+    fn the_new_board_reads_the_names_the_server_sends() {
+        use crate::queue::{Need, Row, Source, Standing};
+        let row = Row {
+            source: Source::Box,
+            need: Need::You,
+            repo: "web".into(),
+            name: "web-main".into(),
+            headline: "shall I proceed?".into(),
+            state: "needs-input".into(),
+            waiting_secs: Some(30),
+            url: "/box/web-main".into(),
+            fix: String::new(),
+        };
+        let wire = serde_json::to_string(&row).unwrap();
+        for field in [
+            "source",
+            "need",
+            "repo",
+            "name",
+            "headline",
+            "state",
+            "waiting_secs",
+            "url",
+        ] {
+            assert!(
+                wire.contains(&format!("\"{field}\"")),
+                "Row stopped sending {field}"
+            );
+            assert!(
+                V2.contains(&format!("r.{field}")),
+                "the page does not read {field}"
+            );
+        }
+        // `fix` is skipped when empty, so it is asserted on a row that has one.
+        let fixable = Row {
+            fix: "run `skein doctor`".into(),
+            ..row
+        };
+        assert!(serde_json::to_string(&fixable).unwrap().contains("\"fix\""));
+        assert!(V2.contains("r.fix"), "a fault's way out is never rendered");
+
+        // The two keys `/api/queue` wraps its answer in.
+        assert!(V2.contains("body.waiting") && V2.contains("body.standing"));
+
+        // The three states, by the tags serde emits. The words are in the bundle, not the page.
+        for standing in [
+            Standing::SetupIncomplete { faults: 1 },
+            Standing::NeedsYou { rows: 1 },
+            Standing::Calm,
+        ] {
+            let tag = serde_json::to_value(&standing).unwrap()["standing"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                BUNDLE.contains(&format!("\"{tag}\"")),
+                "nothing renders the {tag} state, so it falls through to the unknown one"
+            );
+        }
+
+        // The needs, by the same rule: a tone is chosen per need, and a need with no tone is grey —
+        // which would render a box that is asking you something as though nothing were happening.
+        for need in [
+            Need::You,
+            Need::YourAttention,
+            Need::Done,
+            Need::Machine,
+            Need::Quiet,
+            Need::Gone,
+        ] {
+            let tag = serde_json::to_value(need)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                BUNDLE.contains(&format!("\"{tag}\":")),
+                "no tone is defined for the {tag} need, so a row that has it renders as though \
+                 nothing were happening"
+            );
+        }
+    }
+
+    /// The two live joins: the event names the stream sends, and the frame the PTY parses.
+    #[test]
+    fn the_new_board_listens_and_resizes_in_the_words_the_server_uses() {
+        for event in ["snapshot", "changed", "behind"] {
+            assert!(
+                V2.contains(&format!("\"{event}\"")),
+                "the board ignores the {event} event, so it stops updating without saying so"
+            );
+        }
+        // `{"resize":{"cols":N,"rows":M}}` is what `terminal` parses; anything else is silently
+        // dropped and the box runs at 100x30 for ever.
+        assert!(
+            V2.contains("resize: { cols:"),
+            "the resize frame is not the shape the server reads"
+        );
+        assert!(V2.contains("/api/boxes/${encodeURIComponent(name)}/terminal"));
+    }
+
+    /// It is one document, it uses the bundle rather than a second copy of it, and it fetches
+    /// nothing from the network.
+    #[test]
+    fn the_new_board_is_one_self_contained_document() {
+        assert_eq!(
+            V2.matches("<script").count(),
+            V2.matches("</script>").count(),
+            "unbalanced <script> tags silently blank the page"
+        );
+        assert!(V2.trim_end().ends_with("</html>"));
+        assert!(
+            !V2.contains("cdn."),
+            "the cockpit must work with no network"
+        );
+        assert!(V2.contains("/vendor/cockpit.js"));
+        assert!(V2.contains("/vendor/xterm.js") && V2.contains("/vendor/xterm.css"));
+        // The decisions live in the bundle. A copy of one here is a copy that drifts.
+        for called in ["toneOf(", "headlineOf(", "densityFor(", "ageNow("] {
+            assert!(V2.contains(called), "the page does not call {called})");
+        }
+        assert!(
+            !V2.contains("function toneOf") && !V2.contains("function densityFor"),
+            "a decision was reimplemented in the page instead of imported from the bundle"
+        );
+        // Beside the old board, not instead of it: the way back is on the page.
+        assert!(
+            V2.contains("href=\"/\""),
+            "there is no way back to the old board"
+        );
+    }
 
     /// The committed bundle is what `cockpit/src` builds.
     ///

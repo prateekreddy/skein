@@ -26,7 +26,7 @@ use std::io::{Read, Write};
 use std::time::Duration;
 use tokio_stream::StreamExt;
 
-use skein::cockpit::INDEX;
+use skein::cockpit::{INDEX, V2};
 // Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
 // They are no longer four constants and four handlers — `skein::assets` generates the table from the
 // directory, because a build step emits files whose names carry content hashes and neither the count
@@ -195,6 +195,8 @@ async fn main() {
         .unwrap_or_else(|| DEFAULT_ADDR.into());
     let app = Router::new()
         .route("/", get(index))
+        // Beside `/`, not instead of it: the cutover is its own change, and a reversible one.
+        .route("/v2", get(board_v2))
         .route("/vendor/xterm.js", get(|| asset("xterm.min.js")))
         .route("/vendor/xterm.css", get(|| asset("xterm.min.css")))
         .route("/vendor/addon-fit.js", get(|| asset("addon-fit.min.js")))
@@ -423,7 +425,9 @@ tokio::task_local! {
 /// state read, nothing mutated. `/` is here so an unauthenticated visitor gets a page that can
 /// explain itself instead of a bare 401, and so `?t=` has somewhere to land.
 fn open_to_all(path: &str) -> bool {
-    path == "/" || path.starts_with("/vendor/")
+    // `/v2` for the same reason as `/`: it is the same bytes for every fleet, it reads no state, and
+    // it is where `?t=` lands. An unauthenticated visitor gets a page that can explain itself.
+    path == "/" || path == "/v2" || path.starts_with("/vendor/")
 }
 
 /// Refuse anything that does not carry the fleet's token.
@@ -455,6 +459,25 @@ async fn gate(request: axum::extract::Request, next: axum::middleware::Next) -> 
 /// compiled into this binary — and gating it would only mean an unauthenticated visitor got a blank
 /// page instead of one that can say what is wrong.
 async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
+    page(&q, "/", INDEX)
+}
+
+/// The new board, beside the old one rather than instead of it.
+///
+/// `docs/delivery.md` names treating "ground-up surfaces" and "new topology" as one project as the
+/// single biggest avoidable risk in the plan, and shipping beside is what keeps them separate: `/`
+/// keeps working, unchanged, until `docs/parity.md` §7 has been walked against this page item by
+/// item. A surface that is 90% ported and cut over is worse than one that is 60% ported and not.
+async fn board_v2(Query(q): Query<HashMap<String, String>>) -> Response {
+    page(&q, "/v2", V2)
+}
+
+/// One page, one session exchange.
+///
+/// `?t=<token>` is exchanged for an `HttpOnly` cookie and redirected **back to the page that was
+/// asked for**, which is the only part of this that is per-page: a `/v2` link that landed you on `/`
+/// would look like the new board silently not existing.
+fn page(q: &HashMap<String, String>, self_path: &str, body: &'static str) -> Response {
     let headers = [
         (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
         // The UI is embedded in and version-coupled to this binary. Reusing an older document after
@@ -470,7 +493,7 @@ async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
             return (
                 StatusCode::SEE_OTHER,
                 [
-                    (axum::http::header::LOCATION, "/".to_string()),
+                    (axum::http::header::LOCATION, self_path.to_string()),
                     (
                         axum::http::header::SET_COOKIE,
                         format!(
@@ -485,7 +508,7 @@ async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
         }
         // A wrong token gets the page and no cookie, rather than a hint that it was wrong.
     }
-    (headers, INDEX).into_response()
+    (headers, body).into_response()
 }
 
 /// Everything that stopped and is waiting on you, most urgent first.
@@ -493,12 +516,21 @@ async fn index(Query(q): Query<HashMap<String, String>>) -> Response {
 /// **Not on the two-second tick.** The pull-request half comes from `prq::queue`'s own 60-second
 /// cache, so a surface rendering this often still reaches GitHub once a minute per repo — but it is
 /// a surface's call rather than the board's, which is what keeps `signal::board_tick` honest.
-async fn api_queue() -> Json<Vec<skein::queue::Row>> {
-    Json(
-        tokio::task::spawn_blocking(skein::queue::who_needs_you)
-            .await
-            .unwrap_or_default(),
-    )
+async fn api_queue() -> Json<serde_json::Value> {
+    let rows = tokio::task::spawn_blocking(skein::queue::who_needs_you)
+        .await
+        .unwrap_or_default();
+    // **The standing travels with the rows it was derived from.** `queue::standing` reads the same
+    // list, so a client that asked for one and computed the other would be a second implementation
+    // of the rule — and the two disagree the day the rule changes, in the direction of a board that
+    // says "nothing needs you" over a list of things that do.
+    //
+    // `waiting` rather than `rows`, because `Standing::NeedsYou` serialises its own `rows` count and
+    // two fields of that name in one document is a footgun for whoever reads it next.
+    Json(serde_json::json!({
+        "standing": skein::queue::standing(&rows),
+        "waiting": rows,
+    }))
 }
 
 /// What happened since the board was last acknowledged, and the standing that goes with it.

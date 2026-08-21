@@ -309,6 +309,48 @@ every repo's store and the host's own checkouts.
 the architecture keeps `declared = deleted` as a first-class cell — a half-completed destroy is still
 a thing skein must recognise and clean up. Only the board rows go.
 
+### 7.1 The walk against `/v2`
+
+`/v2` ships beside `/` (`src/web/v2.html`, routed in `src/bin/skein-server.rs`), and this is the
+record of walking every entry above against it. **It is a record, not a verdict**: the cutover
+happens when every row reads *holds*, and today it does not.
+
+Three verdicts, and the middle one is the load-bearing one:
+
+- **holds** — the removal is true at `/v2`, by construction rather than by intention.
+- **not yet asked** — the surface the entry is about does not exist at `/v2` yet. This is not a pass.
+  Each of these is a reason the cutover is not due, and listing them is what stops "90% ported and
+  cut over", which `docs/delivery.md` names as worse than 60% ported and not.
+- **not a surface question** — the entry is about the fleet or the host, and `/` and `/v2` are
+  equally affected by it. Recorded so nobody reads its absence as an oversight.
+
+| §7 entry | at `/v2` | how it is known |
+|---|---|---|
+| Adopt-in-place → local-path remotes | not a surface question | about where a repo's bytes come from; neither board changes it |
+| Foreign sandbox display | **holds** | `/v2` reads `/api/queue`, whose rows are boxes, pull requests and setup faults (`queue::Source`). There is no sandbox row and no `foreign:` term in the page |
+| `/api/pick-path` and Browse | not yet asked | `/v2` has no settings or add-a-repo surface yet |
+| The host ssh-agent path | not a surface question | a credential path, not a screen |
+| Transport reporting | **holds** | nothing in `/v2` reads a transport field; there is no readout to port |
+| Every copy rule has a test | not a surface question | `tests/resize_rules.rs`, unchanged by either board |
+| Resize is a root byte copy | not yet asked | `/v2` has no fleet-resize surface yet |
+| The shared toolchain stops being shared | not a surface question | a mount policy |
+| Everything that travels with the diff pane | **holds** | `/v2` has no diff pane, no `d` shortcut, no `Diff:` palette entry, and no attachment target. It was not ported and will not be |
+| The change view needs machinery that does not exist | not yet asked | the machinery now exists — `shape::of_diff`, and `mentions` beside each contract signal — and `/v2` does not render it yet |
+| The diff pane and its comment composer | **holds** | commenting back to an agent is an Act against a box, and the box's terminal at `/v2` is one |
+| The transcript tab | **holds** | not ported, deliberately; kept in §7 so its removal stays a decision |
+| The CLI stays standalone | not a surface question | settled in architecture §14.1 |
+| The `~/.skein` mount split | not a surface question | a mount inversion, per box |
+| Foreign-sandbox *display* goes, the *state* does not | **holds** | `declared = deleted` is fleet state; `/v2` renders no sandbox rows either way |
+
+**What `/v2` is today**: the queue, the three states said in words (`cockpit/src/tone.mjs`), and a
+box's terminal. **What it is not**: the change view, settings, repo import, the fleet controls. Those
+are the rows above that read *not yet asked*, and each is one item's worth of work rather than a
+question anybody still has to answer.
+
+**The cutover is a separate change**, and reversible: `/` is untouched, the route is one line, and
+switching them is editing which constant `index` serves. Nothing in this section is done by that
+edit, which is the point of writing it down before making it.
+
 ---
 
 ## 8. Known gaps in this audit

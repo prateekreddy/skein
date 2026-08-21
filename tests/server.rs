@@ -185,6 +185,54 @@ fn server_serves_ui_vendor_and_guards_routes() {
     );
     assert!(body.contains("</html>"), "UI must not be truncated");
 
+    // The queue answers with the standing **and** the rows it was derived from. Two calls would be
+    // two answers, and the pair that disagrees is the reassuring one: "nothing needs you" over a
+    // list of things that do.
+    let (st, queue) = http_get(&addr, "/api/queue");
+    assert_eq!(st, 200);
+    let body = queue.split("\r\n\r\n").nth(1).unwrap_or("");
+    let queued: serde_json::Value = serde_json::from_str(body.trim()).expect("the queue is JSON");
+    assert!(
+        queued.get("waiting").map(|w| w.is_array()).unwrap_or(false),
+        "the queue no longer sends its rows under `waiting`: {body}"
+    );
+    assert!(
+        queued
+            .get("standing")
+            .and_then(|s| s.get("standing"))
+            .and_then(|s| s.as_str())
+            .is_some(),
+        "the queue no longer sends the standing beside the rows: {body}"
+    );
+
+    // The new board, beside the old one. `docs/delivery.md` names treating "ground-up surfaces" and
+    // "new topology" as one project as the biggest avoidable risk in the plan, and this route is
+    // what keeps them separate — so the test that matters is that BOTH answer.
+    let (st, v2) = http_get(&addr, "/v2");
+    assert_eq!(st, 200, "the new board is not served");
+    assert!(
+        v2.contains("/vendor/cockpit.js"),
+        "the new board does not load the bundle"
+    );
+    assert!(v2.contains("</html>"), "the new board is truncated");
+    assert!(
+        v2.to_ascii_lowercase().contains("cache-control: no-store"),
+        "a cached new board outlives the binary its API belongs to"
+    );
+
+    // `?t=` lands back on the page it was offered to. Redirecting to `/` would look exactly like
+    // the new board silently not existing.
+    let (st, exchanged) = http_get(&addr, &format!("/v2?t={API_TOKEN}"));
+    assert_eq!(st, 303, "the token was not exchanged for a session");
+    assert!(
+        exchanged.to_ascii_lowercase().contains("location: /v2"),
+        "the session exchange sent the visitor to a different board: {exchanged}"
+    );
+    assert!(
+        exchanged.contains("HttpOnly"),
+        "the session cookie is reachable from script"
+    );
+
     // The four vendor URLs are unchanged — the code behind them moved to the generated table, and
     // "unchanged" is the whole claim of that move.
     for (path, ct) in [
