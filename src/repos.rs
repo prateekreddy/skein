@@ -799,38 +799,6 @@ pub fn ensure_gh_secret() -> Result<(), String> {
     if env::var_os("SKEIN_NO_GH_SECRET").is_some() || !cfg.seed_gh_secret {
         return Ok(());
     }
-    // In-fleet this cannot be done, and saying so is the whole of what this arm is for.
-    //
-    // Both halves are the host's: `gh auth token` reads the host's login, and `sbx secret set`
-    // writes the host's keyring — `skein doctor` already says only one of the three credential
-    // sources can reach it. Neither exists in the sandbox. Left as a refusal rather than a silent
-    // `Ok(())`, because seeding is how boxes get a credential at all: succeeding quietly here means
-    // discovering it as a 403 inside a box some minutes later, which is the shape `docs/delivery.md`
-    // §5 is a list of.
-    //
-    // The replacement is SKEIN-107's, not this arm's. What matters here is that the failure names
-    // the deployment rather than reporting a missing binary.
-    if crate::deployment::in_fleet() {
-        return Err(
-            "the fleet's GitHub secret is seeded from the host: `gh auth token` reads the host's \
-             login and `sbx secret set` writes the host's keyring, and neither is reachable from \
-             inside the sandbox. Seed it from a skein on the host, scope credentials per repo \
-             instead (Settings → GitHub & keys), or set SKEIN_NO_GH_SECRET=1 if this fleet gets its \
-             credentials another way"
-                .into(),
-        );
-    }
-    // A fleet that can scope does not get the account token.
-    //
-    // These were two switches that had to be kept in step by hand: configuring an App scoped every
-    // box, and the fleet-wide credential stayed seeded until someone remembered to turn this off
-    // separately. Nothing reminded them. A box drops `GH_TOKEN` at startup, so the secret was
-    // usually unused — but "usually unused" is not "gone", and it remained in sbx's store, reachable
-    // by anything in the sandbox that does not come up through `box-session.sh`.
-    //
-    // Gated on the same question [`crate::gitgate::box_is_scoped`] asks, so the two cannot disagree:
-    // the moment an App or a stored token exists, this stops. Forcing still works, for the fleet
-    // that deliberately wants both.
     let force = env::var_os("SKEIN_FORCE_GH_SECRET").is_some() || cfg.force_gh_secret;
     if !force && crate::gitgate::can_issue_write_tokens() {
         return Ok(());
@@ -854,6 +822,30 @@ pub fn ensure_gh_secret() -> Result<(), String> {
     let seeded = crate::config::skein_home().join("gh-secret-seeded");
     if !force && seeded.exists() {
         return Ok(());
+    }
+    // In-fleet the seeding cannot be done, and saying so is the whole of what this arm is for.
+    //
+    // **After every "nothing to do" above it**, which is where it was not when SKEIN-104 wrote it.
+    // A fleet seeded on the host before the move carries `gh-secret-seeded` across, the secret is
+    // already in sbx's store, and its boxes push perfectly well — refusing there would report a
+    // credential problem to a fleet that has none. The same for a fleet that scopes, and for one
+    // that turned seeding off. The refusal belongs where work would actually start.
+    //
+    // Both halves are the host's: `gh auth token` reads the host's login, and `sbx secret set`
+    // writes the host's keyring — `skein doctor` already says only one of the three credential
+    // sources can reach it. Neither exists in the sandbox. Left as a refusal rather than a silent
+    // `Ok(())`, because seeding is how boxes get a credential at all: succeeding quietly here means
+    // discovering it as a 403 inside a box some minutes later, which is the shape
+    // `docs/delivery.md` §5 is a list of.
+    if crate::deployment::in_fleet() {
+        return Err(
+            "the fleet's GitHub secret is seeded from the host: `gh auth token` reads the host's \
+             login and `sbx secret set` writes the host's keyring, and neither is reachable from \
+             inside the sandbox. Seed it from a skein on the host, scope credentials per repo \
+             instead (Settings → GitHub & keys), or set SKEIN_NO_GH_SECRET=1 if this fleet gets its \
+             credentials another way"
+                .into(),
+        );
     }
     // The environment first, because it costs nothing. A token already exported here is the same
     // credential `gh` would hand back, and asking `gh` for it would unlock a keyring to learn what

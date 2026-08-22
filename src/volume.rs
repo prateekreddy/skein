@@ -744,6 +744,13 @@ mod tests {
         for scoped in INSTANCE_SCOPED {
             fs::write(home.join(scoped), b"instance-scoped").unwrap();
         }
+        // Not instance-scoped, and the distinction is the whole of `docs/delivery.md` §4.1a. The
+        // fleet-agent token and port are re-minted because two volumes holding the same one make
+        // "skein has no machine-global secret" untrue. `gh-secret-seeded` is the opposite case: the
+        // secret it records lives in **sbx's store**, which outlives the volume — so losing only the
+        // marker means the next server start reaches for `gh auth token` and asks to unlock a
+        // keyring, for a secret that is already there. It has to travel.
+        fs::write(home.join("gh-secret-seeded"), b"2026-01-01T00:00:00Z\n").unwrap();
         // Two repos: one whose store is under the volume, one deliberately elsewhere.
         let outside = tempdir().join("shared-store");
         fs::write(
@@ -816,6 +823,15 @@ mod tests {
         assert!(
             report.contains("Not carried") && report.contains("fleet-agent.token"),
             "the report must say what was left behind: {report}"
+        );
+        // And the marker that is NOT instance-scoped travels, because what it records does. The
+        // secret is in sbx's store, which the volume's move does not touch — so a target without
+        // the marker sends the next server start to `gh auth token` and a keyring prompt, for a
+        // credential that was already seeded. `docs/delivery.md` §4.1a names this one by hand.
+        assert_eq!(
+            fs::read_to_string(target.join("gh-secret-seeded")).ok(),
+            fs::read_to_string(home.join("gh-secret-seeded")).ok(),
+            "the gh-secret marker did not travel, so the moved fleet re-seeds a secret it has"
         );
 
         let moved: Vec<serde_json::Value> =

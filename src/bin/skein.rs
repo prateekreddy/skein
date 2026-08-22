@@ -637,7 +637,14 @@ fn cmd_doctor() -> Result<(), String> {
             println!(
                 "{WARN} boxes push    nothing chosen — boxes read public repos and cannot push"
             );
-            println!("              {DIM}Settings → GitHub & keys: a GitHub App, a per-repo token, or this account's gh token{RESET}");
+            // Two of the three paths need nothing from the host; the third is the host's whole
+            // keyring. Offering all three in the fleet would be offering one that cannot be taken
+            // from there — and a person who tries it gets a refusal, from the one line that was
+            // supposed to be their way out.
+            match skein::deployment::in_fleet() {
+                true => println!("              {DIM}Settings → GitHub & keys: a GitHub App, or a per-repo token. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}"),
+                false => println!("              {DIM}Settings → GitHub & keys: a GitHub App, a per-repo token, or this account's gh token{RESET}"),
+            }
         }
         other => println!("{OK} boxes push    with {}", other.label()),
     }
@@ -649,6 +656,14 @@ fn cmd_doctor() -> Result<(), String> {
             Some(when) => println!(
                 "{OK} gh secret     seeded {when} {DIM}— startup skips `gh auth token`, so no \
                  keyring is unlocked. Settings → Overwrite token on startup re-seeds{RESET}"
+            ),
+            // What the *next start* will do, which is not the same thing in the two deployments.
+            // In-fleet it will refuse rather than reach for `gh auth token`, and predicting a
+            // keyring prompt that cannot happen sends somebody to look for a dialog nothing shows.
+            None if skein::deployment::in_fleet() => println!(
+                "{WARN} gh secret     not seeded, and cannot be from here {DIM}— both halves are \
+                 the host's: `gh auth token` reads its login, `sbx secret set` writes its keyring. \
+                 Seed it from a skein on the host, or scope per repo instead{RESET}"
             ),
             None => println!(
                 "{DIM}·{RESET} gh secret     not seeded yet {DIM}— the next server start runs `gh \

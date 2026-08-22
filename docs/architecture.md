@@ -1532,6 +1532,18 @@ Corrected from an earlier draft: the cgroup control plane is **not** box-writabl
 in the launcher goes through `sudo` before `bwrap`, and the source is explicit that a write from
 inside a box "is not an option at all" — the userns maps only uid 1000 and cgroupfs is root-owned.
 
+**And in-fleet, two of the three paths work and the third cannot.** A GitHub App and per-repo stored
+tokens are skein's own — minted here, written into each box's `artifacts/git-tokens/`, flowing down
+only (R7). The account token is not: `gh auth token` reads the host's login and `sbx secret set`
+writes the host's keyring, and neither is reachable from inside the sandbox. So a fleet that has not
+been seeded before the move reads *nothing chosen* rather than *the account token* — the label is
+what the first-run checklist reads as "boxes can push", and a fleet told that when it cannot learns
+otherwise from a 403 inside a box, minutes later and three layers from the cause.
+
+A fleet seeded on the host and then moved in still has it: the secret lives in sbx's store, which
+outlives the volume, and `gh-secret-seeded` travels with the volume as the evidence
+(`docs/delivery.md` §4.1a, and a test on the migration).
+
 ### 9.6 The agent credential cannot be scoped
 
 GitHub tokens can be scoped per repo, short-lived and revoked — with one caveat that belongs beside

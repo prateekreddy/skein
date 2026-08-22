@@ -170,6 +170,14 @@ mod tests {
     /// which somebody decides the deployment may decide this too.
     const CONSULTED_BY: &[(&str, &str)] = &[
         (
+            "gitgate",
+            "whether a box holds the account token. Both halves of the seeding are the host's, so \
+             in-fleet it is not there unless it was seeded before the move \u{2014} and the \
+             `gh-secret-seeded` marker, which travels with the volume, is the evidence. Reported as \
+             unseeded rather than as the token, because the label is what the first-run checklist \
+             reads as \"boxes can push\".",
+        ),
+        (
             "fleet",
             "two host-only calls, answered from inside rather than refused. The fleet agent's port \
              is not published at all in-fleet \u{2014} the agent is on loopback at the port it \

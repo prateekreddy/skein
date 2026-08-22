@@ -263,7 +263,12 @@ depends_on = [
 [current.gitgate]
 # `warden_client` for the same reason as `sandbox`: a credential arriving at a box or being taken
 # away from it is what §9.5 R6 exists to make permanent, and this is where that happens.
-depends_on = ["config", "fleet", "place", "repos", "util", "warden_client"]
+#
+# `deployment` because "does a box hold the account token" has a different answer in the fleet: both
+# halves of the seeding are the host's, so it is not there unless it was seeded before the move. The
+# label this module produces is what the first-run checklist reads as "boxes can push", and a fleet
+# told that when it cannot learns otherwise from a 403 inside a box.
+depends_on = ["config", "deployment", "fleet", "place", "repos", "util", "warden_client"]
 
 [current.github]
 depends_on = ["util"]
