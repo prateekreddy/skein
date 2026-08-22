@@ -169,7 +169,10 @@ fn opened_where_it_was_written(home: &Path) -> Result<(), String> {
         // treating its absence as suspicious would refuse every volume in existence.
         return remember_here(home);
     };
-    if Path::new(&recorded) == here {
+    // Resolved on both sides: a marker written by an older skein that recorded the literal path,
+    // opened through a symlinked component, describes this very directory and would otherwise read
+    // as a volume that had moved.
+    if resolved(&recorded) == resolved(&here.to_string_lossy()) {
         return Ok(());
     }
     let stale = repoint(Path::new(&recorded), &here, false).unwrap_or(0);
@@ -209,7 +212,7 @@ pub fn repoint_here() -> Result<String, String> {
             here.display()
         ));
     };
-    if Path::new(&recorded) == here {
+    if resolved(&recorded) == resolved(&here.to_string_lossy()) {
         return Ok(format!(
             "{} is already where it says it was written; nothing to repoint",
             here.display()
@@ -468,6 +471,65 @@ pub const INSTANCE_SCOPED: &[&str] = &["fleet-agent.token", "fleet-agent.port"];
 /// must not write — a volume that turns out to have nothing stale is one it repairs quietly, and a
 /// volume that does is one it refuses. Two walks would be two things to keep in step, and the one
 /// that only counted would be the one nobody exercised.
+/// A path with every symlink in it resolved, as far as the filesystem can answer.
+///
+/// **Why any of this exists.** On macOS `/var` is a symlink to `/private/var`, and `$TMPDIR` lives
+/// under it. So a volume whose marker was written canonically says `/private/var/…` while the store
+/// paths in its own `repos.json` say `/var/…` — the same directory, sharing not one byte of prefix.
+/// Every `starts_with` below then answers "no", and the consequences are the opposite of harmless:
+/// `skein repoint` reports "0 paths repointed" and rewrites nothing, and `opened_where_it_was_written`
+/// finds nothing stale and quietly ADOPTS the copy. The one check standing between somebody and a
+/// copied volume that goes on writing to the original disarms itself.
+///
+/// Not macOS-only, and that is why this is a resolve rather than a special case: a `$SKEIN_HOME`
+/// reached through any symlinked component — a home directory on another disk, a linked `~/work`,
+/// `/tmp` on several systems — is the same shape.
+///
+/// **The deepest ancestor that exists is resolved, and the rest is kept verbatim.** A path under a
+/// volume that has been moved away from no longer exists, and `canonicalize` on it fails outright —
+/// which is exactly when a repoint needs to reason about it.
+fn resolved(path: &str) -> String {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut at = Path::new(path);
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out.to_string_lossy().to_string();
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                at = parent;
+            }
+            // Nothing on this path exists, so there is nothing to resolve it against. The string
+            // itself is the best available answer and is what the old code always used.
+            _ => return path.to_string(),
+        }
+    }
+}
+
+/// Is `value` at or under `base`, and if so, what is below it?
+///
+/// Compared with [`resolved`] on both sides, so the two ways of spelling one directory match. The
+/// suffix comes back from the RESOLVED value, which is what makes the rewritten path absolute and
+/// unambiguous rather than half one spelling and half the other.
+///
+/// `starts_with` on the base plus a separator, never on the base alone: a sibling directory called
+/// `~/.skein-old` shares the prefix and is a different installation.
+fn below(value: &str, base: &str) -> Option<String> {
+    let value = resolved(value);
+    let base = resolved(base);
+    if value == base {
+        return Some(String::new());
+    }
+    value
+        .strip_prefix(&format!("{base}/"))
+        .map(|rest| format!("/{rest}"))
+}
+
 fn repoint(source: &Path, target: &Path, apply: bool) -> Result<usize, String> {
     let file = target.join("repos.json");
     let Ok(raw) = fs::read_to_string(&file) else {
@@ -483,13 +545,10 @@ fn repoint(source: &Path, target: &Path, apply: bool) -> Result<usize, String> {
             let Some(value) = repo.get(key).and_then(|v| v.as_str()) else {
                 continue;
             };
-            // `starts_with` on the home plus a separator, not on the home alone: a sibling directory
-            // called `~/.skein-old` shares the prefix and is a different installation.
-            let under = value == old || value.starts_with(&format!("{old}/"));
-            if !under {
+            let Some(rest) = below(value, &old) else {
                 continue;
-            }
-            let rewritten = format!("{new}{}", &value[old.len()..]);
+            };
+            let rewritten = format!("{new}{rest}");
             repo[key] = serde_json::Value::String(rewritten);
             moved += 1;
         }
@@ -526,7 +585,7 @@ fn markers(old: &str, new: &str, repos: &[serde_json::Value], apply: bool) -> us
         };
         // Only stores on the new volume. One outside it is shared with the old installation, and one
         // still naming the old home is the old installation's own — neither is this move's to edit.
-        if !store.starts_with(&format!("{new}/")) {
+        if below(store, new).is_none_or(|rest| rest.is_empty()) {
             continue;
         }
         for name in ["skein/source", "skein/mirror"] {
@@ -535,10 +594,13 @@ fn markers(old: &str, new: &str, repos: &[serde_json::Value], apply: bool) -> us
                 continue;
             };
             let line = body.lines().next().unwrap_or("").trim().to_string();
-            if line.is_empty() || !(line == old || line.starts_with(&format!("{old}/"))) {
+            if line.is_empty() {
                 continue;
             }
-            let rewritten = format!("{new}{}\n", &line[old.len()..]);
+            let Some(rest) = below(&line, old) else {
+                continue;
+            };
+            let rewritten = format!("{new}{rest}\n");
             if !apply || fs::write(&file, rewritten).is_ok() {
                 moved += 1;
             }
@@ -966,6 +1028,90 @@ mod tests {
         std::env::set_var("SKEIN_HOME", &home);
         fs::remove_file(moved_path(&home)).unwrap();
         ensure_volume().unwrap();
+    }
+
+    /// The guard still fires when the volume is reached through a symlink.
+    ///
+    /// **Written because macOS is the ordinary case and this suite had never run there.** `/var` is
+    /// a symlink to `/private/var` and `$TMPDIR` lives under it, so a volume's marker says
+    /// `/private/var/…` while the store paths in its own `repos.json` say `/var/…` — one directory,
+    /// two spellings, no shared prefix. Every `starts_with` in `repoint` answered "no", and the two
+    /// consequences were the opposite of harmless: `skein repoint` reported "0 paths repointed" and
+    /// rewrote nothing, and `ensure_volume` found nothing stale and quietly ADOPTED the copy. The
+    /// one check standing between somebody and a copied volume that keeps writing to the original
+    /// disarmed itself, silently, on the platform skein is mostly run on.
+    ///
+    /// Reproduced here on any unix by building the same shape by hand, because a bug that only
+    /// appears on a machine the tests are not run on is a bug that comes back.
+    #[cfg(unix)]
+    #[test]
+    fn a_volume_reached_through_a_symlink_is_still_told_apart_from_its_copy() {
+        let _g = env_lock();
+        let scratch = tempdir();
+        let real = scratch.join("real");
+        fs::create_dir_all(&real).unwrap();
+        // The `/var` → `/private/var` shape: the volume is opened through `link`, and everything
+        // that canonicalises sees `real`.
+        std::os::unix::fs::symlink(&real, scratch.join("link")).unwrap();
+        let home = scratch.join("link").join("vol");
+        fs::create_dir_all(&home).unwrap();
+
+        std::env::set_var("SKEIN_HOME", &home);
+        populate(&home);
+        // A store spelled the way somebody reached it — through the link — which is what
+        // `skein add` records. The marker will be written canonically, and those two strings share
+        // no prefix at all.
+        fs::write(
+            home.join("repos.json"),
+            serde_json::to_vec(&serde_json::json!([{
+                "id": "inside",
+                "source": "https://example.invalid/x.git",
+                "source_tree": "",
+                "store": home.join("repos/inside/store").to_string_lossy(),
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        ensure_volume().unwrap();
+        assert!(
+            written_at(&home).is_some(),
+            "the fixture never got a marker, so it proves nothing"
+        );
+
+        // Copied by hand, exactly as somebody backing up would.
+        let copy = scratch.join("copy");
+        let copied = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(&home)
+            .arg(&copy)
+            .status()
+            .expect("copy the volume");
+        assert!(copied.success());
+
+        std::env::set_var("SKEIN_HOME", &copy);
+        let why = ensure_volume().expect_err(
+            "a copy reached through a symlink was adopted as though it stood on its own \u{2014}              which is the whole failure, because it goes on writing to the original",
+        );
+        assert!(
+            why.contains("skein repoint") && why.contains("export SKEIN_HOME="),
+            "the refusal must name both intents: {why}"
+        );
+
+        // And the repair works from here, which is the half that reported "0 paths repointed".
+        let said = repoint_here().unwrap();
+        assert!(
+            said.contains("1 path(s) repointed"),
+            "the store under the volume was not repointed: {said}"
+        );
+        let after: Vec<serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(copy.join("repos.json")).unwrap()).unwrap();
+        let store = after[0]["store"].as_str().unwrap();
+        assert!(
+            resolved(store).starts_with(&resolved(&copy.to_string_lossy())),
+            "the copy's store still names the original: {store}"
+        );
+        ensure_volume().expect("a repointed copy stands on its own");
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A half-finished copy is not an installation, and says so.
