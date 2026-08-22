@@ -173,7 +173,12 @@ depends_on = []
 depends_on = ["util"]
 
 [current."bin/skein"]
-depends_on = ["apiauth", "board", "config", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
+# `deployment` because `skein doctor` is where somebody looks when something is unreachable, and
+# half of what it checks is reachable from one deployment and not the other (delivery §2). A report
+# that says `sbx` is missing without saying it is running somewhere `sbx` does not exist has named
+# the symptom and hidden the cause. Reporting only — the first caller of that module, deliberately
+# one that changes no behaviour, so the seam exists before anything leans on it.
+depends_on = ["apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
 # `assets` since the cockpit gained one route for a directory of built files: the four vendored
@@ -193,6 +198,13 @@ depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "d
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,
 # addresses or requests, which is what lets it be tested without one. Keeping this row empty is the
 # claim — a pre-auth guard that had to reach for state would be a guard with something to exhaust.
+depends_on = []
+
+[current.deployment]
+# Nothing, and it is the strictest empty row here. This module answers "where is skein running",
+# and every edge out of it would be a way for that answer to depend on something — a config file, a
+# path on disk, a command that may or may not be there. The answer is declared, in one environment
+# variable, precisely so nothing can be wrong about it except the person who set it.
 depends_on = []
 
 [current.doorway]

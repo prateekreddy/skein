@@ -206,7 +206,21 @@ opened before any box exists and inherited across restarts.** Keeping the TCP po
 squatting open (§9.4), and a port that is never free is what closes it. It belongs here rather than
 in its own item because there is nothing to hang it on until there is a fleet start.
 
-**4c — the move**, with host-driven mode still working one environment variable away. This is where
+**4c — the move**, with host-driven mode still working one environment variable away. **Started**,
+and written down: SKEIN-101 with eight children, one per row of §2's table plus the mechanics.
+
+The variable exists (`SKEIN_IN_FLEET`, `src/deployment.rs`) and so far decides **nothing** — it is
+reported by `skein doctor` and read nowhere else. That is deliberate and it is checked: the module
+carries a list of every unit allowed to branch on the deployment, and a test fails the build when a
+unit starts branching without being added to it. The move lands one change at a time, and "what does
+this flag change so far" has to stay answerable for that to mean anything.
+
+Declared rather than detected, because every detector anybody would write — is `/run/sandbox` there,
+is `sbx` on `$PATH` — is a guess about somebody else's machine, and the two wrong answers are not
+symmetric. A fleet process that thinks it is on the host runs `sbx`, fails, and says so. A host
+process that thinks it is in the fleet stops reaching a fleet only it can reach, and the symptom is a
+fleet that appears to have no boxes.
+ This is where
 the six items in §2 get answered, with a fallback available while answering them.
 
 **5 — The cockpit.** Orthogonal, and it can start on day one — with three things named rather than

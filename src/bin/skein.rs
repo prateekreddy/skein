@@ -509,6 +509,19 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    // Where skein itself is, and what that means for what follows. First, because every line below
+    // it is about something skein reaches — and half of those are reachable from one deployment and
+    // not the other (`docs/delivery.md` §2). A report that says `sbx` is missing without saying it
+    // is running somewhere `sbx` does not exist has named a symptom and hidden the cause.
+    {
+        let where_ = skein::deployment::deployment();
+        println!(
+            "{OK} deployment    {} {DIM}{}{RESET}",
+            where_.label(),
+            where_.implies()
+        );
+    }
+
     // Which boxes nothing bounds. Beside the fleet cgroups above and not folded into them, because
     // they answer different questions: those say what the sandbox as a whole is held to, this says
     // whether a given box is inside it. A box that never joined a cgroup is outside every number
