@@ -674,8 +674,11 @@ await check("a burst becomes a count, not a monologue", async () => {
     throw new Error(`the finished box is said alone, got ${JSON.stringify(first)}`);
   if (second.length !== 1)
     throw new Error(`the standing debt must be one sentence, got ${JSON.stringify(second)}`);
-  if (!/2 boxes need you/.test(second[0]))
-    throw new Error(`expected a count rather than a reading of each, got ${JSON.stringify(second[0])}`);
+  // Two get named — spoken, so `a` and `b` rather than a count. Past `NAME_AT_MOST` it collapses,
+  // and `cockpit/test/announce.test.mjs` is where that boundary is pinned. What this asserts is the
+  // property the check is named for: ONE sentence, not one per box.
+  if (!/^a and b need you$/.test(second[0]))
+    throw new Error(`expected one sentence naming both, got ${JSON.stringify(second[0])}`);
 });
 await check("silence when nothing turned, and when you are looking at the board", async () => {
   const said = await page.evaluate(() => {

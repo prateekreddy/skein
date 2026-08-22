@@ -3707,43 +3707,10 @@ function pickVoice() {
 }
 try { speechSynthesis.addEventListener("voiceschanged", () => { pickedVoice = null; pickVoice(); }); } catch {}
 
-// A box name is written to be read, not spoken: `example-box-3` said literally is three
-// words run together, and `example-box-1` comes out as a word. Hyphens and underscores become pauses, and
-// a letter/digit boundary gets a space so "S6" is "S 6" rather than a syllable.
-const sayName = n => String(n || "").replace(/[-_]+/g, " ").replace(/([A-Za-z])(\d)/g, "$1 $2");
-
-// Headlines are agent prose, and agent prose is full of things that are unbearable out loud: absolute
-// paths, URLs, backticked identifiers, markdown. Speaking `/boxes/example-box-6/tree/src/place.rs`
-// costs eight seconds and communicates nothing — the basename communicates all of it. This is the
-// single biggest difference between a voice that helps and one that gets muted.
-function forSpeech(text) {
-  let s = String(text || "");
-  s = s.replace(/`+/g, " ");                                  // code spans: the ticks are noise
-  s = s.replace(/\*\*?|__|~~/g, " ");                          // markdown emphasis
-  s = s.replace(/https?:\/\/\S+/g, " a link ");                // nobody wants a URL read out
-  // A path becomes its basename. Deliberately not every token with a slash in it — "and/or" and
-  // "24/7" are words, not paths — so a token qualifies only by looking like one: rooted at /, ~/ or
-  // ./, or ending in something with a file extension.
-  s = s.replace(/\S+/g, token => {
-    if (!token.includes("/")) return token;
-    const last = token.split("/").filter(Boolean).pop() || token;
-    const isPath = /^[~.]?\//.test(token) || /^[\w.-]+\.[A-Za-z]{1,8}$/.test(last);
-    return isPath ? last : token;
-  });
-  s = s.replace(/\s+/g, " ").trim();
-  // Close the gap the strippers left. A backtick becomes a space so `a`+`b` does not fuse into one
-  // word — but a span that ended right before punctuation then reads as "build ?", and a speech
-  // engine hears that space as a pause in the wrong place.
-  s = s.replace(/\s+([,.;:!?])/g, "$1");
-  // One breath. A long ask is a reason to look, not something to recite — the row on the board has
-  // the full text, and cutting at a sentence boundary keeps what was said grammatical.
-  if (s.length > 160) {
-    const cut = s.slice(0, 160);
-    const stop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
-    s = (stop > 60 ? cut.slice(0, stop + 1) : cut.replace(/\s+\S*$/, "")) + "…";
-  }
-  return s;
-}
+// `sayName` and `forSpeech` are NOT declared here. They are the shared bundle's, beside the sentence
+// they serve (`cockpit/src/announce.mjs`), so the grammar has one home and node can test it. They
+// were here, and the standing-debt channel stopped using them without anybody deciding to — see
+// SKEIN-112. `tests/page_scripts.rs` is what stops a second copy appearing beside the bundle's.
 
 function say(text) {
   if (!voiceOn || !text) return;
@@ -3762,29 +3729,7 @@ function say(text) {
   } catch {}
 }
 
-// What a box that just stopped is actually asking. The kind matters more than the words: "wants
-// permission" and "needs you to sign in" want completely different things from you, and a single
-// "needs a decision" for both is what makes you go and look — which is the cost this is removing.
-const VERB = {
-  permission: "wants permission",
-  question: "asks",
-  trust: "needs you to trust the folder",
-  auth: "needs you to sign in",
-};
-function utteranceFor(b, group) {
-  const name = sayName(b.name);
-  const head = forSpeech(b.headline);
-  if (group === "error") return head ? `${name} hit an error. ${head}` : `${name} hit an error.`;
-  if (group === "done") return `${name} finished.`;
-  // A box that ended its turn. Distinct from `attn` on purpose: nothing is blocking it, it has said
-  // its piece and stopped, so "needs a decision" would overstate what it is asking for.
-  if (group === "waiting") return head ? `${name} is waiting. ${head}` : `${name} is waiting.`;
-  const verb = VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
-  // Trust and auth are self-explaining — appending the box's last words to them adds length and no
-  // information, because the ask is the state itself rather than anything the agent said.
-  if (!head || b.blocked_kind === "trust" || b.blocked_kind === "auth") return `${name} ${verb}.`;
-  return `${name} ${verb}. ${head}`;
-}
+// `VERB` and `utteranceFor` are the bundle's too, for the same reason.
 
 // setFavicon does a synchronous canvas draw + toDataURL PNG encode — real main-thread cost (tens
 // of ms), unlike the near-free DOM writes elsewhere in notify(). notify() runs on every 2s fleet
@@ -3840,16 +3785,9 @@ function notify(snapshot) {
   announceStandingDebt(snapshot, away, away && voiceOn && finished.length > 0);
 }
 
-// The sentence for a set of boxes that are owed something. Shared, so what you hear on demand and
-// what the board says on its own cannot drift into two different accounts of the same fleet.
-function owedSentence(need) {
-  if (!need.length) return "Nothing needs you.";
-  if (need.length === 1) {
-    lastSpoken = need[0].name;
-    return utteranceFor(need[0], groupOf(need[0].state));
-  }
-  return `${need.length} boxes need you. ` + need.map(b => sayName(b.name)).join(", ") + ".";
-}
+// There is no `owedSentence` here any more: `sentenceFor` in the bundle is the one sentence-maker,
+// so what you hear on demand and what the board says on its own cannot become two accounts of the
+// same fleet. That is what they had become — one read the box's ask aloud and the other did not.
 
 // Say what is *still* owed, not only the moment it became owed.
 //
@@ -3938,11 +3876,18 @@ function announceStandingDebt(snapshot, away, speakingAlready) {
   // off silenced the voice) is a rule worth asserting by calling rather than by reading.
   const plan = announcementsFor(fresh, {
     voiceOn, alertsOn, awayForMs: Date.now() - awaySince, speakingAlready,
+    // Passed in rather than imported: the bundle's modules are concatenated and may not depend on
+    // each other, so `sentenceFor` takes the group mapping as an argument. Without it every owed box
+    // sounds the same, which is the whole of what went wrong here.
+    groupOf,
   });
   // Nothing was announced, so nothing is credited: the backlog stays intact and turning a channel
   // on tells you what you missed instead of starting from silence.
   if (!plan.notes.length && !plan.say) return;
   for (const b of fresh) spokenOwed.add(b.name);
+  // What "it" binds to from here on. One box named out loud is one you can answer without saying
+  // its name back; a count names nothing, so it leaves the binding alone.
+  if (plan.say && fresh.length === 1) lastSpoken = fresh[0].name;
   for (const n of plan.notes) pushNote(n.body, n.tag);
   if (plan.beep) beep();
   if (plan.say) say(plan.say);
@@ -3952,7 +3897,13 @@ function announceStandingDebt(snapshot, away, speakingAlready) {
 // looking at the board but do not want to read it, and as the honest way to hear what it sounds
 // like before trusting it to speak on its own.
 function sayInbox() {
-  say(owedSentence(owedIn(boxes)));
+  const need = owedIn(boxes);
+  // The one case `sentenceFor` cannot answer: it returns "" for an empty set, which is right for a
+  // channel that speaks on its own and wrong for one you asked. Silence in reply to a question reads
+  // as broken.
+  if (!need.length) return say("Nothing needs you.");
+  if (need.length === 1) lastSpoken = need[0].name;
+  say(sentenceFor(need, groupOf));
 }
 function pushNote(body, tag) {
   if (Notification.permission !== "granted") return;
