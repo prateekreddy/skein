@@ -5845,10 +5845,14 @@ function arApplySettings(repo) {
 }
 // kept name for existing callers (header ＋repo, per-section ＋, settings, palette) → opens the modal
 function addRepoPrompt() { openAddRepo(); }
-// Box names can't carry every branch char (sbx rejects `/`), so the NAME is a slug of the branch
-// while the real branch (e.g. feat/auth) is passed through and checked out in the box. Mirror of
-// lib::slug — keep them in sync.
-const slug = s => s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+// `slug` is NOT declared here. It comes from `/vendor/cockpit.js` (`cockpit/src/naming.mjs`), which
+// is loaded above and is a classic script, so its top-level `function slug` is this scope's too.
+// There was a second copy here — the same rule written as a regex — and the two collided the day the
+// bundle grew one: both are top-level in the same global lexical scope, so `const` after `function`
+// is `SyntaxError: Identifier 'slug' has already been declared`, which killed the WHOLE inline
+// script and rendered a blank board. `tests/page_scripts.rs` now checks the page the way the browser
+// parses it, because the failure is invisible to `cargo test` and to every check that reads one
+// file at a time.
 // ---------- the fleet sandbox, sized by the person whose machine it is ----------
 //
 // It is created lazily, by the first box launch, and until now that meant `fleet_memory` — 26g on a
