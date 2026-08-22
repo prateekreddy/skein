@@ -1,4 +1,0 @@
-/target
-/.env
-/tests/ui/node_modules
-/tests/ui/package-lock.json

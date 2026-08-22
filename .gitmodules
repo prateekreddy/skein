@@ -1,4 +1,0 @@
-[submodule "upstream/sync"]
-	path = upstream/sync
-	url = https://github.com/prateekreddy/sync.git
-	branch = main
