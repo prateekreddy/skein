@@ -1237,7 +1237,23 @@ impl Place {
             })),
             // The agent's own timeout. The script *started*, so this is not a fallback case however
             // much it looks like one: re-running it on `sbx exec` would apply any side effect twice.
-            504 => Some(Err("fleet agent: the command did not finish in time".into())),
+            //
+            // **And say when the agent is older than this build**, because that changes what the
+            // reader should do about it. A timeout from a current agent is a slow script; a timeout
+            // from a stale one is a transport that should have been replaced and was not, and it
+            // blocks every box start with no fallback by design. Without this the message is the
+            // same in both cases and only one of them has an action.
+            504 => Some(Err(match agent_protocol(port) {
+                Some(speaks) if speaks < AGENT_PROTOCOL => format!(
+                    "fleet agent: the command did not finish in time — and this agent speaks v{speaks} \
+                     where this build needs v{AGENT_PROTOCOL}. A stale agent takes the call and \
+                     cannot hand it back, so nothing falls back to `sbx exec`. Restart skein-server: \
+                     that retires it and installs the current one. If it still will not come up, set \
+                     \"fleet_agent\": false in ~/.skein/config.json and restart — every call then \
+                     goes over `sbx exec`, which is what it did before the agent existed."
+                ),
+                _ => "fleet agent: the command did not finish in time".into(),
+            })),
             // 400/403/404/5xx — the agent refused or broke before running anything, so the script
             // never started and `sbx exec` is free to try it.
             _ => None,
@@ -1732,6 +1748,52 @@ mod tests {
     }
 
     /// An `sbx` on PATH that fails loudly, so a test can tell "the agent carried it" from "it
+    /// A timeout from a STALE agent says what to do; one from a current agent has nothing to add.
+    ///
+    /// The two look identical and only one of them has an action. A stale agent takes the call and
+    /// cannot hand it back — the 504 deliberately does not fall back, since the script started and
+    /// re-running it would apply side effects twice — so every box start blocks on a transport that
+    /// should have been replaced. Reported from a live fleet as "restart never really completes",
+    /// with `agent v2 … this build needs v3` sitting unread on the board the whole time.
+    #[test]
+    fn a_timeout_from_an_agent_older_than_this_build_says_so_and_says_what_to_do() {
+        let _g = crate::testutil::env_lock();
+        // An agent that accepts, reports an old protocol, and then times out — which is the shape
+        // that produced the report.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read, Write};
+                let mut raw = [0u8; 8192];
+                let read = stream.read(&mut raw).unwrap_or(0);
+                let asked = String::from_utf8_lossy(&raw[..read]).to_string();
+                // `/health` carries the protocol; anything else is the call, and it times out.
+                // `skein-fleet-agent <version>`, plain text and space-separated — the shape
+                // `health_over` parses. JSON here would read as a dead agent rather than an old one,
+                // which is the distinction this test is about.
+                let (code, body) = match asked.contains("/health") {
+                    true => (200, format!("skein-fleet-agent {}", AGENT_PROTOCOL - 1)),
+                    false => (504, String::new()),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+
+        let stale = agent_protocol(port);
+        assert_eq!(
+            stale,
+            Some(AGENT_PROTOCOL - 1),
+            "the fixture is not standing in for an old agent: {stale:?}"
+        );
+    }
+
     /// quietly fell back". Returns the previous PATH for the caller to put back.
     fn sbx_must_not_be_used(home: &std::path::Path) -> String {
         use std::os::unix::fs::PermissionsExt;
