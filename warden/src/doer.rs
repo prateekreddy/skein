@@ -207,6 +207,11 @@ mod tests {
     /// §8.4, stated the right way round: an operation id is correlation, not content, and the warden
     /// renders **its own parse**. The test is that a request carrying misleading text cannot change
     /// what a person is shown — because there is no field it could put that text in.
+    ///
+    /// Needs a doer to put something to the approver, so it is a test about the builds that have
+    /// one. In the sink-and-observation build there is no approval surface, which is the property
+    /// §8.3 wants and not a case this assertion can speak about.
+    #[cfg(any(feature = "create", feature = "destroy"))]
     #[test]
     fn what_a_person_is_shown_comes_from_what_will_run() {
         struct Watcher(std::sync::Mutex<Vec<String>>);

@@ -71,6 +71,13 @@ mod tests {
     /// Resize is destroy + create (§7.3). A default that shipped `create` alone would make the
     /// commonest lifecycle operation after create unavailable — by accident, which is how the
     /// earlier draft did it.
+    ///
+    /// Gated, because §13 requires this crate be built and tested **four** ways and this assertion
+    /// is about exactly one of them. Compiled into all four it fails the other three — which it did,
+    /// unseen, because `cargo test` at the root runs the default build and nothing ran the rest.
+    /// `the_advertised_set_is_the_compiled_set` below is the one that has to hold in every build,
+    /// and it does: it asks `cfg!` the same question the code asks.
+    #[cfg(all(feature = "create", feature = "destroy"))]
     #[test]
     fn the_default_build_can_destroy_because_resize_is_destroy_and_create() {
         assert!(
