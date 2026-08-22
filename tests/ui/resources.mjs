@@ -50,7 +50,10 @@ check("and the live figures show as pending, not as zero", (card.match(/…/g) |
 check("the fetch has not even been made yet", T.fetches(), 0);
 
 // --- and fills in once it has --------------------------------------------------------------------
-T.serve([{ name: "web-main", cores: 2.34, mem: 3221225472, pids: 31 }]);
+// `mem_anon` and `mem_cache`, not one `mem`: the card shows what the box is HOLDING and explains
+// the page cache separately, because a box whose memory looks small and whose charge is large
+// has been reading files. `fleet.rs:2797`.
+T.serve([{ name: "web-main", cores: 2.34, mem_anon: 3221225472, mem_cache: 0, pids: 31 }]);
 await T.loadRows();
 card = T.resourceRows("web-main");
 check("memory arrives", /3\.0G/.test(card), true);
@@ -60,7 +63,7 @@ check("and processes", /31/.test(card), true);
 // --- the fetch is shared, not one per hover ------------------------------------------------------
 T.reset();
 T.setBoxes([{ name: "a", disk_mb: 1 }]);
-T.serve([{ name: "a", cores: 1, mem: 1048576, pids: 2 }]);
+T.serve([{ name: "a", cores: 1, mem_anon: 1048576, mem_cache: 0, pids: 2 }]);
 await Promise.all([T.loadRows(), T.loadRows(), T.loadRows()]);
 check("three hovers at once share one request", T.fetches(), 1);
 await T.loadRows();

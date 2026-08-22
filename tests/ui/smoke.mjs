@@ -273,14 +273,18 @@ await check("the breadcrumb goes back to the root", async () => {
 await check("the listing says the box's own tree answered", async () => {
   await openTab("files");
   const d = await page.evaluate(b => fetch(`/api/boxes/${b}/files?path=`).then(r => r.json()), BOX);
-  if (d.source !== "box") throw new Error(`a running box must be read from the box itself, got "${d.source}"`);
+  if (d.vantage !== "box") throw new Error(`a running box must be read from the box itself, got "${d.vantage}"`);
+  // `reach` is the other half and they are not the same question: this listing is `enter`, and a
+  // screen scrape of the same box would be `socket` — both `vantage: "box"`, neither as cheap or
+  // as fresh as the other. Asserted because a field nothing reads is a field the next rename drops.
+  if (d.reach !== "enter") throw new Error(`a listing is read by entering the box, got "${d.reach}"`);
   if (await page.$("#filespane .fsrc.host")) throw new Error("no host-clone badge should show for a live box");
 });
 await check("a fallback tree announces itself in the pane, not just a tooltip", async () => {
   // The Files tab shipped reading the host clone as if it were the box's tree. The badge alone
   // hid the reason behind a hover; provenance has to be readable without pointing at anything.
   const d = await page.evaluate(n => fetch(`/api/boxes/${n}/files?path=`).then(r => r.json()), "bare-box");
-  if (d.source !== "host") throw new Error(`a stopped box's listing comes from the host, got "${d.source}"`);
+  if (d.vantage !== "host") throw new Error(`a stopped box's listing comes from the host, got "${d.vantage}"`);
   if (!/host clone/.test(d.note || "")) throw new Error(`and must say so in words: "${d.note}"`);
 });
 await check("a clone with nothing but .git says so instead of looking broken", async () => {
@@ -319,7 +323,7 @@ await check("the diff is measured against the remote base branch, and says so", 
   if (!/an uncommitted edit/.test(body))
     throw new Error("uncommitted work is missing from the patch");
   const d = await page.evaluate(n => fetch(`/api/boxes/${n}/diff`).then(r => r.json()), BOX);
-  if (d.source !== "box") throw new Error(`the running box should answer for itself, got "${d.source}"`);
+  if (d.vantage !== "box") throw new Error(`the running box should answer for itself, got "${d.vantage}"`);
   if (d.note) throw new Error(`a current answer has nothing to explain, got "${d.note}"`);
   if (d.base !== "origin/master") throw new Error(`unexpected base "${d.base}"`);
 });
