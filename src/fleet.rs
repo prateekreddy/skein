@@ -3298,6 +3298,23 @@ fn mount_manifest(name: &str) -> String {
 ///
 /// **Must run inside the box's namespace**, not the sandbox: it writes `~/.codex`, `~/.claude` and
 /// `~/shared`, and outside the namespace those are the sandbox's, shared by every box.
+/// How long provisioning gets, and it is **derived from what the script itself allows**.
+///
+/// `skein-startup.sh` bounds every network step of its own, and those bounds add up: it waits up to
+/// 240s for the agent image's background `apt update` to finish rather than racing it, then allows
+/// 120s to install, 120s to update, and 120s to install again. Six hundred seconds, worst case.
+///
+/// The caller used to give it three hundred. So a box that started while apt was busy spent four
+/// minutes waiting by design, was killed at five, and the start failed — reported as "the restart
+/// never really completes", on a fleet whose agent was current and whose script was working
+/// perfectly. A deadline shorter than the callee's own budget turns its answer into silence.
+///
+/// The codebase already had the rule and applied it one layer down: `via_agent` asks for
+/// `timeout + 5s` because "a socket deadline that fired first would turn its answer into silence".
+/// This is the same rule, at the layer above, and `the_provisioning_budget_outlasts_the_script`
+/// keeps the two in step by reading the script rather than trusting this comment.
+const PROVISION_BUDGET: Duration = Duration::from_secs(900);
+
 pub fn provision_script(name: &str, store: &str) -> String {
     format!(
         "SKEIN_PROVISION=1 SKEIN_BOX={name_q} SKEIN_STORE={store_q} WORKSPACE_DIR={tree_q} \
@@ -3538,11 +3555,20 @@ fn start_box_inner(
     // five-minute budget — so a start that is working normally prints two lines and then goes
     // completely quiet, which reads as a hang. Reported as "somebody ran restart and it never
     // completed"; it had completed, or was about to.
-    eprintln!("skein: provisioning {name} (kit, hooks, approved packages) — up to five minutes");
-    boxed.exec(
-        &provision_script(name, &repo.store),
-        Duration::from_secs(300),
-    )?;
+    eprintln!(
+        "skein: provisioning {name} (kit, hooks, approved packages) — up to {} minutes",
+        PROVISION_BUDGET.as_secs() / 60
+    );
+    boxed
+        .exec(&provision_script(name, &repo.store), PROVISION_BUDGET)
+        .map_err(|why| {
+            format!(
+                "{why}\n       {name} IS running — its session and namespace came up — but it has \
+                 no hooks or kit, so the board cannot see its turns. Run `skein restart {name}` \
+                 again; if it keeps timing out, something in the sandbox's apt is stuck and \
+                 `skein doctor` reports the substrate queue."
+            )
+        })?;
 
     // Every start, not just a migration's. `migrate_box` used to be the only caller, and its call
     // sits *after* `start_box` — so a migration that failed here left the conversation under the old
@@ -9665,6 +9691,57 @@ b idle 5000000 4 1048576 1048576
             "the second start was not told the first was under way: {outcomes:?}"
         );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The provisioning deadline outlasts everything the provisioning script allows itself.
+    ///
+    /// **Read out of the script, not restated here.** A deadline shorter than the callee's own
+    /// budget turns its answer into silence, and that is not hypothetical: the caller allowed 300s
+    /// while `skein-startup.sh` allows itself 600 — 240 waiting for the agent image's background
+    /// `apt` rather than racing it, then 120 to install, 120 to update, 120 to install again. A box
+    /// that started while apt was busy waited four minutes BY DESIGN, was killed at five, and the
+    /// start failed. It reads as a hung restart on a fleet where everything is working.
+    ///
+    /// Summing every bound is deliberately conservative — some are alternatives on one path — and
+    /// conservative is the right direction: being generous costs a start that takes longer to fail,
+    /// being tight costs this bug.
+    #[test]
+    fn the_provisioning_budget_outlasts_the_script() {
+        let mut allows = 0u64;
+        for line in KIT_STARTUP_SH.lines() {
+            let mut words = line.split_whitespace().peekable();
+            while let Some(word) = words.next() {
+                if word == "timeout" {
+                    if let Some(n) = words.peek().and_then(|n| n.parse::<u64>().ok()) {
+                        allows += n;
+                    }
+                }
+            }
+            // `while apt_busy && [ "$waited" -lt 240 ]` — the wait before it tries at all.
+            if line.contains("waited") {
+                if let Some((_, rest)) = line.split_once("-lt ") {
+                    if let Some(n) = rest
+                        .split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse::<u64>().ok())
+                    {
+                        allows += n;
+                    }
+                }
+            }
+        }
+        assert!(
+            allows > 0,
+            "no bounded waits found in the provisioning script, so this test checks nothing — the \
+             shapes it reads (`timeout <n>` and `-lt <n>`) must have changed"
+        );
+        assert!(
+            PROVISION_BUDGET.as_secs() > allows,
+            "provisioning is given {}s and the script allows itself {allows}s. The shorter deadline \
+             wins, so the script is killed part-way through work it was told it had time for, and \
+             the start fails on a fleet where nothing is wrong.",
+            PROVISION_BUDGET.as_secs()
+        );
     }
 
     /// The revision has to answer "would restarting this box change what it can reach", and the
