@@ -288,38 +288,50 @@ fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
                 false => format!("it says it can {}", sighting.capabilities.join(" and ")),
             };
             HealthCheck::satisfied(format!(
-                "answering, and {doers} ({} sandbox(es) in view)",
+                "answering on {}, and {doers} ({} sandbox(es) in view)",
+                crate::warden_client::where_it_asks(),
                 sighting.sandboxes.len()
             ))
         }
-        // The reason in the warden client's own words rather than a summary of it. Every one of
-        // them sends the reader somewhere different — not running, running and refusing the shared
-        // secret, running and unreadable — and "the warden is not available" sends them nowhere.
+        // **The advice depends on which failure it was**, and getting that wrong is worse than
+        // saying nothing. Every unsatisfied arm printed the build command, so this told somebody to
+        // build a warden they were plainly running. Something answering and refusing is not
+        // something missing, and the two send a reader to opposite places.
+        //
+        // The DETAIL stays the client's own words either way — not running, refusing the secret,
+        // unreadable — because "the warden is not available" sends nobody anywhere.
         None => HealthCheck::unsatisfied(
             crate::warden_client::sighting_failure().unwrap_or_else(|| {
                 "the host warden did not answer, and no reason was recorded".into()
             }),
-            match crate::deployment::in_fleet() {
-                // In-fleet the default address is the SANDBOX's loopback, and the warden is on the
-                // host — so "it is not running" and "this process cannot reach the one that is" look
-                // identical from here, and only one of them is fixed by starting anything. Said
-                // where it matters, because `sbx` is host-only too: in this deployment the warden is
-                // not one of two ways to create a fleet, it is the only one.
-                true => {
-                    "the warden runs on the host and `$SKEIN_WARDEN` is how this process finds \
-                         it — the default is 127.0.0.1:7879, which in here is the sandbox's own \
-                         loopback and not the host's. Set it to the host's address, and check a \
-                         `skein-warden` is running there."
-                }
+            match crate::warden_client::sighting_trouble() {
+                // It answered. Do not send anybody to a compiler.
+                Some(crate::warden_client::Unseen::Answered) => format!(
+                    "something is answering on {} and it is not a warden this skein can use. Check \
+                     what is on that port, and that both ends agree about which one it is: \
+                     `$SKEIN_WARDEN` moves the client, `$SKEIN_WARDEN_PORT` moves the warden, and \
+                     setting only one of them aims skein at whatever else happens to be listening.",
+                    crate::warden_client::where_it_asks()
+                ),
+                // Nothing there — and in-fleet that is ambiguous in a way it is not on a host: the
+                // default address is the SANDBOX's own loopback, so "not running" and "this process
+                // cannot reach the one that is" look identical from in here, and only one of them
+                // is fixed by starting something.
+                _ if crate::deployment::in_fleet() => format!(
+                    "the warden runs on the host and `$SKEIN_WARDEN` is how this process finds it \
+                     \u{2014} it is asking {}, which in here is the sandbox's own loopback rather \
+                     than the host's. Point it at the host, and check a `skein-warden` is running \
+                     there.",
+                    crate::warden_client::where_it_asks()
+                ),
                 // The client's message already says to start one, so this adds only what it does
                 // not know: that a plain `cargo build` never made the binary, and that the process
                 // needs a terminal because a person is asked before every create and destroy.
-                false => {
-                    "`cargo build --release --workspace` \u{2014} a plain `cargo build` makes \
-                          `skein` and `skein-server` only, so on most machines the binary is not \
-                          there at all. Then run it where you will see it: it puts each create and \
-                          destroy to a person, and nothing happens until somebody answers."
-                }
+                _ => "`cargo build --release --workspace` \u{2014} a plain `cargo build` makes \
+                      `skein` and `skein-server` only, so on most machines the binary is not there \
+                      at all. Then run it where you will see it: it puts each create and destroy to \
+                      a person, and nothing happens until somebody answers."
+                    .to_string(),
             },
         ),
     }
@@ -1071,6 +1083,64 @@ mod tests {
                 answering.detail.contains(said),
                 "the report does not pass on what the warden said it can do: {:?}",
                 answering.detail
+            );
+        }
+    }
+
+    /// Something answering on the warden's port is not the same fault as nothing being there.
+    ///
+    /// Written because the first version of this check got it wrong in the way that wastes somebody's
+    /// afternoon: every unsatisfied arm printed `cargo build --release --workspace`, so a person
+    /// looking at a warden they had just started and were watching log to their terminal was told to
+    /// go and build one. The two failures send a reader to opposite places — a compiler, or the
+    /// question of what is actually on that port — and the advice has to know which it is looking at.
+    #[test]
+    fn a_warden_that_answers_and_refuses_is_not_told_to_go_and_build_one() {
+        let _g = crate::testutil::env_lock();
+
+        // Something on the port that is not a warden: answers, refuses, says nothing useful. That is
+        // exactly the shape a wrong port produces, which is now a thing somebody can arrange by
+        // setting `$SKEIN_WARDEN_PORT` without `$SKEIN_WARDEN`.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read, Write};
+                let mut raw = [0u8; 2048];
+                let _ = stream.read(&mut raw);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
+        let refused = warden_health(crate::warden_client::sighting());
+        std::env::remove_var("SKEIN_WARDEN");
+
+        assert!(
+            refused.is_fault(),
+            "a warden that would not answer read as fine"
+        );
+        for absent in ["cargo build", "--workspace"] {
+            assert!(
+                !refused.fix.contains(absent),
+                "the advice tells somebody to build a warden that is plainly running: {:?}",
+                refused.fix
+            );
+        }
+        // And it names where it looked, because a wrong port is the likeliest cause and the reader
+        // cannot check a number nothing printed.
+        assert!(
+            refused.fix.contains(&port.to_string()),
+            "the advice does not say which address was asked: {:?}",
+            refused.fix
+        );
+        // Both variables, because setting one without the other is how somebody gets here.
+        for named in ["$SKEIN_WARDEN", "$SKEIN_WARDEN_PORT"] {
+            assert!(
+                refused.fix.contains(named),
+                "the advice does not name {named}, and the two ends have to agree: {:?}",
+                refused.fix
             );
         }
     }

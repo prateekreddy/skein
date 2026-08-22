@@ -76,6 +76,28 @@ const SIGHTING_FRESH: Duration = Duration::from_secs(10);
 
 static SIGHTING_GATE: Gate<Sighting> = Gate::new();
 
+/// Why a [`sighting`] failed, in the terms the ADVICE differs on.
+///
+/// Not a nicety. "It is not there" and "it answered and would not tell me" send a reader to opposite
+/// places — one builds and starts a binary, the other looks at a secret, a version, or at what is
+/// actually squatting that port — and a check that gives the first answer to the second question is
+/// worse than one that says nothing. It shipped that way this morning and told somebody to build a
+/// warden they were plainly running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unseen {
+    /// Nothing accepted the connection.
+    Unreachable,
+    /// Something answered, and it was not the answer this asks for.
+    Answered,
+}
+
+/// What the last [`sighting`] failure was, when there was one.
+pub fn sighting_trouble() -> Option<Unseen> {
+    SIGHTING_KIND.lock().ok().and_then(|k| *k)
+}
+
+static SIGHTING_KIND: std::sync::Mutex<Option<Unseen>> = std::sync::Mutex::new(None);
+
 /// The last [`sighting`] failure in words. Remembered beside the gate rather than re-derived,
 /// because asking again is a different question — a warden that has just come back would answer
 /// while the panel is still explaining the failure.
@@ -97,10 +119,23 @@ pub fn sighting() -> Option<Sighting> {
     };
     SIGHTING_GATE.get(fresh, || match Warden::configured().glance() {
         Ok(seen) => {
+            if let Ok(mut slot) = SIGHTING_KIND.lock() {
+                *slot = None;
+            }
             remember_sighting_failure(None);
             Some(seen)
         }
         Err(why) => {
+            // The connect error is the one the client itself writes, and it is the only failure
+            // where nothing was on the other end. Everything else — a refusal, a body that would
+            // not parse — means something answered.
+            let kind = match why.contains("is not answering on") {
+                true => Unseen::Unreachable,
+                false => Unseen::Answered,
+            };
+            if let Ok(mut slot) = SIGHTING_KIND.lock() {
+                *slot = Some(kind);
+            }
             remember_sighting_failure(Some(why));
             None
         }
@@ -111,6 +146,15 @@ fn remember_sighting_failure(why: Option<String>) {
     if let Ok(mut slot) = SIGHTING_WHY.lock() {
         *slot = why;
     }
+}
+
+/// The address this process asks, as a person would type it.
+///
+/// Printed rather than assumed: `$SKEIN_WARDEN` moves it, and a diagnostic that says a warden is not
+/// answering without saying *where it looked* is unfalsifiable by the person reading it.
+pub fn where_it_asks() -> String {
+    let warden = Warden::configured();
+    format!("{}:{}", warden.host, warden.port)
 }
 
 /// Why the warden could not be asked, for the health banner and `skein doctor`.
