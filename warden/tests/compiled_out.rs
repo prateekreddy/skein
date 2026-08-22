@@ -73,29 +73,54 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
     // this test is the only thing on it.
     let port: u16 = 39_517;
     let home = target.join("state");
-    let mut child = Command::new(target.join("debug/skein-warden"))
-        .env("SKEIN_WARDEN_PORT", port.to_string())
-        .env("SKEIN_WARDEN_HOME", &home)
-        .env("SKEIN_WARDEN_LS_CMD", "printf '[]'")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start the create-only warden");
+    // **Killed however this test ends.** It used to be killed on the last line, so any assertion
+    // that fired before then left a warden alive on the fixed port — for ever, since nothing else
+    // knows about it. The NEXT run then connected to the corpse, found the port open, and failed on
+    // a missing secret in a home that warden had never heard of. One failure poisoned every
+    // subsequent run on the machine, and the second failure said nothing about the first.
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = Reaped(
+        Command::new(target.join("debug/skein-warden"))
+            .env("SKEIN_WARDEN_PORT", port.to_string())
+            .env("SKEIN_WARDEN_HOME", &home)
+            .env("SKEIN_WARDEN_LS_CMD", "printf '[]'")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the create-only warden"),
+    );
 
+    // Waiting on the SECRET FILE rather than on the port, because an open port is not evidence that
+    // *this* warden opened it — that is exactly what the leak above turned into a false start. The
+    // file is in the home this process was given, so nothing else can have written it.
     let began = Instant::now();
+    let secret = loop {
+        if let Ok(minted) = std::fs::read_to_string(home.join("secret")) {
+            if !minted.trim().is_empty() {
+                break minted.trim().to_string();
+            }
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the warden never came up, or never minted its secret in {}",
+            home.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // And it is listening, which the file alone does not promise.
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
         assert!(
             began.elapsed() < Duration::from_secs(20),
-            "the warden never came up"
+            "the warden minted its secret and never listened"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-
-    // Minted by the warden at start, in the home it was given. skein reads the same file.
-    let secret = std::fs::read_to_string(home.join("secret"))
-        .expect("the warden mints its secret at start")
-        .trim()
-        .to_string();
     let listing = ask(port, "GET", "/v1/fleet", "", &secret);
     let destroyed = ask(
         port,
@@ -111,8 +136,7 @@ fn a_warden_built_without_destroy_does_not_have_a_destroy_endpoint() {
         r#"{"operation":"op-y","sandbox":"skein-fleet"}"#,
         &secret,
     );
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child); // explicit, though `Reaped` would do it at the end of the scope either way
     let _ = std::fs::remove_dir_all(&target);
 
     // It says what it has, and what it has is what was linked.
