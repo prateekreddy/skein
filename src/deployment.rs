@@ -170,6 +170,35 @@ mod tests {
     /// which somebody decides the deployment may decide this too.
     const CONSULTED_BY: &[(&str, &str)] = &[
         (
+            "fleet",
+            "two host-only calls, answered from inside rather than refused. The fleet agent's port \
+             is not published at all in-fleet \u{2014} the agent is on loopback at the port it \
+             listens on, and publishing would forward a port to the machine skein is standing on. \
+             And `skein login` runs its command directly instead of through `sbx exec -it`; the \
+             terminal is still the user's either way, which is why it is an attached run.",
+        ),
+        (
+            "sbx",
+            "`sbx ls` asks about the host's machine, which skein-in-fleet is not standing on. It \
+             returns the same `None` that a missing or wedged sbx returns \u{2014} callers already \
+             fall back to the registry \u{2014} but records the reason, or the board reports a \
+             broken sbx for a deployment where its absence is correct. `$SKEIN_LS_CMD` still wins: \
+             something that can answer the question is answering it.",
+        ),
+        (
+            "repos",
+            "the fleet's GitHub secret is seeded from the host on both halves \u{2014} `gh auth \
+             token` reads the host's login, `sbx secret set` writes the host's keyring. Refuses \
+             in-fleet with what to do instead, rather than succeeding quietly: seeding is how boxes \
+             get a credential, so a silent success is a 403 inside a box minutes later.",
+        ),
+        (
+            "health",
+            "a missing `sbx` is a fault on a host and correct in the fleet. Reporting it red there \
+             would hand somebody a fault they cannot clear, and hide behind a false alarm the thing \
+             they want to know \u{2014} that this deployment reaches boxes another way.",
+        ),
+        (
             "place",
             "the first hop of a crossing. Host-driven it is `sbx exec [flags] <sandbox>`; in-fleet \
              it is nothing, because skein is already in the sandbox and `sbx` is host-only. Also \
@@ -180,7 +209,8 @@ mod tests {
         "bin/skein",
         "`skein doctor` reports which deployment it is and what is reachable from it. Reporting \
          only \u{2014} the first caller, and deliberately one that changes no behaviour, so the \
-         seam exists before anything leans on it.",
+         seam exists before anything leans on it. Also drops `sbx` from the host-tools list it \
+             checks for, for the reason `health` gives.",
         ),
     ];
 

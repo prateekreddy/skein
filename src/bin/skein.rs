@@ -450,13 +450,19 @@ fn cmd_doctor() -> Result<(), String> {
         },
     }
 
-    for (prog, why) in [
-        ("sbx", "attach + launch boxes"),
+    // `sbx` only when skein is on the host. In the fleet it is host-only and absent by design, and
+    // a doctor that reported it missing would be handing somebody a fault they cannot clear —
+    // which is worse than silence, because the next real fault on the list gets read the same way.
+    let host_tools: &[(&str, &str)] = match skein::deployment::in_fleet() {
+        true => &[],
+        false => &[("sbx", "attach + launch boxes")],
+    };
+    for (prog, why) in host_tools.iter().copied().chain([
         ("git", "host-side diffs"),
         // curl, not gh: skein reads GitHub over the API with a token it already holds. `gh` was a
         // hard requirement of the review queue and is now not used at all.
         ("curl", "reading GitHub (PRs, diffs, merges)"),
-    ] {
+    ]) {
         if have(prog) {
             println!("{OK} {prog:<13} on PATH  {DIM}{why}{RESET}");
         } else {

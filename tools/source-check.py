@@ -58,7 +58,12 @@ SPELLINGS = {
     # them: `fleet` spawns `sbx` six times — including the fleet create and the resize's destroy, the
     # two most privileged calls in the system — and the checker reported it as reaching nothing. The
     # program name as the first argument of a call is what "spawning it" looks like here.
-    "sbx": [r'\("sbx"'],
+    #
+    # `\(\s*` and not `\(`, because the same reach goes invisible when rustfmt puts the program name
+    # on its own line. Seen: SKEIN-104 split the login into a `(program, argv)` tuple, `fleet`'s
+    # count silently fell from two to one, and the call it stopped counting was the one that still
+    # runs `sbx`. A pattern that depends on formatting is a law that a reformat can repeal.
+    "sbx": [r'\(\s*"sbx"'],
 }
 
 

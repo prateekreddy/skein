@@ -84,6 +84,19 @@ pub fn fleet_boxes() -> Option<Vec<SbxBox>> {
     };
     FLEET_GATE.get(fresh, || {
         let asked = env::var("SKEIN_LS_CMD").ok().filter(|s| !s.is_empty());
+        // `sbx ls` is a question about the *machine*, and in-fleet skein is not standing on it.
+        // `None` already means "sbx could not be consulted, fall back to the registry", which is the
+        // right behaviour — but the reason has to be recorded or the board reports a broken sbx for
+        // a deployment where its absence is correct. An override still wins: a test or a proxy that
+        // can answer the question is answering it, whatever this process is running inside.
+        if asked.is_none() && crate::deployment::in_fleet() {
+            remember_fleet_failure(Some(
+                "skein is running inside the fleet, and `sbx ls` asks about the host's machine — \
+                 which boxes exist is read from their placement records instead"
+                    .into(),
+            ));
+            return None;
+        }
         let label = format!(
             "`{}`",
             asked.clone().unwrap_or_else(|| "sbx ls --json".into())
@@ -861,5 +874,41 @@ mod tests {
         env::remove_var("SKEIN_REGISTRY");
         env::remove_var("SKEIN_HOME");
         *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// `sbx ls` is a question about the machine, and in-fleet skein is not standing on it.
+    ///
+    /// The answer is the same `None` a missing or wedged sbx gives — callers already fall back to
+    /// the registry, so nothing new has to learn a third state. What is new is the reason: without
+    /// it the board reports a broken sbx for a deployment where its absence is correct, which is a
+    /// fault nobody can clear sitting on top of the one thing they wanted to know.
+    #[test]
+    fn in_the_fleet_the_machine_listing_is_a_question_skein_cannot_put() {
+        let _g = crate::testutil::env_lock();
+        env::remove_var("SKEIN_LS_CMD");
+        env::set_var(crate::deployment::IN_FLEET, "1");
+        crate::fleet::disturbing_liveness(|| ());
+        FLEET_GATE.invalidate();
+
+        assert!(
+            fleet_boxes().is_none(),
+            "skein answered a question about the host's machine from inside the sandbox"
+        );
+        let why = fleet_failure().unwrap_or_default();
+        assert!(
+            why.contains("inside the fleet") && why.contains("placement records"),
+            "the reason does not say it is the deployment rather than a broken sbx: {why:?}"
+        );
+
+        // An override still wins. Something that CAN answer the question is answering it, whatever
+        // this process happens to be running inside — a test, a proxy, a future host-side reporter.
+        env::set_var("SKEIN_LS_CMD", r#"echo '[{"name":"skein-fleet"}]'"#);
+        FLEET_GATE.invalidate();
+        let listed = fleet_boxes().expect("an override answers even in-fleet");
+        assert!(listed.iter().any(|b| b.name == "skein-fleet"));
+
+        env::remove_var("SKEIN_LS_CMD");
+        env::remove_var(crate::deployment::IN_FLEET);
+        FLEET_GATE.invalidate();
     }
 }

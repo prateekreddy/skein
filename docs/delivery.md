@@ -221,6 +221,25 @@ symmetric. A fleet process that thinks it is on the host runs `sbx`, fails, and 
 process that thinks it is in the fleet stops reaching a fleet only it can reach, and the symptom is a
 fleet that appears to have no boxes.
 
+**Every host-only call is answered** (SKEIN-104), and they did not all want the same answer. Two
+stop existing: in-fleet the agent's port is not published at all — it is on loopback at the port it
+listens on, and publishing would forward a port to the machine skein stands on — and `skein login`
+runs its command directly rather than through `sbx exec -it`. Two answer as far as they can: `sbx ls`
+asks about the host's machine and returns the `None` callers already fall back to the registry on,
+with the *reason* recorded so the board does not report a broken sbx for a deployment where its
+absence is correct; and a missing `sbx` stops being a fault, since a banner red for a correct state
+hands somebody something they cannot clear. One refuses: the GitHub secret is host-side on both
+halves — `gh auth token` reads the host's login, `sbx secret set` writes the host's keyring — and it
+says so rather than returning `Ok(())`, because seeding is how boxes get a credential and a quiet
+success is a 403 inside a box some minutes later.
+
+That work found a hole in the Source law itself. Splitting the login into a `(program, argv)` tuple
+put `"sbx"` on its own line, `fleet`'s count fell from two to one, and **the call it stopped counting
+was the one that still runs `sbx`**. The pattern now allows whitespace after the paren — and with it
+the checker saw, for the first time, `sbx ports … --publish`: the more privileged of the two `ports`
+calls, since sbx has no unpublish verb and every mapping is permanent. A law a reformat can repeal is
+not one.
+
 **The crossing is the first thing that leans on it** (SKEIN-103). A crossing has two hops and only
 the first depends on where skein runs: `sbx exec [flags] <sandbox>` from a host, nothing at all from
 inside, since skein is already there and `sbx` is host-only. `Place::reach` is that hop and the only

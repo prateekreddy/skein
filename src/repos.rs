@@ -799,6 +799,27 @@ pub fn ensure_gh_secret() -> Result<(), String> {
     if env::var_os("SKEIN_NO_GH_SECRET").is_some() || !cfg.seed_gh_secret {
         return Ok(());
     }
+    // In-fleet this cannot be done, and saying so is the whole of what this arm is for.
+    //
+    // Both halves are the host's: `gh auth token` reads the host's login, and `sbx secret set`
+    // writes the host's keyring — `skein doctor` already says only one of the three credential
+    // sources can reach it. Neither exists in the sandbox. Left as a refusal rather than a silent
+    // `Ok(())`, because seeding is how boxes get a credential at all: succeeding quietly here means
+    // discovering it as a 403 inside a box some minutes later, which is the shape `docs/delivery.md`
+    // §5 is a list of.
+    //
+    // The replacement is SKEIN-107's, not this arm's. What matters here is that the failure names
+    // the deployment rather than reporting a missing binary.
+    if crate::deployment::in_fleet() {
+        return Err(
+            "the fleet's GitHub secret is seeded from the host: `gh auth token` reads the host's \
+             login and `sbx secret set` writes the host's keyring, and neither is reachable from \
+             inside the sandbox. Seed it from a skein on the host, scope credentials per repo \
+             instead (Settings → GitHub & keys), or set SKEIN_NO_GH_SECRET=1 if this fleet gets its \
+             credentials another way"
+                .into(),
+        );
+    }
     // A fleet that can scope does not get the account token.
     //
     // These were two switches that had to be kept in step by hand: configuring an App scoped every
@@ -1556,5 +1577,44 @@ mod tests {
 
         std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The credential seeding is host-side on both halves, and refuses rather than succeeding.
+    ///
+    /// `gh auth token` reads the host's login; `sbx secret set` writes the host's keyring. Neither
+    /// exists in the sandbox. Returning `Ok(())` would be the tempting shape — nothing to do here —
+    /// and it is wrong: seeding is how boxes get a credential at all, so a quiet success is
+    /// discovered as a 403 inside a box some minutes later, three layers from its cause.
+    #[test]
+    fn seeding_the_fleet_credential_says_it_is_the_hosts_job_rather_than_quietly_not_doing_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env::remove_var("SKEIN_NO_GH_SECRET");
+        let mut cfg = crate::config::load_config();
+        cfg.seed_gh_secret = true;
+        crate::config::save_config(&cfg).unwrap();
+
+        env::set_var(crate::deployment::IN_FLEET, "1");
+        let why = ensure_gh_secret()
+            .expect_err("seeding reported success from a machine that cannot reach the keyring");
+        assert!(
+            why.contains("host"),
+            "the refusal does not say whose job it is: {why}"
+        );
+        // Three ways forward, because there are three: do it from the host, scope per repo instead,
+        // or say this fleet gets credentials another way.
+        for way in ["skein on the host", "Settings", "SKEIN_NO_GH_SECRET"] {
+            assert!(why.contains(way), "the refusal omits {way:?}: {why}");
+        }
+
+        // And the switch that turns seeding off is still read first — a fleet that has said it does
+        // not want this must not be told about a deployment problem it does not have.
+        env::set_var("SKEIN_NO_GH_SECRET", "1");
+        assert!(ensure_gh_secret().is_ok());
+
+        env::remove_var("SKEIN_NO_GH_SECRET");
+        env::remove_var(crate::deployment::IN_FLEET);
+        env::remove_var("SKEIN_HOME");
     }
 }

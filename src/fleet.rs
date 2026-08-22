@@ -119,6 +119,14 @@ fn free_host_port() -> Option<u16> {
 /// fresh one from the OS. A port that is already working is returned untouched — the common case is
 /// a no-op with a single connection to prove it.
 pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
+    // In-fleet there is no port to publish, and that is the whole answer rather than a shortcut.
+    // Everything below exists because skein-on-the-host has to reach *into* the sandbox and sbx has
+    // no unpublish verb, so mappings accumulate and have to be reused. Inside the sandbox the agent
+    // is on loopback at the port it listens on; publishing anything would be forwarding a port to
+    // the machine skein is already standing on.
+    if crate::deployment::in_fleet() {
+        return Ok(AGENT_SANDBOX_PORT);
+    }
     let pinned = load_config().fleet_agent_port;
     // Already working: nothing to publish, and re-publishing a healthy mapping is how a working
     // fleet acquires a broken one.
@@ -4863,18 +4871,38 @@ pub fn fleet_login(runtime: &str) -> Result<(), String> {
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured".into());
     }
-    let argv = [
-        "exec".to_string(),
-        "-it".into(),
-        sandbox.clone(),
-        "bash".into(),
-        "-lc".into(),
-        fleet_login_command(runtime),
-    ];
+    let (program, argv) = login_argv(&sandbox, runtime);
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-    match run_attached("sbx", &args)? {
+    match run_attached(program, &args)? {
         0 => Ok(()),
         code => Err(format!("login in {sandbox} exited {code}")),
+    }
+}
+
+/// The program and arguments a `skein login` runs, split out so both shapes can be read.
+///
+/// The same command either way; what differs is whether skein has to get to the sandbox first. In
+/// the fleet it is already there, so the login runs directly — and it must, because `sbx` is not in
+/// the sandbox to run it with. The terminal is the user's in both, which is the whole reason this is
+/// an attached run rather than a captured one: the device flows print a URL and wait for somebody to
+/// open it.
+fn login_argv(sandbox: &str, runtime: &str) -> (&'static str, Vec<String>) {
+    match crate::deployment::in_fleet() {
+        true => (
+            "bash",
+            vec!["-lc".to_string(), fleet_login_command(runtime)],
+        ),
+        false => (
+            "sbx",
+            vec![
+                "exec".to_string(),
+                "-it".into(),
+                sandbox.to_string(),
+                "bash".into(),
+                "-lc".into(),
+                fleet_login_command(runtime),
+            ],
+        ),
     }
 }
 
@@ -10267,6 +10295,53 @@ b idle 5000000 4 1048576 1048576
             limits_from_launch("SKEIN_ANCHOR 42\n"),
             "",
             "a launcher too old to report was read as having reported something"
+        );
+    }
+
+    /// The two host-only calls in this module, answered from inside rather than refused.
+    ///
+    /// Both are things skein-on-the-host has to do *because* it is outside: publish a port into the
+    /// sandbox, and reach the sandbox to run a login in it. Inside, the first is meaningless and the
+    /// second is a command — so the answer is not a better error message, it is not needing one.
+    #[test]
+    fn the_two_calls_that_only_exist_because_skein_was_outside_stop_existing_inside() {
+        let _g = crate::testutil::env_lock();
+
+        // The port. Everything the host path does — probing, reusing, publishing — exists because
+        // sbx has no unpublish verb and mappings accumulate. In-fleet there is nothing to publish:
+        // the agent is on loopback at the port it listens on.
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        assert_eq!(
+            ensure_fleet_agent_port("skein-fleet"),
+            Ok(AGENT_SANDBOX_PORT),
+            "in-fleet skein went looking for a host port mapping to the machine it is standing on"
+        );
+
+        // The login. Same command, one fewer hop, and the program is not `sbx` — which matters,
+        // because `sbx` is not in the sandbox to be run.
+        let (program, argv) = login_argv("skein-fleet", "claude");
+        assert_eq!(program, "bash");
+        assert_eq!(&argv[..1], ["-lc"]);
+        assert!(
+            !argv.iter().any(|a| a == "skein-fleet"),
+            "the in-fleet login still addresses a sandbox: {argv:?}"
+        );
+
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        let (program, argv) = login_argv("skein-fleet", "claude");
+        assert_eq!(program, "sbx", "the host path stopped going through sbx");
+        assert_eq!(&argv[..3], ["exec", "-it", "skein-fleet"]);
+        // And the command itself is the same one in both — this is a hop, not a different login.
+        let (_, in_fleet_argv) = {
+            std::env::set_var(crate::deployment::IN_FLEET, "1");
+            let got = login_argv("skein-fleet", "claude");
+            std::env::remove_var(crate::deployment::IN_FLEET);
+            got
+        };
+        assert_eq!(
+            argv.last(),
+            in_fleet_argv.last(),
+            "the two deployments log in differently, which is a second thing to keep in step"
         );
     }
 }

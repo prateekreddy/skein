@@ -46,10 +46,20 @@ spelled_in = ["doorway", "gitgate", "github", "place", "repos", "warden/serve", 
 # with `Command::new` — it goes through `run_capture_for` and friends — so the checker had been
 # reporting `fleet` as reaching nothing while it spawned the fleet create and the resize's destroy.
 #
-# `fleet` went 5 → 2 when those two moved behind the warden (delivery step 3). What is left is not
-# lifecycle: `sbx ports` reads, and `sbx exec -it` is the interactive login. `bin/skein`'s two are
-# `sbx` in a tool list and `run_sbx`, which is attach — so the count there does not fall with this
-# step, and expecting it to was a mistake in the item.
+# `fleet` went 5 → 2 when those two moved behind the warden (delivery step 3) — and then to **3**,
+# without anything new being written, because the pattern was widened to see past a line break
+# (SKEIN-104). What it had never seen is `sbx ports … --publish`, which *creates* a port mapping and
+# is the more privileged of the two `ports` calls, sbx having no unpublish verb. A law that a
+# reformat can repeal is not one, which is why the pattern now allows whitespace after the paren.
+#
+# What is left in `fleet` is not lifecycle: two `sbx ports` (read and publish, host-only — in-fleet
+# there is nothing to publish, because the agent is on loopback), and the interactive login's host
+# arm. `bin/skein`'s one is `sbx` in the tool list `skein doctor` checks for, and that list drops it
+# in-fleet, where its absence is correct rather than a fault.
+#
+# `health`'s two are the same shape: one is the check's own name in `checks()` — a label, not a
+# reach — and the other is `program_on_path("sbx")`, which asks whether it is there rather than
+# running it.
 #
 # `bin/skein-server` came off this list when the crossing learned where skein runs (SKEIN-103). The
 # cockpit's terminal used to spawn a literal `CommandBuilder::new("sbx")`; it now takes the program

@@ -205,6 +205,51 @@ pub struct HealthReport {
     pub git_credential: String,
 }
 
+/// The `sbx` line, extracted so both deployments' answers can be read without building a
+/// whole report. `git_scope_health` is here for the same reason.
+///
+/// Three answers, and this is the check that most needed them. `sbx` missing from PATH is a
+/// fault with a fix. A listing that timed out is NOT a fault — it is skein unable to ask, and
+/// reporting it as "sbx is broken" sent people to reinstall a working tool. The snapshot case is
+/// the same shape one step further on: skein is answering from a picture it took a moment ago,
+/// which is neither current nor wrong.
+fn sbx_health(
+    on_path: bool,
+    fleet: &Option<Vec<crate::sbx::SbxBox>>,
+    degraded: bool,
+) -> HealthCheck {
+    match (on_path, fleet, degraded) {
+        // In-fleet its absence is correct, not a fault. `sbx` is host-only, and a check that turned
+        // the banner red for it would be telling somebody to install a tool that cannot run where
+        // they are — and hiding, behind a false alarm, the one thing they would want to know: that
+        // this deployment reaches the fleet a different way.
+        (false, _, _) if crate::deployment::in_fleet() => HealthCheck::satisfied(
+            "not here, and not needed: skein is inside the fleet, so it enters a box by its \
+             namespace rather than through sbx",
+        ),
+        (false, _, _) => HealthCheck::unsatisfied(
+            "`sbx` is not on PATH, and it is how skein reaches the fleet — no box can be created, \
+             started or entered without it",
+            "install Docker Sandboxes, or start the server from a shell whose PATH has `sbx` on it",
+        ),
+        (true, Some(boxes), true) => HealthCheck::unknown(format!(
+            "`sbx ls` did not answer just now; showing the last successful snapshot ({} boxes)",
+            boxes.len()
+        )),
+        (true, Some(boxes), false) => {
+            HealthCheck::satisfied(format!("available ({} boxes)", boxes.len()))
+        }
+        // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what this
+        // said, and it is four different faults wearing one coat — the reader's next move is
+        // different for each. Unknown rather than a fault: sbx is installed and did not answer,
+        // which is a question skein could not put, not an answer it got.
+        (true, None, _) => HealthCheck::unknown(
+            crate::sbx::fleet_failure()
+                .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
+        ),
+    }
+}
+
 /// The isolation line: whether every running box is under the cover this skein installs.
 ///
 /// A fault rather than a note, and the argument had two sides. Against: the fix costs whatever the
@@ -432,33 +477,7 @@ pub fn health_report() -> HealthReport {
     };
     let fleet = fleet_boxes();
     let fleet_degraded = fleet_degraded();
-    // Three answers, and this is the check that most needed them. `sbx` missing from PATH is a
-    // fault with a fix. A listing that timed out is NOT a fault — it is skein unable to ask, and
-    // reporting it as "sbx is broken" sent people to reinstall a working tool. The snapshot case is
-    // the same shape one step further on: skein is answering from a picture it took a moment ago,
-    // which is neither current nor wrong.
-    let sbx = match (program_on_path("sbx"), &fleet, fleet_degraded) {
-        (false, _, _) => HealthCheck::unsatisfied(
-            "`sbx` is not on PATH, and it is how skein reaches the fleet — no box can be created, \
-             started or entered without it",
-            "install Docker Sandboxes, or start the server from a shell whose PATH has `sbx` on it",
-        ),
-        (true, Some(boxes), true) => HealthCheck::unknown(format!(
-            "`sbx ls` did not answer just now; showing the last successful snapshot ({} boxes)",
-            boxes.len()
-        )),
-        (true, Some(boxes), false) => {
-            HealthCheck::satisfied(format!("available ({} boxes)", boxes.len()))
-        }
-        // The failure in its own words. "installed, but `sbx ls` failed or timed out" is what this
-        // said, and it is four different faults wearing one coat — the reader's next move is
-        // different for each. Unknown rather than a fault: sbx is installed and did not answer,
-        // which is a question skein could not put, not an answer it got.
-        (true, None, _) => HealthCheck::unknown(
-            crate::sbx::fleet_failure()
-                .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
-        ),
-    };
+    let sbx = sbx_health(program_on_path("sbx"), &fleet, fleet_degraded);
     let tool = |name: &str, required: bool| match (program_on_path(name), required) {
         (true, _) => HealthCheck::satisfied("available"),
         (false, true) => HealthCheck::unsatisfied(
@@ -931,5 +950,45 @@ mod tests {
                 "the cockpit does not mention the `{name}` level at all"
             );
         }
+    }
+
+    /// A missing `sbx` is a fault on a host and correct in the fleet.
+    ///
+    /// Reporting it red in-fleet would hand somebody a fault they cannot clear — `sbx` is host-only
+    /// and cannot be installed into the sandbox — and, worse, would hide behind a false alarm the
+    /// one thing they wanted to know: that this deployment reaches boxes another way. A banner that
+    /// is red for a correct state is how the next real fault gets read as noise too.
+    #[test]
+    fn a_missing_sbx_is_a_fault_on_a_host_and_the_normal_state_in_the_fleet() {
+        let _g = crate::testutil::env_lock();
+
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        let on_host = sbx_health(false, &None, false);
+        assert!(
+            on_host.is_fault(),
+            "a host with no sbx cannot create, start or enter a box, and that is a fault"
+        );
+        assert!(on_host.fix.contains("PATH"), "{}", on_host.fix);
+
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        let in_fleet = sbx_health(false, &None, false);
+        assert!(
+            !in_fleet.is_fault(),
+            "the fleet was told to install a host-only tool it cannot run: {}",
+            in_fleet.detail
+        );
+        assert!(
+            in_fleet.detail.contains("namespace"),
+            "it says sbx is missing without saying how boxes are reached instead: {}",
+            in_fleet.detail
+        );
+
+        // And the deployment does not touch the other three arms: a present `sbx` that will not
+        // answer is the same unknown either way, because that is a question skein could not put
+        // rather than an answer about where it is standing.
+        let silent = sbx_health(true, &None, false);
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        assert_eq!(silent.level, sbx_health(true, &None, false).level);
+        assert!(!silent.is_fault());
     }
 }
