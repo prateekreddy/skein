@@ -18,25 +18,34 @@
 //      boxes counted, a fresh machine that happens to run `sbx` never sees the checklist at all.
 //
 //   node tests/ui/foreign.mjs
-import { grab, harness } from "./lift.mjs";
+import { harness } from "./lift.mjs";
+import { boardRows, withoutForeignTerm } from "../../cockpit/src/filter.mjs";
 
-// `boardRows` is lifted from the page, not re-implemented here. The first version of this file wrote
-// the same two lines again, and a mutation to the real code — dropping the default `!b.foreign` — left
-// every check green: the test was agreeing with itself.
-const source = ["matchesFilter", "FOREIGN_TERM", "wantsForeign", "withoutForeignTerm", "boardRows"]
-  .map(grab)
-  .join("\n");
-
-const scope = new Function(`
-  ${source}
-  return {
-    shownFor: (boxes, raw) => boardRows(boxes, raw).map(b => b.name),
-    wantsForeign, withoutForeignTerm, matchesFilter,
-  };
-`);
+// **Imported, not lifted, and that is the repair rather than a tidy-up.** These functions used to be
+// in `index.html` and this file pulled them out by text; they moved to `cockpit/src/filter.mjs`
+// (`6e6f1b9`), after which `grab` threw and this whole suite stopped running — silently, because
+// nothing runs these suites. Importing the real module is what the move was for: there is no lifted
+// copy to drift, and `cockpit/test/filter.test.mjs` and this file now exercise the same code.
+//
+// Still not re-implemented here. The first version of this file wrote the same two lines again, and
+// a mutation to the real code — dropping the default `!b.foreign` — left every check green: the test
+// was agreeing with itself.
 
 const { check, done } = harness();
-const T = scope();
+
+// The foreign rows are a SECOND list now, fetched only when somebody asks for them
+// (`askForForeign` in the page), where they used to be module state `boardRows` reached out for.
+// So the harness splits the fixture the way the board holds it — passing one list and letting the
+// function find the other is exactly the shape that stopped being true.
+const T = {
+  shownFor: (boxes, raw) =>
+    boardRows(
+      boxes.filter(b => !b.foreign),
+      raw,
+      boxes.filter(b => b.foreign),
+    ).map(b => b.name),
+  withoutForeignTerm,
+};
 
 const fleet = [
   { name: "thing-main", branch: "main", repo: "thing", headline: "waiting on you", foreign: false },

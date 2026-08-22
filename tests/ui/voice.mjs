@@ -11,6 +11,20 @@
 //
 //   node tests/ui/voice.mjs
 import { grab, harness } from "./lift.mjs";
+// **Imported where the code lives, lifted where it still lives in the page.**
+//
+// The board's groups and the whole speech grammar moved into `cockpit/src` — `6e6f1b9` took
+// `GROUPS`, and SKEIN-112 took `sayName`, `forSpeech`, `VERB` and `utteranceFor` — after which
+// `grab` threw on the first name and this entire suite stopped running. Nothing runs these suites,
+// so nobody saw it (SKEIN-113).
+//
+// What is left in the page is the part this file is actually about: the standing-debt STATE — the
+// grace window, the settle window, and the once-per-box memory. `docs/parity.md` §1 calls that
+// policy the feature, and it has no other home, because it is state and `cockpit/src` holds only
+// leaf functions. So the split below is the real boundary rather than a convenience.
+import { GROUPS, groupOf, NEEDS_YOU, owedIn } from "../../cockpit/src/groups.mjs";
+import { announcementsFor, sentenceFor, utteranceFor, OWED_GRACE_MS }
+  from "../../cockpit/src/announce.mjs";
 
 // The page's output channels, stubbed to record instead of speak or interrupt. Both are driven by
 // one announcer now, so both are recorded here and asserted with the same rules.
@@ -21,24 +35,29 @@ const pushNote = (body, tag) => { notes.push(`${body} [${tag}]`); };
 const beep = () => {};
 
 const source = [
-  "GROUPS", "groupOf", "NEEDS_YOU", "owedIn", "sayName", "forSpeech", "VERB",
   // `awaySince` brings `spokenOwed` and `stateSince` with it — they share one declaration.
-  "utteranceFor", "owedSentence", "OWED_GRACE_MS", "OWED_SETTLE_MS", "awaySince",
-  "settledOwed", "forgetSettledDebts", "noteFor", "announceStandingDebt",
+  "OWED_SETTLE_MS", "awaySince",
+  "settledOwed", "forgetSettledDebts", "announceStandingDebt",
 ].map(grab).join("\n");
 
 // The lifted code closes over two variables the page owns elsewhere. They are declared here rather
 // than rewritten into accessors: `lastSpoken = x` is an assignment, and turning it into a call by
 // string substitution produces `setLastSpoken(x;` — a rewrite that has to understand the code it is
 // rewriting is a worse dependency than a two-line prelude.
+// The imports the lifted code calls are passed in rather than re-declared, so what runs here is the
+// same `announcementsFor` the page runs and the same one `cockpit/test/announce.test.mjs` asserts.
 const scope = new Function(
   "say",
   "pushNote",
   "beep",
+  "groupOf",
+  "owedIn",
+  "announcementsFor",
+  "OWED_GRACE_MS",
+  "NEEDS_YOU",
   `let voiceOn = true, lastSpoken = null, alertsOn = false;
    ${source}
-   return { groupOf, owedIn, utteranceFor, owedSentence, announceStandingDebt, noteFor,
-            NEEDS_YOU, OWED_GRACE_MS, OWED_SETTLE_MS,
+   return { announceStandingDebt, OWED_SETTLE_MS,
             setVoice: v => { voiceOn = v; },
             setAlerts: v => { alertsOn = v; },
             reset: () => { awaySince = 0; spokenOwed = new Set(); stateSince = {}; } };`,
@@ -46,7 +65,14 @@ const scope = new Function(
 
 const { check, done } = harness();
 
-const V = scope(say, pushNote, beep);
+const V = {
+  ...scope(say, pushNote, beep, groupOf, owedIn, announcementsFor, OWED_GRACE_MS, NEEDS_YOU),
+  groupOf, owedIn, utteranceFor, NEEDS_YOU, GROUPS, OWED_GRACE_MS,
+  // What `sayInbox` reads out. `owedSentence` is gone — there is one sentence-maker now, and the
+  // "nothing owed" case belongs to the caller, because "" is right for a channel that speaks on its
+  // own and wrong for one you asked a question.
+  onDemand: need => (need.length ? sentenceFor(need, groupOf) : "Nothing needs you."),
+};
 const box = (name, state, extra = {}) => ({ name, state, ...extra });
 
 // --- what counts as owed ---------------------------------------------------------------------
@@ -70,12 +96,12 @@ check(
 );
 check(
   "the on-demand reading never claims nothing is owed while a box waits",
-  V.owedSentence(V.owedIn([box("web-main", "waiting")])),
+  V.onDemand(V.owedIn([box("web-main", "waiting")])),
   "web main is waiting.",
 );
 check(
   "and an empty fleet says so",
-  V.owedSentence(V.owedIn([box("a", "working")])),
+  V.onDemand(V.owedIn([box("a", "working")])),
   "Nothing needs you.",
 );
 

@@ -96,7 +96,16 @@ async function makeFixture() {
   fs.writeFileSync(path.join(home, "api-token"), API_TOKEN, { mode: 0o600 });
   // A repo whose source IS a GitHub URL — the only kind that has a queue.
   fs.writeFileSync(path.join(home, "repos.json"), JSON.stringify([
-    { id: "acme", source: "https://github.com/acme/thing.git", work: path.join(root, "work"),
+    // `source_tree` as well as `source`, because the module list and CODEOWNERS are read from the
+    // repo's MIRROR now (`repos::Tree` → `git show HEAD:<path>`), not from the working checkout —
+    // `docs/delivery.md` §3 step 1. Without it `ensure_mirror` would try to clone the URL, over a
+    // network this test does not have, and every module-note check would fail on a repo it could
+    // not read. Pointing it at the local checkout is what an adopted repo actually looks like.
+    // `source_tree`, and NOT `work` beside it: `work` is a serde ALIAS for the same field, so both
+    // together is a duplicate key and the whole file fails to parse — which reads downstream as
+    // "no repo with id acme" rather than as a bad fixture.
+    { id: "acme", source: "https://github.com/acme/thing.git",
+      source_tree: path.join(root, "work"),
       store: path.join(root, "store"), agent: "claude", plane_project: "", sync_connection: "" },
   ]));
 
@@ -134,6 +143,15 @@ async function makeFixture() {
   fs.mkdirSync(path.join(root, "work", "web"), { recursive: true });
   fs.writeFileSync(path.join(root, "work", "src", "parser.rs"), "const TIMEOUT: u64 = 5;\n");
   fs.writeFileSync(path.join(root, "work", "web", "app.js"), "export const app = 1;\n");
+  // **Committed, not just written.** The tree is read with `git show HEAD:<path>` off a mirror, so a
+  // file that exists on disk and not in a commit is a file skein cannot see — which is exactly right
+  // (a mirror can never supply a gitignored file) and exactly what this fixture used to get wrong.
+  // Its own comment admitted "the fixture's clone is not a git repo" while asserting things only a
+  // git repo can answer.
+  const wgit = (...a) => spawnSync("git", ["-C", path.join(root, "work"), ...a], { stdio: "ignore" });
+  wgit("init", "-q", "-b", "main");
+  wgit("add", "-A");
+  wgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "the tree the mirror carries");
 
   // A GitHub that answers from fixture files, on a real socket. This replaces a fake `gh` binary on
   // `$PATH`: skein reads the API directly now, so the seam that tells the truth is the wire.
@@ -465,18 +483,41 @@ await check("opening it lists the repo's modules, and admits it has none written
   if (!mods.every(m => m.action === "write")) throw new Error("no way to write one");
 });
 // The whole design rests on this: a note carries the commit its module was at, so out-of-date is a
-// fact rather than a worry. The fixture's clone is not a git repo, so freshness cannot be
-// established — and that must read as stale, never as fresh.
-await check("a note whose freshness cannot be proven is not treated as current", async () => {
+// fact rather than a worry.
+//
+// Both directions, through the API a person's clicks go through. This check used to assert only the
+// stale half, and for the wrong reason: its own comment said "the fixture's clone is not a git repo,
+// so freshness cannot be established". That made it pass on an accident. The fixture commits its
+// tree now, so freshness is a real question here and the answer to it is worth having.
+const modulesNow = async () =>
+  (await (await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules`, { headers: authHeader() })).json());
+await check("a note written against the current commit reads fresh", async () => {
   const wrote = await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules/write`, {
     method: "POST", headers: { "content-type": "application/json", ...authHeader() },
     body: JSON.stringify({ path: "src" }),
   }).then(r => r.json());
   if (!wrote.ok) throw new Error(`writing was refused: ${wrote.error}`);
-  const mods = await (await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules`, { headers: authHeader() })).json();
-  const src = mods.find(m => m.path === "src");
-  if (src.state !== "stale")
-    throw new Error(`a note git cannot vouch for reported "${src.state}" — it must never read fresh`);
+  const src = (await modulesNow()).find(m => m.path === "src");
+  if (src.state !== "fresh")
+    throw new Error(`a note written just now against an unmoved module reads "${src.state}"`);
+});
+await check("and goes stale the moment its module moves", async () => {
+  // The module moves, and skein sees it move. Dropping the mirror is how this fixture stands in for
+  // the fetch a pull does — `ensure_mirror` re-clones what is not there, which is the same path a
+  // half-made mirror takes. Without it the commit exists in the checkout and not in what skein
+  // reads, and the note would go on being right.
+  const work = path.join(fx.root, "work");
+  fs.appendFileSync(path.join(work, "src", "parser.rs"), "const RETRIES: u8 = 3;\n");
+  const wgit = (...a) => spawnSync("git", ["-C", work, ...a], { stdio: "ignore" });
+  wgit("add", "-A");
+  wgit("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "src moves on");
+  fs.rmSync(path.join(fx.home, "repos", "acme", "mirror"), { recursive: true, force: true });
+
+  const src = (await modulesNow()).find(m => m.path === "src");
+  // Never `fresh`. A note whose freshness cannot be established is exactly a note not to trust, so
+  // every uncertainty here has to fall the same way as a known move.
+  if (src.state === "fresh")
+    throw new Error("a note stamped with a commit that is no longer the module's read as current");
 });
 
 console.log("\nsetting aside");

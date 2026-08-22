@@ -23,7 +23,11 @@
 import { grab, harness } from "./lift.mjs";
 
 const source = [
-  "gitqAnnounced", "gitqCreds", "gitqPrimed", "decideGitq", "pollGitq", "paintGitqBadge", "gitqCard",
+  // `gitqShown` is lifted with the function that owns it. It is module state — what each pending
+  // request looked like when it was last seen — and `decideGitq` closes over it, so lifting the
+  // function alone gave `ReferenceError: gitqShown is not defined` and this suite stopped running
+  // entirely (SKEIN-113). Same reason `voice.mjs` lifts `awaySince`.
+  "gitqShown", "gitqAnnounced", "gitqCreds", "gitqPrimed", "decideGitq", "pollGitq", "paintGitqBadge", "gitqCard",
   "gitqGrantRow", "revokeGitq", "gitCredRow", "editGitCred", "credId", "credFor", "storeGitCred",
   "addGitCred", "removeGitCred", "renderGitState", "nameable", "slugFromPath", "repoSlug",
   "repoTokenRow", "arApplySettings",
@@ -103,7 +107,7 @@ const scope = new Function(`
     reset: () => {
       sent.length = 0; notes.length = 0; failing = null;
       payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
-      gitqAnnounced.clear(); gitqPrimed = false;
+      gitqAnnounced.clear(); gitqPrimed = false; gitqShown.clear();
       keep = { checked: false }; hours = { value: "24" }; alertsOn = true;
       fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {}, scrollIntoView: () => {} } };
       form = { plane: { value: "" }, conn: { value: "" }, review: { value: "true" }, token: { value: "" } };
@@ -121,19 +125,35 @@ const ask = (id, over = {}) => ({
   asked: "2026-08-13T09:00:00Z", state: "pending", decided: "", ...over,
 });
 
+// --- a decision is about what was on screen -----------------------------------------------------
+// The rule `gitqShown` exists for, and it had no test: a decision carries the box and repo AS SHOWN,
+// never a re-read. A request is a box's own words in a file the box can rewrite, so approving a
+// re-read approves whatever it says at the moment you press the button — and the minted token is
+// written into whichever box the grant names. Seen in the wild, which is why the map is there.
+//
+// So the suite has to render before it decides, exactly as a person does. It did not, and every
+// decide below was silently refused once the map existed.
+T.reset();
+T.decideGitq("r1", true);
+check("a request never rendered cannot be decided", T.sent().length, 0);
+check("and says why, rather than failing quietly", T.notes()[0], "toast:that request is no longer on screen — reopen the panel");
+
 // --- what the grant carries --------------------------------------------------------------------
 T.reset();
+T.gitqCard(ask("r1"));
 T.decideGitq("r1", true);
 check("granting sends an approval", T.sent()[0].body.approve, true);
 check("and expires by default", T.sent()[0].body.hours, 24);
 
 T.reset();
+T.gitqCard(ask("r1"));
 T.setHours("2");
 T.decideGitq("r1", true);
 check("a shorter window is carried through", T.sent()[0].body.hours, 2);
 
 // Ticked keep wins over whatever the number says, so the two controls cannot mean two things.
 T.reset();
+T.gitqCard(ask("r1"));
 T.setHours("12");
 T.setKeep(true);
 T.decideGitq("r1", true);
@@ -141,15 +161,18 @@ check("keeping indefinitely sends 0, not the leftover number", T.sent()[0].body.
 
 // A number nobody can honour must not become a grant that never expires — 0 means forever here.
 T.reset();
+T.gitqCard(ask("r1"));
 T.setHours("nonsense");
 T.decideGitq("r1", true);
 check("an unusable duration falls back to the default", T.sent()[0].body.hours, 24);
 T.reset();
+T.gitqCard(ask("r1"));
 T.setHours("0");
 T.decideGitq("r1", true);
 check("and zero typed into the box is not silently forever", T.sent()[0].body.hours, 24);
 
 T.reset();
+T.gitqCard(ask("r1"));
 T.setKeep(true);
 T.decideGitq("r1", false);
 check("denying is a denial", T.sent()[0].body.approve, false);

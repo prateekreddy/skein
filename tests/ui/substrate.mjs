@@ -14,7 +14,8 @@
 import { grab, harness } from "./lift.mjs";
 
 const source = [
-  "subqAnnounced", "subqPrimed", "decideSubq", "pollSubq", "paintSubqBadge", "subqCard",
+  // Lifted with `decideSubq`, which closes over it — see the note in `gitgate.mjs`.
+  "subqShown", "subqAnnounced", "subqPrimed", "decideSubq", "pollSubq", "paintSubqBadge", "subqCard",
 ].map(grab).join("\n");
 
 const scope = new Function(`
@@ -65,7 +66,7 @@ const scope = new Function(`
     retick: () => { checkbox.checked = true; },
     reset: () => {
       sent.length = 0; notes.length = 0; queue = [];
-      subqAnnounced.clear(); subqPrimed = false;
+      subqAnnounced.clear(); subqPrimed = false; subqShown.clear();
       checkbox = { checked: true }; alertsOn = true;
     },
   };
@@ -78,22 +79,38 @@ const ask = (id, over = {}) => ({
   state: "pending", remember: true, log: "", ...over,
 });
 
+// --- a decision is about what was on screen -----------------------------------------------------
+// `subqShown` is the same rule `gitgate.mjs` describes, and here the stakes are the plainer half:
+// an approved apt or npm package runs maintainer and lifecycle scripts as root for the whole
+// sandbox, and the package list is the box's own words in a file the box can rewrite. So the
+// decision carries what was DISPLAYED, and a re-read is not a decision anybody made.
+T.reset();
+T.decideSubq("r1", true);
+check("a request never rendered cannot be decided", T.sent().length, 0);
+
 // --- what the decision carries ---------------------------------------------------------------
 T.reset();
+T.subqCard(ask("r1"));
 T.decideSubq("r1", true);
 check("approving sends an approval", T.sent()[0].body.approve, true);
 check("and records it by default", T.sent()[0].body.remember, true);
 
 T.reset();
+T.subqCard(ask("r1"));
 T.untick();
 T.decideSubq("r1", true);
-check("unticking approves without recording", T.sent()[0].body, { approve: true, remember: false });
+// The whole body, not just the two flags: what is sent is the decision AND what was on screen when
+// it was made, so the host approves the packages a person read rather than whatever the box's file
+// says by the time the request lands.
+check("unticking approves without recording", T.sent()[0].body, { approve: true, remember: false, box: "web-main", kind: "apt", packages: ["libnss3"] });
 
 // A denial must not record, and the checkbox is irrelevant to that — it is still ticked here.
 T.reset();
+T.subqCard(ask("r1"));
 T.retick();
 T.decideSubq("r1", false);
-check("denying never records, whatever the box shows", T.sent()[0].body, { approve: false, remember: false });
+check("denying never records, whatever the box shows", T.sent()[0].body,
+  { approve: false, remember: false, box: "web-main", kind: "apt", packages: ["libnss3"] });
 
 // --- announced once, however long it waits -----------------------------------------------------
 T.reset();
