@@ -469,6 +469,26 @@ fn cmd_doctor() -> Result<(), String> {
             println!("{BAD} {prog:<13} not on PATH — {why} unavailable");
         }
     }
+    // The warden, which is not a tool on PATH and is checked here beside the ones that are — because
+    // to somebody reading this list the question is the same: is the thing skein needs present.
+    //
+    // A line rather than a footnote, because fleet create and destroy go ONLY through it. There is
+    // deliberately no fallback (`fleet::create_through_warden`), so a host without one has lost two
+    // lifecycle operations — and until this line existed the first anybody heard of that was a 500
+    // from pressing Launch, which on an upgrade lands weeks after the change that caused it.
+    {
+        let w = skein::health::warden_report();
+        let mark = match w.level {
+            skein::health::Level::Satisfied => OK,
+            skein::health::Level::Unsatisfied => BAD,
+            skein::health::Level::Unknown => WARN,
+        };
+        println!("{mark} warden        {DIM}{}{RESET}", w.detail);
+        if !w.fix.is_empty() {
+            println!("{DIM}              {}{RESET}", w.fix);
+        }
+    }
+
     {
         // Which credential the host's own GitHub calls run on. It matters because only one of the
         // three can reach the system keyring, and that is the one people were being pushed onto.

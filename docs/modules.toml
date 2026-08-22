@@ -283,7 +283,12 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 # `deployment` because a missing `sbx` is a fault on a host and the correct state in the fleet. A
 # banner red for a correct state hands somebody a fault they cannot clear — `sbx` is host-only —
 # and hides the thing they wanted to know behind it.
-depends_on = ["ai", "board", "deployment", "fleet", "gitgate", "github", "registry", "repos", "runtime", "sbx", "util"]
+# `warden_client` because fleet create and destroy go only through the warden and there is no
+# fallback, so a host that is not running one has lost two lifecycle operations — and until this
+# edge existed, the first anybody heard of that was a 500 from pressing Launch. The edge is to the
+# CLIENT and not the warden's crate, which this one deliberately does not depend on; what health
+# reaches for is the reporting endpoint, the one that needs no compiled capability at all.
+depends_on = ["ai", "board", "deployment", "fleet", "gitgate", "github", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
 depends_on = ["config", "probes", "repos", "util"]

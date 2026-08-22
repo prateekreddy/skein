@@ -4680,7 +4680,8 @@ function renderDiagnostics() {
   const CHECKS = [
     ["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "gh"],
     ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
-    ["gitgate", "github scope"], ["cover", "box isolation"], ["ai", "ai enrichment"],
+    ["gitgate", "github scope"], ["warden", "host warden"], ["cover", "box isolation"],
+    ["ai", "ai enrichment"],
   ];
   // Three states, not two. `unknown` is "skein could not tell", which is neither a pass nor a
   // fault — reporting it as ✗ sent people to reinstall a working tool because `sbx ls` timed out
@@ -6429,7 +6430,10 @@ function loadHealth() {
     // "cover" among them for the reason "memory" is: a box running under an older isolation has no
     // symptom at all — it looks exactly like every covered box — so if the banner does not say it,
     // nothing does.
-    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","gitgate","cover"];
+    // "warden" among them for the same reason again: fleet create and destroy go only through it
+    // and there is no fallback, so a host without one has lost two lifecycle operations with no
+    // symptom until somebody presses Launch — which on an upgrade is weeks after the cause.
+    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","gitgate","warden","cover"];
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");

@@ -21,7 +21,9 @@ you have already given it — see [One credential](#configuration) — so there 
 nothing to authenticate. `curl` carries those calls and is on every macOS and ordinary Linux.
 
 ```sh
-cargo build --release                    # → target/release/{skein, skein-server}
+cargo build --release --workspace        # → target/release/{skein, skein-server, skein-warden}
+./target/release/skein-warden            # IN ITS OWN TERMINAL — it asks you before it creates or
+                                         # destroys the fleet, and waits. See below.
 ./target/release/skein login claude      # sign in ONCE — every box inherits it
 ./target/release/skein add git@github.com:you/your-repo.git
 ./target/release/skein-server            # → prints the URL to open, token and all
@@ -36,6 +38,14 @@ Then press **+ box**, name a branch, and an agent starts working on it. The boar
 checklist tracks what is left (sbx answering, an agent signed in, a repo added), and `skein doctor`
 diagnoses the environment if anything looks wrong.
 
+**The warden is not optional, and it is not a daemon you forget about.** Creating or destroying the
+fleet sandbox is the most privileged thing skein does, so it does not do it: it asks `skein-warden`,
+which runs on the host and puts the command to a person before running it. There is deliberately no
+fallback — one that ran `sbx` here instead would be taken on exactly the day something was wrong. So
+run it somewhere you will see it, and note that `cargo build --release` on its own never builds it.
+Without it the fleet you already have keeps working and the next `+ box` on a fresh machine, or the
+next resize on an old one, fails. `skein doctor` says so before that happens.
+
 **Don't skip `skein login`.** It authenticates the agent runtime once inside the shared sandbox, and
 every box inherits that session. Without it each box comes up sitting at a login prompt, does
 nothing, and shows `sign in` on the board — the single most common way a first run goes quiet. Use
@@ -44,8 +54,10 @@ nothing, and shows `sign in` on the board — the single most common way a first
 ## Build
 
 ```sh
-cargo build --release        # → target/release/{skein, skein-server}
-cargo test                   # units, a black-box run of the real server (tests/server.rs), and the
+cargo build --release --workspace   # → target/release/{skein, skein-server, skein-warden}
+                             # `--workspace`: a plain `cargo build` makes the first two only, and
+                             # the fleet cannot be created or resized without the third
+cargo test --workspace       # units, a black-box run of the real server (tests/server.rs), and the
                              # box hook scripts driven as scripts (tests/turn_state_probe.rs)
 node tests/ui/voice.mjs      # what the mouth says + when it stays quiet (no browser needed)
 node tests/ui/tabs.mjs       # do your open tabs survive a reload (no browser needed)

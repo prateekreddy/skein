@@ -209,9 +209,14 @@ mod tests {
         ),
         (
             "health",
-            "a missing `sbx` is a fault on a host and correct in the fleet. Reporting it red there \
-             would hand somebody a fault they cannot clear, and hide behind a false alarm the thing \
-             they want to know \u{2014} that this deployment reaches boxes another way.",
+            "two lines, and they answer opposite ways. A missing `sbx` is a fault on a host and \
+             correct in the fleet: reporting it red there would hand somebody a fault they cannot \
+             clear, and hide behind a false alarm the thing they want to know \u{2014} that this \
+             deployment reaches boxes another way. An unreachable **warden** is a fault in BOTH, \
+             and only its fix changes: on the host it is not running, while in the fleet the \
+             default address is the sandbox's own loopback rather than the host's, so \
+             `$SKEIN_WARDEN` is the thing to look at. The two failures are indistinguishable from \
+             in here and only one of them is fixed by starting something.",
         ),
         (
             "place",

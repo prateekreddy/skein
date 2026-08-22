@@ -31,7 +31,7 @@
 //! answer different questions and neither is this: this only carries a request and reports what came
 //! back.
 
-use crate::util::sh_quote;
+use crate::util::{sh_quote, Gate};
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -62,6 +62,70 @@ const AUDIT_REPLY: Duration = Duration::from_secs(5);
 /// nothing — a firewall that drops — hangs until the kernel gives up, minutes later. Every call here
 /// is to a process on the same machine, so seconds is generous.
 const CONNECT: Duration = Duration::from_secs(5);
+
+/// How long [`Warden::glance`] waits for a reply — a probe's budget, not a doer's.
+const GLANCE: Duration = Duration::from_secs(2);
+
+/// How long the health panel's answer about the warden is reused before asking again.
+///
+/// The panel refreshes every fifteen seconds and there are as many panels as open tabs, so this is
+/// a permanent load rather than an occasional call — the same reasoning that put a [`Gate`] in
+/// front of `sbx ls`. A refused connection on loopback returns instantly and none of this matters;
+/// a `$SKEIN_WARDEN` pointing at a host that drops packets is where it does.
+const SIGHTING_FRESH: Duration = Duration::from_secs(10);
+
+static SIGHTING_GATE: Gate<Sighting> = Gate::new();
+
+/// The last [`sighting`] failure in words. Remembered beside the gate rather than re-derived,
+/// because asking again is a different question — a warden that has just come back would answer
+/// while the panel is still explaining the failure.
+static SIGHTING_WHY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// What the configured warden can see, remembered for [`SIGHTING_FRESH`].
+///
+/// `None` means it could not be asked, and [`sighting_failure`] says why in the words the panel
+/// prints. Separated for the reason `sbx::fleet_boxes` and `sbx::fleet_failure` are: "nothing there"
+/// and "could not ask" are different things to say, and a check that says the first when it means
+/// the second sends somebody to look at the wrong machine.
+pub fn sighting() -> Option<Sighting> {
+    // Zero in tests: they point `$SKEIN_WARDEN` at a different fake per case and run in parallel, so
+    // a process-wide gate would serve one test's warden to another. Same reasoning as `FLEET_GATE`.
+    let fresh = if cfg!(test) {
+        Duration::ZERO
+    } else {
+        SIGHTING_FRESH
+    };
+    SIGHTING_GATE.get(fresh, || match Warden::configured().glance() {
+        Ok(seen) => {
+            remember_sighting_failure(None);
+            Some(seen)
+        }
+        Err(why) => {
+            remember_sighting_failure(Some(why));
+            None
+        }
+    })
+}
+
+fn remember_sighting_failure(why: Option<String>) {
+    if let Ok(mut slot) = SIGHTING_WHY.lock() {
+        *slot = why;
+    }
+}
+
+/// Why the warden could not be asked, for the health banner and `skein doctor`.
+pub fn sighting_failure() -> Option<String> {
+    SIGHTING_WHY.lock().ok().and_then(|why| why.clone())
+}
+
+/// A non-200 in the warden's own words, or the first of the body when it did not send any.
+fn refusal(code: u16, said: &str) -> String {
+    let why = serde_json::from_str::<serde_json::Value>(said)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+        .unwrap_or_else(|| said.chars().take(200).collect());
+    format!("the warden refused to say what it can see ({code}): {why}")
+}
 
 /// What came back, in the terms a caller has to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,13 +250,21 @@ impl Warden {
     pub fn look(&self) -> Result<Sighting, String> {
         let (code, said) = self.send("GET", "/v1/fleet", "")?;
         if code != 200 {
-            let why = serde_json::from_str::<serde_json::Value>(&said)
-                .ok()
-                .and_then(|v| v["error"].as_str().map(str::to_string))
-                .unwrap_or_else(|| said.chars().take(200).collect());
-            return Err(format!(
-                "the warden refused to say what it can see ({code}): {why}"
-            ));
+            return Err(refusal(code, &said));
+        }
+        serde_json::from_str(&said).map_err(|e| format!("the warden's listing was unreadable: {e}"))
+    }
+
+    /// The same question, on a probe's budget rather than a doer's.
+    ///
+    /// [`REPLY`] is half an hour, because a create waits on a person. Nothing waits on a person
+    /// here: this is asked to fill in a line on the health panel, every fifteen seconds, and a
+    /// warden that needs longer than a couple of seconds to say what it can see is one the panel
+    /// should describe as not answering.
+    fn glance(&self) -> Result<Sighting, String> {
+        let (code, said) = self.send_within("GET", "/v1/fleet", "", GLANCE)?;
+        if code != 200 {
+            return Err(refusal(code, &said));
         }
         serde_json::from_str(&said).map_err(|e| format!("the warden's listing was unreadable: {e}"))
     }

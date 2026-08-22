@@ -1573,6 +1573,7 @@ async fn api_health() -> Json<skein::health::HealthReport> {
                 mailbox: skein::health::HealthCheck::unknown("the health check itself failed"),
                 memory: skein::health::HealthCheck::unknown("the health check itself failed"),
                 gitgate: skein::health::HealthCheck::unknown("the health check itself failed"),
+                warden: skein::health::HealthCheck::unknown("the health check itself failed"),
                 cover: skein::health::HealthCheck::unknown("the health check itself failed"),
                 logins: Vec::new(),
                 dark_boxes: Vec::new(),

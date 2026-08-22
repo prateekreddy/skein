@@ -106,7 +106,7 @@ impl HealthCheck {
 impl HealthReport {
     /// Every check in the report, named. One list, so a check added to the struct and forgotten
     /// here shows up as a compile error rather than as a check nothing ever looks at.
-    pub fn checks(&self) -> [(&'static str, &HealthCheck); 10] {
+    pub fn checks(&self) -> [(&'static str, &HealthCheck); 11] {
         let HealthReport {
             registry,
             sbx,
@@ -117,6 +117,7 @@ impl HealthReport {
             ai,
             memory,
             gitgate,
+            warden,
             cover,
             ..
         } = self;
@@ -130,6 +131,7 @@ impl HealthReport {
             ("ai", ai),
             ("memory", memory),
             ("gitgate", gitgate),
+            ("warden", warden),
             // Named for what it is about rather than for the field: this key is what `/v2` puts
             // on the row, and "isolation" is a word somebody can act on where "cover" is jargon.
             ("isolation", cover),
@@ -169,6 +171,13 @@ pub struct HealthReport {
     /// and the server printed them to a detached process's stderr, so the first place anyone
     /// learned of one was a 403 inside a box some minutes later.
     pub gitgate: HealthCheck,
+    /// Whether the host warden is answering, and what it says it can do.
+    ///
+    /// A fault when it is not: fleet create and destroy go only through it and there is no
+    /// fallback, so without it two lifecycle operations are simply unavailable. Said here so that
+    /// is learned at a glance rather than at the moment somebody presses Launch.
+    pub warden: HealthCheck,
+
     /// Whether every running box is under the isolation this skein installs.
     ///
     /// The check that cannot be answered by looking at anything on the host: `install_launcher`
@@ -248,6 +257,81 @@ fn sbx_health(
                 .unwrap_or_else(|| "no fleet listing, and no reason recorded".into()),
         ),
     }
+}
+
+/// Whether the host warden is answering — because fleet create and destroy go only through it.
+///
+/// **The whole point is that this is said BEFORE something needs it.** `create_through_warden`
+/// refuses rather than falling back, deliberately: a fallback that ran `sbx` here would be taken on
+/// exactly the day something was wrong. But until this line existed, that refusal was the first
+/// anybody heard of it, and the sequence was: build, start the server, watch every check go green,
+/// press Launch, get a 500. Worse on an *upgrade* than on a fresh install — an existing fleet keeps
+/// running, so the failure surfaces weeks later on the first resize, by which time nobody connects
+/// it to having upgraded skein.
+///
+/// **A fault, not a note.** Two of the fleet's five lifecycle operations are unavailable without it,
+/// there is one command that fixes it, and this is skein unable to do something it offers — which is
+/// what every other fault on this panel is. The argument against, and it is real: somebody who never
+/// resizes would carry a red mark for a capability they do not use, and a banner that is red for a
+/// state you have chosen is how the next real fault gets read as noise. It loses to the sentence
+/// above — the cost of finding out late is a fleet you cannot resize at the moment you need to.
+///
+/// **What it does not do is trust the answer.** `capabilities` is what the far end SAYS it can do,
+/// and §8.3 is blunt that this is never evidence — a malicious endpoint advertises whatever makes
+/// skein show a button. So it is reported, in the warden's own words, and nothing here decides
+/// anything from it.
+fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
+    match seen {
+        Some(sighting) => {
+            let doers = match sighting.capabilities.is_empty() {
+                true => "it advertises no doers, so it can report but not create or destroy".into(),
+                false => format!("it says it can {}", sighting.capabilities.join(" and ")),
+            };
+            HealthCheck::satisfied(format!(
+                "answering, and {doers} ({} sandbox(es) in view)",
+                sighting.sandboxes.len()
+            ))
+        }
+        // The reason in the warden client's own words rather than a summary of it. Every one of
+        // them sends the reader somewhere different — not running, running and refusing the shared
+        // secret, running and unreadable — and "the warden is not available" sends them nowhere.
+        None => HealthCheck::unsatisfied(
+            crate::warden_client::sighting_failure().unwrap_or_else(|| {
+                "the host warden did not answer, and no reason was recorded".into()
+            }),
+            match crate::deployment::in_fleet() {
+                // In-fleet the default address is the SANDBOX's loopback, and the warden is on the
+                // host — so "it is not running" and "this process cannot reach the one that is" look
+                // identical from here, and only one of them is fixed by starting anything. Said
+                // where it matters, because `sbx` is host-only too: in this deployment the warden is
+                // not one of two ways to create a fleet, it is the only one.
+                true => {
+                    "the warden runs on the host and `$SKEIN_WARDEN` is how this process finds \
+                         it — the default is 127.0.0.1:7879, which in here is the sandbox's own \
+                         loopback and not the host's. Set it to the host's address, and check a \
+                         `skein-warden` is running there."
+                }
+                // The client's message already says to start one, so this adds only what it does
+                // not know: that a plain `cargo build` never made the binary, and that the process
+                // needs a terminal because a person is asked before every create and destroy.
+                false => {
+                    "`cargo build --release --workspace` \u{2014} a plain `cargo build` makes \
+                          `skein` and `skein-server` only, so on most machines the binary is not \
+                          there at all. Then run it where you will see it: it puts each create and \
+                          destroy to a person, and nothing happens until somebody answers."
+                }
+            },
+        ),
+    }
+}
+
+/// The warden line on its own, for `skein doctor`.
+///
+/// Public for the same reason [`health_report_gitgate`] is: the CLI builds its own list rather than
+/// rendering the whole report, so a check that is only reachable through `health_report` is one the
+/// terminal never shows.
+pub fn warden_report() -> HealthCheck {
+    warden_health(crate::warden_client::sighting())
 }
 
 /// The isolation line: whether every running box is under the cover this skein installs.
@@ -681,13 +765,19 @@ pub fn health_report() -> HealthReport {
     // banner would be crying wolf; the caveat belongs on the row and tab it applies to.
     let cover = cover_health(&uncovered_boxes);
     let gitgate = git_scope_health();
+    // Asked through the gate rather than directly, so as many open tabs as you like cost one probe
+    // per ten seconds between them, and a warden that has gone slow is asked progressively less
+    // often instead of being handed a fresh connection every fifteen.
+    let warden = warden_health(crate::warden_client::sighting());
     // A fault, and only a fault. An `Unknown` check must not turn the banner red: telling somebody
     // their fleet is broken because skein could not reach it for two seconds is the false alarm the
     // third state exists to stop. The cockpit reports the unknowns beside the faults, in the mark
     // it already has for "look at this but nothing is wrong".
-    let ok = ![&registry, &sbx, &git, &probes, &mailbox, &gitgate, &cover]
-        .iter()
-        .any(|check| check.is_fault())
+    let ok = ![
+        &registry, &sbx, &git, &probes, &mailbox, &gitgate, &warden, &cover,
+    ]
+    .iter()
+    .any(|check| check.is_fault())
         && stale_boxes.is_empty();
 
     HealthReport {
@@ -701,6 +791,7 @@ pub fn health_report() -> HealthReport {
         ai,
         memory,
         gitgate,
+        warden,
         cover,
         logins: crate::fleet::signed_in_runtimes(),
         dark_boxes,
@@ -800,6 +891,11 @@ mod tests {
     /// answered from the host, and the ones that would need the fleet report `unknown` rather than
     /// inventing a fault. Five red cards for one cause is the failure this rules out.
     ///
+    /// `warden` is in the allowed list beside the three tools, and it is not one: it is a service on
+    /// a port. Same category all the same — an absent dependency skein needs, reported once, with
+    /// one command that clears it — and the property being pinned is unchanged, that its absence
+    /// must not make anything downstream of it look broken too.
+    ///
     /// It reads the machine's own PATH rather than blanking it, and that is not laziness. `PATH` is
     /// process-global and the suite runs in parallel: an earlier version set it to a directory that
     /// does not exist, and a sibling test that shells out failed while it held it. A test that makes
@@ -822,7 +918,7 @@ mod tests {
         assert!(
             faults
                 .iter()
-                .all(|name| ["sbx", "git", "gh"].contains(name)),
+                .all(|name| ["sbx", "git", "gh", "warden"].contains(name)),
             "something that is not a tool is reported broken, which on a machine with no fleet \
              means a check invented a fault out of a question it could not put: {faults:?}"
         );
@@ -889,6 +985,92 @@ mod tests {
             assert!(
                 page.contains(&format!("{name}:")) || page.contains(&format!("\"{name}\"")),
                 "the cockpit does not mention the `{name}` level at all"
+            );
+        }
+    }
+
+    /// The warden line, against a warden rather than by reading the code.
+    ///
+    /// Both arms matter and they fail differently. A warden that is not there has to produce a
+    /// **fault with a fix** — that is the whole item: without this line the first anybody heard of a
+    /// missing warden was a 500 from pressing Launch, weeks after the upgrade that caused it. A
+    /// warden that IS there has to be believed about being reachable and quoted, never trusted,
+    /// about what it can do: §8.3 says the advertised capability set may decide what skein offers
+    /// and may never stand in for a check.
+    #[test]
+    fn a_warden_that_is_not_answering_is_a_fault_that_says_how_to_start_one() {
+        let _g = crate::testutil::env_lock();
+
+        // A port nothing is listening on. Bound and dropped, so the number is real and free —
+        // picking one out of the air races another test that happens to have bound it.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = free.local_addr().unwrap().port();
+        drop(free);
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{dead}"));
+        let missing = warden_health(crate::warden_client::sighting());
+        assert!(
+            missing.is_fault(),
+            "a warden that is not there read as fine"
+        );
+        // Both fields, because both are shown: `skein doctor` prints the detail and the fix on
+        // consecutive lines and the diagnostics pane puts one under the other. What has to be true
+        // is that between them a reader is told the name of the thing to start AND the command that
+        // produces it — the second is the half that was missing, since a plain `cargo build` never
+        // built it and "start the warden" is useless advice about a binary you do not have.
+        assert!(!missing.fix.is_empty(), "a fault with no way out");
+        let shown = format!("{} {}", missing.detail, missing.fix);
+        for needed in ["skein-warden", "--workspace"] {
+            assert!(
+                shown.contains(needed),
+                "nothing a reader sees mentions {needed}: {shown:?}"
+            );
+        }
+        // The reason has to be the client's own. "not available" sends nobody anywhere; the address
+        // it tried is the thing somebody acts on.
+        assert!(
+            missing.detail.contains(&dead.to_string()),
+            "the fault does not say where it looked: {:?}",
+            missing.detail
+        );
+
+        // And one that answers, advertising both doers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read, Write};
+                let mut raw = [0u8; 4096];
+                let _ = stream.read(&mut raw);
+                let body = r#"{"sandboxes":["skein-fleet"],"capabilities":["create","destroy"]}"#;
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_WARDEN", format!("127.0.0.1:{port}"));
+        let answering = warden_health(crate::warden_client::sighting());
+        std::env::remove_var("SKEIN_WARDEN");
+
+        assert!(
+            !answering.is_fault(),
+            "a warden that answered was still reported broken: {answering:?}"
+        );
+        assert!(
+            answering.fix.is_empty(),
+            "a satisfied check carries a fix for a problem it does not have: {:?}",
+            answering.fix
+        );
+        // Quoted, not believed. What it says it can do is in the sentence because a person deciding
+        // whether to trust a Launch button wants to see it — and nothing in `health` reads it.
+        for said in ["create", "destroy"] {
+            assert!(
+                answering.detail.contains(said),
+                "the report does not pass on what the warden said it can do: {:?}",
+                answering.detail
             );
         }
     }
