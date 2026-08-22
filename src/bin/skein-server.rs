@@ -127,6 +127,26 @@ async fn main() {
             }
         }
     });
+    // **The warden, said at boot rather than at the first Launch.**
+    //
+    // Fleet create and destroy go only through it and there is deliberately no fallback, so a host
+    // without one has lost two lifecycle operations. Every other dependency this server needs is
+    // checked here — probes, kit, the launcher, the gh token, the ssh key — and this one was not, so
+    // the first anybody heard of it was a 500 from pressing a button. On an upgrade that lands weeks
+    // after the change that caused it, with nothing left pointing back.
+    //
+    // Not fatal. The server runs a fleet that already exists perfectly well without a warden; what
+    // it cannot do is make or resize one. Refusing to start over a capability somebody may not use
+    // today would be the wrong trade — but so is silence, which is what this had.
+    match skein::warden_client::sighting() {
+        Some(_) => {}
+        None => eprintln!(
+            "skein: {}\n       {}",
+            skein::warden_client::sighting_failure()
+                .unwrap_or_else(|| "the host warden did not answer".into()),
+            skein::health::warden_report().fix
+        ),
+    }
     // Seed the host gh token into sbx (global) so boxes can fetch/push/open PRs. Best-effort and
     // quiet — many setups rely on a proxy injecting credentials instead. Skip with $SKEIN_NO_GH_SECRET.
     if let Err(e) = skein::repos::ensure_gh_secret() {

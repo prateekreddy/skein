@@ -192,7 +192,10 @@ depends_on = ["apiauth", "board", "config", "deployment", "fleet", "gitgate", "h
 # `doorway` beside it, and for the neighbouring reason: `knock` decides who may stay once they have
 # arrived, `doorway` decides whether this process is entitled to be the thing they arrive at. Both
 # are pre-auth and both are one edge from the only file that holds a socket.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume"]
+# `warden_client` because every other dependency this server needs is checked at boot — probes, the
+# kit, the launcher, the gh token, the ssh key — and the warden was not, so a host without one heard
+# about it from a 500 when somebody pressed Launch. It is one call at startup, to say so.
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume", "warden_client"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,

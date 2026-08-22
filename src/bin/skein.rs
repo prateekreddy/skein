@@ -606,18 +606,38 @@ fn cmd_doctor() -> Result<(), String> {
     // only place this surfaces in the cockpit, and a badge cannot say "I did not look" — a repo whose
     // queue is off, or that resolves to no GitHub repository, produced exactly the empty badge that a
     // clean queue produces. Spends `gh` calls, so it is a thing you run rather than a poll.
-    for count in skein::prq::counts() {
-        let id = &count.repo_id;
+    //
+    // **One fault per cause, not one per repo.** Nine repos with no GitHub token produced nine
+    // identical paragraphs — the same sentence about `GH_TOKEN` nine times, burying every other line
+    // on the page in a wall a reader scrolls past. The rule is the codebase's own, and it is already
+    // tested twice elsewhere: `a_missing_tool_is_one_fault_and_not_five` and
+    // `a_repo_with_no_store_is_one_fault_and_not_nine`. This list had escaped it.
+    let counts = skein::prq::counts();
+    let mut by_error: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for count in &counts {
+        let id = count.repo_id.clone();
         if !count.skipped.is_empty() {
             println!(
                 "{DIM}·{RESET} review        {id}: not looked at — {}",
                 count.skipped
             );
         } else if !count.error.is_empty() {
-            println!("{BAD} review        {id}: {}", count.error);
+            by_error.entry(count.error.clone()).or_default().push(id);
         } else {
             println!("{OK} review        {id}: {} need you", count.needs_you);
         }
+    }
+    for (why, repos) in &by_error {
+        // The repos are named because which ones failed is a fact, and dropping it to save a line
+        // would trade the wall for a mystery. It is the SENTENCE that is said once.
+        println!(
+            "{BAD} review        {}: {why}",
+            match repos.as_slice() {
+                [only] => only.clone(),
+                many => format!("{} repos ({})", many.len(), many.join(", ")),
+            }
+        );
     }
     let kit = skein::config::skein_home().join("kit").join("spec.yaml");
     if kit.exists() {

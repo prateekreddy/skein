@@ -879,3 +879,67 @@ fn told_the_socket_comes_from_outside_and_given_none_the_server_refuses_to_bind(
         "the port is still held, so the refusal happened after the bind"
     );
 }
+
+/// The server says the warden is missing **at boot**, not at the first Launch.
+///
+/// Every other thing this server depends on is checked when it starts — the turn-state probes, the
+/// kit, the fleet's launcher, the gh token, the ssh key — and each says so on stderr when it is not
+/// there. The warden was the exception, so a host without one found out from a 500 after pressing a
+/// button, which on an upgrade lands weeks after the change that caused it with nothing pointing
+/// back.
+///
+/// **And it must not be fatal.** A fleet that already exists runs perfectly well without a warden;
+/// what it cannot do is be created or resized. Refusing to start over a capability somebody may not
+/// use today would be the wrong trade — so this asserts both halves: it complains, and it serves.
+#[test]
+fn the_server_says_at_boot_when_no_warden_is_answering() {
+    let home = token_home("nowarden");
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    // A port with nothing on it, so "no warden" is a state this actually reaches rather than one it
+    // inherits from whatever the machine happens to be running.
+    let quiet = free_port();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &home)
+        .env("SKEIN_WARDEN", format!("127.0.0.1:{quiet}"))
+        .env("SKEIN_NO_GH_SECRET", "1")
+        .env("SKEIN_REGISTRY", "")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the server");
+
+    // It serves. The complaint is a complaint, not a refusal.
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the server never bound, so 'it still serves' was never actually asked"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (code, _) = http_get(&addr, "/");
+    assert_eq!(code, 200, "the server did not come up without a warden");
+
+    let _ = child.kill();
+    let out = child
+        .wait_with_output()
+        .expect("collect the server's output");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("warden"),
+        "starting with no warden said nothing about it:\n{said}"
+    );
+    // The address it asked, because a wrong port is the likeliest cause and the reader cannot check
+    // a number nothing printed.
+    assert!(
+        said.contains(&quiet.to_string()),
+        "it did not say where it looked:\n{said}"
+    );
+}
