@@ -3006,13 +3006,16 @@ async fn terminal_session(
                 b
             }
             _ => {
-                let mut b = CommandBuilder::new("sbx");
+                // The program comes from the argv rather than being spelled here. It is `sbx` on a
+                // host and something else in the fleet, and a spawner that names it cannot be told
+                // otherwise — which is how a terminal ends up attached to the wrong machine.
                 let argv = if shell {
                     skein::sandbox::shell_argv(&name)
                 } else {
                     skein::sandbox::attach_argv_as(&name, &dir, &target_agent)
                 };
-                for a in argv {
+                let mut b = CommandBuilder::new(argv.first().map(String::as_str).unwrap_or("sh"));
+                for a in argv.iter().skip(1) {
                     b.arg(a);
                 }
                 b

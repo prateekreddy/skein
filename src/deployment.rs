@@ -168,12 +168,21 @@ mod tests {
     ///
     /// Each entry is a unit, not a line, because line numbers move. Adding one is the point at
     /// which somebody decides the deployment may decide this too.
-    const CONSULTED_BY: &[(&str, &str)] = &[(
+    const CONSULTED_BY: &[(&str, &str)] = &[
+        (
+            "place",
+            "the first hop of a crossing. Host-driven it is `sbx exec [flags] <sandbox>`; in-fleet \
+             it is nothing, because skein is already in the sandbox and `sbx` is host-only. Also \
+             refuses a box whose sandbox is its own \u{2014} that has no second hop, so dropping \
+             the first as well would run the command in skein's own sandbox instead.",
+        ),
+        (
         "bin/skein",
         "`skein doctor` reports which deployment it is and what is reachable from it. Reporting \
          only \u{2014} the first caller, and deliberately one that changes no behaviour, so the \
          seam exists before anything leans on it.",
-    )];
+        ),
+    ];
 
     /// The flag cannot acquire meaning quietly.
     ///

@@ -919,7 +919,10 @@ impl Place {
     /// Its own function so the wire format is testable without a sandbox — and because it is the
     /// contract the takeover guard asserts.
     pub fn exec_argv(&self, script: &str) -> Vec<String> {
-        let mut argv = vec!["sbx".to_string(), "exec".into(), self.sandbox.clone()];
+        if let Some(refusal) = self.unreachable_from_fleet() {
+            return refusal;
+        }
+        let mut argv = self.reach(&[]);
         argv.extend(self.enter());
         argv.push("bash".into());
         argv.push("-lc".into());
@@ -974,6 +977,54 @@ impl Place {
                 "bash".into(),
             ],
         }
+    }
+
+    /// How skein gets to the **sandbox**, before [`Self::enter`] gets it to the box.
+    ///
+    /// Two hops, and only the first of them depends on where skein is running. Host-driven it is
+    /// `sbx exec [flags] <sandbox>`; in-fleet it is nothing at all, because skein is already there —
+    /// and `sbx` is host-only, so it is not merely unnecessary but unavailable.
+    ///
+    /// One function rather than the same three lines in four builders, because "which hops does a
+    /// crossing have" is exactly the sort of thing that gets answered differently in one place after
+    /// somebody changes the other three.
+    fn reach(&self, flags: &[&str]) -> Vec<String> {
+        if crate::deployment::in_fleet() {
+            return Vec::new();
+        }
+        let mut argv = vec!["sbx".to_string(), "exec".into()];
+        argv.extend(flags.iter().map(|f| f.to_string()));
+        argv.push(self.sandbox.clone());
+        argv
+    }
+
+    /// A box whose sandbox *is* the box cannot be reached from inside the fleet's sandbox.
+    ///
+    /// Found by writing [`Self::reach`] rather than by planning: dropping the `sbx exec` hop is
+    /// right when the second hop enters a namespace, and [`Where::OwnSandbox`] has no second hop —
+    /// its `enter()` is empty, because there the sandbox and the box are one thing. Drop the first
+    /// hop as well and the command runs in *skein's own* sandbox, which is a different machine from
+    /// the box it was addressed to, with the same paths and other people's files at them.
+    ///
+    /// So it refuses, in-band, the way [`crate::sandbox::refusal_argv`] does — the caller is
+    /// usually a terminal, and an argv that prints why is read where an `Err` several layers up is
+    /// not. A legacy per-VM box is a real state (`docs/parity.md` keeps `declared = deleted` for the
+    /// same reason), and the honest answer is that this deployment cannot reach one, not a command
+    /// aimed somewhere plausible.
+    fn unreachable_from_fleet(&self) -> Option<Vec<String>> {
+        let own = matches!(self.at, Where::OwnSandbox);
+        (own && crate::deployment::in_fleet()).then(|| {
+            vec![
+                "sh".to_string(),
+                "-c".into(),
+                format!(
+                    "echo 'skein: {name} is a sandbox of its own, and this skein runs inside the \
+                     fleet — there is no sbx here to reach another sandbox with. Migrate it into \
+                     the fleet, or drive it from a skein on the host.' >&2; exit 1",
+                    name = self.name
+                ),
+            ]
+        })
     }
 
     /// The `nsenter` invocation itself, without the guard in front of it.
@@ -1099,19 +1150,23 @@ impl Place {
         }
     }
 
-    /// The `sbx` arguments for an **interactive** attach — a terminal, not a captured command.
+    /// The **whole** argv for an interactive attach — a terminal, not a captured command.
     ///
-    /// Returns everything *after* the program name, unlike the other builders here, because both
-    /// callers hand `sbx` to a PTY spawner (`CommandBuilder::new("sbx")`) rather than running an
-    /// argv[0]. Kept as-is rather than "fixed" for symmetry: changing it would mean touching the
-    /// terminal plumbing on both ends for no behavioural gain.
+    /// This used to return everything *after* the program name, because both callers handed a
+    /// literal `"sbx"` to a PTY spawner. That was kept deliberately, on the grounds that changing it
+    /// would touch the terminal plumbing on both ends "for no behavioural gain". There is one now:
+    /// in-fleet the program is not `sbx` at all, and a builder that returns arguments for a program
+    /// it does not name cannot say so.
     ///
     /// The whole attach runs inside the namespace, not just the tmux call. The shell it carries
     /// refreshes the runtime's instruction file, runs the runtime's setup and starts the pane
     /// observer — all of which read and write the box's own HOME and tree. Outside the hop they
     /// would quietly operate on skein's.
     pub fn interactive_argv(&self, script: &str) -> Vec<String> {
-        let mut argv = vec!["exec".to_string(), "-it".into(), self.sandbox.clone()];
+        if let Some(refusal) = self.unreachable_from_fleet() {
+            return refusal;
+        }
+        let mut argv = self.reach(&["-it"]);
         argv.extend(self.enter());
         argv.push("bash".into());
         argv.push("-lc".into());
@@ -1124,7 +1179,10 @@ impl Place {
     /// For callers that stream stdout somewhere other than a buffer, so they keep their own
     /// plumbing while the sandbox name still resolves through here rather than being assumed.
     pub fn raw_argv(&self, args: &[&str]) -> Vec<String> {
-        let mut argv = vec!["sbx".to_string(), "exec".into(), self.sandbox.clone()];
+        if let Some(refusal) = self.unreachable_from_fleet() {
+            return refusal;
+        }
+        let mut argv = self.reach(&[]);
         argv.extend(self.enter());
         argv.extend(args.iter().map(|a| a.to_string()));
         argv
@@ -1240,12 +1298,10 @@ impl Place {
     /// The argv that runs `script` here with stdin attached. `-i` is not decoration: without it
     /// `sbx exec` does not wire a pipe to the guest, and the body is silently discarded.
     pub fn write_argv(&self, script: &str) -> Vec<String> {
-        let mut argv = vec![
-            "sbx".to_string(),
-            "exec".into(),
-            "-i".into(),
-            self.sandbox.clone(),
-        ];
+        if let Some(refusal) = self.unreachable_from_fleet() {
+            return refusal;
+        }
+        let mut argv = self.reach(&["-i"]);
         argv.extend(self.enter());
         argv.push("bash".into());
         argv.push("-lc".into());
@@ -2219,5 +2275,189 @@ mod tests {
             report.contains("live-one 0"),
             "an anchor from another boot was believed:\n{report}"
         );
+    }
+
+    /// The in-fleet crossing, entering a real namespace.
+    ///
+    /// bwrap and tmux are here even though `sbx` is not, which is the whole reason this is
+    /// testable: a box is a bwrap mount namespace anchored by a pid, and `nsenter` into one is the
+    /// same call whether skein reached the sandbox first or was already in it. What differs is only
+    /// the hop before it, which is what `Place::reach` decides.
+    ///
+    /// The proof is the namespace itself. Running `readlink /proc/self/ns/mnt` through the crossing
+    /// and comparing it with the *test process's* is the one assertion that cannot pass by
+    /// accident: an argv that failed to enter reports this process's namespace, and an argv that
+    /// entered reports the box's.
+    #[test]
+    fn a_crossing_in_the_fleet_enters_the_box_without_sbx() {
+        if std::process::Command::new("bwrap")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: no bwrap here, so there is no namespace to cross into");
+            return;
+        }
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let anchor_at = dir.join("anchor");
+        let mut boxlike = std::process::Command::new("bwrap")
+            .args(["--dev-bind", "/", "/", "--"])
+            .arg("bash")
+            .arg("-c")
+            .arg(format!("echo $$ > {}; sleep 60", anchor_at.display()))
+            // Nulled: a child that outlives this holds an inherited pipe open, and `cargo test`
+            // then looks like a hang long after the test finished.
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start a box-like namespace");
+        let anchor: u32 = {
+            let mut found = None;
+            for _ in 0..100 {
+                if let Ok(text) = std::fs::read_to_string(&anchor_at) {
+                    if let Ok(pid) = text.trim().parse() {
+                        found = Some(pid);
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            found.expect("the box-like namespace never reported its anchor")
+        };
+
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+        let stat = std::fs::read_to_string(format!("/proc/{anchor}/stat")).unwrap_or_default();
+        let ns_start: u64 = stat
+            .rsplit_once(") ")
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+            .and_then(|f| f.parse().ok())
+            .unwrap_or(0);
+        let place = Place {
+            name: "demo".into(),
+            sandbox: "skein-fleet".into(),
+            at: Where::Shared {
+                ns_pid: anchor,
+                home: std::env::var("HOME").unwrap_or_else(|_| "/root".into()),
+                tree: "/".into(),
+                sock: dir.join("session.sock").to_string_lossy().into_owned(),
+                generation: boot.trim().to_string(),
+                ns_start,
+            },
+        };
+        let mine = std::fs::read_link("/proc/self/ns/mnt")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let theirs = std::fs::read_link(format!("/proc/{anchor}/ns/mnt"))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert_ne!(mine, theirs, "the fixture is not in a namespace of its own");
+
+        // Host-driven: the first hop is still there, and it is still `sbx`.
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        let from_host = place.exec_argv("readlink /proc/self/ns/mnt");
+        assert_eq!(
+            &from_host[..3],
+            ["sbx", "exec", "skein-fleet"],
+            "the host path stopped going through sbx, which is the fallback that makes 4c revertible"
+        );
+
+        // In-fleet: no first hop at all, and the crossing still lands inside the box.
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        let argv = place.exec_argv("readlink /proc/self/ns/mnt");
+        assert!(
+            !argv.iter().any(|a| a == "sbx"),
+            "the in-fleet crossing still spells sbx, which does not exist here: {argv:?}"
+        );
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run the in-fleet crossing");
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        assert_eq!(
+            said,
+            theirs,
+            "the crossing did not enter the box (stderr: {})",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_ne!(said, mine, "the command ran here rather than in the box");
+
+        let _ = boxlike.kill();
+        let _ = boxlike.wait();
+    }
+
+    /// The guard still spends the anchor, and dropping the `sbx` hop did not drop it with it.
+    ///
+    /// It is the same shell either way — `reach` only decides what runs *before* it — but that is a
+    /// claim worth a test rather than a reading, because the whole of the refusal lives in an argv
+    /// that a change to argv-building can quietly stop producing.
+    #[test]
+    fn dropping_the_sbx_hop_does_not_drop_the_anchor_check() {
+        let _g = crate::testutil::env_lock();
+        let unprovable = Place {
+            name: "demo".into(),
+            sandbox: "skein-fleet".into(),
+            at: Where::Shared {
+                ns_pid: 4242,
+                home: "/home/agent".into(),
+                tree: "/boxes/demo/tree".into(),
+                sock: "/boxes/demo/session.sock".into(),
+                // Written before skein stamped anchors: exactly the record `provable` refuses.
+                generation: String::new(),
+                ns_start: 0,
+            },
+        };
+        for in_fleet in [false, true] {
+            match in_fleet {
+                true => std::env::set_var(crate::deployment::IN_FLEET, "1"),
+                false => std::env::remove_var(crate::deployment::IN_FLEET),
+            }
+            let argv = unprovable.exec_argv("echo reached");
+            let joined = argv.join(" ");
+            assert!(
+                !joined.contains("nsenter"),
+                "an address that cannot be proved built an nsenter anyway (in_fleet={in_fleet}): \
+                 {joined}"
+            );
+            assert!(
+                joined.contains("skein restart demo"),
+                "the refusal does not say what would fix it (in_fleet={in_fleet}): {joined}"
+            );
+        }
+        std::env::remove_var(crate::deployment::IN_FLEET);
+    }
+
+    /// A box that is its own sandbox cannot be reached from inside the fleet's, and says so.
+    ///
+    /// Found while writing `reach` rather than planned: dropping the `sbx exec` hop is right when a
+    /// second hop enters a namespace, and `OwnSandbox` has no second hop. Drop both and the command
+    /// runs in skein's own sandbox — a different machine with the same paths on it.
+    #[test]
+    fn a_box_that_is_its_own_sandbox_is_not_silently_run_in_skeins() {
+        let _g = crate::testutil::env_lock();
+        let legacy = crate::place::own_sandbox("old-box");
+        std::env::remove_var(crate::deployment::IN_FLEET);
+        let from_host = legacy.exec_argv("echo hello");
+        assert_eq!(&from_host[..3], ["sbx", "exec", "old-box"]);
+
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        for argv in [
+            legacy.exec_argv("echo hello"),
+            legacy.write_argv("cat > /tmp/x"),
+            legacy.raw_argv(&["cat", "/etc/hostname"]),
+            legacy.interactive_argv("bash -l"),
+        ] {
+            let joined = argv.join(" ");
+            assert!(
+                joined.contains("no sbx here") && joined.contains("exit 1"),
+                "a legacy box was addressed from inside the fleet instead of refused: {joined}"
+            );
+            assert!(
+                !joined.contains("echo hello") && !joined.contains("/etc/hostname"),
+                "the refusal still carries the command it refused: {joined}"
+            );
+        }
+        std::env::remove_var(crate::deployment::IN_FLEET);
     }
 }

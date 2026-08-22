@@ -1483,9 +1483,11 @@ mod tests {
         .unwrap();
 
         for argv in [attach_argv("thing-x", "/d"), shell_argv("thing-x")] {
+            // The whole argv now, program included: in-fleet it is not `sbx` at all, so a builder
+            // that returned arguments for a program it did not name could not say so.
             assert_eq!(
-                &argv[..3],
-                ["exec", "-it", "skein-fleet"],
+                &argv[..4],
+                ["sbx", "exec", "-it", "skein-fleet"],
                 "the sandbox is the fleet's, not the box's"
             );
             assert!(
@@ -1537,7 +1539,7 @@ mod tests {
         // attach opens the agent inside a persistent `skein-agent` tmux session so the live process
         // survives a disconnect; `claude --continue` is the (re)create command.
         let a = attach_argv("thing-x", "/d");
-        assert_eq!(&a[..3], ["exec", "-it", "skein-fleet"]);
+        assert_eq!(&a[..4], ["sbx", "exec", "-it", "skein-fleet"]);
         assert!(a.last().unwrap().contains("new-session -d -s skein-agent"));
         assert!(a.last().unwrap().contains("claude --name"));
         assert!(a.last().unwrap().contains("--continue"));
@@ -1612,7 +1614,7 @@ mod tests {
         );
         // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
-        assert_eq!(&sh[..3], ["exec", "-it", "skein-fleet"]);
+        assert_eq!(&sh[..4], ["sbx", "exec", "-it", "skein-fleet"]);
         assert!(sh.last().unwrap().contains("new-session -d -s skein-shell"));
         assert!(sh.last().unwrap().contains("tmux is required"));
         assert!(sh.last().unwrap().contains("-u attach-session"));

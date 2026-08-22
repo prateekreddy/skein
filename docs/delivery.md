@@ -220,6 +220,20 @@ is `sbx` on `$PATH` — is a guess about somebody else's machine, and the two wr
 symmetric. A fleet process that thinks it is on the host runs `sbx`, fails, and says so. A host
 process that thinks it is in the fleet stops reaching a fleet only it can reach, and the symptom is a
 fleet that appears to have no boxes.
+
+**The crossing is the first thing that leans on it** (SKEIN-103). A crossing has two hops and only
+the first depends on where skein runs: `sbx exec [flags] <sandbox>` from a host, nothing at all from
+inside, since skein is already there and `sbx` is host-only. `Place::reach` is that hop and the only
+place it is decided; `enter()` — the `nsenter` into the box — is unchanged in both, which is why this
+is a hop removed rather than a transport rewritten.
+
+Two things it found rather than planned. **A box whose sandbox is its own cannot be reached from
+inside the fleet's**: `OwnSandbox` has no second hop, so dropping the first as well runs the command
+in *skein's* sandbox — a different machine with the same paths on it. It refuses in-band, the way an
+unplaced box already does. And **the cockpit's terminal stopped naming `sbx`**: it spawned a literal
+`CommandBuilder::new("sbx")`, which cannot be told the deployment changed the program, so
+`interactive_argv` now returns the whole argv including argv[0]. `bin/skein-server` came off the
+`sbx` row of `docs/sources.toml` as a result.
  This is where
 the six items in §2 get answered, with a fallback available while answering them.
 

@@ -50,9 +50,14 @@ spelled_in = ["doorway", "gitgate", "github", "place", "repos", "warden/serve", 
 # lifecycle: `sbx ports` reads, and `sbx exec -it` is the interactive login. `bin/skein`'s two are
 # `sbx` in a tool list and `run_sbx`, which is attach — so the count there does not fall with this
 # step, and expecting it to was a mistake in the item.
+#
+# `bin/skein-server` came off this list when the crossing learned where skein runs (SKEIN-103). The
+# cockpit's terminal used to spawn a literal `CommandBuilder::new("sbx")`; it now takes the program
+# from the placement's own argv, which is `sbx` on a host and the `nsenter` alone in the fleet. A
+# spawner that names the program cannot be told the deployment changed it — which is how a terminal
+# ends up attached to the wrong machine.
 spelled_in = [
   "bin/skein",
-  "bin/skein-server",
   "fleet",
   "health",
   "repos",

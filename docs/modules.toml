@@ -289,7 +289,12 @@ depends_on = ["fleet", "registry", "repos", "util"]
 depends_on = ["ai", "codeowners", "prq", "repos", "review", "util"]
 
 [current.place]
-depends_on = ["config", "util"]
+# `deployment` because a crossing has two hops and only the first depends on where skein runs:
+# `sbx exec <sandbox>` from a host, nothing at all from inside the fleet. It is one edge to a module
+# that depends on nothing, so it does not join `place` to anything it was not already joined to —
+# worth saying, because `place` is in the eighteen-module component above and every new edge out of
+# it deserves that check.
+depends_on = ["config", "deployment", "util"]
 
 [current.probes]
 depends_on = ["kit", "registry", "repos", "runtime", "sandbox", "tracking", "util"]

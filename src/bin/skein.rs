@@ -958,20 +958,28 @@ fn start_the_box(name: &str, opts: &[String]) -> Result<(), String> {
     // the caller having to name the box's placement — which does not exist until the line above has
     // run. Resolved here, after the box is real.
     if opts.iter().any(|o| o == "--attach") {
-        return run_sbx(&skein::sandbox::initial_attach_argv_as(name, &agent));
+        return run_attach(&skein::sandbox::initial_attach_argv_as(name, &agent));
     }
     Ok(())
 }
 
-/// Run `sbx` with an already-built argv, reporting the one failure worth naming.
-fn run_sbx(argv: &[String]) -> Result<(), String> {
-    match Command::new("sbx").args(argv).status() {
+/// Run an already-built attach argv, reporting the one failure worth naming.
+///
+/// The program is `argv[0]` rather than a literal `sbx`, because in-fleet it is not `sbx` — skein is
+/// already in the sandbox and the crossing is the `nsenter` alone. Spelling the program here would
+/// be this function deciding a thing the placement already decided.
+fn run_attach(argv: &[String]) -> Result<(), String> {
+    let Some((program, args)) = argv.split_first() else {
+        return Err("nothing to run".into());
+    };
+    match Command::new(program).args(args).status() {
         Ok(s) if s.success() => Ok(()),
-        Ok(_) => Err("sbx exited non-zero".into()),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            Err("sbx not found on PATH — attach needs the sbx CLI (host only)".into())
-        }
-        Err(e) => Err(format!("running sbx: {e}")),
+        Ok(_) => Err(format!("{program} exited non-zero")),
+        Err(e) if e.kind() == ErrorKind::NotFound => Err(match program.as_str() {
+            "sbx" => "sbx not found on PATH — attaching from the host needs the sbx CLI".into(),
+            other => format!("{other} not found on PATH"),
+        }),
+        Err(e) => Err(format!("running {program}: {e}")),
     }
 }
 
@@ -1062,5 +1070,5 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // the user sees is `nsenter: cannot open /proc/<pid>/ns/user`.
     skein::fleet::ensure_box_session(&attach_name)?;
     let dir = skein::sbx::lookup_dir(&attach_name).unwrap_or_default();
-    run_sbx(&skein::sandbox::attach_argv_as(&attach_name, &dir, &agent))
+    run_attach(&skein::sandbox::attach_argv_as(&attach_name, &dir, &agent))
 }
