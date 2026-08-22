@@ -784,9 +784,9 @@ pub(crate) fn agent_attach_argv(
     let agent = runtime.info.id;
     let executable = runtime.info.executable;
     let setup_wait = if wait_for_setup {
-        INITIAL_SETUP_WAIT
+        crate::fleet::initial_setup_wait()
     } else {
-        ""
+        String::new()
     };
     let instruction = agent_instruction_setup(runtime);
     let command = crate::runtime::for_box(command, name);

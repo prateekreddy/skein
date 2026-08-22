@@ -117,11 +117,6 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
     },
 ];
 
-/// `sbx create` returns before its durable startup hooks finish. The first `sbx exec` keeps the box
-/// alive and waits for the kit's provider-neutral handshake; later attaches skip this entirely and
-/// go straight to tmux. A bounded wait makes a broken kit visible instead of hanging the terminal.
-pub(crate) const INITIAL_SETUP_WAIT: &str = "echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt 600 ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ";
-
 /// Make tmux a persistence layer rather than visible UI. These are server-global because the box has
 /// one Skein-owned tmux server; applying after detached session creation works on both first launch
 /// and reconnect, and remains compatible with older boxes whose server already exists.

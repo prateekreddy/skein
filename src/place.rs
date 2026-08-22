@@ -428,7 +428,14 @@ pub fn ensure_agent_token() -> Result<String, String> {
 /// that has already been drained.
 /// **3** since the agent grew `/machine` and the Docker watchdog behind it: an agent an older skein
 /// left running answers 2, has no watchdog, and `heal_fleet_agent` replaces it on that number alone.
-pub const AGENT_PROTOCOL: u32 = 3;
+///
+/// **4** since a 504 carries the tail of what the killed script had printed. That is a behaviour
+/// change and not a wire change, and bumping for it is the point: `retire_stale_agent` leaves a
+/// running agent alone unless this number is higher than the one it answers, so an improvement the
+/// number does not move never reaches a fleet that is already up. The agent would be reinstalled on
+/// disk, the old process would keep serving, and the fix would look shipped. This number is the only
+/// upgrade lever there is, so it moves whenever the agent's behaviour does.
+pub const AGENT_PROTOCOL: u32 = 4;
 
 /// The largest body skein will push through the agent. Above it, `sbx exec -i`, which has no
 /// ceiling at all.
@@ -1243,16 +1250,30 @@ impl Place {
             // from a stale one is a transport that should have been replaced and was not, and it
             // blocks every box start with no fallback by design. Without this the message is the
             // same in both cases and only one of them has an action.
-            504 => Some(Err(match agent_protocol(port) {
-                Some(speaks) if speaks < AGENT_PROTOCOL => format!(
-                    "fleet agent: the command did not finish in time — and this agent speaks v{speaks} \
-                     where this build needs v{AGENT_PROTOCOL}. A stale agent takes the call and \
-                     cannot hand it back, so nothing falls back to `sbx exec`. Restart skein-server: \
-                     that retires it and installs the current one. If it still will not come up, set \
-                     \"fleet_agent\": false in ~/.skein/config.json and restart — every call then \
-                     goes over `sbx exec`, which is what it did before the agent existed."
-                ),
-                _ => "fleet agent: the command did not finish in time".into(),
+            // The agent's body carries the budget that actually expired and the tail of what the
+            // script had printed before the kill. Both were thrown away here, and the cost was
+            // real: "the command did not finish in time" is the same sentence whichever binary you
+            // are running and whichever stage died, so diagnosing one meant reading the provisioning
+            // script end to end. An older agent says only the first half, and that is fine — this
+            // prints whatever it was told rather than deciding what it should have been told.
+            504 => Some(Err({
+                let said = String::from_utf8_lossy(&reply.out).trim().to_string();
+                let detail = match said.is_empty() {
+                    true => String::new(),
+                    false => format!(" ({said})"),
+                };
+                match agent_protocol(port) {
+                    Some(speaks) if speaks < AGENT_PROTOCOL => format!(
+                        "fleet agent: the command did not finish in time{detail} — and this agent \
+                         speaks v{speaks} where this build needs v{AGENT_PROTOCOL}. A stale agent \
+                         takes the call and cannot hand it back, so nothing falls back to `sbx \
+                         exec`. Restart skein-server: that retires it and installs the current one. \
+                         If it still will not come up, set \"fleet_agent\": false in \
+                         ~/.skein/config.json and restart — every call then goes over `sbx exec`, \
+                         which is what it did before the agent existed."
+                    ),
+                    _ => format!("fleet agent: the command did not finish in time{detail}"),
+                }
             })),
             // 400/403/404/5xx — the agent refused or broke before running anything, so the script
             // never started and `sbx exec` is free to try it.
@@ -1748,6 +1769,50 @@ mod tests {
     }
 
     /// An `sbx` on PATH that fails loudly, so a test can tell "the agent carried it" from "it
+    /// A timeout carries what the script had already printed, so it says how far it got.
+    ///
+    /// Drives the real agent with a script that reports a stage and then hangs — which is the shape
+    /// of the failure this exists for. `skein-startup.sh` prints a `[skein-kit] …` line at every
+    /// stage it passes, and a provisioning timeout used to arrive as one sentence with none of them
+    /// in it: "fleet agent: the command did not finish in time", identical whichever stage died and
+    /// whichever budget expired. Finding out which cost an end-to-end read of the script and two
+    /// queries against a live fleet's API, for an answer the killed process had already written down.
+    #[test]
+    fn a_timeout_carries_what_the_script_managed_to_say_before_it_was_killed() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let agent = start_agent(home.as_ref() as &std::path::Path, "tok");
+        point_config_at(home.as_ref() as &std::path::Path, agent.port);
+
+        let why = own_sandbox("fleet")
+            .via_agent(
+                "echo '[skein-kit] linked the store'; echo '[skein-kit] wiring the tracker' >&2; \
+                 sleep 30",
+                Duration::from_secs(1),
+            )
+            .expect("the agent answered")
+            .expect_err("a script that outlives its budget is an error");
+
+        assert!(
+            why.contains("did not finish in time"),
+            "the timeout stopped saying what it was: {why}"
+        );
+        // Both streams. The stage lines a script prints go to whichever it happens to use, and a
+        // message that carries only one of them is a message that is empty half the time.
+        assert!(
+            why.contains("linked the store") && why.contains("wiring the tracker"),
+            "the timeout dropped what the script had printed before the kill, which is the only \
+             account of how far it got: {why}"
+        );
+        // And the budget that actually expired, because "did not finish in time" is the same
+        // sentence whether the caller allowed five minutes or fifteen.
+        assert!(
+            why.contains('1'),
+            "the timeout does not say which budget expired: {why}"
+        );
+    }
+
     /// A timeout from a STALE agent says what to do; one from a current agent has nothing to add.
     ///
     /// The two look identical and only one of them has an action. A stale agent takes the call and

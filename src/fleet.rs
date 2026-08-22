@@ -3313,7 +3313,38 @@ fn mount_manifest(name: &str) -> String {
 /// `timeout + 5s` because "a socket deadline that fired first would turn its answer into silence".
 /// This is the same rule, at the layer above, and `the_provisioning_budget_outlasts_the_script`
 /// keeps the two in step by reading the script rather than trusting this comment.
-const PROVISION_BUDGET: Duration = Duration::from_secs(900);
+pub(crate) const PROVISION_BUDGET: Duration = Duration::from_secs(900);
+
+/// Lives here rather than in `runtime` because what it waits FOR lives here: `/tmp/skein-startup.ready`
+/// is written by the last line of `KIT_STARTUP_SH`, and its bound is derived from the budget above.
+/// The alternative was `runtime` reaching into `fleet` for that budget — an edge from a low-level
+/// module to a high-level one, for a constant that was never `runtime`'s to own.
+/// How much longer the agent launch waits than provisioning is allowed to take.
+///
+/// The direction is the whole point. This wait opens BEFORE provisioning is invoked — `start_box`
+/// starts the session, reads the anchor, records the placement, and only then provisions — so a wait
+/// equal to the provisioning budget closes while provisioning is still legitimately running. It was
+/// 600s against a script that allows itself 840, which is a start killed by its own watcher on a
+/// fleet where everything works.
+pub(crate) const SETUP_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long the first `sbx exec` waits for the kit's handshake before calling the box broken.
+pub(crate) fn setup_wait_secs() -> u64 {
+    (crate::fleet::PROVISION_BUDGET + SETUP_WAIT_MARGIN).as_secs()
+}
+
+/// `sbx create` returns before its durable startup hooks finish. The first `sbx exec` keeps the box
+/// alive and waits for the kit's provider-neutral handshake; later attaches skip this entirely and
+/// go straight to tmux. A bounded wait makes a broken kit visible instead of hanging the terminal.
+///
+/// **Bounded, not short.** The bound is derived from provisioning's, because the failure it is here
+/// to catch — a kit that broke — announces itself: the script's EXIT trap writes
+/// `/tmp/skein-startup.failed` and the loop below exits on it in under a second. The full wait
+/// elapses only when provisioning is still running, and cutting THAT short reports a working box as
+/// a broken one.
+pub(crate) fn initial_setup_wait() -> String {
+    format!("echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt {} ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ", setup_wait_secs())
+}
 
 pub fn provision_script(name: &str, store: &str) -> String {
     format!(
@@ -9705,16 +9736,72 @@ b idle 5000000 4 1048576 1048576
     /// Summing every bound is deliberately conservative — some are alternatives on one path — and
     /// conservative is the right direction: being generous costs a start that takes longer to fail,
     /// being tight costs this bug.
-    #[test]
-    fn the_provisioning_budget_outlasts_the_script() {
-        let mut allows = 0u64;
-        for line in KIT_STARTUP_SH.lines() {
-            let mut words = line.split_whitespace().peekable();
-            while let Some(word) = words.next() {
-                if word == "timeout" {
-                    if let Some(n) = words.peek().and_then(|n| n.parse::<u64>().ok()) {
-                        allows += n;
+    /// Every `timeout <n>` and `-lt <n>` in the provisioning script, summed.
+    ///
+    /// Bounds are written two ways and both have to be readable here. `timeout 120 sudo apt-get …`
+    /// states its number; `timeout "$sync_budget" bash …` names one, because the same number is
+    /// handed to the script it bounds and a second literal would be a second place to update. So the
+    /// plain `name=<n>` assignments are resolved first, and a bound this cannot read is an ERROR
+    /// rather than a zero — a silently unread bound is a bound that is not checked, which is the
+    /// whole failure this test exists to end.
+    fn bounds_in(script: &str) -> Result<u64, String> {
+        let mut known: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for line in script.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((name, value)) = trimmed.split_once('=') {
+                let named =
+                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if named {
+                    if let Ok(n) = value.trim().parse::<u64>() {
+                        known.insert(name, n);
                     }
+                }
+            }
+        }
+        let mut allows = 0u64;
+        for line in script.lines() {
+            if line.trim().starts_with('#') {
+                continue;
+            }
+            let mut words = line.split_whitespace().peekable();
+            let mut before: Option<&str> = None;
+            while let Some(word) = words.next() {
+                let previous = before;
+                before = Some(word);
+                if word != "timeout" {
+                    continue;
+                }
+                // `command -v timeout` asks whether the tool exists and bounds nothing. That is the
+                // ONLY exemption, and it is spelled as narrowly as it is on purpose: the first
+                // version of this test allowed any word that did not look like command position,
+                // and quietly dropped `SKEIN_SYNC_BUDGET=$((sync_budget - 30)) timeout …` because
+                // the arithmetic tokenised badly. A guard against unread bounds that skips the ones
+                // it cannot parse is the bug wearing the fix's clothes. Everything else reaches the
+                // error below.
+                if previous == Some("-v") {
+                    continue;
+                }
+                let Some(raw) = words.peek().copied() else {
+                    continue;
+                };
+                let bare = raw
+                    .trim_matches('"')
+                    .trim_start_matches('$')
+                    .trim_matches(|c| c == '{' || c == '}');
+                if let Ok(n) = bare.parse::<u64>() {
+                    allows += n;
+                } else if let Some(n) = known.get(bare) {
+                    allows += n;
+                } else {
+                    return Err(format!(
+                        "`timeout {raw}` — this test cannot read that bound, so it is not counted \
+                         and the total below is short by however long it is. Write the number, or \
+                         set it as `name=<seconds>` in this script.\n  {}",
+                        line.trim()
+                    ));
                 }
             }
             // `while apt_busy && [ "$waited" -lt 240 ]` — the wait before it tries at all.
@@ -9730,6 +9817,12 @@ b idle 5000000 4 1048576 1048576
                 }
             }
         }
+        Ok(allows)
+    }
+
+    #[test]
+    fn the_provisioning_budget_outlasts_the_script() {
+        let allows = bounds_in(KIT_STARTUP_SH).unwrap_or_else(|why| panic!("{why}"));
         assert!(
             allows > 0,
             "no bounded waits found in the provisioning script, so this test checks nothing — the \
@@ -9741,6 +9834,105 @@ b idle 5000000 4 1048576 1048576
              wins, so the script is killed part-way through work it was told it had time for, and \
              the start fails on a fleet where nothing is wrong.",
             PROVISION_BUDGET.as_secs()
+        );
+    }
+
+    /// The three deadlines a box start depends on are in the one order that works.
+    ///
+    /// A start runs three clocks, and any pair inverted kills a start that was going to succeed:
+    ///
+    ///   the script's own bounds  <  the provisioning deadline  <  the agent launch's setup wait
+    ///
+    /// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and
+    /// `INITIAL_SETUP_WAIT` was 600s against a budget of 900 — and the second is worse than it looks,
+    /// because that wait OPENS FIRST: `start_box_inner` starts the session, reads the anchor, records
+    /// the placement, and provisions last, so the setup wait is already running down before
+    /// provisioning begins. Equal is not good enough; each has to outlast the one inside it.
+    #[test]
+    fn each_deadline_a_start_depends_on_outlasts_the_one_inside_it() {
+        let script = bounds_in(KIT_STARTUP_SH).unwrap_or_else(|why| panic!("{why}"));
+        let provisioning = PROVISION_BUDGET.as_secs();
+        let setup_wait = setup_wait_secs();
+        assert!(
+            script < provisioning && provisioning < setup_wait,
+            "the script allows itself {script}s, provisioning is given {provisioning}s, and the \
+             agent launch waits {setup_wait}s for the marker provisioning writes. They have to \
+             increase in that order — the innermost clock is the one doing the work, and whichever \
+             of the outer two fires first turns its answer into a failure on a healthy fleet."
+        );
+    }
+
+    /// A tracker install that never returns does not stop the box coming up.
+    ///
+    /// This is the last block of provisioning, and its comment has always said "a box with no
+    /// tracker is not a broken box, so this can never gate startup". Nothing made that true. The
+    /// script it runs reached GitHub over ssh with no bound; on a fleet with no token that clone sat
+    /// on a credential prompt, provisioning was killed at its deadline, and the kill landed BEFORE
+    /// `touch /tmp/skein-startup.ready` — so the EXIT trap wrote `startup_failed`, and the next
+    /// agent launch (`runtime::INITIAL_SETUP_WAIT`) read a box that was fully provisioned as one
+    /// whose setup had failed. The box worked. Nothing could start in it.
+    ///
+    /// So the block is run against a script that hangs, which is the case that mattered, and the
+    /// assertion is on the clock: it has to come back, and quickly, whatever the callee does.
+    ///
+    /// Linux because `timeout(1)` is GNU coreutils — and a box is Linux, which is why the script may
+    /// depend on it at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tracker_install_that_hangs_does_not_hold_up_the_box() {
+        // The block, lifted from the script rather than restated — a copy here would pass while the
+        // real one hung.
+        let block: String = KIT_STARTUP_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("sync_install="))
+            .take_while(|l| *l != "fi")
+            .chain(std::iter::once("fi"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            block.contains("sync_budget") && block.contains("timeout"),
+            "the tracker block is not the shape this test lifts:\n{block}"
+        );
+
+        let home = crate::testutil::tempdir();
+        let dir = home.as_ref() as &std::path::Path;
+        let bin = dir.join("skein/bin");
+        std::fs::create_dir_all(&bin).expect("store");
+        // Hangs, the way a git clone waiting on a credential prompt hangs.
+        std::fs::write(
+            bin.join("sync-install.sh"),
+            "#!/usr/bin/env bash\nsleep 45\n",
+        )
+        .expect("the stand-in script");
+
+        let shortened = block.replace("sync_budget=240", "sync_budget=2");
+        assert_ne!(
+            shortened, block,
+            "the budget's spelling changed; this test edits nothing"
+        );
+        let script = format!(
+            "store={}\n{shortened}\n",
+            sh_quote(&dir.display().to_string())
+        );
+
+        let began = std::time::Instant::now();
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash");
+        let took = began.elapsed();
+
+        assert!(
+            out.status.success(),
+            "the tracker block failed the startup it is not allowed to gate: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            took < std::time::Duration::from_secs(30),
+            "the tracker block took {took:?} against a 2s budget, so it is unbounded — provisioning \
+             is killed at its deadline and the box is left with no startup marker, which every \
+             later agent launch reads as a failed setup"
         );
     }
 

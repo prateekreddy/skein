@@ -58,6 +58,10 @@ const GATED: &[(&str, &str)] = &[
         "reads the config that same `sed -i` writes",
     ),
     (
+        "a_tracker_install_that_hangs_does_not_hold_up_the_box",
+        "runs the tail of skein-startup.sh, whose bound is `timeout` (GNU coreutils)",
+    ),
+    (
         "shared_home_import_is_dry_run_first_explicit_and_filtered",
         "the inventory and import shells use `sort -z` and `tar --ignore-failed-read` (GNU)",
     ),

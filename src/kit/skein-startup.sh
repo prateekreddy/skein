@@ -380,8 +380,25 @@ fi
 # START, which is what makes a NEW box come up already tracking once Skein has provisioned
 # its token. Silent and quick when there are no credentials, which is the common case; a box
 # with no tracker is not a broken box, so this can never gate startup.
+#
+# **Bounded here as well as inside**, and the belt-and-braces is the point. The comment above is a
+# claim this line has to keep, and for a long time nothing made it keep it: the script's own network
+# calls were unbounded, provisioning ran out of its deadline waiting on one, and the kill landed
+# before the `startup_ready` marker below — so the EXIT trap wrote `startup_failed` and the next
+# agent launch read a box that was fully provisioned as one whose setup had failed. A step that
+# cannot gate startup has to be unable to, rather than intended not to.
 sync_install="$store/skein/bin/sync-install.sh"
-[ -r "$sync_install" ] && bash "$sync_install" || true
+if [ -r "$sync_install" ]; then
+  # The outer bound is longer than the inner one it hands down, for the reason `via_agent` asks the
+  # agent for `timeout + 5s`: a deadline that fires first turns the callee's answer into silence,
+  # and "[sync] out of time; the rest is left for the next start" is worth more than a kill.
+  sync_budget=240
+  if command -v timeout >/dev/null 2>&1; then
+    SKEIN_SYNC_BUDGET=$((sync_budget - 30)) timeout "$sync_budget" bash "$sync_install" || true
+  else
+    echo "[skein-kit] no timeout(1), so tracker wiring cannot be bounded — skipped" >&2
+  fi
+fi
 
 [ "$tools_ok" = "true" ] || exit 1
 [ "$shared_home_state" = "linked" ] || exit 1

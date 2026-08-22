@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # there, so "is it up" and "does it speak what I am about to send" are separate questions — and the
 # second one has to be answerable *before* a gigabyte goes down the wire, since there is no way back
 # once it has. Bump this whenever an endpoint or its framing changes.
-PROTOCOL = 3
+PROTOCOL = 4
 
 # Bigger than any script skein sends, small enough that a stray POST cannot exhaust the sandbox.
 MAX_BODY = 1 << 20
@@ -56,6 +56,24 @@ MAX_WRITE = 1 << 30
 # a header a proxy refuses would lose the error text that is the whole point of returning it.
 MAX_STDERR = 8192
 DEFAULT_TIMEOUT = 30.0
+
+# How much of a killed script's own output travels back with the timeout. Enough to name the stage it
+# died in, short enough to stay a message rather than a log — the box keeps the whole thing.
+TIMEOUT_TAIL = 1200
+
+
+def _tail(*streams):
+    """The last of whatever the script managed to print, for a message about how far it got."""
+    said = "\n".join(
+        (s.decode("utf-8", "replace") if isinstance(s, bytes) else str(s)).strip()
+        for s in streams
+        if s
+    ).strip()
+    if not said:
+        # Said explicitly. "Nothing printed" and "we did not look" are different diagnoses, and the
+        # second is the one that sent somebody reading the script line by line.
+        return " — and it had printed nothing"
+    return " — it had got as far as:\n" + said[-TIMEOUT_TAIL:]
 
 # ── the Docker daemon's watchdog ──────────────────────────────────────────────────────────────────
 #
@@ -196,10 +214,19 @@ class Handler(BaseHTTPRequestHandler):
                 argv, capture_output=True, timeout=timeout, check=False
             )
             code, out, err = done.returncode, done.stdout, done.stderr
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             # 504 rather than a 200 with a nonzero exit: a timeout is the agent failing to answer,
             # not the script reporting failure, and the host retries the two differently.
-            return self._fail(504, f"timed out after {timeout}s")
+            #
+            # **With what the script had already said.** `TimeoutExpired` carries the output captured
+            # before the kill, and throwing it away made a provisioning timeout unreadable: the host
+            # saw "the command did not finish in time" and nothing else, while the script had been
+            # printing a line at every stage it passed. Diagnosing one took reading the script end to
+            # end and querying the cockpit's API for corroboration. The tail, because the answer to
+            # "how far did it get" is always at the end.
+            return self._fail(
+                504, f"timed out after {timeout}s{_tail(e.stdout, e.stderr)}"
+            )
         except OSError as e:
             return self._fail(500, f"could not run: {e}")
 

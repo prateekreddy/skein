@@ -31,6 +31,47 @@
 # Fail-soft throughout: this runs during startup, and a work-tracking problem must never stop a box.
 set -uo pipefail
 
+# Every `claude` call below reaches the network, and this script is the LAST thing box provisioning
+# runs — so anything unbounded here is unbounded in the caller's deadline. It was: the marketplace
+# `add`/`install` branch had no limit while the `update` branch beside it had one, and a fleet with no
+# GitHub token sat on a credential prompt until provisioning was killed. The box came up anyway, its
+# startup marker was never written, and the next agent launch read that as "box setup failed".
+#
+# **A per-call bound is not a bound.** Four calls of 150s is ten minutes, and the startup that
+# invoked this has less than that. So the budget is the SCRIPT's, one deadline, and each call spends
+# what is left of it — the same shape `fleet-agent.py` uses for the request it is serving.
+#
+# Refusing outright when there is no `timeout(1)` rather than falling back to running unbounded: the
+# fallback is the bug. A box is a GNU userland and has it; anywhere that does not, a tracker this
+# script could not wire is the box we had yesterday, which is what fail-soft means here.
+SYNC_BUDGET="${SKEIN_SYNC_BUDGET:-240}"
+sync_deadline=$(( $(date +%s) + SYNC_BUDGET ))
+# No single call gets the whole budget: one stuck clone would otherwise spend every second the
+# later steps need, and the box would end up with a marketplace and no registration.
+SYNC_CALL_MAX=120
+claude_bounded() {
+  local left
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "[sync] no timeout(1) here, so a network call cannot be bounded — skipping rather than \
+risking an unbounded startup" >&2
+    return 1
+  fi
+  left=$(( sync_deadline - $(date +%s) ))
+  if [ "$left" -le 0 ]; then
+    echo "[sync] out of time; the rest is left for the next start" >&2
+    return 1
+  fi
+  [ "$left" -le "$SYNC_CALL_MAX" ] || left="$SYNC_CALL_MAX"
+  timeout "$left" claude "$@"
+}
+
+# Fail rather than ask. The marketplace is a private repo cloned over the box's forwarded ssh-agent,
+# and with no key loaded git's default is to PROMPT — on a stdin that is a pipe, which is a wait with
+# nothing at the other end of it. These turn that wait into an error, which is a thing this script
+# can report and recover from.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes"
+
 # The store is two levels up from this script — exact, and free of any guess about layout.
 store="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"
 src="$store/skein/sync"
@@ -114,7 +155,7 @@ plugin_version() {
 refresh_plugin() {
   local before after
   before="$(plugin_version)"
-  timeout 150 claude plugin marketplace update sync >/dev/null 2>&1 || return 0
+  claude_bounded plugin marketplace update sync >/dev/null 2>&1 || return 0
   after="$(plugin_version)"
   if [ -n "$after" ] && [ "$before" != "$after" ]; then
     echo "[sync] plugin updated ${before:-none} -> $after" >&2
@@ -143,7 +184,7 @@ elif command -v claude >/dev/null 2>&1; then
   # Asked before installed, because a box may already have it by hand — the sync repo's own box does,
   # with its own OAuth grant. Reinstalling over that would be skein taking something that was not
   # its to take.
-  if claude plugin list 2>/dev/null | grep -q 'sync@sync'; then
+  if claude_bounded plugin list 2>/dev/null | grep -q 'sync@sync'; then
     plugin="yes"
     # Installed by hand, and still kept current. `marketplace update` pulls from whatever source that
     # marketplace was added from, so a box pointed at a local checkout stays pointed at it — this
@@ -151,8 +192,8 @@ elif command -v claude >/dev/null 2>&1; then
     refresh_plugin
   # The marketplace is a private repo, so this clones over the box's forwarded ssh-agent. Fail-soft
   # like everything else here: a box without the plugin is the box we had yesterday.
-  elif claude plugin marketplace add prateekreddy/sync >/dev/null 2>&1 \
-       && claude plugin install sync@sync >/dev/null 2>&1; then
+  elif claude_bounded plugin marketplace add prateekreddy/sync >/dev/null 2>&1 \
+       && claude_bounded plugin install sync@sync >/dev/null 2>&1; then
     plugin="yes"
     echo "[sync] installed the sync plugin — lease monitor, session hooks and the skill" >&2
   else
@@ -234,7 +275,8 @@ if command -v claude >/dev/null 2>&1; then
   # hand-added entry WINS over a plugin's — so leaving it would shadow the plugin's own server and
   # the monitor and hooks would sit dead beside a set of tools that still worked. There is no
   # fallback registration here on purpose. The plugin is the only source of this server now.
-  claude mcp remove sync -s user >/dev/null 2>&1 || claude mcp remove sync >/dev/null 2>&1 || true
+  claude_bounded mcp remove sync -s user >/dev/null 2>&1 \
+    || claude_bounded mcp remove sync >/dev/null 2>&1 || true
   if set_sync_url "$url"; then
     [ "$plugin" = "yes" ] && registered="yes"
   else

@@ -17,8 +17,7 @@ use crate::place::{fleet_sandbox, place_of, placed_boxes};
 use crate::probes::ensure_probe_in;
 use crate::repos::{agent_for_box, box_name, ensure_gh_secret, load_repos, repo_for_box, Repo};
 use crate::runtime::{
-    guarded_agent_command, runtime_adapter, valid_runtime, INITIAL_SETUP_WAIT, TMUX_AGENT_CONTRACT,
-    TMUX_CONFIGURE,
+    guarded_agent_command, runtime_adapter, valid_runtime, TMUX_AGENT_CONTRACT, TMUX_CONFIGURE,
 };
 use crate::sandbox::sbx_guest_output;
 use crate::sbx::fleet_boxes;
@@ -437,8 +436,9 @@ pub fn launch_replacement(replacement: &Replacement) -> Result<(), String> {
         )
     })?;
     let tmux = place.tmux();
+    let setup_wait = crate::fleet::initial_setup_wait();
     let shell = format!(
-        "{INITIAL_SETUP_WAIT}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {}; {tmux} new-session -d -s skein-agent {:?}; {configure}{tmux} set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
+        "{setup_wait}command -v {} >/dev/null 2>&1 || {{ echo 'target runtime is missing' >&2; exit 1; }}; command -v tmux >/dev/null 2>&1 || exit 1; {}; {}; {tmux} new-session -d -s skein-agent {:?}; {configure}{tmux} set-option -t skein-agent @skein-agent-contract {TMUX_AGENT_CONTRACT}",
         runtime.info.executable,
         runtime.interactive_setup,
         runtime.update_before_start,
