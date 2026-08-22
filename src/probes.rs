@@ -1377,6 +1377,10 @@ mod tests {
         );
     }
 
+    /// Linux only: runs Codex's `interactive_setup`, which uses `sed -i` with no argument. That is
+    /// GNU's spelling and it is the right one — the script runs inside the box, never on the host
+    /// — but BSD `sed` reads the FILENAME as the script and fails with `invalid command code`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn codex_status_line_setup_defaults_without_overriding_user_choice() {
         let home = tempdir();
@@ -1429,6 +1433,8 @@ mod tests {
         assert_eq!(fs::read_to_string(config).unwrap(), chosen);
     }
 
+    /// Linux only, for the reason above: it reads the config the same `sed -i` writes.
+    #[cfg(target_os = "linux")]
     #[test]
     fn codex_statusline_uses_default_quota_when_named_pool_arrives_last() {
         let home = tempdir();
@@ -1585,6 +1591,8 @@ mod tests {
         assert_eq!(status("old-style-box")["status"], "waiting");
     }
 
+    /// Linux only: drives `box-token-usage.sh` as a script, in the userland it is installed into.
+    #[cfg(target_os = "linux")]
     #[test]
     fn box_token_usage_sums_new_assistant_entries_and_is_idempotent() {
         // Shells out to the installed script directly (like the mailbox round-trip test) so this

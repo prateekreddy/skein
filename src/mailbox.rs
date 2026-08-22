@@ -442,6 +442,9 @@ mod tests {
     #[allow(unused_imports)]
     use std::{env, fs};
 
+    /// Linux only: it runs the mailbox scripts skein installs INTO a box, against a GNU userland
+    /// they are written for. A box is Linux by construction, so this is where they are true.
+    #[cfg(target_os = "linux")]
     #[test]
     fn mailbox_turn_boundary_delivery_round_trip() {
         // Proves the P0 fix at the shell level: mail delivered at UserPromptSubmit (inbox) and

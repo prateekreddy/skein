@@ -6028,6 +6028,11 @@ b idle 5000000 4 1048576 1048576
     /// That is the trade this shim must never make. A worse error message is a nuisance; a box that
     /// will not start is an outage. So every uncertain step skips, and this proves it skips on the
     /// shape that actually broke it.
+    /// Linux only: it runs a block lifted out of `box-session.sh`, which uses `readlink -f` —
+    /// GNU-only, and correct, because that script only ever runs inside the sandbox. On BSD the
+    /// block fails and produces no binds at all, so the assertion fires on an empty string and
+    /// says nothing about the shim.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_sudo_it_cannot_shim_is_left_alone_rather_than_breaking_the_box() {
         // Ended at the block's last statement rather than at the first bare `fi`: the shim's own
@@ -9709,7 +9714,10 @@ b idle 5000000 4 1048576 1048576
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\nn=$(ls {dir} | wc -l)\ncat > {dir}/$n\n",
+                // `tr -d` on the count, because BSD `wc -l` pads it with leading spaces: `$n`
+                // becomes "       0", the redirect target word-splits, and nothing is written at
+                // all. The test then fails on a missing file rather than on anything it is about.
+                "#!/bin/sh\nn=$(ls {dir} | wc -l | tr -d '[:space:]')\ncat > {dir}/$n\n",
                 dir = kept.display()
             ),
         )
@@ -9974,6 +9982,10 @@ b idle 5000000 4 1048576 1048576
     ///
     /// Deliberately checks that `$boxns` comes out **empty** rather than running the sweep: a test
     /// that ran it to prove the point would be a test that killed the test runner if it were wrong.
+    /// Linux only: it reads this process's own start time out of `/proc/self/stat`, and the
+    /// mechanism under test IS that file — a box's identity is `(generation, pid, starttime)`.
+    /// There is nothing here to port to a Mac; the fleet a box lives in is Linux by construction.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_stop_never_sweeps_the_namespace_it_is_running_in() {
         let me = std::process::id();

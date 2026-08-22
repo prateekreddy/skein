@@ -1357,6 +1357,18 @@ mod tests {
     /// clone inherits and a working tree that is nobody's — and it would read as the safer choice,
     /// because `$mirror/<path>` would then find tracked files and look like it had solved the
     /// gitignored-shared-paths problem it has not touched.
+    /// A path with its symlinks resolved, for comparing against one git wrote down.
+    ///
+    /// git records the canonical path of a local remote. On macOS `$TMPDIR` sits under `/var`, which
+    /// is a symlink to `/private/var`, so a fixture's own `tempdir()` string and the URL git stored
+    /// name the same directory and are not the same string. Comparing the raw strings failed there
+    /// and nowhere else, which is the least useful place for a test to be sharp.
+    fn same_path(p: &str) -> String {
+        std::fs::canonicalize(p)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.to_string())
+    }
+
     #[test]
     fn a_repo_is_mirrored_and_the_mirror_is_what_a_box_clones_from() {
         let _g = env_lock();
@@ -1388,8 +1400,8 @@ mod tests {
         );
         // And its origin is where the code really comes from, so a fetch goes to the right place.
         assert_eq!(
-            remote_origin_url(&mirror.to_string_lossy()).unwrap(),
-            checkout.to_string_lossy(),
+            same_path(&remote_origin_url(&mirror.to_string_lossy()).unwrap()),
+            same_path(&checkout.to_string_lossy()),
             "an adopted repo mirrors the checkout it was adopted from"
         );
 
@@ -1654,8 +1666,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            remote_origin_url(&mirror_path("skein").to_string_lossy()).unwrap(),
-            checkout.to_string_lossy(),
+            same_path(&remote_origin_url(&mirror_path("skein").to_string_lossy()).unwrap()),
+            same_path(&checkout.to_string_lossy()),
             "the mirror must fetch from the checkout it was made from"
         );
         assert_eq!(

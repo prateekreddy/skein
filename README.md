@@ -62,7 +62,16 @@ cargo test --workspace       # units, a black-box run of the real server (tests/
 node tests/ui/voice.mjs      # what the mouth says + when it stays quiet (no browser needed)
 node tests/ui/tabs.mjs       # do your open tabs survive a reload (no browser needed)
 node tests/ui/smoke.mjs      # the cockpit in a browser — run it after touching src/web/index.html
+                             # (`cargo test` runs all eleven browser suites too, and says so when
+                             #  Playwright's chromium is not installed)
 ```
+
+**On macOS, eight tests do not run**, and the suite says which. They drive shell scripts skein
+installs *into a box* — `sed -i` with no argument, `readlink -f`, `sort -z`,
+`tar --ignore-failed-read`, `/proc/<pid>/stat` — and every one of those spellings is the correct one
+where the script actually runs, which is a `bwrap` namespace inside a Linux sandbox. `cargo test`
+lists them by name with the reason, and `tests/platform_gates.rs` fails the build if one gets gated
+without being written down. For the whole suite, run `cargo test` inside a box.
 
 `cargo test` proves the API is right; the browser smoke test proves the *page* is right, which is
 not the same thing. It launches the real binary against a throwaway workspace and clicks through the

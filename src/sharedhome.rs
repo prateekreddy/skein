@@ -174,6 +174,9 @@ mod tests {
     use std::fs;
     use std::process::Command;
 
+    /// Linux only: the inventory and import shells use `sort -z` and `tar --ignore-failed-read`,
+    /// both GNU-only and both deliberate — they run in a box, where that is the userland.
+    #[cfg(target_os = "linux")]
     #[test]
     fn shared_home_import_is_dry_run_first_explicit_and_filtered() {
         use std::os::unix::fs::{symlink, PermissionsExt};

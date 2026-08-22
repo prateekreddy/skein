@@ -2198,6 +2198,8 @@ mod tests {
     /// Worth running the shell rather than reading it. The start time is cut out of
     /// `/proc/<pid>/stat` by the same `sed`/`cut` the stamp uses, and the only way to know the two
     /// agree is to point them both at a process that is really there.
+    /// Linux only: the sweep proves an anchor against `/proc/<pid>`, which is the whole subject.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_sweep_verifies_the_anchor_and_falls_back_only_when_it_cannot() {
         // Exactly as the probe reads it, because agreeing with the probe is the property.
