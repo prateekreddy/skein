@@ -5330,6 +5330,18 @@ function firstRunHtml(foreignN = 0) {
     { done: h.sbx?.ok,
       label: "sbx is installed and answering",
       hint: `it runs the fleet — <a href="https://docs.docker.com/ai/sandboxes/" target="_blank" rel="noreferrer">install it</a>, and make sure Docker is running` },
+    // **The warden, and it gates.** Creating the fleet is what a first Launch does, and that goes
+    // only through the warden with no fallback — so without this step the checklist said "ready",
+    // somebody pressed the button, and got a 500. It is the step that was missing from the run this
+    // page exists to make smooth.
+    //
+    // The hint is the health check's own `fix` rather than a sentence written here, so a fleet whose
+    // warden has been moved to another port is told about ITS port instead of about the default.
+    { done: h.warden?.level === "satisfied",
+      label: h.warden?.level === "satisfied" ? "the warden is answering" : "start the warden",
+      hint: `<code>skein-warden</code> in its own terminal — creating or resizing the fleet asks a \
+             person there, deliberately, and there is no way round it. \
+             ${esc(h.warden?.fix || "")}` },
     { done: (h.logins || []).length > 0,
       label: (h.logins || []).length ? `an agent is signed in (${h.logins.join(", ")})` : "sign an agent in",
       hint: `run <code>skein login claude</code> once — every box inherits it, and without it each one comes up at a sign-in prompt and does nothing` },

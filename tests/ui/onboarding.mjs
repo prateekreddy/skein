@@ -202,6 +202,26 @@ await check("a machine with nothing on it shows the first-run checklist", async 
   if (!body.includes("repositor")) throw new Error(`the checklist never mentions adding a repo: ${body.slice(0, 200)}`);
 });
 
+// **The warden is on the checklist, and it gates.**
+//
+// Creating the fleet is what a first Launch does, and that goes only through the warden with no
+// fallback. Without this step the checklist read "ready", somebody pressed the button, and got a
+// 500 — a first run that says it is ready and then is not is the exact thing this page exists to
+// prevent. This fixture runs a warden, so the step must read as done and the list must offer the
+// launch; the assertion below it is the one that would have caught the gap.
+await check("the checklist counts the warden, and says so when it is up", async () => {
+  const h = await (await fetch(`http://127.0.0.1:${port}/api/health`, { headers: authHeader() })).json();
+  if (h.warden?.level !== "satisfied")
+    throw new Error(`this fixture runs a warden and health disagrees: ${JSON.stringify(h.warden)}`);
+  const body = (await (await mustSee("#fleet .empty", "the first-run checklist")).textContent()).toLowerCase();
+  if (!body.includes("warden"))
+    throw new Error(`the checklist never mentions the warden, so a first run can still reach a 500: ${body.slice(0, 300)}`);
+  // Done, not outstanding — a step that reads unfinished when it is finished sends somebody to start
+  // a second warden, and two on one port is a worse afternoon than none.
+  if (/start the warden/.test(body))
+    throw new Error(`the warden is answering and the checklist still asks for it: ${body.slice(0, 300)}`);
+});
+
 // The checklist's own claim about the fleet. `sbx` here answers, so this step must read as done —
 // it is the one step a new person cannot fix from inside the cockpit, so a false negative sends
 // them installing something they already have.
