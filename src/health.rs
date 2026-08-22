@@ -712,65 +712,6 @@ pub fn health_report() -> HealthReport {
     }
 }
 
-/// Pop the host's native folder/file picker and return the chosen absolute path (`Ok(None)` if the
-/// user cancelled). `kind` is "file" → file picker, anything else → folder picker. skein-server runs
-/// on the host, so this is a *real* OS dialog — which means it only works where that host has a GUI
-/// (local use, not a headless / `tailscale serve` box, where the user types the path instead).
-/// Best-effort across platforms: macOS `osascript`, then Linux `zenity`, then `kdialog`.
-pub fn pick_path(kind: &str) -> Result<Option<String>, String> {
-    let folder = kind != "file";
-    let clean = |p: &str| -> Option<String> {
-        let p = p.trim().trim_end_matches('/');
-        (!p.is_empty()).then(|| p.to_string())
-    };
-    // macOS — AppleScript returns a POSIX path; a cancel exits non-zero with "User canceled".
-    if cfg!(target_os = "macos") {
-        let script = if folder {
-            "POSIX path of (choose folder with prompt \"Pick a folder\")"
-        } else {
-            "POSIX path of (choose file with prompt \"Pick a file\")"
-        };
-        let out = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|e| format!("osascript: {e}"))?;
-        if out.status.success() {
-            return Ok(clean(&String::from_utf8_lossy(&out.stdout)));
-        }
-        let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
-        if err.contains("cancel") {
-            return Ok(None); // user dismissed the dialog
-        }
-        return Err(format!("native picker failed: {}", err.trim()));
-    }
-    // Linux — zenity, then kdialog. Both exit non-zero on cancel with empty stdout.
-    for (bin, args) in linux_picker_argv(folder) {
-        match std::process::Command::new(bin).args(&args).output() {
-            Ok(out) if out.status.success() => {
-                return Ok(clean(&String::from_utf8_lossy(&out.stdout)));
-            }
-            Ok(_) => return Ok(None), // present but cancelled
-            Err(_) => continue,       // not installed → try the next
-        }
-    }
-    Err("no native folder picker found (install zenity or kdialog, or type the path)".into())
-}
-
-pub(crate) fn linux_picker_argv(folder: bool) -> Vec<(&'static str, Vec<&'static str>)> {
-    if folder {
-        vec![
-            ("zenity", vec!["--file-selection", "--directory"]),
-            ("kdialog", vec!["--getexistingdirectory", "."]),
-        ]
-    } else {
-        vec![
-            ("zenity", vec!["--file-selection"]),
-            ("kdialog", vec!["--getopenfilename", "."]),
-        ]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

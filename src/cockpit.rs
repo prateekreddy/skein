@@ -431,15 +431,27 @@ mod tests {
         );
 
         // The path check that replaces Browse, and the three answers it distinguishes.
-        assert!(V2.contains("/api/path?p="));
-        assert!(
-            V2.contains("found.resolved") && V2.contains("found.kind"),
-            "the path check's answer is not read"
-        );
-        assert!(
-            !V2.contains("pick-path"),
-            "Browse came back — it needs a host display the in-fleet skein cannot have (parity §7)"
-        );
+        //
+        // **Both boards now**, which is the whole of SKEIN-106. `/v2` never had Browse; `/` had it
+        // on three fields and it needed the HOST's native dialog — a display skein-in-fleet does not
+        // have, on a filesystem it is not standing on. It was already unusable over Tailscale, where
+        // the advice was "keep typing", so typing became the path and this check is what makes
+        // typing bearable.
+        for (board, page) in [("/", INDEX), ("/v2", V2)] {
+            assert!(
+                page.contains("/api/path?p="),
+                "{board} does not ask what a typed path resolves to"
+            );
+            assert!(
+                page.contains("found.resolved") && page.contains("found.kind"),
+                "{board} does not read the path check's answer"
+            );
+            assert!(
+                !page.contains("pick-path"),
+                "Browse came back on {board} — it needs a host display the in-fleet skein cannot \
+                 have (parity §7)"
+            );
+        }
     }
 
     /// The two live joins: the event names the stream sends, and the frame the PTY parses.

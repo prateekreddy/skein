@@ -51,6 +51,10 @@
     .word { font-size:15px; }
     .counts { font-size:11px; gap:7px; }
     .right { margin-left:0; width:100%; gap:6px; flex-wrap:wrap; }
+  /* The typed path's answer, beside the field rather than under it: it is one word, and a
+     line of its own would make an ordinary state look like a problem. */
+  .pathnote { flex:none; white-space:nowrap; color:var(--dim); font-size:11px; align-self:center; }
+  .pathnote.ok { color:var(--ok, #57d38c); }
     .kbtn { font-size:10px; padding:3px 7px; height:24px; }
     body.docked .row { gap:8px; padding:8px 9px; }
     .sub { gap:7px; font-size:11px; }
@@ -1271,7 +1275,7 @@
       <label class="nb-lbl">git URL or local path</label>
       <div class="path-row">
         <input id="ar-src" placeholder="https://github.com/org/repo.git   ·   ~/code/repo" autocomplete="off" spellcheck="false" />
-        <button type="button" class="kbtn" id="ar-browse" title="Pick a local folder"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button>
+        <span class="pathnote" id="ar-src-note"></span>
       </div>
       <div class="ar-derived" id="ar-derived"></div>
       <label class="nb-lbl">default agent</label>
@@ -1282,7 +1286,7 @@
           <div class="ar-derived">the folder this repo's boxes share: their memory, mailbox and status. skein makes one under <code>~/.skein/repos</code> and you never have to think about it. Point this somewhere else only to adopt a store you already have.</div>
           <div class="path-row">
             <input id="ar-store" placeholder="(skein manages one under ~/.skein/repos)" autocomplete="off" spellcheck="false" />
-            <button type="button" class="kbtn" id="ar-store-browse" title="Pick the shared data folder"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button>
+            <span class="pathnote" id="ar-store-note"></span>
           </div>
         </div>
       </details>
@@ -1383,7 +1387,7 @@
             </details>
 
             <div class="set-head">Host SSH key<span class="sub">not a box credential — the host agent sbx forwards</span></div>
-            <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box. A scoped box has this socket blanked, since a forwarded agent signs for anything the key reaches and would undo the scoping above</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><button type="button" class="kbtn" id="set-sshkey-browse" title="Pick the key file"><svg class="ic" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>Browse</button></div></label>
+            <label class="set-field"><span class="set-title">SSH key path</span><span class="desc">added to your agent so sbx forwards it into boxes — the key itself never enters a box. A scoped box has this socket blanked, since a forwarded agent signs for anything the key reaches and would undo the scoping above</span><div class="path-row"><input id="set-sshkey" placeholder="~/.ssh/id_ed25519" autocomplete="off" spellcheck="false" /><span class="pathnote" id="set-sshkey-note"></span></div></label>
           </section>
           <section class="set-pane" data-pane="fleet">
             <!-- What the numbers below are a share of. They are meaningless without it: 26g is
@@ -6011,23 +6015,38 @@ nbBranch.addEventListener("keydown", e => {
 document.getElementById("ar-go").addEventListener("click", submitAddRepo);
 document.getElementById("ar-src").addEventListener("input", arUpdateDerived);
 nbRepo.addEventListener("change", fillRepoSelect);
-// Native folder/file picker: skein-server pops the host's OS dialog and returns the absolute path
-// (a browser can't read one). Local-GUI only; over Tailscale the dialog can't show, so keep typing.
-function pickPath(kind, input, after) {
-  if (DEMO) { toast("the folder picker needs the server"); return; }
-  fetch("/api/pick-path", { method:"POST", headers:{ "content-type":"application/json" }, body:JSON.stringify({ kind }) })
-    .then(r => r.json()).then(d => {
-      if (d.ok && d.path) { input.value = d.path; input.focus(); if (after) after(); }
-      else if (d.ok && d.cancelled) { /* dismissed — leave the field as-is */ }
-      else toast("picker unavailable: " + ((d.error || "type the path instead").split("\n")[0]));
-    }).catch(() => toast("folder picker unavailable — type the path"));
+// A typed path, and the surface says what it found — the same answer /v2 gives, for the same
+// reason. Browse popped the HOST's native dialog, which needs a display skein-in-fleet does not have
+// and a host filesystem it is not standing on; it was already unusable over Tailscale, where the
+// advice was "keep typing". So typing is the path, and the check is what makes typing bearable:
+// nothing here validates by accepting silently, and a link is reported as a link.
+async function resolvesPath(path, into) {
+  const el = document.getElementById(into);
+  if (!el) return;
+  const said = (text, cls) => { el.textContent = text; el.className = "pathnote" + (cls ? " " + cls : ""); };
+  if (!path.trim()) return said("");
+  if (DEMO) return said("");
+  try {
+    const answer = await fetch(`/api/path?p=${encodeURIComponent(path.trim())}`);
+    const found = await answer.json();
+    if (found.resolved) said(`found: ${found.kind}`, "ok");
+    // Not an error: a URL in the source field and a folder that does not exist yet are both
+    // ordinary, and both worth showing rather than hiding.
+    else said(found.kind === "missing" ? "nothing there yet" : "", "");
+  } catch { said(""); }
 }
-document.getElementById("ar-browse").addEventListener("click",
-  () => pickPath("folder", document.getElementById("ar-src"), arUpdateDerived));
-document.getElementById("ar-store-browse").addEventListener("click",
-  () => pickPath("folder", document.getElementById("ar-store")));
-document.getElementById("set-sshkey-browse").addEventListener("click",
-  () => pickPath("file", document.getElementById("set-sshkey")));
+let pathChecking = {};
+function checkPathLater(inputId, noteId) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  input.addEventListener("input", () => {
+    clearTimeout(pathChecking[inputId]);
+    pathChecking[inputId] = setTimeout(() => resolvesPath(input.value, noteId), 250);
+  });
+}
+checkPathLater("ar-src", "ar-src-note");
+checkPathLater("ar-store", "ar-store-note");
+checkPathLater("set-sshkey", "set-sshkey-note");
 document.getElementById("set-conn-add").addEventListener("click", addConnection);
 arModal().addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); submitAddRepo(); }

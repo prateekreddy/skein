@@ -328,7 +328,7 @@ Three verdicts, and the middle one is the load-bearing one:
 |---|---|---|
 | Adopt-in-place → local-path remotes | not a surface question | about where a repo's bytes come from; neither board changes it |
 | Foreign sandbox display | **holds** | `/v2` reads `/api/queue`, whose rows are boxes, pull requests and setup faults (`queue::Source`). There is no sandbox row and no `foreign:` term in the page |
-| `/api/pick-path` and Browse | **holds** | `/v2` adds a repository and makes a box, and a path is **typed**: `GET /api/path` says what it found — folder, file, link, or nothing there yet — which is law 1 without a host round-trip. A link is reported as a link. `pick-path` is not referenced by the page, and a test asserts that |
+| `/api/pick-path` and Browse | **holds, and gone from `/` too** | `/v2` adds a repository and makes a box, and a path is **typed**: `GET /api/path` says what it found — folder, file, link, or nothing there yet — which is law 1 without a host round-trip. A link is reported as a link. `pick-path` is not referenced by either page now, and one test asserts it of both. SKEIN-106 moved `/`'s three Browse buttons to the same typed path and deleted the route, the handler and `health::pick_path` — it popped the *host's* native dialog, which needs a display the in-fleet skein does not have, and it was already unusable over Tailscale where the advice was "keep typing" |
 | The host ssh-agent path | not a surface question | a credential path, not a screen |
 | Transport reporting | **holds** | nothing in `/v2` reads a transport field; there is no readout to port |
 | Every copy rule has a test | not a surface question | `tests/resize_rules.rs`, unchanged by either board |

@@ -283,7 +283,6 @@ async fn main() {
         .route("/api/boxes/:name/settings", get(api_box_settings))
         .route("/api/boxes/:name/sync", post(api_sync_provision))
         .route("/api/boxes/:name/sync/refresh", post(api_sync_refresh))
-        .route("/api/pick-path", post(api_pick_path))
         // What replaces Browse when there is no host display to open a picker on (parity §7).
         .route("/api/path", get(api_path))
         .route("/api/boxes/:name/diff", get(api_diff))
@@ -2276,25 +2275,6 @@ async fn api_mailbox_send(Json(r): Json<SendReq>) -> Response {
         Ok(()) => (StatusCode::OK, "ok").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
-}
-
-#[derive(Deserialize, Default)]
-struct PickPathReq {
-    kind: String, // "file" → file picker; anything else → folder picker
-}
-
-/// Pop the host's native folder/file dialog (skein-server runs on the host). Returns {ok, path} on a
-/// pick, {ok, cancelled} if dismissed, or {ok:false, error} when no GUI picker is available (headless
-/// / remote — the user types the path instead).
-async fn api_pick_path(Json(r): Json<PickPathReq>) -> Json<serde_json::Value> {
-    let kind = if r.kind == "file" { "file" } else { "folder" }.to_string();
-    let res = tokio::task::spawn_blocking(move || skein::health::pick_path(&kind)).await;
-    Json(match res {
-        Ok(Ok(Some(path))) => serde_json::json!({ "ok": true, "path": path }),
-        Ok(Ok(None)) => serde_json::json!({ "ok": true, "cancelled": true }),
-        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    })
 }
 
 /// Does this typed path resolve, and to what?
