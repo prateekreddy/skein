@@ -172,7 +172,7 @@ fn opened_where_it_was_written(home: &Path) -> Result<(), String> {
     // Resolved on both sides: a marker written by an older skein that recorded the literal path,
     // opened through a symlinked component, describes this very directory and would otherwise read
     // as a volume that had moved.
-    if resolved(&recorded) == resolved(&here.to_string_lossy()) {
+    if crate::util::resolved(&recorded) == crate::util::resolved(&here.to_string_lossy()) {
         return Ok(());
     }
     let stale = repoint(Path::new(&recorded), &here, false).unwrap_or(0);
@@ -212,7 +212,7 @@ pub fn repoint_here() -> Result<String, String> {
             here.display()
         ));
     };
-    if resolved(&recorded) == resolved(&here.to_string_lossy()) {
+    if crate::util::resolved(&recorded) == crate::util::resolved(&here.to_string_lossy()) {
         return Ok(format!(
             "{} is already where it says it was written; nothing to repoint",
             here.display()
@@ -471,46 +471,6 @@ pub const INSTANCE_SCOPED: &[&str] = &["fleet-agent.token", "fleet-agent.port"];
 /// must not write — a volume that turns out to have nothing stale is one it repairs quietly, and a
 /// volume that does is one it refuses. Two walks would be two things to keep in step, and the one
 /// that only counted would be the one nobody exercised.
-/// A path with every symlink in it resolved, as far as the filesystem can answer.
-///
-/// **Why any of this exists.** On macOS `/var` is a symlink to `/private/var`, and `$TMPDIR` lives
-/// under it. So a volume whose marker was written canonically says `/private/var/…` while the store
-/// paths in its own `repos.json` say `/var/…` — the same directory, sharing not one byte of prefix.
-/// Every `starts_with` below then answers "no", and the consequences are the opposite of harmless:
-/// `skein repoint` reports "0 paths repointed" and rewrites nothing, and `opened_where_it_was_written`
-/// finds nothing stale and quietly ADOPTS the copy. The one check standing between somebody and a
-/// copied volume that goes on writing to the original disarms itself.
-///
-/// Not macOS-only, and that is why this is a resolve rather than a special case: a `$SKEIN_HOME`
-/// reached through any symlinked component — a home directory on another disk, a linked `~/work`,
-/// `/tmp` on several systems — is the same shape.
-///
-/// **The deepest ancestor that exists is resolved, and the rest is kept verbatim.** A path under a
-/// volume that has been moved away from no longer exists, and `canonicalize` on it fails outright —
-/// which is exactly when a repoint needs to reason about it.
-fn resolved(path: &str) -> String {
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut at = Path::new(path);
-    loop {
-        if let Ok(real) = at.canonicalize() {
-            let mut out = real;
-            for part in tail.iter().rev() {
-                out.push(part);
-            }
-            return out.to_string_lossy().to_string();
-        }
-        match (at.parent(), at.file_name()) {
-            (Some(parent), Some(name)) => {
-                tail.push(name.to_os_string());
-                at = parent;
-            }
-            // Nothing on this path exists, so there is nothing to resolve it against. The string
-            // itself is the best available answer and is what the old code always used.
-            _ => return path.to_string(),
-        }
-    }
-}
-
 /// Is `value` at or under `base`, and if so, what is below it?
 ///
 /// Compared with [`resolved`] on both sides, so the two ways of spelling one directory match. The
@@ -520,8 +480,8 @@ fn resolved(path: &str) -> String {
 /// `starts_with` on the base plus a separator, never on the base alone: a sibling directory called
 /// `~/.skein-old` shares the prefix and is a different installation.
 fn below(value: &str, base: &str) -> Option<String> {
-    let value = resolved(value);
-    let base = resolved(base);
+    let value = crate::util::resolved(value);
+    let base = crate::util::resolved(base);
     if value == base {
         return Some(String::new());
     }
@@ -762,9 +722,13 @@ mod tests {
 
         // Nothing deleted, and the original says where it went.
         assert!(home.join("config.json").exists(), "the source was emptied");
+        // The PLACE, not the spelling. A move records where the volume now is with its symlinks
+        // resolved, because that is the form every later comparison is made against — and under a
+        // symlinked `$TMPDIR`, which is every macOS run, the raw string and the resolved one are two
+        // names for one directory. Asserting the string made this test sharp about the wrong thing.
         assert_eq!(
-            moved_to().as_deref(),
-            Some(target.to_string_lossy().as_ref())
+            moved_to().map(|at| crate::util::resolved(&at)),
+            Some(crate::util::resolved(&target.to_string_lossy()))
         );
     }
 
@@ -905,7 +869,8 @@ mod tests {
                 .to_string()
         };
         assert!(
-            store("inside").starts_with(target.to_string_lossy().as_ref()),
+            crate::util::resolved(&store("inside"))
+                .starts_with(&crate::util::resolved(&target.to_string_lossy())),
             "a store under the volume still points at the old one: {}",
             store("inside")
         );
@@ -923,8 +888,8 @@ mod tests {
         let moved_marker =
             fs::read_to_string(target.join("repos/inside/store/.claude/skein/mirror")).unwrap();
         assert_eq!(
-            moved_marker.trim(),
-            target.join("repos/inside/mirror").to_string_lossy(),
+            crate::util::resolved(moved_marker.trim()),
+            crate::util::resolved(&target.join("repos/inside/mirror").to_string_lossy()),
             "a box in the new installation would work from a mirror in the old one"
         );
         assert_eq!(
@@ -932,7 +897,9 @@ mod tests {
                 .unwrap()
                 .trim(),
             kept.to_string_lossy(),
-            "a marker pointing outside the volume is somebody's deliberate choice"
+            "a marker pointing outside the volume is somebody's deliberate choice \u{2014} and is \
+             compared verbatim on purpose: it was never rewritten, so it must still read exactly \
+             as it was written"
         );
         assert_eq!(
             fs::read_to_string(outside.join("skein/mirror")).unwrap().trim(),
@@ -1016,7 +983,10 @@ mod tests {
 
         // Still pointed at the old path, which is the mistake everybody makes once.
         let why = ensure_volume().unwrap_err();
-        assert!(why.contains(&target.to_string_lossy().to_string()), "{why}");
+        assert!(
+            why.contains(&crate::util::resolved(&target.to_string_lossy())),
+            "the refusal does not name where the volume went: {why}"
+        );
         assert!(why.contains("export SKEIN_HOME="), "{why}");
 
         // The new one is fine, and saying so is what makes the refusal above a signpost rather
@@ -1107,7 +1077,8 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(copy.join("repos.json")).unwrap()).unwrap();
         let store = after[0]["store"].as_str().unwrap();
         assert!(
-            resolved(store).starts_with(&resolved(&copy.to_string_lossy())),
+            crate::util::resolved(store)
+                .starts_with(&crate::util::resolved(&copy.to_string_lossy())),
             "the copy's store still names the original: {store}"
         );
         ensure_volume().expect("a repointed copy stands on its own");
@@ -1200,11 +1171,25 @@ mod tests {
         );
 
         // The original is untouched — nothing was moved, only copied, and it is still whole.
-        let source = fs::read_to_string(old.join("repos.json")).unwrap();
-        assert!(
-            source.contains(&old.canonicalize().unwrap().display().to_string()),
-            "repointing the copy edited the original: {source}"
-        );
+        //
+        // Asserted as the property rather than as a substring: what matters is that the original's
+        // stores still name the ORIGINAL, whichever way that path is spelled. A `contains` over the
+        // raw JSON was really asking "is it written in the canonical form", which the original has
+        // no reason to be — it was never rewritten, so it holds whatever `skein add` recorded.
+        let source: Vec<serde_json::Value> =
+            serde_json::from_str(&fs::read_to_string(old.join("repos.json")).unwrap()).unwrap();
+        for repo in &source {
+            for key in ["store", "work"] {
+                let Some(path) = repo.get(key).and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                assert!(
+                    crate::util::resolved(path)
+                        .starts_with(&crate::util::resolved(&old.to_string_lossy())),
+                    "repointing the copy edited the original: {key} is {path}"
+                );
+            }
+        }
         std::env::remove_var("SKEIN_HOME");
     }
 

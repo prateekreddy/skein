@@ -413,6 +413,46 @@ pub(crate) fn run_shell(cmd: &str) -> Result<(String, String, i32), String> {
 // these calls fail *fast*. Doubling the interval per consecutive failure lets a struggling daemon
 // drain its backlog instead of being handed a fresh one every second and a half.
 
+/// A path with every symlink in it resolved, as far as the filesystem can answer.
+///
+/// **Why any of this exists.** On macOS `/var` is a symlink to `/private/var`, and `$TMPDIR` lives
+/// under it. So a volume whose marker was written canonically says `/private/var/…` while the store
+/// paths in its own `repos.json` say `/var/…` — the same directory, sharing not one byte of prefix.
+/// Every `starts_with` below then answers "no", and the consequences are the opposite of harmless:
+/// `skein repoint` reports "0 paths repointed" and rewrites nothing, and `opened_where_it_was_written`
+/// finds nothing stale and quietly ADOPTS the copy. The one check standing between somebody and a
+/// copied volume that goes on writing to the original disarms itself.
+///
+/// Not macOS-only, and that is why this is a resolve rather than a special case: a `$SKEIN_HOME`
+/// reached through any symlinked component — a home directory on another disk, a linked `~/work`,
+/// `/tmp` on several systems — is the same shape.
+///
+/// **The deepest ancestor that exists is resolved, and the rest is kept verbatim.** A path under a
+/// volume that has been moved away from no longer exists, and `canonicalize` on it fails outright —
+/// which is exactly when a repoint needs to reason about it.
+pub(crate) fn resolved(path: &str) -> String {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut at = Path::new(path);
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out.to_string_lossy().to_string();
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                at = parent;
+            }
+            // Nothing on this path exists, so there is nothing to resolve it against. The string
+            // itself is the best available answer and is what the old code always used.
+            _ => return path.to_string(),
+        }
+    }
+}
+
 /// A remembered answer to a question only a subprocess can answer: fresh for a while, asked by one
 /// caller at a time, and asked progressively less often while the answers keep failing.
 pub struct Gate<T> {

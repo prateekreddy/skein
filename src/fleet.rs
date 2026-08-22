@@ -6118,7 +6118,8 @@ b idle 5000000 4 1048576 1048576
             std::os::unix::fs::symlink(bin.join("sudo.ws"), bin.join("sudo")).unwrap();
         });
         assert!(
-            present.contains("--ro-bind") && present.contains(&real.to_string_lossy().to_string()),
+            present.contains("--ro-bind")
+                && present.contains(&crate::util::resolved(&real.to_string_lossy())),
             "the shim did not reach a sudo that is genuinely there:\n{present}"
         );
         assert!(

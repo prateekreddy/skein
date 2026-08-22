@@ -122,6 +122,23 @@ impl AsRef<std::ffi::OsStr> for TempDir {
     }
 }
 
+/// # Reproducing macOS on Linux, in one command
+///
+/// This honours `$TMPDIR`, which is the whole of what is needed to reproduce the most expensive
+/// class of bug this suite has had. On macOS `$TMPDIR` lives under `/var`, which is a **symlink** to
+/// `/private/var` — so anything skein canonicalises and anything a fixture holds as a string are two
+/// names for one directory, and every `starts_with` between them answers "no". That silently
+/// disarmed `skein repoint` and the copied-volume guard (SKEIN-118), and nobody saw it because the
+/// suite had only ever been run on Linux.
+///
+/// ```sh
+/// mkdir -p /tmp/realtmp && ln -sfn /tmp/realtmp /tmp/linktmp
+/// TMPDIR=/tmp/linktmp cargo test --lib
+/// ```
+///
+/// **`--lib`, not `--workspace`**: `tests/isolation_bwrap.rs` cannot build a namespace through a
+/// symlinked temp root, which is an artefact of this trick rather than anything macOS does — a Mac
+/// runs no `bwrap` at all. What this reproduces is path comparison, and it reproduces it exactly.
 pub(crate) fn tempdir() -> TempDir {
     sweep_stale_runs();
     let d = env::temp_dir().join(format!(
