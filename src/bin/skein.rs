@@ -677,12 +677,24 @@ fn cmd_doctor() -> Result<(), String> {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        if loaded {
-            println!(
-                "{OK} ssh agent     keys loaded {DIM}(forwarded into boxes for SSH push){RESET}"
-            );
-        } else {
-            println!("{WARN} ssh agent     no keys loaded {DIM}(SSH git push from boxes will fail — set an ssh key in settings){RESET}");
+        // Whose agent this is, which is not the same in the two deployments even though the
+        // command is. On a host it is the user's own, and sbx forwards it into the sandbox at
+        // create. In-fleet it is *already* the forwarded one — the forward is a property of the
+        // sandbox rather than of skein — so `ssh-add -l` here lists the host's keys, and the fix
+        // for an empty list is on the host, where the key file is. Saying "set an ssh key in
+        // settings" there would point at a field skein-in-fleet cannot act on (`ensure_ssh_key`).
+        let whose = match skein::deployment::in_fleet() {
+            true => "the host's, forwarded into this sandbox",
+            false => "yours, forwarded into boxes for SSH push",
+        };
+        match (loaded, skein::deployment::in_fleet()) {
+            (true, _) => println!("{OK} ssh agent     keys loaded {DIM}({whose}){RESET}"),
+            (false, true) => println!(
+                "{WARN} ssh agent     no keys loaded {DIM}(SSH git push from boxes will fail — run \
+                 `ssh-add <key>` on the host; the key file is there and skein cannot read it from \
+                 in here){RESET}"
+            ),
+            (false, false) => println!("{WARN} ssh agent     no keys loaded {DIM}(SSH git push from boxes will fail — set an ssh key in settings){RESET}"),
         }
     }
 

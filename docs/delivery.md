@@ -221,6 +221,18 @@ symmetric. A fleet process that thinks it is on the host runs `sbx`, fails, and 
 process that thinks it is in the fleet stops reaching a fleet only it can reach, and the symptom is a
 fleet that appears to have no boxes.
 
+**Three of §2's six rows are now answered, and one of them was not a row at all.** The file picker
+went from both boards rather than being made deployment-dependent (SKEIN-106) — the answer had
+already shipped at `/v2`, and a button that is there and does nothing is how somebody concludes skein
+is broken. The credential turned out to be two-thirds already built (SKEIN-107): a GitHub App and
+per-repo tokens are skein's own and flow down only, and only the account token is the host's — so the
+work was stopping skein *claiming* one it cannot have, since that label is what the checklist reads
+as "boxes can push". And **the forwarded ssh-agent is not invalidated by the move** (SKEIN-108): the
+forward is `sbx create`'s, from the host into the sandbox, so it is in the same place whether skein
+is beside it or outside it. What does not travel is the key *file*, which is a host path — so
+`ensure_ssh_key` refuses with where to run `ssh-add` rather than failing on a missing file, which
+reads as a mistyped path.
+
 **Every host-only call is answered** (SKEIN-104), and they did not all want the same answer. Two
 stop existing: in-fleet the agent's port is not published at all — it is on loopback at the port it
 listens on, and publishing would forward a port to the machine skein stands on — and `skein login`

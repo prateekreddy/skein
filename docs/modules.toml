@@ -218,7 +218,10 @@ depends_on = []
 depends_on = ["diff", "fleet", "gitgate", "place", "registry", "repos", "runtime", "sbx", "signals", "tracking", "util"]
 
 [current.config]
-depends_on = ["runtime", "util"]
+# `deployment` for one question: whether skein can load the configured SSH key into an agent. The
+# agent is reachable in-fleet — sbx forwards the host's into the sandbox — but the key file is a
+# path on the host. One edge, to a module that depends on nothing.
+depends_on = ["deployment", "runtime", "util"]
 
 [current.diff]
 # `source` for one word: the diff is computed inside the box, and the answer says so by naming the

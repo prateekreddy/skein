@@ -1528,6 +1528,19 @@ no-limit-computed* means the box is contained but unbounded — skein's own memo
 nothing for it, and a restart puts it under the current one. *uncapped no-cgroup-delegation* and
 *could-not-join-cgroup* are the sandbox's answer, and no setting here changes them.
 
+**The forwarded ssh-agent does not change when skein moves in, and that is the answer rather than a
+gap.** §2 listed it as one of six things the move invalidates. It is not one: the forward is `sbx
+create`'s doing, from the host into the **sandbox**, so `$SSH_AUTH_SOCK` inside is the host's agent
+whether skein is beside it or outside it. The launcher's cover above is unaffected, and so is what
+`SKEIN_GIT_SCOPE=fleet` re-exposes (§9.6) — both act on the socket, which is in the same place.
+
+What does not travel is the key *file*. `~/.ssh/id_ed25519` names a path on the host, and the sandbox
+has its own `~`, so `ensure_ssh_key` cannot load it from inside — it refuses with where to run
+`ssh-add`, rather than failing on the file, which reads as a mistyped path and sends somebody to fix
+a setting instead of running one command where their key already is. Nothing is lost: skein never
+handles the key on a host either, only the agent socket is forwarded, and a host `ssh-add` reaches an
+in-fleet deployment exactly as it reaches a host-driven one.
+
 Corrected from an earlier draft: the cgroup control plane is **not** box-writable. Every cgroup write
 in the launcher goes through `sudo` before `bwrap`, and the source is explicit that a write from
 inside a box "is not an option at all" — the userns maps only uid 1000 and cgroupfs is root-owned.

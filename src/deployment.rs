@@ -170,6 +170,13 @@ mod tests {
     /// which somebody decides the deployment may decide this too.
     const CONSULTED_BY: &[(&str, &str)] = &[
         (
+            "config",
+            "loading the SSH key into an agent. The agent is reachable in-fleet \u{2014} sbx \
+             forwards the host's into the sandbox, and that forward belongs to the sandbox rather \
+             than to skein \u{2014} but the key *file* is a path on the host. Refuses with where to \
+             run it, because failing on the file instead reads as a mistyped path.",
+        ),
+        (
             "gitgate",
             "whether a box holds the account token. Both halves of the seeding are the host's, so \
              in-fleet it is not there unless it was seeded before the move \u{2014} and the \

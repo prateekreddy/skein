@@ -278,6 +278,22 @@ pub fn ensure_ssh_key() -> Result<(), String> {
     if key.is_empty() {
         return Ok(());
     }
+    // In-fleet skein cannot do this, and the reason is worth being exact about because half of it
+    // still works. The **agent** is reachable: `sbx` forwards the host's into the sandbox, so
+    // `$SSH_AUTH_SOCK` there is the host's agent and `ssh-add -l` lists the host's keys. The **key
+    // file** is not — `~/.ssh/id_ed25519` is a path on the host, and the sandbox has its own `~`.
+    //
+    // So this would fail on the file, which is the right outcome by accident and the wrong message
+    // for it: "ssh key not found" reads as a mistyped path. The person's move is to run `ssh-add`
+    // on the host, where both the key and their agent are, and the forward carries it in from
+    // there — exactly as it does for a host-driven skein, which also never handles the key itself.
+    if crate::deployment::in_fleet() {
+        return Err(format!(
+            "{key} is a path on the host, and skein is running inside the fleet — it cannot read \
+             the key. Run `ssh-add {key}` on the host instead: sbx forwards that agent into the \
+             sandbox, and the key itself never enters it either way"
+        ));
+    }
     let expanded = expand_tilde(key);
     if !Path::new(&expanded).exists() {
         return Err(format!("ssh key not found: {expanded}"));
@@ -626,6 +642,46 @@ mod tests {
         assert!(!load_config().fleet_agent);
         assert!(config_error().is_none());
 
+        env::remove_var("SKEIN_HOME");
+    }
+
+    /// The key is on the host and the agent is the host's; only one of them is reachable in-fleet.
+    ///
+    /// `sbx` forwards the host's ssh-agent into the sandbox, so `$SSH_AUTH_SOCK` there IS the host's
+    /// agent — the forward belongs to the sandbox rather than to skein, and does not change with
+    /// where skein runs. What does not travel is the key *file*: `~/.ssh/id_ed25519` names a path on
+    /// the host, and the sandbox has its own `~`.
+    ///
+    /// So `ssh-add` from inside would fail on the file, which is the right outcome reached by the
+    /// wrong route — "ssh key not found" reads as a mistyped path, and sends somebody to fix a
+    /// setting rather than to run one command where their key already is.
+    #[test]
+    fn a_key_on_the_host_is_not_loaded_from_inside_the_fleet() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        env::set_var("SKEIN_SSH_KEY", "~/.ssh/id_ed25519");
+
+        env::set_var(crate::deployment::IN_FLEET, "1");
+        let why = ensure_ssh_key().expect_err("skein read a host key path from inside the sandbox");
+        assert!(
+            why.contains("on the host") && why.contains("ssh-add"),
+            "the refusal does not say where to run it: {why}"
+        );
+        assert!(
+            !why.contains("not found"),
+            "it still reads as a mistyped path, which is the wrong thing to go and check: {why}"
+        );
+
+        // No key configured is a no-op in both, and stays one: the agent's existing keys are
+        // forwarded as-is, and there is nothing for skein to do about them either way.
+        env::remove_var("SKEIN_SSH_KEY");
+        let mut cfg = load_config();
+        cfg.ssh_key = String::new();
+        save_config(&cfg).unwrap();
+        assert!(ensure_ssh_key().is_ok());
+
+        env::remove_var(crate::deployment::IN_FLEET);
         env::remove_var("SKEIN_HOME");
     }
 }
