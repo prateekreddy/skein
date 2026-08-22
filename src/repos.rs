@@ -352,6 +352,35 @@ pub fn ensure_mirror(repo: &Repo) -> Result<PathBuf, String> {
     if mirror_is_made(&mirror) {
         return Ok(mirror);
     }
+    // **One clone between all callers, or neither of them gets one.**
+    //
+    // Two readers that both find no mirror both ran `git clone --mirror` into the same directory,
+    // and git refuses the second — `fatal: cannot copy .../templates/description: File exists` —
+    // so BOTH failed and the repo was left with no mirror at all. That is not a transient: every
+    // caller reads `None` as "this repo has nothing to say" rather than "I could not look", so the
+    // PR brief silently stopped attributing ownership and the notes pane offered no modules. And
+    // `review::summarise` caches its answer against the head sha, so one race froze a wrong summary
+    // for the life of that commit. Found by `tests/ui/review.mjs`, which read as flaky because a
+    // later call, alone, made the mirror and the checks after it passed.
+    //
+    // The half-made-mirror repair below made it sharper rather than safer: on a second attempt one
+    // caller `remove_dir_all`s the directory another is mid-clone into.
+    //
+    // The lock file sits BESIDE the mirror, not in it, because the repair deletes the directory.
+    let guard = mirror
+        .parent()
+        .ok_or_else(|| format!("{} has no parent to lock", mirror.display()))?
+        .join(".mirror.lock");
+    crate::util::with_lock(&guard, || clone_mirror(repo, &mirror))
+}
+
+/// The clone itself, with the lock in [`ensure_mirror`] already held.
+fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
+    // Asked again under the lock. The caller that held it may have been making exactly this mirror,
+    // and cloning over a finished one is the collision this function exists to stop.
+    if mirror_is_made(mirror) {
+        return Ok(mirror.to_path_buf());
+    }
     // The checkout when there is one — already fetched, so this is a local copy rather than a
     // second trip over the network — and the URL when there is not.
     let from = match repo.source_tree.trim() {
@@ -365,14 +394,14 @@ pub fn ensure_mirror(repo: &Repo) -> Result<PathBuf, String> {
     // so it would fail here for ever. Nothing in it is anybody's only copy — it is objects that
     // exist in the checkout it was made from.
     if mirror.exists() {
-        fs::remove_dir_all(&mirror).map_err(|e| format!("clearing a half-made mirror: {e}"))?;
+        fs::remove_dir_all(mirror).map_err(|e| format!("clearing a half-made mirror: {e}"))?;
     }
     fs::create_dir_all(mirror.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
     let mut command = Command::new("git");
-    command.args(["clone", "--mirror", from]).arg(&mirror);
+    command.args(["clone", "--mirror", from]).arg(mirror);
     let out = bounded_output(&mut command, "git clone --mirror", Duration::from_secs(300))?;
     if !out.status.success() {
-        let _ = fs::remove_dir_all(&mirror);
+        let _ = fs::remove_dir_all(mirror);
         return Err(format!(
             "mirroring {from}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -386,10 +415,10 @@ pub fn ensure_mirror(repo: &Repo) -> Result<PathBuf, String> {
     };
     let mut set = Command::new("git");
     set.arg("-C")
-        .arg(&mirror)
+        .arg(mirror)
         .args(["remote", "set-url", "origin", &origin]);
     let _ = bounded_output(&mut set, "git remote set-url", Duration::from_secs(10));
-    Ok(mirror)
+    Ok(mirror.to_path_buf())
 }
 
 /// Fetch the mirror from its origin, pruning refs the origin no longer has.
@@ -1379,6 +1408,74 @@ mod tests {
             !dst.join("secret.env").exists(),
             "a gitignored file cannot come out of a mirror, which is why the surfacing block reads \
              the repo's source tree instead"
+        );
+
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Two readers of a repo with no mirror yet get one mirror between them, not neither.
+    ///
+    /// Both used to run `git clone --mirror` into the same directory and git refused the second —
+    /// `fatal: cannot copy .../templates/description: File exists` — so **both** failed and the repo
+    /// was left with nothing. That is not a transient, because of what the callers do with `None`:
+    /// `review::ownership` returns `(vec![], 0)`, which its own doc says is deliberately
+    /// indistinguishable from "this repo has no CODEOWNERS", and `moduledocs::modules` returns an
+    /// empty list. So a PR brief quietly stopped saying which half of a change was yours. And
+    /// `review::summarise` caches against the head sha, so one race froze that answer for the life
+    /// of the commit.
+    ///
+    /// **What this test can and cannot see.** It asserts the outcome — every caller gets a usable
+    /// mirror — because "both failed" IS the bug, and against the unlocked code it fails reliably at
+    /// this width. It cannot prove only one clone RAN; a version that happened to serialise would
+    /// pass. Counting the clones would mean putting a wrapper `git` on `$PATH`, which is
+    /// process-global and would break every sibling test that shells out — the same trap
+    /// `a_missing_tool_is_one_fault_and_not_five` records. The re-check under the lock is what makes
+    /// the count one, and it is one line above this comment's subject.
+    #[test]
+    fn two_readers_of_a_new_repo_make_one_mirror_between_them() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let checkout = tempdir();
+        origin_repo(&checkout);
+        // Registered WITHOUT going through `add_repo`, which would make the mirror as a side effect
+        // and leave nothing for the racing readers to do.
+        let repo = Repo {
+            id: "proj".into(),
+            source: checkout.to_string_lossy().to_string(),
+            source_tree: checkout.to_string_lossy().to_string(),
+            store: home.join("store").to_string_lossy().to_string(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        };
+        assert!(
+            !mirror_is_made(&mirror_path("proj")),
+            "the fixture already has a mirror, so this races nothing"
+        );
+
+        let outcomes: Vec<Result<PathBuf, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8).map(|_| s.spawn(|| ensure_mirror(&repo))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        let failed: Vec<&String> = outcomes.iter().filter_map(|r| r.as_ref().err()).collect();
+        assert!(
+            failed.is_empty(),
+            "{} of 8 concurrent readers were left with no mirror: {failed:?}",
+            failed.len()
+        );
+        // And what they were handed is a mirror rather than a directory that exists.
+        let mirror = mirror_path("proj");
+        assert!(mirror_is_made(&mirror), "no mirror at {}", mirror.display());
+        assert!(
+            Tree::open(&repo).is_some_and(|t| t.read("tracked.txt").is_some()),
+            "the mirror every caller got cannot answer for the tree"
         );
 
         std::env::remove_var("SKEIN_NO_GH_SECRET");
