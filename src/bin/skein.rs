@@ -509,6 +509,34 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    // Which boxes nothing bounds. Beside the fleet cgroups above and not folded into them, because
+    // they answer different questions: those say what the sandbox as a whole is held to, this says
+    // whether a given box is inside it. A box that never joined a cgroup is outside every number
+    // printed above, and it is the box whose runaway build ends the sandbox.
+    //
+    // Free: the answer is in each box's placement record, which the board already reads. There is
+    // nothing on the host to read instead — `limits.state` lives in the box's own root, inside the
+    // sandbox — which is why nothing reported this until the launcher started saying it out loud.
+    {
+        let uncapped = skein::health::uncapped_boxes();
+        if uncapped.is_empty() {
+            println!("{OK} box ceilings  {DIM}every running box is inside the fleet's{RESET}");
+        } else {
+            println!(
+                "{BAD} box ceilings  {} running outside the fleet's ceiling: {}",
+                match uncapped.len() {
+                    1 => "one box is".to_string(),
+                    n => format!("{n} boxes are"),
+                },
+                uncapped.join(", ")
+            );
+            println!(
+                "{DIM}              → a runaway build in one of these reaches the whole sandbox; \
+                 `skein restart <box>` puts it under the current plan{RESET}"
+            );
+        }
+    }
+
     // Which boxes are running under an older isolation. Its own line because there is no other way
     // to learn it: `box-session.sh` in the sandbox is refreshed at every start, so the copy on disk
     // describes the NEXT box and says nothing about the ones already up — and a box keeps the mount

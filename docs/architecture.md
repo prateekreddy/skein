@@ -1510,6 +1510,24 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    which is the same discipline as the rest of this section, an exposure stated where closing it is
    not on offer.
 
+**A box's ceiling is reported, because nothing on the host could read it.** The launcher records
+what it managed to apply in `limits.state` under the box's own root — which is *inside the sandbox* —
+so "an uncapped box says so" was true only of a file no surface could open, and a box with no
+ceiling looked exactly like a box with one from the board, `skein doctor` and the API alike. It now
+travels the way the anchor and the launcher revision do: on the launcher's stdout, into the placement
+record, where a board tick reads it for nothing.
+
+And the cgroup is made **whether or not there is a ceiling to write into it**. It does two jobs and
+only one of them is optional: it is also the box's identity as a set of processes, which is what
+`cgroup.kill` needs at stop and what the fleet's accounting rests on. Gating the whole block on
+"skein computed a limit" gave a box with none *neither* — so the box that most needed containing was
+the one that had nothing containing it, and `2>/dev/null || true` on the kill kept that quiet.
+
+Three states, and they are not one problem. *capped* is the intended one. *uncapped
+no-limit-computed* means the box is contained but unbounded — skein's own memory plan produced
+nothing for it, and a restart puts it under the current one. *uncapped no-cgroup-delegation* and
+*could-not-join-cgroup* are the sandbox's answer, and no setting here changes them.
+
 Corrected from an earlier draft: the cgroup control plane is **not** box-writable. Every cgroup write
 in the launcher goes through `sudo` before `bwrap`, and the source is explicit that a write from
 inside a box "is not an option at all" — the userns maps only uid 1000 and cgroupfs is root-owned.

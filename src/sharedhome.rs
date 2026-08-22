@@ -263,6 +263,7 @@ SANDBOX_VM_ID=demo-old-claude bash -c "$shell"
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();

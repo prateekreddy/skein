@@ -270,6 +270,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             generation: generation.clone(),
             ns_start,
             launcher: String::new(),
+            ceiling: String::new(),
         },
     )
     .unwrap();
@@ -288,6 +289,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             generation,
             ns_start: ns_start + 1,
             launcher: String::new(),
+            ceiling: String::new(),
         },
     )
     .unwrap();
@@ -314,6 +316,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
                 .to_string(),
             ns_start,
             launcher: String::new(),
+            ceiling: String::new(),
         },
     )
     .unwrap();
@@ -753,6 +756,21 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
         placed.launcher,
         skein::fleet::launcher_revision(),
         "the box that this launcher just started does not know which launcher started it"
+    );
+
+    // And what bounds it. The value depends on the machine — a scratch fleet with no cgroup
+    // delegation reports `uncapped no-cgroup-delegation` and that is the honest answer — so what is
+    // asserted is that the box **said something**, which is the whole of the defect. Nothing on the
+    // host can read `limits.state`; it is written inside the sandbox, so a box that reported nothing
+    // is a box whose ceiling is unknowable, and it used to look exactly like a bounded one.
+    assert!(
+        !placed.ceiling.is_empty(),
+        "the box did not say what bounds its memory, so an uncapped one is invisible again"
+    );
+    assert!(
+        skein::fleet::is_capped(&placed.ceiling) || placed.ceiling.starts_with("uncapped "),
+        "the ceiling state is neither capped nor a named reason: {:?}",
+        placed.ceiling
     );
 
     // The launch spec is how the box, and skein, learn which branch this box is for. Asserting on

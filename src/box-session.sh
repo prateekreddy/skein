@@ -977,49 +977,68 @@ rm -f "$sock"
 # container saturating every core makes dockerd miss its own deadlines, which reads as a crash with
 # nothing having died. So `skein/containers` weighs half a box (see `apply_fleet_ceilings`), which
 # costs nothing while the machine is quiet and decides who yields when it is not.
-if [ -n "$limits" ]; then
-  cgroup_root="/sys/fs/cgroup/skein"
-  cg="$cgroup_root/$box"
-  # A controller is only available in a child if the PARENT delegates it, so the order is: make the
-  # parent, delegate, then make the leaf. Processes live only in the leaf — cgroup v2 forbids a
-  # cgroup having both children and processes.
-  if sudo mkdir -p "$cgroup_root" 2>/dev/null \
-    && sudo sh -c 'echo "+memory +pids" > '"$cgroup_root"'/cgroup.subtree_control' 2>/dev/null \
-    && sudo mkdir -p "$cg" 2>/dev/null; then
-    # In a subshell, so that no way this can fail becomes a box that will not start. The guard above
-    # closes the one that bit; this closes the shape. `set -u` aborts the shell it runs in, and the
-    # spec here comes from a *newer* skein than the launcher reading it, so the next token nobody
-    # anticipated would do again exactly what `max` did. A subshell makes the blast radius the
-    # ceilings rather than the session. Nothing downstream reads what it sets.
-    ( apply_fleet_ceilings ) || echo "skein: the shared ceilings could not be applied for $box; it starts under whatever is already on those cgroups" >&2
-    for kv in $(printf '%s' "$limits" | tr ',' ' '); do
-      case "$kv" in
-        max=*)  sudo sh -c 'echo "$1" > "$2"' _ "${kv#max=}"  "$cg/memory.max"  2>/dev/null || true ;;
-        high=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#high=}" "$cg/memory.high" 2>/dev/null || true ;;
-        pids=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#pids=}" "$cg/pids.max"    2>/dev/null || true ;;
-        *) echo "skein: ignoring unknown limit $kv for $box" >&2 ;;
-      esac
-    done
-    if sudo sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null; then
-      # Recorded, not just logged. skein reads a command's stdout and drops its stderr on success,
-      # so a warning here would vanish exactly when nothing looked wrong — and "this box has no
-      # ceiling" is a fact worth still being true tomorrow, not a line in one launch's output.
-      printf 'capped %s\n' "$limits" > "$root/limits.state"
+#
+# **Made whether or not there is a ceiling to write into it.** The cgroup does two jobs and only one
+# of them is the ceiling: it is also the box's identity as a *set of processes*, which is what
+# `cgroup.kill` needs at stop and what the fleet's accounting is built on. Gating the whole block on
+# `$limits` gave a box with no computed limit neither — so the box that most needed containing was
+# the one with none, and `2>/dev/null || true` on the kill made that silent.
+cgroup_root="/sys/fs/cgroup/skein"
+cg="$cgroup_root/$box"
+limits_state="uncapped no-cgroup-delegation"
+# A controller is only available in a child if the PARENT delegates it, so the order is: make the
+# parent, delegate, then make the leaf. Processes live only in the leaf — cgroup v2 forbids a
+# cgroup having both children and processes.
+if sudo mkdir -p "$cgroup_root" 2>/dev/null \
+  && sudo sh -c 'echo "+memory +pids" > '"$cgroup_root"'/cgroup.subtree_control' 2>/dev/null \
+  && sudo mkdir -p "$cg" 2>/dev/null; then
+  # In a subshell, so that no way this can fail becomes a box that will not start. The guard above
+  # closes the one that bit; this closes the shape. `set -u` aborts the shell it runs in, and the
+  # spec here comes from a *newer* skein than the launcher reading it, so the next token nobody
+  # anticipated would do again exactly what `max` did. A subshell makes the blast radius the
+  # ceilings rather than the session. Nothing downstream reads what it sets.
+  #
+  # Applied whether or not THIS box got a ceiling of its own: these are the fleet's — the boxes'
+  # shared parent, docker, and the containers' — and they are the ones that keep the sandbox
+  # answering. Making them conditional on one box's per-box limit was never the intent, only where
+  # the code happened to sit.
+  ( apply_fleet_ceilings ) || echo "skein: the shared ceilings could not be applied for $box; it starts under whatever is already on those cgroups" >&2
+  for kv in $(printf '%s' "$limits" | tr ',' ' '); do
+    case "$kv" in
+      max=*)  sudo sh -c 'echo "$1" > "$2"' _ "${kv#max=}"  "$cg/memory.max"  2>/dev/null || true ;;
+      high=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#high=}" "$cg/memory.high" 2>/dev/null || true ;;
+      pids=*) sudo sh -c 'echo "$1" > "$2"' _ "${kv#pids=}" "$cg/pids.max"    2>/dev/null || true ;;
+      *) echo "skein: ignoring unknown limit $kv for $box" >&2 ;;
+    esac
+  done
+  if sudo sh -c 'echo $1 > "$2"' _ "$$" "$cg/cgroup.procs" 2>/dev/null; then
+    # Two different states, and the difference is what somebody can do about it. In the cgroup
+    # WITH a ceiling is the intended one. In the cgroup with NO ceiling means the box is contained
+    # — a stop reaches it, the fleet accounts for it — and nothing bounds what it can take, which
+    # is a skein-side question about the memory plan. Not in a cgroup at all is the sandbox's
+    # answer and needs a different fleet.
+    if [ -n "$limits" ]; then
+      limits_state="capped $limits"
     else
-      printf 'uncapped could-not-join-cgroup\n' > "$root/limits.state"
-      echo "skein: $box could not join its cgroup; it runs without a memory ceiling" >&2
+      limits_state="uncapped no-limit-computed"
+      echo "skein: no memory ceiling computed for $box; it runs uncapped" >&2
     fi
   else
-    printf 'uncapped no-cgroup-delegation\n' > "$root/limits.state"
-    # Not fatal: an uncapped box still works, and refusing to start one because the image lacks
-    # cgroup delegation would be a worse trade. Loud, though — this is the guard that keeps one
-    # box's runaway build from killing every other box in the sandbox.
-    echo "skein: no cgroup delegation in this sandbox; $box runs WITHOUT a memory ceiling, so a runaway build in it can take the whole fleet down" >&2
+    limits_state="uncapped could-not-join-cgroup"
+    echo "skein: $box could not join its cgroup; it runs without a memory ceiling" >&2
   fi
 else
-  printf 'uncapped no-limit-computed\n' > "$root/limits.state"
-  echo "skein: no memory ceiling computed for $box; it runs uncapped" >&2
+  # Not fatal: an uncapped box still works, and refusing to start one because the image lacks
+  # cgroup delegation would be a worse trade. Loud, though — this is the guard that keeps one
+  # box's runaway build from killing every other box in the sandbox.
+  echo "skein: no cgroup delegation in this sandbox; $box runs WITHOUT a memory ceiling, so a runaway build in it can take the whole fleet down" >&2
 fi
+# Recorded in the box, and reported to skein. The file is the box's own copy and nothing on the host
+# can read it — `$root` is inside the sandbox — which is why "nothing read it" was true for as long
+# as it existed. The report goes out the way the anchor and the launcher revision do: over the
+# channel skein already opened, into the placement record, where the board reads it for free.
+printf '%s\n' "$limits_state" > "$root/limits.state"
+printf "SKEIN_LIMITS %s\n" "$limits_state"
 
 # A login the user made must beat the placeholder key the sandbox ships with.
 #

@@ -234,6 +234,7 @@
   /* Not clickable, unlike .hookwarn: restarting a box throws away whatever its agent was
      part-way through, so this says what a restart would buy and leaves the decision alone. */
   .covwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
+  .capwarn { flex:none; white-space:nowrap; color:var(--attn); font-size:11px; font-weight:600; }
   /* disk chip: only speaks when a box is near or over its share of the fleet's one disk. Silent
      below the threshold, because a badge that is always there is a badge nobody reads. */
   .dchip { flex:none; white-space:nowrap; font-family:var(--mono); font-size:10.5px; font-weight:600;
@@ -1628,7 +1629,7 @@ function ensureSection(id, repoId) {
 function makeRow(name) {
   const el = document.createElement("div"); el.dataset.name = name;
   el.innerHTML = `<span class="dot"></span><div class="main"><div class="name"></div>
-    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="scopetag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span><span class="covwarn"></span></div>
+    <div class="sub"><span class="repotag"></span><span class="vmtag"></span><span class="scopetag"></span><span class="dchip"></span><span class="branch"></span><span class="dstat"></span><span class="dir"></span><span class="hookwarn"></span><span class="covwarn"></span><span class="capwarn"></span></div>
     <div class="headline"><span class="pchip"></span><span class="htext"></span></div>
     <div class="taskline"><span class="ttext"></span></div></div>
     <span class="pill"></span><span class="age"></span><span class="chev">›</span>`;
@@ -1744,6 +1745,18 @@ function updateRow(el, b, showRepo) {
     ? "this box started before the isolation skein installs now, and keeps the namespace it was "
       + "born with until it is restarted — `skein restart " + b.name + "` rebuilds it with the "
       + "current covers, leaving the checkout and branch alone"
+    : "";
+  // What bounds this box's memory, which was invisible until the launcher started reporting it:
+  // the ceiling lives in a cgroup inside the sandbox and the record of it in a file the host cannot
+  // read. An uncapped box looks exactly like a capped one, and it is the one whose runaway build
+  // takes the sandbox with it.
+  const pw = el.querySelector(".capwarn");
+  const uncapped = b.ceiling && !b.ceiling.startsWith("capped");
+  pw.textContent = uncapped ? "⚠ no ceiling" : "";
+  pw.style.display = uncapped ? "" : "none";
+  pw.title = uncapped
+    ? "nothing bounds this box's memory (" + b.ceiling + "), so a runaway build in it reaches the "
+      + "whole sandbox rather than being killed inside the box"
     : "";
   // inbox headline + pause chip: the ask when a box needs you. When nothing's owed, the headline
   // falls back to the box's current task — so a working tab still shows what it's doing (peripheral

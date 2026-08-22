@@ -138,6 +138,19 @@ pub struct PlaceRecord {
     /// as an older cover, because the one direction that must never be guessed is this one.
     #[serde(default)]
     pub launcher: String,
+    /// What the launcher said about this box's memory ceiling — `capped <limits>`, or `uncapped`
+    /// with the reason it could not be.
+    ///
+    /// Recorded for the same reason [`Self::launcher`] is, and it is the same shape of hole: the
+    /// launcher writes `limits.state` into the box's own root, which is *inside the sandbox*, so
+    /// nothing on the host has ever been able to read it. A box with no ceiling therefore looked
+    /// exactly like a box with one, on every surface skein has — while being the box that can take
+    /// the whole fleet down with a runaway build, which is what the launcher's own comment says the
+    /// ceiling is there to stop.
+    ///
+    /// Empty where no launcher answered. Read as *unknown*, never as *capped*.
+    #[serde(default)]
+    pub ceiling: String,
 }
 
 /// The shell that reports what `pid` actually is right now: `<boot-id> <starttime>`.
@@ -2031,6 +2044,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
@@ -2075,6 +2089,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
@@ -2099,6 +2114,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();

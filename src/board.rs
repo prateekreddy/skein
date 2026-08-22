@@ -287,6 +287,16 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 // namespace to be uncovered in, and starting it runs the current launcher. Saying
                 // "older" of one would be asking somebody to restart a box that is already going to
                 // get the current cover the moment it exists.
+                // Same record, same tick. `uncapped …` is the launcher's own word for it and the
+                // rest of the line is the reason; empty means no launcher answered, which is not
+                // the same as capped and must not read as it.
+                ceiling: match live == Some(Liveness::Running) {
+                    false => String::new(),
+                    true => record
+                        .as_ref()
+                        .map(|rec| rec.ceiling.clone())
+                        .unwrap_or_default(),
+                },
                 cover: match live == Some(Liveness::Running) {
                     false => String::new(),
                     true => match record.as_ref() {
@@ -401,6 +411,21 @@ pub struct BoxView {
     /// reads `"older"`, since nothing said otherwise and this is not a direction to guess in.
     #[serde(default)]
     pub cover: String,
+    /// What bounds this box's memory — `capped <limits>`, `uncapped <reason>`, or empty for a box
+    /// that is not running or whose launcher never said.
+    ///
+    /// On the row because it was nowhere else. The launcher records it in `limits.state` under the
+    /// box's own root, which is inside the sandbox, so no surface skein has could read it — and an
+    /// uncapped box looks identical to a capped one right up until a build in it takes the sandbox
+    /// with it. `box-session.sh`'s own comment is the argument: the ceiling "keeps one box's
+    /// runaway build from killing every other box in the sandbox."
+    ///
+    /// Three ways to be uncapped and they are not one problem. *no-limit-computed* is skein's own
+    /// memory plan producing nothing for this box. *could-not-join-cgroup* and
+    /// *no-cgroup-delegation* are the sandbox's answer, and need a different fleet rather than a
+    /// different setting. The reason travels so the row does not have to guess which.
+    #[serde(default)]
+    pub ceiling: String,
     /// Whether this box's GitHub credential is scoped to its own repository — `None` when the fleet
     /// cannot scope at all, so there is no distinction to draw.
     ///
@@ -453,6 +478,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
@@ -501,6 +527,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
@@ -724,6 +751,7 @@ mod tests {
             generation: "test-boot".into(),
             ns_start: 1,
             launcher: launcher.to_string(),
+            ceiling: String::new(),
         };
         let cover_of = || -> String {
             crate::fleet::disturbing_liveness(|| ());

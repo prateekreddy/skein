@@ -2426,6 +2426,35 @@ fn stamped_launcher() -> String {
     BOX_SESSION_SH.replace(LAUNCHER_REVISION_MARK, &launcher_revision())
 }
 
+/// What the launcher said about this box's ceiling: `capped <limits>`, or `uncapped <reason>`.
+///
+/// Reported rather than read, because there is nothing on the host to read. The launcher writes
+/// `limits.state` into the box's own root, which is inside the sandbox — so "nothing reads that
+/// file" was true for as long as it existed, and an uncapped box looked exactly like a capped one
+/// from every surface skein has. It travels the way the anchor and the launcher revision do: over
+/// the channel skein already has open, into the placement record, where a board tick reads it for
+/// nothing.
+///
+/// Empty where no launcher answered — a record from before this, a launcher too old to print it, or
+/// the adoption path. Read as *unknown*, not as *capped*: the whole point is that a box with no
+/// ceiling is invisible, and defaulting to the reassuring answer would rebuild that.
+pub fn limits_from_launch(out: &str) -> String {
+    out.lines()
+        .filter_map(|l| l.trim().strip_prefix("SKEIN_LIMITS "))
+        .next_back()
+        .map(|state| state.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Whether a reported ceiling state is one that actually bounds the box.
+///
+/// The first word is the answer and the rest is the reason, so this is a prefix test rather than a
+/// list of the three ways to be uncapped — a fourth reason added in the launcher tomorrow is
+/// reported correctly by a host that has never heard of it.
+pub fn is_capped(state: &str) -> bool {
+    state.split_whitespace().next() == Some("capped")
+}
+
 /// The revision the launcher reported on stdout, or empty if it reported none.
 ///
 /// Empty is a real answer and not a failure: a launcher old enough to predate this line cannot say
@@ -3459,6 +3488,10 @@ fn start_box_inner(
         .as_deref()
         .map(launcher_from_launch)
         .unwrap_or_default();
+    let ceiling = launched
+        .as_deref()
+        .map(limits_from_launch)
+        .unwrap_or_default();
     record_place(
         name,
         &PlaceRecord {
@@ -3470,6 +3503,7 @@ fn start_box_inner(
             generation,
             ns_start,
             launcher,
+            ceiling,
         },
     )?;
 
@@ -4657,6 +4691,7 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
             // the record's old cover is as dead as its old pid, and carrying it over would leave a
             // just-restarted box still asking to be restarted.
             launcher: launcher_from_launch(&out),
+            ceiling: limits_from_launch(&out),
             ..record.clone()
         },
     )?;
@@ -6307,6 +6342,7 @@ b idle 5000000 4 1048576 1048576
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
@@ -10109,6 +10145,128 @@ b idle 5000000 4 1048576 1048576
             box_container_cgroup("web-feat-x")
                 .starts_with(&format!("/sys/fs/cgroup{CONTAINER_CGROUP}/")),
             "the box's containers left the parent the fleet's ceiling is on"
+        );
+    }
+
+    /// Run the launcher's per-box cgroup block for real, against a scratch cgroup tree.
+    ///
+    /// Extracted rather than restated, and by its first and last lines rather than by a function
+    /// name, because this block is top-level: it runs once per launch, before `exec bwrap`, and
+    /// making it a function to be testable would move code for the test's benefit.
+    ///
+    /// The scratch directory's guard comes back with the answer, and that is not tidiness: dropping
+    /// it removes the tree, so a helper that returned only the path handed the caller a directory
+    /// that no longer existed and every assertion read an empty file.
+    fn box_cgroup_block(limits: &str) -> (String, crate::testutil::TempDir) {
+        let dir = crate::testutil::tempdir();
+        let root = std::path::PathBuf::from(dir.as_ref() as &std::path::Path);
+        std::fs::create_dir_all(root.join("boxroot")).unwrap();
+        let body: Vec<&str> = BOX_SESSION_SH
+            .lines()
+            .skip_while(|l| !l.starts_with("cgroup_root=\"/sys/fs/cgroup/skein\""))
+            .take_while(|l| !l.starts_with("printf \"SKEIN_LIMITS"))
+            .collect();
+        assert!(
+            body.len() > 20,
+            "the per-box cgroup block was not found in box-session.sh; this test would prove \
+             nothing: {body:?}"
+        );
+        let block = body
+            .join("\n")
+            .replace("/sys/fs/cgroup/", &format!("{}/cgroup/", root.display()));
+        let harness = format!(
+            // `sudo` shimmed both ways the block spells it: `mkdir -p`, and `sh -c` with and
+            // without positional arguments after the script.
+            "sudo() {{ case \"$1\" in \
+               mkdir) shift; mkdir \"$@\" ;; \
+               sh) shift; if [ \"$#\" = 2 ]; then sh -c \"$2\"; else sh \"$@\"; fi ;; \
+               *) \"$@\" ;; \
+             esac; }}\n\
+             apply_fleet_ceilings() {{ :; }}\n\
+             box=demo\n\
+             root={root}/boxroot\n\
+             limits={limits}\n\
+             {block}\n\
+             printf 'SKEIN_LIMITS %s\\n' \"$limits_state\"\n",
+            root = root.display(),
+            limits = crate::util::sh_quote(limits),
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&harness)
+            .output()
+            .expect("run the launcher's per-box cgroup block");
+        assert!(
+            out.status.success(),
+            "the block failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (String::from_utf8_lossy(&out.stdout).trim().to_string(), dir)
+    }
+
+    /// The gap: a box with no computed ceiling got no cgroup **either**.
+    ///
+    /// The cgroup does two jobs and only one is the ceiling — it is also the box's identity as a set
+    /// of processes, which is what `cgroup.kill` needs at stop and what the fleet's accounting rests
+    /// on. Gating the whole block on `$limits` gave the box that most needed containing neither, and
+    /// `2>/dev/null || true` on the kill made that silent.
+    #[test]
+    fn a_box_with_no_ceiling_still_gets_a_cgroup_to_be_contained_by() {
+        let (said, dir) = box_cgroup_block("");
+        let cg = dir.join("cgroup/skein/demo");
+        assert!(
+            cg.join("cgroup.procs").is_file(),
+            "the box joined no cgroup, so nothing at stop can reach what it started"
+        );
+        assert!(
+            !cg.join("memory.max").exists(),
+            "a ceiling was invented for a box skein computed none for"
+        );
+        assert_eq!(
+            said, "SKEIN_LIMITS uncapped no-limit-computed",
+            "the box is contained but unbounded, and it did not say so"
+        );
+    }
+
+    /// And the ordinary case still writes the ceiling it was given, and says it did.
+    #[test]
+    fn a_box_with_a_ceiling_reports_the_one_it_got() {
+        let (said, dir) = box_cgroup_block("max=1G,high=800M,pids=512");
+        let cg = dir.join("cgroup/skein/demo");
+        let read = |f: &str| {
+            std::fs::read_to_string(cg.join(f))
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(read("memory.max"), "1G");
+        assert_eq!(read("memory.high"), "800M");
+        assert_eq!(read("pids.max"), "512");
+        assert_eq!(said, "SKEIN_LIMITS capped max=1G,high=800M,pids=512");
+    }
+
+    /// The host's reading of it, and the direction that must never be guessed.
+    #[test]
+    fn a_box_that_did_not_say_what_bounds_it_is_not_taken_to_be_bounded() {
+        assert!(is_capped("capped max=1G,high=800M"));
+        for silent in [
+            "",
+            "uncapped no-limit-computed",
+            "uncapped no-cgroup-delegation",
+        ] {
+            assert!(
+                !is_capped(silent),
+                "{silent:?} was read as a box with a ceiling"
+            );
+        }
+        assert_eq!(
+            limits_from_launch("SKEIN_ANCHOR 42\nSKEIN_LIMITS capped max=1G\n"),
+            "capped max=1G"
+        );
+        assert_eq!(
+            limits_from_launch("SKEIN_ANCHOR 42\n"),
+            "",
+            "a launcher too old to report was read as having reported something"
         );
     }
 }

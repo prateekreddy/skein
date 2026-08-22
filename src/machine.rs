@@ -101,6 +101,7 @@ mod tests {
                 generation: String::new(),
                 ns_start: 0,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();

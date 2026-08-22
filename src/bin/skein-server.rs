@@ -1579,6 +1579,7 @@ async fn api_health() -> Json<skein::health::HealthReport> {
                 dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
                 uncovered_boxes: Vec::new(),
+                uncapped_boxes: Vec::new(),
                 runtimes: skein::runtime::supported_runtimes(),
                 // Empty rather than guessed: this is the report for a health task that *failed*, and
                 // the checklist reads this field as "boxes can push". Naming a credential here would

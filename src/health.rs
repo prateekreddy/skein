@@ -188,6 +188,13 @@ pub struct HealthReport {
     /// "3 boxes" is not something anybody can act on at the moment they read it.
     #[serde(default)]
     pub uncovered_boxes: Vec<String>,
+    /// Running boxes with no memory ceiling on them at all.
+    ///
+    /// Named rather than counted, because the two reasons need different people: skein's own plan
+    /// producing nothing for a box is a restart, and a sandbox that will not delegate cgroups is a
+    /// different fleet.
+    #[serde(default)]
+    pub uncapped_boxes: Vec<String>,
     pub runtimes: Vec<RuntimeInfo>,
     /// How boxes get GitHub credentials, named — or empty when nobody has chosen.
     ///
@@ -228,6 +235,17 @@ pub fn cover_health(uncovered: &[String]) -> HealthCheck {
             ),
         ),
     }
+}
+
+/// Running boxes with no memory ceiling on them, for the CLI, which prints its lines one at a time
+/// rather than from a report.
+pub fn uncapped_boxes() -> Vec<String> {
+    crate::board::load_views()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|view| !view.ceiling.is_empty() && !crate::fleet::is_capped(&view.ceiling))
+        .map(|view| view.name)
+        .collect()
 }
 
 /// The boxes that line is about: running, and placed by a launcher that is not the current one.
@@ -322,7 +340,7 @@ pub fn health_report() -> HealthReport {
     // what did. The fleet had been throttling ninety thousand times an hour and the only place that
     // showed was a file nobody read.
     let squeeze = crate::fleet::pressure();
-    let memory = match crate::fleet::memory_plan() {
+    let mut memory = match crate::fleet::memory_plan() {
         Some(plan) => {
             let divided = format!(
                 "{} across all boxes and the containers they start, {} for the sandbox's own \
@@ -579,10 +597,52 @@ pub fn health_report() -> HealthReport {
     // [`crate::board::BoxView::cover`]: everything skein does about isolation it does at box start,
     // so a cover that lands in a new release reaches new boxes and no running one.
     let uncovered_boxes = views
-        .into_iter()
+        .iter()
         .filter(|view| view.cover == "older")
-        .map(|view| view.name)
+        .map(|view| view.name.clone())
         .collect::<Vec<_>>();
+    // Running boxes nothing bounds. See [`crate::board::BoxView::ceiling`]: the launcher records
+    // this in the box's own root, inside the sandbox, so until it started reporting it there was no
+    // surface on which an uncapped box looked different from a capped one.
+    let uncapped: Vec<(String, String)> = views
+        .into_iter()
+        .filter(|view| !view.ceiling.is_empty() && !crate::fleet::is_capped(&view.ceiling))
+        .map(|view| (view.name, view.ceiling))
+        .collect();
+    let uncapped_boxes: Vec<String> = uncapped.iter().map(|(name, _)| name.clone()).collect();
+    if !uncapped_boxes.is_empty() {
+        // **A fault, and it belongs on the memory line rather than beside it.** The plan above can
+        // be perfectly good and still not reach a box that never joined a cgroup — which is the box
+        // that can take the sandbox down, since the ceiling is what "keeps one box's runaway build
+        // from killing every other box" (`box-session.sh`). Reading "3.0 GiB across all boxes" with
+        // no mention that one of them is outside that number is the reassuring half of the truth.
+        memory.level = Level::Unsatisfied;
+        memory.detail.push_str(&format!(
+            ". {} running outside that ceiling entirely: {}",
+            match uncapped_boxes.len() {
+                1 => "One box is".to_string(),
+                n => format!("{n} boxes are"),
+            },
+            uncapped_boxes.join(", ")
+        ));
+        // The two causes need different people. `no-limit-computed` is skein's own plan producing
+        // nothing for this box; the other two are the sandbox refusing to delegate cgroups, which no
+        // setting here fixes.
+        // `no-limit-computed` means the box IS in a cgroup and skein wrote no ceiling onto it —
+        // a restart puts it under the current plan. The other two mean it is in no cgroup at all,
+        // which is the sandbox's answer and no setting here changes it.
+        let skeins_own = uncapped
+            .iter()
+            .any(|(_, state)| state.contains("no-limit-computed"));
+        memory.fix = match skeins_own {
+            true => format!(
+                "`skein restart {}` — it started before this fleet had a memory plan, and a restart                  puts it under the current one",
+                uncapped_boxes.first().map(String::as_str).unwrap_or("<box>")
+            ),
+            false => "this sandbox does not delegate cgroups, so skein cannot bound a box in it —                       the ceilings on the fleet as a whole still hold, but one box's build can                       reach all of them"
+                .to_string(),
+        };
+    }
     if !dark_boxes.is_empty() {
         probes.level = Level::Unsatisfied;
         probes.detail.push_str(&format!(
@@ -627,6 +687,7 @@ pub fn health_report() -> HealthReport {
         dark_boxes,
         stale_boxes,
         uncovered_boxes,
+        uncapped_boxes,
         runtimes: supported_runtimes(),
         git_credential: crate::gitgate::box_credential().label(),
     }

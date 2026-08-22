@@ -728,6 +728,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
@@ -760,6 +761,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
@@ -817,6 +819,7 @@ mod tests {
                 generation: "test-boot".into(),
                 ns_start: 1,
                 launcher: String::new(),
+                ceiling: String::new(),
             },
         )
         .unwrap();
