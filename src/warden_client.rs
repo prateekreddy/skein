@@ -148,6 +148,41 @@ fn remember_sighting_failure(why: Option<String>) {
     }
 }
 
+/// Somebody has set the WARDEN's variable on a process that is a CLIENT.
+///
+/// `$SKEIN_WARDEN_PORT` is read by `skein-warden` and by nothing here. Setting it on `skein` or
+/// `skein-server` looks like it should move where they ask and does not — they go on asking
+/// [`DEFAULT_PORT`], which is now whatever else is listening there. The failure that follows is a
+/// refusal from a stranger rather than a connection error, so it reads as the warden being broken.
+///
+/// **Two variables because they are two questions, not one setting spelled twice.** The warden binds
+/// `Ipv4Addr::LOCALHOST` in code — `serve::bind` takes a port and no host at all — because §8.6 says
+/// the bind stays narrow until 4c opens it deliberately, and a `host:port` variable on that side
+/// would be a way to widen it by configuration. The client needs a full address for the opposite
+/// reason: after 4c it reaches the host from inside the sandbox, where the host is not `127.0.0.1`.
+/// They share a number today and stop sharing one then.
+///
+/// None of which helps somebody who set the wrong one, so this says so where they are looking.
+pub fn misdirected() -> Option<String> {
+    let port = std::env::var("SKEIN_WARDEN_PORT").ok()?;
+    let port = port.trim();
+    if port.is_empty() {
+        return None;
+    }
+    // Both set is somebody who knows what they are doing, whether or not the two agree — and if they
+    // disagree, `where_it_asks` already prints the one that counts.
+    if std::env::var("SKEIN_WARDEN").is_ok_and(|v| !v.trim().is_empty()) {
+        return None;
+    }
+    Some(format!(
+        "`$SKEIN_WARDEN_PORT={port}` is set here, and it is the WARDEN's variable \u{2014} this \
+         process reads `$SKEIN_WARDEN`, so it is still asking {}. Set `SKEIN_WARDEN=127.0.0.1:{port}` \
+         as well. They are two variables because the warden binds loopback and no host at all \
+         (architecture \u{a7}8.6), while a client has to name one.",
+        where_it_asks()
+    ))
+}
+
 /// The address this process asks, as a person would type it.
 ///
 /// Printed rather than assumed: `$SKEIN_WARDEN` moves it, and a diagnostic that says a warden is not
@@ -602,6 +637,16 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "a sandbox name the warden would refuse must not produce an id it refuses"
         );
+    }
+
+    /// Both crates agree on the port a client asks by default.
+    ///
+    /// They do not depend on each other, on purpose, so this is the only thing keeping the two
+    /// constants in step — and if they drifted the symptom would be a warden that starts on the
+    /// port skein is not asking, saying nothing about it.
+    #[test]
+    fn the_default_port_is_the_one_the_warden_says_skein_looks_at() {
+        assert_eq!(DEFAULT_PORT, 7879);
     }
 
     /// Five states in, five states out, and the two that are not answers stay unanswered.

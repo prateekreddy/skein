@@ -281,17 +281,26 @@ fn sbx_health(
 /// skein show a button. So it is reported, in the warden's own words, and nothing here decides
 /// anything from it.
 fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
+    // Said whichever way the check goes, because setting the warden's own variable on a client is a
+    // mistake even when something happens to answer: it means this process is not asking where the
+    // person thinks it is. It rides on the check rather than being a line of its own — a reader
+    // looking at the warden is exactly the reader who needs it.
+    let misdirected = crate::warden_client::misdirected();
+    let note = |text: String| match &misdirected {
+        Some(said) => format!("{text}\n{said}"),
+        None => text,
+    };
     match seen {
         Some(sighting) => {
             let doers = match sighting.capabilities.is_empty() {
                 true => "it advertises no doers, so it can report but not create or destroy".into(),
                 false => format!("it says it can {}", sighting.capabilities.join(" and ")),
             };
-            HealthCheck::satisfied(format!(
+            HealthCheck::satisfied(note(format!(
                 "answering on {}, and {doers} ({} sandbox(es) in view)",
                 crate::warden_client::where_it_asks(),
                 sighting.sandboxes.len()
-            ))
+            )))
         }
         // **The advice depends on which failure it was**, and getting that wrong is worse than
         // saying nothing. Every unsatisfied arm printed the build command, so this told somebody to
@@ -301,9 +310,9 @@ fn warden_health(seen: Option<crate::warden_client::Sighting>) -> HealthCheck {
         // The DETAIL stays the client's own words either way — not running, refusing the secret,
         // unreadable — because "the warden is not available" sends nobody anywhere.
         None => HealthCheck::unsatisfied(
-            crate::warden_client::sighting_failure().unwrap_or_else(|| {
+            note(crate::warden_client::sighting_failure().unwrap_or_else(|| {
                 "the host warden did not answer, and no reason was recorded".into()
-            }),
+            })),
             match crate::warden_client::sighting_trouble() {
                 // It answered. Do not send anybody to a compiler.
                 Some(crate::warden_client::Unseen::Answered) => format!(
@@ -1143,6 +1152,44 @@ mod tests {
                 refused.fix
             );
         }
+    }
+
+    /// Setting the WARDEN's variable on a CLIENT is said, whichever way the check goes.
+    ///
+    /// The mistake is invisible from where somebody makes it: `$SKEIN_WARDEN_PORT` on a `skein`
+    /// command looks like it moves where skein asks, and moves nothing — skein keeps asking the
+    /// default, where something else may well answer. The failure that follows is a refusal from a
+    /// stranger, which reads as the warden being broken rather than as being asked the wrong place.
+    ///
+    /// Said on the satisfied arm too, deliberately. Something answering does not mean it is the
+    /// warden the person just started, and "it works" is the reading this has to prevent.
+    #[test]
+    fn the_wardens_own_variable_set_on_a_client_is_pointed_out() {
+        let _g = crate::testutil::env_lock();
+        std::env::remove_var("SKEIN_WARDEN");
+        std::env::set_var("SKEIN_WARDEN_PORT", "7880");
+
+        let said = warden_health(crate::warden_client::sighting());
+        for needed in ["SKEIN_WARDEN_PORT", "SKEIN_WARDEN=127.0.0.1:7880", "7879"] {
+            assert!(
+                said.detail.contains(needed),
+                "the note does not mention {needed}: {:?}",
+                said.detail
+            );
+        }
+
+        // Both set is somebody who meant it, and the note goes away — otherwise it becomes noise on
+        // every run of a fleet that has deliberately moved its warden.
+        std::env::set_var("SKEIN_WARDEN", "127.0.0.1:7880");
+        let quiet = warden_health(crate::warden_client::sighting());
+        assert!(
+            !quiet.detail.contains("is the WARDEN's variable"),
+            "the note fires at somebody who set both: {:?}",
+            quiet.detail
+        );
+
+        std::env::remove_var("SKEIN_WARDEN_PORT");
+        std::env::remove_var("SKEIN_WARDEN");
     }
 
     /// A missing `sbx` is a fault on a host and correct in the fleet.

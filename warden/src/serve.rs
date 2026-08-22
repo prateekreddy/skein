@@ -360,6 +360,13 @@ fn answer(outcome: &Outcome) -> Response {
 /// Port 0 gives an ephemeral one, which is how the tests get an address without racing for a fixed
 /// number — and is worth having in production too, for a second warden on a machine that already
 /// has one.
+/// The port skein's client asks when `$SKEIN_WARDEN` says nothing.
+///
+/// Here as well as in `warden_client` because the two crates deliberately do not depend on each
+/// other (`tools/module-check.py` asserts it) — they agree by a constant each, and by the test below
+/// that would fail if they stopped.
+pub const WHERE_SKEIN_LOOKS: u16 = 7879;
+
 pub fn bind(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
 }

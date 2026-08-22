@@ -20,10 +20,11 @@ use std::time::Duration;
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 fn main() {
+    use skein_warden::serve::WHERE_SKEIN_LOOKS;
     let port: u16 = std::env::var("SKEIN_WARDEN_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(7879);
+        .unwrap_or(WHERE_SKEIN_LOOKS);
     let home = std::env::var("SKEIN_WARDEN_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -68,6 +69,20 @@ fn main() {
                 .join(", "),
         }
     );
+
+    // **The pairing, said at the moment somebody changes the port.**
+    //
+    // The two ends have separate variables — `$SKEIN_WARDEN_PORT` here, `$SKEIN_WARDEN` there —
+    // because a warden binds loopback and takes no host (§8.6), while a client after 4c has to name
+    // one. That is right and it is also the trap: move this one and skein goes on asking 7879, where
+    // it now meets whatever else is listening and reports a warden that refuses rather than one that
+    // is missing. Saying it here costs a line and closes the loop where the decision was made.
+    if port != WHERE_SKEIN_LOOKS {
+        eprintln!(
+            "skein-warden: this is not where skein looks by default — export \
+             SKEIN_WARDEN=127.0.0.1:{port} for skein and skein-server, or they keep asking {WHERE_SKEIN_LOOKS}"
+        );
+    }
     eprintln!(
         "skein-warden: state in {} — back this up; it is what makes a retried destroy safe",
         home.display()
