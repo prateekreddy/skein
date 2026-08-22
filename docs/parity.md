@@ -11,16 +11,24 @@ ones. A second pass added two more inventions (`substrate reporting`, a per-box 
 printed three counts none of its own commands reproduced. **A list with fabricated entries cannot be
 a gate**, because the absence of an item stops carrying information.
 
-These commands reproduce the numbers stated here. They have been run:
+These commands reproduce the numbers stated here. They have been run, and — since the numbers went
+stale once, which is the failure this whole section is about — **`tests/parity_numbers.rs` now runs
+them on every `cargo test` and fails when a count moves.** A number here is a claim about the code,
+so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server.rs                    # 67   (NOT '.route("' — that gives 60)
+grep -c '\.route('  src/bin/skein-server.rs                    # 81   (NOT '.route("' — that gives 74)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 155 unique, 158 occurrences
 grep -c 'function ' src/web/index.html                          # 265
-sed -n '25,90p' src/bin/skein.rs                                # subcommands and flags
+sed -n '41,120p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
-Keyboard shortcuts have a single declaration — `const KEYMAP` at `src/web/index.html:4636`, whose
+**Line citations below are grep-able rather than numbered wherever a name exists**, because the
+numbered ones all drifted between the first audit and the second and a reader who checks two and
+finds both wrong stops checking the third. A citation nobody can follow is how a capability that
+quietly disappeared comes to read the same as one that moved.
+
+Keyboard shortcuts have a single declaration — `const KEYMAP` in `src/web/index.html`, whose
 comment says it exists "so the keys documented here cannot drift from the keys the app binds". **The
 code has drifted from it anyway**, so this is still a gap: `ArrowDown`/`ArrowUp` alias `j`/`k`, `o`
 aliases `↵`, `[` and `}` move between sessions (asymmetric because `]` is taken — likely a latent
@@ -45,16 +53,17 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   disk, ranked) and the per-box resource hover card and disk chip.
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever
   *add* a hold.
-- **The board's state taxonomy** — `GROUPS` (`index.html:1422`): eight ranked groups over ~14 states,
+- **The board's state taxonomy** — `GROUPS`, in `cockpit/src/groups.mjs` since the pure functions
+  moved there (`6e6f1b9`), with node tests of its own: eight ranked groups over ~14 states,
   plus `NEEDS_YOU` and `labelOf`. Its comment records a shipped defect: three copies of "owed to you"
   disagreed, so the title said "3 need you" while the mouth stayed shut. **One definition, or the bug
   returns.**
-- **The standing-debt announcer** — `announceStandingDebt` / `owedSentence` / `settledOwed`
-  (`index.html:3744-3852`): level-triggered rather than edge ("a box that turned while you were
+- **The standing-debt announcer** — `announceStandingDebt` / `settledOwed` in `index.html`, with the sentence itself in
+  `cockpit/src/announce.mjs` (`owedSentence` is gone — there is one sentence-maker now, SKEIN-112): level-triggered rather than edge ("a box that turned while you were
   looking at the board was marked seen and never spoken"), a grace window, once-per-box dedup, a ≤2
   threshold before collapsing to a count. The channels below are not the feature; this policy is.
 - Alerts, toasts, **favicon badge, document title count, audio beep**.
-- **The first-run checklist** — `firstRunHtml()` (`index.html:5240`): four gated steps, each carrying
+- **The first-run checklist** — `firstRunHtml()` in `index.html`: four gated steps, each carrying
   the action that resolves it, driven from `/api/health`. This is the shipped implementation of the
   architecture's laws 1, 6 and 7.
 - **Keyboard shortcuts** from `KEYMAP`: `j`/`k`, `↵`, `d`, `]`, `l`, `/`, `⌘N`, `?`, `esc`, plus the
@@ -113,7 +122,7 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Box creation happens over the WebSocket, not a REST route** — `terminal()` takes
   `?launch=<branch>` and creates the box before attaching. Any plan that ports the API before the WS
   loses box creation.
-- **Per-box filesystem isolation** (`box-session.sh:912-990`): a `--tmpfs` over the fleet root and
+- **Per-box filesystem isolation** (`src/box-session.sh`, the block that begins `--tmpfs`): a `--tmpfs` over the fleet root and
   over the box-state parent with only this box's own directories bound back — covering boxes created
   *after* this one starts, "which an enumeration could not" — an empty file bound over the
   fleet-agent token, and another over `$SSH_AUTH_SOCK`. The measurement that motivated it is in the
@@ -296,7 +305,7 @@ the library directly, because as a client it was inverted against the code (the 
 circular against first run needing a terminal before any server exists. The problem the client idea
 was solving is handled by a lock on declared state instead.
 
-**The `~/.skein` mount split.** `apiauth.rs:24-26` records that the API token is safe *because*
+**The `~/.skein` mount split.** `apiauth.rs`'s module note records that the API token is safe *because*
 `~/.skein/repos` and `~/.skein/boxes` are bind-mounted into boxes while `~/.skein` itself is not —
 "checked, not assumed". A durable volume mounted whole into the fleet puts `credentials/`,
 `api-token`, `github-pats/` and `tokens/` inside every box's reach on the shared uid. The volume's
@@ -361,7 +370,13 @@ edit, which is the point of writing it down before making it.
 
 ## 8. Known gaps in this audit
 
-Stated so the next reader knows what has not been checked, rather than inferring completeness:
+Stated so the next reader knows what has not been checked, rather than inferring completeness.
+**Last re-audited 22 August 2026**, on `in-fleet`, independently of the documents — from the code —
+and the results are recorded where they belong rather than here: the four counts above now reproduce
+and are checked by `tests/parity_numbers.rs`; §7.1's `/v2` table was walked row by row and every row
+still holds; and the cockpit's eleven browser suites, which had gone unrun for 160 commits, pass and
+are run by `cargo test` (SKEIN-113). What that pass found is in SKEIN-110 through SKEIN-117.
+
 
 - The 265 JavaScript functions were sampled, not enumerated one by one. This is the largest
   remaining hole and the only honest way to close it is to walk them.
