@@ -3387,6 +3387,10 @@ fn start_box_inner(
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured".into());
     }
+    // The fleet first: this refreshes the launcher, the in-sandbox agent and the docker config
+    // before anything starts a box under them. On a sandbox that is asleep or busy it is where the
+    // first minute goes, and it used to go there in silence.
+    eprintln!("skein: bringing {sandbox} into line with this build…");
     ensure_fleet(&sandbox, &fleet_mounts())?;
     // A fleet box has no `/run/sandbox/source`, so the files a repo keeps out of git — `.env`, and
     // the `CLAUDE.md` some repos take their direction from — are copied into the store here, on the
@@ -3471,6 +3475,10 @@ fn start_box_inner(
         eprintln!("skein: {name} already has a live session; keeping it");
     } else {
         forget_turn_state(repo, name);
+        // Two minutes' budget, and the same silence problem as the provisioning below: the launcher
+        // covers the mounts, makes the cgroup and starts tmux before it reports, so there is nothing
+        // to see until it is done.
+        eprintln!("skein: starting {name}'s session and its isolation…");
         launched = Some(fleet.exec(
             &session_script(name, "skein-shell", agent_command),
             Duration::from_secs(120),
@@ -3525,6 +3533,12 @@ fn start_box_inner(
 
     // Through the placement, so it lands in the box's private HOME rather than the sandbox's.
     let boxed = place_of(name).ok_or_else(|| format!("box {name} was not placed"))?;
+    // **Said before it starts, because this step can take minutes and says nothing while it does.**
+    // It installs the kit, the hooks and any approved packages, over a captured `exec` with a
+    // five-minute budget — so a start that is working normally prints two lines and then goes
+    // completely quiet, which reads as a hang. Reported as "somebody ran restart and it never
+    // completed"; it had completed, or was about to.
+    eprintln!("skein: provisioning {name} (kit, hooks, approved packages) — up to five minutes");
     boxed.exec(
         &provision_script(name, &repo.store),
         Duration::from_secs(300),
