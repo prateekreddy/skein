@@ -25,9 +25,17 @@ fn main() {
     // Before anything reads or writes the volume. A volume this binary does not understand, or one
     // that was moved and left an environment variable behind, is a refusal naming the fix — never a
     // half-read, and never a second empty installation filling up beside the real one.
-    if let Err(e) = skein::volume::ensure_volume() {
-        eprintln!("{DIM}skein:{RESET} {e}");
-        std::process::exit(1);
+    //
+    // Except for the two verbs that exist to *answer* a refusal. `repoint` is named by the one about
+    // a volume opened where it was not written, and `migrate` is the way off a volume whatever is
+    // wrong with it — so gating both behind the check would make the fix line unrunnable, which is
+    // the failure `tests/fix_lines.rs` exists to stop one layer down. `migrate` reads the source's
+    // real path rather than what it records, so it is correct on a volume that records the wrong one.
+    if !matches!(cmd, "repoint" | "migrate") {
+        if let Err(e) = skein::volume::ensure_volume() {
+            eprintln!("{DIM}skein:{RESET} {e}");
+            std::process::exit(1);
+        }
     }
 
     let result = match cmd {
@@ -69,6 +77,7 @@ fn main() {
                     .into(),
             ),
         },
+        "repoint" => skein::volume::repoint_here().map(|report| println!("{report}")),
         "pull" => cmd_pull(rest.first().map(String::as_str)),
         "login" => cmd_login(rest.first().map(String::as_str)),
         "resize" => {
@@ -144,6 +153,7 @@ skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
 skein doctor          check registry, tools, and the shared sandbox if one is on\n  \
 skein migrate <dir>   copy this installation onto another volume (nothing is deleted)\n  \
+skein repoint         after moving a volume by hand: point what it records at where it now is\n  \
 skein version\n  \
 skein help\n\n\
 the web cockpit lives in `skein-server` (run it, open http://127.0.0.1:7878).\n\n\

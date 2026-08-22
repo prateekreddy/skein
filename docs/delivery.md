@@ -291,6 +291,23 @@ One shot, and it must:
    warning is captured;
 6. leave the old state directory intact.
 
+**And the case that is not `skein migrate` at all: somebody copies the volume by hand.** Asked by
+the owner — "I point at the existing `.skein` folder and spin skein up, that works, right?" It does
+when the folder is where it was written, and it half-worked silently when it was not. `repos.json`
+holds each repo's `store`, `source`, `source_tree` and `work` as absolute paths *under the volume*,
+so a `cp -a` opened at its new path went on reading and writing the **old** one — perfectly, and
+invisibly, until somebody deleted the original. Reproduced before it was fixed: a byte-identical
+copy reported its store under the source path and `skein repos` said nothing.
+
+The volume now records where it was written (`written-at`, beside `VERSION`), and `ensure_volume`
+compares. A marker that is wrong about **nothing** — no repos yet, or every store deliberately
+elsewhere — is corrected rather than raised, because refusing over a fact with no consequence is how
+a check earns the reputation that gets it switched off. A marker that is wrong about something is a
+refusal naming both intents, since both are real and they want opposite things: `skein repoint` to
+make this copy stand on its own, or `export SKEIN_HOME=<recorded>` to go back to the original.
+`repoint` is the same rewrite step 3 above does, run without the copy — the copying already
+happened, by whatever means.
+
 An earlier draft said "refuse when any box has unpushed commits **or a dirty tree**". Every actively
 worked box has a dirty tree, so that rule refuses always — and it sat *after* the snapshot, which is
 the thing that makes a dirty tree survivable in the first place. The rule matching this codebase's

@@ -45,6 +45,33 @@ fn migrating_path(home: &Path) -> PathBuf {
 /// whole point of `$SKEIN_HOME` is that it has one. It exists so that the mistake everybody makes
 /// once, moving the volume and forgetting to set the variable, is a refusal naming the new path
 /// instead of a second empty installation quietly filling up beside the real one.
+/// Where a volume records the path it was written at.
+///
+/// A separate marker from `moved-to`, which answers the opposite question — that one is left on the
+/// volume somebody *left*, this one is on the volume somebody is using. A single file could not say
+/// both: an installation that was moved away from and then copied somewhere is two facts.
+fn written_at_path(home: &Path) -> PathBuf {
+    home.join("written-at")
+}
+
+/// The path this volume believes it lives at, canonical, or `None` on a volume from before the
+/// marker existed.
+pub fn written_at(home: &Path) -> Option<String> {
+    fs::read_to_string(written_at_path(home))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// This process's volume path in the form the marker is compared against.
+///
+/// Canonical, so `/home/x/.skein`, `/home/x/./.skein` and a symlinked parent are one answer rather
+/// than three ways to be told a volume has moved when it has not.
+pub fn here() -> PathBuf {
+    let home = skein_home();
+    home.canonicalize().unwrap_or(home)
+}
+
 fn moved_path(home: &Path) -> PathBuf {
     home.join("moved-to")
 }
@@ -105,7 +132,7 @@ pub fn ensure_volume() -> Result<(), String> {
              them. Use a skein that understands {found}.",
             home.display()
         )),
-        Some(_) => Ok(()),
+        Some(_) => opened_where_it_was_written(&home),
         // No VERSION: an installation made before versioning existed. Adopting it is the whole of
         // the upgrade — nothing about its layout differs from schema 1, which is what schema 1 was
         // defined to be.
@@ -118,10 +145,105 @@ pub fn ensure_volume() -> Result<(), String> {
     }
 }
 
+/// Is this volume being opened at the path it was written at — and if not, does that matter yet?
+///
+/// **The failure it closes is silent, which is the only reason it is a refusal.** `repos.json` holds
+/// each repo's `store`, `source`, `source_tree` and `work` as absolute paths *under the volume*. Copy
+/// a `.skein` somewhere else and point `$SKEIN_HOME` at the copy and it works perfectly — reading
+/// and writing the **old** one, which the copy is quietly no longer. Everything looks healthy right
+/// up until somebody deletes the original. Verified before this existed: a byte-identical copy
+/// reported its store under the source path and `skein repos` said nothing.
+///
+/// `skein migrate` has always done this rewrite ([`repoint`]); setting `$SKEIN_HOME` never did, and
+/// there is no reason anybody would expect the difference.
+///
+/// **Nothing stale is repaired rather than refused.** A volume with no repos registered, or whose
+/// repos all keep their stores elsewhere on purpose, has nothing pointing at the old path — so the
+/// marker is simply wrong and gets corrected. Refusing there would be stopping somebody over a fact
+/// with no consequence, which is how a check earns the reputation that gets it switched off.
+fn opened_where_it_was_written(home: &Path) -> Result<(), String> {
+    let here = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let Some(recorded) = written_at(home) else {
+        // A volume from before this marker. Adopting it is the whole of the upgrade, exactly as it
+        // is for a volume with no VERSION — and there is nothing to compare against on one, so
+        // treating its absence as suspicious would refuse every volume in existence.
+        return remember_here(home);
+    };
+    if Path::new(&recorded) == here {
+        return Ok(());
+    }
+    let stale = repoint(Path::new(&recorded), &here, false).unwrap_or(0);
+    if stale == 0 {
+        return remember_here(home);
+    }
+    Err(format!(
+        "this volume was written at {recorded} and $SKEIN_HOME points at {}.\n\
+         {stale} path(s) it records still name {recorded}, so skein here would read and write the \
+         volume over there — and everything would look fine until that one was deleted.\n\
+         If you moved or copied it here:   skein repoint\n\
+         If you meant the original:        export SKEIN_HOME={recorded}",
+        here.display()
+    ))
+}
+
+/// `skein repoint` — make a volume that was moved by hand consistent with where it now is.
+///
+/// The repair half of [`opened_where_it_was_written`]. It is the same rewrite `skein migrate` does
+/// at the end of a move ([`repoint`]), run without the move: the copying already happened, by
+/// whatever means somebody used, and what is left is the paths the volume records about itself.
+///
+/// **Only paths under the recorded home are touched.** A store deliberately kept elsewhere — another
+/// disk, a shared location — is not this command's business, and rewriting it would move somebody's
+/// data in a way they did not ask for. That rule is [`repoint`]'s and is why this reuses it rather
+/// than doing its own walk.
+pub fn repoint_here() -> Result<String, String> {
+    let home = skein_home();
+    let here = home.canonicalize().unwrap_or_else(|_| home.clone());
+    if !here.is_dir() {
+        return Err(format!("there is no volume at {}", here.display()));
+    }
+    let Some(recorded) = written_at(&home) else {
+        remember_here(&home)?;
+        return Ok(format!(
+            "{} did not say where it was written; it does now, and nothing needed repointing",
+            here.display()
+        ));
+    };
+    if Path::new(&recorded) == here {
+        return Ok(format!(
+            "{} is already where it says it was written; nothing to repoint",
+            here.display()
+        ));
+    }
+    let moved = repoint(Path::new(&recorded), &here, true)?;
+    remember_here(&home)?;
+    Ok(format!(
+        "{moved} path(s) repointed from {recorded} to {}.\n\
+         The volume at {recorded} is untouched — nothing was deleted, and it is still a whole \
+         installation if you want to go back to it.",
+        here.display()
+    ))
+}
+
 /// Write the schema version onto a volume.
 pub fn stamp(home: &Path) -> Result<(), String> {
     fs::create_dir_all(home).map_err(|e| format!("mkdir {}: {e}", home.display()))?;
-    write_atomic(&version_path(home), home, format!("{SCHEMA}\n").as_bytes())
+    write_atomic(&version_path(home), home, format!("{SCHEMA}\n").as_bytes())?;
+    remember_here(home)
+}
+
+/// Record the path this volume is at, so opening it from anywhere else is answerable.
+///
+/// Written beside `VERSION` and for the same reason: a volume that cannot say anything about itself
+/// leaves every question about it to be inferred, and the inference here — comparing the absolute
+/// paths in `repos.json` — has nothing to work with on a volume with no repos yet.
+pub fn remember_here(home: &Path) -> Result<(), String> {
+    let canonical = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    write_atomic(
+        &written_at_path(home),
+        home,
+        format!("{}\n", canonical.display()).as_bytes(),
+    )
 }
 
 /// Kilobytes available on the filesystem holding `dir`, and kilobytes `dir` itself occupies.
@@ -290,7 +412,7 @@ pub fn migrate(target: &str) -> Result<String, String> {
             dropped.push(scoped);
         }
     }
-    let repointed = repoint(&source, &target)?;
+    let repointed = repoint(&source, &target, true)?;
     stamp(&target)?;
     // Only now: while this file is there, the target is not an installation.
     fs::remove_file(migrating_path(&target)).map_err(|e| format!("finishing the move: {e}"))?;
@@ -342,7 +464,11 @@ pub const INSTANCE_SCOPED: &[&str] = &["fleet-agent.token", "fleet-agent.port"];
 /// Only paths **under the old home** are touched. A store somebody deliberately put elsewhere — on
 /// another disk, in a shared location — is not this move's business, and rewriting it would move
 /// their data in a way nobody asked for.
-fn repoint(source: &Path, target: &Path) -> Result<usize, String> {
+/// `apply` is what makes this answerable *before* it is done. [`ensure_volume`] needs the count and
+/// must not write — a volume that turns out to have nothing stale is one it repairs quietly, and a
+/// volume that does is one it refuses. Two walks would be two things to keep in step, and the one
+/// that only counted would be the one nobody exercised.
+fn repoint(source: &Path, target: &Path, apply: bool) -> Result<usize, String> {
     let file = target.join("repos.json");
     let Ok(raw) = fs::read_to_string(&file) else {
         return Ok(0);
@@ -368,7 +494,7 @@ fn repoint(source: &Path, target: &Path) -> Result<usize, String> {
             moved += 1;
         }
     }
-    if moved > 0 {
+    if moved > 0 && apply {
         let bytes = serde_json::to_vec_pretty(&repos).map_err(|e| e.to_string())?;
         write_atomic(&file, target, &bytes)?;
     }
@@ -376,7 +502,7 @@ fn repoint(source: &Path, target: &Path) -> Result<usize, String> {
     // the file from disk again would have been worse than redundant: when nothing needed rewriting,
     // the stores still name the old home, and "fixing" a marker there would write into the volume
     // this command promises not to touch.
-    Ok(moved + markers(&old, &new, &repos))
+    Ok(moved + markers(&old, &new, &repos, apply))
 }
 
 /// The same rewrite, for the two path markers a store can be *old enough* to hold.
@@ -392,7 +518,7 @@ fn repoint(source: &Path, target: &Path) -> Result<usize, String> {
 /// Bounded to the store directories the repo list names, and to a single line whose content is under
 /// the old home. A marker pointing somewhere else is somebody's deliberate choice, exactly as in
 /// [`repoint`].
-fn markers(old: &str, new: &str, repos: &[serde_json::Value]) -> usize {
+fn markers(old: &str, new: &str, repos: &[serde_json::Value], apply: bool) -> usize {
     let mut moved = 0usize;
     for repo in repos {
         let Some(store) = repo.get("store").and_then(|v| v.as_str()) else {
@@ -413,7 +539,7 @@ fn markers(old: &str, new: &str, repos: &[serde_json::Value]) -> usize {
                 continue;
             }
             let rewritten = format!("{new}{}\n", &line[old.len()..]);
-            if fs::write(&file, rewritten).is_ok() {
+            if !apply || fs::write(&file, rewritten).is_ok() {
                 moved += 1;
             }
         }
@@ -836,5 +962,132 @@ mod tests {
         fs::write(migrating_path(&home), "x").unwrap();
         let why = ensure_volume().unwrap_err();
         assert!(why.contains("half-finished move"), "{why}");
+    }
+
+    /// The failure the owner walked into: a `.skein` copied somewhere else and opened there.
+    ///
+    /// It worked perfectly before this — reading and writing the volume it was copied *from*, with
+    /// nothing said, right up until somebody deleted the original. `skein migrate` had always done
+    /// the rewrite; setting `$SKEIN_HOME` never did, and nobody would expect the difference.
+    #[test]
+    fn a_volume_opened_where_it_was_not_written_refuses_and_says_which_thing_you_meant() {
+        let _g = crate::testutil::env_lock();
+        let old = crate::testutil::tempdir();
+        let new = crate::testutil::tempdir();
+        let store = old.join("repos/demo/store");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(
+            old.join("repos.json"),
+            format!(
+                r#"[{{"id":"demo","store":"{}","work":"{}/repos/demo/work"}}]"#,
+                store.display(),
+                old.display()
+            ),
+        )
+        .unwrap();
+
+        // Opened where it was written: adopted, and it records where that is.
+        std::env::set_var("SKEIN_HOME", old.as_ref() as &Path);
+        ensure_volume().expect("a volume opened in place is fine");
+        assert_eq!(
+            written_at(&old).map(PathBuf::from),
+            Some(old.canonicalize().unwrap()),
+            "the volume did not record where it lives, so nothing can tell later"
+        );
+
+        // Copied elsewhere, bit for bit, and opened there.
+        let copied = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(old.as_ref() as &Path)
+            .arg(new.join("vol"))
+            .status()
+            .expect("copy the volume");
+        assert!(copied.success());
+        let there = new.join("vol");
+        std::env::set_var("SKEIN_HOME", &there);
+        let why = ensure_volume().expect_err(
+            "a copy that still names the original was opened as though it stood on its own",
+        );
+        // Both intents, because both are real and they want opposite things.
+        assert!(
+            why.contains("skein repoint"),
+            "the refusal does not say how to make this copy stand on its own: {why}"
+        );
+        assert!(
+            why.contains(&format!(
+                "export SKEIN_HOME={}",
+                old.canonicalize().unwrap().display()
+            )),
+            "the refusal does not say how to get back to the original: {why}"
+        );
+        // And how much is actually at stake, rather than a bare "moved".
+        assert!(why.contains("2 path(s)"), "{why}");
+
+        // The repair, and then it stands on its own.
+        let report = repoint_here().expect("repoint the copy");
+        assert!(report.contains("2 path(s) repointed"), "{report}");
+        ensure_volume().expect("a repointed volume opens");
+        let repos = fs::read_to_string(there.join("repos.json")).unwrap();
+        assert!(
+            repos.contains(&there.canonicalize().unwrap().display().to_string()),
+            "the copy still does not name itself: {repos}"
+        );
+        assert!(
+            !repos.contains(&old.canonicalize().unwrap().display().to_string()),
+            "the copy still names the volume it came from: {repos}"
+        );
+
+        // The original is untouched — nothing was moved, only copied, and it is still whole.
+        let source = fs::read_to_string(old.join("repos.json")).unwrap();
+        assert!(
+            source.contains(&old.canonicalize().unwrap().display().to_string()),
+            "repointing the copy edited the original: {source}"
+        );
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A wrong marker with nothing behind it is corrected, not thrown at somebody.
+    ///
+    /// A volume with no repos registered, or whose stores are all deliberately elsewhere, records a
+    /// path that is merely out of date — there is no second copy for skein to read by mistake.
+    /// Refusing there is stopping somebody over a fact with no consequence, which is how a check
+    /// earns the reputation that gets it switched off.
+    #[test]
+    fn a_marker_that_is_wrong_about_nothing_is_fixed_rather_than_raised() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        fs::write(home.join("VERSION"), "1\n").unwrap();
+        fs::write(home.join("written-at"), "/somewhere/that/never/was\n").unwrap();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
+
+        ensure_volume().expect("a volume with nothing stale must open");
+        assert_eq!(
+            written_at(&home).map(PathBuf::from),
+            Some(home.canonicalize().unwrap()),
+            "the stale marker was left in place, so this refuses again next time"
+        );
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A volume from before the marker is adopted, exactly as one with no `VERSION` is.
+    ///
+    /// There is nothing to compare against on one, so treating the absence as suspicious would
+    /// refuse every volume that exists today.
+    #[test]
+    fn a_volume_from_before_the_marker_is_adopted_rather_than_doubted() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        fs::write(home.join("VERSION"), "1\n").unwrap();
+        fs::write(home.join("config.json"), "{}").unwrap();
+        assert!(written_at(&home).is_none(), "the fixture is not old enough");
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &Path);
+
+        ensure_volume().expect("an installation from before the marker must open");
+        assert_eq!(
+            written_at(&home).map(PathBuf::from),
+            Some(home.canonicalize().unwrap()),
+            "adopting it is the whole of the upgrade, and it did not happen"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 }
