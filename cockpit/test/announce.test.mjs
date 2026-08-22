@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { announcementsFor, sentenceFor, sayName, forSpeech, utteranceFor, OWED_GRACE_MS }
+import { announcementsFor, sentenceFor, sayName, forSpeech, utteranceFor, noteFor, OWED_GRACE_MS }
   from "../src/announce.mjs";
 
 const boxes = n => Array.from({ length: n }, (_, i) => ({ name: `b${i + 1}` }));
@@ -130,9 +130,11 @@ test("one owed box is announced with what it is asking", () => {
     ...away, voiceOn: true, alertsOn: true, groupOf,
   });
   assert.equal(plan.say, "era s 6 wants permission. Run rm -rf build?");
-  // And the NOTIFICATION keeps the real name — it is read and clicked, not spoken, and its tag is
-  // what the browser dedupes on.
-  assert.deepEqual(plan.notes, [{ body: "example-box-1 needs you", tag: "example-box-1" }]);
+  // The NOTIFICATION keeps the real name — it is read and clicked, and its tag is what the browser
+  // dedupes on — but it gets the verb, because a banner saying "needs you" is one you dismiss
+  // without learning anything. Shorter than the spoken sentence: no headline, since length is what
+  // gets a lock-screen banner swiped away unread.
+  assert.deepEqual(plan.notes, [{ body: "example-box-1 wants permission", tag: "example-box-1" }]);
 });
 
 test("a caller with no group mapping still gets a usable sentence", () => {
@@ -142,4 +144,15 @@ test("a caller with no group mapping still gets a usable sentence", () => {
     sentenceFor([{ name: "a", blocked_kind: "trust" }]),
     "a needs you to trust the folder."
   );
+});
+
+test("a banner says the same thing in fewer words", () => {
+  // No name — the notification puts that in front of it — and no headline, which is the difference
+  // from `utteranceFor`: a banner is glanced at, and the words that help in a spoken sentence are
+  // the length that gets it swiped away unread.
+  assert.equal(noteFor({ blocked_kind: "permission", headline: "Run x?" }, "attn"), "wants permission");
+  assert.equal(noteFor({}, "waiting"), "is waiting");
+  assert.equal(noteFor({}, "error"), "hit an error");
+  assert.equal(noteFor({ pause: "proceed" }, "attn"), "wants to continue");
+  assert.equal(noteFor({}, "attn"), "needs a decision");
 });

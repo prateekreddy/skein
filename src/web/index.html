@@ -3852,11 +3852,9 @@ function forgetSettledDebts(snapshot) {
 
 // The banner's half-sentence. Deliberately not `utteranceFor`, which is written to be *heard* and
 // carries the box's last words — length a notification has no room for and truncates anyway.
-function noteFor(b, group) {
-  if (group === "error") return "hit an error";
-  if (group === "waiting") return "is waiting";
-  return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
-}
+// `noteFor` is the bundle's, beside `announcementsFor`, which is the only thing that calls it. The
+// copy here was dead: when the decision moved, the notification body became "needs you" and this
+// function stayed behind, defined and unreferenced, with nothing to say it had stopped mattering.
 
 // The single announcer for "this box needs you", across both channels. One rule, two outputs — so
 // they cannot drift into disagreeing about what is worth interrupting you for, and so a fix to the

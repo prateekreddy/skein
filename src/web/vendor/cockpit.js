@@ -101,10 +101,19 @@ function announcementsFor(fresh, opts) {
   // A notification is **read**, so it carries the box's real name — the string on the board row and
   // in the tag the browser dedupes on. Only the spoken channel gets `sayName`. The two look like the
   // same string and are not: one is an identifier you click, the other is something said out loud.
+  //
+  // It gets the verb, though, and for the reason the sentence does: `web-main is waiting` and
+  // `web-main wants permission` are two different reasons to pick the phone up and `web-main needs
+  // you` is neither. This said "needs you" for a while and `noteFor` sat in the page, defined and
+  // called by nothing — the same regression as the spoken one, in the channel where the text is all
+  // there is.
   const notes = !alertsOn
     ? []
     : fresh.length <= NAME_AT_MOST
-      ? fresh.map(b => ({ body: `${b.name} needs you`, tag: b.name }))
+      ? fresh.map(b => ({
+          body: `${b.name} ${noteFor(b, groupOf ? groupOf(b.state) : "attn")}`,
+          tag: b.name,
+        }))
       : [{ body: `${fresh.length} boxes need you`, tag: "skein-owed" }];
 
   return {
@@ -198,6 +207,16 @@ function utteranceFor(b, group) {
   // information, because the ask is the state itself rather than anything the agent said.
   if (!head || b.blocked_kind === "trust" || b.blocked_kind === "auth") return `${name} ${verb}.`;
   return `${name} ${verb}. ${head}`;
+}
+
+// The same thing in a banner's worth of words — no name, because the notification puts it in front.
+//
+// Shorter than `utteranceFor` on purpose: a notification is glanced at on a lock screen and the
+// headline that helps in a spoken sentence is length that gets it dismissed unread.
+function noteFor(b, group) {
+  if (group === "error") return "hit an error";
+  if (group === "waiting") return "is waiting";
+  return VERB[b.blocked_kind] || (b.pause === "proceed" ? "wants to continue" : "needs a decision");
 }
 
 // ── change.mjs ──
