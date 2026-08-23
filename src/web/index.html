@@ -6362,6 +6362,11 @@ function pickAttachment(folder) {
 // and the poll behind this banner queues behind it. So the banner spent its time announcing a board
 // that was about to update anyway, which is how a warning becomes something you look past. It is
 // worth reading only when it means the server is actually gone.
+// Thirty seconds is a threshold on the `alive` heartbeat the producer sends every ten (see
+// `stream::ALIVE_EVERY`), so it now measures what it always claimed to: time since the SERVER last
+// spoke. It used to measure time since the DATA changed, and the stream deliberately says nothing
+// when nothing moves — so a calm fleet raised this banner every single time, for up to the ten
+// minutes until the re-sync floor. A warning that fires on the ordinary case is one nobody reads.
 const STALE_AFTER_S = 30;
 let lastTickAt = Date.now();
 setInterval(() => {
@@ -6375,7 +6380,12 @@ setInterval(() => {
         + "padding:6px 14px;border-radius:0 0 8px 8px;pointer-events:none";
       document.body.append(ban);
     }
-    ban.textContent = `board is ${age}s stale — reconnecting…`;
+    // Which of the two it is, because they want different things from the reader. An open stream
+    // that has gone quiet is a producer that wedged — nothing to wait for. A closed one is the
+    // browser already retrying, and waiting is exactly right.
+    ban.textContent = es && es.readyState === EventSource.OPEN
+      ? `board is ${age}s stale — the server stopped answering`
+      : `board is ${age}s stale — reconnecting…`;
   } else ban?.remove();
 }, 2000);
 let es = null;
@@ -6405,6 +6415,9 @@ function connect() {
   };
   es.addEventListener("snapshot", e => { try { applyTick(JSON.parse(e.data)); } catch {} });
   es.addEventListener("changed", e => { try { applyTick(JSON.parse(e.data)); } catch {} });
+  // "Still here", and nothing else — no render, because nothing about the fleet changed. This is the
+  // whole reason the staleness banner can mean "the server is gone" rather than "nothing happened".
+  es.addEventListener("alive", () => { lastTickAt = Date.now(); });
   // Told rather than silently skipped: this tab stopped reading long enough to fall behind the
   // producer, so what it holds may be wrong in ways a delta cannot repair. Ask for the whole thing.
   es.addEventListener("behind", e => {

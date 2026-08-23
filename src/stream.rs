@@ -50,6 +50,29 @@ pub const BEHIND: usize = 8;
 /// afternoon.
 pub const FULL_EVERY: u64 = 300;
 
+/// How often the producer turns. Here rather than at the `tokio::interval` that spends it, because
+/// [`ALIVE_EVERY`] is a count of ticks and a count is meaningless without the length of one.
+pub const TICK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Say "still here" every this many quiet ticks — ten seconds at the cadence above.
+///
+/// **A different question from "what changed", and it needed its own answer.** The stream says
+/// nothing when nothing moved, on purpose, and the re-sync floor above is ten minutes. So a calm
+/// fleet was ten minutes of silence, and the board — which had nothing else to go on — read that as
+/// a server that had died and put up "board is Ns stale — reconnecting…". A banner whose own comment
+/// says it "is worth reading only when it means the server is actually gone" was firing on every
+/// quiet afternoon, which is how a warning stops being read.
+///
+/// It was not only cosmetic. Ten minutes of a connection carrying zero bytes is a connection that
+/// browsers, the OS and anything in between are entitled to drop — and each real reconnect costs a
+/// fresh `load_views`, the most expensive thing skein computes.
+///
+/// Deliberately an EVENT and not an SSE keep-alive comment: `EventSource` does not surface comments
+/// to JavaScript, so a keep-alive would have fixed the dropped connections and left the banner
+/// firing. And it says more than a comment can — that the producer LOOP is still turning, where an
+/// open socket only says the process has not exited.
+pub const ALIVE_EVERY: u64 = 5;
+
 /// What the stream carries.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
@@ -65,6 +88,12 @@ pub enum Tick {
         boxes: Vec<BoxView>,
         gone: Vec<String>,
     },
+    /// Nothing moved, and the producer is still turning.
+    ///
+    /// Carries no data because it answers no question about the fleet — only about the stream. A
+    /// client that gets these knows its board is current; one that stops getting them knows the
+    /// thing feeding it has stopped, which is the only reading of a stale board worth acting on.
+    Alive,
 }
 
 /// What changed between two snapshots.
@@ -175,6 +204,12 @@ pub fn publish(views: Vec<BoxView>) {
     // whose silence means nothing, and "nothing needs you" is a state the board has to be able to
     // render calmly.
     if matches!(&tick, Tick::Changed { boxes, gone } if boxes.is_empty() && gone.is_empty()) {
+        // Still not box data — but not silence either. `Alive` is the stream saying it is turning,
+        // which is a different fact from anything about the fleet and is the one a board needs to
+        // tell "calm" from "gone". See [`ALIVE_EVERY`].
+        if ticks.is_multiple_of(ALIVE_EVERY) {
+            let _ = producer.say.send(Tick::Alive);
+        }
         return;
     }
     let _ = producer.say.send(tick);
@@ -415,6 +450,73 @@ mod tests {
     }
 
     /// The digest is about **state**, and a restart is not the whole fleet moving at once.
+    /// A fleet where nothing happens still tells the board the producer is turning.
+    ///
+    /// The board had no way to tell a calm fleet from a dead server: `lastTickAt` advanced only on
+    /// box data, the stream sends none when nothing moves, and the re-sync floor is ten minutes. So
+    /// "board is Ns stale — reconnecting…" was the ordinary state of a quiet afternoon, and the
+    /// reconnects behind it were real — ten minutes of zero bytes is a connection anything in the
+    /// path may drop.
+    #[test]
+    fn a_quiet_fleet_still_says_it_is_there_and_says_nothing_about_the_fleet() {
+        let (_snapshot, mut rest) = subscribe();
+        let same = vec![view("a", "live")];
+        // The first publish is a real change — the box was not there a moment ago — so it is the
+        // baseline, not the case under test. Drained rather than tolerated, so "no box data" below
+        // means exactly that.
+        publish(same.clone());
+        while rest.try_recv().is_ok() {}
+        // Enough ticks to cross the cadence whatever the global counter started at, and few enough
+        // that the channel (BEHIND) cannot lag this reader.
+        for _ in 0..ALIVE_EVERY + 1 {
+            publish(same.clone());
+        }
+        let mut heard = Vec::new();
+        while let Ok(tick) = rest.try_recv() {
+            heard.push(tick);
+        }
+        assert!(
+            heard.iter().any(|t| matches!(t, Tick::Alive)),
+            "a quiet fleet sent nothing at all, so a board watching it cannot tell it from a dead \
+             server: {heard:?}"
+        );
+        // And still no box data — the silence about the FLEET is the property that made transitions
+        // worth having, and a heartbeat must not quietly undo it.
+        assert!(
+            !heard.iter().any(
+                |t| matches!(t, Tick::Changed { boxes, gone } if !boxes.is_empty() || !gone.is_empty())
+            ),
+            "a quiet fleet sent box data: {heard:?}"
+        );
+    }
+
+    /// The heartbeat arrives sooner than the board gives up, and the two numbers live in two files.
+    ///
+    /// `ALIVE_EVERY` is a count of ticks here; `STALE_AFTER_S` is seconds in the page. Equal is not
+    /// enough — a heartbeat due exactly when the banner fires loses the race half the time, and the
+    /// failure is a banner that flickers on a healthy fleet, which is the bug this pair exists to
+    /// end. Read out of the page rather than restated, because a copy here is a second place to
+    /// update and the drift would just move.
+    #[test]
+    fn the_heartbeat_arrives_before_the_board_calls_the_server_dead() {
+        let page = include_str!("web/index.html");
+        let stated = page
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("const STALE_AFTER_S = "))
+            .and_then(|rest| rest.trim_end_matches(';').parse::<u64>().ok())
+            .expect(
+                "the page no longer declares `const STALE_AFTER_S = <n>;` — if it moved, this test \
+                 has to follow it, because nothing else keeps these two numbers in step",
+            );
+        let beat = ALIVE_EVERY * TICK.as_secs();
+        assert!(
+            beat * 2 <= stated,
+            "the producer says it is alive every {beat}s and the board calls it dead after \
+             {stated}s. One heartbeat of margin is not margin: a tick that is late, a client that \
+             is briefly busy, and the banner fires on a fleet where nothing is wrong."
+        );
+    }
+
     #[test]
     fn the_journal_remembers_a_state_change_and_not_a_restart() {
         let journal = Mutex::new(std::collections::VecDeque::new());

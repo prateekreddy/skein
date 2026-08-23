@@ -2793,6 +2793,7 @@ fn sse(tick: &skein::stream::Tick) -> Result<Event, Infallible> {
     let name = match tick {
         skein::stream::Tick::Snapshot { .. } => "snapshot",
         skein::stream::Tick::Changed { .. } => "changed",
+        skein::stream::Tick::Alive => "alive",
     };
     Ok(Event::default()
         .event(name)
@@ -2811,7 +2812,7 @@ fn start_producing() {
         return;
     }
     tokio::spawn(async move {
-        let mut every = tokio::time::interval(Duration::from_secs(2));
+        let mut every = tokio::time::interval(skein::stream::TICK);
         // A tick that is late does not become two ticks in a row. The default policy bursts to catch
         // up, which for a snapshot means running the most expensive thing skein computes twice with
         // no gap — at a client that was already slow.
