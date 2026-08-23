@@ -88,6 +88,20 @@ pub enum MergeAs {
     Rebase,
 }
 
+/// A merge, and whether the branch goes with it.
+///
+/// **Deleting the branch is part of merging, and cannot be a step of its own.** That is not a
+/// convenience — it is forced by what the queue can see. The queue is `is:pr is:open`
+/// (`prq.rs`), so the moment a pull request merges it leaves the queue and nothing evaluates it
+/// again: a following `delete-branch` step would never fire. And a `delete-branch` step that DID
+/// fire, on a pull request still open, would delete the head branch of an open PR — which closes
+/// it. So the action is useless in the one place it could run and harmful in the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Merge {
+    pub how: MergeAs,
+    pub delete_branch: bool,
+}
+
 /// The one thing a step does. A closed set, on purpose — see the module note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Act {
@@ -96,9 +110,7 @@ pub enum Act {
     RemoveLabel(String),
     /// Bring the branch up to date with its base.
     UpdateBranch(Update),
-    Merge(MergeAs),
-    /// Delete the head branch. Only ever after a merge — see the evaluator.
-    DeleteBranch,
+    Merge(Merge),
     /// Say something on the row and stop. The end state for anything a person has to look at.
     Flag(String),
     /// Do nothing, and keep waiting. Named rather than implied, because "waiting for CI" and "no
@@ -183,7 +195,7 @@ pub const CONDITIONS: [(&str, &str); 11] = [
 ];
 
 /// Every action that can be written. See [`CONDITIONS`] for why this is a table.
-pub const ACTIONS: [(&str, &str); 8] = [
+pub const ACTIONS: [(&str, &str); 9] = [
     (
         "add-label:<name>",
         "put a label on it — usually what starts CI",
@@ -192,8 +204,12 @@ pub const ACTIONS: [(&str, &str); 8] = [
     ("update-branch:rebase", "rebase the branch onto its base"),
     ("update-branch:merge", "merge the base into the branch"),
     ("merge:squash", "squash and merge"),
+    (
+        "merge:squash+delete",
+        "squash and merge, then delete the branch",
+    ),
     ("merge:merge", "merge with a merge commit"),
-    ("delete-branch", "delete the head branch"),
+    ("merge:merge+delete", "merge, then delete the branch"),
     ("flag:<why>", "say this on the row, and stop"),
 ];
 
@@ -273,13 +289,25 @@ impl Act {
                      repository that dismisses stale ones; see docs/pr-workflow.md"
                 )),
             },
-            "merge" => match arg {
-                "squash" => Ok(Act::Merge(MergeAs::Squash)),
-                "merge" => Ok(Act::Merge(MergeAs::Merge)),
-                "rebase" => Ok(Act::Merge(MergeAs::Rebase)),
-                _ => Err(format!("merge is squash, merge or rebase — not {arg:?}")),
-            },
-            "delete-branch" => Ok(Act::DeleteBranch),
+            "merge" => {
+                // `+delete` rather than a step of its own — see [`Merge`].
+                let (how, delete_branch) = match arg.strip_suffix("+delete") {
+                    Some(how) => (how, true),
+                    None => (arg, false),
+                };
+                let how = match how {
+                    "squash" => MergeAs::Squash,
+                    "merge" => MergeAs::Merge,
+                    "rebase" => MergeAs::Rebase,
+                    _ => {
+                        return Err(format!(
+                            "merge is squash, merge or rebase, each optionally +delete to remove \
+                             the branch as well — not {arg:?}"
+                        ))
+                    }
+                };
+                Ok(Act::Merge(Merge { how, delete_branch }))
+            }
             "flag" => Ok(Act::Flag(named("reason")?)),
             "wait" => Ok(Act::Wait(named("reason")?)),
             _ => Err(unknown("action", atom, &ACTIONS)),
@@ -408,18 +436,130 @@ pub fn spell_act(act: &Act) -> String {
         Act::RemoveLabel(l) => format!("remove-label:{l}"),
         Act::UpdateBranch(Update::Rebase) => "update-branch:rebase".into(),
         Act::UpdateBranch(Update::Merge) => "update-branch:merge".into(),
-        Act::Merge(MergeAs::Squash) => "merge:squash".into(),
-        Act::Merge(MergeAs::Merge) => "merge:merge".into(),
-        Act::Merge(MergeAs::Rebase) => "merge:rebase".into(),
-        Act::DeleteBranch => "delete-branch".into(),
+        Act::Merge(m) => format!(
+            "merge:{}{}",
+            match m.how {
+                MergeAs::Squash => "squash",
+                MergeAs::Merge => "merge",
+                MergeAs::Rebase => "rebase",
+            },
+            match m.delete_branch {
+                true => "+delete",
+                false => "",
+            }
+        ),
         Act::Flag(why) => format!("flag:{why}"),
         Act::Wait(why) => format!("wait:{why}"),
     }
 }
 
+/// Everything a workflow may ask about a pull request, as skein sees it right now.
+///
+/// Plain data with no GitHub in it, so the deciding can be tested against every state in the
+/// owner's example without a network — and so that this module keeps its one dependency. Whoever
+/// has a queue builds these; nothing here knows where they came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// Approved against the commit that is there NOW. An approval of an earlier head is not one.
+    pub approved: bool,
+    pub changes_requested: bool,
+    pub labels: Vec<String>,
+    /// `passing` | `failing` | `pending` | `none`.
+    pub checks: String,
+    /// `None` when GitHub has not worked it out yet, which it reports as `UNKNOWN` for a while
+    /// after every push. **Not the same as "cannot be merged"** — see [`holds`].
+    pub mergeable: Option<bool>,
+    pub draft: bool,
+    /// You opened it.
+    pub mine: bool,
+}
+
+/// The step a workflow would take next, and where it is in the file.
+///
+/// The index is carried because everything downstream needs to name it: the audit says which step
+/// acted, and the row says which step it is waiting on. "The third one" is the only durable name a
+/// step has — they have no ids, deliberately, since a file people edit should not require them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chosen {
+    pub step: usize,
+    pub act: Act,
+}
+
+/// Does this condition hold?
+///
+/// The one subtlety is `mergeable`. GitHub computes it asynchronously and says `UNKNOWN` for a
+/// while after every push, so a workflow that treated unknown as "not mergeable" would rebase a
+/// pull request for no reason — and on a repository that dismisses stale approvals, that rebase
+/// costs the approval that authorised it (`docs/pr-workflow.md`). **Unknown satisfies neither
+/// `mergeable` nor `not-mergeable`**: skein waits until GitHub has an answer.
+pub fn holds(cond: &Cond, facts: &Facts) -> bool {
+    match cond {
+        Cond::Approved => facts.approved,
+        Cond::NotApproved => !facts.approved,
+        Cond::ChangesRequested => facts.changes_requested,
+        Cond::Label(want) => facts.labels.iter().any(|l| l == want),
+        Cond::NoLabel(want) => !facts.labels.iter().any(|l| l == want),
+        Cond::Checks(want) => &facts.checks == want,
+        Cond::Mergeable => facts.mergeable == Some(true),
+        Cond::NotMergeable => facts.mergeable == Some(false),
+        Cond::Draft => facts.draft,
+        Cond::Ready => !facts.draft,
+        Cond::Mine => facts.mine,
+    }
+}
+
+/// The one step this workflow would take on this pull request, or nothing.
+///
+/// **One step, and the first one that applies.** Not a cascade: the moment an action lands, what
+/// skein believes is one action out of date — the label is on but no check has been queued yet, so
+/// `checks:passing` is still true from the *previous* run, and a cascade would merge on it. The
+/// next poll re-reads GitHub, which is the only thing that can say what the label did.
+///
+/// `None` is a real answer and not a fallthrough: "no step applies" is what a healthy workflow says
+/// most of the time, and whoever calls this shows it as such rather than as a failure to decide.
+///
+/// Nothing here acts. Same function drives the dry run and the tick, so what a person is shown
+/// before they trust it is by construction what will happen.
+pub fn next(flow: &Workflow, facts: &Facts) -> Option<Chosen> {
+    flow.steps
+        .iter()
+        .enumerate()
+        .find(|(_, step)| step.when.iter().all(|cond| holds(cond, facts)))
+        .map(|(step, s)| Chosen {
+            step,
+            act: s.act.clone(),
+        })
+}
+
+/// Does this workflow claim this pull request on its own?
+///
+/// Empty `matches` means never — a workflow with no rule runs only where somebody assigned it by
+/// hand. That is the safe direction: the cost of a rule that never fires is that you assign it
+/// yourself; the cost of one that fires on everything is a merge you did not ask for.
+pub fn claims(flow: &Workflow, facts: &Facts) -> bool {
+    !flow.matches.is_empty() && flow.matches.iter().all(|cond| holds(cond, facts))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The owner's own workflow, as it would be written down. Shared by the tests that read it back
+    /// and the ones that walk a pull request through it, so the thing being evaluated is the thing
+    /// somebody asked for rather than a fixture shaped to pass.
+    const EXAMPLE: &[u8] = br#"{
+      "workflow": [{
+        "name": "ship-mine",
+        "matches": ["mine"],
+        "steps": [
+          { "when": ["approved", "no-label:ci"],        "do": "add-label:ci" },
+          { "when": ["checks:pending"],                 "do": "wait:CI is running" },
+          { "when": ["checks:failing"],                 "do": "flag:CI is red" },
+          { "when": ["approved", "mergeable", "checks:passing"], "do": "merge:squash+delete" },
+          { "when": ["approved", "not-mergeable"],      "do": "update-branch:rebase" }
+        ]
+      }]
+    }"#;
 
     /// The owner's own example, written down and read back.
     ///
@@ -437,7 +577,7 @@ mod tests {
               { "when": ["checks:pending"],                 "do": "wait:CI is running" },
               { "when": ["checks:failing"],                 "do": "flag:CI is red" },
               { "when": ["approved", "not-mergeable"],      "do": "update-branch:rebase" },
-              { "when": ["approved", "mergeable", "checks:passing"], "do": "merge:squash" }
+              { "when": ["approved", "mergeable", "checks:passing"], "do": "merge:squash+delete" }
             ]
           }]
         }"#;
@@ -455,13 +595,149 @@ mod tests {
             }
         );
         assert_eq!(flow.steps[3].act, Act::UpdateBranch(Update::Rebase));
-        assert_eq!(flow.steps[4].act, Act::Merge(MergeAs::Squash));
+        assert_eq!(
+            flow.steps[4].act,
+            Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: true
+            }),
+            "the owner asked for merge AND delete, which is one action because the queue only \
+             lists open pull requests"
+        );
 
         // And it survives being written back out, because the cockpit edits these. An editor that
         // cannot read back what it wrote loses a step, and the step it loses is the one nobody
         // notices until a pull request merges without it.
         let again = from_bytes(&to_bytes(&flows).unwrap()).unwrap();
         assert_eq!(again, flows, "a workflow did not survive the round trip");
+    }
+
+    /// The example, walked from opened to merged, one poll at a time.
+    ///
+    /// This is the whole feature asserted end to end without a network: at every state the pull
+    /// request can be in, what would skein do next? Table-driven because the interesting failures
+    /// are at the boundaries between states — and because a workflow that does the right thing in
+    /// four states and merges in the fifth is worse than one that does nothing.
+    #[test]
+    fn the_example_walks_from_opened_to_merged_one_step_at_a_time() {
+        let flow = &from_bytes(EXAMPLE).unwrap()[0];
+        let facts = |approved, labels: &[&str], checks: &str, mergeable| Facts {
+            approved,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            checks: checks.into(),
+            mergeable,
+            mine: true,
+            ..Default::default()
+        };
+        let act = |f: &Facts| next(flow, f).map(|c| c.act);
+
+        // Opened, nobody has looked at it: a workflow that acted here would be acting on unreviewed
+        // code, which is the whole thing the owner's first condition is for.
+        assert_eq!(act(&facts(false, &[], "none", None)), None);
+
+        // Approved. The label is what starts this repository's CI.
+        assert_eq!(
+            act(&facts(true, &[], "none", None)),
+            Some(Act::AddLabel("ci".into()))
+        );
+
+        // CI is running. "Wait" is a said thing, not an absence — the row can tell somebody what it
+        // is waiting for, which is the difference between patience and a stall.
+        assert_eq!(
+            act(&facts(true, &["ci"], "pending", None)),
+            Some(Act::Wait("CI is running".into()))
+        );
+
+        // CI is red. It stops, and says so: the owner asked to be told rather than have it retried.
+        assert_eq!(
+            act(&facts(true, &["ci"], "failing", Some(true))),
+            Some(Act::Flag("CI is red".into()))
+        );
+
+        // Green and mergeable: merge it, and the branch goes with it.
+        assert_eq!(
+            act(&facts(true, &["ci"], "passing", Some(true))),
+            Some(Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: true
+            }))
+        );
+
+        // The base moved under it.
+        assert_eq!(
+            act(&facts(true, &["ci"], "passing", Some(false))),
+            Some(Act::UpdateBranch(Update::Rebase))
+        );
+
+        // **And the state that is neither.** GitHub says UNKNOWN for a while after every push while
+        // it works out whether the branch merges. Treating that as "not mergeable" rebases a pull
+        // request for no reason — and on a repository that dismisses stale approvals, that rebase
+        // throws away the approval that authorised it. So skein waits for GitHub to have an answer.
+        assert_eq!(
+            act(&facts(true, &["ci"], "passing", None)),
+            None,
+            "an unknown mergeable state was treated as a conflict, and rebased on a guess"
+        );
+
+        // After the rebase the approval may be gone — that is the repository's setting, not skein's
+        // doing (docs/pr-workflow.md). What matters here is that it does NOT go on merging.
+        assert_eq!(act(&facts(false, &["ci"], "passing", Some(true))), None);
+    }
+
+    /// The first step that applies is the one that happens, and only that one.
+    #[test]
+    fn one_step_fires_and_it_is_the_first_that_applies() {
+        let flow = &from_bytes(
+            br#"{"workflow":[{"name":"w","steps":[
+              {"when":["approved"],  "do":"add-label:ci"},
+              {"when":["approved"],  "do":"merge:squash"}]}]}"#,
+        )
+        .unwrap()[0];
+        let chosen = next(
+            flow,
+            &Facts {
+                approved: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(chosen.step, 0, "a later step won over an earlier one");
+        assert_eq!(chosen.act, Act::AddLabel("ci".into()));
+    }
+
+    /// A workflow with no rule of its own never claims a pull request.
+    ///
+    /// The safe direction, and worth a test because the opposite reads as more helpful: the cost of
+    /// a rule that never fires is that you assign it yourself. The cost of one that fires on
+    /// everything is a merge nobody asked for.
+    #[test]
+    fn a_workflow_with_no_rule_claims_nothing() {
+        let mine = Facts {
+            mine: true,
+            approved: true,
+            ..Default::default()
+        };
+        let flows = from_bytes(EXAMPLE).unwrap();
+        assert!(claims(&flows[0], &mine), "a rule that matches must claim");
+        assert!(
+            !claims(
+                &flows[0],
+                &Facts {
+                    mine: false,
+                    ..mine.clone()
+                }
+            ),
+            "somebody else's pull request was claimed by a rule about yours"
+        );
+
+        let unruled = &from_bytes(
+            br#"{"workflow":[{"name":"w","steps":[{"when":[],"do":"merge:squash"}]}]}"#,
+        )
+        .unwrap()[0];
+        assert!(
+            !claims(unruled, &mine),
+            "a workflow with no rule claimed a pull request anyway"
+        );
     }
 
     /// A file skein does not fully understand does not half-load.
@@ -518,7 +794,7 @@ mod tests {
         // Two workflows with one name: whichever skein picked, half the assignments would mean the
         // other one.
         let bad = br#"{"workflow":[
-          {"name":"w","steps":[{"when":[],"do":"delete-branch"}]},
+          {"name":"w","steps":[{"when":[],"do":"merge:merge"}]},
           {"name":"w","steps":[{"when":[],"do":"merge:squash"}]}]}"#;
         assert!(
             from_bytes(bad).is_err(),
