@@ -4638,6 +4638,125 @@ fn carries_login(bytes: &[u8]) -> bool {
 /// saved login and the fleet lost the copy it keeps precisely so a rebuild can restore it. Same bug,
 /// one layer up. [`carries_login`] is the same test the launcher applies, kept in step by
 /// `the_host_and_the_launcher_agree_on_what_a_login_is`.
+/// The script that spreads one live login across the fleet, in both directions.
+///
+/// Separated from [`heal_logins`] so a test can drive it against a fixture of box roots rather than
+/// against a sandbox.
+fn heal_logins_script() -> String {
+    let root = sh_quote(&fleet_root());
+    let files = LOGIN_FILES
+        .iter()
+        .map(|rel| sh_quote(rel))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"set -u
+command -v python3 >/dev/null 2>&1 || exit 0
+for rel in {files}; do
+  python3 - "$HOME/$rel" {root}/*/home/"$rel" <<'SKEIN_HEAL'
+import json, os, shutil, sys, tempfile, time
+
+# Which of these credentials still works, and can the ones that do not be given it?
+#
+# `refreshTokenExpiresAt` is the field that decides. The ACCESS token expires in hours and is renewed
+# without being asked, so a past `expiresAt` is the ordinary state of a healthy login — measuring
+# that would call every fleet dead most of the day.
+NOW = time.time() * 1000
+KEYS = ("accessToken", "refreshToken", "access_token", "refresh_token", "OPENAI_API_KEY")
+
+
+def blocks(data):
+    for b in (data.get("claudeAiOauth"), data.get("tokens"), data):
+        if isinstance(b, dict):
+            yield b
+
+
+def life(path):
+    """How long this credential has left, or None if it is not a working login at all."""
+    try:
+        data = json.load(open(path))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for b in blocks(data):
+        # Never `mcpOAuth`: those grants survive a logout and would make every corpse look alive.
+        if not any(str(b.get(k) or "").strip() for k in KEYS):
+            continue
+        dies = b.get("refreshTokenExpiresAt") or b.get("refresh_token_expires_at")
+        if isinstance(dies, bool) or not isinstance(dies, (int, float)):
+            # A shape that does not record one. Usable, and ranked below anything that does: the
+            # honest reading of "it did not say" is not "it is dead".
+            return 0
+        return dies if dies > NOW else None
+    return None
+
+
+paths = sys.argv[1:]
+alive = [(life(p), p) for p in paths]
+best = max(((v, p) for v, p in alive if v is not None), default=None)
+if best is None:
+    sys.exit(0)
+source = best[1]
+for value, path in alive:
+    if path == source or value is not None:
+        continue
+    # Dead, and there is a live one to give it. Written through a temporary and renamed, because a
+    # running agent reads this file and a half-written one is a logged-out box.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    os.close(fd)
+    try:
+        shutil.copyfile(source, tmp)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        print(path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+SKEIN_HEAL
+done
+"#
+    )
+}
+
+/// Spread one still-working login across the fleet — the sandbox's copy and every box's — in both
+/// directions.
+///
+/// **Why both directions, when the launcher deliberately allows only one.** `box-session.sh` argues
+/// that a credential may flow DOWN from the fleet to a box but never UP, because nothing in a file a
+/// box writes is evidence about that file. That argument is right and survives here. Its escape
+/// clause is that when the fleet "holds no login at all" a box's login heals it — "there is nothing
+/// to poison: the alternative is every box logged out".
+///
+/// The hole was the words "at all". Holding a login was any non-empty token string, so an
+/// INVALIDATED credential still counted as occupied, the vacuum clause never fired, and no box's
+/// fresh login could heal anything. Reported by the owner as six or seven interactive logins a day —
+/// one per box, every time Claude invalidated the sessions.
+///
+/// A dead credential is worth exactly what no credential is worth. So the vacuum is "no login that
+/// still works", and the poisoning argument is untouched: a forged credential can only win when the
+/// real one is already dead, and at that moment there is nothing to displace and nothing to steal.
+///
+/// **And it runs on a tick, not at box start.** The launcher's rule fires when a box's session
+/// starts, so a login typed inside a running box healed nothing until that box was restarted — a
+/// cure worse than the disease. Returns the paths it wrote, so the caller can say what changed.
+pub fn heal_logins() -> Result<Vec<String>, String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured".into());
+    }
+    let told = own_sandbox(&sandbox).exec(&heal_logins_script(), Duration::from_secs(60))?;
+    Ok(told
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Put the fleet's login into every box that already exists, and answer with the ones it reached.
 ///
 /// **The hole this fills.** The launcher reconciles logins at box session START and nowhere else,
@@ -10130,6 +10249,168 @@ b idle 5000000 4 1048576 1048576
                 "{name} kept the temporary file"
             );
         }
+    }
+
+    /// One live login reaches every box whose own is dead — and nothing else is touched.
+    ///
+    /// The owner's daily tax: Claude invalidates the sessions, and because an invalidated credential
+    /// still counted as "the fleet holds a login", no box's fresh login could heal any other. Six or
+    /// seven interactive logins a day, one per box.
+    ///
+    /// Runs the real script against a fixture of box roots. `refreshTokenExpiresAt` decides — the
+    /// access token expires hourly on a healthy login and is not evidence of anything.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn one_live_login_heals_every_box_whose_own_is_dead() {
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let boxes = crate::testutil::tempdir();
+        let boxes = boxes.as_ref() as &std::path::Path;
+
+        let future = 32_503_680_000_000i64; // year 3000
+        let cred = |refresh: i64| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"a","refreshToken":"r","expiresAt":1,"refreshTokenExpiresAt":{refresh}}}}}"#
+            )
+        };
+        let put = |at: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, body).unwrap();
+        };
+
+        // The canonical copy is a corpse — invalidated, but still a well-formed credential file.
+        put(&home.join(".claude/.credentials.json"), &cred(1));
+        // One box was logged into by hand. Two others are dead. A fourth has no HOME at all.
+        put(
+            &boxes.join("live/home/.claude/.credentials.json"),
+            &cred(future),
+        );
+        put(
+            &boxes.join("deadA/home/.claude/.credentials.json"),
+            &cred(1),
+        );
+        put(
+            &boxes.join("deadB/home/.claude/.credentials.json"),
+            &cred(1),
+        );
+        std::fs::create_dir_all(boxes.join("no-home/tree")).unwrap();
+        // And something that is not a credential at all, in a box that has one.
+        put(&boxes.join("deadA/home/.claude/settings.json"), "{\"x\":1}");
+
+        std::env::set_var("SKEIN_FLEET_ROOT", boxes);
+        let script = heal_logins_script();
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", home)
+            .output()
+            .expect("bash");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let read = |at: std::path::PathBuf| std::fs::read_to_string(at).unwrap_or_default();
+        let live = cred(future);
+
+        assert_eq!(
+            read(boxes.join("deadA/home/.claude/.credentials.json")),
+            live,
+            "a box with a dead credential was left logged out while a live one existed — which is \
+             the six-logins-a-day this exists to end"
+        );
+        assert_eq!(
+            read(boxes.join("deadB/home/.claude/.credentials.json")),
+            live
+        );
+        // UP as well as down. The canonical copy was the corpse; the whole point is that a box's
+        // login may heal it once it is dead, which the launcher's start-time rule cannot do.
+        assert_eq!(
+            read(home.join(".claude/.credentials.json")),
+            live,
+            "the fleet's own dead copy was left in place, so the next box to start takes a corpse"
+        );
+        // Untouched: the one that was already alive, and anything that is not a credential.
+        assert_eq!(
+            read(boxes.join("live/home/.claude/.credentials.json")),
+            live
+        );
+        assert_eq!(
+            read(boxes.join("deadA/home/.claude/settings.json")),
+            "{\"x\":1}"
+        );
+        assert!(
+            !boxes.join("no-home/home").exists(),
+            "a HOME was invented for something that is not a box"
+        );
+        // No temporaries left behind — a credential at a second path nobody thinks to look at.
+        let strays: Vec<_> = std::fs::read_dir(boxes.join("deadA/home/.claude"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != ".credentials.json" && n != "settings.json")
+            .collect();
+        assert!(strays.is_empty(), "left behind: {strays:?}");
+    }
+
+    /// Nothing is moved when every copy is dead, or when every copy is alive.
+    ///
+    /// The two ways a reconciler goes wrong: inventing a login out of corpses, and churning files
+    /// that were already fine — the second is what turns a periodic tick into a source of writes
+    /// under a running agent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn healing_does_nothing_when_there_is_nothing_to_heal() {
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let boxes = crate::testutil::tempdir();
+        let boxes = boxes.as_ref() as &std::path::Path;
+        let cred = |refresh: i64| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":{refresh}}}}}"#
+            )
+        };
+        let put = |at: std::path::PathBuf, body: &str| {
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(&at, body).unwrap();
+            at
+        };
+        let run = || {
+            std::env::set_var("SKEIN_FLEET_ROOT", boxes);
+            let script = heal_logins_script();
+            std::env::remove_var("SKEIN_FLEET_ROOT");
+            String::from_utf8_lossy(
+                &std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(&script)
+                    .env("HOME", home)
+                    .output()
+                    .expect("bash")
+                    .stdout,
+            )
+            .trim()
+            .to_string()
+        };
+
+        // Everything dead: there is nothing to spread, and spreading a corpse would make every box
+        // look logged in and fail on the first call.
+        put(home.join(".claude/.credentials.json"), &cred(1));
+        let a = put(boxes.join("a/home/.claude/.credentials.json"), &cred(1));
+        assert_eq!(run(), "", "something was copied when nothing was alive");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), cred(1));
+
+        // Everything alive: no writes at all. A tick that rewrites healthy files is a tick that
+        // touches a file a running agent is reading, for no reason.
+        let future = 32_503_680_000_000i64;
+        put(home.join(".claude/.credentials.json"), &cred(future));
+        put(
+            boxes.join("a/home/.claude/.credentials.json"),
+            &cred(future),
+        );
+        assert_eq!(run(), "", "healthy credentials were rewritten");
     }
 
     /// The provisioning deadline outlasts everything the provisioning script allows itself.

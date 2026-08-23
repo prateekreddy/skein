@@ -58,6 +58,14 @@ const GATED: &[(&str, &str)] = &[
         "reads the config that same `sed -i` writes",
     ),
     (
+        "one_live_login_heals_every_box_whose_own_is_dead",
+        "runs the reconciler's own script — GNU-shaped, and the fleet it repairs is Linux",
+    ),
+    (
+        "healing_does_nothing_when_there_is_nothing_to_heal",
+        "the same script, in the two cases where it must write nothing at all",
+    ),
+    (
         "a_tracker_install_that_hangs_does_not_hold_up_the_box",
         "runs the tail of skein-startup.sh, whose bound is `timeout` (GNU coreutils)",
     ),

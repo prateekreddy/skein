@@ -127,6 +127,34 @@ async fn main() {
             }
         }
     });
+    // **One login anywhere, everywhere.**
+    //
+    // Claude invalidates sessions often, and every invalidation used to cost one interactive login
+    // PER BOX — reported as six or seven a day on a fleet of a dozen. The launcher's rule only lets
+    // a box's login heal the fleet's when the fleet "holds no login at all", and an invalidated
+    // credential still counted as holding one, so nothing could ever heal anything.
+    //
+    // It also only ran at box session start, which is why this is a tick rather than a hook: a login
+    // typed inside a running box has to reach the others without restarting them.
+    //
+    // A minute, for the same reason as the transport repair above: it is a repair, not a probe. The
+    // common case is a single script in the sandbox that reads a dozen small files and writes none.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            match tokio::task::spawn_blocking(skein::fleet::heal_logins).await {
+                // Silent when there was nothing to do, which is nearly always. A line only when a
+                // credential actually moved, because that is a thing somebody may want to know
+                // happened without having asked for it.
+                Ok(Ok(healed)) if !healed.is_empty() => eprintln!(
+                    "skein: a working login reached {} place(s) that had none",
+                    healed.len()
+                ),
+                _ => {}
+            }
+        }
+    });
     // **The warden, said at boot rather than at the first Launch.**
     //
     // Fleet create and destroy go only through it and there is deliberately no fallback, so a host
