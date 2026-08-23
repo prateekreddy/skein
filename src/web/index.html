@@ -2429,6 +2429,10 @@ let revLoading = false;
 // rather than after three GraphQL searches. The server keeps its own copy on disk for a cold start;
 // this is the same idea one layer up, for the switch that happens twenty times an hour.
 const revSeen = new Map();
+// The repo the in-memory state below belongs to — the queue on screen, which rows are expanded, and
+// every summary read for it. NOT the same question as "what does the view name": leaving review for
+// a box names no repo at all, and that is not a repo switch.
+let revHeld = null;
 let revStaleTimer = null;
 let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
 // Three at a time. Each summary is a `gh pr diff` plus one or two model calls on the SAME
@@ -2497,7 +2501,21 @@ function openReview(repoId) {
   try { localStorage.setItem("skein.reviewRepo", id); } catch {}
   // Switching repos must not carry the previous repo's expansions: PR numbers collide across repos,
   // so #12 of one would silently open #12 of the other.
-  if (view.repo !== id) { revQueue = null; revOpen = new Set(); revSums = new Map(); revMods = null; }
+  //
+  // Asked of `revHeld` — the repo this state BELONGS to — and not of `view.repo`, which is the repo
+  // the view happens to name. A box view names no repo, so leaving review for a box and coming back
+  // read as a repo switch and threw all of it away: every summary that had been read, and every row
+  // that had been expanded. Reported as "I clicked a box and went back to PRs and the entire thing
+  // disappears" — with the pane then re-reading, from a server cache, what it had just discarded.
+  if (revHeld && revHeld !== id) {
+    revQueue = null; revOpen = new Set(); revSums = new Map(); revMods = null;
+  }
+  revHeld = id;
+  // Here as well as after the queue lands: the allowance governs what is read WITHOUT being asked,
+  // and between this moment and the queue arriving there is a remembered queue on screen that the
+  // pump can already act on. Settling it late gives a repo you open second whatever the first had
+  // left of it.
+  revAllowanceFor(id);
   view = { box: null, mode: "review", kind: "agent", repo: id };
   applyView();
   loadReview();
