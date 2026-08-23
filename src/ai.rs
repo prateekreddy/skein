@@ -399,14 +399,39 @@ fn from_sandbox(
             return Err(out);
         }
     };
+    // **Did the script reach the sandbox at all?** `sbx exec` exits non-zero with its own message
+    // when the daemon is not responding, when the sandbox is not running, or when it does not
+    // exist — and the payload never runs. Read as an exit code alone that is indistinguishable
+    // from the CLI refusing, which is how a fleet whose sandbox was fine got told
+    // "`claude` exited 1: …" for a failure `claude` was never part of.
+    //
+    // The marker is printed by the script before it does anything else, so on a failure its ABSENCE
+    // is evidence that nothing in the sandbox ever ran. See [`crate::fleet::REACHED`].
+    let reached = ran.err.contains(crate::fleet::REACHED);
+    // And it is skein's own bookkeeping, not something to show a person.
+    let err = ran
+        .err
+        .lines()
+        .filter(|line| line.trim() != crate::fleet::REACHED)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    let said_all = format!("{} {}", String::from_utf8_lossy(&ran.out).trim(), err);
+    if ran.code != 0 && !reached {
+        let out = Unread::Unreachable {
+            sandbox: crate::fleet::fleet_sandbox(),
+            why: match said_all.trim().is_empty() {
+                true => format!("`sbx exec` exited {}, saying nothing", ran.code),
+                false => crate::util::clip(said_all.trim(), 240),
+            },
+        };
+        remember_refusal(&out);
+        return Err(out);
+    }
     // The sandbox answered, and the shell in it could not find the CLI. `claude` never ran, so
     // reporting its exit code would be reporting a number it did not produce — and the cure is in
     // the sandbox, not on the server's PATH.
-    let said_all = format!(
-        "{} {}",
-        String::from_utf8_lossy(&ran.out).trim(),
-        ran.err.trim()
-    );
     if ran.code == 127 && said_all.to_lowercase().contains("command not found") {
         let out = Unread::AbsentInSandbox {
             bin: bin.to_string(),
@@ -420,14 +445,11 @@ fn from_sandbox(
         // would have thrown it away, which is why this path uses `Place::attempt`.
         let why = Unread::Refused {
             code: ran.code.to_string(),
-            said: [
-                String::from_utf8_lossy(&ran.out).trim().to_string(),
-                ran.err,
-            ]
-            .into_iter()
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join(" / "),
+            said: [String::from_utf8_lossy(&ran.out).trim().to_string(), err]
+                .into_iter()
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" / "),
         };
         remember_refusal(&why);
         return Err(why);
@@ -834,6 +856,22 @@ mod tests {
             "the delimiter did not grow past a prompt containing it, so the heredoc ends early and \
              the model is handed half a question: {script}"
         );
+        // The script says it got there, before it does anything else. Without this line a failure
+        // cannot be attributed: `sbx exec` exits non-zero on its own account — a stalled daemon, a
+        // sandbox that is not running — and an exit code cannot say which program chose it. The
+        // marker's ABSENCE on a failure is the evidence that nothing in the sandbox ever ran.
+        //
+        // Asserted on the SCRIPT, not on a stub's behaviour: the stubs in the sibling test print
+        // this marker themselves to stand in for a shell that ran it, so they would go on passing
+        // if the real script stopped printing it.
+        assert!(
+            script.trim_start().starts_with("printf")
+                && script.contains(crate::fleet::REACHED)
+                && script.find(crate::fleet::REACHED) < script.find("-p"),
+            "the call cannot prove it reached the sandbox, so a transport failure will be reported \
+             as the model refusing: {script}"
+        );
+
         // And the call brings its own scratch directory. The CLI derives one from the shared
         // /tmp and refuses to start when that path belongs to somebody else — which in a sandbox
         // is whoever ran first, and on the owner's fleet was root. `$HOME` unexpanded, because it
@@ -1188,7 +1226,11 @@ mod tests {
         // The sandbox answers, and `claude` is not in it. `claude` never ran, so its exit code is
         // not skein's to report — and the server's PATH, which `Missing` sends you to check, has
         // nothing to do with a binary inside a sandbox.
-        sbx("echo 'bash: line 2: claude: command not found' >&2; exit 127");
+        // The marker the real script prints the moment a shell in the sandbox runs it. These fakes
+        // never run the script they are handed, so they print it themselves to stand for one that
+        // did — without it they are indistinguishable from an `sbx` that failed before the payload
+        // started, which is exactly the distinction the case below turns on.
+        sbx("echo SKEIN_IN_SANDBOX >&2; echo 'bash: line 2: claude: command not found' >&2; exit 127");
         match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
             Err(Unread::AbsentInSandbox { bin, sandbox }) => {
                 assert_eq!((bin.as_str(), sandbox.as_str()), ("claude", "skein-fleet"));
@@ -1201,15 +1243,44 @@ mod tests {
             other => panic!("expected AbsentInSandbox, got {other:?}"),
         }
 
+        // `sbx` itself failing, which is what a stalled daemon or a sandbox that is not running
+        // looks like: it exits non-zero, with its own words, and the script never runs. Told apart
+        // by evidence rather than by the exit code — 1 means whatever the program that exited chose
+        // it to mean — because this is the arm that fires most often, and it was being reported to
+        // a person as `claude` refusing.
+        sbx("echo 'the daemon is not responding' >&2; exit 1");
+        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
+            Err(Unread::Unreachable { sandbox, why }) => {
+                assert_eq!(sandbox, "skein-fleet");
+                assert!(
+                    why.contains("the daemon is not responding"),
+                    "the transport's own words were dropped: {why}"
+                );
+                let said = Unread::Unreachable { sandbox, why }.say();
+                assert!(
+                    !said.contains("claude"),
+                    "a transport failure was reported under the model's name: {said}"
+                );
+            }
+            other => panic!(
+                "an `sbx` that failed before the model ran was reported as the model failing: \
+                 {other:?}"
+            ),
+        }
+
         // And a CLI that ran and refused still reports its own diagnosis, unchanged — the point of
         // separating the first two is that this one keeps meaning what it says.
-        sbx("echo 'Invalid API key'; exit 1");
+        sbx("echo SKEIN_IN_SANDBOX >&2; echo 'Invalid API key'; exit 1");
         match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
             Err(Unread::Refused { code, said }) => {
                 assert_eq!(code, "1");
                 assert!(
                     said.contains("Invalid API key"),
                     "the diagnosis was lost: {said}"
+                );
+                assert!(
+                    !said.contains(crate::fleet::REACHED),
+                    "skein's own bookkeeping was shown to a person: {said}"
                 );
             }
             other => panic!("expected Refused, got {other:?}"),

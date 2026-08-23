@@ -584,6 +584,13 @@ fn a_box_cannot_read_the_fleet_agents_token() {
             box_root.display()
         ))
         .env("SKEIN_FLEET_ROOT", &fleet)
+        // Every variable the block reads is supplied here, none inherited. The block's first
+        // condition is `[ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]`, so run inside a box that IS
+        // privileged this test skipped the branch it exists for, produced no bind, and failed with
+        // an empty stderr that reads like a broken script. A test that drives a shell block and
+        // lets the ambient environment choose the branch is a test whose result depends on where it
+        // is run — green all morning here, red every run after this box was made privileged.
+        .env("SKEIN_BOX_PRIVILEGED", "0")
         .stdout(Stdio::piped())
         .output()
         .unwrap();
@@ -608,6 +615,26 @@ fn a_box_cannot_read_the_fleet_agents_token() {
     // The host's own copy is what the agent authenticates against, and it is untouched: the cover
     // exists only inside a box's namespace.
     assert_eq!(fs::read_to_string(&token).unwrap(), "s3cret-fleet-token");
+
+    // And the privileged box, which is the branch the ambient environment used to select by
+    // accident. A privileged box is one somebody deliberately gave the fleet's own reach to, so the
+    // cover is not applied — stated here rather than left as whatever the machine happened to be,
+    // because "no bind" is the assertion above's failure AND this one's pass.
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -uo pipefail; binds=(); root={}; {block}; printf '%s\\n' \"${{binds[@]}}\"",
+            box_root.display()
+        ))
+        .env("SKEIN_FLEET_ROOT", &fleet)
+        .env("SKEIN_BOX_PRIVILEGED", "1")
+        .stdout(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("--ro-bind"),
+        "a privileged box had the fleet token covered anyway, which is not what privileged means"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

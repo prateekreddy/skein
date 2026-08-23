@@ -4881,7 +4881,8 @@ pub fn model_call_in_sandbox(
     // from /tmp belongs to somebody else. `$HOME` is expanded IN THE SANDBOX, by the shell that
     // runs this, because it is the sandbox's HOME that holds the credential and not the host's.
     let script = format!(
-        "if [ -n \"${{HOME:-}}\" ]; then export CLAUDE_CODE_TMPDIR=\"$HOME/{MODEL_SCRATCH}\"; fi\n\
+        "printf '%s\\n' {REACHED} >&2\n\
+         if [ -n \"${{HOME:-}}\" ]; then export CLAUDE_CODE_TMPDIR=\"$HOME/{MODEL_SCRATCH}\"; fi\n\
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
          {bin} -p --model {model} <<'{delim}'\n{prompt}\n{delim}\n",
         bin = sh_quote(bin),
@@ -4951,6 +4952,25 @@ pub fn refreshable_login_at(home: &std::path::Path) -> bool {
 /// refuses; with `CLAUDE_CODE_TMPDIR` pointed at a private path the same call answers, and the CLI
 /// creates the directory itself, 0700, without being asked.
 pub const MODEL_SCRATCH: &str = ".cache/skein/claude";
+
+/// Printed on stderr by the model-call script before it does anything else, so that a failure can
+/// be attributed to the program that actually failed.
+///
+/// **Why a marker and not an exit code.** `sbx exec` exits non-zero with its own message when the
+/// daemon is not responding, when the sandbox is not running, or when it does not exist — and the
+/// payload never runs. Exit 1 means whatever the program that exited chose it to mean, so nothing
+/// in the code or the text can be relied on to say WHICH program that was. Skein was reading those
+/// as the model refusing:
+///
+/// ```text
+/// `claude` exited 1: <something sbx said>
+/// ```
+///
+/// which names `claude` for a failure `claude` was never part of — the defect SKEIN-171 was filed
+/// to end, surviving in the arm that fires most often. This is the evidence version of the same
+/// question: the marker is absent unless a shell inside the sandbox ran the script, so its absence
+/// on a failure PROVES the payload never started.
+pub const REACHED: &str = "SKEIN_IN_SANDBOX";
 
 /// The environment variables that decide WHICH CREDENTIAL a model call authenticates with, and
 /// which skein removes before making one — but only when it has a login of its own to fall back on.
