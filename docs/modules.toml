@@ -420,6 +420,13 @@ depends_on = ["config", "repos", "sandbox", "sbx", "util"]
 [current.transcript]
 depends_on = ["fleet", "place", "repos", "sandbox", "util"]
 
+[current.prwork]
+# The half with consequences: `workflow` for what was decided, `github` to do it, `prq` for where a
+# repo's state is kept, `warden_client` for the log skein does not own, `config` for the switch.
+# Nothing depends on THIS except the tick and the routes — it is a leaf, so the thing that merges
+# pull requests can never become something another module reaches into.
+depends_on = ["config", "github", "prq", "warden_client", "workflow"]
+
 [current.workflow]
 # `config` for one thing: where skein's own home is, so the file can be found. Nothing else, and
 # that is the point — this module is a vocabulary and a reader, and it is the one part of the

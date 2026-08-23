@@ -113,6 +113,19 @@ pub struct Config {
     /// "not summarised" and stays at full attention. See [`crate::review`].
     #[serde(default = "default_true")]
     pub review_summaries: bool,
+
+    /// May skein act on pull requests on its own — labels, updates, merges, deleted branches?
+    ///
+    /// **Off by default, and the only default in skein that leans this way.** Everything else
+    /// defaults toward showing you more; what this one gates is not a reading but a merge, and a
+    /// fleet that starts merging because a config file was absent is not one anybody would trust
+    /// twice.
+    ///
+    /// `$SKEIN_PR_WORKFLOWS=on|off` overrides — so a fleet doing something you want stopped can be
+    /// stopped from the command line that starts the server, without the cockpit and without
+    /// finding the file. See [`crate::prwork`].
+    #[serde(default)]
+    pub pr_workflows: bool,
     /// The one sbx sandbox that hosts every box. **Naming it is the only supported shape.**
     ///
     /// Empty used to mean skein's original model — one microVM per box — and that is gone. It does not
@@ -481,6 +494,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             seed_gh_secret: false,
+            pr_workflows: false,
             force_gh_secret: false,
             default_agent: default_agent(),
             base_branch: String::new(),
