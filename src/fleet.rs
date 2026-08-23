@@ -4713,6 +4713,49 @@ done
     )
 }
 
+/// Can this HOME's Claude credential still be used — refreshing it if need be?
+///
+/// **`refreshTokenExpiresAt`, not `expiresAt`.** The access token expires in hours and Claude Code
+/// renews it without being asked, so a past `expiresAt` is the ordinary state of a perfectly good
+/// login; a check against it would report every fleet as signed out most of the day. What decides
+/// whether a credential is still worth anything is the REFRESH token's expiry. Absent means an older
+/// shape that does not record one, and the honest answer there is "usable" — declining to use a
+/// credential because it declined to say when it dies is a worse failure than trying and being told.
+pub fn refreshable_login_at(home: &std::path::Path) -> bool {
+    let Ok(bytes) = std::fs::read(home.join(".claude/.credentials.json")) else {
+        return false;
+    };
+    if !carries_login(&bytes) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let Some(dies) = value
+        .get("claudeAiOauth")
+        .and_then(|b| b.get("refreshTokenExpiresAt"))
+        .and_then(|v| v.as_i64())
+    else {
+        return true;
+    };
+    dies > chrono::Utc::now().timestamp_millis()
+}
+
+/// The HOME skein should run its own `claude` calls with, when the ambient one will not do.
+///
+/// Skein keeps the fleet's login under `fleet-home` precisely so it always has one — it is what
+/// `signed_in_runtimes` reports and what seeds every box. And then `ai::claude_oneshot` spawned
+/// `claude` with no environment at all, so the call read whatever HOME the SERVER happened to be
+/// started with. On a host where those differ the result is `Not logged in · Please run /login`
+/// from a skein whose own health report says `logins: ["claude"]` in the same breath.
+///
+/// Same shape as the review queue refusing to use the `gh` login it was already seeding boxes from:
+/// a credential the user gave skein, held and not used for a job it is capable of.
+pub fn login_home() -> Option<std::path::PathBuf> {
+    let home = fleet_home_dir();
+    refreshable_login_at(&home).then_some(home)
+}
+
 /// Which runtimes have a login the fleet can hand to a new box.
 ///
 /// Read from the host's own copy under `fleet-home`, not from the sandbox: this answers the first

@@ -186,6 +186,26 @@ pub(crate) fn tried(
 ) -> Result<String, Unread> {
     let mut command = Command::new(bin);
     command.args(["-p", "--model", model, prompt]);
+    // **Which HOME the credential is read from**, because that is where this failed.
+    //
+    // `claude` finds its login at `$HOME/.claude/.credentials.json` and nowhere else — verified by
+    // running it with HOME pointed at an empty directory, which reproduces the exact message a live
+    // fleet was reporting: `Not logged in · Please run /login`. This spawned the CLI with no
+    // environment at all, so it read whatever HOME the SERVER was started with. Meanwhile skein
+    // keeps the fleet's login under `fleet-home`, reports it as `logins: ["claude"]`, and seeds
+    // every box from it. It had the credential and was looking somewhere else.
+    //
+    // The ambient HOME wins when it has a usable login, so a host where this already worked is not
+    // moved off it. Only when it does not does skein reach for its own.
+    let ambient = env::var_os("HOME").map(std::path::PathBuf::from);
+    let usable = ambient
+        .as_deref()
+        .is_some_and(crate::fleet::refreshable_login_at);
+    if !usable {
+        if let Some(home) = crate::fleet::login_home() {
+            command.env("HOME", home);
+        }
+    }
     let started = std::time::Instant::now();
     let out = crate::util::output_with_timeout_why(&mut command, timeout).map_err(|why| {
         // Told apart by the clock rather than by parsing the message: a spawn that fails does so
@@ -430,6 +450,93 @@ mod tests {
         // And the happy path still is one.
         let works = stub("answers", "echo '  a summary  '");
         assert_eq!(tried(&works, "m", "hi", quick), Ok("a summary".to_string()));
+    }
+
+    /// A model call uses the login skein holds when the one it inherits will not do.
+    ///
+    /// The bug: `claude` reads its credential from `$HOME/.claude/.credentials.json` and nowhere
+    /// else, and this module spawned it with no environment — so it used whatever HOME the server
+    /// was started with. A live fleet answered `Not logged in · Please run /login` for every single
+    /// summary while its own health report said `logins: ["claude"]`, because skein's copy was under
+    /// `fleet-home` and the call was looking somewhere else.
+    ///
+    /// Asserted on the HOME the child actually receives, via a stub that prints it — the property is
+    /// which credential the call reads, and nothing short of the spawned environment shows that.
+    #[cfg(unix)]
+    #[test]
+    fn a_model_call_falls_back_to_the_login_skein_keeps() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_AI", "on");
+
+        // A stub `claude` that answers with the HOME it was given.
+        let bin = home.join("claude");
+        fs::write(&bin, "#!/usr/bin/env bash\nprintf '%s' \"$HOME\"\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+
+        // An ambient HOME with no credential in it — the state the owner's server was in.
+        let bare = home.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        env::set_var("HOME", &bare);
+
+        // Nothing anywhere yet: the call is left alone, so a host that works another way is not
+        // moved off whatever it was doing.
+        assert_eq!(
+            claude_oneshot("hi").as_deref(),
+            Some(bare.to_string_lossy().as_ref()),
+            "skein redirected a call while it had no login of its own to redirect it to"
+        );
+
+        // Now skein has one. `refreshTokenExpiresAt` far in the future — that field and NOT
+        // `expiresAt`, which is the access token and expires hourly on a perfectly good login.
+        let fleet_home = home.join("fleet-home/.claude");
+        fs::create_dir_all(&fleet_home).unwrap();
+        fs::write(
+            fleet_home.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_oneshot("hi").as_deref(),
+            Some(home.join("fleet-home").to_string_lossy().as_ref()),
+            "the call still read a HOME with no credential while skein was holding one"
+        );
+
+        // And an ambient HOME that DOES carry a usable login keeps it — no reason to move a host
+        // that already worked.
+        let mine = bare.join(".claude");
+        fs::create_dir_all(&mine).unwrap();
+        fs::write(
+            mine.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_oneshot("hi").as_deref(),
+            Some(bare.to_string_lossy().as_ref()),
+            "a working host was moved off the credential it was already using"
+        );
+
+        // A refresh token that has died is not a login. This is the one expiry that means anything:
+        // `expiresAt` in the past is the ordinary state of a good credential.
+        fs::write(
+            mine.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_oneshot("hi").as_deref(),
+            Some(home.join("fleet-home").to_string_lossy().as_ref()),
+            "a dead refresh token was treated as a login"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
+            env::remove_var(key);
+        }
     }
 
     /// The health report asks about both switches, not one of them.

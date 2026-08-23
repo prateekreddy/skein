@@ -144,7 +144,14 @@ item = "SKEIN-1"
 # @CURRENT
 
 [current.ai]
-depends_on = ["config", "signals", "util"]
+# `fleet` for one thing: WHICH HOME a `claude` call reads its credential from. `claude` finds a login
+# at `$HOME/.claude/.credentials.json` and nowhere else, and this module spawned it with no
+# environment — so the call used whatever HOME the server was started with, while skein's own copy
+# sat under `fleet-home` being reported as `logins: ["claude"]` and seeded into every box. A live
+# fleet answered `Not logged in · Please run /login` for every summary with a working credential on
+# disk. The edge is upward and worth it: the fleet's login is `fleet`'s to know about, and the
+# alternative was a second place that knows where skein keeps credentials.
+depends_on = ["config", "fleet", "signals", "util"]
 
 [current.apiauth]
 depends_on = ["config"]
