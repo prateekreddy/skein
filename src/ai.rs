@@ -62,31 +62,33 @@ pub fn model_wanted() -> Vec<&'static str> {
     wanted
 }
 
-/// Can skein start the model binary at all? Asked without spending a token.
+/// Can skein make the model call it actually makes? Asked by running one.
 ///
-/// `--version` rather than a prompt: the commonest failure by far is that the binary is not on the
-/// PATH of the process running the server — which is not your shell's — and that question has an
-/// answer that costs nothing. A binary that runs and then refuses is a different report, and the
-/// call site that actually needs the model is where that one surfaces.
+/// **It used to ask `--version`**, on the grounds that the commonest failure is a binary that is not
+/// on the server's PATH and that question is free. It is free because it answers a *different*
+/// question. Measured against the real CLI: `claude --version` prints its version happily inside a
+/// sandbox whose temp directory the CLI will refuse to use, and `claude -p` in the same shell exits
+/// 1 — so `skein doctor` said `model … claude runs here` on a fleet where every single summary was
+/// coming back unread. A check that cannot fail the way the feature fails is not a check.
 ///
-/// Not `program_on_path`: `$SKEIN_CLAUDE_BIN` may be an absolute path, and a PATH scan answers "no"
-/// for one that works perfectly.
+/// So this runs the real thing, through [`claude_oneshot_telling`] — same binary, same HOME, same
+/// temp directory, and the same trip into the sandbox when that is where the login lives. One
+/// haiku-sized token of spend, only when a person types `doctor`, and it is the only wiring in
+/// skein that reports on the model without guessing.
+///
+/// [`forget_refusal`] first: a person running `doctor` is asking for the current answer, not for
+/// the circuit breaker's memory of an older one.
 pub fn model_reachable() -> Result<(), Unread> {
-    let (bin, _) = binary_and_model(None);
-    let mut command = Command::new(&bin);
-    command.arg("--version");
-    match crate::util::output_with_timeout_why(&mut command, Duration::from_secs(10)) {
-        Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(Unread::Refused {
-            code: out
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "on a signal".into()),
-            said: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        }),
-        Err(why) => Err(Unread::Missing { bin, why }),
-    }
+    forget_refusal();
+    let out = claude_oneshot_telling(
+        "Reply with the single word: ok",
+        None,
+        Duration::from_secs(30),
+    );
+    // A refusal found by `doctor` is not remembered — the *next* real call should try for itself
+    // rather than inherit a verdict from a diagnostic.
+    forget_refusal();
+    out.map(|_| ())
 }
 
 /// One-shot headless Haiku over the subscription: `claude -p --model <haiku>`. Returns trimmed
@@ -246,10 +248,22 @@ pub(crate) fn tried(
     let usable = ambient
         .as_deref()
         .is_some_and(crate::fleet::refreshable_login_at);
+    let mut home = ambient;
     if !usable {
-        if let Some(home) = crate::fleet::login_home() {
-            command.env("HOME", home);
+        if let Some(own) = crate::fleet::login_home() {
+            command.env("HOME", &own);
+            home = Some(own);
         }
+    }
+    // **And which temp directory it writes into**, which is the same question asked about a
+    // different directory — and the next thing that stopped a live fleet dead. The CLI refuses to
+    // start when the path it derives from the shared `/tmp` is owned by somebody else, and in a
+    // sandbox something else always ran first. See [`crate::fleet::MODEL_SCRATCH`].
+    //
+    // This path matters MOST in-fleet: there the sandbox call is skipped, because skein is already
+    // inside the sandbox — so this spawn is the only one there is, in the very /tmp that is shared.
+    if let Some(home) = home {
+        command.env("CLAUDE_CODE_TMPDIR", crate::fleet::model_scratch_dir(&home));
     }
     let started = std::time::Instant::now();
     let out = crate::util::output_with_timeout_why(&mut command, timeout).map_err(|why| {
@@ -752,6 +766,22 @@ mod tests {
             "the delimiter did not grow past a prompt containing it, so the heredoc ends early and \
              the model is handed half a question: {script}"
         );
+        // And the call brings its own scratch directory. The CLI derives one from the shared
+        // /tmp and refuses to start when that path belongs to somebody else — which in a sandbox
+        // is whoever ran first, and on the owner's fleet was root. `$HOME` unexpanded, because it
+        // is the SANDBOX's home that holds the credential, not the host's.
+        let export = script
+            .find("CLAUDE_CODE_TMPDIR")
+            .expect("the model call took the sandbox's shared /tmp, which anything can poison");
+        assert!(
+            script.contains(&format!("\"$HOME/{}\"", crate::fleet::MODEL_SCRATCH)),
+            "the scratch path was resolved on the host, so it names a directory the sandbox does \
+             not have: {script}"
+        );
+        assert!(
+            export < script.find("-p").unwrap(),
+            "the scratch directory is exported after the call it is for: {script}"
+        );
 
         env::set_var("PATH", path);
         for key in ["SKEIN_HOME", "SKEIN_AI"] {
@@ -849,6 +879,147 @@ mod tests {
         for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
             env::remove_var(key);
         }
+    }
+
+    /// A model call brings its own temp directory, and it is under the HOME it is already using.
+    ///
+    /// The bug, reported live with every review summary failing:
+    ///
+    /// ```text
+    /// `claude` exited 1: Temp directory /tmp/claude-1000 is owned by uid 0, expected 1000.
+    /// Refusing to use it — another user may have pre-created it.
+    /// ```
+    ///
+    /// The CLI derives its scratch from the shared `/tmp` and refuses to start when that path is
+    /// owned by somebody else — deliberately, against a planted directory. Skein had already taken
+    /// charge of WHICH HOME the call reads its credential from and left the temp directory to
+    /// whoever ran first, which in a sandbox is always something. Verified against the real CLI:
+    /// poison the derived path and it refuses; set this and the same call answers.
+    ///
+    /// Asserted on the environment the child actually receives, because nothing shorter shows it.
+    #[cfg(unix)]
+    #[test]
+    fn a_model_call_brings_its_own_temp_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_AI", "on");
+
+        // A stub `claude` that answers with the scratch directory it was handed.
+        let bin = home.join("claude");
+        fs::write(
+            &bin,
+            "#!/usr/bin/env bash\nprintf '%s' \"${CLAUDE_CODE_TMPDIR:-the shared /tmp}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+
+        let live = br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#;
+
+        // An ambient HOME that carries a login: the call stays on it, and so does its scratch.
+        let mine = home.join("mine");
+        fs::create_dir_all(mine.join(".claude")).unwrap();
+        fs::write(mine.join(".claude/.credentials.json"), live).unwrap();
+        env::set_var("HOME", &mine);
+        assert_eq!(
+            claude_oneshot("hi"),
+            Some(crate::fleet::model_scratch_dir(&mine).display().to_string()),
+            "the call wrote its scratch into a directory skein does not own"
+        );
+
+        // And when the call moves to the login skein keeps, the scratch moves with it — a temp
+        // directory under a HOME the call is no longer using is the same bug wearing a hat.
+        let bare = home.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        env::set_var("HOME", &bare);
+        let fleet_home = home.join("fleet-home");
+        fs::create_dir_all(fleet_home.join(".claude")).unwrap();
+        fs::write(fleet_home.join(".claude/.credentials.json"), live).unwrap();
+        assert_eq!(
+            claude_oneshot("hi"),
+            Some(
+                crate::fleet::model_scratch_dir(&fleet_home)
+                    .display()
+                    .to_string()
+            ),
+            "the credential moved and the scratch directory did not"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
+    }
+
+    /// The model check runs the call it reports on, not a cheaper one.
+    ///
+    /// `model_reachable` asked `claude --version`, because a missing binary is the commonest
+    /// failure and that question costs nothing. Measured against the real CLI: inside a sandbox
+    /// whose temp directory it refuses to use, `--version` prints `2.1.221 (Claude Code)` and exits
+    /// 0 while `-p` exits 1. So `skein doctor` — the one place a person goes to ask why — reported
+    /// the model fine on a fleet where every summary was failing.
+    ///
+    /// The stub here is exactly that host: fine when asked its version, refusing when asked a
+    /// question.
+    #[cfg(unix)]
+    #[test]
+    fn the_model_check_runs_the_call_it_reports_on() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("HOME", home);
+
+        let bin = home.join("claude");
+        let stub = |body: &str| {
+            fs::write(&bin, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            env::set_var("SKEIN_CLAUDE_BIN", &bin);
+        };
+
+        stub(
+            "case \"$1\" in --version) echo '2.1.221 (Claude Code)'; exit 0 ;; esac\n\
+             echo 'Temp directory /tmp/claude-1000 is owned by uid 0, expected 1000.'; exit 1",
+        );
+        match model_reachable() {
+            Err(Unread::Refused { said, .. }) => assert!(
+                said.contains("Temp directory"),
+                "the refusal was reported without its reason: {said}"
+            ),
+            other => panic!(
+                "a host that answers --version and refuses -p was reported as working: {other:?}"
+            ),
+        }
+
+        // A host where the real call works still reports working.
+        stub("printf ok");
+        assert_eq!(model_reachable(), Ok(()));
+
+        // And the diagnostic leaves no verdict behind for the next real call to inherit.
+        stub("echo 'Invalid API key' >&2; exit 3");
+        assert!(model_reachable().is_err());
+        stub("printf ok");
+        assert_eq!(
+            tried(
+                &bin.display().to_string(),
+                "m",
+                "hi",
+                Duration::from_secs(5)
+            ),
+            Ok("ok".to_string()),
+            "a refusal found by `doctor` was remembered and answered the next real call"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_CLAUDE_BIN", "HOME"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
     }
 
     /// The health report asks about both switches, not one of them.

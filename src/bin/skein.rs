@@ -508,7 +508,7 @@ fn cmd_doctor() -> Result<(), String> {
         } else {
             match skein::ai::model_reachable() {
                 Ok(()) => println!(
-                    "{OK} model         {DIM}{} — `claude` runs here{RESET}",
+                    "{OK} model         {DIM}{} — a test call answered here{RESET}",
                     wanted.join(" and ")
                 ),
                 Err(unread) => {

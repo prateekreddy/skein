@@ -4876,8 +4876,13 @@ pub fn model_call_in_sandbox(
     while prompt.contains(&delim) {
         delim.push('_');
     }
+    // The scratch directory travels with the call. See [`MODEL_SCRATCH`] — a sandbox's /tmp is
+    // shared by everything skein runs in it, and the CLI refuses to start when the path it derives
+    // from /tmp belongs to somebody else. `$HOME` is expanded IN THE SANDBOX, by the shell that
+    // runs this, because it is the sandbox's HOME that holds the credential and not the host's.
     let script = format!(
-        "{bin} -p --model {model} <<'{delim}'\n{prompt}\n{delim}\n",
+        "if [ -n \"${{HOME:-}}\" ]; then export CLAUDE_CODE_TMPDIR=\"$HOME/{MODEL_SCRATCH}\"; fi\n\
+         {bin} -p --model {model} <<'{delim}'\n{prompt}\n{delim}\n",
         bin = sh_quote(bin),
         model = sh_quote(model),
     );
@@ -4922,6 +4927,34 @@ pub fn refreshable_login_at(home: &std::path::Path) -> bool {
 ///
 /// Same shape as the review queue refusing to use the `gh` login it was already seeding boxes from:
 /// a credential the user gave skein, held and not used for a job it is capable of.
+/// Where a model call skein makes keeps its scratch: under the HOME skein already chose for it.
+///
+/// **Why skein decides this rather than the CLI.** Claude Code puts its temp directory at
+/// `${os.tmpdir()}/claude-<uid>` and REFUSES to start when that path exists and is not owned by the
+/// calling uid — a deliberate guard against a directory somebody else planted. In a fleet that path
+/// is the sandbox's SHARED `/tmp`, which everything skein runs there writes into, and on the owner's
+/// fleet something running as root had got there first. Every review summary came back:
+///
+/// ```text
+/// `claude` exited 1: Temp directory /tmp/claude-1000 is owned by uid 0, expected 1000.
+/// Refusing to use it — another user may have pre-created it.
+/// ```
+///
+/// Skein already decides which HOME the call reads its credential from ([`login_home`]). Choosing
+/// the HOME and then letting whoever ran first choose the temp directory is how a fleet ends up
+/// with a login that works and a model that will not start — and it is not a state anything can
+/// recover from by retrying, because the offending directory outlives every call.
+///
+/// Measured against the real CLI, not inferred from the message: with the derived path poisoned it
+/// refuses; with `CLAUDE_CODE_TMPDIR` pointed at a private path the same call answers, and the CLI
+/// creates the directory itself, 0700, without being asked.
+pub const MODEL_SCRATCH: &str = ".cache/skein/claude";
+
+/// [`MODEL_SCRATCH`] under a HOME that is already known, for the calls skein spawns itself.
+pub fn model_scratch_dir(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(MODEL_SCRATCH)
+}
+
 pub fn login_home() -> Option<std::path::PathBuf> {
     let home = fleet_home_dir();
     refreshable_login_at(&home).then_some(home)
