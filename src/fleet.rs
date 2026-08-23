@@ -4638,6 +4638,81 @@ fn carries_login(bytes: &[u8]) -> bool {
 /// saved login and the fleet lost the copy it keeps precisely so a rebuild can restore it. Same bug,
 /// one layer up. [`carries_login`] is the same test the launcher applies, kept in step by
 /// `the_host_and_the_launcher_agree_on_what_a_login_is`.
+/// Put the fleet's login into every box that already exists, and answer with the ones it reached.
+///
+/// **The hole this fills.** The launcher reconciles logins at box session START and nowhere else,
+/// so `skein login` reached new boxes and no running one — which it said out loud and nobody read
+/// as the problem it is. When a login is invalidated fleet-wide, the owner's choice was to restart
+/// every box or to sign in on every box, and both are exactly what sharing a login exists to
+/// prevent. Reported from daily use: "every time Claude logs me out, I have to login separately on
+/// each box."
+///
+/// **No comparison, and that is the point.** `box-session.sh` argues at length that a credential may
+/// flow DOWN from the fleet to a box but never UP, because nothing in a file a box writes is
+/// evidence about that file — and between two that both carry a login it compares `expiresAt`. This
+/// runs immediately after an interactive login, which is the one moment when there is nothing to
+/// compare: a person has just authenticated, so the canonical copy is the freshest credential in the
+/// fleet by construction. A box mid-refresh may hold one minted seconds earlier; replacing it with
+/// the one minted now costs nothing, and asking would mean a second copy of a rule whose whole
+/// safety argument is about direction.
+///
+/// **It never leaves the sandbox.** Source and destination are both paths the sandbox can see —
+/// `$HOME/<rel>` and `<box root>/home/<rel>` — so this is one script over there rather than bytes
+/// read to the host and written back. The host has no business holding this even in memory.
+///
+/// Stopped boxes are written too. A box that is not running has a private HOME sitting on disk that
+/// its next start will use, and the launcher's own reconciliation would take this copy anyway.
+pub fn share_login_with_boxes() -> Result<Vec<String>, String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured".into());
+    }
+    let told = own_sandbox(&sandbox).exec(&share_login_script(), Duration::from_secs(60))?;
+    Ok(told
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// The script [`share_login_with_boxes`] runs, separated so a test can drive it against a fixture
+/// rather than against a fleet.
+///
+/// Writes through a temporary file and `mv`, because the destination is read by a running agent: a
+/// half-written credentials file is a logged-out box, and `cp` straight over it has a window where
+/// that is exactly what is on disk.
+fn share_login_script() -> String {
+    let root = sh_quote(&fleet_root());
+    let files = LOGIN_FILES
+        .iter()
+        .map(|rel| sh_quote(rel))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"set -u
+for rel in {files}; do
+  src="$HOME/$rel"
+  [ -s "$src" ] || continue
+  for root in {root}/*/; do
+    home="$root/home"
+    [ -d "$home" ] || continue
+    dst="$home/$rel"
+    mkdir -p "$(dirname "$dst")" 2>/dev/null || continue
+    tmp="$dst.skein-login"
+    if cp "$src" "$tmp" 2>/dev/null && chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$dst" 2>/dev/null; then
+      name="${{root%/}}"
+      printf '%s
+' "${{name##*/}}"
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
+  done
+done
+"#
+    )
+}
+
 /// Which runtimes have a login the fleet can hand to a new box.
 ///
 /// Read from the host's own copy under `fleet-home`, not from the sandbox: this answers the first
@@ -9857,6 +9932,107 @@ b idle 5000000 4 1048576 1048576
             assert!(
                 written.contains(&format!("{cgroup}=")),
                 "doctor reports `{cgroup}` and `fleet_limits` never sets it: {written}"
+            );
+        }
+    }
+
+    /// A login lands in every box that exists, and never travels the other way.
+    ///
+    /// Driven by RUNNING the script against a fixture rather than by reading it: the thing that
+    /// matters is which file ends up where, and a source-shaped assertion would pass on a script
+    /// that copied in the wrong direction — which is the one mistake here that would matter, since
+    /// the launcher's whole security argument is that a box may never write the fleet's copy.
+    #[test]
+    fn a_shared_login_reaches_every_box_and_never_comes_back_up() {
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let boxes = crate::testutil::tempdir();
+        let boxes = boxes.as_ref() as &std::path::Path;
+
+        // The fleet's copy: what a person just logged in as.
+        let canonical = home.join(".claude/.credentials.json");
+        std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        std::fs::write(&canonical, br#"{"claudeAiOauth":{"accessToken":"fresh"}}"#).unwrap();
+
+        // Three boxes: one already holding a dead token, one with an empty private HOME, and one
+        // that is only a checkout — no HOME at all, which must be skipped rather than created.
+        for (name, cred) in [
+            (
+                "web-main",
+                Some(br#"{"claudeAiOauth":{"accessToken":""}}"#.as_slice()),
+            ),
+            ("api-worker", None),
+        ] {
+            let h = boxes.join(name).join("home");
+            std::fs::create_dir_all(h.join(".claude")).unwrap();
+            if let Some(cred) = cred {
+                std::fs::write(h.join(".claude/.credentials.json"), cred).unwrap();
+            }
+        }
+        std::fs::create_dir_all(boxes.join("no-home").join("tree")).unwrap();
+
+        std::env::set_var("SKEIN_FLEET_ROOT", boxes);
+        let script = share_login_script();
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", home)
+            .output()
+            .expect("bash");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // FIRST, because it is the failure that matters most and the one most easily masked. The
+        // canonical copy is what a box must never be able to change; a script that swapped source
+        // and destination would trip a later assertion instead and report itself as something else.
+        assert_eq!(
+            std::fs::read(&canonical).unwrap(),
+            br#"{"claudeAiOauth":{"accessToken":"fresh"}}"#,
+            "the fleet's own copy was rewritten from a box — the direction is reversed, and this is \
+             the one mistake here that is a security bug rather than an inconvenience"
+        );
+
+        let mut reached: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        reached.sort();
+        assert_eq!(
+            reached,
+            vec!["api-worker".to_string(), "web-main".to_string()],
+            "the boxes it says it reached are not the boxes with a private HOME"
+        );
+
+        for name in ["web-main", "api-worker"] {
+            let landed = std::fs::read(boxes.join(name).join("home/.claude/.credentials.json"))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                String::from_utf8_lossy(&landed).contains("fresh"),
+                "{name} kept a credential the person has just replaced, so it still needs its own \
+                 login — which is the whole bug"
+            );
+        }
+        // A box with no private HOME is not given one. Creating it would be skein inventing a box.
+        assert!(
+            !boxes.join("no-home").join("home").exists(),
+            "the script created a HOME for something that is not a box"
+        );
+        // And no leftovers: the write goes through a temporary, and one left behind is a credential
+        // sitting at a second path nobody will think to look at.
+        for name in ["web-main", "api-worker"] {
+            assert!(
+                !boxes
+                    .join(name)
+                    .join("home/.claude/.credentials.json.skein-login")
+                    .exists(),
+                "{name} kept the temporary file"
             );
         }
     }

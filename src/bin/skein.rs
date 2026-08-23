@@ -1093,9 +1093,23 @@ fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
         eprintln!("{DIM}skein:{RESET} type {CYAN}/login{RESET} once it starts, then {CYAN}/exit{RESET} — `setup-token` returns a token to export and leaves no credential to seed boxes with");
     }
     skein::fleet::fleet_login(runtime)?;
-    eprintln!(
-        "{DIM}skein:{RESET} every new box now inherits this login; running boxes pick it up when their session next starts"
-    );
+    // And into the boxes that already exist. Without this the line above was the whole story, and
+    // the story was "restart twelve boxes or sign in twelve times" — which is what sharing a login
+    // exists to prevent. Best-effort: the login itself succeeded, and failing the command now would
+    // report a working login as a failure.
+    match skein::fleet::share_login_with_boxes() {
+        Ok(reached) if reached.is_empty() => eprintln!(
+            "{DIM}skein:{RESET} every new box inherits this login; there are no existing boxes to give it to"
+        ),
+        Ok(reached) => eprintln!(
+            "{DIM}skein:{RESET} every new box inherits this login, and {} existing box(es) now hold it: {}",
+            reached.len(),
+            reached.join(", ")
+        ),
+        Err(why) => eprintln!(
+            "{DIM}skein:{RESET} logged in, but could not hand it to the boxes already running ({why}) —              they pick it up when their session next starts"
+        ),
+    }
     Ok(())
 }
 
