@@ -244,7 +244,12 @@ pub fn host_token_source() -> GhToken {
 }
 
 /// The token itself, or the sentence to show instead of an empty queue.
-fn host_token() -> Result<String, String> {
+///
+/// Public because the workflow tick acts as you — a label, a merge, a deleted branch are all things
+/// GitHub attributes to whoever's credential asked. There is deliberately no second, quieter
+/// credential for automation: everything skein does on its own is done as you, and shows up in the
+/// repository's history under your name where you can see it.
+pub fn host_token() -> Result<String, String> {
     host_credential().1.ok_or_else(|| {
         "no GitHub token: the review queue reads pull requests as you, and nothing here names a \
          user. Any of these does it — `gh auth login` on the host, exporting GH_TOKEN, or a read \

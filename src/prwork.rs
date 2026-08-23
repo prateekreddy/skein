@@ -528,6 +528,102 @@ fn delete_branch(slug: &str, head_ref: &str, token: &str) -> Result<(), String> 
     .map(|_| ())
 }
 
+/// One pass over the fleet: every repo skein manages, every pull request a workflow governs, one
+/// step each.
+///
+/// **One step per pull request per pass, and the pass is the only thing that acts.** After an
+/// action lands, what skein believes about that pull request is one action out of date — the label
+/// is on but no check has been queued, so `checks:passing` is still true from the previous run. The
+/// next pass re-reads GitHub, which is the only thing that can say what the action did.
+///
+/// **Every repo in the registry**, not only ones whose queue somebody has opened — the owner's
+/// decision, and what makes this automation rather than a thing you have to remember to visit. A
+/// repo with no workflow claiming anything costs one cached queue read.
+///
+/// Returns what it did, for the server's log. Every action is also in the host audit with its
+/// authority; this is the line a person watching a terminal sees.
+pub fn sweep() -> Vec<String> {
+    // Nothing at all when the switch is off — not even a queue read. A feature that is switched off
+    // should be invisible in every way somebody might notice, including a rate limit.
+    if !enabled() {
+        return Vec::new();
+    }
+    let flows = match crate::workflow::load() {
+        Ok(flows) => flows,
+        // A file with one bad step loads none of them (`workflow::from_bytes`), which is the right
+        // answer and a silent one — so it is said here, where somebody watching the server sees it.
+        Err(why) => {
+            eprintln!("skein: no workflow is running — {why}");
+            return Vec::new();
+        }
+    };
+    if flows.is_empty() {
+        return Vec::new();
+    }
+    let token = match crate::prq::host_token() {
+        Ok(token) => token,
+        Err(why) => {
+            eprintln!("skein: workflows are on, and there is no GitHub token to act with — {why}");
+            return Vec::new();
+        }
+    };
+
+    let mut did = Vec::new();
+    for repo in crate::repos::load_repos() {
+        let Ok(queue) = crate::prq::queue(&repo, false) else {
+            // A queue that cannot be read is not a reason to stop the fleet's other repos. The
+            // review pane reports the failure with its reason; this pass simply has nothing to
+            // decide from.
+            continue;
+        };
+        let mut acted_in_repo = false;
+        for pr in &queue.prs {
+            // A pull request you set aside is one you said "not now" about. A workflow acting on it
+            // would be overruling that with a rule, which is the opposite of what setting aside is
+            // for — and the row that says "archived" would be acting.
+            if matches!(pr.lane, crate::prq::Lane::Archived) {
+                continue;
+            }
+            let facts = facts_of(pr, &queue.viewer);
+            let Some(name) = carries(&repo.id, pr.number, &facts, &flows)
+                .name()
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let Some(flow) = flows.iter().find(|f| f.name == name) else {
+                continue;
+            };
+            let Some(chosen) = crate::workflow::next(flow, &facts) else {
+                continue;
+            };
+            let subject = Subject {
+                repo_id: &repo.id,
+                slug: &queue.slug,
+                number: pr.number,
+                head_sha: &pr.head_sha,
+                head_ref: &pr.head_ref,
+            };
+            match perform(&subject, flow, &chosen, &token) {
+                Outcome::Did(what) => {
+                    did.push(format!("{}: {what}", repo.id));
+                    acted_in_repo = true;
+                }
+                // Waiting is the ordinary state and says nothing. A stop has already been written
+                // down and audited by `perform`; repeating it here every pass would bury the log.
+                Outcome::Waited(_) | Outcome::Stopped(_) => {}
+            }
+        }
+        // The queue is cached for a minute, and skein has just changed the thing it describes. Left
+        // alone, the next pass would decide from facts it had itself made stale — which is the one
+        // input a cascade needs to merge on a check that has not run.
+        if acted_in_repo {
+            crate::prq::invalidate(&repo.id);
+        }
+    }
+    did
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +701,163 @@ mod tests {
 
     fn chosen(act: Act) -> Chosen {
         Chosen { step: 3, act }
+    }
+
+    /// The owner's example, walked to merged by the tick alone, with nothing open.
+    ///
+    /// The claim the whole feature makes: a pull request that is approved and green ends up merged
+    /// without anybody pressing anything. Driven through `sweep` against a GitHub that answers from
+    /// a fixture and CHANGES as skein acts on it — a label appears when skein adds one, checks go
+    /// green once it is there — because a stub that answers the same thing every time cannot tell a
+    /// workflow that advances from one that is stuck in a loop taking the same step.
+    ///
+    /// The other half of the claim is that it takes ONE step per pass. After an action lands, what
+    /// skein believes is one action out of date, so a pass that kept going would decide the next
+    /// step from facts it had just made stale — a label added, no check yet queued, `checks:passing`
+    /// still true from the previous run, and it merges.
+    #[test]
+    fn the_tick_walks_a_pull_request_to_merged_one_step_per_pass() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::prq::forget_host_token();
+
+        // The workflow, as the owner described it.
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"ship-mine","matches":["mine"],"steps":[
+              {"when":["approved","no-label:ci"],"do":"add-label:ci"},
+              {"when":["checks:pending"],"do":"wait:CI is running"},
+              {"when":["checks:failing"],"do":"flag:CI is red"},
+              {"when":["approved","mergeable","checks:passing"],"do":"merge:squash+delete"},
+              {"when":["approved","not-mergeable"],"do":"update-branch:rebase"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+
+        // A GitHub whose answers move as skein acts on it.
+        // **Green before the label goes on**, which is the state that makes "one step per pass" a
+        // property with teeth. The branch passed CI on an earlier run, so `checks:passing` is true
+        // AND the label is missing — both step 1 and step 4 apply at once. A pass that kept going
+        // would add the label and then merge, in the same breath, on a check run that predates it.
+        let state: Arc<Mutex<(bool, String)>> = Arc::new(Mutex::new((false, "passing".into())));
+        let merged = Arc::new(Mutex::new(Vec::<String>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (world, seen) = (state.clone(), merged.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let (labelled, checks) = world.lock().unwrap().clone();
+                let answer = if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.contains("/labels") {
+                    // The label lands, and this repository's CI starts on it.
+                    *world.lock().unwrap() = (true, "pending".into());
+                    "[]".to_string()
+                } else if head.contains("/merge") {
+                    seen.lock().unwrap().push(head.clone());
+                    r#"{"merged":true}"#.to_string()
+                } else if head.starts_with("DELETE") {
+                    seen.lock().unwrap().push(head.clone());
+                    "{}".to_string()
+                } else if head.contains("/graphql") {
+                    format!(
+                        r#"{{"data":{{"search":{{"nodes":[{{"number":7,"title":"t","url":"u",
+                          "isDraft":false,"author":{{"login":"me"}},"headRefName":"feat",
+                          "headRefOid":"abc","baseRefName":"main",
+                          "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
+                          "mergeable":"MERGEABLE",
+                          "labels":{{"nodes":[{}]}},
+                          "latestReviews":{{"nodes":[]}},
+                          "commits":{{"nodes":[{{"commit":{{
+                             "committedDate":"2026-08-23T00:00:00Z",
+                             "statusCheckRollup":{{"contexts":{{"nodes":[{}]}}}}}}}}]}}}}]}}}}}}"#,
+                        match labelled {
+                            true => r#"{"name":"ci"}"#,
+                            false => "",
+                        },
+                        match checks.as_str() {
+                            "pending" => r#"{"status":"IN_PROGRESS"}"#,
+                            "passing" => r#"{"status":"COMPLETED","conclusion":"SUCCESS"}"#,
+                            _ => "",
+                        },
+                    )
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // **A pull request you set aside is left alone**, even by a rule that claims it. Setting
+        // aside is a person saying "not now" about this one; a workflow acting on it would overrule
+        // that with a rule, and the row would say "archived" while skein merged it.
+        std::fs::create_dir_all(crate::prq::review_dir("demo")).unwrap();
+        std::fs::write(crate::prq::review_dir("demo").join("archived.json"), b"[7]").unwrap();
+        assert!(
+            sweep().is_empty(),
+            "a pull request that was set aside was acted on anyway"
+        );
+        std::fs::write(crate::prq::review_dir("demo").join("archived.json"), b"[]").unwrap();
+
+        // Pass one: approved, unlabelled. The label that starts CI.
+        let did = sweep();
+        assert_eq!(did.len(), 1, "a pass took more than one step: {did:?}");
+        assert!(did[0].contains("label"), "{did:?}");
+        assert!(
+            merged.lock().unwrap().is_empty(),
+            "it merged in the same pass that started CI — on a check that had not run"
+        );
+
+        // Pass two: CI is running. Waiting is not an action, so nothing is reported and nothing is
+        // done — and above all it does not merge.
+        assert!(
+            sweep().is_empty(),
+            "waiting for CI was reported as doing something"
+        );
+        assert!(merged.lock().unwrap().is_empty());
+
+        // CI goes green.
+        state.lock().unwrap().1 = "passing".into();
+        let did = sweep();
+        assert_eq!(did.len(), 1, "{did:?}");
+        assert!(did[0].contains("merged #7"), "{did:?}");
+        let calls = merged.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|c| c.contains("/pulls/7/merge"))
+                && calls.iter().any(|c| c.contains("git/refs/heads/feat")),
+            "the branch did not go with the merge: {calls:?}"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
     }
 
     /// Which workflow governs a pull request, and who gets the last word.

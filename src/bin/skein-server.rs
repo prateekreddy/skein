@@ -155,6 +155,33 @@ async fn main() {
             }
         }
     });
+    // **What makes a workflow automation rather than a button.** One pass over every repo skein
+    // manages, one step per pull request, and the pass is the only thing that acts.
+    //
+    // Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts
+    // to are minutes-scale — a review lands, CI finishes, somebody pushes — and the queue underneath
+    // is cached for a minute, so a faster tick would mostly re-read its own cache. A slower one
+    // would leave a green, approved pull request sitting unmerged for no reason a person could see.
+    //
+    // Does nothing at all until `pr_workflows` is switched on, including no GitHub reads: a feature
+    // that is off should be invisible in every way somebody might notice, a rate limit included.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(120));
+        loop {
+            tick.tick().await;
+            match tokio::task::spawn_blocking(skein::prwork::sweep).await {
+                // Silent when nothing happened, which is nearly always. A line per action, because
+                // this is skein doing something outward-facing that nobody asked for just now —
+                // the audit has it with its authority, and this is what a person watching sees.
+                Ok(did) => {
+                    for what in did {
+                        eprintln!("skein: {what}");
+                    }
+                }
+                Err(e) => eprintln!("skein: the workflow pass did not finish ({e})"),
+            }
+        }
+    });
     // **The warden, said at boot rather than at the first Launch.**
     //
     // Fleet create and destroy go only through it and there is deliberately no fallback, so a host
