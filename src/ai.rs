@@ -174,6 +174,46 @@ impl Unread {
     }
 }
 
+/// A refusal that will not change by asking again, remembered so it is not asked again.
+///
+/// **Why this exists.** A host whose `claude` cannot log in answers every call instantly, and the
+/// review queue asks once per pull request. On macOS each of those attempts pops a system Keychain
+/// dialog. The owner opened the review tab and got a modal, repeatedly, from a fleet that had
+/// already been told the answer six times in the same second.
+///
+/// Only the refusals that are ABOUT THE SETUP are remembered — a missing binary, or a CLI that ran
+/// and refused. A timeout is a slow diff and the next one may be fine; an empty answer is about that
+/// one prompt. Remembering those would turn one bad moment into a dead feature.
+///
+/// Cleared by a call that works, and by [`forget_refusal`] — which anything explicitly asked for
+/// calls first, because "read this one" is a person saying they think it will work now.
+static REFUSED: std::sync::Mutex<Option<Unread>> = std::sync::Mutex::new(None);
+
+/// Stop declining, and try the next call for real. Called by `skein login` and by an explicit re-read.
+pub fn forget_refusal() {
+    if let Ok(mut held) = REFUSED.lock() {
+        *held = None;
+    }
+}
+
+/// The refusal being repeated back, if there is one.
+fn standing_refusal() -> Option<Unread> {
+    REFUSED
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+fn remember_refusal(why: &Unread) {
+    // A setup problem, not a bad moment. See the type above.
+    if !matches!(why, Unread::Missing { .. } | Unread::Refused { .. }) {
+        return;
+    }
+    if let Ok(mut held) = REFUSED.lock() {
+        *held = Some(why.clone());
+    }
+}
+
 /// The call, with the reason it failed kept.
 ///
 /// `output_with_timeout_why` rather than `bounded_output`: the second returns one string for "could
@@ -184,6 +224,11 @@ pub(crate) fn tried(
     prompt: &str,
     timeout: Duration,
 ) -> Result<String, Unread> {
+    // Already told, and told something that asking again cannot change. Answering from memory is
+    // the difference between one Keychain dialog and one per pull request.
+    if let Some(known) = standing_refusal() {
+        return Err(known);
+    }
     let mut command = Command::new(bin);
     command.args(["-p", "--model", model, prompt]);
     // **Which HOME the credential is read from**, because that is where this failed.
@@ -217,9 +262,16 @@ pub(crate) fn tried(
                 why,
             },
         }
-    })?;
+    });
+    let out = match out {
+        Ok(out) => out,
+        Err(why) => {
+            remember_refusal(&why);
+            return Err(why);
+        }
+    };
     if !out.status.success() {
-        return Err(Unread::Refused {
+        let why = Unread::Refused {
             code: out
                 .status
                 .code()
@@ -242,12 +294,18 @@ pub(crate) fn tried(
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
                 .join(" / "),
-        });
+        };
+        remember_refusal(&why);
+        return Err(why);
     }
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
     match said.is_empty() {
         true => Err(Unread::Silent),
-        false => Ok(said),
+        false => {
+            // It works. Whatever was wrong before is not wrong now.
+            forget_refusal();
+            Ok(said)
+        }
     }
 }
 
@@ -378,11 +436,20 @@ mod tests {
             at.display().to_string()
         };
         let quick = Duration::from_secs(5);
+        // Each case below has to actually REACH the binary. `tried` remembers a refusal about the
+        // setup and answers the next call from memory — deliberately, so a host that cannot log in
+        // is asked once rather than once per pull request — and that is a different property, tested
+        // in `a_refusal_about_the_setup_is_only_asked_once`. Here it would mean every case after the
+        // first got the first one's answer.
+        let ask = |bin: &str, timeout| {
+            forget_refusal();
+            tried(bin, "m", "hi", timeout)
+        };
 
         // Not on PATH — the commonest one by far, and the one the old message never named. Its
         // sentence has to be about the SERVER's PATH: a person reads it, checks their shell, finds
         // `claude` right there, and concludes skein is broken.
-        match tried("skein-no-such-binary", "m", "hi", quick) {
+        match ask("skein-no-such-binary", quick) {
             Err(Unread::Missing { bin, .. }) => {
                 assert_eq!(bin, "skein-no-such-binary");
                 let said = Unread::Missing {
@@ -401,7 +468,7 @@ mod tests {
         // Ran and refused. Its diagnosis was being thrown away — not logged in, a model it will
         // not serve, a rate limit.
         let refused = stub("refuses", "echo 'Invalid API key' >&2; exit 3");
-        match tried(&refused, "m", "hi", quick) {
+        match ask(&refused, quick) {
             Err(Unread::Refused { code, said }) => {
                 assert_eq!(code, "3");
                 assert!(
@@ -424,7 +491,7 @@ mod tests {
             "explains-on-stdout",
             "echo \"issue with the selected model\"; echo 'Warning: no stdin data' >&2; exit 1",
         );
-        match tried(&talkative, "m", "hi", quick) {
+        match ask(&talkative, quick) {
             Err(Unread::Refused { said, .. }) => assert!(
                 said.contains("issue with the selected model"),
                 "the CLI explained itself on stdout and the explanation was dropped: {said:?}"
@@ -434,13 +501,13 @@ mod tests {
 
         // Ran, succeeded, said nothing. Distinct from every other case: there is no fault to fix.
         let silent = stub("says-nothing", "exit 0");
-        assert_eq!(tried(&silent, "m", "hi", quick), Err(Unread::Silent));
+        assert_eq!(ask(&silent, quick), Err(Unread::Silent));
 
         // Still going when the budget ran out — and told apart from a failed spawn by the clock
         // rather than by parsing a message.
         let slow = stub("dawdles", "sleep 30");
         let began = std::time::Instant::now();
-        let out = tried(&slow, "m", "hi", Duration::from_secs(1));
+        let out = ask(&slow, Duration::from_secs(1));
         assert_eq!(out, Err(Unread::Slow(Duration::from_secs(1))));
         assert!(
             began.elapsed() < Duration::from_secs(20),
@@ -449,7 +516,97 @@ mod tests {
 
         // And the happy path still is one.
         let works = stub("answers", "echo '  a summary  '");
-        assert_eq!(tried(&works, "m", "hi", quick), Ok("a summary".to_string()));
+        assert_eq!(ask(&works, quick), Ok("a summary".to_string()));
+    }
+
+    /// A refusal about the setup is asked once, not once per row.
+    ///
+    /// A host whose `claude` cannot log in answers instantly, and the review queue asks once per
+    /// pull request. On macOS every one of those pops a Keychain dialog — the owner opened the tab
+    /// and got a modal, repeatedly, from a fleet that had been told the answer six times in the same
+    /// second. Reported as "why does it keep asking me".
+    #[cfg(unix)]
+    #[test]
+    fn a_refusal_about_the_setup_is_only_asked_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_AI", "on");
+        env::set_var("HOME", home);
+        forget_refusal();
+
+        // Counts how many times it is actually run.
+        let ran = home.join("ran");
+        let stub = |body: &str| {
+            let at = home.join("claude");
+            fs::write(
+                &at,
+                format!("#!/usr/bin/env bash\necho x >> {}\n{body}\n", ran.display()),
+            )
+            .unwrap();
+            fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+            env::set_var("SKEIN_CLAUDE_BIN", &at);
+        };
+        let times = || {
+            fs::read_to_string(&ran)
+                .map(|t| t.lines().count())
+                .unwrap_or(0)
+        };
+
+        stub("echo 'Not logged in · Please run /login'; exit 1");
+        for _ in 0..6 {
+            assert!(claude_oneshot("hi").is_none());
+        }
+        assert_eq!(
+            times(),
+            1,
+            "a `claude` that cannot log in was run once per call — on macOS that is one system \
+             dialog per pull request, for an answer already given"
+        );
+        // And the reason is still the real one, not a shrug about having given up.
+        let said = claude_oneshot_telling("hi", None, Duration::from_secs(5))
+            .unwrap_err()
+            .say();
+        assert!(
+            said.contains("Not logged in"),
+            "the remembered refusal lost its reason: {said}"
+        );
+
+        // A person asking explicitly gets a real attempt: a standing refusal must never make a
+        // button do nothing.
+        forget_refusal();
+        assert_eq!(times(), 1, "clearing it must not itself run anything");
+        assert!(claude_oneshot("hi").is_none());
+        assert_eq!(times(), 2, "an explicit ask did not reach the model");
+
+        // A timeout is NOT remembered — that is a slow diff, and the next one may be fine.
+        // Remembering it would turn one bad moment into a dead feature.
+        forget_refusal();
+        stub("sleep 30");
+        for _ in 0..2 {
+            let _ = claude_oneshot_telling("hi", None, Duration::from_millis(300));
+        }
+        assert_eq!(
+            times(),
+            4,
+            "a timeout was remembered as though it were a broken setup"
+        );
+
+        // And success clears whatever was standing.
+        forget_refusal();
+        stub("echo ok");
+        assert_eq!(claude_oneshot("hi").as_deref(), Some("ok"));
+        assert!(
+            standing_refusal().is_none(),
+            "a working call left a refusal standing"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
     }
 
     /// A model call uses the login skein holds when the one it inherits will not do.

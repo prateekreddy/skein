@@ -2448,7 +2448,8 @@ let revSumBusy = 0;
 // the order the lane happens to be in, and a test that reads a particular row then passes or fails
 // on that ordering. A budget whose edge cuts through the common case is a flake generator.
 const REV_SUM_AUTO = 6;
-let revSumAuto = 0;           // read unasked so far, this queue load
+let revSumAuto = 0;           // model calls spent unasked, on this repo
+let revSumRepo = null;        // which repo that allowance belongs to
 
 // The badge on the review button. Polled slowly and never as part of the 2s fleet tick: each count
 // is three `gh` round trips per repo, and this is a number you act on within minutes, not seconds.
@@ -2523,9 +2524,7 @@ function loadReview(force) {
       const held = revSums.get(pr.number);
       if (held && held !== "…" && held.head_sha !== pr.head_sha) revSums.delete(pr.number);
     }
-    // A fresh budget per queue load, so switching repos or asking for a refresh reads the head of
-    // the new lane rather than inheriting a spent allowance from the last one.
-    revSumAuto = 0;
+    revAllowanceFor(id);
     revQueue = q; revSeen.set(id, q); renderReview(); revPumpSummaries();
     // `fresh: false` means the server handed over its remembered copy and went to fetch the real
     // one. Ask again shortly — by then it is a cache hit, not another wait. Once: if the second ask
@@ -2692,6 +2691,21 @@ function revModsHtml() {
 // already decided on does not need explaining, and one you set aside explicitly does not either.
 // Nothing is fetched at all when AI is off: the answer would be the same "unread" thirty times over,
 // and the pane says it once instead.
+// A fresh allowance when the REPO changes, and not on every load.
+//
+// It reset per load, and every approve and set-aside calls `loadReview(true)` — so working through a
+// queue handed out another six model calls per button press, uncapped, from the constant whose whole
+// purpose is a cap.
+//
+// Its own name rather than four lines inside `loadReview` so a test can drive it: the version of
+// this test that could not reach it passed against the bug, which is the one outcome a test must
+// never have.
+function revAllowanceFor(id) {
+  if (revSumRepo === id) return;
+  revSumRepo = id;
+  revSumAuto = 0;
+}
+
 function revPumpSummaries() {
   if (!revQueue || !revQueue.ai) return;
   const want = (revQueue.prs || [])
@@ -2701,8 +2715,10 @@ function revPumpSummaries() {
     // rule is about what happens on its own, not about what you can have.
     .filter(p => p.lane === "needs-you" && !p.draft && !revSums.has(p.number))
     .map(p => p.number);
+  // The allowance is spent on the ANSWER, not on the asking — see `revFetchSummary`. Up to
+  // REV_SUM_PARALLEL-1 may be in flight past the limit, which is the price of not blocking; a
+  // handful is the overshoot, not a multiple.
   while (revSumBusy < REV_SUM_PARALLEL && revSumAuto < REV_SUM_AUTO && want.length) {
-    revSumAuto++;
     revFetchSummary(want.shift());
   }
 }
@@ -2718,7 +2734,17 @@ function revFetchSummary(number, force) {
       if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
       return JSON.parse(text);
     })
-    .then(s => { if (view.repo === id) revSums.set(number, s); })
+    .then(s => {
+      if (view.repo !== id) return;
+      revSums.set(number, s);
+      // **Only what actually cost something.** This counted requests, and a request answered from
+      // the cache on disk costs nothing — so a reload spent the whole allowance on free answers and
+      // every row past the sixth was never read, on any reload, for ever. Strictly worse than no
+      // limit at all, which is what a limit measuring the wrong thing buys you.
+      //
+      // A row you asked for by hand never counts: you asked.
+      if (s && s.computed && !force) revSumAuto++;
+    })
     .catch(e => {
       // A failed request is not "nothing to see here". It becomes an unread summary carrying the
       // reason, exactly as the server's own failures do — the page must not be a place where a

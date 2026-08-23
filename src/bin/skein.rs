@@ -1134,6 +1134,8 @@ fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
         eprintln!("{DIM}skein:{RESET} type {CYAN}/login{RESET} once it starts, then {CYAN}/exit{RESET} — `setup-token` returns a token to export and leaves no credential to seed boxes with");
     }
     skein::fleet::fleet_login(runtime)?;
+    // The model may have been refusing every call because of the credential that just changed.
+    skein::ai::forget_refusal();
     // And into the boxes that already exist. Without this the line above was the whole story, and
     // the story was "restart twelve boxes or sign in twelve times" — which is what sharing a login
     // exists to prevent. Best-effort: the login itself succeeded, and failing the command now would

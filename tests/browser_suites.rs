@@ -33,7 +33,8 @@ use std::process::Command;
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 8] = [
+const NODE_SUITES: [&str; 9] = [
+    "budget",
     "foreign",
     "gitgate",
     "overlays",

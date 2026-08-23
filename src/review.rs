@@ -569,6 +569,11 @@ PR #{number}: {title}
 /// Never returns an error: a PR that could not be read is a [`Depth::Unread`] summary carrying the
 /// reason, because the caller's only sane response to a failure here is to show you the PR anyway.
 pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force: bool) -> Summary {
+    // Somebody pressed "read it". Whatever the model refused with last time, they are entitled to
+    // find out whether it still refuses — a standing refusal must never make a button do nothing.
+    if force {
+        crate::ai::forget_refusal();
+    }
     if !force {
         if let Some(hit) = cached(&repo.id, pr.number, &pr.head_sha) {
             return hit;
