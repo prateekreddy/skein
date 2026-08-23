@@ -952,6 +952,67 @@ pub fn fleet_limits() -> String {
     )
 }
 
+/// The cgroups worth reading back from the kernel, and what each one being uncapped MEANS.
+///
+/// Read back rather than reported from config, because a ceiling skein computed and failed to write
+/// looks identical from the host until the sandbox stops answering.
+///
+/// The list carries `capped_is_the_goal` because it is not the same answer for all three, and
+/// assuming it was is how `skein doctor` came to print a red ✗ for something [`fleet_limits`] writes
+/// on purpose: `docker=max/max`, uncapped deliberately and for forty lines of measured reasons. That
+/// ✗ was the only one in the fleet section and the only one anywhere with no fix under it — because
+/// there is no fix, because nothing is wrong. A warning that fires on the ordinary case is one
+/// nobody reads, and this one said the fleet was unsafe to depend on.
+pub const CEILINGS: &[(&str, &str, bool)] = &[
+    ("skein", "all boxes together", true),
+    (
+        "skein/containers",
+        "the containers boxes start, inside the ceiling above",
+        true,
+    ),
+    ("docker", "the sandbox's own init, socat and dockerd", false),
+];
+
+/// What one cgroup's `memory.max` means, in the words somebody reading `doctor` needs.
+///
+/// A function rather than a `match` inside the printer so it can be driven by a test: the wrong
+/// version of this shipped and was read by a person deciding whether to trust their fleet.
+pub enum Ceiling {
+    /// As it should be. The string says what it is bounded to, or why being unbounded is right.
+    Good(String),
+    /// Wrong, and worth a red mark.
+    Bad(String),
+    /// Neither — there is no such cgroup to have an opinion about.
+    Absent(String),
+}
+
+pub fn ceiling_reading(what: &str, capped_is_the_goal: bool, live: &str) -> Ceiling {
+    match live.trim() {
+        "" => Ceiling::Absent(format!("no such cgroup ({what})")),
+        "max" if capped_is_the_goal => Ceiling::Bad(format!(
+            "UNBOUNDED — {what} can reach the VM's memory, and with no swap that ends the sandbox \
+             rather than the build"
+        )),
+        // The designed state. Named as such rather than merely tolerated, because "uncapped" on its
+        // own is the word somebody is scanning for when they are looking for what is wrong.
+        "max" => Ceiling::Good(format!("uncapped by design ({what})")),
+        bytes if !capped_is_the_goal => Ceiling::Bad(format!(
+            "capped at {} — {what} must not be, and an OOM here picks its victim from a cgroup \
+             holding pid 1. An older skein wrote this; starting any box rewrites it",
+            gib(bytes)
+        )),
+        bytes => Ceiling::Good(format!("capped at {} ({what})", gib(bytes))),
+    }
+}
+
+/// `memory.max`'s bytes as a person reads them, or the raw string when it is not a number.
+fn gib(bytes: &str) -> String {
+    bytes
+        .parse::<u64>()
+        .map(|b| format!("{:.1}G", b as f64 / 1024.0 / 1024.0 / 1024.0))
+        .unwrap_or_else(|_| bytes.to_string())
+}
+
 /// How hard the fleet is being squeezed, as a rate rather than a total.
 ///
 /// **A counter is not a number a person can act on.** Everything the kernel keeps here is monotonic
@@ -9722,6 +9783,82 @@ b idle 5000000 4 1048576 1048576
             "the second start was not told the first was under way: {outcomes:?}"
         );
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// `doctor` does not call skein's own deliberate ceiling a failure.
+    ///
+    /// It did, and it was the only ✗ in the fleet section — the one line telling somebody their
+    /// fleet was unsafe to depend on, for a value `fleet_limits` writes on purpose. Driven through
+    /// the reading rather than by matching doctor's output, so the judgement is tested where it is
+    /// made and the printer stays a printer.
+    #[test]
+    fn a_ceiling_reads_as_what_the_design_wanted_and_not_as_the_word_uncapped() {
+        let says = |cgroup: &str, live: &str| {
+            let (_, what, goal) = CEILINGS
+                .iter()
+                .find(|(name, _, _)| *name == cgroup)
+                .unwrap_or_else(|| panic!("{cgroup} is not one of the ceilings doctor reads"));
+            ceiling_reading(what, *goal, live)
+        };
+
+        // The one that shipped wrong. `fleet_limits` writes `docker=max/max`; doctor called it BAD.
+        match says("docker", "max") {
+            Ceiling::Good(said) => assert!(
+                said.contains("by design"),
+                "an uncapped `docker` is right, and has to READ as right: {said}"
+            ),
+            Ceiling::Bad(said) => panic!(
+                "doctor calls skein's own `docker=max/max` a failure: {said}\n\
+                 `fleet_limits` writes that value deliberately — capping the cgroup that holds init \
+                 and socat stalls the sandbox's service path, and its OOM picks from a cgroup with \
+                 pid 1 in it. The containers are moved instead, into `skein/containers`."
+            ),
+            Ceiling::Absent(said) => panic!("{said}"),
+        }
+        // And the value that IS wrong there — written by an older skein — says so, and says that
+        // starting a box undoes it.
+        assert!(
+            matches!(says("docker", "8589934592"), Ceiling::Bad(said) if said.contains("older skein")),
+            "a `docker` an older skein capped reads as fine, so nobody ever clears it"
+        );
+
+        // The real ceiling, both ways round.
+        assert!(
+            matches!(says("skein", "max"), Ceiling::Bad(said) if said.contains("UNBOUNDED")),
+            "an uncapped `skein` is one runaway box taking every other box down, and must be loud"
+        );
+        assert!(
+            matches!(says("skein", "25566023680"), Ceiling::Good(said) if said.contains("23.8G")),
+            "a capped `skein` should read back the size it is capped to"
+        );
+
+        // Reported at all, which it was not: the whole argument for `docker=max/max` is that the
+        // containers moved somewhere that IS capped, and doctor never showed that place.
+        assert!(
+            CEILINGS
+                .iter()
+                .any(|(name, _, _)| *name == "skein/containers"),
+            "doctor does not report the cgroup the containers were moved INTO, so the reason the \
+             one above it is uncapped cannot be checked from the report"
+        );
+
+        // Nothing there to have an opinion about is its own answer — not a failure, and not a pass.
+        assert!(matches!(says("docker", ""), Ceiling::Absent(_)));
+    }
+
+    /// The value doctor reads back is the value skein writes.
+    ///
+    /// The two drifting apart is exactly what this pair of changes was about, and they live in
+    /// different functions a hundred lines apart.
+    #[test]
+    fn every_ceiling_doctor_reads_is_one_the_fleet_actually_sets() {
+        let written = fleet_limits();
+        for (cgroup, _, _) in CEILINGS {
+            assert!(
+                written.contains(&format!("{cgroup}=")),
+                "doctor reports `{cgroup}` and `fleet_limits` never sets it: {written}"
+            );
+        }
     }
 
     /// The provisioning deadline outlasts everything the provisioning script allows itself.

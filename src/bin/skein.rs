@@ -801,25 +801,18 @@ fn cmd_doctor() -> Result<(), String> {
         // config: a per-box cap can never bound their sum, and it does not reach inside the Docker
         // daemon they share, where a box's `docker build` really runs. A ceiling skein computed and
         // failed to write looks identical from the host until the sandbox stops answering.
-        for (cgroup, what) in [
-            ("skein", "all boxes together"),
-            ("docker", "the sandbox's Docker daemon"),
-        ] {
+        for (cgroup, what, capped_is_the_goal) in skein::fleet::CEILINGS {
             let live = probe(&format!(
                 "cat /sys/fs/cgroup/{cgroup}/memory.max 2>/dev/null"
             ));
-            match live.as_str() {
-                "" => println!("{DIM}·{RESET} {cgroup:<13} no such cgroup {DIM}({what}){RESET}"),
-                "max" => println!(
-                    "{BAD} {cgroup:<13} UNBOUNDED — {what} can reach the VM's memory, and with no \
-                     swap that ends the sandbox rather than the build"
-                ),
-                bytes => {
-                    let gib = bytes
-                        .parse::<u64>()
-                        .map(|b| format!("{:.1}G", b as f64 / 1024.0 / 1024.0 / 1024.0))
-                        .unwrap_or_else(|_| bytes.to_string());
-                    println!("{OK} {cgroup:<13} capped at {gib} {DIM}({what}){RESET}");
+            // The judgement is `fleet`'s, beside the code that WRITES these values. It was here, and
+            // it disagreed with that code: `docker=max/max` is written on purpose and this printed a
+            // red ✗ for it, with no fix under it because there is nothing to fix.
+            match skein::fleet::ceiling_reading(what, *capped_is_the_goal, &live) {
+                skein::fleet::Ceiling::Good(said) => println!("{OK} {cgroup:<13} {said}"),
+                skein::fleet::Ceiling::Bad(said) => println!("{BAD} {cgroup:<13} {said}"),
+                skein::fleet::Ceiling::Absent(said) => {
+                    println!("{DIM}·{RESET} {cgroup:<13} {said}")
                 }
             }
         }
