@@ -495,6 +495,26 @@
   .revflow-head span { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint); }
   .revflow-stop { color:var(--attn); display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
   .revflow-off { color:var(--waiting); }
+  /* The editor. Steps are numbered and stacked because their ORDER is their meaning — the first one
+     that applies is the one that happens — so it has to look like a sequence, not like a set. */
+  .revflow-edit { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
+    margin:8px 0; display:flex; flex-direction:column; gap:8px; }
+  .revflow-edit-head { display:flex; align-items:center; gap:8px; }
+  .revflow-edit-head input { flex:0 1 220px; font-weight:600; }
+  .revflow-edit-foot { display:flex; align-items:center; gap:8px; margin-top:6px; }
+  .revstep { display:flex; align-items:flex-start; gap:8px; border-top:1px solid var(--border-2);
+    padding-top:8px; }
+  .revstep-n { flex:0 0 20px; text-align:center; color:var(--faint); font-variant-numeric:tabular-nums;
+    line-height:26px; }
+  .revstep-body { flex:1 1 auto; display:flex; flex-direction:column; gap:5px; }
+  .revstep-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  .revstep-lbl { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint);
+    flex:0 0 46px; }
+  .revstep-atom { display:inline-flex; align-items:center; gap:3px; }
+  .revstep-move { display:flex; gap:2px; }
+  .revx { background:none; border:1px solid transparent; color:var(--faint); cursor:pointer;
+    border-radius:var(--radius-sm); padding:1px 5px; font-size:12px; }
+  .revx:hover { color:var(--text-1); border-color:var(--border-3); }
   .revstale { border:1px solid var(--working); border-radius:var(--radius-sm); padding:8px 10px;
     margin-bottom:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-wrap:wrap;
     align-items:center; gap:6px; }
@@ -2693,11 +2713,12 @@ function renderReview() {
   revpane.innerHTML = `<div class="revwrap"><div class="revhead">${picker}<div class="revchips">${chips}</div>
       <span class="revspacer"></span>
       <button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>
+      <button type="button" class="revchip${revEdit ? " on" : ""}" onclick="toggleWorkflowEditor()">workflows</button>
       ${revQueue && revQueue.fresh === false
         ? `<span class="revage" title="the last queue skein read, shown while it fetches the current one">read ${esc(revAgo(revQueue.as_of))} · refreshing</span>`
         : ""}
       <button type="button" class="revchip" onclick="loadReview(true)">${revLoading ? "refreshing…" : "refresh"}</button>
-    </div>${revModsHtml()}${body}</div>`;
+    </div>${revModsHtml()}${revEditHtml()}${body}</div>`;
 }
 
 // How old the queue on screen is, in the shortest true form. Its own function rather than a shared
@@ -2827,6 +2848,206 @@ function revWorkflowPost(number, body) {
     .then(r => r.json())
     .then(d => { if (!d.ok) toast(d.error || "that did not stick"); loadWorkflows(); })
     .catch(e => toast(String(e.message || e).split("\n")[0]));
+}
+
+// ---------- the workflow editor ----------
+//
+// Workflows merge pull requests, so the thing that writes one has two jobs: make the vocabulary
+// visible — every word skein knows, offered rather than remembered — and make it impossible to
+// build a workflow the parser will refuse. Both come from the same tables the parser reads, served
+// by `/api/workflows`, because a picker with its own idea of the vocabulary is a workflow somebody
+// builds in the UI and cannot save.
+let revEdit = null;        // { workflow: [...] } while open, null while closed
+let revVocab = null;       // { conditions: [Word], actions: [Word] }
+let revEditSaying = "";    // the server's last refusal, shown as it came
+
+function toggleWorkflowEditor() {
+  if (revEdit) { revEdit = null; renderReview(); return; }
+  fetch("/api/workflows")
+    .then(r => r.json())
+    .then(d => {
+      revVocab = { conditions: d.conditions || [], actions: d.actions || [] };
+      // A file skein cannot read is NOT loaded into the editor as an empty list. Somebody who has
+      // not seen what is there cannot mean to replace it, and saving would do exactly that.
+      revEditSaying = d.error || "";
+      revEdit = d.error ? null : { workflow: d.workflow || [] };
+      if (d.error) toast("the workflow file has a problem — fix it before editing here");
+      renderReview();
+    })
+    .catch(e => toast(String(e.message || e).split("\n")[0]));
+}
+
+// Every word, from the server, so the page never invents one.
+const revWords = kind => (revVocab && revVocab[kind]) || [];
+
+// One condition or action, as a kind and — where the word takes one — its argument.
+//
+// `where` is the path to the thing being edited: the workflow, the step (-1 for the workflow's own
+// rule) and the position (-1 for a step's action). Passing a path rather than binding a closure is
+// what lets these be plain inline handlers, which is how the rest of this page is written.
+function revAtom(kind, value, where) {
+  const words = revWords(kind);
+  const [head, ...rest] = String(value || "").split(":");
+  const arg = rest.join(":");
+  // A word whose argument is part of the word itself (`update-branch:rebase`) is offered whole.
+  const whole = words.filter(w => !w.arg && w.spelling.includes(":"));
+  const simple = words.filter(w => !w.arg && !w.spelling.includes(":"));
+  const taking = words.filter(w => w.arg);
+  const opt = (v, label, on) => `<option value="${esc(v)}"${on ? " selected" : ""}>${esc(label)}</option>`;
+  const chosen = whole.find(w => w.spelling === value) ? value : head;
+  const picker = `<select aria-label="${kind === "conditions" ? "Condition" : "Action"}"
+      onchange="revEditWord('${where}', this.value)">${
+    [...simple.map(w => opt(w.kind, w.kind, chosen === w.kind)),
+     ...whole.map(w => opt(w.spelling, w.spelling, chosen === w.spelling)),
+     ...taking.map(w => opt(w.kind, `${w.kind}:…`, chosen === w.kind))].join("")
+  }</select>`;
+  const word = taking.find(w => w.kind === head);
+  if (!word) return picker;
+  // A closed set is offered as a set. Free text gets a box with the argument's name in it, so
+  // `add-label:` shows "name" rather than an empty rectangle nobody knows what to type into.
+  const box = word.choices && word.choices.length
+    ? `<select aria-label="Value" onchange="revEditArg('${where}', this.value)">${
+        word.choices.map(c => opt(c, c, arg === c)).join("")}</select>`
+    : `<input aria-label="Value" placeholder="${esc(word.arg)}" value="${esc(arg)}"
+         onchange="revEditArg('${where}', this.value)">`;
+  return picker + box;
+}
+
+// Where in the file a path points. `w.s.c` — workflow, step (-1 = the workflow's own rule),
+// condition (-1 = the step's action).
+function revAt(where) {
+  const [w, st, c] = String(where).split(".").map(Number);
+  const flow = revEdit.workflow[w];
+  return { flow, st, c, list: st < 0 ? flow.matches : flow.steps[st].when };
+}
+
+function revEditWord(where, kind) {
+  const { flow, st, c, list } = revAt(where);
+  // Changing the kind drops the old argument rather than carrying it: `label:ci` becoming
+  // `checks:ci` is not a thing anybody meant, and it would not parse.
+  const word = revWords(c < 0 ? "actions" : "conditions").find(x => x.kind === kind || x.spelling === kind);
+  const next = word && word.arg
+    ? `${word.kind}:${(word.choices && word.choices[0]) || ""}`
+    : (word ? word.spelling.replace(/<.*>/, "") : kind);
+  if (c < 0) flow.steps[st].do = next; else list[c] = next;
+  renderReview();
+}
+
+// **No re-render.** Changing a value does not change the SHAPE of the form: the box already shows
+// what was typed, and redrawing it would throw away the caret — and, worse, lose the very click that
+// caused the blur that fired this. That is not hypothetical: it is why the first attempt at "type a
+// name, then press + step" added no step. Only structural changes redraw.
+function revEditArg(where, arg) {
+  const { flow, st, c, list } = revAt(where);
+  const at = c < 0 ? flow.steps[st].do : list[c];
+  const head = String(at).split(":")[0];
+  const next = `${head}:${arg}`;
+  if (c < 0) flow.steps[st].do = next; else list[c] = next;
+}
+
+function revEditAddCond(w, st) {
+  const flow = revEdit.workflow[w];
+  (st < 0 ? flow.matches : flow.steps[st].when).push("approved");
+  renderReview();
+}
+function revEditDelCond(w, st, c) {
+  const flow = revEdit.workflow[w];
+  (st < 0 ? flow.matches : flow.steps[st].when).splice(c, 1);
+  renderReview();
+}
+function revEditAddStep(w) {
+  revEdit.workflow[w].steps.push({ when: ["approved"], do: "flag:look at this" });
+  renderReview();
+}
+function revEditDelStep(w, st) { revEdit.workflow[w].steps.splice(st, 1); renderReview(); }
+// Order is not decoration: the FIRST step that applies is the one that happens, so moving a step is
+// changing what the workflow does.
+function revEditMoveStep(w, st, by) {
+  const steps = revEdit.workflow[w].steps;
+  const to = st + by;
+  if (to < 0 || to >= steps.length) return;
+  [steps[st], steps[to]] = [steps[to], steps[st]];
+  renderReview();
+}
+function revEditAddFlow() {
+  revEdit.workflow.push({ name: `workflow-${revEdit.workflow.length + 1}`, matches: [], steps: [] });
+  renderReview();
+}
+function revEditDelFlow(w) { revEdit.workflow.splice(w, 1); renderReview(); }
+// Same: the input holds the name, so redrawing it would only take the caret away — see `revEditArg`.
+function revEditName(w, name) { revEdit.workflow[w].name = name; }
+
+function revEditSave() {
+  fetch("/api/workflows", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workflow: revEdit.workflow }),
+  })
+    .then(r => r.json())
+    .then(d => {
+      revEditSaying = d.ok ? "" : (d.error || "that did not save");
+      if (d.ok) {
+        revEdit = { workflow: d.workflow || [] };   // what skein will read back, not what was sent
+        toast("workflows saved");
+        loadWorkflows();
+      }
+      renderReview();
+    })
+    .catch(e => toast(String(e.message || e).split("\n")[0]));
+}
+
+function revEditHtml() {
+  if (!revEdit) {
+    return revEditSaying
+      ? `<div class="revmods"><div class="revblind"><b>the workflow file could not be read</b>
+          <div>${esc(revEditSaying)}</div>
+          <div class="dim">Nothing is running, and this editor will not save over a file it could not show you.</div>
+        </div></div>`
+      : "";
+  }
+  const flows = revEdit.workflow.map((flow, w) => {
+    const rule = (flow.matches || []).map((c, i) => `<span class="revstep-atom">${revAtom("conditions", c, `${w}.-1.${i}`)}
+        <button type="button" class="revx" title="remove" onclick="revEditDelCond(${w}, -1, ${i})">×</button></span>`).join("");
+    const steps = (flow.steps || []).map((st, i) => `<div class="revstep">
+        <span class="revstep-n">${i + 1}</span>
+        <div class="revstep-body">
+          <div class="revstep-line"><span class="revstep-lbl">when</span>${
+            (st.when || []).map((c, ci) => `<span class="revstep-atom">${revAtom("conditions", c, `${w}.${i}.${ci}`)}
+              <button type="button" class="revx" title="remove" onclick="revEditDelCond(${w}, ${i}, ${ci})">×</button></span>`).join("")
+          }<button type="button" class="revchip" onclick="revEditAddCond(${w}, ${i})">+ and</button>
+          ${(st.when || []).length ? "" : `<span class="dim">anything</span>`}</div>
+          <div class="revstep-line"><span class="revstep-lbl">do</span>${revAtom("actions", st.do, `${w}.${i}.-1`)}</div>
+        </div>
+        <div class="revstep-move">
+          <button type="button" class="revx" title="earlier" onclick="revEditMoveStep(${w}, ${i}, -1)">↑</button>
+          <button type="button" class="revx" title="later" onclick="revEditMoveStep(${w}, ${i}, 1)">↓</button>
+          <button type="button" class="revx" title="remove step" onclick="revEditDelStep(${w}, ${i})">×</button>
+        </div>
+      </div>`).join("");
+    return `<div class="revflow-edit">
+      <div class="revflow-edit-head">
+        <input aria-label="Workflow name" value="${esc(flow.name || "")}" onchange="revEditName(${w}, this.value)">
+        <span class="revspacer"></span>
+        <button type="button" class="revchip" onclick="revEditDelFlow(${w})">delete workflow</button>
+      </div>
+      <div class="revstep-line"><span class="revstep-lbl">runs on</span>${rule}
+        <button type="button" class="revchip" onclick="revEditAddCond(${w}, -1)">+ rule</button>
+        ${(flow.matches || []).length ? "" : `<span class="dim">nothing on its own — assign it to a pull request</span>`}</div>
+      ${steps}
+      <button type="button" class="revchip" onclick="revEditAddStep(${w})">+ step</button>
+    </div>`;
+  }).join("");
+  // Said where the steps are, not in a settings page: the first step that applies is the one that
+  // happens, and somebody dragging a step up is changing the workflow's meaning.
+  return `<div class="revmods">
+    <div class="dim">The first step whose conditions all hold is the one that happens, one per pass.</div>
+    ${flows}
+    ${revEditSaying ? `<div class="revblind"><b>not saved</b><div>${esc(revEditSaying)}</div></div>` : ""}
+    <div class="revflow-edit-foot">
+      <button type="button" class="revchip" onclick="revEditAddFlow()">+ workflow</button>
+      <span class="revspacer"></span>
+      <button type="button" class="revchip go" onclick="revEditSave()">save</button>
+    </div>
+  </div>`;
 }
 
 // What this pull request's workflow is, in one word for the collapsed line.

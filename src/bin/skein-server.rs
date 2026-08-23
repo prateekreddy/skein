@@ -308,6 +308,10 @@ async fn main() {
         )
         .route("/api/repos/:id/workflows", get(api_workflows))
         .route(
+            "/api/workflows",
+            get(api_workflow_file).put(api_save_workflows),
+        )
+        .route(
             "/api/repos/:id/review/:number/workflow",
             post(api_set_workflow),
         )
@@ -1239,6 +1243,57 @@ async fn api_review_summary(
         Ok(Ok(summary)) => Json(summary).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// The fleet's workflows, and every word one can be written with.
+///
+/// The vocabulary is served rather than hard-coded in the page for the same reason the tables exist
+/// at all: a picker offering a word the parser refuses is a workflow somebody builds and cannot
+/// save, and it is found by a person in the one moment they were trusting the tool.
+async fn api_workflow_file() -> Response {
+    let flows = skein::workflow::load();
+    Json(serde_json::json!({
+        "enabled": skein::prwork::enabled(),
+        // A file that will not parse is reported as itself. The editor refuses to save over it,
+        // because a person who has not seen what is there cannot mean to replace it.
+        "error": flows.as_ref().err().cloned().unwrap_or_default(),
+        "workflow": flows
+            .as_ref()
+            .map(|f| f.iter().map(written).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "conditions": skein::workflow::conditions(),
+        "actions": skein::workflow::actions(),
+    }))
+    .into_response()
+}
+
+/// A workflow in the shape the file has and the editor edits.
+fn written(f: &skein::workflow::Workflow) -> serde_json::Value {
+    serde_json::json!({
+        "name": f.name,
+        "matches": f.matches.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
+        "steps": f.steps.iter().map(|s| serde_json::json!({
+            "when": s.when.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
+            "do": skein::workflow::spell_act(&s.act),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Replace the fleet's workflows with what the editor sends.
+///
+/// The whole file at once, because a workflow is only meaningful as an ordered whole and a
+/// step-by-step API would let a half-written one run on the next tick.
+async fn api_save_workflows(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    let raw = body.to_string();
+    match skein::workflow::save(raw.as_bytes()) {
+        Ok(flows) => Json(serde_json::json!({
+            "ok": true,
+            "workflow": flows.iter().map(written).collect::<Vec<_>>(),
+        })),
+        // The refusal names the workflow, the step and the word — see `workflow::from_bytes`. It is
+        // shown as it is: a message that says "invalid" teaches nobody the vocabulary.
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
     }
 }
 

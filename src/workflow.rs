@@ -213,6 +213,69 @@ pub const ACTIONS: [(&str, &str); 9] = [
     ("flag:<why>", "say this on the row, and stop"),
 ];
 
+/// One word of the vocabulary, taken apart for a picker.
+///
+/// The tables are the source for both the parser and the cockpit's dropdowns, so the split between
+/// "which kind" and "what argument" is made HERE rather than by the page re-parsing `label:<name>`
+/// with a regex. A second parser is a second thing to disagree with the first, and the disagreement
+/// would appear as a workflow somebody builds in the UI and cannot save.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Word {
+    /// The part before the colon: `label`, `merge`, `checks`.
+    pub kind: String,
+    /// What goes after it, as a word for a placeholder — `name`, `state`, `why` — or empty where
+    /// the word takes no argument.
+    pub arg: String,
+    /// The whole spelling as it is written in the file, `<…>` included.
+    pub spelling: String,
+    pub help: String,
+    /// Where the argument is a closed set, every value it may take. Empty means free text.
+    ///
+    /// `checks` is the one that has this, and it exists because a text box would accept `green` —
+    /// which is exactly the mistake the first fixture written against this vocabulary made. A word
+    /// with four possible values should be four things you can choose, not four things you can
+    /// mistype.
+    pub choices: Vec<String>,
+}
+
+fn words(table: &[(&str, &str)]) -> Vec<Word> {
+    table
+        .iter()
+        .map(|(spelling, help)| {
+            let (kind, rest) = split(spelling);
+            Word {
+                kind: kind.to_string(),
+                // `<name>` is a placeholder; `rebase` in `update-branch:rebase` is part of the word
+                // itself and the picker must offer it as its own entry rather than as a blank.
+                arg: rest
+                    .strip_prefix('<')
+                    .and_then(|r| r.strip_suffix('>'))
+                    .unwrap_or_default()
+                    .to_string(),
+                spelling: spelling.to_string(),
+                help: help.to_string(),
+                choices: match kind {
+                    "checks" => ["passing", "failing", "pending", "none"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                    _ => Vec::new(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Every condition a picker may offer.
+pub fn conditions() -> Vec<Word> {
+    words(&CONDITIONS)
+}
+
+/// Every action a picker may offer.
+pub fn actions() -> Vec<Word> {
+    words(&ACTIONS)
+}
+
 fn split(atom: &str) -> (&str, &str) {
     match atom.split_once(':') {
         Some((head, rest)) => (head.trim(), rest.trim()),
@@ -385,6 +448,30 @@ pub fn from_bytes(raw: &[u8]) -> Result<Vec<Workflow>, String> {
         });
     }
     Ok(out)
+}
+
+/// Write the file, having first proved skein can read back what it is about to write.
+///
+/// The editor sends a whole file, so this is the one moment a person can replace every workflow in
+/// the fleet with something that does not parse. It is checked BEFORE the write, not after: a
+/// refusal that arrives after the old file is gone is a refusal that cost somebody their workflows.
+///
+/// Returns what was saved, so a caller can answer with what it will read back rather than with what
+/// it was handed.
+pub fn save(raw: &[u8]) -> Result<Vec<Workflow>, String> {
+    let flows = from_bytes(raw)?;
+    let path = workflows_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    // Written from what was PARSED rather than from the bytes, so the file on disk is always in the
+    // shape this module writes — an editor cannot leave a comment, a stray field or an ordering
+    // that reads back differently the next time.
+    let body = to_bytes(&flows)?;
+    let temp = path.with_extension("json.new");
+    std::fs::write(&temp, &body).map_err(|e| format!("{}: {e}", temp.display()))?;
+    std::fs::rename(&temp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(flows)
 }
 
 /// Write workflows back, in the shape [`load`] reads.
@@ -804,6 +891,65 @@ mod tests {
         // And no file at all is a fleet where nobody has written one, which is not a fault.
         assert_eq!(from_bytes(b"").unwrap(), Vec::new());
         assert_eq!(from_bytes(b"  \n ").unwrap(), Vec::new());
+    }
+
+    /// A picker built from the vocabulary produces words the parser takes.
+    ///
+    /// The page renders a kind and, where there is one, a box for its argument — and then joins them
+    /// back with a colon. That join is the moment a UI can produce something no file could contain,
+    /// so it is done against the same table the parser reads and asserted here.
+    #[test]
+    fn what_a_picker_would_build_is_what_the_parser_reads() {
+        for word in conditions() {
+            let built = match word.arg.is_empty() {
+                true => word.kind.clone(),
+                false => format!("{}:{}", word.kind, "ci"),
+            };
+            // `checks` is the one whose argument is a closed set rather than free text; the picker
+            // offers those four, so the test uses one of them.
+            let built = match word.kind.as_str() {
+                "checks" => "checks:passing".to_string(),
+                _ => built,
+            };
+            Cond::parse(&built)
+                .unwrap_or_else(|why| panic!("a picker would build {built:?}, refused: {why}"));
+        }
+        for word in actions() {
+            let built = match word.arg.is_empty() {
+                true => word.spelling.clone(),
+                false => format!("{}:{}", word.kind, "something"),
+            };
+            Act::parse(&built)
+                .unwrap_or_else(|why| panic!("a picker would build {built:?}, refused: {why}"));
+        }
+        // And the words with no argument are offered whole, so `update-branch:rebase` is one entry
+        // rather than a kind with a box beside it that somebody could type `sideways` into.
+        let update = actions()
+            .into_iter()
+            .filter(|w| w.kind == "update-branch")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            update.len(),
+            2,
+            "the two ways to update a branch must both be offered"
+        );
+        assert!(update.iter().all(|w| w.arg.is_empty()));
+
+        // And where the argument is a closed set, the picker offers the set. Every value it offers
+        // has to parse, or the UI can build `checks:green` — which is what the first fixture written
+        // against this vocabulary actually said.
+        let checks = conditions()
+            .into_iter()
+            .find(|w| w.kind == "checks")
+            .unwrap();
+        assert!(
+            !checks.choices.is_empty(),
+            "checks has four values and offers none"
+        );
+        for value in &checks.choices {
+            Cond::parse(&format!("checks:{value}"))
+                .unwrap_or_else(|why| panic!("the picker offers checks:{value}, refused: {why}"));
+        }
     }
 
     /// Every word in the pickers is a word the parser accepts.

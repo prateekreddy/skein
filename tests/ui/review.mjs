@@ -636,6 +636,108 @@ await check("and one pull request can be left out of it entirely", async () => {
   if (chip) throw new Error("a pull request that was left out still shows a workflow on its row");
 });
 
+console.log("\nauthoring");
+await check("a workflow can be written in the cockpit, and it governs a pull request", async () => {
+  // Start from nothing: this is somebody opening the editor on a fleet that has never had one.
+  fs.rmSync(path.join(fx.home, "workflows.json"), { force: true });
+  await page.click("#revbtn");
+  await settle(900);
+  await page.click("#revpane .revchip:has-text('workflows')");
+  await settle();
+  await page.click("#revpane .revchip:has-text('+ workflow')");
+  await settle();
+
+  // Name it, and give it a step: when checks are failing, say so and stop. Deliberately a step
+  // whose action is a `flag` — the first workflow anybody writes should not be one that merges.
+  await page.fill("#revpane .revflow-edit-head input", "watch-ci");
+  await page.click("#revpane .revflow-edit .revchip:has-text('+ step')");
+  await settle();
+  // **The picker offers exactly what the parser knows.** Taken from the server rather than written
+  // into the page: a dropdown with its own idea of the vocabulary is a workflow somebody builds here
+  // and cannot save, discovered by a person at the moment they were trusting the tool.
+  const vocab = await (await fetch(`http://127.0.0.1:${port}/api/workflows`, { headers: authHeader() })).json();
+  // Each line against its own half of the vocabulary: the `when` line offers conditions, the `do`
+  // line offers actions, and neither may offer the other's words.
+  const bothWays = (offered, words, what) => {
+    const known = new Set(words.map(w => (w.arg ? w.kind : w.spelling)));
+    for (const value of offered) {
+      if (!known.has(value)) throw new Error(`the ${what} picker offers "${value}", which skein cannot parse`);
+    }
+    for (const want of known) {
+      if (!offered.includes(want)) throw new Error(`skein knows "${want}" and the ${what} picker hides it`);
+    }
+  };
+  const optionsIn = sel => page.$$eval(sel, els => els.map(e => e.value));
+  bothWays(
+    await optionsIn("#revpane .revstep .revstep-line:nth-child(1) select:first-of-type option"),
+    vocab.conditions || [],
+    "condition",
+  );
+  bothWays(
+    await optionsIn("#revpane .revstep .revstep-line:nth-child(2) select:first-of-type option"),
+    vocab.actions || [],
+    "action",
+  );
+
+  // The step's condition picker offers the vocabulary; choose `checks`, then its value.
+  const when = await page.$$("#revpane .revstep .revstep-line select");
+  await when[0].selectOption("checks");
+  await settle();
+  const value = await page.$$("#revpane .revstep .revstep-line select");
+  await value[1].selectOption("failing");
+  await settle();
+  // And the action.
+  const acts = await page.$$("#revpane .revstep .revstep-line select");
+  await acts[acts.length - 1].selectOption("flag");
+  await settle();
+  await page.fill("#revpane .revstep .revstep-line input", "CI is red");
+  await settle();
+  await page.click("#revpane .revchip:has-text('save')");
+  await settle(1200);
+
+  // It is on disk, in the shape skein reads back — not the shape the page sent.
+  const written = JSON.parse(fs.readFileSync(path.join(fx.home, "workflows.json"), "utf8"));
+  const flow = (written.workflow || [])[0];
+  if (!flow || flow.name !== "watch-ci") throw new Error(`nothing was saved: ${JSON.stringify(written)}`);
+  if (JSON.stringify(flow.steps) !== JSON.stringify([{ when: ["checks:failing"], do: "flag:CI is red" }])) {
+    throw new Error(`the step was not written as it was built: ${JSON.stringify(flow.steps)}`);
+  }
+
+  // And the workflow it just wrote can be put on a pull request — the two halves of this feature
+  // meeting, which is the only thing that proves the editor produces something usable.
+  const rows = await page.$$("#revpane .revrow");
+  for (const row of rows) {
+    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
+    if (t.includes("default timeout") && !(await row.$(".revbody"))) { await row.click(); break; }
+  }
+  await settle();
+  const options = await page.$$eval("#revpane .revrow.open .revflow select option", els => els.map(e => e.value));
+  if (!options.includes("watch-ci")) {
+    throw new Error(`a workflow written here cannot be chosen there: ${options.join(", ")}`);
+  }
+});
+
+await check("a workflow it could not read is refused with the step that is wrong", async () => {
+  // What the server says when the file will not parse — the message that names the workflow, the
+  // step and the vocabulary, rather than "invalid".
+  const res = await fetch(`http://127.0.0.1:${port}/api/workflows`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeader() },
+    body: JSON.stringify({ workflow: [{ name: "bad", steps: [{ when: ["checks:green"], do: "merge:squash" }] }] }),
+  });
+  const said = await res.json();
+  if (said.ok) throw new Error("a step nobody can parse was saved");
+  if (!String(said.error).includes("bad") || !String(said.error).includes("passing")) {
+    throw new Error(`the refusal does not say where to look or what to say: ${said.error}`);
+  }
+  // And the good file is still there: a refusal that arrives after the old file is gone is a
+  // refusal that cost somebody their workflows.
+  const still = JSON.parse(fs.readFileSync(path.join(fx.home, "workflows.json"), "utf8"));
+  if ((still.workflow || [])[0]?.name !== "watch-ci") {
+    throw new Error("a refused save destroyed the file it refused to replace");
+  }
+});
+
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
   if (noise.length) throw new Error(noise.join(" | "));

@@ -63,6 +63,8 @@ function board() {
     const persistView = () => {};
     const toast = () => {};
     const loadWorkflows = () => {};
+    let revEdit = null;
+    const revEditHtml = () => "";
     return {
       open: id => openReview(id),
       // Clicking a box: the dock's own view change, verbatim from \`showBox\`.
