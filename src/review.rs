@@ -92,6 +92,17 @@ pub struct Summary {
     pub signals: Vec<crate::contracts::Signal>,
     /// Why there is no summary. Only set for [`Depth::Unread`], and written to be shown verbatim.
     pub unread_because: String,
+    /// Did answering this actually spend a model call?
+    ///
+    /// The client keeps a budget for how many pull requests are read WITHOUT being asked, and that
+    /// budget counted requests. A request served from the cache on disk costs nothing, so a page
+    /// reload spent the whole allowance on six free answers and rows seven onward were never read —
+    /// on any reload, for ever. A limit on spending has to count spending.
+    ///
+    /// Defaults false so a summary read back off disk reports what it is, whatever was written into
+    /// it when it was computed.
+    #[serde(default)]
+    pub computed: bool,
 }
 
 impl Summary {
@@ -105,6 +116,10 @@ impl Summary {
             detail: String::new(),
             flags: Vec::new(),
             signals: Vec::new(),
+            // Whether getting here cost anything is the caller's to say: an unread summary is
+            // written both by a model call that failed (it did) and by the switch being off (it did
+            // not). `with_spend` marks the ones that did.
+            computed: false,
             yours: Vec::new(),
             others: 0,
             unread_because: because.to_string(),
@@ -131,7 +146,13 @@ fn cache_path(repo_id: &str, number: u64, head_sha: &str) -> PathBuf {
 /// A previously written summary for exactly this PR *and* this head commit.
 pub fn cached(repo_id: &str, number: u64, head_sha: &str) -> Option<Summary> {
     let text = fs::read_to_string(cache_path(repo_id, number, head_sha)).ok()?;
-    serde_json::from_str(&text).ok()
+    // `computed` is forced false rather than trusted from the file, for the same reason
+    // `prq::remembered` forces `fresh` false: what was written was computed WHEN it was written, and
+    // the one thing this must never do is let a free answer be counted as one that cost something.
+    serde_json::from_str::<Summary>(&text).ok().map(|mut s| {
+        s.computed = false;
+        s
+    })
 }
 
 /// What skein said about this PR at an EARLIER commit — the newest such reading, if any.
@@ -604,10 +625,19 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
         // The reason, not a disjunction. "the model call failed or timed out" was the whole of what
         // this said, for four different problems with four different fixes — and it named the
         // timeout first for a failure that came back in two seconds.
-        Err(unread) => return Summary::unread(pr.number, &pr.head_sha, &unread.say()),
+        // Asked, and could not answer. That counts as spent — a `claude` that is not logged in
+        // fails instantly and free, and a budget that did not count it would ask it once per row on
+        // every reload for ever.
+        Err(unread) => {
+            let mut said = Summary::unread(pr.number, &pr.head_sha, &unread.say());
+            said.computed = true;
+            return said;
+        }
     };
     let Some(verdict) = parse_stage1(&raw) else {
-        return Summary::unread(pr.number, &pr.head_sha, "skein read it but could not make sense of its own answer, so it is not vouching for one.");
+        let mut said = Summary::unread(pr.number, &pr.head_sha, "skein read it but could not make sense of its own answer, so it is not vouching for one.");
+        said.computed = true;
+        return said;
     };
 
     // The scanner escalates and never clears. A model that read a moved default as routine is
@@ -626,6 +656,8 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
         number: pr.number,
         head_sha: pr.head_sha.clone(),
         depth: if expand { Depth::Expanded } else { Depth::Line },
+        // Reached only by having run the model.
+        computed: true,
         line: verdict.line.clone(),
         detail: String::new(),
         flags,
@@ -790,6 +822,50 @@ Their notes: {intent}
 
 #[cfg(test)]
 mod tests {
+
+    /// An answer served from the cache does not report as having cost anything.
+    ///
+    /// The client keeps a budget for how many pull requests are read WITHOUT being asked for, and
+    /// that budget counted REQUESTS. A request answered from the cache on disk costs nothing, so a
+    /// page reload spent the whole allowance on free answers and the rows past it were never read —
+    /// on any reload, for ever. Strictly worse than having no budget, which is the shape of mistake
+    /// worth a test of its own: the limit was doing the opposite of its name.
+    #[test]
+    fn a_cached_summary_does_not_count_as_a_model_call() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let fresh = Summary {
+            number: 4,
+            head_sha: "abc".into(),
+            depth: Depth::Line,
+            line: "a change".into(),
+            detail: String::new(),
+            flags: Vec::new(),
+            signals: Vec::new(),
+            yours: Vec::new(),
+            others: 0,
+            unread_because: String::new(),
+            computed: true,
+        };
+        store("demo", &fresh).unwrap();
+
+        let read_back = cached("demo", 4, "abc").expect("the summary was stored");
+        assert_eq!(
+            read_back.line, "a change",
+            "the summary itself did not survive"
+        );
+        assert!(
+            !read_back.computed,
+            "a summary read off disk claims to have cost a model call, so a budget that counts \
+             spending is spent by answers that were free"
+        );
+
+        // And "unread" from the switch being off is not spending either — nothing was asked.
+        let off = Summary::unread(4, "abc", "AI is off");
+        assert!(!off.computed);
+    }
 
     /// Pruning keeps exactly the readings that can still be read.
     ///
