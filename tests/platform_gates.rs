@@ -30,6 +30,10 @@ use std::path::Path;
 /// are deciding whether a green run on their machine means what they want it to mean.
 const GATED: &[(&str, &str)] = &[
     (
+        "a_box_that_cannot_be_entered_says_which_proof_failed",
+        "runs the crossing guard, whose subject is /proc/<pid>/stat and the kernel's boot id",
+    ),
+    (
         "a_stop_never_sweeps_the_namespace_it_is_running_in",
         "reads this process's start time from /proc/self/stat — a box's identity IS that triple",
     ),

@@ -1112,12 +1112,32 @@ impl Place {
         // Cut after the LAST `) ` rather than taking whitespace field 22: `comm` is the process's
         // own name in parentheses and may contain spaces and parentheses of its own, so `$22` is
         // right until something is called an awkward name and then it is silently off.
+        // **Two facts, two answers.** These were one branch and one sentence — "{name} is gone —
+        // pid N is no longer the session skein recorded" — which names neither of the things it
+        // just measured. A person who reads that about the box they were working in cannot tell
+        // whether they lost one box or the whole sandbox, and those want opposite reactions:
+        //
+        //   * the boot id differs -> the SANDBOX restarted. Nothing that was running in it
+        //     survived, every box is in this same state, and the fleet needs starting again. That
+        //     is a fleet-wide fact arriving one box at a time.
+        //   * the start time differs -> that one pid was reused by another process. About this box
+        //     and nothing else.
+        //
+        // `fleet::anchor_matches` already separates them on the other path into a box, so this was
+        // the odd one out — with both values in hand at the moment it decided.
         format!(
             "skein_gen=\"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"\n\
              skein_start=\"$(sed -n 's/.*) //p' /proc/{ns_pid}/stat 2>/dev/null | cut -d' ' -f20)\"\n\
-             if [ \"$skein_gen\" != {gen_q} ] || [ \"$skein_start\" != {start_q} ]; then\n\
-             \x20 echo \"skein: {name} is gone — pid {ns_pid} is no longer the session skein \
-             recorded, so entering it would be entering some other box\" >&2\n\
+             if [ \"$skein_gen\" != {gen_q} ]; then\n\
+             \x20 echo \"skein: the sandbox has restarted since {name} was placed, so {name} is \
+             gone and so is everything else that was running in it — start them again with: skein \
+             start <box>\" >&2\n\
+             \x20 exit 78\n\
+             fi\n\
+             if [ \"$skein_start\" != {start_q} ]; then\n\
+             \x20 echo \"skein: {name} is gone — pid {ns_pid} has been reused by another process \
+             since skein recorded it, so entering it would be entering some other box; restart it \
+             with: skein restart {name}\" >&2\n\
              \x20 exit 78\n\
              fi\n",
             gen_q = sh_quote(generation),
@@ -2388,6 +2408,97 @@ mod tests {
     /// Worth running the shell rather than reading it. The start time is cut out of
     /// `/proc/<pid>/stat` by the same `sed`/`cut` the stamp uses, and the only way to know the two
     /// agree is to point them both at a process that is really there.
+    /// The refusal to enter says WHICH of the two things it measured went wrong.
+    ///
+    /// Reported live, about the box its owner was working in:
+    ///
+    /// ```text
+    /// skein: example-box-6 is gone — pid 625094 is no longer the session skein recorded,
+    /// so entering it would be entering some other box
+    /// ```
+    ///
+    /// The refusal itself is correct and is the whole point of the anchor — a stale pid is ANOTHER
+    /// box, and a wrong address is not a degraded address. But the guard checks two facts and that
+    /// sentence named neither. A boot id that has moved means **the sandbox restarted**: nothing
+    /// that was running in it survived, every box is in the same state, and it is a fleet-wide fact
+    /// arriving one box at a time. A start time that has moved means **one pid was reused**, about
+    /// that box alone. A person cannot act on "is gone" without knowing which.
+    ///
+    /// Run rather than read, and against a process that is really there: the start time is cut out
+    /// of `/proc/<pid>/stat` by a `sed`/`cut` pair, and the only way to know the guard agrees with
+    /// what stamped the record is to point both at the same live pid.
+    ///
+    /// Linux only: the guard's whole subject is `/proc/<pid>/stat` and the kernel's boot id.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_box_that_cannot_be_entered_says_which_proof_failed() {
+        let stat = std::fs::read_to_string("/proc/self/stat").expect("a linux /proc");
+        let start: u64 = stat
+            .rsplit_once(") ")
+            .expect("a stat line")
+            .1
+            .split_whitespace()
+            .nth(19)
+            .and_then(|f| f.parse().ok())
+            .expect("field 22 of /proc/self/stat");
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("a boot id")
+            .trim()
+            .to_string();
+
+        let placed = |generation: &str, ns_start: u64| Place {
+            name: "web-main".into(),
+            sandbox: "skein-fleet".into(),
+            at: Where::Shared {
+                ns_pid: std::process::id(),
+                home: "/home/agent".into(),
+                tree: "/boxes/web-main/tree".into(),
+                sock: "/tmp/skein-web-main".into(),
+                generation: generation.to_string(),
+                ns_start,
+            },
+        };
+        let run = |place: Place| {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(place.guard())
+                .output()
+                .expect("bash");
+            (
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            )
+        };
+
+        // Both proofs hold: the guard says nothing and gets out of the way.
+        let (code, said) = run(placed(&boot, start));
+        assert_eq!((code, said.as_str()), (0, ""), "a live box was refused");
+
+        // The sandbox restarted. Every box in it is in this state, so the sentence has to be about
+        // the sandbox — being told "web-main is gone", one box at a time, is what sent a person
+        // looking for what happened to one box.
+        let (code, said) = run(placed("a-different-boot", start));
+        assert_eq!(code, 78, "a restarted sandbox was entered anyway");
+        assert!(
+            said.contains("the sandbox has restarted") && said.contains("everything else"),
+            "a sandbox restart was reported as one box going missing: {said}"
+        );
+
+        // One pid, reused. About this box and nothing else — and it must still refuse, because the
+        // process at that number now is somebody else's.
+        let (code, said) = run(placed(&boot, start + 1));
+        assert_eq!(code, 78, "a reused pid was entered");
+        assert!(
+            said.contains("reused") && said.contains("web-main"),
+            "a reused pid was not named as one: {said}"
+        );
+        assert!(
+            !said.contains("the sandbox has restarted"),
+            "a reused pid was reported as a sandbox restart, which would send a person to start a \
+             fleet that is running: {said}"
+        );
+    }
+
     /// Linux only: the sweep proves an anchor against `/proc/<pid>`, which is the whole subject.
     #[cfg(target_os = "linux")]
     #[test]
