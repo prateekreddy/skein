@@ -4882,9 +4882,11 @@ pub fn model_call_in_sandbox(
     // runs this, because it is the sandbox's HOME that holds the credential and not the host's.
     let script = format!(
         "if [ -n \"${{HOME:-}}\" ]; then export CLAUDE_CODE_TMPDIR=\"$HOME/{MODEL_SCRATCH}\"; fi\n\
+         if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
          {bin} -p --model {model} <<'{delim}'\n{prompt}\n{delim}\n",
         bin = sh_quote(bin),
         model = sh_quote(model),
+        overrides = MODEL_AUTH_OVERRIDES.join(" "),
     );
     Some(own_sandbox(&sandbox).attempt(&script, timeout))
 }
@@ -4949,6 +4951,42 @@ pub fn refreshable_login_at(home: &std::path::Path) -> bool {
 /// refuses; with `CLAUDE_CODE_TMPDIR` pointed at a private path the same call answers, and the CLI
 /// creates the directory itself, 0700, without being asked.
 pub const MODEL_SCRATCH: &str = ".cache/skein/claude";
+
+/// The environment variables that decide WHICH CREDENTIAL a model call authenticates with, and
+/// which skein removes before making one — but only when it has a login of its own to fall back on.
+///
+/// **Why.** `src/ai.rs` opens with the contract: *rationed, lazy AI enrichment over the Claude
+/// subscription — no API key*. Skein already decides which HOME the call reads its credential from
+/// and which temp directory it writes; leaving the auth source to whatever launched the server is
+/// the same mistake a third time. An `ANTHROPIC_API_KEY` inherited from a shell, a launch agent or
+/// the sandbox's own environment silently OUTRANKS the subscription login — the one skein seeds
+/// every box with, heals across the fleet, and reports as `logins: ["claude"]`.
+///
+/// Reported live, with every summary failing:
+///
+/// ```text
+/// `claude` exited 1: Invalid API key · Fix external API key / ⚠ claude.ai connectors are
+/// disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over
+/// your claude.ai login
+/// ```
+///
+/// Measured here, and it is worse than the message: a stale key made the CLI HANG until the call's
+/// budget ran out, so the same misconfiguration also shows up as "`claude` was still going after
+/// 30s" — a sentence that sends the reader looking at diff sizes.
+///
+/// **Only when skein has a login to fall back on.** Somebody whose only credential IS a key would
+/// otherwise have it taken away and get no authentication at all, which is a worse failure than the
+/// one this fixes. The rule is "prefer the login skein manages", not "refuse keys".
+///
+/// The provider switches are here for the same reason as the keys: a call routed to Bedrock or
+/// Vertex is not on the subscription either. `ANTHROPIC_BASE_URL` is deliberately NOT here — a
+/// proxy in front of the API is still the subscription's own credential going through it.
+pub const MODEL_AUTH_OVERRIDES: [&str; 4] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+];
 
 /// [`MODEL_SCRATCH`] under a HOME that is already known, for the calls skein spawns itself.
 pub fn model_scratch_dir(home: &std::path::Path) -> std::path::PathBuf {

@@ -275,10 +275,15 @@ pub(crate) fn tried(
         .as_deref()
         .is_some_and(crate::fleet::refreshable_login_at);
     let mut home = ambient;
+    // Whether this call ends up on a login skein knows about — NOT merely whether a HOME exists.
+    // The difference decides whether an inherited API key is removed below, and getting it wrong
+    // means taking the only credential away from somebody who authenticates with a key.
+    let mut on_a_login = usable;
     if !usable {
         if let Some(own) = crate::fleet::login_home() {
             command.env("HOME", &own);
             home = Some(own);
+            on_a_login = true;
         }
     }
     // **And which temp directory it writes into**, which is the same question asked about a
@@ -290,6 +295,19 @@ pub(crate) fn tried(
     // inside the sandbox — so this spawn is the only one there is, in the very /tmp that is shared.
     if let Some(home) = home {
         command.env("CLAUDE_CODE_TMPDIR", crate::fleet::model_scratch_dir(&home));
+    }
+    // **And which credential it authenticates with**, which is the third time the same question has
+    // been answered by the ambient environment rather than by skein. An `ANTHROPIC_API_KEY`
+    // inherited from whatever launched the server outranks the subscription login skein seeds every
+    // box from — see [`crate::fleet::MODEL_AUTH_OVERRIDES`].
+    //
+    // Gated on there being a login to prefer, not on there being a HOME: a host whose ONLY
+    // credential is a key keeps it, because taking that away leaves the call with no
+    // authentication at all — a worse failure than the one this fixes.
+    if on_a_login {
+        for key in crate::fleet::MODEL_AUTH_OVERRIDES {
+            command.env_remove(key);
+        }
     }
     let started = std::time::Instant::now();
     let out = crate::util::output_with_timeout_why(&mut command, timeout).map_err(|why| {
@@ -828,6 +846,16 @@ mod tests {
             export < script.find("-p").unwrap(),
             "the scratch directory is exported after the call it is for: {script}"
         );
+        // And the sandbox's own environment does not get to choose the credential either. Decided
+        // IN the sandbox — it is the sandbox's key and the sandbox's login — and only where there
+        // is a login to prefer, so a sandbox authenticated by a key keeps it.
+        let unset = script
+            .find("unset ANTHROPIC_API_KEY")
+            .expect("an API key in the sandbox still outranks the login skein put there");
+        assert!(
+            script.contains(".claude/.credentials.json") && unset < script.find("-p").unwrap(),
+            "the key is unset unconditionally, or after the call it is for: {script}"
+        );
 
         env::set_var("PATH", path);
         for key in ["SKEIN_HOME", "SKEIN_AI"] {
@@ -925,6 +953,84 @@ mod tests {
         for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
             env::remove_var(key);
         }
+    }
+
+    /// A model call runs on the login skein manages, not on a key it inherited.
+    ///
+    /// Reported live, the moment the temp-directory fix let the call run at all:
+    ///
+    /// ```text
+    /// `claude` exited 1: Invalid API key · Fix external API key / ⚠ claude.ai connectors are
+    /// disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over
+    /// your claude.ai login
+    /// ```
+    ///
+    /// The third answer the ambient environment was giving on skein's behalf, after which HOME and
+    /// which temp directory. Measured against the real CLI, and worse than the message says: a
+    /// stale key made it HANG until the budget ran out, so the same misconfiguration also reads as
+    /// "`claude` was still going after 30s" — which sends the reader to look at diff sizes.
+    ///
+    /// The second half of this test is the half that matters: somebody whose only credential is a
+    /// key must keep it. "Prefer the login skein manages" is not "refuse keys".
+    #[cfg(unix)]
+    #[test]
+    fn a_model_call_runs_on_the_login_not_an_inherited_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_AI", "on");
+
+        // A stub that answers with the auth source it was handed.
+        let bin = home.join("claude");
+        fs::write(
+            &bin,
+            "#!/usr/bin/env bash\nprintf '%s' \"${ANTHROPIC_API_KEY:-none}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        env::set_var("SKEIN_CLAUDE_BIN", &bin);
+        env::set_var("ANTHROPIC_API_KEY", "sk-ant-stale");
+
+        // A HOME carrying a login: the key is removed, and the call runs on the subscription.
+        let mine = home.join("mine");
+        fs::create_dir_all(mine.join(".claude")).unwrap();
+        fs::write(
+            mine.join(".claude/.credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#,
+        )
+        .unwrap();
+        env::set_var("HOME", &mine);
+        assert_eq!(
+            claude_oneshot("hi").as_deref(),
+            Some("none"),
+            "an inherited API key outranked the login skein manages"
+        );
+
+        // No login anywhere — the key is the only credential there is, and removing it would leave
+        // the call with nothing. skein prefers its own login; it does not refuse keys.
+        let bare = home.join("bare");
+        fs::create_dir_all(&bare).unwrap();
+        env::set_var("HOME", &bare);
+        forget_refusal();
+        assert_eq!(
+            claude_oneshot("hi").as_deref(),
+            Some("sk-ant-stale"),
+            "skein took away the only credential the call had"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_AI",
+            "SKEIN_CLAUDE_BIN",
+            "HOME",
+            "ANTHROPIC_API_KEY",
+        ] {
+            env::remove_var(key);
+        }
+        forget_refusal();
     }
 
     /// A failure names the program that failed, not the one it was carrying.
