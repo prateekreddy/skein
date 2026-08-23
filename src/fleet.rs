@@ -20,8 +20,8 @@ use crate::config::*;
 use crate::kit::KIT_STARTUP_SH;
 use crate::place::{anchor_probe, parse_anchor_probe, record_agent_port, recorded_agent_port};
 use crate::place::{
-    fleet_sandbox, forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record,
-    Place, PlaceRecord,
+    forget_place, own_sandbox, place_of, placed_boxes, record_place, shared_record, Place,
+    PlaceRecord,
 };
 use crate::repos::agent_for_box;
 use crate::repos::{
@@ -4835,7 +4835,7 @@ done
 /// What a sandbox run reports. Re-exported so a caller that only wants to run something in the
 /// fleet names `fleet` alone — the type is `place`'s and reaching for it directly would be a second
 /// dependency for one struct.
-pub use crate::place::Ran;
+pub use crate::place::{fleet_sandbox, Ran};
 
 /// Run a one-shot model call in the fleet sandbox, where `skein login` put the credential.
 ///

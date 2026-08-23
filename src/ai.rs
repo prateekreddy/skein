@@ -138,8 +138,17 @@ pub(crate) fn claude_oneshot_with(
 /// Each variant carries its own cure, because they have four different ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unread {
-    /// `claude` could not be started at all — almost always not on this process's PATH.
+    /// `claude` could not be started at all — almost always not on this process's PATH. **Local
+    /// spawns only.** A call that was to run in the sandbox and never got there is `Unreachable`:
+    /// saying "could not start `claude`" for a missing `sbx` sends a person to check a binary that
+    /// is fine, and to a cure (`SKEIN_CLAUDE_BIN`) for a problem they do not have.
     Missing { bin: String, why: String },
+    /// The sandbox the call was to run in could not be reached, so the model was never asked.
+    /// About the transport — `sbx`, or the sandbox being down — and about nothing else.
+    Unreachable { sandbox: String, why: String },
+    /// The sandbox answered, and the CLI is not installed in it. Distinct from `Missing`, whose
+    /// cure is the PATH of the process running skein-server: that PATH has no bearing on this one.
+    AbsentInSandbox { bin: String, sandbox: String },
     /// It ran and refused. Its own stderr is the diagnosis: not logged in, a model it will not
     /// serve, a rate limit.
     Refused { code: String, said: String },
@@ -158,6 +167,17 @@ impl Unread {
             // desktop is often not the shell where `claude` was installed.
             Unread::Missing { bin, why } => format!(
                 "skein could not start `{bin}` ({why}). It is on the PATH of the process running                  skein-server that matters, not your shell's — start the server from a shell that                  has it, or set SKEIN_CLAUDE_BIN to its full path."
+            ),
+            // Leads with the sandbox, because the reader's next move is `sbx ls` and not anything
+            // to do with the model. The `why` carries the PATH skein actually had.
+            Unread::Unreachable { sandbox, why } => format!(
+                "skein could not reach the fleet sandbox `{sandbox}`, so the model was never asked: \
+                 {why}"
+            ),
+            Unread::AbsentInSandbox { bin, sandbox } => format!(
+                "`{bin}` is not installed in the fleet sandbox `{sandbox}` — which is where skein \
+                 makes model calls, because that is where your login is. The PATH of the process \
+                 running skein-server has no bearing on this one."
             ),
             Unread::Refused { code, said } if said.is_empty() => format!(
                 "`claude` exited {code} without saying why. Run the same call by hand to see it:                  `claude -p --model claude-haiku-4-5 hello`."
@@ -208,7 +228,13 @@ fn standing_refusal() -> Option<Unread> {
 
 fn remember_refusal(why: &Unread) {
     // A setup problem, not a bad moment. See the type above.
-    if !matches!(why, Unread::Missing { .. } | Unread::Refused { .. }) {
+    if !matches!(
+        why,
+        Unread::Missing { .. }
+            | Unread::Refused { .. }
+            | Unread::Unreachable { .. }
+            | Unread::AbsentInSandbox { .. }
+    ) {
         return;
     }
     if let Ok(mut held) = REFUSED.lock() {
@@ -338,8 +364,12 @@ fn from_sandbox(
         Err(why) => {
             let out = match started.elapsed() >= timeout {
                 true => Unread::Slow(timeout),
-                false => Unread::Missing {
-                    bin: bin.to_string(),
+                // Not `Missing`: the call never reached the machine the CLI lives on, so whatever
+                // is wrong is between skein and the sandbox. Reported to a person as "skein could
+                // not start `claude` … set SKEIN_CLAUDE_BIN to its full path" on a host where
+                // `claude` was fine and `sbx` was absent.
+                false => Unread::Unreachable {
+                    sandbox: crate::fleet::fleet_sandbox(),
                     why,
                 },
             };
@@ -347,6 +377,22 @@ fn from_sandbox(
             return Err(out);
         }
     };
+    // The sandbox answered, and the shell in it could not find the CLI. `claude` never ran, so
+    // reporting its exit code would be reporting a number it did not produce — and the cure is in
+    // the sandbox, not on the server's PATH.
+    let said_all = format!(
+        "{} {}",
+        String::from_utf8_lossy(&ran.out).trim(),
+        ran.err.trim()
+    );
+    if ran.code == 127 && said_all.to_lowercase().contains("command not found") {
+        let out = Unread::AbsentInSandbox {
+            bin: bin.to_string(),
+            sandbox: crate::fleet::fleet_sandbox(),
+        };
+        remember_refusal(&out);
+        return Err(out);
+    }
     if ran.code != 0 {
         // Both streams, stdout first — `claude -p` puts its diagnosis there, and `Place::exec`
         // would have thrown it away, which is why this path uses `Place::attempt`.
@@ -879,6 +925,116 @@ mod tests {
         for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
             env::remove_var(key);
         }
+    }
+
+    /// A failure names the program that failed, not the one it was carrying.
+    ///
+    /// Observed on a host with no `sbx`, from `skein doctor`:
+    ///
+    /// ```text
+    /// ✗ model  skein could not start `claude` (sbx exec failed to start or exceeded the 30s
+    /// timeout) … or set SKEIN_CLAUDE_BIN to its full path.
+    /// ```
+    ///
+    /// Nothing was wrong with `claude` and `SKEIN_CLAUDE_BIN` was not the cure. The model call
+    /// travels into the sandbox now, so a transport failure came back wearing the payload's name —
+    /// and sent the reader to check a binary that was fine. This is the line a person reads when
+    /// they are already confused, so it is the worst possible place to guess.
+    ///
+    /// Three failures, three answers, and the test exists because they were one.
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_names_the_program_that_failed() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_AI", "on");
+        env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never goes to the sandbox at all
+        env::remove_var(crate::deployment::IN_FLEET);
+        fs::write(
+            home.join("config.json"),
+            br#"{"fleet_sandbox":"skein-fleet","fleet_agent":false}"#,
+        )
+        .unwrap();
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let real_path = env::var("PATH").unwrap_or_default();
+        let sbx = |body: &str| {
+            let at = bin.join("sbx");
+            fs::write(&at, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
+            fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+            env::set_var("PATH", format!("{}:{real_path}", bin.display()));
+            forget_refusal();
+        };
+
+        // No `sbx` at all — the call never left the host. The one thing it must NOT say is that
+        // `claude` could not be started.
+        env::set_var("PATH", bin.display().to_string());
+        let _ = fs::remove_file(bin.join("sbx"));
+        forget_refusal();
+        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
+            Err(Unread::Unreachable { sandbox, why }) => {
+                assert_eq!(sandbox, "skein-fleet", "the sandbox was not named");
+                // The transport's own words, and they have to be worth carrying. `bounded_output`
+                // says "sbx exec failed to start or exceeded the 30s timeout" for both failures —
+                // offering a timeout skein has ALREADY ruled out by the clock, and dropping the one
+                // fact the reader cannot recover later: the PATH the server actually had. By the
+                // time they go and look, they are looking at their shell's.
+                assert!(
+                    why.contains("sbx") && why.contains("PATH"),
+                    "the transport did not say what failed or where it looked: {why}"
+                );
+                assert!(
+                    !why.contains("or exceeded"),
+                    "skein ruled out the timeout by the clock and then offered it anyway: {why}"
+                );
+                let said = Unread::Unreachable { sandbox, why }.say();
+                assert!(
+                    said.contains("skein-fleet") && !said.contains("SKEIN_CLAUDE_BIN"),
+                    "a missing sandbox was reported as a missing model binary: {said}"
+                );
+            }
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+
+        // The sandbox answers, and `claude` is not in it. `claude` never ran, so its exit code is
+        // not skein's to report — and the server's PATH, which `Missing` sends you to check, has
+        // nothing to do with a binary inside a sandbox.
+        sbx("echo 'bash: line 2: claude: command not found' >&2; exit 127");
+        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
+            Err(Unread::AbsentInSandbox { bin, sandbox }) => {
+                assert_eq!((bin.as_str(), sandbox.as_str()), ("claude", "skein-fleet"));
+                let said = Unread::AbsentInSandbox { bin, sandbox }.say();
+                assert!(
+                    said.contains("claude") && said.contains("skein-fleet"),
+                    "the reader is not told what is missing or where: {said}"
+                );
+            }
+            other => panic!("expected AbsentInSandbox, got {other:?}"),
+        }
+
+        // And a CLI that ran and refused still reports its own diagnosis, unchanged — the point of
+        // separating the first two is that this one keeps meaning what it says.
+        sbx("echo 'Invalid API key'; exit 1");
+        match claude_oneshot_telling("hi", None, Duration::from_secs(5)) {
+            Err(Unread::Refused { code, said }) => {
+                assert_eq!(code, "1");
+                assert!(
+                    said.contains("Invalid API key"),
+                    "the diagnosis was lost: {said}"
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+
+        env::set_var("PATH", real_path);
+        for key in ["SKEIN_HOME", "SKEIN_AI"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
     }
 
     /// A model call brings its own temp directory, and it is under the HOME it is already using.

@@ -1325,7 +1325,14 @@ impl Place {
             return answered;
         }
         let mut command = self.command(script);
-        let out = bounded_output(&mut command, "sbx exec", timeout)?;
+        // `output_with_timeout_why`, not `bounded_output`: the second says "sbx exec failed to
+        // start or exceeded the 30s timeout" for both, and this is the one caller where the
+        // difference is the whole answer. A model call that never left the host was reported to a
+        // person as "skein could not start `claude` … set SKEIN_CLAUDE_BIN to its full path", for a
+        // host where `claude` was fine and `sbx` was missing. The message it gets instead names the
+        // program that failed AND the PATH skein had, which is the one fact the reader cannot
+        // recover afterwards — by the time they look, they are looking at their shell's PATH.
+        let out = crate::util::output_with_timeout_why(&mut command, timeout)?;
         Ok(Ran {
             code: out.status.code().unwrap_or(-1),
             out: out.stdout,
