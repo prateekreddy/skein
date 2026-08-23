@@ -808,6 +808,29 @@ pub fn pull_repo(id: &str) -> Result<String, String> {
     })
 }
 
+/// The token the host's `gh` is logged in with, or `None` if it has none.
+///
+/// Extracted so it is not only the seeding's. `ensure_gh_secret` reads this to put a credential in
+/// front of every box — so a fleet whose boxes push as you has, by construction, a `gh` login on the
+/// host that can also answer "who are you" to GitHub. The review queue asked for a token four
+/// separate ways and not this one, and then reported "nothing here names a user" on a machine where
+/// skein had just used that very login to seed the fleet.
+///
+/// **Bounded, and worth being last.** `gh` keeps its token in the system keyring on a modern Linux,
+/// so this can unlock one — which is exactly why startup skips it once the secret is seeded. Every
+/// caller should try the sources that cost nothing first and reach this only when they would
+/// otherwise have no credential at all.
+pub fn gh_cli_token() -> Option<String> {
+    let mut command = Command::new("gh");
+    command.args(["auth", "token"]);
+    let out = bounded_output(&mut command, "gh auth token", Duration::from_secs(15)).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
 /// Seed the host's GitHub token into sbx globally so every box can fetch/push/open PRs:
 /// `sbx secret set -g github -t "$(gh auth token)"`. Best-effort; skip with $SKEIN_NO_GH_SECRET.
 /// Done once (global) rather than per-box, sidestepping the "box must exist first" timing.

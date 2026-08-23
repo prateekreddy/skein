@@ -121,6 +121,15 @@ pub enum GhToken {
     /// Narrower than a read token — what it cannot see is reported as a blind spot rather than
     /// quietly missing from the queue.
     WritePat,
+    /// The host's own `gh` login, asked for last.
+    ///
+    /// It was missing, and its absence contradicted this list's own reason for existing. Skein
+    /// already reads this login — `repos::ensure_gh_secret` puts it in front of every box — so a
+    /// fleet whose boxes push as you necessarily has a credential here that can say who you are.
+    /// Reported from a live fleet: `skein doctor` showing `gh secret seeded` and `boxes push with
+    /// this account's gh token` three lines above `github token none`, with every pull request
+    /// queue answering 502.
+    GhCli,
     /// Nothing. The queue says so instead of reporting an empty queue, which is the one failure it
     /// must never look like.
     None,
@@ -132,6 +141,7 @@ impl GhToken {
             GhToken::Environment => "$GH_TOKEN",
             GhToken::ReadToken => "the read token in Settings",
             GhToken::WritePat => "a repository write token you stored",
+            GhToken::GhCli => "the host's `gh` login",
             GhToken::None => "no token at all",
         }
     }
@@ -164,6 +174,14 @@ fn host_credential() -> (GhToken, Option<String>) {
         if let Some(pat) = crate::gitgate::any_user_pat() {
             return (GhToken::WritePat, Some(pat));
         }
+        // Last, and last for a reason rather than by accident: `gh` keeps its token in the system
+        // keyring on a modern Linux, so asking can unlock one — which is why skein's own startup
+        // stopped asking once the fleet secret was seeded. Every source above costs nothing, so
+        // this is reached only by a host that would otherwise have no credential at all, and the
+        // answer is remembered for the life of the process.
+        if let Some(token) = crate::repos::gh_cli_token() {
+            return (GhToken::GhCli, Some(token));
+        }
         (GhToken::None, None)
     })
     .clone()
@@ -178,8 +196,9 @@ pub fn host_token_source() -> GhToken {
 fn host_token() -> Result<String, String> {
     host_credential().1.ok_or_else(|| {
         "no GitHub token: the review queue reads pull requests as you, and nothing here names a \
-         user. Export GH_TOKEN, or add a read token in Settings → GitHub & keys. A GitHub App \
-         cannot do this one — an installation token is not a person."
+         user. Any of these does it — `gh auth login` on the host, exporting GH_TOKEN, or a read \
+         token in Settings → GitHub & keys. A GitHub App cannot: an installation token is not a \
+         person."
             .to_string()
     })
 }
@@ -882,6 +901,77 @@ mod tests {
     /// here: the queue talks to the API with a token skein holds. What survives is the property
     /// that mattered — one credential the user chose, doing every job it is capable of — and it is
     /// now asserted on the wire rather than on a subprocess's environment.
+    /// The host's own `gh` login counts as a credential the user already gave skein.
+    ///
+    /// It did not, and the contradiction was visible in one `skein doctor`: `gh secret seeded` and
+    /// `boxes push with this account's gh token` three lines above `github token none`, with every
+    /// review queue answering 502. Skein was reading that login to put a credential in front of
+    /// every box and refusing to read it to answer "who are you".
+    ///
+    /// Driven with a stub `gh` on PATH, because the property is that the CLI is ASKED — a test that
+    /// injected the token would pass on a version that never ran anything.
+    #[test]
+    fn the_hosts_gh_login_is_the_last_credential_tried_and_it_is_tried() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, seen) = fake_github(r#"{"login":"prateek"}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("gh"),
+            "#!/usr/bin/env bash\n[ \"$1 $2\" = \"auth token\" ] || exit 1\necho gho_from_the_cli\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // Nothing stored anywhere: the state a fleet is in when it has only ever been set up with
+        // `gh auth login`, which is the commonest way there is.
+        forget_host_token();
+        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(
+            host_token_source(),
+            GhToken::GhCli,
+            "the host has a `gh` login and the queue still reports no credential"
+        );
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|h| h == "bearer gho_from_the_cli"),
+            "the CLI's token never reached GitHub: {:?}",
+            seen.lock().unwrap()
+        );
+
+        // And it is LAST. Asking `gh` can unlock a system keyring, so anything already stored has
+        // to win — otherwise every board poll pays for a credential skein was already holding.
+        crate::gitgate::set_read_pat("github_pat_read").unwrap();
+        forget_host_token();
+        seen.lock().unwrap().clear();
+        assert_eq!(viewer().unwrap().0, "prateek");
+        assert_eq!(
+            host_token_source(),
+            GhToken::ReadToken,
+            "the `gh` CLI was asked while a stored token was sitting right there"
+        );
+
+        std::env::set_var("PATH", path);
+        crate::gitgate::set_read_pat("").unwrap();
+        forget_host_token();
+    }
+
     #[test]
     fn the_host_reads_github_with_the_credential_you_already_gave_it() {
         let _g = crate::testutil::env_lock();

@@ -506,11 +506,15 @@ fn cmd_doctor() -> Result<(), String> {
             GhToken::ReadToken => {
                 println!("{OK} github token  {DIM}the read token in Settings{RESET}")
             }
+            GhToken::GhCli => println!(
+                "{OK} github token  {DIM}the host's `gh` login — the same credential that seeds \
+                 the fleet's secret{RESET}"
+            ),
             GhToken::None => println!(
                 "{WARN} github token  none — the review queue reads PRs as you, and nothing here \
-                 names a user.\n              {DIM}export GH_TOKEN, or add a read token in \
-                 Settings → GitHub & keys. A GitHub App cannot do this one: an installation token \
-                 is not a person{RESET}"
+                 names a user.\n              {DIM}`gh auth login` on this host, export \
+                 GH_TOKEN, or add a read token in Settings → GitHub & keys. A GitHub App cannot do \
+                 this one: an installation token is not a person{RESET}"
             ),
         }
     }
