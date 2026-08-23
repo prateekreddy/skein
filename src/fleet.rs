@@ -4713,6 +4713,58 @@ done
     )
 }
 
+/// What a sandbox run reports. Re-exported so a caller that only wants to run something in the
+/// fleet names `fleet` alone — the type is `place`'s and reaching for it directly would be a second
+/// dependency for one struct.
+pub use crate::place::Ran;
+
+/// Run a one-shot model call in the fleet sandbox, where `skein login` put the credential.
+///
+/// **Skein authenticated in one place and was spending the credential in another.** `fleet_login`
+/// runs the runtime interactively inside the sandbox — the `/login` somebody types happens in the
+/// sandbox's own HOME, and `fleet_login_command` says why: "Seeding a box copies FILES, so the flow
+/// that writes one is the flow that works". `ai::tried` then spawned `claude` as a child of
+/// `skein-server`, which on a host-driven deployment is a process on the owner's laptop.
+///
+/// That is wrong in BOTH deployments, not just before the in-fleet move — the login is in the
+/// sandbox either way. What it cost on macOS: `claude` there keeps credentials in the Keychain
+/// rather than a file, so a broken Keychain answered `Not logged in · Please run /login` for every
+/// summary while the sandbox two hops away held a working credential as a file.
+///
+/// **The prompt travels as a quoted heredoc.** It carries a diff and runs to tens of kilobytes, so
+/// putting it in argv means quoting a large hostile string; `<<'DELIM'` means the shell expands
+/// nothing at all inside it. The delimiter is grown until it does not occur in the prompt, because
+/// a prompt containing it would end the heredoc early and hand `claude` half a question.
+///
+/// `None` when there is no sandbox to run in — a fresh install, or a host that has not made one —
+/// and the caller falls back to running it here.
+pub fn model_call_in_sandbox(
+    bin: &str,
+    model: &str,
+    prompt: &str,
+    timeout: Duration,
+) -> Option<Result<Ran, String>> {
+    // In-fleet, this process is ALREADY inside the sandbox. Going through `Place` would be skein
+    // asking the sandbox to run something on skein's behalf, from inside it.
+    if crate::deployment::in_fleet() {
+        return None;
+    }
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return None;
+    }
+    let mut delim = "SKEIN_PROMPT".to_string();
+    while prompt.contains(&delim) {
+        delim.push('_');
+    }
+    let script = format!(
+        "{bin} -p --model {model} <<'{delim}'\n{prompt}\n{delim}\n",
+        bin = sh_quote(bin),
+        model = sh_quote(model),
+    );
+    Some(own_sandbox(&sandbox).attempt(&script, timeout))
+}
+
 /// Can this HOME's Claude credential still be used — refreshing it if need be?
 ///
 /// **`refreshTokenExpiresAt`, not `expiresAt`.** The access token expires in hours and Claude Code

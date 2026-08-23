@@ -581,6 +581,22 @@ static AGENT: Mutex<Option<TcpStream>> = Mutex::new(None);
 
 /// What the agent said. `status` is HTTP's; `exit` is the script's, and the two mean different
 /// things — see [`Place::via_agent`], where confusing them would re-run a side effect.
+/// A command that RAN, whatever it exited with.
+///
+/// [`Place::exec`] and [`Place::bytes`] collapse a non-zero exit into an error built from stderr and
+/// throw stdout away. That is right for the callers they have — a script that fails is a failure and
+/// its stderr is the reason — and wrong for anything whose subject writes its diagnosis to stdout.
+/// `claude -p` is exactly that: measured against the real CLI, an unknown model exits 1 with the
+/// explanation on STDOUT and an unrelated stdin warning on stderr. A caller given only stderr is
+/// told "exited 1" and nothing else, which is a failure this codebase shipped once already at the
+/// layer above (`215d143`) and would have shipped again the moment the model call moved in here.
+#[derive(Debug, Clone)]
+pub struct Ran {
+    pub code: i32,
+    pub out: Vec<u8>,
+    pub err: String,
+}
+
 struct AgentReply {
     status: u16,
     exit: i32,
@@ -1299,6 +1315,46 @@ impl Place {
     ///
     /// Separate from [`Place::exec`] because a lossy UTF-8 hop corrupts every image and PDF the
     /// Files tab serves — the bug is silent and the file merely looks broken.
+    /// Run `script` and report what happened, rather than whether it worked.
+    ///
+    /// `Err` means it did not run at all — the sandbox was unreachable, or it outlived `timeout`.
+    /// Any exit code is `Ok`, because "it ran and said no" is an answer, and only the caller knows
+    /// what to make of it. See [`Ran`].
+    pub fn attempt(&self, script: &str, timeout: Duration) -> Result<Ran, String> {
+        if let Some(answered) = self.attempt_via_agent(script, timeout) {
+            return answered;
+        }
+        let mut command = self.command(script);
+        let out = bounded_output(&mut command, "sbx exec", timeout)?;
+        Ok(Ran {
+            code: out.status.code().unwrap_or(-1),
+            out: out.stdout,
+            err: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
+    }
+
+    /// `None` when the agent is not there or refused before running anything, which is the one case
+    /// where falling through to `sbx exec` is safe.
+    fn attempt_via_agent(&self, script: &str, timeout: Duration) -> Option<Result<Ran, String>> {
+        let (port, token) = agent_target()?;
+        let body = serde_json::to_vec(&self.agent_request(script, timeout)).ok()?;
+        let reply = agent_post(port, &token, &body, timeout + Duration::from_secs(5)).ok()?;
+        match reply.status {
+            200 => Some(Ok(Ran {
+                code: reply.exit,
+                out: reply.out,
+                err: reply.err.trim().to_string(),
+            })),
+            // The agent's own timeout. The script STARTED, so this must not fall through to
+            // `sbx exec`: re-running it would apply any side effect twice.
+            504 => Some(Err(format!(
+                "the command did not finish in time ({})",
+                String::from_utf8_lossy(&reply.out).trim()
+            ))),
+            _ => None,
+        }
+    }
+
     pub fn bytes(&self, script: &str, timeout: Duration) -> Result<Vec<u8>, String> {
         // The agent first when there is one, `sbx exec` when there is not — and `sbx exec` is what
         // every fleet has until someone configures a port, so this changes nothing by upgrading.

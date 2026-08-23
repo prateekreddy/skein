@@ -1760,6 +1760,10 @@ mod tests {
         env::set_var("SKEIN_REGISTRY", &reg);
         env::remove_var("SKEIN_SHARED");
         env::set_var("SKEIN_CLAUDE_BIN", write_claude_stub(&dir));
+        // `ai` remembers a refusal about the setup so a broken `claude` is asked once rather than
+        // once per row. It is process-global, like the env this test already locks — so a sibling's
+        // failure would otherwise make this stub never run, in a parallel run only.
+        crate::ai::forget_refusal();
         env::set_var("SKEIN_RESUME_CMD", "true {name} {prompt}"); // don't spawn a real agent
         env::set_var(
             "SKEIN_LS_CMD",
@@ -1774,6 +1778,7 @@ mod tests {
 
         env::remove_var("SKEIN_AI");
         env::remove_var("SKEIN_CLAUDE_BIN");
+        crate::ai::forget_refusal();
         env::remove_var("SKEIN_RESUME_CMD");
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");

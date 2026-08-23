@@ -120,10 +120,10 @@ pub(crate) fn claude_oneshot_with(
     model: Option<&str>,
     timeout: Duration,
 ) -> Option<String> {
-    // `$SKEIN_AI_MODEL` still wins over the call site: it is the escape hatch that lets one env var
-    // pin every AI call in a run, which is what the tests and a cost-conscious operator both need.
-    let (bin, model) = binary_and_model(model);
-    tried(&bin, &model, prompt, timeout).ok()
+    // The model and the machine are both decided in `claude_oneshot_telling` now, so this is the
+    // Option-shaped door onto the same call: every caller that treats `None` as "fall back to the
+    // free deterministic path" keeps working, and the ones that show a person why use the other.
+    claude_oneshot_telling(prompt, model, timeout).ok()
 }
 
 /// Why a model call produced nothing — because "it produced nothing" is four different problems.
@@ -309,6 +309,57 @@ pub(crate) fn tried(
     }
 }
 
+/// Read a sandbox run the same way a local one is read, so a call means the same thing wherever it
+/// ran. The classification is the point of [`Unread`]; running somewhere else must not blur it.
+fn from_sandbox(
+    ran: Result<crate::fleet::Ran, String>,
+    bin: &str,
+    timeout: Duration,
+    started: std::time::Instant,
+) -> Result<String, Unread> {
+    let ran = match ran {
+        Ok(ran) => ran,
+        // Did not run. Told apart by the clock, exactly as the local path does it: a sandbox that
+        // cannot be reached fails fast, and anything that spent its whole budget was running.
+        Err(why) => {
+            let out = match started.elapsed() >= timeout {
+                true => Unread::Slow(timeout),
+                false => Unread::Missing {
+                    bin: bin.to_string(),
+                    why,
+                },
+            };
+            remember_refusal(&out);
+            return Err(out);
+        }
+    };
+    if ran.code != 0 {
+        // Both streams, stdout first — `claude -p` puts its diagnosis there, and `Place::exec`
+        // would have thrown it away, which is why this path uses `Place::attempt`.
+        let why = Unread::Refused {
+            code: ran.code.to_string(),
+            said: [
+                String::from_utf8_lossy(&ran.out).trim().to_string(),
+                ran.err,
+            ]
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / "),
+        };
+        remember_refusal(&why);
+        return Err(why);
+    }
+    let said = String::from_utf8_lossy(&ran.out).trim().to_string();
+    match said.is_empty() {
+        true => Err(Unread::Silent),
+        false => {
+            forget_refusal();
+            Ok(said)
+        }
+    }
+}
+
 /// The same call, reporting why rather than only that. Used where the reason reaches a person.
 pub(crate) fn claude_oneshot_telling(
     prompt: &str,
@@ -316,6 +367,26 @@ pub(crate) fn claude_oneshot_telling(
     timeout: Duration,
 ) -> Result<String, Unread> {
     let (bin, model) = binary_and_model(model);
+    // **In the sandbox, where `skein login` put the credential.** Skein authenticated in one place
+    // and spent it in another: the `/login` you type happens inside the sandbox, and this spawned
+    // `claude` as a child of the server — on a host-driven deployment, a process on somebody's
+    // laptop. On macOS that means the Keychain rather than a file, and a broken one answered
+    // `Not logged in` for every summary while the sandbox held a working credential two hops away.
+    //
+    // Wrong in both deployments, not merely before the in-fleet move: the login is in the sandbox
+    // either way.
+    //
+    // The decision belongs here rather than in `tried`, because this is where the binary is CHOSEN
+    // — and `$SKEIN_CLAUDE_BIN` naming one means "run exactly this", which is also "run it here": a
+    // path somebody named on this machine is not a path in the sandbox. `tried` is left meaning one
+    // thing, "run it locally", which is what its callers in `model_reachable` and the tests want.
+    let named = env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty());
+    if !named {
+        let started = std::time::Instant::now();
+        if let Some(ran) = crate::fleet::model_call_in_sandbox(&bin, &model, prompt, timeout) {
+            return from_sandbox(ran, &bin, timeout, started);
+        }
+    }
     tried(&bin, &model, prompt, timeout)
 }
 
@@ -530,6 +601,10 @@ mod tests {
     fn a_refusal_about_the_setup_is_only_asked_once() {
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::testutil::env_lock();
+        // Shared with every other test in this module, and a panic skips the cleanup at the end:
+        // clear the remembered refusal on the way IN. Without it a sibling's failure makes this
+        // one's stub never run, and only in a parallel run.
+        forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         env::set_var("SKEIN_HOME", home);
@@ -609,6 +684,82 @@ mod tests {
         forget_refusal();
     }
 
+    /// A model call runs where `skein login` put the credential — in the sandbox.
+    ///
+    /// Skein authenticated in one place and spent it in another: `/login` happens inside the
+    /// sandbox, and this module spawned `claude` as a child of the server, which on a host-driven
+    /// deployment is a process on somebody's laptop. On macOS that means the Keychain rather than a
+    /// file, so a broken one answered `Not logged in` for every summary while a working credential
+    /// sat in the sandbox two hops away.
+    ///
+    /// Driven with a fake `sbx` that echoes back the script it was handed, because the questions are
+    /// *did it go there at all* and *did the prompt survive the trip* — a diff-sized prompt in argv
+    /// would have to be quoted, and the heredoc exists so nothing has to be.
+    #[cfg(unix)]
+    #[test]
+    fn a_model_call_runs_where_the_login_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        // Shared with every other test in this module, and a panic skips the cleanup at the end:
+        // clear the remembered refusal on the way IN. Without it a sibling's failure makes this
+        // one's stub never run, and only in a parallel run.
+        forget_refusal();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        env::set_var("SKEIN_HOME", home);
+        env::set_var("SKEIN_AI", "on");
+        env::remove_var(crate::deployment::IN_FLEET); // host-driven: the sandbox is elsewhere
+        forget_refusal();
+
+        // An `sbx` that prints the script it was asked to run, so the test can read what travelled.
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sbx");
+        fs::write(&fake, "#!/usr/bin/env bash\nprintf '%s' \"${@: -1}\"\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", format!("{}:{path}", bin.display()));
+        // A fleet to run in, and the transport off so this takes the `sbx` path deterministically.
+        fs::write(
+            home.join("config.json"),
+            br#"{"fleet_sandbox":"skein-fleet","fleet_agent":false}"#,
+        )
+        .unwrap();
+
+        // A prompt with every character that would need quoting in argv, and a line that looks like
+        // a heredoc terminator — the one input that could end the prompt early and hand the model
+        // half a question.
+        let nasty = "a diff:\n'quoted' \"double\" $VAR `cmd` \\slash\nSKEIN_PROMPT\nand more";
+        let script = claude_oneshot(nasty).expect("the sandbox answered");
+
+        assert!(
+            script.contains("skein-fleet") || !script.is_empty(),
+            "nothing was sent to the sandbox at all"
+        );
+        assert!(
+            script.contains("-p") && script.contains("--model"),
+            "the model call did not travel as one: {script}"
+        );
+        assert!(
+            script.contains("$VAR") && script.contains("`cmd`") && script.contains("'quoted'"),
+            "the prompt was mangled on the way — a quoted heredoc expands nothing: {script}"
+        );
+        // The delimiter grew past the line in the prompt that looked like one. Asserted on the
+        // OPENING and the closing together: either alone is satisfied by a delimiter that grew in
+        // one place and not the other, which is a heredoc that never terminates.
+        assert!(
+            script.contains("<<'SKEIN_PROMPT_'") && script.trim_end().ends_with("SKEIN_PROMPT_"),
+            "the delimiter did not grow past a prompt containing it, so the heredoc ends early and \
+             the model is handed half a question: {script}"
+        );
+
+        env::set_var("PATH", path);
+        for key in ["SKEIN_HOME", "SKEIN_AI"] {
+            env::remove_var(key);
+        }
+        forget_refusal();
+    }
+
     /// A model call uses the login skein holds when the one it inherits will not do.
     ///
     /// The bug: `claude` reads its credential from `$HOME/.claude/.credentials.json` and nowhere
@@ -624,6 +775,10 @@ mod tests {
     fn a_model_call_falls_back_to_the_login_skein_keeps() {
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::testutil::env_lock();
+        // Shared with every other test in this module, and a panic skips the cleanup at the end:
+        // clear the remembered refusal on the way IN. Without it a sibling's failure makes this
+        // one's stub never run, and only in a parallel run.
+        forget_refusal();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         env::set_var("SKEIN_HOME", home);
@@ -704,6 +859,13 @@ mod tests {
     #[test]
     fn what_wants_the_model_names_every_switch_that_does() {
         let _g = crate::testutil::env_lock();
+        // Shared with every other test in this module, and a panic skips the cleanup at the end:
+        // clear the remembered refusal on the way IN. Without it a sibling's failure makes this
+        // one's stub never run, and only in a parallel run.
+        forget_refusal();
+        // No deployment override here: this reads switches and calls no model. Setting one would be
+        // a variable nothing in this test depends on, left behind for whichever test ran next —
+        // which is what it was, and what broke `board`'s cover test in a parallel run.
         env::set_var("SKEIN_AI", "off");
         env::set_var("SKEIN_REVIEW_AI", "on");
         assert_eq!(
@@ -732,6 +894,10 @@ mod tests {
             return;
         }
         let _g = env_lock();
+        // Shared with every other test in this module, and a panic skips the cleanup at the end:
+        // clear the remembered refusal on the way IN. Without it a sibling's failure makes this
+        // one's stub never run, and only in a parallel run.
+        forget_refusal();
         let dir = tempdir();
         let reg = dir.join("sandboxes.json");
         fs::write(
