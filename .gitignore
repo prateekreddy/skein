@@ -4,3 +4,4 @@
 /tests/ui/package-lock.json
 __pycache__/
 *.pyc
+/.skein/
