@@ -90,6 +90,26 @@ pub struct Pr {
     pub committed_at: String,
     /// "passing" | "pending" | "failing" | "none".
     pub checks: String,
+    /// Every label on it, by name. What a workflow adds to start CI and reads to know it did.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// GitHub's verdict on the pull request as a whole: `APPROVED`, `CHANGES_REQUESTED`,
+    /// `REVIEW_REQUIRED`, or empty where the repository asks for no review.
+    ///
+    /// Distinct from [`Pr::my_review`], which is what YOU last said. A workflow that merges cares
+    /// about the repository's answer — being one of six reviewers who approved is not the same fact
+    /// as the pull request being approved.
+    #[serde(default)]
+    pub review_decision: String,
+    /// Can GitHub merge it as it stands? `None` where GitHub has not worked it out yet, which it
+    /// reports as `UNKNOWN` for a while after every push.
+    ///
+    /// **`Option`, not `bool`.** Unknown is not "no": a workflow that read it as a conflict would
+    /// rebase on a guess, and on a repository that dismisses stale approvals that rebase destroys
+    /// the approval authorising the merge. Flattening it here would undo `workflow::holds` quietly,
+    /// one layer down from the test that protects it.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
     /// "approved" | "changes-requested" | "commented" | "none" — *your* last review.
     pub my_review: String,
     /// Was that review submitted against the current head? False after new commits land, which is
@@ -592,7 +612,8 @@ query($q: String!, $n: Int!) {
     nodes {
       ... on PullRequest {
         number title url isDraft updatedAt
-        headRefName headRefOid baseRefName reviewDecision
+        headRefName headRefOid baseRefName reviewDecision mergeable
+        labels(first: 20) { nodes { name } }
         author { login }
         latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
         commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { nodes {
@@ -667,7 +688,20 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         .and_then(|c| c.get("committedDate"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    let labels = node
+        .get("labels")
+        .and_then(|l| l.get("nodes"))
+        .and_then(|n| n.as_array())
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|l| l.get("name").and_then(|v| v.as_str()))
+                .map(|name| serde_json::Value::String(name.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if let Some(map) = out.as_object_mut() {
+        map.insert("labels".into(), serde_json::Value::Array(labels));
         map.insert("latestReviews".into(), reviews);
         map.insert("statusCheckRollup".into(), checks);
         map.insert("committedDate".into(), committed);
@@ -720,6 +754,23 @@ fn build_pr(
             .unwrap_or(false),
         updated_at: s("updatedAt"),
         committed_at: s("committedDate"),
+        labels: item
+            .get("labels")
+            .and_then(|v| v.as_array())
+            .map(|l| {
+                l.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        review_decision: s("reviewDecision"),
+        // GitHub's enum, kept as three states rather than two. See the field.
+        mergeable: match item.get("mergeable").and_then(|v| v.as_str()) {
+            Some("MERGEABLE") => Some(true),
+            Some("CONFLICTING") => Some(false),
+            _ => None,
+        },
         checks: rollup(item),
         my_review,
         review_is_current,
@@ -1548,6 +1599,9 @@ mod tests {
             // Touched a minute ago…
             "updatedAt": "2026-08-23T12:00:00Z",
             "latestReviews": { "nodes": [] },
+            "reviewDecision": "APPROVED",
+            "mergeable": "MERGEABLE",
+            "labels": { "nodes": [{ "name": "ci" }, { "name": "needs docs" }] },
             // …and last pushed to three days before that.
             "commits": { "nodes": [{ "commit": {
                 "committedDate": "2026-08-20T09:00:00Z",
@@ -1575,6 +1629,33 @@ mod tests {
             "both are still reported"
         );
 
+        // The three facts a workflow decides on, off the same node. GitHub's `mergeable` is an enum
+        // of three and stays three: UNKNOWN is what it says for a while after every push, and an
+        // answer invented here would reach a workflow as a conflict — which rebases, which on a
+        // repository that dismisses stale approvals throws away the approval that authorised the
+        // merge. Two layers below the test that protects that rule, so it is asserted here as well.
+        assert_eq!(pr.labels, vec!["ci".to_string(), "needs docs".to_string()]);
+        assert_eq!(pr.review_decision, "APPROVED");
+        assert_eq!(pr.mergeable, Some(true));
+        let conflicting = build_pr(
+            &shape(&serde_json::json!({
+                "number": 9, "title": "t", "url": "u", "isDraft": false,
+                "author": { "login": "someone" }, "headRefName": "f", "headRefOid": "d",
+                "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
+                "latestReviews": { "nodes": [] }, "mergeable": "CONFLICTING",
+            })),
+            9,
+            "me",
+            "acme",
+            &Reason::Author,
+            &[],
+        );
+        assert_eq!(conflicting.mergeable, Some(false));
+        assert!(
+            conflicting.labels.is_empty(),
+            "a PR with no labels must not invent one"
+        );
+
         // GitHub answering without one is "skein does not know", never "long ago" — a guess in that
         // direction reads a pull request somebody is still pushing to.
         let bare = shape(&serde_json::json!({
@@ -1583,9 +1664,11 @@ mod tests {
             "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
             "latestReviews": { "nodes": [] },
         }));
+        let bare = build_pr(&bare, 8, "me", "acme", &Reason::Author, &[]);
+        assert_eq!(bare.committed_at, "");
         assert_eq!(
-            build_pr(&bare, 8, "me", "acme", &Reason::Author, &[]).committed_at,
-            ""
+            bare.mergeable, None,
+            "GitHub saying nothing about mergeability became an answer"
         );
     }
 

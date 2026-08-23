@@ -36,6 +36,29 @@
 use crate::workflow::{Act, Chosen, MergeAs, Update, Workflow};
 use std::path::PathBuf;
 
+/// What a workflow sees, built from what GitHub said.
+///
+/// The one place the translation happens. Two facts about a pull request are easy to confuse and
+/// this is where they are kept apart:
+///
+/// * **`approved` is the REPOSITORY's verdict**, not yours. `Pr::my_review` is what you last said,
+///   and being one approver of six is not the same fact as the pull request being approved. A
+///   workflow that merges must read the first one.
+/// * **`mergeable` stays three-valued.** GitHub says UNKNOWN for a while after every push, and
+///   `workflow::holds` turns on unknown being neither mergeable nor not-mergeable — so flattening
+///   it here would undo that one layer below the test that protects it.
+pub fn facts_of(pr: &crate::prq::Pr, viewer: &str) -> crate::workflow::Facts {
+    crate::workflow::Facts {
+        approved: pr.review_decision == "APPROVED",
+        changes_requested: pr.review_decision == "CHANGES_REQUESTED",
+        labels: pr.labels.clone(),
+        checks: pr.checks.clone(),
+        mergeable: pr.mergeable,
+        draft: pr.draft,
+        mine: !viewer.is_empty() && pr.author.eq_ignore_ascii_case(viewer),
+    }
+}
+
 /// May skein act on pull requests at all?
 ///
 /// **Off unless it is switched on.** Every other default in skein leans toward showing you more;
@@ -401,6 +424,77 @@ mod tests {
 
     fn chosen(act: Act) -> Chosen {
         Chosen { step: 3, act }
+    }
+
+    /// What GitHub said becomes what a workflow sees, and UNKNOWN survives the trip.
+    ///
+    /// The queue is the only source of facts, so anything lost here is lost to every decision. Two
+    /// things are easy to get wrong and both are asserted:
+    ///
+    /// * approved is the REPOSITORY's verdict, not yours. Being one approver of six is not the
+    ///   pull request being approved, and a workflow that merges must read the first one.
+    /// * UNKNOWN is not "cannot be merged". GitHub says it for a while after every push; read as a
+    ///   conflict it rebases on a guess, and that rebase costs the approval authorising the merge
+    ///   on any repository that dismisses stale approvals.
+    #[test]
+    fn what_github_said_becomes_what_a_workflow_sees() {
+        // Built from JSON rather than a struct literal: `Pr` gains fields regularly, and a literal
+        // is the thing that stops compiling for a reason unrelated to what is being tested. How the
+        // fields get there from GitHub's own answer is prq's to prove, and it does.
+        let pr = |decision: &str, mergeable: Option<bool>| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "title": "t", "author": "Me", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": ["ci", "needs docs"],
+                "review_decision": decision,
+                "mergeable": mergeable,
+                "checks": "passing", "my_review": "none", "review_is_current": false,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+
+        let approved = facts_of(&pr("APPROVED", Some(true)), "me");
+        assert!(
+            approved.approved,
+            "the repository approved it and skein did not see that"
+        );
+        assert!(!approved.changes_requested);
+        assert_eq!(approved.mergeable, Some(true));
+        // Labels come through by name, including one with a space in it — which also has to survive
+        // being put back in a URL when a step removes it.
+        assert_eq!(
+            approved.labels,
+            vec!["ci".to_string(), "needs docs".to_string()]
+        );
+        assert!(
+            approved.mine,
+            "the author is the viewer, in whatever case GitHub spells it"
+        );
+
+        let conflicting = facts_of(&pr("REVIEW_REQUIRED", Some(false)), "me");
+        assert!(!conflicting.approved);
+        assert_eq!(conflicting.mergeable, Some(false));
+
+        // The one that matters.
+        let unknown = facts_of(&pr("APPROVED", None), "me");
+        assert_eq!(
+            unknown.mergeable, None,
+            "an unknown mergeable state was given an answer on the way to the workflow"
+        );
+        assert!(
+            !crate::workflow::holds(&crate::workflow::Cond::NotMergeable, &unknown)
+                && !crate::workflow::holds(&crate::workflow::Cond::Mergeable, &unknown),
+            "unknown satisfied one of the two conditions it must satisfy neither of"
+        );
+
+        // Changes requested is its own state, not the absence of approval.
+        let blocked = facts_of(&pr("CHANGES_REQUESTED", Some(true)), "me");
+        assert!(blocked.changes_requested && !blocked.approved);
+
+        // And somebody else's pull request is not yours, however it is spelled.
+        assert!(!facts_of(&pr("APPROVED", Some(true)), "someone-else").mine);
     }
 
     /// Nothing happens on a fleet that has not switched this on.
