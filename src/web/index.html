@@ -484,6 +484,13 @@
   .revgist { padding:0 11px 8px 47px; font-size:12.5px; color:var(--text-2); }
   .revgist.dim { color:var(--faint); font-style:italic; }
   .revgist.unread { color:var(--waiting); }
+  /* A reading of an older commit is dimmed rather than coloured: it is still true about the code it
+     read, so it must not shout like a fault — but it must never look like the current answer. */
+  .revgist.stale { color:var(--faint); }
+  .revstale { border:1px solid var(--working); border-radius:var(--radius-sm); padding:8px 10px;
+    margin-bottom:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-wrap:wrap;
+    align-items:center; gap:6px; }
+  .revstale code { color:var(--text-1); }
   .revtag.flag { color:var(--accent-2); border-color:var(--accent); }
   .revsignals { border:1px solid var(--border-2); border-left:2px solid var(--accent);
                 border-radius:var(--radius-sm); padding:8px 11px; margin-bottom:11px;
@@ -2452,6 +2459,42 @@ let revSumBusy = 0;
 // the order the lane happens to be in, and a test that reads a particular row then passes or fails
 // on that ordering. A budget whose edge cuts through the common case is a flake generator.
 const REV_SUM_AUTO = 6;
+
+// How long a pull request must go without a commit before skein reads it for you.
+//
+// A branch somebody is actively pushing to is the worst possible thing to spend a reading on: the
+// reading describes a commit that is about to stop being the head, and the next poll spends another
+// one. The owner asked for an hour, and an hour is also about the shortest gap that reliably means
+// "they have stopped for now" rather than "they are between commits".
+//
+// It governs only what happens WITHOUT being asked. The button in the expanded row reads any PR at
+// any age — the rule is about what skein does on its own, exactly as with drafts.
+const REV_SETTLE_MS = 60 * 60 * 1000;
+
+// Has this pull request been quiet long enough to be worth reading?
+//
+// **An unknown commit date reads as settled**, which is the opposite of what it looks like it should
+// be. The first version treated "skein does not know" as "not settled", on the reasoning that GitHub
+// staying silent is not evidence of age — true, but it makes one missing field switch the whole
+// feature off: nothing is ever read, on any PR, and the row explains the silence with a sentence
+// about a branch still moving that skein has no evidence for. The browser suite caught exactly that,
+// which is what its fixtures are for.
+//
+// So the rule applies where there is something to apply it to, and where there is not, skein does
+// what it did before the rule existed. A feature that declines to work is worse than one that
+// occasionally reads a busy branch.
+function revSettled(pr) {
+  const at = Date.parse(pr.committed_at || "");
+  return !at || Date.now() - at >= REV_SETTLE_MS;
+}
+
+// What the row says while it is waiting, in the shortest true form.
+function revSettlesIn(pr) {
+  const at = Date.parse(pr.committed_at || "");
+  if (!at) return "";
+  const mins = Math.max(1, Math.round((REV_SETTLE_MS - (Date.now() - at)) / 60000));
+  return mins >= 60 ? "in about an hour" : `in ${mins}m`;
+}
 let revSumAuto = 0;           // model calls spent unasked, on this repo
 let revSumRepo = null;        // which repo that allowance belongs to
 
@@ -2541,11 +2584,16 @@ function loadReview(force) {
     for (const pr of q.prs || []) {
       const held = revSums.get(pr.number);
       if (!held || held === "…") continue;
-      // A reading of a commit that is no longer the head describes code that is not there.
-      if (held.head_sha !== pr.head_sha) revSums.delete(pr.number);
-      // And a row that could not be REACHED is not a reading at all — asking again is the whole
-      // point, and this is the moment to allow it.
-      else if (held.transient) revSums.delete(pr.number);
+      // A row that could not be REACHED is not a reading at all — asking again is the whole point,
+      // and this is the moment to allow it.
+      if (held.transient) { revSums.delete(pr.number); continue; }
+      // A reading of a commit that is no longer the head is KEPT, and marked. It used to be deleted
+      // here, which is what made the pump read the PR again on its own: a branch pushed to five
+      // times was read five times and none of those readings survived to be compared against.
+      //
+      // Keeping it is only safe because the row says so loudly — "AI may only add scrutiny, never
+      // remove it", and a stale reading shown as current would remove it. Re-reading is a click.
+      if (held.head_sha !== pr.head_sha) held.stale = true;
     }
     revAllowanceFor(id);
     revQueue = q; revSeen.set(id, q); renderReview(); revPumpSummaries();
@@ -2736,7 +2784,9 @@ function revPumpSummaries() {
     // spending a model call to describe something nobody has proposed yet is the clearest case of
     // work that was not asked for. The button in the expanded row still reads one on request — the
     // rule is about what happens on its own, not about what you can have.
-    .filter(p => p.lane === "needs-you" && !p.draft && !revSums.has(p.number))
+    // Settled, and not a draft. Both are the same rule in different clothes: skein spends a reading
+    // on its own only where the author has stopped changing the answer.
+    .filter(p => p.lane === "needs-you" && !p.draft && revSettled(p) && !revSums.has(p.number))
     .map(p => p.number);
   // The allowance is spent on the ANSWER, not on the asking — see `revFetchSummary`. Up to
   // REV_SUM_PARALLEL-1 may be in flight past the limit, which is the price of not blocking; a
@@ -2821,7 +2871,10 @@ function revGist(s) {
   if (!s) return "";
   if (s === "…") return `<div class="revgist dim">reading it…</div>`;
   if (s.depth === "unread") return `<div class="revgist unread">not summarised — ${esc(s.unread_because || "")}</div>`;
-  return `<div class="revgist">${esc(s.line || "")}</div>`;
+  // A reading of an earlier commit says so on the line you actually read, not only when expanded.
+  // The whole risk of keeping it is that it gets mistaken for a reading of what is there now.
+  return `<div class="revgist${s.stale ? " stale" : ""}">${s.stale
+    ? `<span class="revtag moved">read before the latest commits</span> ` : ""}${esc(s.line || "")}</div>`;
 }
 
 function revBody(pr) {
@@ -2868,12 +2921,24 @@ function revDetail(pr) {
       ? " Reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes. Until then every PR stays at full attention."
       : pr.draft
         ? " It is a draft, so skein leaves it alone until it is marked ready."
-        : " Only the first few in this lane are read for you, so the fleet keeps its rate limit.";
+        // Silence with no reason given is what makes a queue look broken. A PR still being pushed
+        // to is not being neglected — it is being left until the answer stops changing.
+        : !revSettled(pr)
+          ? ` The branch is still moving, so skein waits for it to settle${
+              revSettlesIn(pr) ? ` — ${esc(revSettlesIn(pr))}` : ""}. Reading it now describes a commit that is about to be replaced.`
+          : " Only the first few in this lane are read for you, so the fleet keeps its rate limit.";
     return `<div class="revnosum">Not read yet.${why}${revQueue && !revQueue.ai ? ""
       : ` <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">read it</button>`}</div>`;
   }
   if (s === "…") return `<div class="revnosum">reading it…</div>`;
   if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")} Read this one yourself.</div>`;
+  // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable
+  // about which code it describes — and the way out is right here rather than somewhere else.
+  const stale = s.stale
+    ? `<div class="revstale"><b>This was read before the latest commits.</b> It describes
+        <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>, and the branch has moved since.
+        <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">read it again</button></div>`
+    : "";
   const owned = (s.yours || []).length
     ? `<div class="revowned">yours: ${(s.yours || []).map(p => `<code>${esc(p)}</code>`).join(" ")}${
         s.others ? ` <span class="dim">· and ${s.others} path${s.others === 1 ? "" : "s"} you do not own</span>` : ""}</div>`
@@ -2888,7 +2953,7 @@ function revDetail(pr) {
   const detail = s.detail
     ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
     : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
-  return owned + signals + detail;
+  return stale + owned + signals + detail;
 }
 
 // The composer: one box for the three things that need words. `ask` stays private; the other two

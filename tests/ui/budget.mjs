@@ -34,6 +34,8 @@ function board({ computed, prs = 29 }) {
       ai: true,
       prs: Array.from({ length: ${prs} }, (_, i) => ({ number: i + 1, lane: "needs-you", draft: false })),
     };
+    ${grab("REV_SETTLE_MS")}
+    ${grab("revSettled")}
     ${grab("revAllowanceFor")}
     ${grab("revPumpSummaries")}
     ${grab("revFetchSummary")}

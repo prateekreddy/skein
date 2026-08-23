@@ -43,6 +43,9 @@ function board() {
     ${grab("revSumRepo")}
     ${grab("revHeld")}
     ${grab("REV_LANES")}
+    ${grab("REV_SETTLE_MS")}
+    ${grab("revSettled")}
+    ${grab("revSettlesIn")}
     ${grab("revAllowanceFor")}
     ${grab("revPumpSummaries")}
     ${grab("revFetchSummary")}
@@ -69,13 +72,25 @@ function board() {
       open_rows: () => revOpen.size,
       spent: () => revSumAuto,
       expand: n => { revOpen.add(n); },
+      fetchOne: n => revFetchSummary(n, true),
     };
   `;
+  // Settled by default — two hours since the head commit. A pull request skein has no commit date
+  // for, or one pushed to minutes ago, is not read on its own, so a fixture without this reads as
+  // an empty queue and every assertion about reading would be vacuous.
+  const SETTLED = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  let hot = [];            // numbers whose head commit landed just now
+  let moved = [];          // numbers whose head has moved since it was read
   const queue = id => ({
     ai: true,
     fresh: true,
     prs: [1, 2, 3, 4, 5, 6].map(n => ({
-      number: n, lane: "needs-you", draft: false, head_sha: id + n, reasons: ["reviewer"],
+      number: n,
+      lane: "needs-you",
+      draft: false,
+      head_sha: id + n + (moved.includes(n) ? "-moved" : ""),
+      committed_at: hot.includes(n) ? new Date().toISOString() : SETTLED,
+      reasons: ["reviewer"],
     })),
     blind_spots: [],
   });
@@ -126,6 +141,10 @@ function board() {
     // Everything, until it stops asking.
     drain: async () => { for (let i = 0; i < 20 && pending.length; i++) await settle(); },
     refuse: id => { refuse = id; },
+    // A pull request somebody has just pushed to.
+    hot: ns => { hot = ns; },
+    // The branch moving under a reading that has already been made.
+    moved: ns => { moved = ns; },
     // Summary requests only — the queue's own fetches are not what these counts are about.
     reads: () => asked.filter(u => /summary/.test(u)),
   };
@@ -214,8 +233,56 @@ function board() {
   b.refuse(null);            // whatever it was, it is over
   b.open();                  // and you come back to the queue
   await b.drain();
-  t.check("coming back asks again rather than keeping the failure", b.got(1).line, "x");
+  t.check("coming back asks again rather than keeping the failure", b.got(1) && b.got(1).line, "x");
   t.check("and the row is read", b.sums(), 6);
+}
+
+// ---- a pull request still being pushed to is left alone ----
+//
+// Asked for: "PR should be analyzed in background once there have been no commits for atleast an
+// hour". Reading a branch somebody is mid-push on spends a model call describing a commit that is
+// about to stop being the head — and the next poll spends another.
+{
+  const b = board();
+  b.hot([2, 5]);           // two of the six were pushed to a moment ago
+  b.open("alpha");
+  await b.drain();
+
+  t.check("a branch that is still moving is not read", b.got(2), undefined);
+  t.check("nor asked for", b.reads().filter(u => /\/2\/summary/.test(u)), []);
+  t.check("and the settled ones are read", b.sums(), 4);
+
+  // Asking by hand reads it at any age — the rule governs what skein does on its OWN, exactly as
+  // it does for drafts. Without this the rule is a wall rather than a default.
+  b.fetchOne(2);
+  await b.drain();
+  t.check("asking for it by hand reads it anyway", b.got(2) && b.got(2).line, "x");
+}
+
+// ---- a reading survives the commits that land after it ----
+//
+// Asked for: "if new commits come in show that there have been new commits since analysis and I
+// will trigger reanalysis manually". It used to be deleted, which is what made the pump read the
+// same pull request again on its own.
+{
+  const b = board();
+  b.open("alpha");
+  await b.drain();
+  const before = b.reads().length;
+  t.check("read once", b.got(1) && b.got(1).line, "x");
+
+  b.moved([1]);            // somebody pushes to #1
+  b.open();                // and the queue is read again
+  await b.drain();
+
+  t.check("the reading is still there", b.got(1) && b.got(1).line, "x");
+  t.check("marked as being of an earlier commit", b.got(1) && b.got(1).stale, true);
+  t.check("and it was not read again on its own", b.reads().length, before);
+
+  // The manual re-read is the only thing that replaces it.
+  b.fetchOne(1);
+  await b.drain();
+  t.check("asking again replaces it", b.got(1) && b.got(1).stale, undefined);
 }
 
 t.done();

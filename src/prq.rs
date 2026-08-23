@@ -74,6 +74,20 @@ pub struct Pr {
     pub base_ref: String,
     pub draft: bool,
     pub updated_at: String,
+    /// When the head COMMIT landed, RFC 3339 — not when the pull request was last touched.
+    ///
+    /// These are different questions and only one of them is about commits. `updated_at` moves when
+    /// somebody leaves a comment, so a branch nobody has pushed to in a day reads as hot the moment
+    /// it is discussed — which is exactly backwards for deciding whether a PR has settled enough to
+    /// be worth reading.
+    ///
+    /// Empty when GitHub did not say. "Do not know" is not "long ago" and must never be REPORTED as
+    /// one — nothing may tell somebody a branch is still moving on the strength of an absent field.
+    /// What a caller DOES about it is a separate decision, and the review pane makes the opposite
+    /// one to the obvious: it falls back to what it did before the settle rule existed, because a
+    /// rule that switches a feature off when its input is missing is worse than the churn it was
+    /// written to stop.
+    pub committed_at: String,
     /// "passing" | "pending" | "failing" | "none".
     pub checks: String,
     /// "approved" | "changes-requested" | "commented" | "none" — *your* last review.
@@ -581,7 +595,7 @@ query($q: String!, $n: Int!) {
         headRefName headRefOid baseRefName reviewDecision
         author { login }
         latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
-        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+        commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { nodes {
           ... on CheckRun { status conclusion }
           ... on StatusContext { state }
         } } } } } }
@@ -642,9 +656,21 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         .and_then(|c| c.get("nodes"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    // The head commit's own date, lifted out before `commits` is dropped. Same node the check
+    // rollup comes from, so it costs nothing to ask for and would cost a second query to add later.
+    let committed = node
+        .get("commits")
+        .and_then(|c| c.get("nodes"))
+        .and_then(|n| n.as_array())
+        .and_then(|n| n.first())
+        .and_then(|c| c.get("commit"))
+        .and_then(|c| c.get("committedDate"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     if let Some(map) = out.as_object_mut() {
         map.insert("latestReviews".into(), reviews);
         map.insert("statusCheckRollup".into(), checks);
+        map.insert("committedDate".into(), committed);
         map.remove("commits");
     }
     out
@@ -693,6 +719,7 @@ fn build_pr(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         updated_at: s("updatedAt"),
+        committed_at: s("committedDate"),
         checks: rollup(item),
         my_review,
         review_is_current,
@@ -1494,6 +1521,72 @@ mod tests {
         // Nothing reached the network: `gh` is never invoked for a repo that was not asked, which is
         // what makes reporting them free rather than three round trips each.
         unsafe { std::env::remove_var("SKEIN_HOME") };
+    }
+
+    /// A pull request says when its HEAD COMMIT landed, not when the pull request was last touched.
+    ///
+    /// The two are different questions and only one of them is about commits. `updatedAt` moves on
+    /// a comment, so a branch nobody has pushed to in days reads as hot the moment somebody
+    /// discusses it — backwards for deciding whether a PR has settled enough to be worth reading,
+    /// which is what this field exists for.
+    ///
+    /// Free: `commits(last: 1)` is already fetched for the check rollup, so this is one more field
+    /// inside a node skein asks for anyway. Asserted through `shape`, because `shape` DROPS
+    /// `commits` after flattening it — anything not lifted out there is gone by the time a `Pr` is
+    /// built, and it would be gone silently.
+    #[test]
+    fn a_pull_request_carries_its_head_commits_date_and_not_its_own() {
+        let node = serde_json::json!({
+            "number": 7,
+            "title": "a pull request",
+            "url": "u",
+            "isDraft": false,
+            "author": { "login": "someone" },
+            "headRefName": "feat",
+            "headRefOid": "abc",
+            "baseRefName": "main",
+            // Touched a minute ago…
+            "updatedAt": "2026-08-23T12:00:00Z",
+            "latestReviews": { "nodes": [] },
+            // …and last pushed to three days before that.
+            "commits": { "nodes": [{ "commit": {
+                "committedDate": "2026-08-20T09:00:00Z",
+                "statusCheckRollup": null,
+            }}]},
+        });
+        // And it is actually ASKED for. Everything above works on a node handed to it, so without
+        // this the whole feature can be reading a field GitHub was never told to send — every PR
+        // would report "do not know", the settle rule would decline to read anything, and the
+        // queue would look thoughtfully quiet rather than broken.
+        assert!(
+            SEARCH_QUERY.contains("commit { committedDate"),
+            "the head commit's date is read but never requested: {SEARCH_QUERY}"
+        );
+
+        let shaped = shape(&node);
+        let pr = build_pr(&shaped, 7, "me", "acme", &Reason::Author, &[]);
+        assert_eq!(
+            pr.committed_at, "2026-08-20T09:00:00Z",
+            "the queue is carrying the pull request's own timestamp, so a PR that was merely \
+             commented on reads as freshly pushed"
+        );
+        assert_eq!(
+            pr.updated_at, "2026-08-23T12:00:00Z",
+            "both are still reported"
+        );
+
+        // GitHub answering without one is "skein does not know", never "long ago" — a guess in that
+        // direction reads a pull request somebody is still pushing to.
+        let bare = shape(&serde_json::json!({
+            "number": 8, "title": "t", "url": "u", "isDraft": false,
+            "author": { "login": "someone" }, "headRefName": "f", "headRefOid": "d",
+            "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
+            "latestReviews": { "nodes": [] },
+        }));
+        assert_eq!(
+            build_pr(&bare, 8, "me", "acme", &Reason::Author, &[]).committed_at,
+            ""
+        );
     }
 
     #[test]
