@@ -279,6 +279,11 @@ async fn main() {
             "/api/repos/:id/review/:number/summary",
             get(api_review_summary),
         )
+        .route("/api/repos/:id/workflows", get(api_workflows))
+        .route(
+            "/api/repos/:id/review/:number/workflow",
+            post(api_set_workflow),
+        )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
         // The shape of a change: which modules moved and how. The same route shape for both
         // sources, because the answer is the same question — `?box=` for a box's branch.
@@ -1207,6 +1212,93 @@ async fn api_review_summary(
         Ok(Ok(summary)) => Json(summary).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// What every pull request in this repo's queue would have happen to it, and what could.
+///
+/// A separate read from the queue on purpose. The queue is what GitHub says and is cached for a
+/// minute; this is skein's own answer about it, and it changes the moment somebody assigns a
+/// workflow — folding the two together would mean a page that cannot show a choice taking effect
+/// without re-reading GitHub.
+async fn api_workflows(Path(id): Path<String>) -> Response {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        // A file skein cannot read is reported as itself, not as "no workflows": a fleet whose
+        // workflows all stopped working because of a typo must say so, or the automation simply
+        // appears to have been forgotten.
+        let flows = skein::workflow::load()?;
+        let queue = skein::prq::queue(&repo, false)?;
+        let mut prs = serde_json::Map::new();
+        for pr in &queue.prs {
+            let facts = skein::prwork::facts_of(pr, &queue.viewer);
+            let standing = skein::prwork::standing(&repo.id, pr.number, &facts, &flows);
+            prs.insert(
+                pr.number.to_string(),
+                serde_json::to_value(standing).unwrap_or_default(),
+            );
+        }
+        Ok::<_, String>(serde_json::json!({
+            "enabled": skein::prwork::enabled(),
+            "defined": flows.iter().map(|f| serde_json::json!({
+                "name": f.name,
+                "matches": f.matches.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
+                "steps": f.steps.iter().map(|s| serde_json::json!({
+                    "when": s.when.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
+                    "do": skein::workflow::spell_act(&s.act),
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "prs": prs,
+        }))
+    })
+    .await;
+    match out {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct WorkflowReq {
+    /// The workflow to put on this pull request. The empty string means "no workflow, and no rule
+    /// either" — the exclusion, which is a choice and not an absence.
+    ///
+    /// Absent means **leave the choice alone**. It used to mean "forget it", which made
+    /// `clear_stop` on its own silently take the workflow off the pull request as well: one button
+    /// doing a second thing nobody asked it to.
+    #[serde(default)]
+    name: Option<String>,
+    /// Forget the choice entirely, and let the rules speak for this pull request again.
+    #[serde(default)]
+    unassign: bool,
+    /// Let a stopped workflow run again. What a person presses after fixing whatever stopped it.
+    #[serde(default)]
+    clear_stop: bool,
+}
+
+/// Choose what governs one pull request, or let it run again.
+async fn api_set_workflow(
+    Path((id, number)): Path<(String, u64)>,
+    Json(req): Json<WorkflowReq>,
+) -> Json<serde_json::Value> {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    };
+    // The meaning of the three answers lives in `prwork`, where it is tested. It grew a bug in an
+    // hour when it lived here: clearing a stop also un-assigned the workflow.
+    let done = skein::prwork::apply(
+        &repo.id,
+        number,
+        req.name.as_deref(),
+        req.unassign,
+        req.clear_stop,
+    );
+    match done {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
 }
 

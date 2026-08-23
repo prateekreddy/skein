@@ -205,10 +205,16 @@ depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgat
 # `doorway` beside it, and for the neighbouring reason: `knock` decides who may stay once they have
 # arrived, `doorway` decides whether this process is entitled to be the thing they arrive at. Both
 # are pre-auth and both are one edge from the only file that holds a socket.
+# `prwork` and `workflow` because the row where somebody assigns a workflow, sees what it would do
+# and lets a stopped one run again is served here. The DECIDING is not: this binary maps a request
+# to `prwork::apply` and renders `prwork::standing`, and the moment it started doing more than that
+# — it worked out for itself what an absent name meant — it grew a bug where clearing a stop also
+# took the workflow off the pull request. Rules about what an assignment is belong in the module
+# that owns the idea, where they are tested.
 # `warden_client` because every other dependency this server needs is checked at boot — probes, the
 # kit, the launcher, the gh token, the ssh key — and the warden was not, so a host without one heard
 # about it from a 500 when somebody pressed Launch. It is one call at startup, to say so.
-depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume", "warden_client"]
+depends_on = ["act", "ai", "apiauth", "assets", "board", "cockpit", "config", "diff", "digest", "doorway", "files", "fleet", "gitgate", "handoff", "health", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "prwork", "queue", "repos", "review", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "takeover", "tracking", "transcript", "util", "volume", "warden_client", "workflow"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,

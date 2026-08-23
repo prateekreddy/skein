@@ -86,6 +86,136 @@ pub enum Outcome {
     Stopped(String),
 }
 
+/// Which workflow a pull request carries, and how it came to carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Carries {
+    /// Somebody chose this one on the row. Outranks every rule, in both directions.
+    Assigned(String),
+    /// A workflow's own `matches` claimed it.
+    Matched(String),
+    /// Excluded by hand — the row said "no workflow", and no rule may override that.
+    ///
+    /// A distinct answer from [`Carries::Nothing`] and the whole reason assignment is a
+    /// three-valued thing: with the tick sweeping every repo in the registry, "not this one" has to
+    /// be sayable about a single pull request. Otherwise the only way to exclude one is to edit the
+    /// rule for everybody.
+    Excluded,
+    /// No rule claims it and nobody assigned one.
+    Nothing,
+}
+
+impl Carries {
+    /// The workflow's name, where there is one.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Carries::Assigned(name) | Carries::Matched(name) => Some(name),
+            Carries::Excluded | Carries::Nothing => None,
+        }
+    }
+}
+
+fn assign_path(repo_id: &str) -> PathBuf {
+    crate::prq::review_dir(repo_id).join("workflow-assigned.json")
+}
+
+fn read_assigned(repo_id: &str) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(assign_path(repo_id))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Put a workflow on one pull request, or take it off.
+///
+/// `name` empty means **excluded** — not "no opinion". Clearing the choice entirely is
+/// [`unassign`], which lets the rules speak again. Three states, because with a rule sweeping every
+/// repo in the fleet, "leave this one alone" is a thing somebody has to be able to say.
+pub fn assign(repo_id: &str, number: u64, name: &str) -> Result<(), String> {
+    let mut all = read_assigned(repo_id);
+    all.insert(number.to_string(), name.to_string());
+    write_assigned(repo_id, &all)
+}
+
+/// Forget any choice made on this pull request, and let the rules decide again.
+pub fn unassign(repo_id: &str, number: u64) -> Result<(), String> {
+    let mut all = read_assigned(repo_id);
+    all.remove(&number.to_string());
+    write_assigned(repo_id, &all)
+}
+
+fn write_assigned(
+    repo_id: &str,
+    all: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let path = assign_path(repo_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let body = serde_json::to_vec_pretty(all).map_err(|e| e.to_string())?;
+    std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What a choice made on the row means, in one place.
+///
+/// The mapping lived in the route and grew a bug there within an hour of being written: "let it run
+/// again" sent no name, "no name" meant *forget the choice*, and so clearing a stop quietly took the
+/// workflow off the pull request as well — one button doing a second thing nobody asked for. It is
+/// here now because it is a rule about what an assignment IS, and a route is where rules go to be
+/// untested.
+///
+/// - `name: Some("x")` — put x on it.
+/// - `name: Some("")` — leave this one out, and let no rule claim it.
+/// - `unassign` — forget the choice; the rules speak for it again.
+/// - neither — **change nothing**. `clear_stop` alone is not a statement about what governs it.
+pub fn apply(
+    repo_id: &str,
+    number: u64,
+    name: Option<&str>,
+    unassign_it: bool,
+    clear_stop: bool,
+) -> Result<(), String> {
+    if clear_stop {
+        clear(repo_id, number);
+    }
+    match (name, unassign_it) {
+        (Some(name), _) => assign(repo_id, number, name),
+        (None, true) => unassign(repo_id, number),
+        (None, false) => Ok(()),
+    }
+}
+
+/// Which workflow governs this pull request.
+///
+/// The choice on the row wins over every rule. Where there is none, the first workflow whose
+/// `matches` claims it does — and a workflow with no `matches` claims nothing, ever
+/// ([`crate::workflow::claims`]).
+///
+/// An assignment naming a workflow that no longer exists is [`Carries::Nothing`] rather than an
+/// error: the file it named was edited, and the honest thing is to act on nothing rather than to
+/// guess which of the remaining ones was meant. The row says so.
+pub fn carries(
+    repo_id: &str,
+    number: u64,
+    facts: &crate::workflow::Facts,
+    flows: &[Workflow],
+) -> Carries {
+    match read_assigned(repo_id).get(&number.to_string()) {
+        Some(name) if name.is_empty() => return Carries::Excluded,
+        Some(name) => {
+            return match flows.iter().any(|f| &f.name == name) {
+                true => Carries::Assigned(name.clone()),
+                false => Carries::Nothing,
+            }
+        }
+        None => {}
+    }
+    flows
+        .iter()
+        .find(|flow| crate::workflow::claims(flow, facts))
+        .map(|flow| Carries::Matched(flow.name.clone()))
+        .unwrap_or(Carries::Nothing)
+}
+
 /// Where a repo's stopped pull requests are written down.
 ///
 /// Beside the review state for that repo, and on the host: this is skein's own memory of a decision
@@ -134,6 +264,57 @@ pub fn clear(repo_id: &str, number: u64) {
     let mut stops = read_stops(repo_id);
     if stops.remove(&number.to_string()).is_some() {
         let _ = write_stops(repo_id, &stops);
+    }
+}
+
+/// What a workflow would do to one pull request, and why — without doing any of it.
+///
+/// The dry run the owner asked to see before trusting this, and the same [`crate::workflow::next`]
+/// the tick uses. Deliberately the same function: a preview computed a second way is a preview that
+/// can disagree with what happens, and the whole point of showing it is that it cannot.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Standing {
+    /// The workflow's name, or empty.
+    pub workflow: String,
+    /// `assigned` | `matched` | `excluded` | `none` — how it came to carry that workflow, because
+    /// "you chose this" and "a rule chose this" are different things to see on a row.
+    pub how: String,
+    /// The step it would take next, spelled as it is written in the file. Empty when nothing
+    /// applies, which is what a healthy workflow says most of the time.
+    pub next: String,
+    /// Which step that is, 1-based, for a row that wants to say "waiting on step 2".
+    pub step: usize,
+    /// Why it is stopped, if it is. A stopped workflow does nothing until this is cleared.
+    pub stopped: String,
+}
+
+/// Everything the cockpit needs to draw one pull request's workflow state.
+pub fn standing(
+    repo_id: &str,
+    number: u64,
+    facts: &crate::workflow::Facts,
+    flows: &[Workflow],
+) -> Standing {
+    let carried = carries(repo_id, number, facts, flows);
+    let how = match &carried {
+        Carries::Assigned(_) => "assigned",
+        Carries::Matched(_) => "matched",
+        Carries::Excluded => "excluded",
+        Carries::Nothing => "none",
+    };
+    let flow = carried
+        .name()
+        .and_then(|name| flows.iter().find(|f| f.name == name));
+    let chosen = flow.and_then(|flow| crate::workflow::next(flow, facts));
+    Standing {
+        workflow: carried.name().unwrap_or_default().to_string(),
+        how: how.to_string(),
+        next: chosen
+            .as_ref()
+            .map(|c| crate::workflow::spell_act(&c.act))
+            .unwrap_or_default(),
+        step: chosen.as_ref().map(|c| c.step + 1).unwrap_or(0),
+        stopped: stopped(repo_id, number).unwrap_or_default(),
     }
 }
 
@@ -424,6 +605,120 @@ mod tests {
 
     fn chosen(act: Act) -> Chosen {
         Chosen { step: 3, act }
+    }
+
+    /// Which workflow governs a pull request, and who gets the last word.
+    ///
+    /// The owner's answer was "rules, plus a per-PR override" — and the override matters more than
+    /// it looks, because the tick sweeps every repo in the registry. Without a way to say "not this
+    /// one" about a single pull request, the only way to exclude one is to edit the rule for
+    /// everybody, which is how a rule stops being written honestly.
+    ///
+    /// So the choice on a row wins in BOTH directions: it can put a workflow on a pull request no
+    /// rule claims, and it can keep every rule off one.
+    #[test]
+    fn the_row_has_the_last_word_over_a_rule() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let flows = crate::workflow::from_bytes(
+            br#"{"workflow":[
+              {"name":"ship-mine","matches":["mine"],"steps":[{"when":[],"do":"merge:squash"}]},
+              {"name":"by-hand","steps":[{"when":[],"do":"flag:look at this"}]}]}"#,
+        )
+        .unwrap();
+        let mine = crate::workflow::Facts {
+            mine: true,
+            ..Default::default()
+        };
+        let theirs = crate::workflow::Facts {
+            mine: false,
+            ..Default::default()
+        };
+
+        // A rule claims what it matches, and nothing else.
+        assert_eq!(
+            carries("demo", 1, &mine, &flows),
+            Carries::Matched("ship-mine".into())
+        );
+        assert_eq!(carries("demo", 2, &theirs, &flows), Carries::Nothing);
+
+        // A workflow with no rule of its own is never picked up by matching — it exists to be
+        // chosen, and choosing it works on a pull request no rule would have claimed.
+        assign("demo", 2, "by-hand").unwrap();
+        assert_eq!(
+            carries("demo", 2, &theirs, &flows),
+            Carries::Assigned("by-hand".into())
+        );
+
+        // And the row overrules a rule that would otherwise have claimed it.
+        assign("demo", 1, "by-hand").unwrap();
+        assert_eq!(
+            carries("demo", 1, &mine, &flows),
+            Carries::Assigned("by-hand".into())
+        );
+
+        // "No workflow" is a thing you can say, and it is not the same as saying nothing. This is
+        // the one that keeps a fleet-wide rule usable.
+        assign("demo", 1, "").unwrap();
+        assert_eq!(
+            carries("demo", 1, &mine, &flows),
+            Carries::Excluded,
+            "a rule reclaimed a pull request that was excluded by hand"
+        );
+
+        // Clearing the choice is different again: the rules speak for it once more.
+        unassign("demo", 1).unwrap();
+        assert_eq!(
+            carries("demo", 1, &mine, &flows),
+            Carries::Matched("ship-mine".into())
+        );
+
+        // An assignment naming a workflow that has since been deleted acts on nothing, rather than
+        // guessing which of the survivors was meant.
+        assign("demo", 3, "the-one-that-was-deleted").unwrap();
+        assert_eq!(carries("demo", 3, &mine, &flows), Carries::Nothing);
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Letting a stopped workflow run again does not also take the workflow off.
+    ///
+    /// The bug this exists for was written and found within an hour: "let it run again" sends no
+    /// workflow name, no name meant "forget the choice", and so one button quietly did two things —
+    /// the second being to un-assign the workflow somebody had chosen. On a fleet where a rule
+    /// would then re-claim the pull request, that is a change of behaviour nobody asked for,
+    /// arriving through a button labelled something else.
+    #[test]
+    fn clearing_a_stop_does_not_change_what_governs_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let flows = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"by-hand","steps":[{"when":[],"do":"flag:hi"}]}]}"#,
+        )
+        .unwrap();
+        let facts = crate::workflow::Facts::default();
+
+        apply("demo", 5, Some("by-hand"), false, false).unwrap();
+        stop("demo", 5, "CI is red");
+        assert!(stopped("demo", 5).is_some());
+
+        // The button, and only the button.
+        apply("demo", 5, None, false, true).unwrap();
+        assert_eq!(stopped("demo", 5), None, "the stop was not cleared");
+        assert_eq!(
+            carries("demo", 5, &facts, &flows),
+            Carries::Assigned("by-hand".into()),
+            "letting it run again silently took the workflow off it"
+        );
+
+        // And forgetting the choice is its own request, which still works.
+        apply("demo", 5, None, true, false).unwrap();
+        assert_eq!(carries("demo", 5, &facts, &flows), Carries::Nothing);
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// What GitHub said becomes what a workflow sees, and UNKNOWN survives the trip.

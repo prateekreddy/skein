@@ -487,6 +487,14 @@
   /* A reading of an older commit is dimmed rather than coloured: it is still true about the code it
      read, so it must not shout like a fault — but it must never look like the current answer. */
   .revgist.stale { color:var(--faint); }
+  .revtag.flow { color:var(--accent); border-color:var(--accent); }
+  .revtag.stopped { color:var(--attn); border-color:var(--attn); }
+  .revflow { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
+    margin-top:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-direction:column; gap:6px; }
+  .revflow-head { display:flex; align-items:center; gap:8px; }
+  .revflow-head span { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint); }
+  .revflow-stop { color:var(--attn); display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+  .revflow-off { color:var(--waiting); }
   .revstale { border:1px solid var(--working); border-radius:var(--radius-sm); padding:8px 10px;
     margin-bottom:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-wrap:wrap;
     align-items:center; gap:6px; }
@@ -2440,6 +2448,13 @@ const revSeen = new Map();
 // every summary read for it. NOT the same question as "what does the view name": leaving review for
 // a box names no repo at all, and that is not a repo switch.
 let revHeld = null;
+// What skein would do to each pull request in this repo, and what it could be told to do —
+// `{enabled, defined: [...], prs: {number: standing}}`.
+//
+// Read separately from the queue, and on purpose. The queue is what GitHub says and is cached for a
+// minute; this is skein's own answer about it, and it changes the instant somebody assigns a
+// workflow. Folded together, choosing a workflow would not show up until GitHub was read again.
+let revFlows = null;
 let revStaleTimer = null;
 let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
 // Three at a time. Each summary is a `gh pr diff` plus one or two model calls on the SAME
@@ -2551,7 +2566,7 @@ function openReview(repoId) {
   // that had been expanded. Reported as "I clicked a box and went back to PRs and the entire thing
   // disappears" — with the pane then re-reading, from a server cache, what it had just discarded.
   if (revHeld && revHeld !== id) {
-    revQueue = null; revOpen = new Set(); revSums = new Map(); revMods = null;
+    revQueue = null; revOpen = new Set(); revSums = new Map(); revMods = null; revFlows = null;
   }
   revHeld = id;
   // Here as well as after the queue lands: the allowance governs what is read WITHOUT being asked,
@@ -2596,7 +2611,7 @@ function loadReview(force) {
       if (held.head_sha !== pr.head_sha) held.stale = true;
     }
     revAllowanceFor(id);
-    revQueue = q; revSeen.set(id, q); renderReview(); revPumpSummaries();
+    revQueue = q; revSeen.set(id, q); renderReview(); revPumpSummaries(); loadWorkflows();
     // `fresh: false` means the server handed over its remembered copy and went to fetch the real
     // one. Ask again shortly — by then it is a cache hit, not another wait. Once: if the second ask
     // is still stale the fetch is genuinely slow, and hammering it would not make it faster.
@@ -2777,6 +2792,56 @@ function revAllowanceFor(id) {
   revSumAuto = 0;
 }
 
+// What workflows exist, and what each pull request's is doing. Cheap: it reads the cached queue and
+// skein's own files, and touches GitHub only when the queue cache has aged out.
+function loadWorkflows() {
+  const id = revHeld;
+  if (!id) return;
+  fetch(`/api/repos/${encodeURIComponent(id)}/workflows`)
+    .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+    .then(w => { if (revHeld === id) { revFlows = w; renderReview(); } })
+    // A workflow file with a typo in it answers 502 here, and the row says so — see `revFlowBox`.
+    .catch(e => { if (revHeld === id) { revFlows = { error: String(e.message || e).split("\n")[0] }; renderReview(); } });
+}
+
+// Put a workflow on one pull request, take it off, or let the rules decide again.
+function revSetWorkflow(number, choice) {
+  const id = revHeld;
+  if (!id) return;
+  // Three answers, not two: a name, the empty string (excluded by hand — no rule may claim it), and
+  // "let the rules decide", which forgets the choice. See `prwork::Carries`.
+  const body = choice === "__rules" ? { unassign: true } : { name: choice };
+  revWorkflowPost(number, body);
+}
+
+// Let a stopped workflow run again. Deliberately not bundled with the picker: a person clearing a
+// stop is saying "I fixed it", not "change what governs this".
+function revClearStop(number) { revWorkflowPost(number, { clear_stop: true }); }
+
+function revWorkflowPost(number, body) {
+  const id = revHeld;
+  if (!id) return;
+  fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/workflow`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  })
+    .then(r => r.json())
+    .then(d => { if (!d.ok) toast(d.error || "that did not stick"); loadWorkflows(); })
+    .catch(e => toast(String(e.message || e).split("\n")[0]));
+}
+
+// What this pull request's workflow is, in one word for the collapsed line.
+function revFlowChip(pr) {
+  const st = revFlows && revFlows.prs && revFlows.prs[pr.number];
+  if (!st || !st.workflow) return "";
+  if (st.stopped) {
+    return `<span class="revtag stopped" title="${esc(st.stopped)}">${esc(st.workflow)} · stopped</span>`;
+  }
+  // The verb only — "add-label", "merge" — because the row is scanned and the argument is detail.
+  const doing = st.next ? String(st.next).split(":")[0] : "";
+  const title = st.next ? `step ${st.step}: ${st.next}` : "nothing to do right now";
+  return `<span class="revtag flow" title="${esc(title)}">${esc(st.workflow)}${doing ? ` · ${esc(doing)}` : ""}</span>`;
+}
+
 function revPumpSummaries() {
   if (!revQueue || !revQueue.ai) return;
   const want = (revQueue.prs || [])
@@ -2859,7 +2924,7 @@ function revRow(pr) {
       <span class="revtitle">${esc(pr.title || "")}</span>
       ${pr.draft ? `<span class="revtag draft">draft</span>` : ""}
       ${revMoved(pr) ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""}
-      ${flags}${reasons}
+      ${revFlowChip(pr)}${flags}${reasons}
       <span class="revwho">${esc(pr.author || "")}</span>
     </div>${revGist(s)}`;
   return `<div class="revrow${open ? " open" : ""}">${line}${open ? revBody(pr) : ""}</div>`;
@@ -2903,6 +2968,7 @@ function revBody(pr) {
       <button type="button" class="revchip" onclick="archivePr(${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
       <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">re-read</button>
     </div>
+    ${revFlowBox(pr)}
     ${revComposeHtml(pr)}
   </div>`;
 }
@@ -2954,6 +3020,52 @@ function revDetail(pr) {
     ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
     : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
   return stale + owned + signals + detail;
+}
+
+// What governs this pull request, what it would do next, and how to change either.
+//
+// Everything here is about a thing that acts on its own, so it says three things a person needs
+// before they can trust it: what it WOULD do (the same evaluator the tick uses, so the preview
+// cannot disagree with what happens), who decided it should — a rule or you — and how to stop it.
+function revFlowBox(pr) {
+  if (!revFlows) return "";
+  if (revFlows.error) {
+    // A workflow file with a typo in it loads none of them, deliberately (half an automation is
+    // worse than none), and the pull request is the place somebody will notice.
+    return `<div class="revflow"><b>Workflows are not running.</b> ${esc(revFlows.error)}</div>`;
+  }
+  const defined = revFlows.defined || [];
+  const st = (revFlows.prs || {})[pr.number] || { workflow: "", how: "none", next: "", step: 0, stopped: "" };
+  const chosen = st.how === "assigned" ? st.workflow : st.how === "excluded" ? "" : "__rules";
+  const options = [
+    `<option value="__rules"${chosen === "__rules" ? " selected" : ""}>let the rules decide</option>`,
+    ...defined.map(f => `<option value="${esc(f.name)}"${chosen === f.name ? " selected" : ""}>${esc(f.name)}</option>`),
+    `<option value=""${st.how === "excluded" ? " selected" : ""}>no workflow — leave this one alone</option>`,
+  ].join("");
+
+  // Where it stands, in a sentence rather than a badge: this is the part somebody reads when they
+  // are deciding whether to let it run.
+  const where = st.stopped
+    ? `<div class="revflow-stop"><b>Stopped.</b> ${esc(st.stopped)}
+        <button type="button" class="revchip" onclick="revClearStop(${pr.number})">let it run again</button></div>`
+    : !st.workflow
+      ? `<div class="dim">Nothing governs this pull request${st.how === "excluded" ? " — you left it out" : ""}.</div>`
+      : st.next
+        ? `<div>Next: <code>${esc(st.next)}</code> <span class="dim">(step ${st.step}${
+            st.how === "matched" ? `, from ${esc(st.workflow)}'s own rule` : ""})</span></div>`
+        : `<div class="dim">Nothing to do right now — ${esc(st.workflow)} is waiting for something to change.</div>`;
+
+  // Said once, here, rather than on every row: with the switch off none of this acts, and a person
+  // reading "next: merge" deserves to know whether that is a plan or a prediction.
+  const off = revFlows.enabled === false && st.workflow
+    ? `<div class="revflow-off">Workflows are switched off for this fleet, so nothing will happen on its own.</div>`
+    : "";
+
+  return `<div class="revflow">
+    <div class="revflow-head"><span>workflow</span>
+      <select aria-label="Workflow for this pull request" onchange="revSetWorkflow(${pr.number}, this.value)">${options}</select>
+    </div>${where}${off}
+  </div>`;
 }
 
 // The composer: one box for the three things that need words. `ask` stays private; the other two

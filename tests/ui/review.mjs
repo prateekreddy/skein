@@ -574,6 +574,68 @@ await check("set aside moves a PR to the archived lane", async () => {
   if (after.length >= before.length) throw new Error("it was archived but never left needs-you");
 });
 
+console.log("\nworkflows");
+// Assign, see what it would do, and leave one out. The chain the owner has to be able to walk
+// before trusting something that merges on its own — driven through the real page and the real
+// routes, because "the endpoint returns the right JSON" is not the claim being made.
+await check("a pull request can be told which workflow governs it, and what it would do", async () => {
+  // A workflow that claims nothing on its own: what governs this PR must be a CHOICE somebody
+  // made, or the test proves matching rather than assignment.
+  fs.writeFileSync(path.join(fx.home, "workflows.json"), JSON.stringify({
+    workflow: [{
+      name: "ship-it",
+      steps: [
+        { when: ["checks:failing"], do: "flag:CI is red" },
+        { when: ["no-label:ci"], do: "add-label:ci" },
+      ],
+    }],
+  }));
+  // Reopen the pane so it asks again — the workflow file is read per request, and nothing tells a
+  // page already on screen that a file changed underneath it.
+  await page.click("#revbtn");
+  await settle(900);
+  const rows = await page.$$("#revpane .revrow");
+  for (const row of rows) {
+    const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
+    if (t.includes("default timeout") && !(await row.$(".revbody"))) { await row.click(); break; }
+  }
+  await settle();
+  const box = await page.$("#revpane .revrow.open .revflow");
+  if (!box) throw new Error("an expanded row says nothing about what governs it");
+  const before = await page.$eval("#revpane .revrow.open .revflow", e => e.textContent);
+  if (!before.includes("Nothing governs")) {
+    throw new Error(`a pull request nobody assigned anything to already carries something: ${before}`);
+  }
+
+  await page.selectOption("#revpane .revrow.open .revflow select", "ship-it");
+  await settle(900);
+  const after = await page.$eval("#revpane .revrow.open .revflow", e => e.textContent);
+  // The dry run: the step it WOULD take, from the same evaluator the tick uses.
+  if (!after.includes("Next:") || !after.includes("add-label:ci")) {
+    throw new Error(`assigning a workflow did not say what it would do: ${after}`);
+  }
+  // And the honest state of a fleet that has not switched this on: a plan, not a prediction.
+  if (!after.includes("switched off")) {
+    throw new Error(`the pane promised action on a fleet with workflows off: ${after}`);
+  }
+  // The collapsed line carries it too, or a queue of thirty says nothing at a glance.
+  const chip = await page.$eval("#revpane .revrow.open .revtag.flow", e => e.textContent).catch(() => "");
+  if (!chip.includes("ship-it")) {
+    throw new Error(`the row does not show what governs it: ${chip}`);
+  }
+});
+
+await check("and one pull request can be left out of it entirely", async () => {
+  await page.selectOption("#revpane .revrow.open .revflow select", "");
+  await settle(900);
+  const said = await page.$eval("#revpane .revrow.open .revflow", e => e.textContent);
+  if (!said.includes("you left it out")) {
+    throw new Error(`excluding a pull request did not stick: ${said}`);
+  }
+  const chip = await page.$("#revpane .revrow.open .revtag.flow");
+  if (chip) throw new Error("a pull request that was left out still shows a workflow on its row");
+});
+
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
   if (noise.length) throw new Error(noise.join(" | "));
