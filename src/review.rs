@@ -134,6 +134,48 @@ pub fn cached(repo_id: &str, number: u64, head_sha: &str) -> Option<Summary> {
     serde_json::from_str(&text).ok()
 }
 
+/// What skein said about this PR at an EARLIER commit — the newest such reading, if any.
+///
+/// The prompt has always had a "what skein already said" slot, and until now nothing could fill it
+/// in the case that matters. [`summarise`] returns the cached summary before building a prompt at
+/// all, so the only lookup that existed — keyed on the CURRENT head — could only ever hit when
+/// somebody pressed "re-read" on a commit already read. A new commit landing, which is the whole
+/// reason a PR comes back to you, started from nothing every time.
+///
+/// So the reading of the commit it moved FROM is what gets handed over, and the model is asked to
+/// account for the change rather than for the pull request. Cheaper and better in the same move: it
+/// is the difference between "read these forty files" and "you said this yesterday, here is what
+/// moved".
+///
+/// Newest by modification time, because a PR force-pushed twice leaves two and only the last one
+/// describes what the branch actually looked like before this push.
+pub fn previous(repo_id: &str, number: u64, not_sha: &str) -> Option<Summary> {
+    let dir = review_dir(repo_id).join("summaries");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for path in fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()) {
+        let Some((n, sha)) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|name| name.split_once('-'))
+        else {
+            continue;
+        };
+        if n.parse::<u64>().ok() != Some(number) || sha == not_sha {
+            continue;
+        }
+        let Ok(at) = fs::metadata(&path).and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(seen, _)| at > *seen) {
+            best = Some((at, path));
+        }
+    }
+    let text = fs::read_to_string(best?.1).ok()?;
+    serde_json::from_str::<Summary>(&text)
+        .ok()
+        .filter(|s| s.depth != Depth::Unread)
+}
+
 fn store(repo_id: &str, s: &Summary) -> Result<(), String> {
     let path = cache_path(repo_id, s.number, &s.head_sha);
     let dir = path.parent().ok_or("no parent")?.to_path_buf();
@@ -177,7 +219,11 @@ pub fn prune(repo_id: &str, slug: &str, open: &[(u64, String)]) -> usize {
     // Asked once per number rather than once per file: a PR force-pushed ten times has ten files and
     // exactly one answer.
     let mut closed: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
-    for path in entries.flatten().map(|e| e.path()) {
+    let files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    // The newest superseded reading per open PR, worked out before anything is removed — it is what
+    // [`previous`] will hand to the next pass instead of starting from nothing.
+    let newest_stale = keepsakes(&files, open);
+    for path in files {
         let Some((number, sha)) = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -187,8 +233,16 @@ pub fn prune(repo_id: &str, slug: &str, open: &[(u64, String)]) -> usize {
             continue;
         };
         let doomed = match open.iter().find(|(n, _)| *n == number) {
-            // Open, and this is not the commit it is at.
-            Some((_, head)) => !head.starts_with(&sha) && *head != sha,
+            // Open, and this is not the commit it is at — but the most recent of those is kept.
+            //
+            // Deleting every superseded reading and then asking the model to build on "what skein
+            // already said" are two changes that undo each other, and they were written an hour
+            // apart. [`previous`] hands the reading of the commit a PR moved FROM to the next pass,
+            // so exactly one superseded file per PR is not waste — it is the input that makes the
+            // next read cheap. The ones behind it describe branches nobody will ever ask about.
+            Some((_, head)) => {
+                !head.starts_with(&sha) && *head != sha && Some(&path) != newest_stale.get(&number)
+            }
             // Not in your queue. That is a question, not an answer — and one worth paying for
             // only once the file has stopped being current enough to be worth keeping anyway.
             None if fresh(&path) => false,
@@ -213,6 +267,42 @@ pub fn prune(repo_id: &str, slug: &str, open: &[(u64, String)]) -> usize {
         }
     }
     gone
+}
+
+/// For each open pull request, the newest reading of a commit it is no longer at.
+///
+/// Kept by [`prune`] so [`previous`] has something to hand the next pass. One per PR: the ones
+/// behind it describe branches that will never be asked about again.
+fn keepsakes(files: &[PathBuf], open: &[(u64, String)]) -> std::collections::HashMap<u64, PathBuf> {
+    let mut best: std::collections::HashMap<u64, (std::time::SystemTime, PathBuf)> =
+        std::collections::HashMap::new();
+    for path in files {
+        let Some((n, sha)) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|name| name.split_once('-'))
+        else {
+            continue;
+        };
+        let Ok(number) = n.parse::<u64>() else {
+            continue;
+        };
+        // Only for PRs still open, and only for commits they have moved past.
+        let Some((_, head)) = open.iter().find(|(o, _)| *o == number) else {
+            continue;
+        };
+        if head.starts_with(sha) || head == sha {
+            continue;
+        }
+        let Ok(at) = fs::metadata(path).and_then(|m| m.modified()) else {
+            continue;
+        };
+        let better = best.get(&number).is_none_or(|(seen, _)| at > *seen);
+        if better {
+            best.insert(number, (at, path.clone()));
+        }
+    }
+    best.into_iter().map(|(n, (_, path))| (n, path)).collect()
 }
 
 /// How long a summary is left alone before it is worth a call to ask whether its PR still exists.
@@ -601,8 +691,12 @@ fn context(slug: &str, pr: &Pr, repo: &Repo) -> String {
                 .join("\n\n")
         )
     };
+    // The current head first — that is the "re-read this" case, where what skein said about THIS
+    // commit is the thing to improve on. Otherwise the commit it moved from, which is the case that
+    // was unreachable and is the common one.
     let prior = cached(repo_id, pr.number, &pr.head_sha)
         .filter(|s| s.depth != Depth::Unread)
+        .or_else(|| previous(repo_id, pr.number, &pr.head_sha))
         .map(|s| {
             if s.detail.is_empty() {
                 format!("\nWhat skein already said about it: {}\n", s.line)
@@ -721,7 +815,8 @@ mod tests {
             fs::write(dir.join(format!("{name}.json")), "{}").unwrap();
         };
         put("7-aaaaaaaa"); // #7 is open at aaaaaaaa — the current reading
-        put("7-bbbbbbbb"); // and this is the commit it used to be at
+        put("7-ffffffff"); // two pushes ago: nobody will ever ask about that branch again
+        put("7-bbbbbbbb"); // the commit it moved FROM — kept, because `previous` hands it on
         put("9-cccccccc"); // #9 left the lane because it CLOSED — old enough to be worth asking
         put("8-eeeeeeee"); // #8 left the lane and is still open — asked, and kept
         put("4-dddddddd"); // #4 left the lane too, but is too recent to spend a call on
@@ -731,6 +826,12 @@ mod tests {
         // that has nothing to do with what it claims to check — which is exactly what it did on its
         // first draft: sabotaging the failed-lookup arm changed nothing, because every file was new.
         let old = std::time::SystemTime::now() - (SETTLE + Duration::from_secs(60));
+        // Explicit ordering between the two superseded readings, so "the newest" is a fact rather
+        // than whatever order the filesystem happened to create them in.
+        backdate(
+            &dir.join("7-ffffffff.json"),
+            std::time::SystemTime::now() - Duration::from_secs(3600),
+        );
         for name in ["9-cccccccc", "8-eeeeeeee"] {
             let handle = fs::OpenOptions::new()
                 .write(true)
@@ -748,10 +849,15 @@ mod tests {
             left("7-aaaaaaaa"),
             "the reading of the commit the PR is AT was deleted"
         );
+        // Exactly one superseded reading survives, and it is the newest. Not waste: the next pass
+        // hands it to the model as "what skein already said", which is the difference between
+        // re-reading forty files and accounting for what moved.
         assert!(
-            !left("7-bbbbbbbb"),
-            "a reading that can never be read again was kept"
+            left("7-bbbbbbbb"),
+            "the reading of the commit this PR moved FROM was deleted, so the next read starts \
+             from nothing — pruning and building-on-the-last-reading undoing each other"
         );
+        assert!(!left("7-ffffffff"), "a reading two pushes back was kept");
         assert!(
             !left("9-cccccccc"),
             "the reading of a CLOSED pull request was kept — which is the \
@@ -764,7 +870,10 @@ mod tests {
             "a pull request that merely left your lane, and is still open, was deleted"
         );
         assert!(left("nonsense"), "a file that is not a summary was deleted");
-        assert_eq!(gone, 2, "exactly the superseded commit and the closed PR");
+        assert_eq!(
+            gone, 2,
+            "exactly the oldest superseded commit and the closed PR"
+        );
 
         // And the recent one was never ASKED about — cheap is not free, and a call per abandoned
         // summary on every tab open is a cost nobody agreed to. Asserted on the requests actually
@@ -802,9 +911,13 @@ mod tests {
 
         let dir = crate::prq::review_dir("demo").join("summaries");
         fs::create_dir_all(&dir).unwrap();
-        for name in ["7-aaaaaaaa", "7-bbbbbbbb", "9-cccccccc"] {
+        for name in ["7-aaaaaaaa", "7-ffffffff", "7-bbbbbbbb", "9-cccccccc"] {
             fs::write(dir.join(format!("{name}.json")), "{}").unwrap();
         }
+        backdate(
+            &dir.join("7-ffffffff.json"),
+            std::time::SystemTime::now() - Duration::from_secs(3600),
+        );
         let old = std::time::SystemTime::now() - (SETTLE + Duration::from_secs(60));
         let handle = fs::OpenOptions::new()
             .write(true)
@@ -817,10 +930,14 @@ mod tests {
         let gone = prune("demo", "acme/repo", &[(7, "aaaaaaaa".to_string())]);
         assert_eq!(
             gone, 1,
-            "only the superseded commit, which needs nobody's opinion"
+            "only the oldest superseded commit, which needs nobody's opinion"
         );
         assert!(dir.join("7-aaaaaaaa.json").exists());
-        assert!(!dir.join("7-bbbbbbbb.json").exists());
+        assert!(
+            dir.join("7-bbbbbbbb.json").exists(),
+            "the keepsake was deleted"
+        );
+        assert!(!dir.join("7-ffffffff.json").exists());
         assert!(
             dir.join("9-cccccccc.json").exists(),
             "a summary was deleted on a lookup that never got an answer — an unreachable GitHub \
@@ -830,6 +947,15 @@ mod tests {
         std::env::remove_var("SKEIN_GITHUB_API");
         std::env::remove_var("GH_TOKEN");
         crate::prq::forget_host_token();
+    }
+
+    /// Make a file look older than it is. Several call sites now, and a brace-heavy block inlined
+    /// four times is one that drifts.
+    fn backdate(path: &std::path::Path, to: std::time::SystemTime) {
+        let handle = fs::OpenOptions::new().write(true).open(path).unwrap();
+        handle
+            .set_times(fs::FileTimes::new().set_modified(to).set_accessed(to))
+            .unwrap();
     }
 
     /// A GitHub that answers "is this pull request open" by number.

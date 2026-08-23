@@ -205,7 +205,23 @@ pub(crate) fn tried(
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "on a signal".into()),
-            said: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            // **Both streams, stdout first.** `claude -p` puts its diagnosis on STDOUT and leaves
+            // stderr for unrelated noise — measured:
+            //
+            //   $ claude -p --model definitely-not-a-real-model x
+            //   exit 1
+            //   stdout: There's an issue with the selected model (…). It may not exist or you may
+            //           not have access to it.
+            //   stderr: Warning: no stdin data received in 3s…
+            //
+            // Reading stderr alone is why a live fleet was told "`claude` exited 1 without saying
+            // why" for a failure the CLI had explained in full, on the other pipe.
+            said: [&out.stdout, &out.stderr]
+                .iter()
+                .map(|raw| String::from_utf8_lossy(raw).trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" / "),
         });
     }
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -362,8 +378,8 @@ mod tests {
             other => panic!("expected Missing, got {other:?}"),
         }
 
-        // Ran and refused. Its stderr is the diagnosis — not logged in, a model it will not serve,
-        // a rate limit — and it was being thrown away.
+        // Ran and refused. Its diagnosis was being thrown away — not logged in, a model it will
+        // not serve, a rate limit.
         let refused = stub("refuses", "echo 'Invalid API key' >&2; exit 3");
         match tried(&refused, "m", "hi", quick) {
             Err(Unread::Refused { code, said }) => {
@@ -376,6 +392,23 @@ mod tests {
                     .say()
                     .contains("Invalid API key"));
             }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+
+        // **And on stdout**, which is where `claude -p` actually puts it. Measured against the real
+        // CLI: an unknown model exits 1 with the explanation on STDOUT and an unrelated stdin
+        // warning on stderr. Reading stderr alone told a live fleet "`claude` exited 1 without
+        // saying why" for a failure the CLI had explained in full — so the noisy stream must not be
+        // allowed to hide the useful one.
+        let talkative = stub(
+            "explains-on-stdout",
+            "echo \"issue with the selected model\"; echo 'Warning: no stdin data' >&2; exit 1",
+        );
+        match tried(&talkative, "m", "hi", quick) {
+            Err(Unread::Refused { said, .. }) => assert!(
+                said.contains("issue with the selected model"),
+                "the CLI explained itself on stdout and the explanation was dropped: {said:?}"
+            ),
             other => panic!("expected Refused, got {other:?}"),
         }
 

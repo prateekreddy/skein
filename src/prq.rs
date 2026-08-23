@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 /// Which lane a PR sits in. Derived on every fetch, never stored — the only lane skein has an
 /// opinion about is [`Lane::Archived`], and even that is cleared the moment GitHub stops calling
 /// the PR open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Lane {
     /// Open, yours, and you have not submitted a decision on the *current* head commit.
@@ -45,7 +45,7 @@ pub enum Lane {
 
 /// Why a PR is in your queue. Kept as a list rather than one value because a PR is routinely more
 /// than one of these at once, and collapsing them would break the filter you actually asked for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Reason {
     /// You opened it.
@@ -63,7 +63,7 @@ pub enum Reason {
 /// Fields are pulled defensively from `gh`'s JSON: a field this version of `gh` does not emit
 /// degrades that one value, rather than dropping the PR. A PR you never saw is the failure mode
 /// that costs something; a PR with an unknown check state is merely less useful.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pr {
     pub number: u64,
     pub title: String,
@@ -88,7 +88,7 @@ pub struct Pr {
 }
 
 /// A repo's queue, plus an honest account of what could not be looked at.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Queue {
     pub repo_id: String,
     pub slug: String,
@@ -103,6 +103,23 @@ pub struct Queue {
     /// miss things. Every path that can fail partially — team review requests needing `read:org`,
     /// a query that errored — states itself here rather than returning a shorter list.
     pub blind_spots: Vec<String>,
+    /// When this was read from GitHub, RFC 3339.
+    ///
+    /// Load-bearing rather than decoration. A queue may now be served from the copy on disk before
+    /// the fresh one exists, and showing somebody yesterday's pull requests as if they were today's
+    /// is the same failure as a board that looks calm because its server died (SKEIN-128). Stale is
+    /// only safe when its age is visible.
+    #[serde(default)]
+    pub as_of: String,
+    /// Was this read from GitHub just now, or handed over while a fresh one is being fetched?
+    #[serde(default = "yes")]
+    pub fresh: bool,
+}
+
+/// `Queue::fresh` defaults true: everything that computes one directly has just read GitHub, and a
+/// field that quietly defaulted to "stale" would put an age warning on every honest answer.
+fn yes() -> bool {
+    true
 }
 
 /// Where the token the host talks to GitHub with came from, in the order it is looked for.
@@ -487,6 +504,8 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
         ai: crate::review::summaries_enabled(),
         prs,
         blind_spots,
+        as_of: chrono::Utc::now().to_rfc3339(),
+        fresh: true,
     };
     if !cfg!(test) {
         QUEUE_CACHE
@@ -494,8 +513,57 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
             .unwrap_or_else(|e| e.into_inner())
             .get_or_insert_with(HashMap::new)
             .insert(repo.id.clone(), (Instant::now(), q.clone()));
+        // And to disk, so the tab has something to paint after a server restart. The in-process
+        // cache is the fast path; this is the one that means "cold" does not mean "blank".
+        remember(&q);
     }
     Ok(q)
+}
+
+// ───────────────────────────── what to show before the answer ─────────────────────────────
+
+/// Where a repo's last queue is kept between runs.
+fn remembered_path(repo_id: &str) -> PathBuf {
+    review_dir(repo_id).join("queue.json")
+}
+
+/// Keep this queue for the next cold start. Best-effort: failing to cache is not failing.
+fn remember(q: &Queue) {
+    let dir = review_dir(&q.repo_id);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(bytes) = serde_json::to_vec(q) {
+        let _ = write_atomic(&remembered_path(&q.repo_id), &dir, &bytes);
+    }
+}
+
+/// The last queue read for this repo, however old — marked as not fresh.
+///
+/// **Whatever exists, immediately.** Opening the tab used to block on three GraphQL searches per
+/// repo plus the viewer lookup, and on a cold cache — a fresh server, a repo not looked at yet,
+/// any refresh past the micro-cache — it painted nothing until they all came back. The thing it was
+/// being compared against was a blank panel, and last night's pull requests beat a blank panel every
+/// time so long as their age is on screen.
+///
+/// `fresh` is forced false here rather than trusted from the file: what was written was fresh when
+/// it was written, and the one thing this must never do is hand somebody an old queue that claims
+/// to be current.
+pub fn remembered(repo_id: &str) -> Option<Queue> {
+    let text = std::fs::read_to_string(remembered_path(repo_id)).ok()?;
+    let mut q: Queue = serde_json::from_str(&text).ok()?;
+    q.fresh = false;
+    Some(q)
+}
+
+/// The in-process copy, if one is young enough to be worth calling fresh.
+///
+/// Separate from [`queue`] so a caller can ask "would this cost a network round trip" without
+/// taking one. That is the whole difference between painting now and painting in four seconds.
+pub fn unexpired(repo_id: &str) -> Option<Queue> {
+    let cache = QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let (at, q) = cache.as_ref()?.get(repo_id)?;
+    (at.elapsed() < Duration::from_secs(60)).then(|| q.clone())
 }
 
 /// The query behind the queue. One call per membership rule, and every field the parser needs.

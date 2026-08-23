@@ -1014,6 +1014,27 @@ async fn api_review_queue(
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
+    // **Paint now, refresh behind.** Opening this tab used to block on three GraphQL searches per
+    // repo plus the viewer lookup, so a cold cache showed nothing at all until every one of them
+    // came back. What it was being compared against is a blank panel, and the last queue beats a
+    // blank panel every time — as long as its age travels with it, which is what `as_of` and
+    // `fresh` are for. Same rule as the board's staleness banner: stale is safe only when visible.
+    //
+    // `force` is the explicit refresh and always waits, because somebody who pressed it is asking
+    // for the new answer rather than for a fast one.
+    if !force {
+        if let Some(fresh) = skein::prq::unexpired(&id) {
+            return Json(fresh).into_response();
+        }
+        if let Some(old) = skein::prq::remembered(&id) {
+            // The refresh nobody is waiting for. Its result lands in the cache and on disk, so the
+            // client's next ask — a few seconds later — is a cache hit rather than another wait.
+            tokio::task::spawn_blocking(move || {
+                let _ = skein::prq::queue(&repo, true);
+            });
+            return Json(old).into_response();
+        }
+    }
     let slug = skein::prq::repo_slug(&repo);
     match tokio::task::spawn_blocking(move || skein::prq::queue(&repo, force)).await {
         Ok(Ok(queue)) => {

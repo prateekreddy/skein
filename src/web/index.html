@@ -2425,6 +2425,11 @@ let revQueue = null;          // last fetched queue for view.repo
 let revFilter = "all";        // all | author | reviewer | mentioned
 let revOpen = new Set();      // PR numbers expanded in place
 let revLoading = false;
+// The last queue seen for each repo, so switching to one you have already looked at paints now
+// rather than after three GraphQL searches. The server keeps its own copy on disk for a cold start;
+// this is the same idea one layer up, for the switch that happens twenty times an hour.
+const revSeen = new Map();
+let revStaleTimer = null;
 let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
 // Three at a time. Each summary is a `gh pr diff` plus one or two model calls on the SAME
 // subscription the fleet is working on, so this is a deliberate throttle rather than a UI nicety —
@@ -2500,6 +2505,10 @@ function openReview(repoId) {
 function loadReview(force) {
   const id = view.repo;
   if (!id) return;
+  // Whatever is already known for THIS repo, on screen before the request goes out. `revQueue` is
+  // whatever the last repo left behind, so it is replaced rather than kept — showing one repo's
+  // pull requests under another's name is worse than showing none.
+  revQueue = revSeen.get(id) || null;
   revLoading = true; renderReview();
   fetch(`/api/repos/${encodeURIComponent(id)}/review${force ? "?force=1" : ""}`).then(async r => {
     const text = await r.text();
@@ -2517,7 +2526,12 @@ function loadReview(force) {
     // A fresh budget per queue load, so switching repos or asking for a refresh reads the head of
     // the new lane rather than inheriting a spent allowance from the last one.
     revSumAuto = 0;
-    revQueue = q; renderReview(); revPumpSummaries();
+    revQueue = q; revSeen.set(id, q); renderReview(); revPumpSummaries();
+    // `fresh: false` means the server handed over its remembered copy and went to fetch the real
+    // one. Ask again shortly — by then it is a cache hit, not another wait. Once: if the second ask
+    // is still stale the fetch is genuinely slow, and hammering it would not make it faster.
+    clearTimeout(revStaleTimer);
+    if (q.fresh === false) revStaleTimer = setTimeout(() => { if (view.repo === id) loadReview(); }, 4000);
     // The pane just fetched this repo for real; fold that into the badge rather than waiting up to
     // three minutes for the poller to rediscover a number we already have.
     const n = (q.prs || []).filter(p => p.lane === "needs-you").length;
@@ -2594,8 +2608,25 @@ function renderReview() {
   revpane.innerHTML = `<div class="revwrap"><div class="revhead">${picker}<div class="revchips">${chips}</div>
       <span class="revspacer"></span>
       <button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>
+      ${revQueue && revQueue.fresh === false
+        ? `<span class="revage" title="the last queue skein read, shown while it fetches the current one">read ${esc(revAgo(revQueue.as_of))} · refreshing</span>`
+        : ""}
       <button type="button" class="revchip" onclick="loadReview(true)">${revLoading ? "refreshing…" : "refresh"}</button>
     </div>${revModsHtml()}${body}</div>`;
+}
+
+// How old the queue on screen is, in the shortest true form. Its own function rather than a shared
+// one because the shared ages on this page are driven by a ticking clock over `age_secs`; this is a
+// single RFC 3339 stamp rendered once per fetch, and borrowing that machinery for it would be more
+// moving parts than the sentence needs.
+function revAgo(iso) {
+  const at = Date.parse(iso || "");
+  if (!at) return "a while ago";
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
 }
 
 function setRevFilter(k) { revFilter = k; renderReview(); }
