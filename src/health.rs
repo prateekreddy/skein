@@ -769,10 +769,16 @@ pub fn health_report() -> HealthReport {
             .any(|(_, state)| state.contains("no-limit-computed"));
         memory.fix = match skeins_own {
             true => format!(
-                "`skein restart {}` — it started before this fleet had a memory plan, and a restart                  puts it under the current one",
-                uncapped_boxes.first().map(String::as_str).unwrap_or("<box>")
+                "`skein restart {}` — it started before this fleet had a memory plan, and a \
+                 restart puts it under the current one",
+                uncapped_boxes
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("<box>")
             ),
-            false => "this sandbox does not delegate cgroups, so skein cannot bound a box in it —                       the ceilings on the fleet as a whole still hold, but one box's build can                       reach all of them"
+            false => "this sandbox does not delegate cgroups, so skein cannot bound a box in it — \
+                      the ceilings on the fleet as a whole still hold, but one box's build \
+                      can reach all of them"
                 .to_string(),
         };
     }

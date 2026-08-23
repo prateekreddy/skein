@@ -1060,7 +1060,8 @@ mod tests {
 
         std::env::set_var("SKEIN_HOME", &copy);
         let why = ensure_volume().expect_err(
-            "a copy reached through a symlink was adopted as though it stood on its own \u{2014}              which is the whole failure, because it goes on writing to the original",
+            "a copy reached through a symlink was adopted as though it stood on its own \u{2014} \
+             which is the whole failure, because it goes on writing to the original",
         );
         assert!(
             why.contains("skein repoint") && why.contains("export SKEIN_HOME="),

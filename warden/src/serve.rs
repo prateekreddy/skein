@@ -237,7 +237,9 @@ impl Warden {
                 let said = e.to_string();
                 let why = match said.contains("approved") || said.contains("approve") {
                     true => format!(
-                        "this warden has no `approved` field, and adding one to the request would                          not create it: approval is a fact the approving side writes, confirmed by                          a human at the host (architecture §8.1). {said}"
+                        "this warden has no `approved` field, and adding one to the request would not \
+                         create it: approval is a fact the approving side writes, confirmed \
+                         by a human at the host (architecture §8.1). {said}"
                     ),
                     false => format!("that is not an operation: {said}"),
                 };

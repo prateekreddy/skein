@@ -166,7 +166,9 @@ impl Unread {
             // nearly always is: the server inherits the PATH of whatever launched it, which on a
             // desktop is often not the shell where `claude` was installed.
             Unread::Missing { bin, why } => format!(
-                "skein could not start `{bin}` ({why}). It is on the PATH of the process running                  skein-server that matters, not your shell's — start the server from a shell that                  has it, or set SKEIN_CLAUDE_BIN to its full path."
+                "skein could not start `{bin}` ({why}). It is on the PATH of the process running \
+                 skein-server that matters, not your shell's — start the server from a shell \
+                 that has it, or set SKEIN_CLAUDE_BIN to its full path."
             ),
             // Leads with the sandbox, because the reader's next move is `sbx ls` and not anything
             // to do with the model. The `why` carries the PATH skein actually had.
@@ -180,13 +182,15 @@ impl Unread {
                  running skein-server has no bearing on this one."
             ),
             Unread::Refused { code, said } if said.is_empty() => format!(
-                "`claude` exited {code} without saying why. Run the same call by hand to see it:                  `claude -p --model claude-haiku-4-5 hello`."
+                "`claude` exited {code} without saying why. Run the same call by hand to see it: \
+                 `claude -p --model claude-haiku-4-5 hello`."
             ),
             Unread::Refused { code, said } => {
                 format!("`claude` exited {code}: {}", crate::util::clip(said, 240))
             }
             Unread::Slow(budget) => format!(
-                "`claude` was still going after {}s. A larger diff needs longer than this call                  allows; nothing is wrong with the model.",
+                "`claude` was still going after {}s. A larger diff needs longer than this call \
+                 allows; nothing is wrong with the model.",
                 budget.as_secs()
             ),
             Unread::Silent => {
@@ -952,6 +956,81 @@ mod tests {
 
         for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
             env::remove_var(key);
+        }
+    }
+
+    /// Every sentence skein shows for an unread call arrives as one line, with no blank runs in it.
+    ///
+    /// Observed in `skein doctor`, and on the board:
+    ///
+    /// ```text
+    /// ✗ model  … It is on the PATH of the process running                  skein-server that
+    /// matters
+    /// ```
+    ///
+    /// Eighteen spaces mid-sentence. A Rust string literal that spans lines keeps the newline AND
+    /// every space of the source indentation unless the line ends with `\` — and a literal that has
+    /// been reflowed by an editor keeps them on ONE line, which is what happened here. The defect
+    /// is invisible where it is written: the source looks like a neatly wrapped paragraph.
+    ///
+    /// So it is asserted on the rendered sentence, which is the only place it can be seen. These
+    /// are one-line messages by contract — they land in a row on a board — so a newline in one is
+    /// the same defect wearing its original shape.
+    #[test]
+    fn a_failure_message_arrives_as_one_line() {
+        let every = [
+            Unread::Missing {
+                bin: "claude".into(),
+                why: "not on PATH".into(),
+            },
+            Unread::Unreachable {
+                sandbox: "skein-fleet".into(),
+                why: "`sbx` is not on this process's PATH".into(),
+            },
+            Unread::AbsentInSandbox {
+                bin: "claude".into(),
+                sandbox: "skein-fleet".into(),
+            },
+            Unread::Refused {
+                code: "1".into(),
+                said: String::new(),
+            },
+            Unread::Refused {
+                code: "1".into(),
+                said: "Invalid API key".into(),
+            },
+            Unread::Slow(Duration::from_secs(30)),
+            Unread::Silent,
+        ];
+        // The compiler keeps this list honest: a new variant stops this match compiling, and the
+        // count below stops somebody adding an arm without adding a sentence to check.
+        let tag = |u: &Unread| match u {
+            Unread::Missing { .. } => 0,
+            Unread::Unreachable { .. } => 1,
+            Unread::AbsentInSandbox { .. } => 2,
+            Unread::Refused { .. } => 3,
+            Unread::Slow(_) => 4,
+            Unread::Silent => 5,
+        };
+        let mut seen: Vec<usize> = every.iter().map(tag).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            [0, 1, 2, 3, 4, 5],
+            "a variant has no sentence checked here"
+        );
+
+        for unread in &every {
+            let said = unread.say();
+            assert!(
+                !said.contains('\n'),
+                "a message that lands in a row on a board arrived as more than one row: {said:?}"
+            );
+            assert!(
+                !said.contains("  "),
+                "source indentation was carried into the sentence a person reads: {said:?}"
+            );
         }
     }
 

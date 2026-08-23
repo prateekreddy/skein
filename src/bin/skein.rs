@@ -517,10 +517,16 @@ fn cmd_doctor() -> Result<(), String> {
                         wanted.join(" and "),
                         unread.say()
                     );
-                    println!(
-                        "{DIM}              the PATH that decides this is the one skein-server was \
-                         started with, not this shell's{RESET}"
-                    );
+                    // Only where the PATH is what decides. Printed under every failure, it
+                    // contradicted the line above it — a sandbox that could not be reached was
+                    // followed by advice about the model binary's PATH, which is the confusion
+                    // `Unreachable` exists to end.
+                    if matches!(unread, skein::ai::Unread::Missing { .. }) {
+                        println!(
+                            "{DIM}              the PATH that decides this is the one skein-server \
+                             was started with, not this shell's{RESET}"
+                        );
+                    }
                 }
             }
         }
@@ -1150,7 +1156,8 @@ fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
             reached.join(", ")
         ),
         Err(why) => eprintln!(
-            "{DIM}skein:{RESET} logged in, but could not hand it to the boxes already running ({why}) —              they pick it up when their session next starts"
+            "{DIM}skein:{RESET} logged in, but could not hand it to the boxes already running \
+             ({why}) — they pick it up when their session next starts"
         ),
     }
     Ok(())
