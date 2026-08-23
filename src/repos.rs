@@ -150,6 +150,68 @@ pub fn update_repos<T>(f: impl FnOnce(&mut Vec<Repo>) -> Result<T, String>) -> R
     })
 }
 
+/// Record that a repository was renamed on GitHub, rewriting the name wherever skein spells it.
+///
+/// A repository NAME is not an identifier, and skein stored one as if it were. Everything downstream
+/// is keyed on it — the review queue's searches, `gitgate`'s per-repo write credentials, what a box
+/// is allowed to push to — so following the rename in one place and not the others would trade a
+/// silent empty queue for a silent credential scoped to a repository nobody can name any more.
+///
+/// **The id is untouched, deliberately.** `Repo::id` is what box names, box roots, store paths and
+/// placement records are built from; renaming it would rename running boxes and orphan their state,
+/// for a change GitHub made to a label. `source` is the URL, and the URL is the thing that moved.
+///
+/// Substring replacement on the URL rather than reconstruction, because skein does not own the
+/// shape: `git@github.com:o/n.git`, `https://github.com/o/n`, and `https://github.com/o/n.git` are
+/// all in use, and rebuilding one would quietly change a repo's transport along with its name.
+pub fn follow_rename(id: &str, was: &str, now: &str) -> Result<(), String> {
+    if was.eq_ignore_ascii_case(now) {
+        return Ok(());
+    }
+    if now.split('/').count() != 2 || now.split('/').any(|part| part.is_empty()) {
+        return Err(format!("{now:?} is not an owner/name"));
+    }
+    update_repos(|repos| {
+        let repo = repos
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(|| format!("no repo with id {id:?}"))?;
+        if repo.source.contains(was) {
+            repo.source = repo.source.replace(was, now);
+        }
+        Ok(())
+    })?;
+    // The mirror's origin too, so a fetch stops relying on GitHub's redirect. Best-effort: the name
+    // above is what the queue needed, and a mirror that keeps working through the redirect is not a
+    // reason to fail the rename that just fixed it.
+    let _ = repoint_mirror(id);
+    eprintln!("skein: {was} is now {now}; recorded");
+    Ok(())
+}
+
+/// Point a mirror's `origin` at the URL now recorded for the repo — which `follow_rename` has
+/// just rewritten, so this reads it back rather than being told the name twice.
+fn repoint_mirror(id: &str) -> Result<(), String> {
+    let Some(repo) = load_repos().into_iter().find(|r| r.id == id) else {
+        return Err(format!("no repo with id {id:?}"));
+    };
+    let mirror = mirror_path(id);
+    if !mirror.exists() {
+        return Ok(());
+    }
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(&mirror)
+        .args(["remote", "set-url", "origin", &repo.source]);
+    let out = bounded_output(&mut command, "git remote set-url", Duration::from_secs(20))
+        .map_err(|e| e.to_string())?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
 /// Update a repo's own settings. Every field is optional: `None` leaves it alone, `Some("")` clears
 /// it back to the global default. One function — and one route — rather than one per field, because
 /// there are three of these now and a fourth would have been a fourth copy of the same lookup.

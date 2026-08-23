@@ -205,6 +205,56 @@ pub(crate) fn get_json(path: &str, token: &str) -> Result<serde_json::Value, Str
     )?)
 }
 
+/// What this repository is called **now**, following a rename.
+///
+/// A repository name is not a stable identifier, and skein stored one as if it were. GitHub's two
+/// APIs then disagree about what to do with a stale one, and skein depends on both: REST answers
+/// `301 Moved Permanently` with the canonical URL in the body, so every REST caller that follows it
+/// keeps working — while **search silently matches nothing**. Measured on a live fleet:
+///
+/// ```text
+/// repo:acme/gadget-demo is:pr is:open review-requested:me  ->  issueCount 0, no errors
+/// repo:acme/thing        is:pr is:open review-requested:me  ->  issueCount 23
+/// ```
+///
+/// Twenty-three pull requests waiting on somebody, an empty queue, HTTP 200 and nothing to say why.
+///
+/// The redirect is read rather than followed with `curl -L`, and deliberately: following it would
+/// paper over the rename, and the caller's job is to record the new name rather than to spend a
+/// redirect on every request for ever. `-L` on the shared `call` would also make every POST follow
+/// one, which is not a thing to switch on for this.
+pub(crate) fn canonical_repo(slug: &str, token: &str) -> Result<String, String> {
+    let (status, body) = call(
+        "GET",
+        &format!("{}/repos/{slug}", api_base()),
+        token,
+        None,
+        "application/vnd.github+json",
+        Duration::from_secs(30),
+    )?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| complaint(status, &body))?;
+    if let Some(name) = value.get("full_name").and_then(|v| v.as_str()) {
+        return Ok(name.to_string());
+    }
+    // A rename. The body carries `/repositories/<id>`, which is the identifier that does not move —
+    // asking it is how the new name is learned rather than guessed.
+    if let Some(url) = value.get("url").and_then(|v| v.as_str()) {
+        let path = url.rsplit_once("/repositories/").map(|(_, id)| id);
+        if let Some(id) = path.filter(|id| id.chars().all(|c| c.is_ascii_digit())) {
+            let moved = get_json(&format!("/repositories/{id}"), token)?;
+            if let Some(name) = moved.get("full_name").and_then(|v| v.as_str()) {
+                return Ok(name.to_string());
+            }
+        }
+    }
+    Err(value
+        .get("message")
+        .and_then(|m| m.as_str())
+        .map(|m| format!("GitHub said {status}: {m}"))
+        .unwrap_or_else(|| complaint(status, &body)))
+}
+
 /// `GET`, as text — for the media types that are not JSON at all, i.e. a diff.
 pub(crate) fn get_text(path: &str, token: &str, accept: &str) -> Result<String, String> {
     let url = format!("{}{path}", api_base());

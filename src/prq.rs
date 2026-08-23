@@ -203,6 +203,39 @@ fn host_token() -> Result<String, String> {
     })
 }
 
+/// The repository's current name when it differs from the one skein holds, else `None`.
+///
+/// Remembered per process like the token beside it: this is a REST round trip and the queue is
+/// polled from the board, so asking per refresh would spend a call on an answer that changes about
+/// once a year. A lookup that fails is remembered as "no rename" rather than retried on every poll
+/// — the cost of being wrong is one stale name until a restart, and the cost of not caching it is a
+/// call per repo per poll on every fleet that has no rename at all, which is all of them.
+fn renamed_to(slug: &str) -> Option<String> {
+    let mut seen = match RENAMES.lock() {
+        Ok(seen) => seen,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(known) = seen.get(slug) {
+        return known.clone();
+    }
+    let now = host_token()
+        .ok()
+        .and_then(|token| crate::github::canonical_repo(slug, &token).ok())
+        .filter(|now| !now.eq_ignore_ascii_case(slug));
+    seen.insert(slug.to_string(), now.clone());
+    now
+}
+
+static RENAMES: std::sync::Mutex<std::collections::BTreeMap<String, Option<String>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Forget the resolved names, for tests and for a caller that has just been told one changed.
+pub fn forget_renames() {
+    if let Ok(mut seen) = RENAMES.lock() {
+        seen.clear();
+    }
+}
+
 /// The one resolution, remembered. A `Mutex<Option<_>>` rather than a `OnceLock` so a test can
 /// forget it; the outer `Option` is "have we looked yet".
 static GH_TOKEN: std::sync::Mutex<Option<(GhToken, Option<String>)>> = std::sync::Mutex::new(None);
@@ -345,10 +378,30 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
             }
         }
     }
-    let slug = repo_slug(repo)
+    let stored = repo_slug(repo)
         .ok_or("this repo has no GitHub remote, so it has no pull requests to review")?;
     let (login, teams) = viewer()?;
     let mut blind_spots = Vec::new();
+    // What this repository is called NOW. A name is not an identifier: `acme/gadget-demo`
+    // became `acme/thing`, and because GitHub's search matches a stale name against nothing
+    // — HTTP 200, zero results, no error — the queue rendered empty while twenty-three pull
+    // requests waited on a review. An empty queue is the one thing this module must never be able
+    // to show by accident.
+    //
+    // Written back into the repo, not just used here. Everything else keyed on the slug follows it:
+    // `gitgate`'s per-repo write credentials, the mirror's origin, what a box may push to.
+    let slug = match renamed_to(&stored) {
+        Some(now) => {
+            if let Err(why) = crate::repos::follow_rename(&repo.id, &stored, &now) {
+                blind_spots.push(format!(
+                    "{stored} is now {now}, and skein could not record that ({why}) — it will look \
+                     it up again every time until it can"
+                ));
+            }
+            now
+        }
+        None => stored,
+    };
     if teams.is_empty() {
         // Short, and it names the cure. A warning that cannot be acted on is shown on every load
         // forever, and a banner that is always there stops being read — so the fix belongs in the
@@ -893,6 +946,144 @@ mod tests {
             }
         });
         (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    /// A GitHub server that answers by path, so a rename can be told from an empty repository.
+    ///
+    /// The single-body stub beside this cannot express the bug: it needs `/repos/<old>` to redirect
+    /// while `search` answers differently for the old name and the new one.
+    fn routing_github() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = asked.clone();
+        let mine = base.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut body).ok();
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
+                recorder.lock().unwrap().push(format!("{path} {body}"));
+
+                let (status, answer) = match path.as_str() {
+                    "/user" => (200, r#"{"login":"me"}"#.to_string()),
+                    p if p.starts_with("/user/teams") => (200, "[]".to_string()),
+                    // The rename, exactly as GitHub reports it.
+                    "/repos/acme/old-name" => (
+                        301,
+                        format!(
+                            r#"{{"message":"Moved Permanently","url":"{mine}/repositories/42"}}"#
+                        ),
+                    ),
+                    "/repositories/42" => (200, r#"{"full_name":"acme/new-name"}"#.to_string()),
+                    "/repos/acme/new-name" => (200, r#"{"full_name":"acme/new-name"}"#.to_string()),
+                    "/graphql" => {
+                        // The heart of it: the stale name matches nothing, with no error — which is
+                        // what GitHub really does and why the queue went quietly empty.
+                        let hit =
+                            body.contains("acme/new-name") && body.contains("review-requested");
+                        (
+                            200,
+                            match hit {
+                                true => r#"{"data":{"search":{"nodes":[{"number":7,"title":"a pull request","url":"u","isDraft":false,"author":{"login":"someone"},"headRefOid":"abc","updatedAt":"2026-08-01T00:00:00Z","latestReviews":{"nodes":[]},"reviewRequests":{"nodes":[]}}]}}}"#.to_string(),
+                                false => r#"{"data":{"search":{"nodes":[]}}}"#.to_string(),
+                            },
+                        )
+                    }
+                    _ => (200, "{}".to_string()),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (base, asked)
+    }
+
+    /// A repository that was renamed fills its queue, and skein records the new name.
+    ///
+    /// The bug this is about produced no error anywhere. `acme/gadget-demo` became
+    /// `acme/thing`; GitHub's REST redirects, so diffs and merges kept working, while its
+    /// SEARCH matches a stale name against nothing and answers 200 with zero results. The queue
+    /// collected nothing, recorded no blind spot, and rendered empty — with twenty-three pull
+    /// requests waiting on a review behind it.
+    #[test]
+    fn a_renamed_repository_fills_its_queue_and_the_new_name_is_written_down() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, asked) = routing_github();
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        // Built from JSON like the other fixtures here: `Repo` gains fields regularly and a
+        // struct literal is the thing that stops compiling for a reason unrelated to this test.
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "source": "https://github.com/acme/old-name.git",
+            "work": "",
+            "store": "",
+            "review_queue": true,
+        }))
+        .unwrap();
+        crate::repos::save_repos(std::slice::from_ref(&repo)).unwrap();
+
+        let answered = queue(&repo, true).expect("the queue answered");
+        assert!(
+            !answered.prs.is_empty(),
+            "the queue is empty on a repository that was renamed — which is the failure it must \
+             never be able to show by accident. Asked: {:?}",
+            asked.lock().unwrap()
+        );
+
+        // And the new name is recorded, so everything else keyed on the slug follows it — the write
+        // credential a box pushes with, the mirror's origin, the next queue refresh.
+        let after = crate::repos::load_repos();
+        let stored = &after.iter().find(|r| r.id == "demo").unwrap().source;
+        assert!(
+            stored.contains("acme/new-name"),
+            "the rename was used and not written down, so every restart pays for it again: {stored}"
+        );
+        // The URL's shape survives — skein does not own it, and rebuilding one would change a
+        // repo's transport along with its name.
+        assert!(
+            stored.starts_with("https://") && stored.ends_with(".git"),
+            "the URL was rebuilt rather than edited: {stored}"
+        );
+        // The id is untouched. Box names, box roots and placement records are built from it.
+        assert_eq!(after.iter().find(|r| r.id == "demo").unwrap().id, "demo");
+
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        forget_host_token();
+        forget_renames();
     }
 
     /// The host uses the credential you already gave it, and never asks for another.
