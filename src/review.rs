@@ -48,11 +48,10 @@ use std::time::Duration;
 /// Off is a supported state, not a broken one: every PR reads "not summarised" and keeps your full
 /// attention, which is the direction every failure in this module runs.
 pub fn summaries_enabled() -> bool {
-    match std::env::var("SKEIN_REVIEW_AI").ok().as_deref() {
-        Some("on" | "1" | "true" | "yes") => true,
-        Some("off" | "0" | "false" | "no") => false,
-        _ => crate::config::load_config().review_summaries,
-    }
+    // The rule lives in `ai`, which owns both switches — `health` must be able to ask and does not
+    // depend on this module. Kept as a name here because every caller in this file reads better for
+    // it, and one of them is a public API.
+    crate::ai::summaries_enabled()
 }
 
 /// How much of a PR skein is prepared to vouch for.
@@ -417,16 +416,16 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
     let signals = crate::contracts::scan(&full);
     let (diff, cut) = truncate(&full, STAGE1_BYTES);
 
-    let Some(raw) = claude_oneshot_with(
+    let raw = match crate::ai::claude_oneshot_telling(
         &stage1_prompt(pr, &yours, others, &diff, cut),
         None,
         Duration::from_secs(60),
-    ) else {
-        return Summary::unread(
-            pr.number,
-            &pr.head_sha,
-            "skein could not read it — the model call failed or timed out.",
-        );
+    ) {
+        Ok(raw) => raw,
+        // The reason, not a disjunction. "the model call failed or timed out" was the whole of what
+        // this said, for four different problems with four different fixes — and it named the
+        // timeout first for a failure that came back in two seconds.
+        Err(unread) => return Summary::unread(pr.number, &pr.head_sha, &unread.say()),
     };
     let Some(verdict) = parse_stage1(&raw) else {
         return Summary::unread(pr.number, &pr.head_sha, "skein read it but could not make sense of its own answer, so it is not vouching for one.");

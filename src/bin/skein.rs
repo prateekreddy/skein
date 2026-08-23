@@ -490,6 +490,43 @@ fn cmd_doctor() -> Result<(), String> {
     }
 
     {
+        // Can skein reach the model, and does anything actually want it?
+        //
+        // Both questions, because they came apart on a live fleet: `review_summaries` defaults ON
+        // and `ai_enrichment` defaults off, so the health line — which reports only the second —
+        // said "ai off" while every review summary was failing. Reported as "all summarization
+        // fails", with no way anywhere to ask why.
+        //
+        // Here rather than in the health report because this SPAWNS something. `doctor` is a command
+        // a person runs; the health endpoint is polled every fifteen seconds by every open board.
+        let wanted = skein::ai::model_wanted();
+        if wanted.is_empty() {
+            println!(
+                "{DIM}·{RESET} model         {DIM}nothing asks for it — Settings → Boxes turns on \
+                 box summaries, and the review pane its own{RESET}"
+            );
+        } else {
+            match skein::ai::model_reachable() {
+                Ok(()) => println!(
+                    "{OK} model         {DIM}{} — `claude` runs here{RESET}",
+                    wanted.join(" and ")
+                ),
+                Err(unread) => {
+                    println!(
+                        "{BAD} model         {} on, and {}",
+                        wanted.join(" and "),
+                        unread.say()
+                    );
+                    println!(
+                        "{DIM}              the PATH that decides this is the one skein-server was \
+                         started with, not this shell's{RESET}"
+                    );
+                }
+            }
+        }
+    }
+
+    {
         // Which credential the host's own GitHub calls run on. It matters because only one of the
         // three can reach the system keyring, and that is the one people were being pushed onto.
         use skein::prq::GhToken;

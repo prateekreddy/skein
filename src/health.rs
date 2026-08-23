@@ -470,6 +470,15 @@ pub fn health_report_gitgate() -> HealthCheck {
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
 pub fn health_report() -> HealthReport {
+    // **This field is the toggle's own state**, and deliberately stays that way. The page builds
+    // `#set-ainote` from it and the settings pane reads "off — …" beside the checkbox, so widening
+    // it to mean "anything that wants the model" broke the sentence next to the control it
+    // describes. It must also never go unsatisfied: opting out is not a fault, and a polled endpoint
+    // is the wrong place to spawn a process to find out whether a binary runs.
+    //
+    // Where the other half went: `skein doctor` has a `model` line that asks about BOTH switches and
+    // actually tries the binary. That is a command a person runs, so it can afford the subprocess
+    // and the answer arrives when somebody is asking the question.
     let ai = HealthCheck::satisfied(if !crate::ai::ai_enabled() {
         "off — Settings → Boxes turns it on: a one-line summary for boxes with no journal, and a \
          second opinion before Continue N resumes anything"

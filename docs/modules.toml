@@ -178,7 +178,13 @@ depends_on = ["util"]
 # that says `sbx` is missing without saying it is running somewhere `sbx` does not exist has named
 # the symptom and hidden the cause. Reporting only — the first caller of that module, deliberately
 # one that changes no behaviour, so the seam exists before anything leans on it.
-depends_on = ["apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
+#
+# `ai` for `doctor`'s `model` line, and the edge is here rather than in `health` on purpose: that
+# check SPAWNS the binary to find out whether it runs, and the health report is polled every fifteen
+# seconds by every open board. A command a person types can afford a subprocess; a poll cannot. The
+# line exists because the two switches came apart on a live fleet — `review_summaries` defaults on
+# and `ai_enrichment` off, so the health field reported "ai off" while every summary was failing.
+depends_on = ["ai", "apiauth", "board", "config", "deployment", "fleet", "gitgate", "handoff", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "takeover", "util", "volume"]
 
 [current."bin/skein-server"]
 # `assets` since the cockpit gained one route for a directory of built files: the four vendored
@@ -348,7 +354,7 @@ depends_on = ["mailbox", "repos", "sbx", "util"]
 depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "runtime", "sbx", "tracking", "util"]
 
 [current.review]
-depends_on = ["ai", "codeowners", "config", "contracts", "moduledocs", "prq", "repos", "util"]
+depends_on = ["ai", "codeowners", "contracts", "moduledocs", "prq", "repos", "util"]
 
 [current.runtime]
 depends_on = ["repos", "util"]

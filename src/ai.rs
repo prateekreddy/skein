@@ -12,7 +12,6 @@
 use crate::config::load_config;
 use crate::signals::{session_signal, SessionSignal};
 use crate::util::valid_name;
-use crate::util::*;
 use std::env;
 use std::process::Command;
 use std::time::Duration;
@@ -29,6 +28,64 @@ pub fn ai_enabled() -> bool {
         Some("on" | "1" | "true" | "yes") => true,
         Some("off" | "0" | "false" | "no") => false,
         _ => load_config().ai_enrichment,
+    }
+}
+
+/// Whether skein may read a pull request you have already opened a queue to look at.
+///
+/// A **second** switch, defaulting the opposite way to [`ai_enabled`], and they are separate on
+/// purpose: one gates background enrichment that runs whether or not you asked for it, the other
+/// gates work you asked for by opening the queue.
+///
+/// It lives here rather than in `review` because `health` has to be able to ask, and `health` does
+/// not depend on `review`. Two copies of the rule would have been the alternative, and the bug this
+/// was found by is what two views of the same question costs: the health check asked only about
+/// [`ai_enabled`], reported "off", and said nothing at all about a fleet whose summaries were
+/// switched ON and failing on every pull request.
+pub fn summaries_enabled() -> bool {
+    match env::var("SKEIN_REVIEW_AI").ok().as_deref() {
+        Some("on" | "1" | "true" | "yes") => true,
+        Some("off" | "0" | "false" | "no") => false,
+        _ => load_config().review_summaries,
+    }
+}
+
+/// What, if anything, wants the model — named, so a report can say which switch it is talking about.
+pub fn model_wanted() -> Vec<&'static str> {
+    let mut wanted = Vec::new();
+    if ai_enabled() {
+        wanted.push("box summaries");
+    }
+    if summaries_enabled() {
+        wanted.push("review summaries");
+    }
+    wanted
+}
+
+/// Can skein start the model binary at all? Asked without spending a token.
+///
+/// `--version` rather than a prompt: the commonest failure by far is that the binary is not on the
+/// PATH of the process running the server — which is not your shell's — and that question has an
+/// answer that costs nothing. A binary that runs and then refuses is a different report, and the
+/// call site that actually needs the model is where that one surfaces.
+///
+/// Not `program_on_path`: `$SKEIN_CLAUDE_BIN` may be an absolute path, and a PATH scan answers "no"
+/// for one that works perfectly.
+pub fn model_reachable() -> Result<(), Unread> {
+    let (bin, _) = binary_and_model(None);
+    let mut command = Command::new(&bin);
+    command.arg("--version");
+    match crate::util::output_with_timeout_why(&mut command, Duration::from_secs(10)) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(Unread::Refused {
+            code: out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "on a signal".into()),
+            said: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        }),
+        Err(why) => Err(Unread::Missing { bin, why }),
     }
 }
 
@@ -63,24 +120,122 @@ pub(crate) fn claude_oneshot_with(
     model: Option<&str>,
     timeout: Duration,
 ) -> Option<String> {
+    // `$SKEIN_AI_MODEL` still wins over the call site: it is the escape hatch that lets one env var
+    // pin every AI call in a run, which is what the tests and a cost-conscious operator both need.
+    let (bin, model) = binary_and_model(model);
+    tried(&bin, &model, prompt, timeout).ok()
+}
+
+/// Why a model call produced nothing — because "it produced nothing" is four different problems.
+///
+/// They were one `None`, and the caller rendered every one of them as "the model call failed or
+/// timed out". Reported from a live fleet as "all summarization fails", with that sentence as the
+/// entire evidence — and the failure had come back in two seconds, so of the two things the message
+/// named, it was not the second.
+///
+/// Each variant carries its own cure, because they have four different ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unread {
+    /// `claude` could not be started at all — almost always not on this process's PATH.
+    Missing { bin: String, why: String },
+    /// It ran and refused. Its own stderr is the diagnosis: not logged in, a model it will not
+    /// serve, a rate limit.
+    Refused { code: String, said: String },
+    /// It was still going when the budget ran out.
+    Slow(Duration),
+    /// It succeeded and said nothing.
+    Silent,
+}
+
+impl Unread {
+    /// The sentence to show, cure included. One line, because it lands in a row on a board.
+    pub fn say(&self) -> String {
+        match self {
+            // Named as a PATH problem rather than as "not installed", because that is what it
+            // nearly always is: the server inherits the PATH of whatever launched it, which on a
+            // desktop is often not the shell where `claude` was installed.
+            Unread::Missing { bin, why } => format!(
+                "skein could not start `{bin}` ({why}). It is on the PATH of the process running                  skein-server that matters, not your shell's — start the server from a shell that                  has it, or set SKEIN_CLAUDE_BIN to its full path."
+            ),
+            Unread::Refused { code, said } if said.is_empty() => format!(
+                "`claude` exited {code} without saying why. Run the same call by hand to see it:                  `claude -p --model claude-haiku-4-5 hello`."
+            ),
+            Unread::Refused { code, said } => {
+                format!("`claude` exited {code}: {}", crate::util::clip(said, 240))
+            }
+            Unread::Slow(budget) => format!(
+                "`claude` was still going after {}s. A larger diff needs longer than this call                  allows; nothing is wrong with the model.",
+                budget.as_secs()
+            ),
+            Unread::Silent => {
+                "`claude` answered with nothing at all, so there is nothing to vouch for.".into()
+            }
+        }
+    }
+}
+
+/// The call, with the reason it failed kept.
+///
+/// `output_with_timeout_why` rather than `bounded_output`: the second returns one string for "could
+/// not start" and "ran out of time", which is where the four failures first became one.
+pub(crate) fn tried(
+    bin: &str,
+    model: &str,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<String, Unread> {
+    let mut command = Command::new(bin);
+    command.args(["-p", "--model", model, prompt]);
+    let started = std::time::Instant::now();
+    let out = crate::util::output_with_timeout_why(&mut command, timeout).map_err(|why| {
+        // Told apart by the clock rather than by parsing the message: a spawn that fails does so
+        // immediately, and anything that used its whole budget was running.
+        match started.elapsed() >= timeout {
+            true => Unread::Slow(timeout),
+            false => Unread::Missing {
+                bin: bin.to_string(),
+                why,
+            },
+        }
+    })?;
+    if !out.status.success() {
+        return Err(Unread::Refused {
+            code: out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "on a signal".into()),
+            said: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match said.is_empty() {
+        true => Err(Unread::Silent),
+        false => Ok(said),
+    }
+}
+
+/// The same call, reporting why rather than only that. Used where the reason reaches a person.
+pub(crate) fn claude_oneshot_telling(
+    prompt: &str,
+    model: Option<&str>,
+    timeout: Duration,
+) -> Result<String, Unread> {
+    let (bin, model) = binary_and_model(model);
+    tried(&bin, &model, prompt, timeout)
+}
+
+/// Which binary and which model this call will use, after both override layers.
+fn binary_and_model(model: Option<&str>) -> (String, String) {
     let bin = env::var("SKEIN_CLAUDE_BIN")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "claude".into());
-    // `$SKEIN_AI_MODEL` still wins over the call site: it is the escape hatch that lets one env var
-    // pin every AI call in a run, which is what the tests and a cost-conscious operator both need.
     let model = env::var("SKEIN_AI_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| model.unwrap_or("claude-haiku-4-5").to_string());
-    let mut command = Command::new(&bin);
-    command.args(["-p", "--model", &model, prompt]);
-    let out = bounded_output(&mut command, "AI enrichment", timeout).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
+    (bin, model)
 }
 
 /// Memoize an AI result by a turn-end-scoped key, so repeat views of the same paused box don't
@@ -168,6 +323,110 @@ mod tests {
     use crate::testutil::*;
     #[allow(unused_imports)]
     use std::{env, fs};
+
+    /// Each way a model call can fail says which one it was.
+    ///
+    /// They were one `None` and one sentence — "the model call failed or timed out" — for four
+    /// problems with four different fixes. Reported as "all summarization fails", with that sentence
+    /// as the whole of the evidence, for a failure that had come back in two seconds.
+    #[cfg(unix)]
+    #[test]
+    fn a_model_call_that_fails_says_which_failure_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let stub = |name: &str, body: &str| {
+            let at = dir.join(name);
+            fs::write(&at, format!("#!/usr/bin/env bash\n{body}\n")).unwrap();
+            fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).unwrap();
+            at.display().to_string()
+        };
+        let quick = Duration::from_secs(5);
+
+        // Not on PATH — the commonest one by far, and the one the old message never named. Its
+        // sentence has to be about the SERVER's PATH: a person reads it, checks their shell, finds
+        // `claude` right there, and concludes skein is broken.
+        match tried("skein-no-such-binary", "m", "hi", quick) {
+            Err(Unread::Missing { bin, .. }) => {
+                assert_eq!(bin, "skein-no-such-binary");
+                let said = Unread::Missing {
+                    bin: bin.clone(),
+                    why: "no such file".into(),
+                }
+                .say();
+                assert!(
+                    said.contains("skein-server") && said.contains("SKEIN_CLAUDE_BIN"),
+                    "a missing binary must say whose PATH decides and how to override it: {said}"
+                );
+            }
+            other => panic!("expected Missing, got {other:?}"),
+        }
+
+        // Ran and refused. Its stderr is the diagnosis — not logged in, a model it will not serve,
+        // a rate limit — and it was being thrown away.
+        let refused = stub("refuses", "echo 'Invalid API key' >&2; exit 3");
+        match tried(&refused, "m", "hi", quick) {
+            Err(Unread::Refused { code, said }) => {
+                assert_eq!(code, "3");
+                assert!(
+                    said.contains("Invalid API key"),
+                    "stderr was dropped: {said:?}"
+                );
+                assert!(Unread::Refused { code, said }
+                    .say()
+                    .contains("Invalid API key"));
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+
+        // Ran, succeeded, said nothing. Distinct from every other case: there is no fault to fix.
+        let silent = stub("says-nothing", "exit 0");
+        assert_eq!(tried(&silent, "m", "hi", quick), Err(Unread::Silent));
+
+        // Still going when the budget ran out — and told apart from a failed spawn by the clock
+        // rather than by parsing a message.
+        let slow = stub("dawdles", "sleep 30");
+        let began = std::time::Instant::now();
+        let out = tried(&slow, "m", "hi", Duration::from_secs(1));
+        assert_eq!(out, Err(Unread::Slow(Duration::from_secs(1))));
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the budget was not enforced"
+        );
+
+        // And the happy path still is one.
+        let works = stub("answers", "echo '  a summary  '");
+        assert_eq!(tried(&works, "m", "hi", quick), Ok("a summary".to_string()));
+    }
+
+    /// The health report asks about both switches, not one of them.
+    ///
+    /// `review_summaries` defaults ON and `ai_enrichment` defaults off, so a report that consulted
+    /// only the second said "off" on the common configuration — while every review summary on that
+    /// fleet was failing. The one place somebody would look, saying the feature was not in use.
+    #[test]
+    fn what_wants_the_model_names_every_switch_that_does() {
+        let _g = crate::testutil::env_lock();
+        env::set_var("SKEIN_AI", "off");
+        env::set_var("SKEIN_REVIEW_AI", "on");
+        assert_eq!(
+            model_wanted(),
+            vec!["review summaries"],
+            "review summaries are on and the report does not mention them — which is exactly the \
+             fleet that reported every summary failing while health said `ai: off`"
+        );
+
+        env::set_var("SKEIN_AI", "on");
+        assert_eq!(model_wanted(), vec!["box summaries", "review summaries"]);
+
+        env::set_var("SKEIN_REVIEW_AI", "off");
+        assert_eq!(model_wanted(), vec!["box summaries"]);
+
+        env::set_var("SKEIN_AI", "off");
+        assert!(model_wanted().is_empty());
+        env::remove_var("SKEIN_AI");
+        env::remove_var("SKEIN_REVIEW_AI");
+    }
 
     #[test]
     #[cfg(unix)]
