@@ -793,6 +793,25 @@ pub enum Verdict {
     Comment,
 }
 
+/// Is this pull request still open? `None` when GitHub could not say.
+///
+/// Asked directly rather than inferred from the queue's absence, and the distinction is the whole
+/// point: this queue is **personal** — `review-requested:you`, `author:you`, `mentions:you` — so a
+/// PR leaving it means "no longer involves you" at least as often as it means "closed". Anything
+/// that pruned on absence would delete the reading of a live PR whose review request moved to
+/// somebody else.
+///
+/// `None` rather than a guess when the call fails: every caller keeps what it has on `None`, so a
+/// GitHub that is down costs nothing and deletes nothing.
+pub fn pr_is_open(slug: &str, number: u64) -> Option<bool> {
+    let value = crate::github::get_json(
+        &format!("/repos/{slug}/pulls/{number}"),
+        &host_token().ok()?,
+    )
+    .ok()?;
+    Some(value.get("state").and_then(|s| s.as_str())? == "open")
+}
+
 /// Submit a review as **you**, with the token the host holds.
 ///
 /// GitHub refuses an empty body on `--request-changes` and `--comment`, so this refuses first with a

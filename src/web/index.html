@@ -2432,6 +2432,19 @@ let revSums = new Map();      // PR number -> summary, or "…" while one is in 
 const REV_SUM_PARALLEL = 3;
 let revSumBusy = 0;
 
+// How many get read WITHOUT being asked for. A separate limit from the one above, and the one that
+// was missing: three-at-a-time bounded the burst and not the total, so a lane of twenty-three
+// eventually spent twenty-three model calls on a subscription the fleet is working on — nobody
+// asked for twenty of them. The head of the lane is what you read first, so that is what is read
+// for you; the rest carry a "read it" button, which is a click at the moment you actually want one.
+//
+// Six, which is two full batches at the throttle above — about a screenful, and the set you were
+// going to open anyway. Not three: with a lane of four, three makes WHICH ones get read depend on
+// the order the lane happens to be in, and a test that reads a particular row then passes or fails
+// on that ordering. A budget whose edge cuts through the common case is a flake generator.
+const REV_SUM_AUTO = 6;
+let revSumAuto = 0;           // read unasked so far, this queue load
+
 // The badge on the review button. Polled slowly and never as part of the 2s fleet tick: each count
 // is three `gh` round trips per repo, and this is a number you act on within minutes, not seconds.
 //
@@ -2501,6 +2514,9 @@ function loadReview(force) {
       const held = revSums.get(pr.number);
       if (held && held !== "…" && held.head_sha !== pr.head_sha) revSums.delete(pr.number);
     }
+    // A fresh budget per queue load, so switching repos or asking for a refresh reads the head of
+    // the new lane rather than inheriting a spent allowance from the last one.
+    revSumAuto = 0;
     revQueue = q; renderReview(); revPumpSummaries();
     // The pane just fetched this repo for real; fold that into the badge rather than waiting up to
     // three minutes for the poller to rediscover a number we already have.
@@ -2648,9 +2664,16 @@ function revModsHtml() {
 function revPumpSummaries() {
   if (!revQueue || !revQueue.ai) return;
   const want = (revQueue.prs || [])
-    .filter(p => p.lane === "needs-you" && !revSums.has(p.number))
+    // **Drafts are never read unasked.** A draft is the author saying it is not finished, and
+    // spending a model call to describe something nobody has proposed yet is the clearest case of
+    // work that was not asked for. The button in the expanded row still reads one on request — the
+    // rule is about what happens on its own, not about what you can have.
+    .filter(p => p.lane === "needs-you" && !p.draft && !revSums.has(p.number))
     .map(p => p.number);
-  while (revSumBusy < REV_SUM_PARALLEL && want.length) revFetchSummary(want.shift());
+  while (revSumBusy < REV_SUM_PARALLEL && revSumAuto < REV_SUM_AUTO && want.length) {
+    revSumAuto++;
+    revFetchSummary(want.shift());
+  }
 }
 
 function revFetchSummary(number, force) {
@@ -2742,8 +2765,15 @@ function revBody(pr) {
 function revDetail(pr) {
   const s = revSums.get(pr.number);
   if (!s) {
-    return `<div class="revnosum">Not read yet.${revQueue && !revQueue.ai
+    // Which reason, because three different ones land here and only one of them is a setting to
+    // change. "Not read yet" alone reads as a failure on a draft that skein is deliberately leaving
+    // alone, and as a limit on a fleet where the feature is simply switched off.
+    const why = revQueue && !revQueue.ai
       ? " Reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes. Until then every PR stays at full attention."
+      : pr.draft
+        ? " It is a draft, so skein leaves it alone until it is marked ready."
+        : " Only the first few in this lane are read for you, so the fleet keeps its rate limit.";
+    return `<div class="revnosum">Not read yet.${why}${revQueue && !revQueue.ai ? ""
       : ` <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">read it</button>`}</div>`;
   }
   if (s === "…") return `<div class="revnosum">reading it…</div>`;

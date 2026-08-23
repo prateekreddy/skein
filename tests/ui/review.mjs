@@ -128,6 +128,11 @@ async function makeFixture() {
     pr(1, "fix a null deref in the parser", "dana", checks([{ status: "COMPLETED", conclusion: "SUCCESS" }])),
     pr(2, "rename the retry flag", "dana", reviewed("APPROVED", "sha2")),
     pr(3, "change the default timeout", "erin", reviewed("APPROVED", "older")),
+    // A draft. Skein must leave it alone until somebody marks it ready or asks for it by hand — a
+    // draft is the author saying it is not finished, and spending a model call on the fleet's own
+    // rate limit to describe something nobody has proposed yet is the clearest case of work that
+    // was not asked for.
+    pr(5, "wip: still moving things around", "dana", { isDraft: true }),
   ]));
   fs.writeFileSync(path.join(root, "search-author.json"),
     JSON.stringify([pr(4, "my own change to the store layout", "me")]));
@@ -279,11 +284,15 @@ await check("the count reaches the button without opening the pane", async () =>
   await page.waitForFunction(() => document.querySelector("#revbtn .revbadge"), null, { timeout: 15000 });
   const badge = await mustSee("#revbtn .revbadge", "the review badge");
   const n = (await badge.textContent()).trim();
-  if (n !== "3") throw new Error(`expected the three needs-you PRs, got ${JSON.stringify(n)}`);
+  // Four: three ready and one draft. A draft whose review was requested still needs you — the rule
+  // about drafts is that skein does not spend a model call reading one unasked, not that it hides
+  // one from the count. Those are different promises and conflating them would make a PR someone
+  // asked you to look at disappear.
+  if (n !== "4") throw new Error(`expected the four needs-you PRs, got ${JSON.stringify(n)}`);
 });
 await check("and its tooltip names the repo the count came from", async () => {
   const title = await page.$eval("#revbtn", e => e.title);
-  if (!/acme: 3/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
+  if (!/acme: 4/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
 });
 // Turning a repo off must stop skein asking GitHub about it — while still saying that is why there is
 // nothing to show. It used to vanish from the counts entirely, which made "nothing needs you" and
@@ -386,6 +395,34 @@ await check("a bug fix states itself on the collapsed row", async () => {
   if (!gists.some(g => g.includes("crashing on empty input")))
     throw new Error(`no one-line summary on the row: ${JSON.stringify(gists)}`);
 });
+await check("a draft is not read unless you ask, and says so rather than looking failed", async () => {
+  // Every non-draft in this lane has a gist by now (the check above waited for one). A draft that
+  // was going to be read would have been read in the same pass.
+  const rows = await page.$$eval("#revpane .revrow", els => els.map(e => ({
+    title: e.querySelector(".revtitle")?.textContent.trim() || "",
+    draft: !!e.querySelector(".revtag.draft"),
+    gist: e.querySelector(".revgist")?.textContent.trim() || "",
+  })));
+  const wip = rows.find(r => r.title.includes("still moving things around"));
+  if (!wip) throw new Error(`the draft is not in the lane at all: ${JSON.stringify(rows.map(r => r.title))}`);
+  if (!wip.draft) throw new Error("the draft is not marked as one, so the rule cannot be seen either");
+  if (wip.gist) throw new Error(`a draft was read without being asked: ${wip.gist}`);
+
+  // And opening it explains WHY rather than reading as a failure — three different reasons land in
+  // that space and only one of them is a setting to change.
+  await page.click(`#revpane .revrow:has-text("still moving things around") .revline`);
+  await settle(300);
+  const said = await page.$eval(`#revpane .revrow:has-text("still moving things around") .revnosum`,
+    e => e.textContent.trim());
+  if (!/draft/i.test(said) || !/ready/i.test(said))
+    throw new Error(`a draft must say it is being left alone until it is ready, got: ${said}`);
+  // The way to have one anyway is right there.
+  const button = await page.$(`#revpane .revrow:has-text("still moving things around") .revnosum .revchip`);
+  if (!button) throw new Error("no way to ask for it by hand");
+  await page.click(`#revpane .revrow:has-text("still moving things around") .revline`);
+  await settle(200);
+});
+
 // The tripwire marks belong on the collapsed line, because they are the reason to stop scrolling.
 await check("a contract change is flagged where you can see it without opening", async () => {
   const rows = await page.$$eval("#revpane .revrow", els => els.map(e => ({

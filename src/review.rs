@@ -142,6 +142,95 @@ fn store(repo_id: &str, s: &Summary) -> Result<(), String> {
     write_atomic(&path, &dir, &bytes)
 }
 
+/// Drop what describes a pull request that is over, or a commit that has been replaced.
+///
+/// Nothing used to. `summaries/<number>-<head_sha>.json` holds one file per PR **per head commit**,
+/// which is what makes a stale summary unreadable rather than wrong — the lookup for a new head
+/// simply misses — but the miss leaves the old file behind. Every push to a PR under review wrote
+/// another and abandoned the last, and merging or closing it abandoned them all.
+///
+/// Two rules, because the two questions are not the same shape:
+///
+/// **A superseded head is exact and free.** The queue has just told us every open PR's current sha.
+/// A file for that number with any other sha can never be read again by construction, so it goes
+/// with no ambiguity and no call to anybody.
+///
+/// **Closed and merged is asked, not inferred.** A PR absent from this queue has very often just
+/// stopped involving you — the searches behind it are `review-requested:you`, `author:you`,
+/// `mentions:you` — so absence is not death, and treating it as death deletes the reading of a live
+/// PR whose review request was reassigned. `prq::pr_is_open` answers the actual question.
+///
+/// Best-effort throughout: a failed lookup keeps the file. Deleting a summary costs one re-read;
+/// keeping one costs a few kilobytes, and only one of those is irreversible.
+///
+/// **Only the old ones are asked about.** GitHub reads are cheap here and model calls are not, but
+/// cheap is not free and asking about every file on every tab open would be a call per abandoned
+/// summary for ever. A file written in the last [`SETTLE`] is left alone: if its PR did just close,
+/// keeping it a few more days costs kilobytes, and the next pass reaps it. The superseded-head rule
+/// above has no such delay — it needs no call at all, so it runs on everything every time.
+pub fn prune(repo_id: &str, slug: &str, open: &[(u64, String)]) -> usize {
+    let dir = review_dir(repo_id).join("summaries");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut gone = 0;
+    // Asked once per number rather than once per file: a PR force-pushed ten times has ten files and
+    // exactly one answer.
+    let mut closed: std::collections::HashMap<u64, bool> = std::collections::HashMap::new();
+    for path in entries.flatten().map(|e| e.path()) {
+        let Some((number, sha)) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|name| name.split_once('-'))
+            .and_then(|(n, sha)| Some((n.parse::<u64>().ok()?, sha.to_string())))
+        else {
+            continue;
+        };
+        let doomed = match open.iter().find(|(n, _)| *n == number) {
+            // Open, and this is not the commit it is at.
+            Some((_, head)) => !head.starts_with(&sha) && *head != sha,
+            // Not in your queue. That is a question, not an answer — and one worth paying for
+            // only once the file has stopped being current enough to be worth keeping anyway.
+            None if fresh(&path) => false,
+            None => match closed.get(&number) {
+                Some(known) => *known,
+                None => {
+                    let over = crate::prq::pr_is_open(slug, number).map(|open| !open);
+                    // `None` — GitHub could not say — keeps the file, and is not remembered, so the
+                    // next pass asks again rather than treating one bad call as a verdict.
+                    match over {
+                        Some(over) => {
+                            closed.insert(number, over);
+                            over
+                        }
+                        None => false,
+                    }
+                }
+            },
+        };
+        if doomed && fs::remove_file(&path).is_ok() {
+            gone += 1;
+        }
+    }
+    gone
+}
+
+/// How long a summary is left alone before it is worth a call to ask whether its PR still exists.
+///
+/// A week, and the number is a trade rather than a guess: below it, a busy repo spends a GitHub read
+/// per abandoned summary on every tab open; above it, an unreadable file survives longer than
+/// anybody would notice. Nothing depends on the exact value — being wrong costs kilobytes and one
+/// later pass.
+const SETTLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Written recently enough that it is not worth asking about yet.
+fn fresh(path: &std::path::Path) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|at| at.elapsed().map(|age| age < SETTLE).unwrap_or(true))
+        .unwrap_or(false)
+}
+
 // ───────────────────────────── the diff ─────────────────────────────
 
 /// How much diff each stage is willing to read.
@@ -607,6 +696,179 @@ Their notes: {intent}
 
 #[cfg(test)]
 mod tests {
+
+    /// Pruning keeps exactly the readings that can still be read.
+    ///
+    /// Nothing pruned anything: one file per PR per head commit, and every push abandoned the last
+    /// while merging abandoned them all. The two rules have to be told apart here, because getting
+    /// the second one wrong deletes a live PR's reading — absence from this queue means "no longer
+    /// involves you" at least as often as it means "closed", and the queue is personal.
+    #[test]
+    fn pruning_drops_replaced_commits_and_keeps_what_it_cannot_ask_about() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+        // A GitHub that answers by number: #9 is closed, #8 is still open. Both are absent from the
+        // lane below, which is the whole point — absence is the question, not the answer.
+        let (base, asked) = stub_github();
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let dir = crate::prq::review_dir("demo").join("summaries");
+        fs::create_dir_all(&dir).unwrap();
+        let put = |name: &str| {
+            fs::write(dir.join(format!("{name}.json")), "{}").unwrap();
+        };
+        put("7-aaaaaaaa"); // #7 is open at aaaaaaaa — the current reading
+        put("7-bbbbbbbb"); // and this is the commit it used to be at
+        put("9-cccccccc"); // #9 left the lane because it CLOSED — old enough to be worth asking
+        put("8-eeeeeeee"); // #8 left the lane and is still open — asked, and kept
+        put("4-dddddddd"); // #4 left the lane too, but is too recent to spend a call on
+        put("nonsense"); // not a summary; must be left alone rather than guessed at
+
+        // Backdated past SETTLE, or the lookup is never reached and this test passes for a reason
+        // that has nothing to do with what it claims to check — which is exactly what it did on its
+        // first draft: sabotaging the failed-lookup arm changed nothing, because every file was new.
+        let old = std::time::SystemTime::now() - (SETTLE + Duration::from_secs(60));
+        for name in ["9-cccccccc", "8-eeeeeeee"] {
+            let handle = fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join(format!("{name}.json")))
+                .unwrap();
+            handle
+                .set_times(fs::FileTimes::new().set_modified(old).set_accessed(old))
+                .unwrap();
+        }
+
+        let gone = prune("demo", "acme/repo", &[(7, "aaaaaaaa".to_string())]);
+
+        let left = |name: &str| dir.join(format!("{name}.json")).exists();
+        assert!(
+            left("7-aaaaaaaa"),
+            "the reading of the commit the PR is AT was deleted"
+        );
+        assert!(
+            !left("7-bbbbbbbb"),
+            "a reading that can never be read again was kept"
+        );
+        assert!(
+            !left("9-cccccccc"),
+            "the reading of a CLOSED pull request was kept — which is the \
+             whole of what was asked for"
+        );
+        // The one that would lose real work. This queue is personal, so a PR leaving it usually
+        // means it stopped involving you.
+        assert!(
+            left("8-eeeeeeee"),
+            "a pull request that merely left your lane, and is still open, was deleted"
+        );
+        assert!(left("nonsense"), "a file that is not a summary was deleted");
+        assert_eq!(gone, 2, "exactly the superseded commit and the closed PR");
+
+        // And the recent one was never ASKED about — cheap is not free, and a call per abandoned
+        // summary on every tab open is a cost nobody agreed to. Asserted on the requests actually
+        // made, because "it survived" is also true of a file that was asked about and kept.
+        let asked = asked.lock().unwrap().clone();
+        assert!(
+            !asked.iter().any(|p| p.contains("/pulls/4")),
+            "a summary too recent to be worth a call was asked about anyway: {asked:?}"
+        );
+        assert!(
+            asked.iter().any(|p| p.contains("/pulls/9")),
+            "the old one was never asked about, so nothing here was tested: {asked:?}"
+        );
+
+        std::env::remove_var("SKEIN_GITHUB_API");
+        std::env::remove_var("GH_TOKEN");
+        crate::prq::forget_host_token();
+    }
+
+    /// A GitHub that cannot be reached deletes nothing it was not certain about.
+    ///
+    /// Its own test because the sibling above uses a working stub, which never reaches this arm —
+    /// and this is the arm where being wrong is unrecoverable. Deleting a summary normally costs one
+    /// re-read; deleting every summary in the repo because GitHub was down for a minute costs the
+    /// lot, and the superseded rule must still work while it happens.
+    #[test]
+    fn a_github_that_cannot_be_reached_deletes_only_what_needs_no_asking() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+        // Nothing listens here.
+        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
+
+        let dir = crate::prq::review_dir("demo").join("summaries");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["7-aaaaaaaa", "7-bbbbbbbb", "9-cccccccc"] {
+            fs::write(dir.join(format!("{name}.json")), "{}").unwrap();
+        }
+        let old = std::time::SystemTime::now() - (SETTLE + Duration::from_secs(60));
+        let handle = fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("9-cccccccc.json"))
+            .unwrap();
+        handle
+            .set_times(fs::FileTimes::new().set_modified(old).set_accessed(old))
+            .unwrap();
+
+        let gone = prune("demo", "acme/repo", &[(7, "aaaaaaaa".to_string())]);
+        assert_eq!(
+            gone, 1,
+            "only the superseded commit, which needs nobody's opinion"
+        );
+        assert!(dir.join("7-aaaaaaaa.json").exists());
+        assert!(!dir.join("7-bbbbbbbb.json").exists());
+        assert!(
+            dir.join("9-cccccccc.json").exists(),
+            "a summary was deleted on a lookup that never got an answer — an unreachable GitHub \
+             would empty the whole cache, and nothing here is recoverable"
+        );
+
+        std::env::remove_var("SKEIN_GITHUB_API");
+        std::env::remove_var("GH_TOKEN");
+        crate::prq::forget_host_token();
+    }
+
+    /// A GitHub that answers "is this pull request open" by number.
+    fn stub_github() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    line.clear();
+                }
+                recorder.lock().unwrap().push(path.clone());
+                let body = match path.ends_with("/pulls/9") {
+                    true => r#"{"state":"closed"}"#,
+                    false => r#"{"state":"open"}"#,
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), asked)
+    }
     use super::*;
 
     /// The default that makes the queue worth opening. A fresh install, and an existing

@@ -1014,8 +1014,24 @@ async fn api_review_queue(
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
+    let slug = skein::prq::repo_slug(&repo);
     match tokio::task::spawn_blocking(move || skein::prq::queue(&repo, force)).await {
-        Ok(Ok(queue)) => Json(queue).into_response(),
+        Ok(Ok(queue)) => {
+            // Housekeeping AFTER the answer, never before it. Pruning asks GitHub about summaries
+            // whose PR is no longer in your lane, and doing that on the way to the response would
+            // spend somebody's tab-open on tidying up files they cannot see. Detached: the queue is
+            // already on its way out, and nothing here has an answer the caller is waiting for.
+            if let Some(slug) = slug {
+                let open: Vec<(u64, String)> = queue
+                    .prs
+                    .iter()
+                    .map(|pr| (pr.number, pr.head_sha.clone()))
+                    .collect();
+                let id = queue.repo_id.clone();
+                tokio::task::spawn_blocking(move || skein::review::prune(&id, &slug, &open));
+            }
+            Json(queue).into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
