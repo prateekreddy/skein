@@ -25,6 +25,7 @@ function board({ computed, prs = 29 }) {
     ${grab("REV_SUM_AUTO")}
     ${grab("revSumAuto")}
     ${grab("revSumRepo")}
+    ${grab("revHeld")}
     let revSumBusy = 0;
     let revSums = new Map();
     const view = { repo: "acme" };
@@ -44,7 +45,7 @@ function board({ computed, prs = 29 }) {
       // Called at the start of every scenario, or revSumRepo is still null when the first reload
       // asks and the reset fires for the wrong reason — which is how this test first passed against
       // the bug it exists for. (No backticks in here: this whole block is a template literal.)
-      load: (repo) => revAllowanceFor(repo || "acme"),
+      load: (repo) => { revHeld = repo || "acme"; view.repo = revHeld; revAllowanceFor(revHeld); },
       // A page reload forgets what it has read. The refetch after an approve does not.
       forget: () => { revSums = new Map(); },
     };

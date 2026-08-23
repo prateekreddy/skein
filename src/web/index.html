@@ -2540,7 +2540,12 @@ function loadReview(force) {
     // is no longer there. Dropping it here is what makes a re-review actually get re-read.
     for (const pr of q.prs || []) {
       const held = revSums.get(pr.number);
-      if (held && held !== "…" && held.head_sha !== pr.head_sha) revSums.delete(pr.number);
+      if (!held || held === "…") continue;
+      // A reading of a commit that is no longer the head describes code that is not there.
+      if (held.head_sha !== pr.head_sha) revSums.delete(pr.number);
+      // And a row that could not be REACHED is not a reading at all — asking again is the whole
+      // point, and this is the moment to allow it.
+      else if (held.transient) revSums.delete(pr.number);
     }
     revAllowanceFor(id);
     revQueue = q; revSeen.set(id, q); renderReview(); revPumpSummaries();
@@ -2742,7 +2747,13 @@ function revPumpSummaries() {
 }
 
 function revFetchSummary(number, force) {
-  const id = view.repo;
+  // The repo this queue BELONGS to, never the one the view happens to name. Read from `view.repo`,
+  // any summary the pump started while you were looking at a box asked for
+  // `/api/repos/undefined/review/N/summary`, and the server's honest 404 — "no such repo" — was
+  // written into the row as its reading. The guard below was `view.repo === id`, which is
+  // `undefined === undefined`, so it stored it rather than dropping it.
+  const id = revHeld;
+  if (!id) return;
   revSumBusy++;
   revSums.set(number, "…");
   renderReview();
@@ -2753,7 +2764,7 @@ function revFetchSummary(number, force) {
       return JSON.parse(text);
     })
     .then(s => {
-      if (view.repo !== id) return;
+      if (revHeld !== id) return;   // you switched repos while this was in flight
       revSums.set(number, s);
       // **Only what actually cost something.** This counted requests, and a request answered from
       // the cache on disk costs nothing — so a reload spent the whole allowance on free answers and
@@ -2767,8 +2778,18 @@ function revFetchSummary(number, force) {
       // A failed request is not "nothing to see here". It becomes an unread summary carrying the
       // reason, exactly as the server's own failures do — the page must not be a place where a
       // network error looks like a clear PR.
-      if (view.repo === id) revSums.set(number, {
-        number, depth: "unread", line: "", detail: "", flags: [], yours: [], others: 0,
+      // `transient`: this is a failure to REACH the reading, not a reading. It has to be visible —
+      // a network error must never look like a clear PR — but it must not become the permanent
+      // answer for that row. The pump skips anything already in `revSums`, so without this the row
+      // showed a transport error for ever and nothing ever asked again. Dropped on the next queue
+      // load, which is where the stale-head drop already lives.
+      // Carries the head it was asked about, like a real reading does. Without it the entry is
+      // dropped by the stale-head rule below — by ACCIDENT, because it happens to have no head to
+      // compare — and the rule that is supposed to govern this ("a failure to reach is not an
+      // answer") would be dead code that nothing could test.
+      if (revHeld === id) revSums.set(number, {
+        number, depth: "unread", line: "", detail: "", flags: [], yours: [], others: 0, transient: true,
+        head_sha: ((revQueue && revQueue.prs || []).find(p => p.number === number) || {}).head_sha,
         unread_because: "skein could not reach its own summary for this PR: " + String(e.message || e).split("\n")[0],
       });
     })

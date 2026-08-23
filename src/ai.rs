@@ -602,6 +602,14 @@ mod tests {
     #[test]
     fn a_model_call_that_fails_says_which_failure_it_was() {
         use std::os::unix::fs::PermissionsExt;
+        // **The lock is for the breaker, not the environment** — this test sets no env var, and
+        // that is exactly why it was left out. `REFUSED` is process-global on purpose (a broken
+        // setup must be asked about once, not once per pull request), and this is the one test that
+        // MANUFACTURES refusals. Clearing it before each of its own calls protects this test and
+        // nobody else: a refusal left set between two cases here was read by whichever sibling was
+        // between calls, which then saw `None` from a stub that would have answered fine. One run
+        // in three.
+        let _g = crate::testutil::env_lock();
         let dir = crate::testutil::tempdir();
         let dir = dir.as_ref() as &std::path::Path;
         let stub = |name: &str, body: &str| {
