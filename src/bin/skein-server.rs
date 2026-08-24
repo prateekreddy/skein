@@ -3,6 +3,7 @@
 //!   GET /api/boxes                 fleet snapshot (JSON)
 //!   GET /api/events                live fleet stream (SSE)
 //!   GET /api/boxes/:name/terminal  WebSocket ↔ PTY ↔ persistent in-box tmux session
+//!   GET /api/login/:runtime/terminal  WebSocket ↔ PTY ↔ one-shot `skein login` in the fleet HOME
 //!
 //! The terminal reuses wheels: portable-pty (server PTY) + xterm.js (browser). We write only the
 //! WS↔PTY bridge. Bind is loopback-only by default; for remote access either `tailscale serve`
@@ -444,6 +445,7 @@ async fn main() {
         .route("/api/away", get(api_away))
         .route("/api/away/seen", post(api_seen))
         .route("/api/events", get(api_events))
+        .route("/api/login/:runtime/terminal", get(login_terminal))
         .route("/api/boxes/:name/terminal", get(terminal));
 
     // Everything above is routed; this decides who may drive it.
@@ -1492,15 +1494,12 @@ async fn api_workflow_file() -> Response {
 }
 
 /// A workflow in the shape the file has and the editor edits.
+///
+/// Delegated to `workflow::editor_shape` — the same code `to_bytes` writes the file with. The
+/// hand-built copy this replaces dropped `serial` the day it was added, which under-reported a
+/// running train AND meant an editor save would strip it from the file (see `editor_shape`).
 fn written(f: &skein::workflow::Workflow) -> serde_json::Value {
-    serde_json::json!({
-        "name": f.name,
-        "matches": f.matches.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
-        "steps": f.steps.iter().map(|s| serde_json::json!({
-            "when": s.when.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
-            "do": skein::workflow::spell_act(&s.act),
-        })).collect::<Vec<_>>(),
-    })
+    skein::workflow::editor_shape(f)
 }
 
 /// Replace the fleet's workflows with what the editor sends.
@@ -1536,26 +1535,36 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
         // appears to have been forgotten.
         let flows = skein::workflow::load()?;
         let queue = skein::prq::queue(&repo, false)?;
+        // One read for every PR's history — `journal()` per PR would re-read the same file
+        // per row.
+        let mut journals = skein::prwork::journals(&repo.id);
+        // What the train view is computed FROM: the same carrying set the sweep uses — archived
+        // PRs excluded, because a PR set aside is one the owner said "not now" about and the
+        // sweep honours that; a panel that showed it in the line would promise an act the tick
+        // will never take.
+        let mut carrying: Vec<(u64, String)> = Vec::new();
         let mut prs = serde_json::Map::new();
         for pr in &queue.prs {
             let facts = skein::prwork::facts_of(pr, &queue.viewer, &queue.trunk);
             let standing = skein::prwork::standing(&repo.id, pr.number, &facts, &flows);
-            prs.insert(
-                pr.number.to_string(),
-                serde_json::to_value(standing).unwrap_or_default(),
-            );
+            if !standing.workflow.is_empty() && !matches!(pr.lane, skein::prq::Lane::Archived) {
+                carrying.push((pr.number, standing.workflow.clone()));
+            }
+            let mut entry = serde_json::to_value(standing).unwrap_or_default();
+            // The history rides beside the standing: "which step is it on" and "what has it
+            // already done" are one question to the person automating this.
+            entry["journal"] =
+                serde_json::to_value(journals.remove(&pr.number).unwrap_or_default())
+                    .unwrap_or_default();
+            prs.insert(pr.number.to_string(), entry);
         }
         Ok::<_, String>(serde_json::json!({
             "enabled": skein::prwork::enabled(),
             "read_prs": repo.read_prs,
-            "defined": flows.iter().map(|f| serde_json::json!({
-                "name": f.name,
-                "matches": f.matches.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
-                "steps": f.steps.iter().map(|s| serde_json::json!({
-                    "when": s.when.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),
-                    "do": skein::workflow::spell_act(&s.act),
-                })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
+            // `editor_shape`, NOT a hand-built copy: this route had the second of the two hand
+            // serializers that silently dropped `serial` — see workflow::editor_shape.
+            "defined": flows.iter().map(skein::workflow::editor_shape).collect::<Vec<_>>(),
+            "trains": skein::prwork::trains(&repo.id, &carrying, &flows),
             "prs": prs,
         }))
     })
@@ -1630,6 +1639,12 @@ struct ActReq {
     /// a non-verdict kind refuses them rather than dropping them silently.
     #[serde(default)]
     comments: Vec<skein::prq::ReviewComment>,
+    /// The head sha the comments were drafted against — what the reader was actually looking at.
+    /// Empty means "assume current". When it trails the live head, the comments are re-anchored
+    /// against the new diff rather than refused (SKEIN-214): a moving PR must not make a finished
+    /// review unpostable.
+    #[serde(default)]
+    drafted_at: String,
 }
 
 /// The change itself, for the reading view — the diff the reader already had a right to, at a
@@ -1677,14 +1692,23 @@ async fn api_review_act(
             _ => None,
         };
         let text = match (verdict, req.kind.as_str()) {
-            (Some(v), _) if !req.comments.is_empty() => skein::prq::submit_review_with_comments(
-                &queue.slug,
-                number,
-                &pr.head_sha,
-                v,
-                &req.body,
-                &req.comments,
-            )?,
+            (Some(v), _) if !req.comments.is_empty() => {
+                // The queue is cached for up to a minute, so its sha may already be history. One
+                // REST call reads the live head — posting `commit_id` you did not verify is how
+                // GitHub's 422 gets re-created. If GitHub will not answer, the cached sha is the
+                // best truth available and the post still goes.
+                let head = skein::prq::live_head_sha(&queue.slug, number)
+                    .unwrap_or_else(|_| pr.head_sha.clone());
+                skein::prq::submit_review_with_comments(
+                    &queue.slug,
+                    number,
+                    &head,
+                    v,
+                    &req.body,
+                    &req.comments,
+                    &req.drafted_at,
+                )?
+            }
             (Some(v), _) => skein::prq::submit_review(&queue.slug, number, v, &req.body)?,
             (None, _) if !req.comments.is_empty() => {
                 return Err(format!(
@@ -3442,21 +3466,6 @@ async fn terminal_session(
         }
     }
 
-    let pair = match native_pty_system().openpty(PtySize {
-        rows: 30,
-        cols: 100,
-        pixel_width: 0,
-        pixel_height: 0,
-    }) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = socket
-                .send(Message::Text(format!("skein: pty error: {e}")))
-                .await;
-            return;
-        }
-    };
-
     // Build the command. Propagate env + cwd so `sbx`/`sh` resolve on PATH.
     // Default: reconnect to the box's *existing* provider-specific tmux session,
     // rooted at the dir the box registered.
@@ -3549,13 +3558,42 @@ async fn terminal_session(
         cmd.cwd(dir);
     }
 
+    pump_pty(&mut socket, cmd).await;
+}
+
+/// The WS↔PTY byte pump shared by the box terminal ([`terminal_session`]) and the login terminal
+/// ([`login_session`]): open a fresh PTY, spawn `cmd` on it, pipe bytes both ways, honour
+/// `{"resize":…}` frames, ping every 30s, and reap the child on the way out.
+///
+/// Returns the child's exit code when the CHILD ended the session — PTY EOF with the socket still
+/// up — and `None` when the socket went first or the bridge never got started (the error is already
+/// on the socket in that case). A socket that drops mid-session kills the child, which is exactly
+/// what the login flow wants: a login is a one-shot flow, not a tmux-backed session to resume, so
+/// an abandoned OAuth prompt dies with its browser tab instead of waiting forever for input nobody
+/// can give it.
+async fn pump_pty(socket: &mut WebSocket, cmd: CommandBuilder) -> Option<u32> {
+    let pair = match native_pty_system().openpty(PtySize {
+        rows: 30,
+        cols: 100,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("skein: pty error: {e}")))
+                .await;
+            return None;
+        }
+    };
+
     let mut child = match pair.slave.spawn_command(cmd) {
         Ok(c) => c,
         Err(e) => {
             let _ = socket
                 .send(Message::Text(format!("skein: spawn failed: {e}")))
                 .await;
-            return;
+            return None;
         }
     };
     drop(pair.slave); // release the slave fd in the parent so EOF propagates on child exit
@@ -3566,7 +3604,7 @@ async fn terminal_session(
             let _ = socket
                 .send(Message::Text(format!("skein: pty reader: {e}")))
                 .await;
-            return;
+            return None;
         }
     };
     let mut writer = match pair.master.take_writer() {
@@ -3575,7 +3613,7 @@ async fn terminal_session(
             let _ = socket
                 .send(Message::Text(format!("skein: pty writer: {e}")))
                 .await;
-            return;
+            return None;
         }
     };
     let master = pair.master; // kept for resize
@@ -3612,13 +3650,16 @@ async fn terminal_session(
     let mut keepalive = tokio::time::interval(Duration::from_secs(30));
     keepalive.tick().await; // the first tick fires immediately — discard it
 
+    // Who ended the bridge decides what the caller may say afterwards: only a child that exited
+    // under a still-open socket has an exit code worth reporting to anyone.
+    let mut child_ended = false;
     loop {
         tokio::select! {
             out = out_rx.recv() => match out {
                 Some(bytes) => {
                     if socket.send(Message::Binary(bytes)).await.is_err() { break; }
                 }
-                None => break, // PTY closed (child exited)
+                None => { child_ended = true; break; } // PTY closed (child exited)
             },
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(b))) => {
@@ -3643,10 +3684,105 @@ async fn terminal_session(
         }
     }
 
-    // Reap the child so it doesn't linger as a zombie. Kill, then wait off the async runtime
-    // (Child::wait blocks); dropping `master`/the reader closes the PTY so descendants get SIGHUP.
+    // Reap the child so it doesn't linger as a zombie. Kill (a no-op for one that already exited),
+    // then wait off the async runtime (Child::wait blocks); dropping `master`/the reader closes the
+    // PTY so descendants get SIGHUP.
     let _ = child.kill();
-    let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+    let status = tokio::task::spawn_blocking(move || child.wait()).await;
+    match (child_ended, status) {
+        (true, Ok(Ok(st))) => Some(st.exit_code()),
+        _ => None,
+    }
+}
+
+/// Upgrade to a WebSocket that runs the interactive runtime login — the same flow `skein login`
+/// attaches to a terminal, on a PTY the cockpit owns. The UI half opens this when the fleet's
+/// credential expires (`/api/health` → `expired_logins`), so repair is a click rather than a shell.
+async fn login_terminal(
+    ws: WebSocketUpgrade,
+    Path(runtime): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin terminal blocked").into_response();
+    }
+    if !skein::runtime::valid_runtime(&runtime) {
+        return (StatusCode::BAD_REQUEST, "unsupported runtime").into_response();
+    }
+    ws.on_upgrade(move |socket| login_session(socket, runtime))
+}
+
+/// The login half of the WS↔PTY bridge; [`pump_pty`] is shared with [`terminal_session`].
+///
+/// Deliberately NOT tmux-backed, unlike the box terminal: a login is a one-shot flow, and a socket
+/// that drops mid-login should kill it — resuming a half-finished OAuth prompt in a session nobody
+/// is attached to helps no one, and the next click simply starts a fresh one.
+///
+/// On exit 0 the post-login tail (`fleet::after_login`) runs HERE, in the server process — the CLI
+/// path clears the refusal memory of the CLI process, which the long-running server never sees.
+/// The sentences it returns go down the socket, and the socket closing is the UI's completion
+/// signal either way.
+async fn login_session(mut socket: WebSocket, runtime: String) {
+    // Same cap as the box terminals: a login PTY is a PTY.
+    let _permit = match PTY_LIMIT.try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = socket
+                .send(Message::Text(
+                    "skein: too many terminals open — close one and retry".into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let (program, argv) = match skein::fleet::login_spawn_argv(&runtime) {
+        Ok(spawn) => spawn,
+        Err(why) => {
+            let _ = socket.send(Message::Text(format!("skein: {why}\r\n"))).await;
+            return;
+        }
+    };
+    if runtime == "claude" {
+        // The same coaching `skein login` prints: claude has no login subcommand, so the flow is
+        // the TUI plus a slash command, and nothing on screen says so.
+        let _ = socket
+            .send(Message::Text(
+                "skein: type /login once it starts, then /exit — `setup-token` returns a token to \
+                 export and leaves no credential to seed boxes with\r\n"
+                    .into(),
+            ))
+            .await;
+    }
+    let mut cmd = CommandBuilder::new(program);
+    for a in &argv {
+        cmd.arg(a);
+    }
+    // Propagate env so `sbx`/`bash` resolve on PATH, exactly as the box terminal does.
+    for (k, v) in std::env::vars() {
+        cmd.env(k, v);
+    }
+    match pump_pty(&mut socket, cmd).await {
+        Some(0) => {
+            let rt = runtime.clone();
+            let said = tokio::task::spawn_blocking(move || skein::fleet::after_login(&rt))
+                .await
+                .unwrap_or_else(|e| vec![format!("logged in, but the post-login share failed: {e}")]);
+            for line in said {
+                let _ = socket
+                    .send(Message::Text(format!("skein: {line}\r\n")))
+                    .await;
+            }
+        }
+        Some(code) => {
+            let _ = socket
+                .send(Message::Text(format!(
+                    "skein: login exited {code} — nothing changed\r\n"
+                )))
+                .await;
+        }
+        None => {} // the browser went first; the child is already dead, and there is nobody to tell
+    }
+    // Dropping the socket sends Close — the UI's signal that the flow is over, either way.
 }
 
 #[cfg(test)]

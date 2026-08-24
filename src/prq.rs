@@ -1523,13 +1523,150 @@ pub struct ReviewComment {
     pub path: String,
     pub line: u64,
     pub body: String,
+    /// The drafted line's own content — the text the reviewer was looking at, without the diff's
+    /// `+`/` ` marker. It travels with the comment because it is the only durable anchor a moving
+    /// branch leaves: a line NUMBER is a coordinate into one commit's diff and dies with it, but
+    /// the line's text survives a rebase, a force-push, an insertion above it. `re_anchor` finds
+    /// it again in the new diff by this text. Empty means "unknown" — an old client, or a draft
+    /// that never captured it — and such a comment cannot be re-anchored, only displaced.
+    #[serde(default)]
+    pub text: String,
+}
+
+/// The first seven characters of a sha — the length `git log --oneline` taught everyone to read —
+/// whole if it is somehow shorter.
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
+/// The RIGHT-side commentable lines of a unified diff: every `+` and context line, with the NEW
+/// file's line number and the line's content (marker stripped). This is exactly the set of
+/// coordinates GitHub accepts for a `side: "RIGHT"` review comment.
+///
+/// The counters come from each `@@ -a,b +c,d @@` header's `+c`; `-` lines do not advance the new
+/// counter, and a `\ No newline at end of file` marker advances nothing. File identity comes from
+/// the `+++ b/...` header. A hunk header that does not parse (the assembled diff's
+/// `@@ no patch available @@` placeholder) suspends counting until the next real one, so a file
+/// GitHub served only as numbers contributes no false anchors.
+fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
+    let mut out = Vec::new();
+    let mut path: Option<String> = None;
+    let mut new_line: u64 = 0;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            path = None;
+            in_hunk = false;
+        } else if !in_hunk && line.starts_with("+++ ") {
+            let name = line["+++ ".len()..].trim();
+            path = (name != "/dev/null").then(|| {
+                name.strip_prefix("b/").unwrap_or(name).to_string()
+            });
+        } else if !in_hunk && line.starts_with("--- ") {
+            // The old-file header; only the +++ side names what RIGHT comments attach to.
+        } else if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@` — only `+c` matters here.
+            in_hunk = false;
+            if let Some(plus) = line.split_whitespace().find(|w| w.starts_with('+')) {
+                let start = plus[1..].split(',').next().unwrap_or("");
+                if let Ok(n) = start.parse::<u64>() {
+                    new_line = n;
+                    in_hunk = true;
+                }
+            }
+        } else if in_hunk {
+            if let Some(rest) = line.strip_prefix('+') {
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            } else if line.starts_with('\\') || line.starts_with('-') {
+                // `\ No newline…` marks the previous line; `-` lines live only in the old file.
+            } else {
+                // Context: a leading space, or the entirely empty line git emits for blank context.
+                let rest = line.strip_prefix(' ').unwrap_or(line);
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Re-anchor drafted comments against a NEWER diff, by line text. Returns
+/// `(anchored, displaced)`: the anchored carry updated line numbers valid in the new diff, the
+/// displaced could not be placed and belong in the review body instead.
+///
+/// The rule, and its trade-offs, plainly:
+///
+/// - A comment's candidates are the new diff's RIGHT-side lines in the SAME path whose content
+///   equals `comment.text` exactly (marker stripped, trailing newline ignored). Exact equality,
+///   not fuzzy matching: a near-miss anchor puts a review sentence on a line it was not about,
+///   which is worse than the honest fallback of naming it in the body.
+/// - Exactly one candidate → anchored there. Several → the one nearest the old line number
+///   (tie → the earlier), on the theory that most pushes move a line a little, not far; a
+///   same-text line far away is likelier a different occurrence.
+/// - None — the line was edited, deleted, or its file left the diff — or `comment.text` is empty
+///   (nothing to search for) → displaced. Deliberately conservative: displacement costs a little
+///   reading, a wrong anchor costs trust in every anchor.
+/// - A comment whose text appears verbatim in an unrelated spot of the same file WILL anchor
+///   there if its own line vanished. That is the price of text-only matching; the nearest-line
+///   rule bounds it, and the (read at…, posted against…) note in the body names the commit that
+///   was actually reviewed either way.
+pub fn re_anchor(
+    comments: &[ReviewComment],
+    new_diff: &str,
+) -> (Vec<ReviewComment>, Vec<ReviewComment>) {
+    let lines = right_side_lines(new_diff);
+    let mut anchored = Vec::new();
+    let mut displaced = Vec::new();
+    for c in comments {
+        let want = c.text.trim_end_matches(['\n', '\r']);
+        if want.is_empty() {
+            displaced.push(c.clone());
+            continue;
+        }
+        let best = lines
+            .iter()
+            .filter(|(p, _, t)| *p == c.path && t.trim_end_matches(['\n', '\r']) == want)
+            // Nearest to the old number wins; on a tie min_by_key keeps the FIRST seen, and the
+            // lines arrive in file order, so the earlier line wins the tie.
+            .min_by_key(|(_, n, _)| (n.abs_diff(c.line), *n));
+        match best {
+            Some((_, n, _)) => anchored.push(ReviewComment {
+                line: *n,
+                ..c.clone()
+            }),
+            None => displaced.push(c.clone()),
+        }
+    }
+    (anchored, displaced)
+}
+
+/// The head sha GitHub holds for this PR right now — one REST call, for the moment before a
+/// review posts. The queue's cached sha can be a minute old, and a review posted against a sha
+/// nobody verified is how the 422 this module just removed used to be born.
+pub fn live_head_sha(slug: &str, number: u64) -> Result<String, String> {
+    let v = crate::github::get_json(&format!("/repos/{slug}/pulls/{number}"), &host_token()?)?;
+    v.pointer("/head/sha")
+        .and_then(|s| s.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "GitHub's answer named no head commit".into())
 }
 
 /// Post one review carrying line comments — the vetted output of `crate::review::critique`.
 ///
-/// `head_sha` is sent as `commit_id` and it is load-bearing: the comments were anchored against
-/// that commit's diff, and GitHub attaches them to whatever commit this names. The caller has
-/// already refused a moved head with a better sentence than GitHub's 422; this is the second lock.
+/// `head_sha` is the LIVE head, sent as `commit_id` — always. `drafted_at` is the head the
+/// comments were drafted against; empty means "assume current". When they differ, the review is
+/// not refused (a dynamically moving PR made that refusal a treadmill — SKEIN-214): the new diff
+/// is fetched and each comment is re-anchored by its line's text via [`re_anchor`]. Comments that
+/// survive post as line comments at their NEW numbers; the displaced fold into the body under a
+/// "Reviewed at {sha} — the branch has moved since" heading, and whenever the head moved at all
+/// the body names both commits, because the GitHub record must say what was actually reviewed.
+/// A diff that cannot be fetched (the 20k-line 406, a network refusal) displaces every comment
+/// rather than failing the post — the review always lands.
 pub fn submit_review_with_comments(
     slug: &str,
     number: u64,
@@ -1537,11 +1674,46 @@ pub fn submit_review_with_comments(
     verdict: Verdict,
     body: &str,
     comments: &[ReviewComment],
+    drafted_at: &str,
 ) -> Result<String, String> {
     // A bare approval is a complete statement; anything else with neither words nor comments is a
     // press with nothing behind it.
     if body.trim().is_empty() && comments.is_empty() && verdict != Verdict::Approve {
         return Err("nothing to post — every comment was dropped and the note is empty.".into());
+    }
+    let moved = !drafted_at.is_empty() && drafted_at != head_sha;
+    let (anchored, displaced) = match moved {
+        false => (comments.to_vec(), Vec::new()),
+        true => match pr_diff_text(slug, number) {
+            Ok(diff) => re_anchor(comments, &diff),
+            // The owner's ask is that the review always lands: an unreadable diff means no
+            // anchor can be trusted, so everything travels in the body instead of a 422 or an
+            // error nobody can act on.
+            Err(_) => (Vec::new(), comments.to_vec()),
+        },
+    };
+    let mut full = body.trim().to_string();
+    if !displaced.is_empty() {
+        if !full.is_empty() {
+            full.push_str("\n\n");
+        }
+        full.push_str(&format!(
+            "Reviewed at {} — the branch has moved since, and these lines changed:",
+            short_sha(drafted_at)
+        ));
+        for c in &displaced {
+            full.push_str(&format!("\n• {}:{} — {}", c.path, c.line, c.body));
+        }
+    }
+    if moved {
+        if !full.is_empty() {
+            full.push_str("\n\n");
+        }
+        full.push_str(&format!(
+            "(read at {}, posted against {})",
+            short_sha(drafted_at),
+            short_sha(head_sha)
+        ));
     }
     let event = match verdict {
         Verdict::Approve => "APPROVE",
@@ -1551,10 +1723,10 @@ pub fn submit_review_with_comments(
     let mut payload = serde_json::json!({
         "event": event,
         "commit_id": head_sha,
-        "body": body.trim(),
+        "body": full,
     });
-    if !comments.is_empty() {
-        payload["comments"] = comments
+    if !anchored.is_empty() {
+        payload["comments"] = anchored
             .iter()
             .map(|c| {
                 serde_json::json!({
@@ -1574,11 +1746,18 @@ pub fn submit_review_with_comments(
         Verdict::RequestChanges => "changes requested",
         Verdict::Comment => "posted the review",
     };
-    Ok(match comments.len() {
-        0 => said.into(),
+    let mut told = match anchored.len() {
+        0 => said.to_string(),
         1 => format!("{said} — with 1 line comment"),
         n => format!("{said} — with {n} line comments"),
-    })
+    };
+    if !displaced.is_empty() {
+        told.push_str(&format!(
+            " ({} moved into the note — the branch has new commits)",
+            displaced.len()
+        ));
+    }
+    Ok(told)
 }
 
 /// A pull request's diff, as a diff — the media type is the whole of what `gh pr diff` did.
@@ -2569,6 +2748,304 @@ mod tests {
             std::env::remove_var(key);
         }
         forget_host_token();
+    }
+
+    // ---- SKEIN-214: a review drafted against one commit still lands after the branch moves ----
+
+    /// A comment as the reading view drafts it: `text` is the line the reviewer was looking at.
+    fn drafted(path: &str, line: u64, body: &str, text: &str) -> ReviewComment {
+        ReviewComment {
+            path: path.into(),
+            line,
+            body: body.into(),
+            text: text.into(),
+        }
+    }
+
+    /// The PR after one more push: one line replaced by two above `fn target() {}`, so everything
+    /// below shifted down, and the old `fn gone() {}` no longer exists. The `-` line is
+    /// deliberate: it must NOT advance the new-file counter, and only a diff that has one can
+    /// catch a counter that thinks otherwise.
+    const MOVED_DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\n\
+                              --- a/src/lib.rs\n\
+                              +++ b/src/lib.rs\n\
+                              @@ -1,4 +1,5 @@\n \
+                              fn keep() {}\n\
+                              -fn old() {}\n\
+                              +fn added() {}\n\
+                              +fn extra() {}\n \
+                              fn target() {}\n \
+                              tail\n";
+
+    #[test]
+    fn re_anchor_keeps_an_unmoved_line_at_its_number() {
+        let (kept, gone) = re_anchor(&[drafted("src/lib.rs", 1, "note", "fn keep() {}")], MOVED_DIFF);
+        assert!(gone.is_empty());
+        assert_eq!((kept[0].line, kept[0].path.as_str()), (1, "src/lib.rs"));
+    }
+
+    #[test]
+    fn re_anchor_follows_a_line_pushed_down_by_an_insertion_above() {
+        // Drafted at line 3; one line above became two, so it now lives at 4 — and the `-` line
+        // between must not be counted on the way there.
+        let (kept, gone) =
+            re_anchor(&[drafted("src/lib.rs", 3, "note", "fn target() {}")], MOVED_DIFF);
+        assert!(gone.is_empty(), "the line still exists and was displaced anyway");
+        assert_eq!(kept[0].line, 4, "the comment did not follow its line to its new number");
+        assert_eq!(kept[0].body, "note", "the body must travel untouched");
+    }
+
+    #[test]
+    fn re_anchor_prefers_the_duplicate_nearest_the_old_line_and_the_earlier_on_a_tie() {
+        let twice = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+                     @@ -1,9 +1,9 @@\n one\n+same\n three\n four\n five\n six\n+same\n eight\n nine\n";
+        // `+same` sits at new lines 2 and 7. Old line 8 → 7 is nearer than 2.
+        let (kept, _) = re_anchor(&[drafted("a.rs", 8, "n", "same")], twice);
+        assert_eq!(kept[0].line, 7, "nearest-to-old did not win");
+        // Old line 4 or 5 is a near-tie; make it exact: |2-4|=2 vs |7-4|=3 → 2. And a true tie —
+        // candidates 2 and 7 from old line 4.5 cannot be written, so test equidistance directly:
+        // old line at the midpoint via a diff whose duplicates sit at 2 and 6, old 4 → tie → earlier.
+        let tie = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+                   @@ -1,7 +1,7 @@\n one\n+same\n three\n four\n five\n+same\n seven\n";
+        let (kept, _) = re_anchor(&[drafted("a.rs", 4, "n", "same")], tie);
+        assert_eq!(kept[0].line, 2, "a tie must break toward the earlier line");
+    }
+
+    #[test]
+    fn re_anchor_displaces_a_deleted_line() {
+        let (kept, gone) = re_anchor(&[drafted("src/lib.rs", 9, "n", "fn gone() {}")], MOVED_DIFF);
+        assert!(kept.is_empty(), "anchored a comment to a line that no longer exists");
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].line, 9, "the displaced comment must keep its original coordinates");
+    }
+
+    #[test]
+    fn re_anchor_displaces_a_comment_with_no_text_to_search_for() {
+        // `text` empty means an old client or a draft that never captured the line — matching
+        // by nothing would anchor everywhere, so it anchors nowhere.
+        let (kept, gone) = re_anchor(&[drafted("src/lib.rs", 1, "n", "")], MOVED_DIFF);
+        assert!(kept.is_empty() && gone.len() == 1);
+    }
+
+    #[test]
+    fn re_anchor_displaces_a_comment_on_a_file_the_new_diff_no_longer_touches() {
+        // Same text exists — in a DIFFERENT file. Text matching never crosses paths.
+        let (kept, gone) =
+            re_anchor(&[drafted("src/other.rs", 1, "n", "fn keep() {}")], MOVED_DIFF);
+        assert!(kept.is_empty() && gone.len() == 1);
+    }
+
+    /// A GitHub for the moved-head posting path: serves one PR's diff (or refuses with a 500 when
+    /// `diff` is `None`), answers every POST with `{}`, and records `"METHOD path body"` — the
+    /// wire is the thing under test, exactly as `fake_github` argues above.
+    fn reanchor_github(
+        diff: Option<&'static str>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let mut parts = request.split_whitespace();
+                let method = parts.next().unwrap_or("").to_string();
+                let path = parts.next().unwrap_or("").to_string();
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut body).ok();
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
+                recorder.lock().unwrap().push(format!("{method} {path} {body}"));
+                let (status, answer) = match (method.as_str(), diff) {
+                    ("POST", _) => (200, "{}".to_string()),
+                    (_, Some(d)) => (200, d.to_string()),
+                    (_, None) => (500, r#"{"message":"boom"}"#.to_string()),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    /// Env plumbing every wire test here shares. Returns the guard that must stay alive.
+    fn wired(base: &str) -> impl Drop {
+        struct Undo(std::sync::MutexGuard<'static, ()>);
+        impl Drop for Undo {
+            fn drop(&mut self) {
+                for key in ["GH_TOKEN", "SKEIN_GITHUB_API"] {
+                    std::env::remove_var(key);
+                }
+                forget_host_token();
+            }
+        }
+        let guard = crate::testutil::env_lock();
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::set_var("SKEIN_GITHUB_API", base);
+        forget_host_token();
+        Undo(guard)
+    }
+
+    /// The recorded review POST, parsed. Panics with the whole record if none was made.
+    fn posted_review(seen: &std::sync::Mutex<Vec<String>>) -> serde_json::Value {
+        let seen = seen.lock().unwrap();
+        let post = seen
+            .iter()
+            .find(|r| r.starts_with("POST "))
+            .unwrap_or_else(|| panic!("no review reached GitHub: {seen:?}"));
+        serde_json::from_str(post.splitn(3, ' ').nth(2).unwrap()).unwrap()
+    }
+
+    /// SKEIN-214, the whole ask on one wire: the branch moved after drafting, and the review still
+    /// lands — the comment whose line survives follows it to its NEW number, the one whose line
+    /// changed folds into the body naming the commit it was read at, `commit_id` is the LIVE head,
+    /// and the body says read-at/posted-against so the GitHub record is honest about what was
+    /// actually reviewed.
+    #[test]
+    fn a_review_of_a_moved_branch_lands_with_reanchored_lines_and_an_honest_body() {
+        let (base, seen) = reanchor_github(Some(MOVED_DIFF));
+        let _env = wired(&base);
+
+        let drafted_at = "aaaaaaa1111111111111111111111111111111111";
+        let live_head = "bbbbbbb2222222222222222222222222222222222";
+        let said = submit_review_with_comments(
+            "acme/thing",
+            7,
+            live_head,
+            Verdict::Comment,
+            "overall: fine",
+            &[
+                drafted("src/lib.rs", 3, "tighten this", "fn target() {}"),
+                drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
+            ],
+            drafted_at,
+        )
+        .expect("a moved branch must not make the review unpostable");
+
+        let payload = posted_review(&seen);
+        assert_eq!(
+            payload["commit_id"], *live_head,
+            "commit_id must be the live head, never the drafted one"
+        );
+        let comments = payload["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1, "the displaced comment leaked into the line comments");
+        assert_eq!(
+            (comments[0]["line"].as_u64(), comments[0]["side"].as_str()),
+            (Some(4), Some("RIGHT")),
+            "the surviving comment did not move to its new line number"
+        );
+        assert_eq!(comments[0]["body"], "tighten this");
+        let body = payload["body"].as_str().unwrap();
+        assert!(
+            body.contains("Reviewed at aaaaaaa — the branch has moved since, and these lines changed:"),
+            "the displaced heading is missing: {body}"
+        );
+        assert!(
+            body.contains("• src/lib.rs:9 — dead code?"),
+            "the displaced comment's bullet is missing: {body}"
+        );
+        assert!(
+            body.contains("(read at aaaaaaa, posted against bbbbbbb)"),
+            "the record does not say what was actually reviewed: {body}"
+        );
+        assert!(said.contains("1 line comment"), "the answer under-reports: {said}");
+    }
+
+    /// The unmoved case pays nothing: same head → no diff fetch, and the payload is byte-for-byte
+    /// today's shape — no heading, no read-at line, the drafted numbers as given.
+    #[test]
+    fn a_review_of_an_unmoved_branch_posts_exactly_as_before() {
+        let (base, seen) = reanchor_github(Some(MOVED_DIFF));
+        let _env = wired(&base);
+
+        let head = "cccccccc333333333333333333333333333333333";
+        submit_review_with_comments(
+            "acme/thing",
+            7,
+            head,
+            Verdict::Comment,
+            "looks fine",
+            &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
+            head,
+        )
+        .unwrap();
+
+        assert_eq!(
+            posted_review(&seen),
+            serde_json::json!({
+                "event": "COMMENT",
+                "commit_id": head,
+                "body": "looks fine",
+                "comments": [
+                    { "path": "src/lib.rs", "line": 2, "side": "RIGHT", "body": "tighten this" }
+                ],
+            }),
+            "the unmoved payload must be identical to the pre-SKEIN-214 shape"
+        );
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            1,
+            "an unmoved head must cost no diff fetch: {requests:?}"
+        );
+    }
+
+    /// A diff GitHub will not serve (the 20k-line 406, a network refusal) displaces EVERY comment
+    /// into the body — the review lands anyway, because "post it" was the whole of the ask, and an
+    /// error here would strand a finished review behind an unreadable diff.
+    #[test]
+    fn an_unfetchable_diff_moves_every_comment_into_the_body_and_still_posts() {
+        let (base, seen) = reanchor_github(None);
+        let _env = wired(&base);
+
+        submit_review_with_comments(
+            "acme/thing",
+            7,
+            "bbbbbbb2222222222222222222222222222222222",
+            Verdict::Comment,
+            "",
+            &[
+                drafted("src/lib.rs", 2, "tighten this", "fn target() {}"),
+                drafted("src/lib.rs", 9, "dead code?", "fn gone() {}"),
+            ],
+            "aaaaaaa1111111111111111111111111111111111",
+        )
+        .expect("an unreadable diff must not make the review unpostable");
+
+        let payload = posted_review(&seen);
+        assert!(
+            payload.get("comments").is_none(),
+            "with no diff to anchor against, no line comment can be trusted: {payload}"
+        );
+        let body = payload["body"].as_str().unwrap();
+        assert!(
+            body.contains("• src/lib.rs:2 — tighten this")
+                && body.contains("• src/lib.rs:9 — dead code?"),
+            "a comment vanished instead of riding in the body: {body}"
+        );
+        assert!(body.contains("(read at aaaaaaa, posted against bbbbbbb)"));
     }
 
     /// A pull request says when its HEAD COMMIT landed, not when the pull request was last touched.
