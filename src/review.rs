@@ -205,6 +205,85 @@ fn store(repo_id: &str, s: &Summary) -> Result<(), String> {
     write_atomic(&path, &dir, &bytes)
 }
 
+/// A reading skein already has, and whether it is of the commit that is there now.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Known {
+    #[serde(flatten)]
+    pub summary: Summary,
+    /// True when this reading describes an earlier commit — the branch has moved since.
+    pub stale: bool,
+}
+
+/// Every reading skein already holds for these pull requests, off disk, costing nothing.
+///
+/// **Why this exists as a bulk read.** The pane used to discover an existing reading only by asking
+/// for it one pull request at a time, through the same path that COMPUTES one — so every limit that
+/// belongs to spending money was also a limit on remembering. A reading skein had already paid for
+/// was hidden if the pull request was a draft, or unsettled, or in the waiting lane, or simply past
+/// the sixth row, because the loop that asks stops when the allowance is gone. Reported as "I can
+/// only see 2 PRs with summaries while before there were a bunch", with the owner's own diagnosis:
+/// the limits are for new analysis, not for reading from disk.
+///
+/// So: one request, every reading, no model calls and no rules. What the pane then asks to have
+/// COMPUTED is a separate question, and that one keeps every limit it had.
+///
+/// A reading of an earlier commit is returned too, marked. It is still true about the code it read,
+/// and the row says which commit that was — without it, everything skein knew about a pull request
+/// vanished from the pane the moment somebody pushed, and came back only if asked for again.
+pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap<u64, Known> {
+    let mut out = std::collections::BTreeMap::new();
+    for (number, head_sha) in prs {
+        if let Some(summary) = cached(repo_id, *number, head_sha) {
+            out.insert(
+                *number,
+                Known {
+                    summary,
+                    stale: false,
+                },
+            );
+            continue;
+        }
+        if let Some(summary) = newest_for(repo_id, *number) {
+            out.insert(
+                *number,
+                Known {
+                    summary,
+                    stale: true,
+                },
+            );
+        }
+    }
+    out
+}
+
+/// The most recent reading of any commit of this pull request.
+///
+/// By modification time rather than by parsing shas out of filenames: the file's own age is what
+/// "most recent" means, and a sha says nothing about which came first.
+fn newest_for(repo_id: &str, number: u64) -> Option<Summary> {
+    let dir = review_dir(repo_id).join("summaries");
+    let prefix = format!("{number}-");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(&dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(seen, _)| at > *seen) {
+            best = Some((at, entry.path()));
+        }
+    }
+    let text = fs::read_to_string(best?.1).ok()?;
+    serde_json::from_str::<Summary>(&text).ok().map(|mut s| {
+        // Same rule as `cached`: what came off disk did not cost anything NOW.
+        s.computed = false;
+        s
+    })
+}
+
 /// Drop what describes a pull request that is over, or a commit that has been replaced.
 ///
 /// Nothing used to. `summaries/<number>-<head_sha>.json` holds one file per PR **per head commit**,
@@ -1225,6 +1304,75 @@ mod tests {
             std::env::remove_var(key);
         }
         crate::prq::forget_host_token();
+    }
+
+    /// What skein already holds is handed over in one go, and an older reading is marked, not lost.
+    ///
+    /// The bulk read exists because the pane used to learn what skein knew only by asking for one
+    /// pull request at a time, down the path that COMPUTES a reading — so a draft's reading, an
+    /// unsettled branch's reading, and everything past the sixth row were all hidden by limits meant
+    /// to bound money. Reading from disk is not spending, and this is the call that says so.
+    #[test]
+    fn every_reading_on_disk_is_handed_over_at_once() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let put = |number: u64, head: &str, line: &str| {
+            store(
+                "demo",
+                &Summary {
+                    number,
+                    head_sha: head.into(),
+                    depth: Depth::Line,
+                    line: line.into(),
+                    detail: String::new(),
+                    flags: Vec::new(),
+                    signals: Vec::new(),
+                    yours: Vec::new(),
+                    others: 0,
+                    unread_because: String::new(),
+                    computed: true,
+                },
+            )
+            .unwrap();
+        };
+        put(1, "aaa", "read at the current head");
+        put(2, "old", "read before the last push");
+
+        let asked = [
+            (1, "aaa".to_string()),
+            // #2 has moved since it was read.
+            (2, "new".to_string()),
+            // #3 has never been read at all.
+            (3, "ccc".to_string()),
+        ];
+        let known = known("demo", &asked);
+
+        assert_eq!(known.len(), 2, "a reading was lost or invented: {known:?}");
+        let one = &known[&1];
+        assert_eq!(one.summary.line, "read at the current head");
+        assert!(!one.stale, "a reading of the current head was marked stale");
+        assert!(
+            !one.summary.computed,
+            "a reading off disk claims to have cost a model call, so a budget that counts spending \
+             is spent by answers that were free"
+        );
+
+        // The one that matters: a reading of an earlier commit is KEPT and marked, not dropped.
+        // Dropped, everything skein knew about a pull request vanished the moment somebody pushed —
+        // and only a person asking again could bring it back.
+        let two = &known[&2];
+        assert_eq!(two.summary.line, "read before the last push");
+        assert!(
+            two.stale,
+            "a reading of an earlier commit was handed over as current"
+        );
+
+        // And nothing is invented for one that was never read.
+        assert!(!known.contains_key(&3));
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// An answer served from the cache does not report as having cost anything.

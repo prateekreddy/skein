@@ -2642,7 +2642,12 @@ function loadReview(force) {
       if (held.head_sha !== pr.head_sha) held.stale = true;
     }
     revAllowanceFor(id);
-    revQueue = q; revSeen.set(id, q); renderReview(); revPumpSummaries(); loadWorkflows();
+    revQueue = q; revSeen.set(id, q); renderReview();
+    // **What skein already knows, before anything is asked for.** One request, no model calls, no
+    // rules — see `loadKnownSummaries`. The pump runs after it, so it only ever asks for readings
+    // that do not exist yet.
+    loadKnownSummaries(id);
+    loadWorkflows();
     // `fresh: false` means the server handed over its remembered copy and went to fetch the real
     // one. Ask again shortly — by then it is a cache hit, not another wait. Once: if the second ask
     // is still stale the fetch is genuinely slow, and hammering it would not make it faster.
@@ -2835,6 +2840,37 @@ function revAllowanceFor(id) {
   if (revSumRepo === id) return;
   revSumRepo = id;
   revSumAuto = 0;
+}
+
+// Every reading skein already holds for this repo, in one request.
+//
+// This is the fix for "I can only see 2 PRs with summaries while before there were a bunch". The
+// pane used to discover an existing reading only by asking for one pull request at a time, through
+// the same call that COMPUTES one — so every limit meant to bound spending also bounded remembering:
+// a draft's reading was hidden, an unsettled branch's was hidden, a row past the sixth was hidden
+// because the loop stops when the allowance is gone. None of those are reasons to forget something
+// skein has already paid for.
+//
+// Reading from disk is free, so this asks for all of it at once and applies no rules. The pump then
+// asks for what is MISSING, and keeps every limit it had.
+function loadKnownSummaries(id) {
+  fetch(`/api/repos/${encodeURIComponent(id)}/review/summaries`)
+    .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+    .then(known => {
+      if (revHeld !== id) return;
+      for (const [number, s] of Object.entries(known || {})) {
+        const n = Number(number);
+        // A reading the page already has for THIS head is not replaced: it may be one that has just
+        // landed from a forced re-read, and the copy on disk is the older answer.
+        const held = revSums.get(n);
+        if (held && held !== "…" && !held.stale && !held.transient) continue;
+        revSums.set(n, s);
+      }
+      renderReview();
+      // Only now. Anything still missing is genuinely unread, which is what the limits are for.
+      revPumpSummaries();
+    })
+    .catch(() => { if (revHeld === id) revPumpSummaries(); });
 }
 
 // What workflows exist, and what each pull request's is doing. Cheap: it reads the cached queue and

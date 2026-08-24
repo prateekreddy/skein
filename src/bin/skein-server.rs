@@ -328,6 +328,7 @@ async fn main() {
             "/api/repos/:id/review/:number/summary",
             get(api_review_summary),
         )
+        .route("/api/repos/:id/review/summaries", get(api_review_summaries))
         .route("/api/repos/:id/workflows", get(api_workflows))
         .route("/api/repos/:id/reading", post(api_set_reading))
         .route(
@@ -1286,6 +1287,43 @@ async fn api_set_reading(
     match skein::repos::set_read_prs(&id, r.on) {
         Ok(()) => Json(serde_json::json!({ "ok": true, "on": r.on })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// Every reading skein already holds for this repo's queue, in one request.
+///
+/// **Reading from disk is not spending.** The pane used to learn what skein knew only by asking for
+/// one pull request at a time, down the same path that COMPUTES a reading — so every limit meant to
+/// bound money also bounded memory, and a reading already paid for stayed hidden behind a draft
+/// flag, an unsettled branch, or the sixth row. Reported as "I can only see 2 PRs with summaries
+/// while before there were a bunch".
+///
+/// So this costs nothing and refuses nothing: no model calls, no rules about drafts or settling.
+/// What the pane then asks to have COMPUTED is a separate question, and that one keeps its limits.
+async fn api_review_summaries(Path(id): Path<String>) -> Response {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        let queue = skein::prq::queue(&repo, false)?;
+        let want: Vec<(u64, String)> = queue
+            .prs
+            .iter()
+            .map(|pr| (pr.number, pr.head_sha.clone()))
+            .collect();
+        Ok::<_, String>(skein::review::known(&repo.id, &want))
+    })
+    .await;
+    match out {
+        Ok(Ok(known)) => Json(
+            known
+                .into_iter()
+                .map(|(number, k)| (number.to_string(), k))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

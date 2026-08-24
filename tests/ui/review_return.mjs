@@ -49,6 +49,7 @@ function board() {
     ${grab("revSettled")}
     ${grab("revSettlesIn")}
     ${grab("revAllowanceFor")}
+    ${grab("loadKnownSummaries")}
     ${grab("revPumpSummaries")}
     ${grab("revFetchSummary")}
     ${grab("revMatchesFilter")}
@@ -111,9 +112,23 @@ function board() {
   // its answer — which is where both defects lived.
   let pending = [];
   let refuse = null;              // a repo whose summaries the server will not serve
+  let known = {};                 // readings already on disk, as the bulk route answers them
   const fetch = (url) => {
     const id = decodeURIComponent(url.match(/repos\/([^/]+)\/review/)[1]);
     asked.push(url);
+    // The bulk read: what skein already holds. This fixture holds nothing — every scenario here is
+    // about what the pane ASKS for, so an empty answer keeps the pump as the only source and the
+    // assertions about it meaningful.
+    if (/review\/summaries$/.test(url)) {
+      return new Promise(resolve => pending.push(() => resolve({
+        ok: true,
+        // This route is read with `r.json()`, like the workflow one — the queue and the per-PR
+        // summaries are read with `r.text()`. Both shapes, or the stub answers a call the page does
+        // not make.
+        json: () => Promise.resolve(known),
+        text: () => Promise.resolve(JSON.stringify(known)),
+      })));
+    }
     const sum = url.match(/review\/(\d+)\/summary/);
     return new Promise(resolve => pending.push(() => {
       // Word for word what the server answers for a repo id it does not know.
@@ -167,10 +182,12 @@ function board() {
     fire: () => { const due = waits.map(w => w.fn); waits.length = 0; due.forEach(f => f()); },
     // A pull request somebody has just pushed to.
     hot: ns => { hot = ns; },
+    // Readings skein already holds, which the pane must show without asking for any of them.
+    holds: map => { known = map; },
     // The branch moving under a reading that has already been made.
     moved: ns => { moved = ns; },
     // Summary requests only — the queue's own fetches are not what these counts are about.
-    reads: () => asked.filter(u => /summary/.test(u)),
+    reads: () => asked.filter(u => /review\/\d+\/summary/.test(u)),
   };
 }
 
@@ -348,6 +365,53 @@ function board() {
   await b.drain();
   t.check("and once the server is current, so is the pane", b.rows(), 6);
   t.check("the chase resets for the next time", b.tries(), 0);
+}
+
+// ---- what skein already knows shows up at once, whatever the limits are ----
+//
+// Reported live: "it is on latest build but still I can only see 2 PRs with summaries while before
+// there were a bunch of them" … "shouldn't they just load if they are just reading from disk".
+//
+// Exactly right, and the cause was that the pane learned what skein knew only by asking for one
+// pull request at a time — down the same call that COMPUTES a reading. So every limit meant to bound
+// money also bounded memory: a draft's reading was hidden, an unsettled branch's was hidden, and
+// everything past the sixth row was hidden because the loop stops when the allowance is gone.
+{
+  const b = board();
+  // Six pull requests, and skein has already read all of them. Two are drafts, two were pushed to a
+  // minute ago — every one of those was invisible before, and none of them costs anything now.
+  b.hot([3, 4]);
+  b.holds({
+    "1": { number: 1, head_sha: "alpha1", depth: "line", line: "read one" },
+    "2": { number: 2, head_sha: "alpha2", depth: "line", line: "read two" },
+    "3": { number: 3, head_sha: "alpha3", depth: "line", line: "read three" },
+    "4": { number: 4, head_sha: "alpha4", depth: "line", line: "read four" },
+    "5": { number: 5, head_sha: "alpha5", depth: "line", line: "read five" },
+    // A reading of an earlier commit, which the server marks rather than hides.
+    "6": { number: 6, head_sha: "old", depth: "line", line: "read six", stale: true },
+  });
+  b.open("alpha");
+  await b.drain();
+
+  t.check("every reading skein holds is on screen", b.sums(), 6);
+  t.check("including one of an earlier commit, marked", b.got(6).stale, true);
+  t.check("and nothing was asked for one at a time", b.reads(), []);
+  t.check("so no allowance was spent on what was already paid for", b.spent(), 0);
+}
+
+// ---- and what is genuinely unread still obeys every limit ----
+{
+  const b = board();
+  b.hot([5, 6]);
+  b.holds({ "1": { number: 1, head_sha: "alpha1", depth: "line", line: "read one" } });
+  b.open("alpha");
+  await b.drain();
+
+  // #1 came free. #2, #3, #4 are unread and settled, so they are asked for. #5 and #6 are still
+  // being pushed to, so they are not — the limits are for new analysis, which is the whole point.
+  const asked = b.reads().map(u => Number(u.match(/review\/(\d+)\/summary/)[1])).sort();
+  t.check("only what is missing is asked for", asked, [2, 3, 4]);
+  t.check("and everything known or read is on screen", b.sums(), 4);
 }
 
 t.done();

@@ -532,13 +532,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
         }
     }
 
-    // Newest activity first: the queue is worked from the top, and "changed most recently" is the
-    // closest thing to "most likely to still be moving".
-    prs.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then(b.number.cmp(&a.number))
-    });
+    newest_first(&mut prs);
 
     // An archived PR that is no longer open cannot be in this list, so its entry is dead weight.
     // Pruning is safe in the direction that matters: if a PR is ever reopened it comes back
@@ -873,6 +867,19 @@ pub fn settled(committed_at: &str) -> bool {
         // A commit dated in the future is a clock skew, not a settled branch.
         Err(_) => false,
     }
+}
+
+/// **Newest pull request first, by number.** The owner's own ordering.
+///
+/// It was `updated_at` descending, which sounds like the same thing and is not: a comment, a label,
+/// a bot's push all move a pull request to the top of that order without changing what it is, so the
+/// queue reshuffled between two looks and nothing stayed where it had been put. A number never
+/// moves — the row you looked at yesterday is where you left it.
+///
+/// Its own function so a test can assert the QUEUE's ordering rather than assert that `sort_by`
+/// sorts.
+pub(crate) fn newest_first(prs: &mut [Pr]) {
+    prs.sort_by_key(|pr| std::cmp::Reverse(pr.number));
 }
 
 fn rollup(item: &serde_json::Value) -> String {
@@ -1707,6 +1714,50 @@ mod tests {
         // Nothing reached the network: `gh` is never invoked for a repo that was not asked, which is
         // what makes reporting them free rather than three round trips each.
         unsafe { std::env::remove_var("SKEIN_HOME") };
+    }
+
+    /// The queue is newest-first by number, and stays that way.
+    ///
+    /// The owner's ordering, and it replaced `updated_at` descending — which sounds like the same
+    /// thing and is not. A comment, a label, a bot's push all move a pull request to the top of that
+    /// order without changing what it is, so the queue reshuffled between two looks and nothing
+    /// stayed where it had been put. A number never moves.
+    #[test]
+    fn the_queue_is_newest_first_by_number() {
+        let node = |number: u64, updated: &str| {
+            serde_json::json!({
+                "number": number, "title": "t", "url": "u", "isDraft": false,
+                "author": { "login": "someone" }, "headRefName": "f",
+                "headRefOid": format!("sha{number}"), "baseRefName": "main",
+                "updatedAt": updated, "latestReviews": { "nodes": [] },
+            })
+        };
+        // The two orderings must DISAGREE here, or the test passes on a coincidence — which the
+        // first version of it did. #7 is the oldest pull request and was commented on a minute ago;
+        // #41 is the newest and has been quiet. By number: 41, 12, 7. By activity: 7, 12, 41.
+        let mut prs: Vec<Pr> = [
+            (7, "2026-08-24T00:00:00Z"),
+            (41, "2020-01-01T00:00:00Z"),
+            (12, "2024-01-01T00:00:00Z"),
+        ]
+        .iter()
+        .map(|(n, at)| {
+            build_pr(
+                &shape(&node(*n, at)),
+                *n,
+                "me",
+                "acme",
+                &Reason::Author,
+                &[],
+            )
+        })
+        .collect();
+        newest_first(&mut prs);
+        assert_eq!(
+            prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+            vec![41, 12, 7],
+            "the queue is not newest-first by number"
+        );
     }
 
     /// A pull request too big for GitHub to serve a diff for is still readable.
