@@ -103,6 +103,12 @@ pub struct Summary {
     /// it when it was computed.
     #[serde(default)]
     pub computed: bool,
+    /// The ONLY reason this row is unread is that the day's AUTOMATIC budget is spent. The
+    /// machine-readable half of the refusal sentence: the pane detects it to render the read
+    /// button prominently — the manual trigger the sentence invites, which is never budgeted
+    /// (see [`Trigger`]). Omitted from the JSON when false, so older clients see no new key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_stopped: bool,
 }
 
 impl Summary {
@@ -120,6 +126,7 @@ impl Summary {
             // written both by a model call that failed (it did) and by the switch being off (it did
             // not). `with_spend` marks the ones that did.
             computed: false,
+            budget_stopped: false,
             yours: Vec::new(),
             others: 0,
             unread_because: because.to_string(),
@@ -212,6 +219,17 @@ pub struct Known {
     pub summary: Summary,
     /// True when this reading describes an earlier commit — the branch has moved since.
     pub stale: bool,
+    /// The review drafted at the CURRENT head, riding the same bulk payload as the summary —
+    /// the owner's ask (2026-08-24): "Show the critique as another section along with summary."
+    /// Carried here so the pane renders the review section with NO per-row fetch; the per-row
+    /// `/critique` GET stays for the keep/drop/post flow. Absent (and omitted from the JSON, so
+    /// an older client simply never sees the key) when nothing is drafted at this head — a draft
+    /// of an earlier commit is not offered as if it read this one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub critique: Option<Critique>,
+    /// The cheap flag beside the payload: is a drafted review here? `critique.comments.len()` is
+    /// the count when it is.
+    pub has_critique: bool,
 }
 
 /// Every reading skein already holds for these pull requests, off disk, costing nothing.
@@ -233,12 +251,18 @@ pub struct Known {
 pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap<u64, Known> {
     let mut out = std::collections::BTreeMap::new();
     for (number, head_sha) in prs {
+        // The drafted review at THIS head, whichever vintage the summary turns out to be — off
+        // disk, costing nothing, same rule as the summaries themselves.
+        let critique = critiqued(repo_id, *number).filter(|c| &c.head_sha == head_sha);
+        let has_critique = critique.is_some();
         if let Some(summary) = cached(repo_id, *number, head_sha) {
             out.insert(
                 *number,
                 Known {
                     summary,
                     stale: false,
+                    critique,
+                    has_critique,
                 },
             );
             continue;
@@ -249,6 +273,8 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
                 Known {
                     summary,
                     stale: true,
+                    critique,
+                    has_critique,
                 },
             );
         }
@@ -419,6 +445,144 @@ fn fresh(path: &std::path::Path) -> bool {
         .and_then(|m| m.modified())
         .map(|at| at.elapsed().map(|age| age < SETTLE).unwrap_or(true))
         .unwrap_or(false)
+}
+
+// ───────────────────────────── the day's analysis budget ─────────────────────────────
+//
+// FLEET-WIDE, per UTC day, counted HERE — at the model call — and nowhere else. One unit is one
+// pull request ANALYSED: a `(number, head_sha)` that actually reached a model, whether that visit
+// produced a one-liner, a brief, or a brief plus a drafted review. A cache hit is zero. The
+// ceiling and its default (100) live on `Config::review_reads_per_day` — the owner's own number:
+// "not more than 100 PRs a day (cache misses, actual analysis)".
+//
+// The client used to keep this budget (`REV_SUM_AUTO`/`revSumAuto` in index.html), and it was
+// wrong twice over, in ways nobody should reintroduce:
+//
+// 1. **It counted REQUESTS, not model calls.** A request answered from the disk cache costs
+//    nothing, so a page reload re-requested the six newest rows, took six free cache hits, and the
+//    allowance was gone — rows seven onward were never read, on any reload, for ever. A limit on
+//    spending has to count spending, and only the server knows whether a request reached a model.
+// 2. **A button press reset it.** Every approve and set-aside reloaded the pane, and the reload
+//    handed out a fresh allowance — one approve authorised six more reads (measured 6→12), thirty
+//    acts a day up to 180 stage-1 calls, with no ceiling, while the reload-only reviewer got
+//    nothing. A budget the client holds is a budget any client action can refill.
+//
+// So the ledger lives on disk beside the per-repo summary dirs, keyed by day with the per-repo
+// attribution kept inside it (cheap, and it says where the money went), and every path that is
+// about to spend a model call — the summary read, the drafted review, asked-for or background —
+// checks the same number. One budget, not two. The file self-prunes: writing today's count drops
+// every other day's key, so it never grows past one entry.
+//
+// Unlocked read-modify-write, deliberately: two analyses racing can overshoot the ceiling by the
+// number in flight, which is bounded by the client's small parallelism and costs cents — a lock
+// here would buy precision nothing needs.
+
+/// The one ledger, above the per-repo dirs — the budget is the fleet's, not a repo's.
+fn spend_path() -> PathBuf {
+    crate::config::skein_home().join("review").join("reads-spent.json")
+}
+
+/// Today's key. UTC, so the budget resets at the same moment for everyone and a test can name a
+/// day instead of sleeping through midnight.
+fn utc_day() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+/// The ceiling, from settings. See `Config::review_reads_per_day` for the default and its why.
+fn reads_per_day() -> u32 {
+    crate::config::load_config().review_reads_per_day
+}
+
+/// day → repo → analyses. The inner map is attribution, the budget is the day's SUM.
+type SpendLedger = std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>>;
+
+fn spend_ledger() -> SpendLedger {
+    fs::read_to_string(spend_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// How many pull requests the whole fleet has analysed on `day`.
+fn reads_spent(day: &str) -> u32 {
+    spend_ledger()
+        .get(day)
+        .map(|repos| repos.values().sum())
+        .unwrap_or(0)
+}
+
+/// Count one analysed pull request against `day` under `repo_id`, and drop every other day's key
+/// while here — the file is this day's tally, not a history, and pruning on write is what keeps
+/// it one entry for ever.
+fn note_read_spent(repo_id: &str, day: &str) {
+    let path = spend_path();
+    let mut all = spend_ledger();
+    all.retain(|k, _| k == day);
+    *all.entry(day.to_string())
+        .or_default()
+        .entry(repo_id.to_string())
+        .or_insert(0) += 1;
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+        if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
+            let _ = write_atomic(&path, dir, &bytes);
+        }
+    }
+}
+
+/// The honest-absence sentence a budget-stopped row carries, shown verbatim by the pane — and it
+/// INVITES the manual trigger, per the owner: "When limit is hit, surface and ask me to manually
+/// trigger these." The machine-readable marker beside it is [`Summary::budget_stopped`], which
+/// the pane uses to render the read button prominently.
+fn budget_spent_because(spent: u32, budget: u32) -> String {
+    format!(
+        "today's automatic reading budget is spent ({spent}/{budget}) — press read to analyse \
+         this one now; the budget resets at midnight UTC."
+    )
+}
+
+/// Who wants this pull request analysed. **The budget's whole boundary**, so it is a named type
+/// rather than a bool a call site can get backwards.
+///
+/// The owner's rule, verbatim: "Limit is only for automatic stuff, manually I can invoke as many
+/// as I want." The ceiling is on skein's INITIATIVE, never on the person — so an [`Asked`] visit
+/// (the read button, the draft button, a `force` re-read, any user-initiated route) neither
+/// checks the counter nor increments it: a manual call must never be refused for budget, and
+/// must never eat the automatic allowance. Only [`Unasked`] work — the background pass, the
+/// pane's pump asking for rows nobody clicked — pays from and is stopped by the day's ledger.
+///
+/// A future route defaults the safe way round: the HTTP layer treats a request as `Unasked`
+/// unless it explicitly carries the asked marker, so forgetting the marker gates a button rather
+/// than un-gating a sweep.
+///
+/// [`Asked`]: Trigger::Asked
+/// [`Unasked`]: Trigger::Unasked
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    /// A person pressed something. No check, no count.
+    Asked,
+    /// Skein's own idea. Checked against the ledger, and counted into it.
+    Unasked,
+}
+
+/// Is the day's budget already spent — for UNASKED work? The one question every model-spending
+/// path asks, so the answer cannot drift between them. An [`Trigger::Asked`] visit is never over
+/// budget by definition: the ceiling is on skein's initiative, not on the person.
+fn over_budget(trigger: Trigger, day: &str) -> Option<String> {
+    if trigger == Trigger::Asked {
+        return None;
+    }
+    let budget = reads_per_day();
+    let spent = reads_spent(day);
+    (spent >= budget).then(|| budget_spent_because(spent, budget))
+}
+
+/// Count one analysed pull request — if this was skein's own initiative. An asked visit never
+/// touches the ledger: the person's calls must not eat the automatic allowance.
+fn note_spent_if_unasked(trigger: Trigger, repo_id: &str, day: &str) {
+    if trigger == Trigger::Unasked {
+        note_read_spent(repo_id, day);
+    }
 }
 
 // ───────────────────────────── the diff ─────────────────────────────
@@ -801,10 +965,10 @@ fn note_critique_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
 
 /// How many pull requests one background pass reads.
 ///
-/// Burst control, not a budget: the budget is the SCOPE — pull requests somebody asked you to
-/// review, in a repo you switched reading on for (the owner's own answer, SKEIN-185). This only
-/// stops a queue that has been quiet all week from firing thirty model calls in one minute when it
-/// finally settles.
+/// Burst control, not a budget: the budgets are the SCOPE — pull requests somebody asked you to
+/// review, in a repo you switched reading on for (the owner's own answer, SKEIN-185) — and the
+/// day's spend ceiling (`Config::review_reads_per_day`). This only stops a queue that has been
+/// quiet all week from firing thirty model calls in one minute when it finally settles.
 const READ_PER_PASS: usize = 3;
 
 /// Read the pull requests waiting on you, in the repos you asked skein to read, with nobody
@@ -815,8 +979,10 @@ const READ_PER_PASS: usize = 3;
 /// * a repo reads nothing until `read_prs` is switched on for it, so the feature costs exactly
 ///   nothing on a fleet nobody has opted in;
 /// * only pull requests where you are the REVIEWER — your own do not need summarising for you, and
-///   being mentioned is not a request to review. This is why there is no daily quota: the scope is
-///   the budget, and a number would only bound the damage of reading the wrong things;
+///   being mentioned is not a request to review. The scope is the first budget; the day's spend
+///   ceiling (`Config::review_reads_per_day`, enforced inside [`summarise`] and the critique
+///   drafter) is the second, and this pass obeys the same counter as every button press — one
+///   budget, not two;
 /// * settled ([`crate::prq::settled`]), not a draft, and not already read at this head.
 ///
 /// Returns what it read, for the server's log.
@@ -836,27 +1002,34 @@ pub fn read_waiting() -> Vec<String> {
             continue;
         }
         let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        for pr in queue.prs.iter() {
-            let read_it = worth_reading(&repo.id, pr);
-            // The critique door is the same doorway reading uses — lane, draft, settled — so a PR
-            // the reader would not summarise cannot enter the pass through its second half. What
-            // it deliberately does NOT require is an uncached summary: the queue this feature
-            // landed on was already summarised at its current heads, and "drafted alongside the
-            // summary" must cover those rows too, not only heads that move later.
-            let draft_it = matches!(pr.lane, crate::prq::Lane::NeedsYou)
-                && !pr.draft
-                && pr.settled
-                && worth_critiquing(&repo.id, pr, &queue.viewer);
-            if !read_it && !draft_it {
+        // The budget is spent from the TOP of the lane as the pane shows it — oldest-waiting
+        // first — not in the queue's transport order (`prq::newest_first`, number descending) and
+        // never by most-recently-touched. The order is the pane's own, mirrored by
+        // [`waited_since`] from `revWaitedSince` and the needs-you lane sort in
+        // `src/web/index.html`: what the reader spends the day's money on must be the rows the
+        // person will read first, or the ceiling starves exactly the pull requests that have
+        // waited longest.
+        let mut waiting: Vec<&Pr> = queue.prs.iter().collect();
+        waiting.sort_by(|a, b| waited_since(a).cmp(waited_since(b)));
+        for pr in waiting {
+            // The one doorway both halves share: waiting on you, and actually proposed. Checked
+            // first so rows in other lanes cost no disk scans at all.
+            if !matches!(pr.lane, crate::prq::Lane::NeedsYou) || pr.draft {
                 continue;
             }
-            if read.len() >= READ_PER_PASS {
-                return read;
-            }
+            let read_it = worth_reading(&repo.id, pr);
+            let had_draft =
+                critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha);
             if read_it {
+                if read.len() >= READ_PER_PASS {
+                    return read;
+                }
                 // Never `force`: a reading already on disk for this head is the answer, and asking
-                // again would spend a model call to be told what skein already knows.
-                let summary = summarise(&repo, &queue.slug, pr, &identities, false);
+                // again would spend a model call to be told what skein already knows. Where the
+                // review is yours to give, `summarise` drafts it INSIDE this same visit, off the
+                // one diff download — see `draft_alongside`.
+                let summary =
+                    summarise(&repo, &queue.slug, pr, &identities, false, Trigger::Unasked);
                 // A reading that could not be made is written down as tried, or the next pass picks
                 // it straight back up — see `tried_path`. The row still says "not summarised", and
                 // the button still reads it on request.
@@ -879,12 +1052,19 @@ pub fn read_waiting() -> Vec<String> {
                     read.push(format!("{}: read #{}", repo.id, pr.number));
                 }
             }
-            // The reader's second half: where the review is yours to give, draft it in the same
-            // pass, so opening the row finds summary AND review waiting instead of costing a
-            // second round trip.
+            // The reader's second half — the DRAFT-ONLY door, for a row whose summary is already
+            // on disk at this head (the visit above covers the rest, and `worth_critiquing`
+            // re-checked here sees anything it just drafted or noted). Same doorway reading uses
+            // — the lane/draft gate at the top of the loop — and no settle hour: the daily budget
+            // is the money guard now (owner decision, 2026-08-24), and re-anchoring made a moving
+            // head postable.
+            let draft_it = worth_critiquing(&repo.id, pr, &queue.viewer);
             if draft_it {
-                match draft_critique(&repo, &queue.slug, pr) {
-                    Ok(_) => read.push(format!("{}: drafted a review for #{}", repo.id, pr.number)),
+                if read.len() >= READ_PER_PASS {
+                    return read;
+                }
+                match draft_critique(&repo, &queue.slug, pr, Trigger::Unasked) {
+                    Ok(_) => {}
                     // Non-fatal by construction: the summary above already stands, the row simply
                     // opens without a draft and the button still drafts on request. Noted only
                     // when a model call was SPENT — the same boundary the summary path draws with
@@ -895,9 +1075,31 @@ pub fn read_waiting() -> Vec<String> {
                     Err(_) => {}
                 }
             }
+            // Reported off what is now on disk, whichever door drafted it.
+            if !had_draft && critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha)
+            {
+                read.push(format!("{}: drafted a review for #{}", repo.id, pr.number));
+            }
         }
     }
     read
+}
+
+/// When this pull request started waiting on YOU — the your-move lane's sort key, ascending.
+///
+/// Mirrored, on purpose and field for field, from the pane's own `revWaitedSince` and the
+/// needs-you lane sort in `src/web/index.html`: the head moving after your review is the moment
+/// the PR came back to you (so `committed_at` when your review exists and is no longer current),
+/// and `updated_at` is the honest fallback. Oldest first is the order on screen. Do not invent a
+/// second order here — the background reader spends the day's budget by this key precisely so
+/// that what gets read unasked is what sits at the top of the pane.
+fn waited_since(pr: &Pr) -> &str {
+    let moved = !pr.my_review.is_empty() && pr.my_review != "none" && !pr.review_is_current;
+    if moved && !pr.committed_at.is_empty() {
+        &pr.committed_at
+    } else {
+        &pr.updated_at
+    }
 }
 
 /// Is the review of this pull request yours to give — and therefore worth drafting, unasked?
@@ -944,7 +1146,11 @@ fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
     asked
         && matches!(pr.lane, crate::prq::Lane::NeedsYou)
         && !pr.draft
-        && pr.settled
+        // NO settle gate, any more. It required an hour of quiet before reading — the owner's
+        // decision (2026-08-24) removed it: the daily spend ceiling (`Config::review_reads_per_day`,
+        // enforced in `summarise` and the critique drafter) is now THE money guard, and re-anchoring
+        // by line text (SKEIN-214/215) made drafts against a moving head postable, which is what
+        // made the hour obsolete. A head that moves again simply becomes a new cache key.
         // A reading of THIS head. One of an earlier commit is kept and shown as such (SKEIN-184),
         // but it is not a reason to leave the current one unread.
         && cached(repo_id, pr.number, &pr.head_sha).is_none()
@@ -953,7 +1159,14 @@ fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
         && !read_tried(repo_id).contains_key(&format!("{}-{}", pr.number, pr.head_sha))
 }
 
-pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force: bool) -> Summary {
+pub fn summarise(
+    repo: &Repo,
+    slug: &str,
+    pr: &Pr,
+    identities: &[String],
+    force: bool,
+    trigger: Trigger,
+) -> Summary {
     // Somebody pressed "read it". Whatever the model refused with last time, they are entitled to
     // find out whether it still refuses — a standing refusal must never make a button do nothing.
     if force {
@@ -980,14 +1193,28 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
             "GitHub did not report a head commit for this PR.",
         );
     }
+    // Enforced where the money is spent, and only there. Everything above cost nothing — a cache
+    // hit was already served, a switched-off repo asked for nothing — and everything below leads
+    // to a model call. The check sits before the GitHub reads too: refusing after fetching the
+    // diff would spend HTTP on an answer already known. `computed` stays false — nothing was
+    // asked, so the day's budget is not charged for saying so, and the button can ask tomorrow.
+    let day = utc_day();
+    if let Some(because) = over_budget(trigger, &day) {
+        let mut said = Summary::unread(pr.number, &pr.head_sha, &because);
+        // The machine-readable half of the sentence's invitation: the pane shows the read
+        // button prominently on this flag, and that button comes back `Asked` — un-budgeted.
+        said.budget_stopped = true;
+        return said;
+    }
     let paths = changed_paths(slug, pr.number);
     let (yours, others) = ownership(repo, identities, &paths);
 
-    // One fetch, three readers. The scanner wants as much of the diff as it can get — a contract
-    // change in the tail is still a contract change — while stage 1 only needs enough to classify.
-    // Fetching twice would cost a second round trip to tell us something we already had.
-    let (full, deep_cut) = match pr_diff(slug, pr.number, STAGE2_BYTES) {
-        Ok(d) => d,
+    // ONE download, every reader. The RAW diff is fetched once and every consumer truncates its
+    // own view of it: the scanner and stage 2 at [`STAGE2_BYTES`], stage 1 at [`STAGE1_BYTES`],
+    // and the merged summary-and-review call at [`CRITIQUE_BYTES`]. Fetching per consumer would
+    // cost up to three round trips to be told the same bytes.
+    let raw = match crate::prq::pr_diff_text(slug, pr.number) {
+        Ok(raw) => raw,
         Err(e) => {
             return Summary::unread(
                 pr.number,
@@ -996,16 +1223,40 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
             )
         }
     };
-    if full.trim().is_empty() {
+    if raw.trim().is_empty() {
         return Summary::unread(
             pr.number,
             &pr.head_sha,
             "GitHub returned an empty diff for this PR.",
         );
     }
+    let (full, deep_cut) = truncate_diff(&raw, STAGE2_BYTES);
     let signals = crate::contracts::scan(&full);
     let (diff, cut) = truncate(&full, STAGE1_BYTES);
 
+    // Where the review is yours to give, summary and review are ONE model call over the one
+    // download — the owner's decision (2026-08-24): "combine summary with critique review …
+    // merging summary and critique into one model call since they are always done together". The
+    // merged call runs on the critique's (stronger) model because it is writing review comments;
+    // rows needing a summary only — involved, but the review is not yours — keep the cheap
+    // two-stage path below. Either visit is ONE unit of the day's budget: the unit is the pull
+    // request analysed, not the number of things the analysis produced.
+    let draft_due = identities.first().is_some_and(|viewer| {
+        matches!(pr.lane, crate::prq::Lane::NeedsYou)
+            && !pr.draft
+            && worth_critiquing(&repo.id, pr, viewer)
+    });
+    if draft_due {
+        // Counted the moment the model is about to be asked — a call that then fails still spent.
+        note_spent_if_unasked(trigger, &repo.id, &day);
+        return summarise_and_draft(repo, pr, &yours, others, &signals, &raw);
+    }
+
+    // One analysed pull request = one unit, counted at the call (a call that then fails still
+    // spent — same boundary `computed` draws below). Stage 2, when stage 1 earns it, is the
+    // second half of the SAME unit: the budget counts pull requests analysed, and one that needed
+    // explaining must not cost double what a boring one did.
+    note_spent_if_unasked(trigger, &repo.id, &day);
     let raw = match crate::ai::claude_oneshot_telling(
         &stage1_prompt(pr, &yours, others, &diff, cut),
         review_model(None).as_deref(),
@@ -1048,6 +1299,7 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
         depth: if expand { Depth::Expanded } else { Depth::Line },
         // Reached only by having run the model.
         computed: true,
+        budget_stopped: false,
         line: verdict.line.clone(),
         detail: String::new(),
         flags,
@@ -1083,6 +1335,100 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
         }
     }
     let _ = store(&repo.id, &summary);
+    summary
+}
+
+/// The merged visit: ONE model call over the one downloaded diff, producing the summary AND the
+/// drafted review — for rows whose review is yours to give (the owner's decision, 2026-08-24; the
+/// caller has already gated on [`worth_critiquing`] and counted the budget unit).
+///
+/// Runs on the critique's (stronger) model, because it is writing review comments a person will
+/// post under their name; the cheap model keeps only the summary-only rows. Strict on both halves,
+/// in the module's usual direction: a summary that did not follow the format is [`Depth::Unread`]
+/// and no draft is stored (a PR that could not be summarised earns no draft — same rule as the
+/// two-stage path); a summary that parsed WITHOUT a review section stores the summary and notes
+/// the draft as tried — the call was spent, and leaving it unnoted would re-buy the whole visit
+/// every pass.
+fn summarise_and_draft(
+    repo: &Repo,
+    pr: &Pr,
+    yours: &[String],
+    others: usize,
+    signals: &[crate::contracts::Signal],
+    raw_diff: &str,
+) -> Summary {
+    // The review's byte budget, not the summary's: the review is the reader that cannot say
+    // anything about a file it never saw, so the merged call gets the most diff either consumer
+    // would have been given.
+    let (diff, cut) = truncate_diff(raw_diff, CRITIQUE_BYTES);
+    let spent_unread = |why: &str| {
+        // The draft is noted as tried too: this visit WAS the draft attempt, and without the note
+        // the pass's draft-only door would buy the same failure again next pass.
+        note_critique_tried(&repo.id, pr.number, &pr.head_sha, why);
+        let mut said = Summary::unread(pr.number, &pr.head_sha, why);
+        said.computed = true;
+        said
+    };
+    let answer = match crate::ai::claude_oneshot_telling(
+        &merged_prompt(pr, yours, others, signals, &diff, cut),
+        review_model(Some("claude-sonnet-5")).as_deref(),
+        Duration::from_secs(300),
+    ) {
+        Ok(answer) => answer,
+        Err(unread) => return spent_unread(&unread.say()),
+    };
+    let Some((verdict, detail, critique)) = parse_merged(&answer) else {
+        return spent_unread(
+            "skein read it but could not make sense of its own answer, so it is not vouching for one.",
+        );
+    };
+    // The scanner escalates and never clears — same rule as the two-stage path, see there.
+    let mut flags = verdict.flags.clone();
+    for s in signals {
+        if !flags.contains(&s.kind) {
+            flags.push(s.kind.clone());
+        }
+    }
+    let expand = verdict.expand || !signals.is_empty();
+    if expand && detail.trim().is_empty() {
+        // Flagged as needing your judgement and not explained: unread, never presented as
+        // summarised — the same inversion the two-stage path refuses when stage 2 fails.
+        return spent_unread(&format!(
+            "this one needs explaining ({}) and skein could not do it — read it yourself.",
+            verdict.line
+        ));
+    }
+    let summary = Summary {
+        number: pr.number,
+        head_sha: pr.head_sha.clone(),
+        depth: if expand { Depth::Expanded } else { Depth::Line },
+        computed: true,
+        budget_stopped: false,
+        line: verdict.line.clone(),
+        detail,
+        flags,
+        signals: signals.to_vec(),
+        yours: yours.to_vec(),
+        others,
+        unread_because: String::new(),
+    };
+    let _ = store(&repo.id, &summary);
+    match critique {
+        // Vetted against the very diff the model read, exactly as the standalone drafter vets.
+        Some(drafted) => {
+            if let Err(fail) = vet_and_store_critique(repo, pr, drafted, &diff, cut) {
+                note_critique_tried(&repo.id, pr.number, &pr.head_sha, &fail.why);
+            }
+        }
+        // The summary parsed and the review did not: the call was spent, so the absence is noted
+        // — the button still drafts on request, same as every other tried note.
+        None => note_critique_tried(
+            &repo.id,
+            pr.number,
+            &pr.head_sha,
+            "the merged answer carried no usable review section — press draft to try again.",
+        ),
+    }
     summary
 }
 
@@ -1232,8 +1578,10 @@ Their notes: {intent}
 // 2. **A comment lands where the problem is.** Each one is anchored to a file and a NEW-side line,
 //    validated against the diff's own hunks. One the model mis-anchored is not thrown away and not
 //    guessed at — it travels in the review body, marked as such.
-// 3. **A review of one commit is not posted onto another.** The draft carries the head sha it read;
-//    posting against a moved head is refused out loud, with the fix (draft again) named.
+// 3. **A review of one commit says so when it lands on another.** The draft carries the head sha
+//    it read AND each comment's line text; a moved head is not refused (that refusal was a
+//    treadmill on any actively-pushed PR) — the comments re-anchor against the live head by their
+//    text, the displaced fold into the body, and the posted record names both commits.
 
 /// One drafted review comment. `line` is a NEW-side line number; `anchored` says the diff actually
 /// shows that line, which is GitHub's own condition for accepting the comment there.
@@ -1243,6 +1591,20 @@ pub struct Draft {
     pub line: u64,
     pub anchored: bool,
     pub text: String,
+    /// The content of the line this comment sits on, exactly as the drafted diff showed it with
+    /// the `+`/` ` marker stripped. This is the durable anchor [`crate::prq::re_anchor`] searches
+    /// the LIVE head's diff for when the branch has moved since drafting — a line NUMBER is a
+    /// coordinate into one commit's diff and dies with it; the line's text survives a rebase, a
+    /// force-push, an insertion above it (the same field human line comments carry,
+    /// `prq::ReviewComment::text`, SKEIN-214). Filled by the drafter from the diff it vetted the
+    /// comment against, so it is only ever set for a line the diff actually proved.
+    ///
+    /// `#[serde(default)]` so drafts persisted before this field existed still parse — with empty
+    /// text, which re-anchoring deliberately treats as "nothing to search for": on a moved head
+    /// every such comment is displaced into the review body naming the drafted commit. Harmless,
+    /// and honest — displacement costs a little reading, a guessed anchor costs trust.
+    #[serde(default)]
+    pub line_text: String,
 }
 
 /// A drafted review: the overall note and the comments, tied to the commit that was read.
@@ -1296,11 +1658,15 @@ fn store_critique(repo_id: &str, c: &Critique) -> Result<(), String> {
     )
 }
 
-/// The NEW-side lines the diff actually shows, per file — exactly the lines GitHub accepts a
-/// RIGHT-side review comment on. Context and added lines count; a deleted line exists only on the
-/// left, and a deleted file has no right side at all.
-fn commentable(diff: &str) -> std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> {
-    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+/// The NEW-side lines the diff actually shows, per file, each with its CONTENT (marker stripped)
+/// — exactly the lines GitHub accepts a RIGHT-side review comment on. Context and added lines
+/// count; a deleted line exists only on the left, and a deleted file has no right side at all.
+///
+/// The content rides along because it is what a draft stores as each comment's durable anchor
+/// ([`Draft::line_text`]): the number places the comment today, the text finds it again after the
+/// branch moves.
+fn commentable(diff: &str) -> std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> {
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> =
         Default::default();
     let mut file: Option<String> = None;
     let mut line = 0u64;
@@ -1324,7 +1690,8 @@ fn commentable(diff: &str) -> std::collections::BTreeMap<String, std::collection
         } else if in_hunk && (l.starts_with('+') || l.starts_with(' ') || l.is_empty()) {
             // An empty line inside a hunk is a context line whose content is empty.
             if let Some(f) = &file {
-                map.entry(f.clone()).or_default().insert(line);
+                let content = l.get(1..).unwrap_or("").to_string();
+                map.entry(f.clone()).or_default().insert(line, content);
             }
             line += 1;
         } else if in_hunk && l.starts_with('-') {
@@ -1415,6 +1782,9 @@ fn parse_critique(text: &str) -> Option<Critique> {
             line: line.parse().unwrap_or(0),
             anchored: false, // decided against the diff by the caller, never by the model
             text: body,
+            // Same rule: the anchor text comes from the DIFF in `draft_critique`, never from the
+            // model's own claim about what a line says.
+            line_text: String::new(),
         });
     }
     Some(Critique {
@@ -1424,6 +1794,115 @@ fn parse_critique(text: &str) -> Option<Critique> {
         comments,
         truncated: false,
     })
+}
+
+/// The merged prompt: triage, brief, and review in ONE answer — the stage-1 rules, the stage-2
+/// headings, and the critique's comment discipline, over one diff. See [`summarise_and_draft`]
+/// for why one call.
+fn merged_prompt(
+    pr: &Pr,
+    yours: &[String],
+    others: usize,
+    signals: &[crate::contracts::Signal],
+    diff: &str,
+    cut: bool,
+) -> String {
+    let scope = if yours.is_empty() {
+        String::from("This repo has no CODEOWNERS, or none of it is attributed — treat the whole change as in scope.")
+    } else {
+        format!(
+            "The reviewer owns these paths: {}. {} other changed path(s) are outside their ownership — go deep on theirs, stay brief elsewhere.",
+            yours.join(", "),
+            others
+        )
+    };
+    let evidence = if signals.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Scanning the diff mechanically found these moved, which is not in dispute — explain what each means for someone using this:\n{}\n",
+            signals
+                .iter()
+                .map(|s| format!("- {} ({})", s.what, s.file))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    format!(
+        r###"You are reading a pull request for a senior engineer whose review this is. Produce BOTH halves in one answer: a triage summary of what the change means, and an actual review of the code.
+
+For the SUMMARY half: they review to stay informed, not to catch bugs — mechanism, product, architecture and user level, never functions or line-level edits. Expand ONLY if the change moves something's contract or behaviour. The tripwires are:
+- behaviour: an existing feature now does something different
+- interface: a flag, route, config key, env var, file format or public API changed
+- default: a default value or default-on/off choice changed
+- architecture: a mechanism was replaced, removed, or its responsibility moved
+- ux: what a person sees or has to do changed
+A bug fix, a test, a refactor with no behaviour change, docs, or a dependency bump does NOT expand, however large the diff. When you are genuinely unsure, expand.
+
+For the REVIEW half: comment ONLY on actual problems and improvements that matter — bugs, correctness risks, races, security holes, data loss, unhandled error paths that can actually fail, misleading names that will cause a wrong call later, real performance traps. Do not manufacture findings to seem thorough; no style, no formatting, no praise, no hedged maybes, no restating what the diff does. The reviewer will keep or drop each comment and post the kept ones under their own name. An empty review is a valid review.
+
+PR #{number}: {title}
+Author: {author}
+Branch {head} into {base}.
+{scope}
+{evidence}{cut_note}
+
+Answer in EXACTLY this format and nothing else:
+KIND: <fix|feature|refactor|docs|chore>
+LINE: <one sentence, plain English, saying what this changes and why it matters. For a fix, say what was broken.>
+EXPAND: <yes|no>
+FLAGS: <comma-separated from: {flags} — or "none" when EXPAND is no>
+DETAIL:
+<when EXPAND is yes: plain prose under the headings "## What it does", "## What changes in how it works", and — only for a genuinely close call — "## Worth your call", omitting any heading with nothing true to say. When EXPAND is no: the single word none>
+REVIEW:
+OVERALL: <one sentence on the change as a whole, or "nothing to flag">
+Then one block per review comment, each ended by a line containing only three dashes:
+FILE: <the path exactly as it appears in the diff>
+LINE: <the line number IN THE NEW FILE this is about — count from the +start in the nearest @@ header. 0 if it is about the change as a whole>
+COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
+---
+
+--- diff ---
+{diff}"###,
+        number = pr.number,
+        title = pr.title,
+        author = pr.author,
+        head = pr.head_ref,
+        base = pr.base_ref,
+        scope = scope,
+        evidence = evidence,
+        cut_note = if cut {
+            "NOTE: the diff below was cut at a byte cap — you are seeing part of the change. The cut names the files that are missing; do not guess about them, say the summary and review do not cover them, and if what you can see is not enough to triage, answer EXPAND: yes."
+        } else {
+            ""
+        },
+        flags = FLAGS.join(", "),
+        diff = diff,
+    )
+}
+
+/// Parse the merged answer into its two halves: the triage verdict plus brief, and the review.
+///
+/// Strict where strictness protects attention, forgiving where it protects paid work: the SUMMARY
+/// fields are the same strict [`parse_stage1`] (a model that ignored the format ignored the
+/// instructions — `None` here is the whole answer refused), while a missing or unparseable
+/// REVIEW section comes back as `Ok` with `None` — the summary still stands, and the caller notes
+/// the draft as tried because the call was spent either way.
+fn parse_merged(text: &str) -> Option<(Verdict, String, Option<Critique>)> {
+    // Everything before the first `REVIEW:` line is the summary's; everything after is the
+    // review's, in exactly the shape [`parse_critique`] already reads.
+    let (summary_part, review_part) = match text.split_once("\nREVIEW:") {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (text, None),
+    };
+    let verdict = parse_stage1(summary_part)?;
+    let detail = summary_part
+        .split_once("DETAIL:")
+        .map(|(_, d)| d.trim())
+        .filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("none"))
+        .map(str::to_string)
+        .unwrap_or_default();
+    Some((verdict, detail, review_part.and_then(parse_critique)))
 }
 
 /// Fold the vetted comments into what GitHub is told: anchored ones ride as line comments, the
@@ -1445,17 +1924,20 @@ pub fn assemble_post(overall: &str, kept: &[Draft]) -> (String, Vec<crate::prq::
             path: d.path.clone(),
             line: d.line,
             body: d.text.clone(),
-            // A Draft never captured the line's own content, and this path refuses a moved head
-            // before posting, so there is nothing to re-anchor with and no need.
-            text: String::new(),
+            // The line's own content, captured when the draft was vetted against the diff — the
+            // anchor `prq::re_anchor` searches the live head for if the branch has moved by the
+            // time this posts. Empty (a draft persisted before `line_text` existed) means the
+            // re-anchor displaces it into the body instead of guessing, which is the safe shape.
+            text: d.line_text.clone(),
         })
         .collect();
     (body, anchored)
 }
 
 /// Post what the person kept, and nothing else — the whole write path, so the rules live where
-/// they can be proven: a review of one commit is not posted onto another, and the payload is
-/// assembled from the VETTED comments handed in, never from what was stored.
+/// they can be proven: a review drafted at one commit posts onto the live one by re-anchoring
+/// each kept comment's line text (displacing what no longer matches, naming the drafted sha), and
+/// the payload is assembled from the VETTED comments handed in, never from what was stored.
 pub fn post_critique(
     repo: &Repo,
     number: u64,
@@ -1469,23 +1951,22 @@ pub fn post_critique(
         .iter()
         .find(|p| p.number == number)
         .ok_or("that PR is not in your queue")?;
-    // The draft was anchored against the commit it read; if the branch moved, the right move is a
-    // fresh draft, and saying so beats GitHub's 422.
-    if pr.head_sha != head_sha {
-        return Err(
-            "the branch has moved since this review was drafted — draft it again against the              new commits before posting."
-                .into(),
-        );
-    }
     let (body, anchored) = assemble_post(overall, kept);
+    // A moved head is no longer refused (it used to be — a dynamically moving PR made "draft it
+    // again" a treadmill, SKEIN-215): each kept comment carries its line's text, so the submit
+    // path re-anchors against the LIVE head's diff exactly as human line comments do (SKEIN-214).
+    // Lines that survive post at their new numbers; the displaced fold into the body naming the
+    // drafted commit, and the record says what was actually reviewed either way.
     let said = crate::prq::submit_review_with_comments(
         &queue.slug,
         number,
-        head_sha,
+        // The live head — what `commit_id` must name.
+        &pr.head_sha,
         crate::prq::Verdict::Comment,
         &body,
         &anchored,
-        // Drafted against the same head the gate above just verified — never a moved-head post.
+        // The head the draft read. Equal to the live head in the common case, in which case
+        // nothing re-anchors and nothing is annotated.
         head_sha,
     )?;
     crate::prq::invalidate(&repo.id);
@@ -1507,7 +1988,9 @@ pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
     // background reader deliberately does not come through here — an unattended pass has no
     // standing to clear a refusal a person has not seen.
     crate::ai::forget_refusal();
-    draft_critique(repo, slug, pr).map_err(|fail| fail.why)
+    // A person pressed the button: `Asked`, so the day's ceiling neither refuses nor counts
+    // this — the limit is on skein's initiative only (see [`Trigger`]).
+    draft_critique(repo, slug, pr, Trigger::Asked).map_err(|fail| fail.why)
 }
 
 /// What the reading view shows: the change itself, at a display budget, cut honestly.
@@ -1550,35 +2033,94 @@ struct CritiqueFail {
     spent: bool,
 }
 
-fn draft_critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, CritiqueFail> {
+/// Draft standalone — the button, and the pass's draft-only door (a summary already cached at
+/// this head). Downloads the diff itself, once; a draft made inside a summary's visit goes
+/// through [`draft_critique_from`] with the visit's own download instead.
+fn draft_critique(
+    repo: &Repo,
+    slug: &str,
+    pr: &Pr,
+    trigger: Trigger,
+) -> Result<Critique, CritiqueFail> {
+    let free = |why: String| CritiqueFail { why, spent: false };
+    // Checked before the download too — `draft_critique_from` re-checks at the call, but refusing
+    // after fetching would spend HTTP on an answer already known. `Asked` passes both checks by
+    // definition: the ceiling is on skein's initiative, not on the person.
+    if let Some(because) = over_budget(trigger, &utc_day()) {
+        return Err(free(because));
+    }
+    let raw = crate::prq::pr_diff_text(slug, pr.number).map_err(free)?;
+    draft_critique_from(repo, pr, &raw, trigger)
+}
+
+/// The drafting itself, from a diff ALREADY DOWNLOADED — the shared half of the one-download
+/// rule: whoever holds the raw diff (the summary's visit, or the wrapper above) hands it in, and
+/// no second fetch ever happens for the same head.
+fn draft_critique_from(
+    repo: &Repo,
+    pr: &Pr,
+    full: &str,
+    trigger: Trigger,
+) -> Result<Critique, CritiqueFail> {
     let free = |why: String| CritiqueFail { why, spent: false };
     let spent = |why: String| CritiqueFail { why, spent: true };
-    let (diff, cut) = pr_diff(slug, pr.number, CRITIQUE_BYTES).map_err(free)?;
+    // The same day, the same counter, the same sentence as the summaries — ONE budget, because the
+    // money is one budget. `free`, so a budget refusal is never written down as tried: tomorrow's
+    // pass, and tomorrow's button, start fresh.
+    let day = utc_day();
+    if let Some(because) = over_budget(trigger, &day) {
+        return Err(free(because));
+    }
+    let (diff, cut) = truncate_diff(full, CRITIQUE_BYTES);
     if diff.trim().is_empty() {
         return Err(free("GitHub returned an empty diff for this PR.".into()));
     }
+    // One unit of the day's budget — if this is skein's own initiative — counted at the call,
+    // exactly as `summarise` counts its visit.
+    note_spent_if_unasked(trigger, &repo.id, &day);
     let raw = crate::ai::claude_oneshot_telling(
         &critique_prompt(pr, &diff, cut),
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(300),
     )
     .map_err(|unread| spent(unread.say()))?;
-    let mut drafted = parse_critique(&raw).ok_or_else(|| {
+    let drafted = parse_critique(&raw).ok_or_else(|| {
         spent(
             "the model's review did not follow the format, so no comments are being offered from it — try again."
                 .into(),
         )
     })?;
-    let lines = commentable(&diff);
+    vet_and_store_critique(repo, pr, drafted, &diff, cut)
+}
+
+/// The vetting, shared by the standalone drafter and the merged visit: anchor every comment
+/// against the diff the model actually read, keep the proof, pin the draft to this pull request
+/// and head, and write it down.
+fn vet_and_store_critique(
+    repo: &Repo,
+    pr: &Pr,
+    mut drafted: Critique,
+    diff: &str,
+    cut: bool,
+) -> Result<Critique, CritiqueFail> {
+    let lines = commentable(diff);
     for d in &mut drafted.comments {
-        d.anchored = d.line > 0 && lines.get(&d.path).is_some_and(|set| set.contains(&d.line));
+        // The vetting keeps only lines the diff proves — and takes the proof with it: the line's
+        // own content is stored as the anchor that lets this draft survive the head moving before
+        // it is posted (see [`Draft::line_text`]). An unanchored comment gets none, truthfully:
+        // there is no line the diff vouches for.
+        let proven = (d.line > 0)
+            .then(|| lines.get(&d.path).and_then(|m| m.get(&d.line)))
+            .flatten();
+        d.anchored = proven.is_some();
+        d.line_text = proven.cloned().unwrap_or_default();
     }
     drafted.number = pr.number;
     drafted.head_sha = pr.head_sha.clone();
     drafted.truncated = cut;
     // Spent: the model already answered, and losing the write is worth noting rather than
     // re-buying the answer next pass.
-    store_critique(&repo.id, &drafted).map_err(spent)?;
+    store_critique(&repo.id, &drafted).map_err(|why| CritiqueFail { why, spent: true })?;
     Ok(drafted)
 }
 
@@ -1595,6 +2137,37 @@ fn drafted_body(raw: &str) -> String {
         Some(at) => raw[at + "COMMENT:".len()..].trim().to_string(),
         None => raw.trim().to_string(),
     }
+}
+
+/// Test-only: read one HTTP request off a socket properly — headers to the blank line, then
+/// exactly Content-Length bytes of body. The fixed-size single read the stubs used truncated the
+/// batched GraphQL request when SKEIN-209 folded five searches into one call, and a stub that
+/// answers a half-read request answers the wrong question.
+#[cfg(test)]
+fn read_request(stream: &std::net::TcpStream) -> (String, String) {
+    use std::io::{BufRead as _, Read as _};
+    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+    let mut head = String::new();
+    reader.read_line(&mut head).ok();
+    let mut length = 0usize;
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+        if line.trim().is_empty() {
+            break;
+        }
+        if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = n.trim().parse().unwrap_or(0);
+        }
+        line.clear();
+    }
+    let mut body = vec![0u8; length];
+    if length > 0 {
+        reader.read_exact(&mut body).ok();
+    }
+    (
+        head.trim_end().to_string(),
+        String::from_utf8_lossy(&body).into_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -1702,10 +2275,16 @@ mod tests {
         draft.draft = true;
         assert!(!worth_reading("demo", &draft));
 
-        // Still being pushed to: reading it describes a commit about to be replaced.
+        // A branch still being pushed to IS read now — the settle hour is gone (owner decision,
+        // 2026-08-24). The daily budget is the money guard, and re-anchoring by line text made a
+        // draft against a moving head postable; a head that moves again is just a new cache key.
         let mut moving = pr(8, Reason::Reviewer, Lane::NeedsYou);
         moving.settled = false;
-        assert!(!worth_reading("demo", &moving));
+        assert!(
+            worth_reading("demo", &moving),
+            "an unsettled branch was refused a reading — the settle gate was removed, the budget \
+             is the guard"
+        );
 
         // And one already read AT THIS HEAD is not read again — the single most expensive mistake
         // available here, since it would spend a model call every pass, for ever, on every row.
@@ -1725,6 +2304,7 @@ mod tests {
                 others: 0,
                 unread_because: String::new(),
                 computed: true,
+                budget_stopped: false,
             },
         )
         .unwrap();
@@ -1748,17 +2328,9 @@ mod tests {
         let diff_broken_flag = diff_broken.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                use std::io::{Read as _, Write as _};
+                use std::io::Write as _;
                 let mut stream = stream;
-                let mut buf = [0u8; 8192];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let said = String::from_utf8_lossy(&buf[..n]).to_string();
-                let head = said.lines().next().unwrap_or_default().to_string();
-                let body = said
-                    .split("\r\n\r\n")
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_string();
+                let (head, body) = read_request(&stream);
                 let (status, answer) = if head.contains("/pulls/11 HTTP")
                     && diff_broken_flag.exists()
                 {
@@ -1768,16 +2340,18 @@ mod tests {
                 } else if head.contains("/user") {
                     (200, r#"{"login":"me"}"#.to_string())
                 } else if body.contains("review-requested") {
-                    // One pull request, waiting on your review, settled, unread.
-                    (200, r#"{"data":{"search":{"nodes":[{"number":11,"title":"t","url":"u",
+                    // One pull request, waiting on your review, unread. The batched wire
+                    // (SKEIN-209): q0 review-requested, q1 reviewed-by, q2 author, q3 mentions.
+                    (200, r#"{"data":{"q0":{"nodes":[{"number":11,"title":"t","url":"u",
                        "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
                        "headRefOid":"sha11","baseRefName":"main",
                        "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
                        "latestReviews":{"nodes":[]},
-                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]}}}"#
+                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]},
+                       "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
                         .to_string())
                 } else if head.contains("/graphql") {
-                    (200, r#"{"data":{"search":{"nodes":[]}}}"#.to_string())
+                    (200, r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string())
                 } else {
                     (200, "{}".to_string())
                 };
@@ -1928,23 +2502,35 @@ mod tests {
     }
 
     /// A GitHub that answers with two pull requests — #21 waiting on your review, #22 where you
-    /// are only mentioned — and a `claude` that answers whichever prompt it is handed: the stage-1
-    /// shape for summaries, the OVERALL shape for review drafts. Review calls are counted into a
-    /// file, because "it drafted nothing" looks identical whether or not the model was asked, and
-    /// the dedupe test below is ABOUT how often it was asked.
+    /// are only mentioned — and a `claude` that answers whichever prompt it is handed: the MERGED
+    /// summary-and-review shape when the prompt carries `REVIEW:` (a yours-to-give visit), the
+    /// OVERALL shape for a standalone review draft, the stage-1 shape otherwise. Review-drafting
+    /// calls are counted into a file, because "it drafted nothing" looks identical whether or not
+    /// the model was asked, and the dedupe tests below are ABOUT how often it was asked. Every
+    /// request's first line is also appended to `home/hits`, so a test can count DOWNLOADS —
+    /// the one-diff-fetch rule is about the wire, not about what landed on disk.
+    ///
+    /// Both pull requests carry a commit date of NOW: the settle hour is gone (owner decision,
+    /// 2026-08-24), so the pass must read and draft a branch that is still moving.
     #[cfg(unix)]
     fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         let reviews_asked = home.join("reviews-asked");
         let claude = home.join("claude-both.sh");
-        // The review prompt is the only one carrying the literal `OVERALL:`; the stage prompts ask
-        // for KIND/LINE. Branching on the prompt is what lets ONE binary serve a pass that now
-        // makes two different model calls per pull request.
+        // The merged prompt is the only one carrying the literal `REVIEW:`; the standalone
+        // critique prompt carries `OVERALL:` without it; the stage prompts ask for KIND/LINE.
+        // Branching on the prompt is what lets ONE binary serve every call the pass makes.
         std::fs::write(
             &claude,
             format!(
-                "#!/bin/sh\ncase \"$4\" in\n  *OVERALL:*) echo x >> {count}; printf 'OVERALL: nothing to flag\\n';;\n  *) printf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n';;\nesac\n",
+                concat!(
+                    "#!/bin/sh\ncase \"$4\" in\n",
+                    "  *\"REVIEW:\"*) echo merged >> {count}; printf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change as a whole.\\n---\\n';;\n",
+                    "  *OVERALL:*) echo critique >> {count}; printf 'OVERALL: nothing to flag\\n';;\n",
+                    "  *) printf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n';;\n",
+                    "esac\n"
+                ),
                 count = reviews_asked.display()
             ),
         )
@@ -1960,19 +2546,26 @@ mod tests {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let hits = home.join("hits");
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                use std::io::{Read as _, Write as _};
+                use std::io::Write as _;
                 let mut stream = stream;
-                let mut buf = [0u8; 8192];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let said = String::from_utf8_lossy(&buf[..n]).to_string();
-                let head = said.lines().next().unwrap_or_default().to_string();
-                let body = said
-                    .split("\r\n\r\n")
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_string();
+                let (head, body) = read_request(&stream);
+                // Every request's first line, so a test can count downloads on the wire.
+                {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&hits)
+                    {
+                        let _ = writeln!(f, "{head}");
+                    }
+                }
+                // A commit dated NOW: the settle hour is gone, and the pass must read a branch
+                // that is still moving.
+                let committed = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let node = |number: u64| {
                     format!(
                         r#"{{"number":{number},"title":"t","url":"u",
@@ -1980,19 +2573,23 @@ mod tests {
                            "headRefOid":"sha{number}","baseRefName":"main",
                            "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
                            "latestReviews":{{"nodes":[]}},
-                           "commits":{{"nodes":[{{"commit":{{"committedDate":"2020-01-01T00:00:00Z"}}}}]}}}}"#
+                           "commits":{{"nodes":[{{"commit":{{"committedDate":"{committed}"}}}}]}}}}"#
                     )
                 };
+                // The batched wire (SKEIN-209): q0 review-requested, q1 reviewed-by, q2 author,
+                // q3 mentions — #21 waits on your review, #22 only mentions you.
                 let answer = if head.contains("/user/teams") {
                     "[]".to_string()
                 } else if head.contains("/user") {
                     r#"{"login":"me"}"#.to_string()
                 } else if body.contains("review-requested:") {
-                    format!(r#"{{"data":{{"search":{{"nodes":[{}]}}}}}}"#, node(21))
-                } else if body.contains("mentions:") {
-                    format!(r#"{{"data":{{"search":{{"nodes":[{}]}}}}}}"#, node(22))
+                    format!(
+                        r#"{{"data":{{"q0":{{"nodes":[{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[{}]}}}}}}"#,
+                        node(21),
+                        node(22)
+                    )
                 } else if head.contains("/graphql") {
-                    r#"{"data":{"search":{"nodes":[]}}}"#.to_string()
+                    r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
                 } else {
                     "{}".to_string()
                 };
@@ -2040,13 +2637,19 @@ mod tests {
     /// The reader opens summary and drafted review in one go: a pull request waiting on YOUR
     /// review comes out of the background pass with both stored, so expanding the row costs
     /// nothing and asks nothing. No HTTP pane involved — the pass alone must do it.
+    ///
+    /// And "in one go" is asserted on the wire, not on the disk: ONE diff download and ONE model
+    /// call for the whole visit (the merged summary-and-review call, the owner's decision
+    /// 2026-08-24) — the fixture records every request head and every `claude` invocation
+    /// precisely so this cannot regress into fetch-twice or ask-twice. The fixture's commit
+    /// dates are NOW, so this also proves an unsettled branch is read: the settle hour is gone.
     #[cfg(unix)]
     #[test]
     fn the_reader_drafts_the_review_where_it_is_yours_to_give() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
-        let _asked = drafting_fixture(home);
+        let asked = drafting_fixture(home);
 
         let read = read_waiting();
         assert!(
@@ -2057,6 +2660,25 @@ mod tests {
         assert!(
             drafted.as_ref().is_some_and(|c| c.head_sha == "sha21"),
             "the pass summarised #21 but drafted no review for it — summary and draft must arrive together: {read:?}"
+        );
+
+        // One model call made both. The stub tags each invocation with which prompt it saw.
+        let calls = std::fs::read_to_string(&asked).unwrap_or_default();
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            vec!["merged"],
+            "summary and review must be ONE merged model call, and only one"
+        );
+        // One download fed it. The REST diff endpoint for #21 is `GET …/pulls/21` — the files
+        // listing (`/pulls/21/files`) is a different, cheaper question and not counted.
+        let hits = std::fs::read_to_string(home.join("hits")).unwrap_or_default();
+        let diff_fetches = hits
+            .lines()
+            .filter(|l| l.starts_with("GET") && l.contains("/pulls/21 "))
+            .count();
+        assert_eq!(
+            diff_fetches, 1,
+            "one head must cost one diff download for both outputs: {hits}"
         );
 
         drafting_teardown();
@@ -2236,6 +2858,7 @@ mod tests {
                     others: 0,
                     unread_because: String::new(),
                     computed: true,
+                    budget_stopped: false,
                 },
             )
             .unwrap();
@@ -2303,6 +2926,7 @@ mod tests {
             others: 0,
             unread_because: String::new(),
             computed: true,
+            budget_stopped: false,
         };
         store("demo", &fresh).unwrap();
 
@@ -2660,6 +3284,522 @@ mod tests {
         let paths = vec!["src/a.rs".to_string()];
         assert_eq!(ownership(&repo, &["me".into()], &paths), (vec![], 0));
     }
+
+    // ─────────────────── the day's analysis budget ───────────────────
+
+    /// The ledger's own arithmetic, no model anywhere near it: units accumulate across repos into
+    /// ONE fleet-wide day (spend in one repo counts against every repo — the owner's ceiling is
+    /// "100 PRs a day", not per anything), the day rolling over restores the full allowance
+    /// without waiting for it, and writing a new day prunes the old one out of the file.
+    #[test]
+    fn the_budget_is_one_fleet_wide_ledger_that_resets_by_day_key() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        note_read_spent("repo-a", "2026-08-23");
+        note_read_spent("repo-a", "2026-08-23");
+        note_read_spent("repo-b", "2026-08-23");
+        assert_eq!(
+            reads_spent("2026-08-23"),
+            3,
+            "two repos' analyses sum into the one fleet-wide day"
+        );
+        // The rollover, by key — no sleeping through midnight.
+        assert_eq!(
+            reads_spent("2026-08-24"),
+            0,
+            "a new day starts with the whole allowance"
+        );
+        note_read_spent("repo-a", "2026-08-24");
+        assert_eq!(reads_spent("2026-08-24"), 1);
+        let raw = std::fs::read_to_string(spend_path()).unwrap();
+        assert!(
+            !raw.contains("2026-08-23"),
+            "writing a new day must prune the old one — the file is a tally, not a history: {raw}"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A cache hit spends nothing: the whole reason the counter lives on the server. The client's
+    /// allowance counted requests, six cache hits ate it on every reload, and rows 7–29 were never
+    /// read. Here the same request shape — summarise, unasked — answers from disk and the ledger
+    /// does not move; the stub `claude` counts its invocations to prove the model was not even
+    /// consulted.
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_hit_spends_none_of_the_days_budget() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let asked = home.join("asked");
+        let claude = home.join("claude-count.sh");
+        std::fs::write(
+            &claude,
+            format!("#!/bin/sh\necho x >> {}\nprintf 'KIND: fix\\nLINE: x.\\nEXPAND: no\\nFLAGS: none\\n'\n", asked.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "demo", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+        let pr = budget_pr(4, "abc");
+        store(
+            "demo",
+            &Summary {
+                number: 4,
+                head_sha: "abc".into(),
+                depth: Depth::Line,
+                line: "already read".into(),
+                detail: String::new(),
+                flags: Vec::new(),
+                signals: Vec::new(),
+                yours: Vec::new(),
+                others: 0,
+                unread_because: String::new(),
+                computed: true,
+                budget_stopped: false,
+            },
+        )
+        .unwrap();
+
+        let s = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Unasked);
+        assert_eq!(s.line, "already read", "the cache answered");
+        assert_eq!(
+            reads_spent(&utc_day()),
+            0,
+            "a summary served from disk decremented the budget — the exact client bug, reborn on \
+             the server"
+        );
+        assert!(
+            !asked.exists(),
+            "the model was consulted for an answer already on disk"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN"] {
+            std::env::remove_var(key);
+        }
+    }
+
+    /// At the ceiling the model is NEVER reached for unasked work, and the row carries the
+    /// invitation: the budget sentence with the numbers, the `budget_stopped` marker the pane
+    /// keys the prominent read button on, `computed: false` (nothing was spent saying no), and
+    /// no count moved. Both spending paths — the summary visit and the standalone draft — refuse
+    /// through the same gate.
+    #[cfg(unix)]
+    #[test]
+    fn at_the_ceiling_unasked_work_never_reaches_the_model_and_the_row_invites_the_button() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let asked = drafting_fixture(home);
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_reads_per_day":2}"#,
+        )
+        .unwrap();
+        let day = utc_day();
+        note_read_spent("elsewhere", &day);
+        note_read_spent("elsewhere", &day);
+
+        // The background pass finds a full queue and reads NOTHING.
+        let read = read_waiting();
+        assert!(read.is_empty(), "over budget, and the pass still read: {read:?}");
+        assert!(
+            !asked.exists(),
+            "the summariser was reached with the day's budget spent"
+        );
+        assert!(cached("crit", 21, "sha21").is_none());
+        assert!(critiqued("crit", 21).is_none());
+
+        // The unasked per-row request — the pane's pump — gets the honest refusal, shaped for
+        // the affordance.
+        let pr = budget_pr(21, "sha21");
+        let s = summarise(
+            &crate::repos::load_repos().into_iter().find(|r| r.id == "crit").unwrap(),
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
+        assert_eq!(s.depth, Depth::Unread);
+        assert!(
+            s.budget_stopped,
+            "the machine-readable marker the pane keys the button on is missing"
+        );
+        assert!(
+            s.unread_because.contains("press read") && s.unread_because.contains("(2/2)"),
+            "the refusal must invite the manual trigger, with the numbers: {}",
+            s.unread_because
+        );
+        assert!(
+            !s.computed,
+            "saying 'budget spent' must not itself count as spending"
+        );
+        assert_eq!(reads_spent(&day), 2, "a refusal moved the counter");
+
+        drafting_teardown();
+    }
+
+    /// The owner's boundary, both halves: "Limit is only for automatic stuff, manually I can
+    /// invoke as many as I want." At 2/2 an ASKED analysis still runs — the model is reached and
+    /// a real summary (and its merged draft) comes back — and the ledger stays at 2 afterwards:
+    /// a manual call is never refused for budget and never eats the automatic allowance.
+    #[cfg(unix)]
+    #[test]
+    fn an_asked_analysis_ignores_the_ceiling_and_leaves_it_untouched() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let asked = drafting_fixture(home);
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_reads_per_day":2}"#,
+        )
+        .unwrap();
+        let day = utc_day();
+        note_read_spent("elsewhere", &day);
+        note_read_spent("elsewhere", &day);
+
+        let repo = crate::repos::load_repos().into_iter().find(|r| r.id == "crit").unwrap();
+        let pr = budget_pr(21, "sha21");
+        let s = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Asked);
+        assert_ne!(
+            s.depth,
+            Depth::Unread,
+            "a manual call was refused for budget: {}",
+            s.unread_because
+        );
+        assert!(
+            std::fs::read_to_string(&asked).unwrap_or_default().lines().count() >= 1,
+            "the model was never reached for the asked call"
+        );
+        assert_eq!(
+            reads_spent(&day),
+            2,
+            "the manual call ate the automatic allowance — asked work must not be counted"
+        );
+
+        drafting_teardown();
+    }
+
+    /// One unasked analysis is exactly one unit — the merged visit produced a summary AND a
+    /// drafted review, and the ledger moved by one, attributed to the repo that spent it.
+    #[cfg(unix)]
+    #[test]
+    fn one_analysed_pull_request_is_one_unit_whatever_it_produced() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let _asked = drafting_fixture(home);
+
+        let _ = read_waiting();
+        assert!(cached("crit", 21, "sha21").is_some());
+        assert!(critiqued("crit", 21).is_some());
+        assert_eq!(
+            reads_spent(&utc_day()),
+            1,
+            "summary plus drafted review is ONE analysed pull request, not two units"
+        );
+        // And the attribution names the repo.
+        let raw = std::fs::read_to_string(spend_path()).unwrap();
+        assert!(raw.contains("crit"), "the ledger lost the attribution: {raw}");
+
+        drafting_teardown();
+    }
+
+    /// The budget is spent from the TOP of the lane as the pane shows it — oldest-waiting first
+    /// (`revWaitedSince` in index.html, mirrored by `waited_since`) — never newest-number and
+    /// never most-recently-touched. Three waiting rows, budget for two: the two that have waited
+    /// longest are read, the most recently touched is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_budget_is_spent_on_the_lanes_oldest_waiting_rows_first() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let claude = home.join("claude-stage1.sh");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let (head, body) = read_request(&stream);
+                // Three PRs waiting on your review. updatedAt is the waited-since key here (no
+                // review of yours on any): #31 has waited longest, then #33, then #32 — while
+                // the NUMBER order and the most-recently-touched order both put #32/#33 first.
+                let node = |number: u64, updated: &str| {
+                    format!(
+                        r#"{{"number":{number},"title":"t","url":"u",
+                           "isDraft":false,"author":{{"login":"someone"}},"headRefName":"feat",
+                           "headRefOid":"sha{number}","baseRefName":"main",
+                           "updatedAt":"{updated}","reviewDecision":"REVIEW_REQUIRED",
+                           "latestReviews":{{"nodes":[]}},
+                           "commits":{{"nodes":[{{"commit":{{"committedDate":"2020-01-01T00:00:00Z"}}}}]}}}}"#
+                    )
+                };
+                let answer = if head.contains("/user/teams") {
+                    "[]".to_string()
+                } else if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if body.contains("review-requested:") {
+                    format!(
+                        r#"{{"data":{{"q0":{{"nodes":[{},{},{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
+                        node(31, "2020-01-01T00:00:00Z"),
+                        node(32, "2020-01-03T00:00:00Z"),
+                        node(33, "2020-01-02T00:00:00Z"),
+                    )
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
+            "id": "ord", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "", "read_prs": true,
+        }))
+        .unwrap()])
+        .unwrap();
+        crate::prq::invalidate("ord");
+        std::fs::write(
+            crate::config::skein_home().join("config.json"),
+            br#"{"review_reads_per_day":2}"#,
+        )
+        .unwrap();
+        // Every head already has its drafted review, so each visit is summary-only: WHICH rows
+        // are read is then purely the ordering under test, with one unit per row.
+        for n in [31u64, 32, 33] {
+            store_critique(
+                "ord",
+                &Critique {
+                    number: n,
+                    head_sha: format!("sha{n}"),
+                    overall: "nothing to flag".into(),
+                    comments: Vec::new(),
+                    truncated: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let _ = read_waiting();
+        assert!(
+            cached("ord", 31, "sha31").is_some(),
+            "the row that waited longest was skipped"
+        );
+        assert!(
+            cached("ord", 33, "sha33").is_some(),
+            "the second-longest waiting row was skipped"
+        );
+        assert!(
+            cached("ord", 32, "sha32").is_none(),
+            "the most recently touched row was read ahead of the queue's top — the budget is \
+             being spent from the wrong end"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::invalidate("ord");
+        crate::prq::forget_host_token();
+    }
+
+    /// A Pr literal for budget tests — the queue's own fields, one place.
+    fn budget_pr(number: u64, head: &str) -> crate::prq::Pr {
+        crate::prq::Pr {
+            number,
+            title: "t".into(),
+            author: "someone".into(),
+            url: String::new(),
+            head_ref: "feat".into(),
+            head_sha: head.into(),
+            base_ref: "main".into(),
+            draft: false,
+            updated_at: String::new(),
+            committed_at: String::new(),
+            settled: true,
+            labels: Vec::new(),
+            review_decision: String::new(),
+            mergeable: None,
+            merge_state: String::new(),
+            additions: None,
+            deletions: None,
+            changed_files: None,
+            checks: "none".into(),
+            failing_checks: Vec::new(),
+            my_review: "none".into(),
+            review_is_current: false,
+            snoozed: false,
+            reasons: vec![crate::prq::Reason::Reviewer],
+            lane: crate::prq::Lane::NeedsYou,
+            box_name: String::new(),
+        }
+    }
+
+    /// The merged answer parses into both halves; a summary without a review section keeps the
+    /// summary and reports no critique; prose that ignored the format is nothing at all.
+    #[test]
+    fn a_merged_answer_parses_into_summary_and_review() {
+        let full = "KIND: feature\nLINE: adds a thing.\nEXPAND: yes\nFLAGS: behaviour\nDETAIL:\n## What it does\nIt does a thing.\nREVIEW:\nOVERALL: one real problem.\nFILE: src/a.rs\nLINE: 2\nCOMMENT: this is wrong.\n---\n";
+        let (verdict, detail, critique) = parse_merged(full).expect("a well-formed merged answer");
+        assert_eq!(verdict.line, "adds a thing.");
+        assert!(verdict.expand);
+        assert_eq!(verdict.flags, vec!["behaviour"]);
+        assert!(detail.contains("## What it does"), "{detail}");
+        let critique = critique.expect("the review half is here");
+        assert_eq!(critique.overall, "one real problem.");
+        assert_eq!(critique.comments.len(), 1);
+        assert_eq!(critique.comments[0].path, "src/a.rs");
+
+        // No review section: the summary stands, the critique is honestly absent (the caller
+        // notes it as tried — the call was spent).
+        let (v, d, c) =
+            parse_merged("KIND: fix\nLINE: fixes a thing.\nEXPAND: no\nFLAGS: none\nDETAIL:\nnone")
+                .expect("the summary half alone still parses");
+        assert_eq!(v.line, "fixes a thing.");
+        assert!(!v.expand);
+        assert!(d.is_empty(), "the word 'none' is not a brief: {d}");
+        assert!(c.is_none());
+
+        // Prose that ignored the format is not a summary — same strictness as stage 1.
+        assert!(parse_merged("This PR looks fine to me.").is_none());
+    }
+
+    /// The bulk payload carries the drafted review beside the summary — the owner's "show the
+    /// critique as another section along with summary" with NO per-row fetch — and only when the
+    /// draft is of the CURRENT head: a stale draft is not offered as if it read this commit. The
+    /// wire shape is asserted too, because "an older client simply ignores it" is a claim about
+    /// keys.
+    #[test]
+    fn the_bulk_payload_carries_the_current_heads_critique_beside_the_summary() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let put = |number: u64, head: &str| {
+            store(
+                "demo",
+                &Summary {
+                    number,
+                    head_sha: head.into(),
+                    depth: Depth::Line,
+                    line: "read".into(),
+                    detail: String::new(),
+                    flags: Vec::new(),
+                    signals: Vec::new(),
+                    yours: Vec::new(),
+                    others: 0,
+                    unread_because: String::new(),
+                    computed: true,
+                    budget_stopped: false,
+                },
+            )
+            .unwrap();
+        };
+        put(1, "aaa");
+        put(2, "bbb");
+        store_critique(
+            "demo",
+            &Critique {
+                number: 1,
+                head_sha: "aaa".into(),
+                overall: "one real problem.".into(),
+                comments: vec![Draft {
+                    path: "src/a.rs".into(),
+                    line: 2,
+                    anchored: true,
+                    text: "on the line".into(),
+                    line_text: "    let x = 1;".into(),
+                }],
+                truncated: false,
+            },
+        )
+        .unwrap();
+        // #2's draft reads an EARLIER commit: it must not ride the payload as current.
+        store_critique(
+            "demo",
+            &Critique {
+                number: 2,
+                head_sha: "old".into(),
+                overall: "stale".into(),
+                comments: Vec::new(),
+                truncated: false,
+            },
+        )
+        .unwrap();
+
+        let known = known(
+            "demo",
+            &[(1, "aaa".to_string()), (2, "bbb".to_string())],
+        );
+        let one = &known[&1];
+        assert!(one.has_critique);
+        let riding = one.critique.as_ref().expect("the draft rides the payload");
+        assert_eq!(riding.overall, "one real problem.");
+        assert_eq!(riding.comments.len(), 1);
+        let wire = serde_json::to_value(one).unwrap();
+        assert_eq!(wire["has_critique"], true);
+        assert_eq!(wire["critique"]["comments"][0]["path"], "src/a.rs");
+        assert_eq!(wire["critique"]["comments"][0]["line"], 2);
+        assert_eq!(wire["critique"]["comments"][0]["text"], "on the line");
+
+        let two = &known[&2];
+        assert!(
+            !two.has_critique && two.critique.is_none(),
+            "a draft of an earlier commit was offered as current"
+        );
+        let wire = serde_json::to_value(two).unwrap();
+        assert!(
+            wire.get("critique").is_none(),
+            "absent must be an absent KEY, so an older client never sees it: {wire}"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
 }
 
 #[cfg(test)]
@@ -2737,10 +3877,15 @@ diff --git a/dead.rs b/dead.rs
         let a = map.get("src/a.rs").expect("the surviving file is present");
         // First hunk: new lines 1..=4. Second hunk: only line 11 (the two deletions have no right side).
         assert_eq!(
-            a.iter().copied().collect::<Vec<_>>(),
+            a.keys().copied().collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 11],
             "right-side lines only, following the hunk headers"
         );
+        // And each carries its content, marker stripped — the anchor a draft stores so its
+        // comments can be found again on a moved head.
+        assert_eq!(a[&2], "    let x = 1;", "an added line's own text");
+        assert_eq!(a[&3], "    println!(\"hi\");", "a context line's own text");
+        assert_eq!(a[&11], "kept");
         assert!(
             !map.contains_key("dead.rs"),
             "a deleted file has no right side to comment on"
@@ -2786,18 +3931,25 @@ COMMENT: this one points at a line the diff does not show.
                 line: 2,
                 anchored: true,
                 text: "on the line".into(),
+                line_text: "    let x = 1;".into(),
             },
             Draft {
                 path: "src/b.rs".into(),
                 line: 0,
                 anchored: false,
                 text: "about the change".into(),
+                line_text: String::new(),
             },
         ];
         let (body, anchored) = assemble_post("overall note", &kept);
         assert_eq!(anchored.len(), 1, "only the anchored comment rides as one");
         assert_eq!(anchored[0].path, "src/a.rs");
         assert_eq!(anchored[0].line, 2);
+        assert_eq!(
+            anchored[0].text, "    let x = 1;",
+            "the line's own text travels to the wire comment — it is the re-anchor's only handle \
+             on a moved head"
+        );
         assert!(
             body.contains("**src/b.rs**: about the change"),
             "the unanchored comment travels in the body, named: {body}"
@@ -2893,9 +4045,19 @@ COMMENT: this one points at a line the diff does not show.
             drafted.comments[0].anchored,
             "line 2 is in the diff, so the comment anchors"
         );
+        assert_eq!(
+            drafted.comments[0].line_text, "    let x = 1;",
+            "the drafted line's own content is stored with the comment — the anchor that lets \
+             this draft post after the branch moves"
+        );
         assert!(
             !drafted.comments[1].anchored,
             "line 99 is not in the diff — offered for the body, not guessed onto a line"
+        );
+        assert_eq!(
+            drafted.comments[1].line_text, "",
+            "no line the diff vouches for, no anchor text — an unanchored comment must not carry \
+             a text it could falsely re-anchor by"
         );
 
         // Found again from disk — the property that makes a draft survive a restart.
@@ -2915,11 +4077,14 @@ COMMENT: this one points at a line the diff does not show.
         crate::prq::forget_host_token();
     }
 
-    /// The write path, whole: a moved head is refused with the fix named, and what reaches GitHub
-    /// is exactly what was handed in — the kept comments on their lines, the unanchored one in the
-    /// body, the commit id pinned to the head the draft read.
+    /// The write path, whole, both heads. A matching head posts exactly what was handed in — the
+    /// kept comments on their lines, the unanchored one in the body, the commit id the live head.
+    /// A MOVED head no longer refuses (the old refusal made any actively-pushed PR a "draft it
+    /// again" treadmill — SKEIN-215): the wire shows the comment re-anchored by its line's text to
+    /// its new number, the drafted sha named in the body, and a comment with no line text — a
+    /// draft persisted before `line_text` existed — displaced into the body rather than guessed.
     #[test]
-    fn posting_refuses_a_moved_head_and_sends_exactly_what_was_kept() {
+    fn posting_a_moved_head_re_anchors_by_line_text_instead_of_refusing() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
@@ -2933,16 +4098,8 @@ COMMENT: this one points at a line the diff does not show.
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         std::thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
-                use std::io::{Read as _, Write as _};
-                let mut buf = [0u8; 16384];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let said = String::from_utf8_lossy(&buf[..n]).to_string();
-                let head = said.lines().next().unwrap_or_default().to_string();
-                let body = said
-                    .split("\r\n\r\n")
-                    .nth(1)
-                    .unwrap_or_default()
-                    .to_string();
+                use std::io::Write as _;
+                let (head, body) = read_request(&stream);
                 let answer = if head.contains("/user/teams") {
                     "[]".to_string()
                 } else if head.contains("/user") {
@@ -2951,16 +4108,23 @@ COMMENT: this one points at a line the diff does not show.
                     // The thing under test: record exactly what skein said.
                     std::fs::write(&posted_at, &body).unwrap();
                     "{}".to_string()
+                } else if head.starts_with("GET") && head.contains("/pulls/11 ") {
+                    // The LIVE head's diff, fetched only when the head moved: an insertion above
+                    // has pushed the drafted line from 2 to 3.
+                    "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,5 @@\n fn main() {\n+    // a new line above\n+    let x = 1;\n     println!(\"hi\");\n }\n"
+                        .to_string()
                 } else if body.contains("review-requested") {
-                    r#"{"data":{"search":{"nodes":[{"number":11,"title":"t","url":"u",
+                    // The batched wire (SKEIN-209): the queue's PR at its LIVE head, sha11.
+                    r#"{"data":{"q0":{"nodes":[{"number":11,"title":"t","url":"u",
                        "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
                        "headRefOid":"sha11","baseRefName":"main",
                        "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
                        "latestReviews":{"nodes":[]},
-                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]}}}"#
+                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]},
+                       "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
                         .to_string()
                 } else if head.contains("/graphql") {
-                    r#"{"data":{"search":{"nodes":[]}}}"#.to_string()
+                    r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
                 } else {
                     "{}".to_string()
                 };
@@ -2986,31 +4150,24 @@ COMMENT: this one points at a line the diff does not show.
                 line: 2,
                 anchored: true,
                 text: "on the line".into(),
+                // What `draft_critique` stored from the diff it vetted against: the drafted
+                // line's own content, the durable anchor.
+                line_text: "    let x = 1;".into(),
             },
             Draft {
                 path: "src/b.rs".into(),
                 line: 0,
                 anchored: false,
                 text: "about the change".into(),
+                line_text: String::new(),
             },
         ];
 
-        // The head the queue reports is sha11; a draft of some earlier commit must not post.
-        let refused = post_critique(&repo, 11, "old-sha", "note", &kept)
-            .expect_err("a moved head must refuse");
-        assert!(
-            refused.contains("has moved") && refused.contains("draft it again"),
-            "the refusal names the fix: {refused}"
-        );
-        assert!(!posted.exists(), "nothing reached GitHub on a refusal");
-
+        // A matching head posts untouched — nothing re-anchors, nothing is annotated.
         post_critique(&repo, 11, "sha11", "note", &kept).expect("a matching head posts");
         let sent: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
-        assert_eq!(
-            sent["commit_id"], "sha11",
-            "pinned to the commit the draft read"
-        );
+        assert_eq!(sent["commit_id"], "sha11", "pinned to the live head");
         assert_eq!(sent["event"], "COMMENT");
         let comments = sent["comments"]
             .as_array()
@@ -3031,6 +4188,59 @@ COMMENT: this one points at a line the diff does not show.
         assert!(
             said_body.contains("**src/b.rs**: about the change"),
             "the unanchored comment travels in the body, named: {said_body}"
+        );
+        assert!(
+            !said_body.contains("read at"),
+            "a head that did not move gets no moved-head annotation: {said_body}"
+        );
+
+        // The head the queue reports is sha11; a draft of an earlier commit POSTS ANYWAY —
+        // SKEIN-215 — re-anchored to the live diff by its line's text.
+        std::fs::remove_file(&posted).unwrap();
+        post_critique(&repo, 11, "aaaaaaa2222", "note", &kept)
+            .expect("a moved head posts instead of refusing");
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
+        assert_eq!(
+            sent["commit_id"], "sha11",
+            "the commit id is the LIVE head, never the drafted one"
+        );
+        let comments = sent["comments"].as_array().expect("the comment survived");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["path"], "src/a.rs");
+        assert_eq!(
+            comments[0]["line"], 3,
+            "the insertion above pushed the drafted line from 2 to 3, and the comment followed \
+             its text there"
+        );
+        let said_body = sent["body"].as_str().unwrap();
+        assert!(
+            said_body.contains("(read at aaaaaaa, posted against sha11)"),
+            "the record names the drafted head and the posted one: {said_body}"
+        );
+
+        // A draft persisted before `line_text` existed parses with it empty…
+        let old: Draft = serde_json::from_str(
+            r#"{"path":"src/a.rs","line":2,"anchored":true,"text":"on the line"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.line_text, "", "an absent field is empty, not an error");
+        // …and on a moved head everything displaces into the body — harmless and honest: with no
+        // text to search for, a guessable anchor does not exist.
+        std::fs::remove_file(&posted).unwrap();
+        post_critique(&repo, 11, "aaaaaaa2222", "note", &[old])
+            .expect("an old draft still posts on a moved head");
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
+        assert!(
+            sent.get("comments").is_none(),
+            "nothing anchors without line text: {sent}"
+        );
+        let said_body = sent["body"].as_str().unwrap();
+        assert!(
+            said_body.contains("Reviewed at aaaaaaa — the branch has moved since")
+                && said_body.contains("src/a.rs:2 — on the line"),
+            "the displaced comment folds into the body naming the drafted sha: {said_body}"
         );
 
         for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {

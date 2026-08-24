@@ -119,6 +119,20 @@ pub struct Config {
     /// `$SKEIN_AI_MODEL` — the everything-override — still trumps both, as it always has.
     #[serde(default)]
     pub review_model: String,
+    /// How many pull requests the review queue may ANALYSE per UTC day, across every repo — one
+    /// fleet-wide budget, counted in [`crate::review`] at the moment a model call is actually
+    /// made. One unit is one `(number, head_sha)` analysed, whether the visit produced a
+    /// one-liner, a brief, or a brief plus a drafted review; a summary served from the disk cache
+    /// costs nothing and counts nothing. The day rolls over at midnight UTC.
+    ///
+    /// **Default 100** — the owner's own ceiling, verbatim: "the allowance can be very high. Say
+    /// for example not more than 100 PRs a day (cache misses, actual analysis)". Not a per-repo
+    /// number and not a throttle: it exists to put a roof over the runaway case (the old
+    /// client-side allowance had none — every button press refilled it, measured at up to 180
+    /// calls/day) while never starving an ordinary day's queue. Zero means zero: no unasked or
+    /// asked reads at all today, which is a supported state, not a broken one.
+    #[serde(default = "default_review_reads_per_day")]
+    pub review_reads_per_day: u32,
 
     /// May skein act on pull requests on its own — labels, updates, merges, deleted branches?
     ///
@@ -496,6 +510,10 @@ fn default_fleet_memory() -> String {
     "26g".to_string()
 }
 
+fn default_review_reads_per_day() -> u32 {
+    100
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -512,6 +530,7 @@ impl Default for Config {
             github_app_key: String::new(),
             ai_enrichment: false,
             review_summaries: true,
+            review_reads_per_day: default_review_reads_per_day(),
             fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),

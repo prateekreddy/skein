@@ -1323,6 +1323,17 @@ async fn api_review_summary(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
+    // The owner's boundary (see `review::Trigger`): the daily budget limits only what skein does
+    // on its own initiative. A request a person made — the read button (`asked=1`) or a forced
+    // re-read — is never budget-checked and never counted. Absent both markers the request is
+    // treated as UNASKED, which is the safe default: a route that forgets the marker gates a
+    // button instead of un-gating the pump.
+    let asked = force || q.get("asked").is_some_and(|v| v == "1" || v == "true");
+    let trigger = if asked {
+        skein::review::Trigger::Asked
+    } else {
+        skein::review::Trigger::Unasked
+    };
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
@@ -1340,6 +1351,7 @@ async fn api_review_summary(
             pr,
             &identities,
             force,
+            trigger,
         ))
     })
     .await;
@@ -1401,7 +1413,7 @@ async fn api_critique_post(
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
     };
-    // The rules — moved head refused, vetted comments only — live in `review::post_critique`,
+    // The rules — a moved head re-anchored by line text, vetted comments only — live in `review::post_critique`,
     // where they are proven against a stubbed GitHub.
     let out = tokio::task::spawn_blocking(move || {
         skein::review::post_critique(&repo, number, &req.head_sha, &req.overall, &req.comments)
