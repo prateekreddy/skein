@@ -1113,7 +1113,19 @@ async fn api_review_merged(Query(q): Query<HashMap<String, String>>) -> Response
 /// per-repo cache as the pane. Repos with the queue switched off, and repos with no GitHub remote,
 /// are never asked.
 async fn api_review_counts() -> Response {
-    match tokio::task::spawn_blocking(skein::prq::counts).await {
+    // The merge train's stops are stapled on HERE, not inside `prq::counts` — the stops file is
+    // `prwork`'s, and `prq` reading it would join the module cycle (`docs/modules.toml`). This
+    // route already stands on both modules, and the stops are a disk read, so every branch of the
+    // count — the failed and the switched-off included — can still say a machine waits on a person.
+    match tokio::task::spawn_blocking(|| {
+        let mut counts = skein::prq::counts();
+        for count in &mut counts {
+            count.stopped = skein::prwork::stops(&count.repo_id);
+        }
+        counts
+    })
+    .await
+    {
         Ok(counts) => Json(counts).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1526,7 +1538,7 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
         let queue = skein::prq::queue(&repo, false)?;
         let mut prs = serde_json::Map::new();
         for pr in &queue.prs {
-            let facts = skein::prwork::facts_of(pr, &queue.viewer);
+            let facts = skein::prwork::facts_of(pr, &queue.viewer, &queue.trunk);
             let standing = skein::prwork::standing(&repo.id, pr.number, &facts, &flows);
             prs.insert(
                 pr.number.to_string(),

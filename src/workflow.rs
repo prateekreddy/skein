@@ -67,6 +67,15 @@ pub enum Cond {
     Ready,
     /// You opened it. The one condition about a person, and it means the fleet's own login.
     Mine,
+    /// The base has commits this branch lacks — GitHub's `mergeStateStatus` says `BEHIND`.
+    Behind,
+    /// Known up to date with its base. Not merely "not behind": an unknown state satisfies
+    /// neither this nor [`Cond::Behind`] — see [`holds`].
+    Current,
+    /// Its base is the repository's default branch. What keeps a merge train off stacked
+    /// children: a child's base is its parent's branch, and merging it would merge into the
+    /// parent, not ship it (docs/pr-workflow.md, "The merge train").
+    BaseTrunk,
 }
 
 /// How a branch is brought up to date with its base.
@@ -137,6 +146,14 @@ pub struct Workflow {
     /// workflow" on a PR a rule would otherwise claim.
     #[serde(default)]
     pub matches: Vec<Cond>,
+    /// One at a time, per repo. The sweep orders this workflow's carrying pull requests
+    /// oldest-first (lowest number) and lets only the first one without a stop act each pass;
+    /// everyone behind the front simply waits, and a stopped front is passed over — that is the
+    /// "skip failures and move ahead" the owner asked for. A parallel train re-runs CI on every
+    /// sibling after every merge, which is the tax serial exists to avoid
+    /// (`docs/pr-workflow.md`, "The merge train").
+    #[serde(default)]
+    pub serial: bool,
     pub steps: Vec<Step>,
 }
 
@@ -153,6 +170,10 @@ struct WrittenFlow {
     name: String,
     #[serde(default)]
     matches: Vec<String>,
+    /// See [`Workflow::serial`]. Defaulted, so every file written before the merge train still
+    /// reads — and serialized always, so an editor's round trip cannot drop it.
+    #[serde(default)]
+    serial: bool,
     #[serde(default)]
     steps: Vec<WrittenStep>,
 }
@@ -171,7 +192,7 @@ struct WrittenStep {
 /// One table, so the parser and the picker cannot disagree about what exists — a dropdown offering
 /// something the parser refuses is the same defect as a parser accepting something no dropdown can
 /// produce, and both are found only by a person typing it.
-pub const CONDITIONS: [(&str, &str); 11] = [
+pub const CONDITIONS: [(&str, &str); 14] = [
     ("approved", "approved, against the commit that is there now"),
     (
         "not-approved",
@@ -192,6 +213,12 @@ pub const CONDITIONS: [(&str, &str); 11] = [
     ("draft", "still a draft"),
     ("ready", "marked ready for review"),
     ("mine", "you opened it"),
+    ("behind", "the base has commits this branch lacks"),
+    ("current", "known up to date with its base"),
+    (
+        "base:trunk",
+        "its base is the repository's default branch",
+    ),
 ];
 
 /// Every action that can be written. See [`CONDITIONS`] for why this is a table.
@@ -326,6 +353,17 @@ impl Cond {
             "draft" => Ok(Cond::Draft),
             "ready" => Ok(Cond::Ready),
             "mine" => Ok(Cond::Mine),
+            "behind" => Ok(Cond::Behind),
+            "current" => Ok(Cond::Current),
+            // Only `trunk`, deliberately: a base named outright (`base:main`) would be a workflow
+            // that silently stops fitting the repo the day its default branch is renamed, and the
+            // trunk is the one base a merge train may ship to.
+            "base" => match arg {
+                "trunk" => Ok(Cond::BaseTrunk),
+                _ => Err(format!(
+                    "base can only be trunk — the repository's default branch — not {arg:?}"
+                )),
+            },
             _ => Err(unknown("condition", atom, &CONDITIONS)),
         }
     }
@@ -444,6 +482,7 @@ pub fn from_bytes(raw: &[u8]) -> Result<Vec<Workflow>, String> {
         out.push(Workflow {
             name: flow.name,
             matches,
+            serial: flow.serial,
             steps,
         });
     }
@@ -485,6 +524,7 @@ pub fn to_bytes(flows: &[Workflow]) -> Result<Vec<u8>, String> {
             .map(|w| WrittenFlow {
                 name: w.name.clone(),
                 matches: w.matches.iter().map(spell_cond).collect(),
+                serial: w.serial,
                 steps: w
                     .steps
                     .iter()
@@ -513,6 +553,9 @@ pub fn spell_cond(cond: &Cond) -> String {
         Cond::Draft => "draft".into(),
         Cond::Ready => "ready".into(),
         Cond::Mine => "mine".into(),
+        Cond::Behind => "behind".into(),
+        Cond::Current => "current".into(),
+        Cond::BaseTrunk => "base:trunk".into(),
     }
 }
 
@@ -559,6 +602,13 @@ pub struct Facts {
     pub draft: bool,
     /// You opened it.
     pub mine: bool,
+    /// Does the base have commits this branch lacks? `None` when GitHub has not said —
+    /// `mergeStateStatus: UNKNOWN`, or a queue from before the field existed. Three-valued for
+    /// the same reason as [`Facts::mergeable`] — see [`holds`].
+    pub behind: Option<bool>,
+    /// The base ref is the repository's default branch. False whenever the trunk is not known:
+    /// a train that guessed here could ship a stacked child into its parent's branch.
+    pub base_is_trunk: bool,
 }
 
 /// The step a workflow would take next, and where it is in the file.
@@ -579,6 +629,12 @@ pub struct Chosen {
 /// pull request for no reason — and on a repository that dismisses stale approvals, that rebase
 /// costs the approval that authorised it (`docs/pr-workflow.md`). **Unknown satisfies neither
 /// `mergeable` nor `not-mergeable`**: skein waits until GitHub has an answer.
+///
+/// `behind` and `current` keep the same discipline, for the merge train's sake: **unknown
+/// satisfies neither.** GitHub reports `mergeable: true` for a branch that is merely behind, so
+/// the train's merge step requires `current` explicitly — and if unknown counted as current,
+/// merging a branch whose behind-ness is unknown could merge code CI never tested against the
+/// current trunk (`docs/pr-workflow.md`, "The merge train").
 pub fn holds(cond: &Cond, facts: &Facts) -> bool {
     match cond {
         Cond::Approved => facts.approved,
@@ -592,6 +648,9 @@ pub fn holds(cond: &Cond, facts: &Facts) -> bool {
         Cond::Draft => facts.draft,
         Cond::Ready => !facts.draft,
         Cond::Mine => facts.mine,
+        Cond::Behind => facts.behind == Some(true),
+        Cond::Current => facts.behind == Some(false),
+        Cond::BaseTrunk => facts.base_is_trunk,
     }
 }
 
@@ -893,6 +952,88 @@ mod tests {
         assert_eq!(from_bytes(b"  \n ").unwrap(), Vec::new());
     }
 
+    /// The merge train's three words parse, and the one with an argument is a closed set.
+    ///
+    /// `base` takes only `trunk`, on purpose: a base named outright (`base:main`) is a workflow
+    /// that silently stops fitting the repo the day its default branch is renamed, and the trunk
+    /// is the one base a train may ship to (`docs/pr-workflow.md`, "The merge train").
+    #[test]
+    fn the_train_vocabulary_parses_and_base_takes_only_trunk() {
+        assert_eq!(Cond::parse("behind"), Ok(Cond::Behind));
+        assert_eq!(Cond::parse("current"), Ok(Cond::Current));
+        assert_eq!(Cond::parse("base:trunk"), Ok(Cond::BaseTrunk));
+
+        let why = Cond::parse("base:main").expect_err("a named base must be refused");
+        assert!(
+            why.contains("trunk"),
+            "the refusal must say what base CAN be: {why}"
+        );
+        assert!(
+            Cond::parse("base").is_err(),
+            "a base with nothing after it is not one"
+        );
+
+        // And the unknown-word error offers the new spellings, because "what CAN I say" is
+        // always the reader's next question.
+        let why = Cond::parse("caboose").expect_err("a word nobody defined must be refused");
+        for word in ["behind", "current", "base:trunk"] {
+            assert!(why.contains(word), "{word:?} missing from the listing: {why}");
+        }
+    }
+
+    /// Unknown behind-ness satisfies neither `behind` nor `current`.
+    ///
+    /// Same discipline as `mergeable`, and with the same teeth: GitHub reports `mergeable: true`
+    /// for a branch that is merely behind, so the train's merge step leans on `current` — and if
+    /// unknown counted, the train would merge code CI never tested against the current trunk.
+    #[test]
+    fn unknown_behindness_satisfies_neither_behind_nor_current() {
+        let facts = |behind, base_is_trunk| Facts {
+            behind,
+            base_is_trunk,
+            ..Default::default()
+        };
+        assert!(holds(&Cond::Behind, &facts(Some(true), false)));
+        assert!(!holds(&Cond::Current, &facts(Some(true), false)));
+        assert!(holds(&Cond::Current, &facts(Some(false), false)));
+        assert!(!holds(&Cond::Behind, &facts(Some(false), false)));
+        assert!(
+            !holds(&Cond::Behind, &facts(None, false))
+                && !holds(&Cond::Current, &facts(None, false)),
+            "unknown behind-ness satisfied a condition it must satisfy neither of"
+        );
+        assert!(holds(&Cond::BaseTrunk, &facts(None, true)));
+        assert!(!holds(&Cond::BaseTrunk, &facts(None, false)));
+    }
+
+    /// `serial` survives being read, written back, and saved.
+    ///
+    /// The cockpit editor sends a whole file through [`save`], which re-serializes from what was
+    /// PARSED — so a field the round trip dropped would be a train that quietly went parallel the
+    /// first time somebody edited an unrelated workflow.
+    #[test]
+    fn serial_survives_the_round_trip_and_the_save() {
+        let file = br#"{"workflow":[
+          {"name":"merge-train","serial":true,"matches":["mine"],"steps":[{"when":[],"do":"merge:squash+delete"}]},
+          {"name":"plain","steps":[{"when":[],"do":"flag:look"}]}]}"#;
+        let flows = from_bytes(file).unwrap();
+        assert!(flows[0].serial, "serial was not read");
+        assert!(!flows[1].serial, "a file that says nothing means not serial");
+
+        let again = from_bytes(&to_bytes(&flows).unwrap()).unwrap();
+        assert_eq!(again, flows, "serial did not survive the round trip");
+
+        // And through the save path itself, filesystem included.
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let saved = save(file).unwrap();
+        assert!(saved[0].serial);
+        let reloaded = load().unwrap();
+        assert_eq!(reloaded, flows, "what save wrote is not what load reads");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     /// A picker built from the vocabulary produces words the parser takes.
     ///
     /// The page renders a kind and, where there is one, a box for its argument — and then joins them
@@ -901,8 +1042,10 @@ mod tests {
     #[test]
     fn what_a_picker_would_build_is_what_the_parser_reads() {
         for word in conditions() {
+            // The whole spelling where there is no argument, because a word like `base:trunk` is
+            // one entry, not a kind with a box beside it — same rule as `update-branch:rebase`.
             let built = match word.arg.is_empty() {
-                true => word.kind.clone(),
+                true => word.spelling.clone(),
                 false => format!("{}:{}", word.kind, "ci"),
             };
             // `checks` is the one whose argument is a closed set rather than free text; the picker

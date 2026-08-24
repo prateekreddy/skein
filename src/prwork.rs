@@ -47,7 +47,14 @@ use std::path::PathBuf;
 /// * **`mergeable` stays three-valued.** GitHub says UNKNOWN for a while after every push, and
 ///   `workflow::holds` turns on unknown being neither mergeable nor not-mergeable — so flattening
 ///   it here would undo that one layer below the test that protects it.
-pub fn facts_of(pr: &crate::prq::Pr, viewer: &str) -> crate::workflow::Facts {
+///
+/// `trunk` is [`crate::prq::Queue::trunk`] — the repository's default branch, `""` when not
+/// known. `behind` keeps `mergeable`'s three values: `BEHIND` is yes, `""` and `UNKNOWN` are
+/// *no answer* rather than no, and everything else GitHub says (`CLEAN`, `BLOCKED`, `DIRTY`,
+/// `UNSTABLE`, …) is a head GitHub has compared with its base and not found behind. An unknown
+/// trunk makes `base_is_trunk` false — the safe direction, since the one thing it gates is a
+/// train shipping into what it believes is the trunk (`docs/pr-workflow.md`, "The merge train").
+pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
     crate::workflow::Facts {
         approved: pr.review_decision == "APPROVED",
         changes_requested: pr.review_decision == "CHANGES_REQUESTED",
@@ -56,6 +63,12 @@ pub fn facts_of(pr: &crate::prq::Pr, viewer: &str) -> crate::workflow::Facts {
         mergeable: pr.mergeable,
         draft: pr.draft,
         mine: !viewer.is_empty() && pr.author.eq_ignore_ascii_case(viewer),
+        behind: match pr.merge_state.as_str() {
+            "BEHIND" => Some(true),
+            "" | "UNKNOWN" => None,
+            _ => Some(false),
+        },
+        base_is_trunk: !trunk.is_empty() && pr.base_ref == trunk,
     }
 }
 
@@ -227,6 +240,25 @@ fn stops_path(repo_id: &str) -> PathBuf {
 /// Why this pull request's workflow is stopped, if it is.
 pub fn stopped(repo_id: &str, number: u64) -> Option<String> {
     read_stops(repo_id).remove(&number.to_string())
+}
+
+/// Every stopped pull request in this repo, in numeric order, in the shape the counts payload
+/// carries ([`crate::prq::StoppedPr`] — the type is the payload's, the file is this module's).
+///
+/// Numeric rather than the file's own: the stops are keyed by strings, and `"10"` sorting before
+/// `"9"` is not an order anybody asked to read a banner in.
+pub fn stops(repo_id: &str) -> Vec<crate::prq::StoppedPr> {
+    let mut out: Vec<crate::prq::StoppedPr> = read_stops(repo_id)
+        .into_iter()
+        .filter_map(|(number, why)| {
+            number
+                .parse::<u64>()
+                .ok()
+                .map(|number| crate::prq::StoppedPr { number, why })
+        })
+        .collect();
+    out.sort_by_key(|s| s.number);
+    out
 }
 
 fn read_stops(repo_id: &str) -> std::collections::BTreeMap<String, String> {
@@ -576,7 +608,10 @@ pub fn sweep() -> Vec<String> {
             // decide from.
             continue;
         };
-        let mut acted_in_repo = false;
+        // Who carries what, decided once for the whole repo before anyone may act: a serial
+        // workflow's rule below is about the *whole* train, and a decision made one pull request
+        // at a time could not see past the one in hand.
+        let mut rows = Vec::new();
         for pr in &queue.prs {
             // A pull request you set aside is one you said "not now" about. A workflow acting on it
             // would be overruling that with a rule, which is the opposite of what setting aside is
@@ -584,17 +619,47 @@ pub fn sweep() -> Vec<String> {
             if matches!(pr.lane, crate::prq::Lane::Archived) {
                 continue;
             }
-            let facts = facts_of(pr, &queue.viewer);
+            let facts = facts_of(pr, &queue.viewer, &queue.trunk);
             let Some(name) = carries(&repo.id, pr.number, &facts, &flows)
                 .name()
                 .map(str::to_string)
             else {
                 continue;
             };
-            let Some(flow) = flows.iter().find(|f| f.name == name) else {
+            rows.push((pr, facts, name));
+        }
+        // The front of each serial train: carrying pull requests oldest-first (lowest number —
+        // the sort key the owner chose), and the first one without a stop is the only one that
+        // may act this pass. A stopped front is passed over rather than reported — that is the
+        // "skip failures and move ahead" — and everyone behind the front is simply waiting, which
+        // is the ordinary state of a train and not an event (`docs/pr-workflow.md`, "The merge
+        // train"). A workflow whose every carrying PR is stopped has no front, and nobody acts.
+        let mut fronts = std::collections::BTreeMap::new();
+        for flow in flows.iter().filter(|f| f.serial) {
+            let mut train: Vec<u64> = rows
+                .iter()
+                .filter(|(_, _, name)| *name == flow.name)
+                .map(|(pr, _, _)| pr.number)
+                .collect();
+            train.sort_unstable();
+            if let Some(front) = train
+                .into_iter()
+                .find(|number| stopped(&repo.id, *number).is_none())
+            {
+                fronts.insert(flow.name.clone(), front);
+            }
+        }
+        let mut acted_in_repo = false;
+        for (pr, facts, name) in &rows {
+            let Some(flow) = flows.iter().find(|f| &f.name == name) else {
                 continue;
             };
-            let Some(chosen) = crate::workflow::next(flow, &facts) else {
+            // Everyone but the front of a serial train is passed over: no action, and no stop —
+            // being behind the front is where a train's pull requests live, not a fault.
+            if flow.serial && fronts.get(name) != Some(&pr.number) {
+                continue;
+            }
+            let Some(chosen) = crate::workflow::next(flow, facts) else {
                 continue;
             };
             let subject = Subject {
@@ -1003,7 +1068,7 @@ mod tests {
             .unwrap()
         };
 
-        let approved = facts_of(&pr("APPROVED", Some(true)), "me");
+        let approved = facts_of(&pr("APPROVED", Some(true)), "me", "main");
         assert!(
             approved.approved,
             "the repository approved it and skein did not see that"
@@ -1021,12 +1086,12 @@ mod tests {
             "the author is the viewer, in whatever case GitHub spells it"
         );
 
-        let conflicting = facts_of(&pr("REVIEW_REQUIRED", Some(false)), "me");
+        let conflicting = facts_of(&pr("REVIEW_REQUIRED", Some(false)), "me", "main");
         assert!(!conflicting.approved);
         assert_eq!(conflicting.mergeable, Some(false));
 
         // The one that matters.
-        let unknown = facts_of(&pr("APPROVED", None), "me");
+        let unknown = facts_of(&pr("APPROVED", None), "me", "main");
         assert_eq!(
             unknown.mergeable, None,
             "an unknown mergeable state was given an answer on the way to the workflow"
@@ -1038,11 +1103,11 @@ mod tests {
         );
 
         // Changes requested is its own state, not the absence of approval.
-        let blocked = facts_of(&pr("CHANGES_REQUESTED", Some(true)), "me");
+        let blocked = facts_of(&pr("CHANGES_REQUESTED", Some(true)), "me", "main");
         assert!(blocked.changes_requested && !blocked.approved);
 
         // And somebody else's pull request is not yours, however it is spelled.
-        assert!(!facts_of(&pr("APPROVED", Some(true)), "someone-else").mine);
+        assert!(!facts_of(&pr("APPROVED", Some(true)), "someone-else", "main").mine);
     }
 
     /// Nothing happens on a fleet that has not switched this on.
@@ -1228,5 +1293,237 @@ mod tests {
         for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
             std::env::remove_var(key);
         }
+    }
+
+    /// What GitHub's `mergeStateStatus` becomes on the way to a workflow, and what "trunk" means.
+    ///
+    /// `behind` keeps `mergeable`'s discipline — `""` and `UNKNOWN` are *no answer*, not "current"
+    /// — because the merge step leans on `current`, and unknown read as current merges code CI
+    /// never tested against the trunk (docs/pr-workflow.md, "The merge train"). And an unknown
+    /// trunk claims nothing: `base_is_trunk` false is the direction that keeps a train parked
+    /// rather than shipping into a branch it only believes is the trunk.
+    #[test]
+    fn the_train_facts_come_from_merge_state_and_the_trunk() {
+        let pr = |merge_state: &str, base_ref: &str| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "title": "t", "author": "me", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": base_ref,
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": [], "review_decision": "APPROVED", "mergeable": true,
+                "merge_state": merge_state,
+                "checks": "passing", "my_review": "none", "review_is_current": false,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+
+        assert_eq!(facts_of(&pr("BEHIND", "main"), "me", "main").behind, Some(true));
+        assert_eq!(facts_of(&pr("CLEAN", "main"), "me", "main").behind, Some(false));
+        assert_eq!(
+            facts_of(&pr("", "main"), "me", "main").behind,
+            None,
+            "a queue from before the field was given an answer it does not have"
+        );
+        assert_eq!(
+            facts_of(&pr("UNKNOWN", "main"), "me", "main").behind,
+            None,
+            "UNKNOWN was flattened to an answer on the way to the workflow"
+        );
+
+        assert!(facts_of(&pr("CLEAN", "main"), "me", "main").base_is_trunk);
+        assert!(!facts_of(&pr("CLEAN", "feat-parent"), "me", "main").base_is_trunk);
+        assert!(
+            !facts_of(&pr("CLEAN", "main"), "me", "").base_is_trunk,
+            "an unknown trunk claimed a base as the trunk anyway"
+        );
+    }
+
+    /// A stacked child never boards the train, and no stack model was needed.
+    ///
+    /// The one rule from docs/pr-workflow.md ("Stacks need no stack model"): the train only
+    /// touches a PR whose base is the trunk. A child's base is its parent's *branch* — merging it
+    /// would merge into the parent, not ship it — so `base:trunk` in `matches` keeps it out until
+    /// GitHub retargets it onto the trunk after the parent merges.
+    #[test]
+    fn a_stacked_child_is_kept_out_by_its_matches() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let flows = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+                 "matches":["ready","approved","base:trunk"],
+                 "steps":[{"when":[],"do":"merge:squash+delete"}]}]}"#,
+        )
+        .unwrap();
+        let pr = |base_ref: &str| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 12, "title": "t", "author": "me", "url": "u",
+                "head_ref": "feat-child", "head_sha": "abc", "base_ref": base_ref,
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": [], "review_decision": "APPROVED", "mergeable": true,
+                "checks": "passing", "my_review": "none", "review_is_current": false,
+                "reasons": [], "lane": "needs-you", "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+
+        let child = facts_of(&pr("feat-parent"), "me", "main");
+        assert_eq!(
+            carries("demo", 12, &child, &flows),
+            Carries::Nothing,
+            "a stacked child was claimed by the train — it would merge into its parent's branch"
+        );
+        // And the same pull request, retargeted onto the trunk after its parent merged, is an
+        // ordinary trunk-based PR the train claims — that is the whole stack mechanism.
+        let retargeted = facts_of(&pr("main"), "me", "main");
+        assert_eq!(
+            carries("demo", 12, &retargeted, &flows),
+            Carries::Matched("merge-train".into())
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A serial workflow acts on the front of the train, and only the front.
+    ///
+    /// Oldest first — lowest number, the sort key the owner chose — and a stopped front is
+    /// passed over so the train moves ahead of a failure rather than parking behind it
+    /// (docs/pr-workflow.md, "The merge train"). The assertion is on the wire, the file's
+    /// discipline: two pull requests both due the same action, and exactly one request leaves.
+    #[test]
+    fn a_serial_workflow_acts_on_the_front_of_the_train_only() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::prq::forget_host_token();
+
+        let serial = br#"{"workflow":[{"name":"train","serial":true,"matches":["mine"],"steps":[
+          {"when":["no-label:ci"],"do":"add-label:ci"}]}]}"#;
+        std::fs::write(home.join("workflows.json"), serial).unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"demo","source":"https://github.com/acme/serial.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+
+        // A GitHub with two open pull requests, both mine, both unlabelled — and #9 listed FIRST,
+        // so a sweep that took the queue's own order would act on the wrong one.
+        let labelled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = labelled.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let answer = if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.contains("/labels") {
+                    seen.lock().unwrap().push(head.clone());
+                    "[]".to_string()
+                } else if head.contains("/graphql") {
+                    let node = |number: u64| {
+                        format!(
+                            r#"{{"number":{number},"title":"t","url":"u","isDraft":false,
+                              "author":{{"login":"me"}},"headRefName":"feat-{number}",
+                              "headRefOid":"abc","baseRefName":"main",
+                              "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
+                              "mergeable":"MERGEABLE","labels":{{"nodes":[]}},
+                              "latestReviews":{{"nodes":[]}},
+                              "commits":{{"nodes":[{{"commit":{{
+                                "committedDate":"2026-08-23T00:00:00Z",
+                                "statusCheckRollup":{{"contexts":{{"nodes":[]}}}}}}}}]}}}}"#
+                        )
+                    };
+                    format!(
+                        r#"{{"data":{{"search":{{"nodes":[{},{}]}}}}}}"#,
+                        node(9),
+                        node(5)
+                    )
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // Pass one: both #5 and #9 are due the same step. Exactly one request leaves, and it is
+        // for #5 — the oldest, not the first in the queue's own order.
+        let did = sweep();
+        let calls = labelled.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "a serial workflow acted past the front of the train: {calls:?} ({did:?})"
+        );
+        assert!(
+            calls[0].contains("/issues/5/labels"),
+            "the train did not act on its oldest pull request: {calls:?}"
+        );
+
+        // The front stops — CI failed, say. The next pass skips it and moves ahead: #9 is the
+        // front now. That pass-over is the "skip failures and move ahead", and it is silent,
+        // because a stopped PR's story is in the stops file, not re-announced every pass.
+        stop("demo", 5, "CI is red");
+        labelled.lock().unwrap().clear();
+        let did = sweep();
+        let calls = labelled.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "a stopped front did not yield to the next in line: {calls:?} ({did:?})"
+        );
+        assert!(
+            calls[0].contains("/issues/9/labels"),
+            "the train did not move ahead of its stopped front: {calls:?}"
+        );
+
+        // And the stops read back in numeric order, the shape the banner row carries.
+        let stops = stops("demo");
+        assert_eq!(stops.len(), 1);
+        assert_eq!((stops[0].number, stops[0].why.as_str()), (5, "CI is red"));
+
+        // The same two pull requests under a NON-serial workflow: everyone due a step acts, which
+        // is today's behavior and must stay — serial is a property of a workflow, not of the sweep.
+        clear("demo", 5);
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"train","matches":["mine"],"steps":[
+              {"when":["no-label:ci"],"do":"add-label:ci"}]}]}"#,
+        )
+        .unwrap();
+        labelled.lock().unwrap().clear();
+        let did = sweep();
+        let calls = labelled.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            2,
+            "a workflow that never asked to be serial was serialized: {calls:?} ({did:?})"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
     }
 }

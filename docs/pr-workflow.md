@@ -108,3 +108,79 @@ approval, the row says so in those words: *skein updated this branch, which dism
 - GitHub's live GraphQL schema, introspected above.
 - [About protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) — dismissal on merge-base change.
 - [Security enhancements to required approvals (2023-06-06)](https://github.blog/changelog/2023-06-06-security-enhancements-to-required-approvals-on-pull-requests/) — the change that made merge-base movement dismiss approvals.
+
+## The merge train (SKEIN-207)
+
+The owner's second ask, 2026-08-24: per repo, take the oldest fully-approved PRs first; rebase,
+apply the CI-enabling label, and merge+delete when green — one at a time; stacks too; skip anything
+that fails and say so. Three decisions, made by the owner:
+
+- **Serial.** One PR at a time per repo. Only the front of the train is rebased, labeled and
+  merged; everyone else waits. A parallel train re-runs CI on every sibling after every merge — the
+  re-run tax and the API spend are why serial won.
+- **Any fully-approved PR**, not just the owner's. The train acts on the fleet's credential, so
+  every label, merge and branch deletion shows under the owner's name (`prq::host_token`'s
+  contract).
+- **Stacks: merge the approved prefix.** Not atomic — the train ships from the bottom up as far as
+  approvals reach.
+
+### Stacks need no stack model
+
+The one rule that matters: **the train only ever touches a PR whose base is the trunk** (the
+repository's default branch). A stacked child's base is its parent's *branch* — merging it would
+merge into the parent branch, not ship it — so `base:trunk` in `matches` keeps children out
+entirely. When the bottom PR merges and its branch is deleted, GitHub retargets the child onto the
+trunk; the next sweep sees an ordinary trunk-based PR, oldest in line. The stack merges bottom-up,
+prefix-first, with zero stack-specific machinery.
+
+### What was added to the vocabulary
+
+Three conditions and one workflow property, all answerable from the queue skein already fetches:
+
+| word | meaning |
+|---|---|
+| `behind` | GitHub's `mergeStateStatus` is `BEHIND` — the base has commits this branch lacks |
+| `current` | known **not** behind. `UNKNOWN` satisfies neither, same discipline as `mergeable` |
+| `base:trunk` | the PR's base ref is the repository's default branch |
+| `"serial": true` | on a workflow: per repo, order carrying PRs oldest-first (lowest number); only the first one without a stop acts. A stopped PR is passed over — that is the "skip and move ahead" |
+
+### How a skip reaches the owner
+
+A failure (`flag:`, or an action GitHub refused) writes a stop, exactly as before — and the stops
+now travel on the counts poll to a **banner row** in the cockpit (`#trainban`, a block row like the
+cover banner, never an overlay): the repo's name and the skipped PR numbers with their reasons.
+Clicking the repo opens its review queue. Clearing the stop puts the PR back in line.
+
+### The train, written down
+
+`~/.skein/workflows.json` — steps are guards over live state, first match fires, one per
+evaluation; see the top of this document for why:
+
+```json
+{ "workflow": [ {
+  "name": "merge-train",
+  "serial": true,
+  "matches": ["ready", "approved", "base:trunk"],
+  "steps": [
+    { "when": ["changes-requested"], "do": "flag:changes were requested — resolve them to rejoin the train" },
+    { "when": ["not-mergeable"],     "do": "flag:conflicts with the base — resolve the conflict to rejoin the train" },
+    { "when": ["behind"],            "do": "update-branch:rebase" },
+    { "when": ["checks:failing"],    "do": "flag:CI failed — fix it and clear this stop to rejoin the train" },
+    { "when": ["no-label:ci-queue"], "do": "add-label:ci-queue" },
+    { "when": ["label:ci-queue", "checks:pending"], "do": "wait:CI is running" },
+    { "when": ["label:ci-queue", "checks:passing", "mergeable", "current"], "do": "merge:squash+delete" },
+    { "when": [],                    "do": "wait:waiting for GitHub to catch up" }
+  ] } ] }
+```
+
+Step order is load-bearing. `behind → rebase` sits **before** `checks:failing → flag`, so a stale
+red run on an old head gets its rebase (and a fresh CI run) before it can stop anything. The merge
+step requires `current` explicitly: GitHub reports `mergeable: true` for a branch that is merely
+behind (no conflict), and without `current` the train would merge code CI never tested against the
+current trunk. And the rebase-dismisses-approval finding above still governs: on a repository that
+dismisses stale approvals, the train's own rebase costs the approval, the PR stops carrying the
+workflow (its `approved` match fails), and the train moves on — it rejoins, oldest-first, when
+somebody re-approves. That stall is the branch-protection setting working, not a train defect.
+
+The kill switch is unchanged: workflows as a whole run only with `pr_workflows` on (Settings, or
+`$SKEIN_PR_WORKFLOWS=on`), and `flag`/stops halt a single PR until a person clears it.
