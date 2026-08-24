@@ -2718,14 +2718,12 @@ function toggleNotReady() { revNotReadyOpen = !revNotReadyOpen; renderReview(); 
 // these at once, so the tallies are independent — they name the reasons, they do not sum to the
 // count.
 function revNotReadyWhy(rows) {
-  const n = { failing: 0, draft: 0, conflicted: 0 };
+  const n = { draft: 0, conflicted: 0 };
   for (const p of rows) {
-    if (p.checks === "failing") n.failing++;
     if (p.draft) n.draft++;
     if (p.mergeable === false) n.conflicted++;
   }
   const parts = [];
-  if (n.failing) parts.push(`${n.failing} failing checks`);
   if (n.draft) parts.push(`${n.draft} draft${n.draft === 1 ? "" : "s"}`);
   if (n.conflicted) parts.push(`${n.conflicted} conflicted`);
   return parts.join(", ");

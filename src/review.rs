@@ -1097,7 +1097,8 @@ Rules:
 - Be specific about code where being specific helps the author act; reference paths, not line numbers.
 - Plain, direct, collegial. No preamble, no sign-off, no "great work overall".
 - Markdown is fine. Keep it as short as the point allows.
-- Output the comment body ONLY — no headings, no quotes around it, no explanation of what you wrote.
+- Output a line reading exactly COMMENT: and then the comment body, and NOTHING else — no
+  explanation of what you wrote or changed, no notes to the reviewer, before or after.
 
 Their notes: {intent}
 
@@ -1110,6 +1111,7 @@ Their notes: {intent}
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(180),
     )
+    .map(|raw| drafted_body(&raw))
     .ok_or_else(|| "no draft came back — the model call failed or timed out.".into())
 }
 
@@ -1408,6 +1410,21 @@ pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
     drafted.truncated = cut;
     store_critique(&repo.id, &drafted)?;
     Ok(drafted)
+}
+
+/// The comment body out of a model answer that may carry meta-chatter before it.
+///
+/// The prompt has always said body-only, and a model narrated anyway — a live draft opened with
+/// `Publishing "…" isn't right for a PR comment — let me rewrite that as feedback in the
+/// reviewer's own voice.` and THAT landed in the box the person was about to post from. Telling a
+/// model harder is not a mechanism; a marker it must emit is. Everything before the first
+/// `COMMENT:` is the model talking to itself, and an answer without the marker is taken whole, so
+/// an answer that followed the old instruction exactly still works.
+fn drafted_body(raw: &str) -> String {
+    match raw.find("COMMENT:") {
+        Some(at) => raw[at + "COMMENT:".len()..].trim().to_string(),
+        None => raw.trim().to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -2556,5 +2573,25 @@ COMMENT: this one points at a line the diff does not show.
             std::env::remove_var(key);
         }
         crate::prq::forget_host_token();
+    }
+}
+
+#[cfg(test)]
+mod drafted_body_tests {
+    use super::*;
+
+    /// The live leak, verbatim shape: narration before the marker stays with the model.
+    #[test]
+    fn a_models_narration_never_reaches_the_composer() {
+        let raw = "Publishing \"the flag thing\" isn't right for a PR comment — let me rewrite \
+                   that as feedback in the reviewer's own voice.\nCOMMENT:\nReload recovery could \
+                   keep its flag in the backend instead of sessionStorage, so a new tab recovers too.";
+        assert_eq!(
+            drafted_body(raw),
+            "Reload recovery could keep its flag in the backend instead of sessionStorage, so a \
+             new tab recovers too."
+        );
+        // No marker: the whole answer is the comment — the old contract, still honoured.
+        assert_eq!(drafted_body("  just the comment.  "), "just the comment.");
     }
 }

@@ -467,7 +467,10 @@ function board() {
     reasons: ["reviewer"], checks: "none", ...extra,
   });
   b.lanes([
-    pr(1, { lane: "not-ready", checks: "failing" }),
+    // Red, and STILL your move: on this fleet CI runs only after review, so failing checks are
+    // the ordinary state of a PR awaiting you — demoting them hid live PRs (reported as "some
+    // PRs are cut out from the view, including 577").
+    pr(1, { lane: "needs-you", checks: "failing" }),
     pr(2, { lane: "not-ready", draft: true }),
     pr(3, { lane: "not-ready", mergeable: false }),
     pr(4, { lane: "waiting", reasons: ["author"] }),
@@ -478,9 +481,9 @@ function board() {
 
   t.check("whose-move lanes are on screen",
     ["your move", "their move", "not ready"].every(l => b.pane().includes(l)), true);
-  t.check("only the actionable rows are drawn while not-ready is folded", b.rows(), 2);
+  t.check("a red PR awaiting review is drawn with your move, not folded away", b.rows(), 3);
   t.check("the fold states its own composition",
-    b.pane().includes("1 failing checks, 1 draft, 1 conflicted"), true);
+    b.pane().includes("1 draft, 1 conflicted"), true);
 
   b.toggleNR();
   t.check("one click and every not-ready row is there — folded is not hidden", b.rows(), 5);

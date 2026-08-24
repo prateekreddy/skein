@@ -35,15 +35,18 @@ use std::time::{Duration, Instant};
 #[serde(rename_all = "kebab-case")]
 pub enum Lane {
     /// **Your move**: somebody is waiting on your review and nothing stops you giving it — not a
-    /// draft, checks not failing, not conflicted. This is the lane the badge counts, so it holds
-    /// only what you can actually act on now.
+    /// draft, not conflicted. This is the lane the badge counts, so it holds only what you can
+    /// actually act on now. **Failing checks do not move a PR out of here**: on this fleet CI runs
+    /// only after review (a workflow applies the CI label on approval), so red is the *ordinary*
+    /// state of a PR awaiting you, and demoting it hid exactly the rows the queue exists to show
+    /// — reported live as "some PRs are cut out from the view, including 577".
     NeedsYou,
     /// **Their move**: you authored it, or you already decided on the *current* head commit
     /// (approved or requested changes). Either way the next act belongs to somebody else.
     Waiting,
-    /// **Not ready for review**: a draft, failing checks, or unmergeable — reviewing it now would
-    /// be reviewing something its author is still going to change. Shown as a count with its
-    /// reasons rather than as rows: nothing is hidden, it is just not claiming to be your problem.
+    /// **Not ready for review**: a draft, or unmergeable — reviewing it now would be reviewing
+    /// something its author is still going to change. Shown as a count with its reasons rather
+    /// than as rows: nothing is hidden, it is just not claiming to be your problem.
     NotReady,
     /// You have set it aside by hand — it is open, but not going to move for reasons skein has no
     /// way to know.
@@ -767,16 +770,21 @@ fn build_pr(
     };
     let checks = rollup(item);
     // Whose move is it? Decided from READINESS, not from whether you have acted — the change that
-    // took a 29-row "needs you" on the live fleet down to the two that were actually yours to do.
+    // took a 29-row "needs you" on the live fleet down to the ones actually yours to do.
     // Yours-or-decided outranks not-ready on purpose: your own red PR is your problem as an
     // AUTHOR, and this queue is the reviewer's; it must not resurface there as review work.
+    //
+    // Failing checks are deliberately NOT here. The owner's fleets run CI only after review — a
+    // workflow applies the CI label on approval — so an unreviewed PR being red says nothing
+    // about whether it can be reviewed, and treating red as not-ready removed live PRs from the
+    // reviewer's view. The dot on the row still says red; the lane says whose move it is.
     let lane = if archived_numbers.contains(&number) {
         Lane::Archived
     } else if author == login
         || (review_is_current && matches!(my_review.as_str(), "approved" | "changes-requested"))
     {
         Lane::Waiting
-    } else if draft || checks == "failing" || mergeable == Some(false) {
+    } else if draft || mergeable == Some(false) {
         Lane::NotReady
     } else {
         Lane::NeedsYou
@@ -2225,14 +2233,17 @@ mod tests {
     /// and one genuinely awaiting you — readiness decides the lane, not whether you have acted.
     #[test]
     fn a_lane_says_whose_move_it_is_not_whether_you_acted() {
+        // Red is the ORDINARY state of an unreviewed PR here: CI runs only after review (the
+        // workflow applies the CI label on approval), so failing checks must not take a PR off
+        // the reviewer. The first version of this rule did, and live PRs vanished from the view.
         let red = item(
             r#"{"number":1,"headRefOid":"a","author":{"login":"someone"},
                 "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
         );
         assert_eq!(
             build_pr(&red, 1, "me", "repo", &Reason::Reviewer, &[]).lane,
-            Lane::NotReady,
-            "failing checks: reviewing it now reviews code its author must change"
+            Lane::NeedsYou,
+            "failing checks do not excuse the review — on this fleet CI follows review"
         );
 
         let draft =
