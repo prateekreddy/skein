@@ -38,6 +38,8 @@ function board() {
     let revSumBusy = 0;
     const REV_SUM_PARALLEL = 3;
     ${grab("revSeen")}
+    ${grab("revStaleTries")}
+    ${grab("REV_STALE_TRIES")}
     ${grab("REV_SUM_AUTO")}
     ${grab("revSumAuto")}
     ${grab("revSumRepo")}
@@ -66,6 +68,8 @@ function board() {
     let revEdit = null;
     const revEditHtml = () => "";
     const revReadChip = () => "";
+    // The page's own scheduler, so the test can see WHEN it would ask again rather than waiting.
+    
     return {
       open: id => openReview(id),
       // Clicking a box: the dock's own view change, verbatim from \`showBox\`.
@@ -76,6 +80,7 @@ function board() {
       open_rows: () => revOpen.size,
       spent: () => revSumAuto,
       expand: n => { revOpen.add(n); },
+      tries: () => revStaleTries,
       fetchOne: n => revFetchSummary(n, true),
     };
   `;
@@ -85,9 +90,10 @@ function board() {
   const SETTLED = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
   let hot = [];            // numbers whose head commit landed just now
   let moved = [];          // numbers whose head has moved since it was read
+  let fresh = true;          // whether the server has the current list yet
   const queue = id => ({
     ai: true,
-    fresh: true,
+    fresh,
     prs: [1, 2, 3, 4, 5, 6].map(n => ({
       number: n,
       lane: "needs-you",
@@ -127,12 +133,18 @@ function board() {
   const localStorage = {
     store: {}, getItem(k) { return this.store[k] ?? null; }, setItem(k, v) { this.store[k] = v; },
   };
+  // Timers the test drives, so "it asks again in four seconds, then eight" is observable without
+  // any waiting — and so a page that STOPPED asking is visibly different from one that is waiting.
+  const waits = [];
   const made = new Function(
     "revpane", "document", "localStorage", "fetch", "esc", "encodeURIComponent",
     "decodeURIComponent", "setTimeout", "clearTimeout", "console", body,
   )(
     revpane, document, localStorage, fetch, String, encodeURIComponent,
-    decodeURIComponent, () => 0, () => {}, console,
+    decodeURIComponent,
+    (fn, ms) => { waits.push({ fn, ms }); return waits.length; },
+    () => {},
+    console,
   );
   // One round of answers: what is outstanding right now, and not what those answers go on to ask
   // for. The pump refills itself, so the two are different moments and both matter here.
@@ -148,6 +160,11 @@ function board() {
     // Everything, until it stops asking.
     drain: async () => { for (let i = 0; i < 20 && pending.length; i++) await settle(); },
     refuse: id => { refuse = id; },
+    // The server has not caught up yet: it hands over the copy it remembers.
+    stale: on => { fresh = !on; },
+    // What the page asked to be woken for, and how long it wanted to wait.
+    waits: () => waits.slice(),
+    fire: () => { const due = waits.map(w => w.fn); waits.length = 0; due.forEach(f => f()); },
     // A pull request somebody has just pushed to.
     hot: ns => { hot = ns; },
     // The branch moving under a reading that has already been made.
@@ -290,6 +307,47 @@ function board() {
   b.fetchOne(1);
   await b.drain();
   t.check("asking again replaces it", b.got(1) && b.got(1).stale, undefined);
+}
+
+// ---- a queue served stale keeps asking until it is current ----
+//
+// Reported live: "sometimes the list of PRs just shows 34 while the PR button shows 44 and it
+// suddenly shows up later."
+//
+// Two sources of different ages. The badge polls `/api/review/counts` on its own; the pane's list
+// comes back REMEMBERED (`fresh: false`) while the server fetches the real one. The pane then asked
+// again exactly once, four seconds later, and gave up — so any GitHub read slower than that left the
+// older list on screen under a newer number, until something else happened to reload it. That
+// "something else" is the "later".
+{
+  const b = board();
+  b.stale(true);
+  b.open("alpha");
+  await b.drain();
+  t.check("a remembered queue still paints", b.rows(), 6);
+
+  // It wants to be woken, and with a growing gap each time: the reason it was stale is that GitHub
+  // is slow, so asking again at the same interval only asks more often for the same reason.
+  const gaps = [];
+  for (let i = 0; i < 4; i++) {
+    const due = b.waits().filter(w => w.ms >= 4000);
+    if (!due.length) break;
+    gaps.push(due[due.length - 1].ms);
+    b.fire();
+    await b.drain();
+  }
+  t.check("it asks again, and backs off each time", gaps, [4000, 8000, 16000, 32000]);
+
+  // And it gives up eventually rather than asking for ever.
+  for (let i = 0; i < 6; i++) { b.fire(); await b.drain(); }
+  t.check("it gives up rather than asking for ever", b.tries(), 5);
+
+  // The server catches up. The pane converges on its own — which is the whole complaint.
+  b.stale(false);
+  b.open();
+  await b.drain();
+  t.check("and once the server is current, so is the pane", b.rows(), 6);
+  t.check("the chase resets for the next time", b.tries(), 0);
 }
 
 t.done();

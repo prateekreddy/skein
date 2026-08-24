@@ -2476,6 +2476,17 @@ let revHeld = null;
 // workflow. Folded together, choosing a workflow would not show up until GitHub was read again.
 let revFlows = null;
 let revStaleTimer = null;
+// How many times the pane has asked again for a queue that came back remembered rather than fresh.
+//
+// It used to ask ONCE, four seconds later, on the reasoning that "hammering it would not make it
+// faster". True, and it left the pane on the older copy whenever the real fetch took longer than
+// four seconds — with the badge, which polls separately, already showing the newer number. Reported
+// as "the list shows 34 while the PR button shows 44 and it suddenly shows up later": the "later"
+// being whenever something else happened to reload it.
+//
+// So it keeps asking, with growing gaps, and gives up out loud rather than silently.
+let revStaleTries = 0;
+const REV_STALE_TRIES = 5;
 let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
 // Three at a time. Each summary is a `gh pr diff` plus one or two model calls on the SAME
 // subscription the fleet is working on, so this is a deliberate throttle rather than a UI nicety —
@@ -2603,6 +2614,9 @@ function loadReview(force) {
   // whatever the last repo left behind, so it is replaced rather than kept — showing one repo's
   // pull requests under another's name is worse than showing none.
   revQueue = revSeen.get(id) || null;
+  // A load somebody ASKED for starts the chase again: pressing refresh after giving up should not
+  // inherit the exhausted counter and give up immediately.
+  if (force) revStaleTries = 0;
   revLoading = true; renderReview();
   fetch(`/api/repos/${encodeURIComponent(id)}/review${force ? "?force=1" : ""}`).then(async r => {
     const text = await r.text();
@@ -2633,7 +2647,16 @@ function loadReview(force) {
     // one. Ask again shortly — by then it is a cache hit, not another wait. Once: if the second ask
     // is still stale the fetch is genuinely slow, and hammering it would not make it faster.
     clearTimeout(revStaleTimer);
-    if (q.fresh === false) revStaleTimer = setTimeout(() => { if (view.repo === id) loadReview(); }, 4000);
+    if (q.fresh === false && revStaleTries < REV_STALE_TRIES) {
+      // 4s, 8s, 16s, 32s, 64s — five tries over two minutes. Growing, because the reason it was
+      // stale the first time is that GitHub is slow, and asking at the same interval would just ask
+      // more often for the same reason.
+      const wait = 4000 * 2 ** revStaleTries;
+      revStaleTries++;
+      revStaleTimer = setTimeout(() => { if (revHeld === id) loadReview(); }, wait);
+    }
+    // Fresh: the chase is over, and the next stale answer starts its own.
+    if (q.fresh !== false) revStaleTries = 0;
     // The pane just fetched this repo for real; fold that into the badge rather than waiting up to
     // three minutes for the poller to rediscover a number we already have.
     const n = (q.prs || []).filter(p => p.lane === "needs-you").length;
@@ -2713,7 +2736,10 @@ function renderReview() {
       <button type="button" class="revchip${revEdit ? " on" : ""}" onclick="toggleWorkflowEditor()">workflows</button>
       ${revReadChip()}
       ${revQueue && revQueue.fresh === false
-        ? `<span class="revage" title="the last queue skein read, shown while it fetches the current one">read ${esc(revAgo(revQueue.as_of))} · refreshing</span>`
+        ? `<span class="revage" title="These are the pull requests skein last read. It is fetching the current list; the count on the review button may already be the newer one.">read ${esc(revAgo(revQueue.as_of))} · ${
+            revStaleTries >= REV_STALE_TRIES
+              ? `still fetching — <button type="button" class="revchip" onclick="loadReview(true)">try again</button>`
+              : "refreshing"}</span>`
         : ""}
       <button type="button" class="revchip" onclick="loadReview(true)">${revLoading ? "refreshing…" : "refresh"}</button>
     </div>${revModsHtml()}${revEditHtml()}${body}</div>`;
