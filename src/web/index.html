@@ -3720,9 +3720,22 @@ function revChains(prs) {
   }
   for (const [repo, list] of byRepo) {
     const byHead = new Map(list.map(p => [p.head_ref, p]));
+    // A branch is a seam inside a stack only when exactly ONE open pull request is based on it.
+    // With several it is a trunk (develop, master), and linking through it is how one trunk PR
+    // (master → develop, live #625) dissolved every stack rooted on develop but one: develop became
+    // "a head", so no develop-based PR could be a root, and the single overwritten child link let an
+    // arbitrary stack win while Rhea's vanished into loose rows.
+    const kids = new Map();
+    for (const p of list) {
+      if (!byHead.has(p.base_ref)) continue;
+      kids.set(p.base_ref, (kids.get(p.base_ref) || []).concat([p]));
+    }
     const child = new Map();
-    for (const p of list) if (byHead.has(p.base_ref)) child.set(p.base_ref, p);
-    const roots = list.filter(p => !byHead.has(p.base_ref) && child.has(p.head_ref));
+    for (const [base, arr] of kids) if (arr.length === 1) child.set(base, arr[0]);
+    // A root starts a chain (it has an unambiguous successor) and is not itself the unambiguous
+    // successor of a queued PR — a trunk-based root qualifies precisely because the trunk is not a
+    // seam, and a stack whose lower steps are not in the queue still starts at the break.
+    const roots = list.filter(p => child.has(p.head_ref) && child.get(p.base_ref) !== p);
     for (const r of roots) {
       const steps = [r];
       const seen = new Set([rk(r)]);

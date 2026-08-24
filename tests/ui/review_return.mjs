@@ -642,6 +642,49 @@ function critWorld() {
   t.check("and the row is the one thing open", b.openRow(), ["alpha#700"]);
 }
 
+// ---- a trunk pull request is not a stack seam ----
+//
+// The live queue that lost Rhea's stack: #625 (master → develop) makes develop "a head", and the
+// old chain walk linked through it — so no develop-based PR could be a root, one arbitrary stack
+// survived through the single child slot, and the other dissolved into loose rows. A branch with
+// several open pull requests based on it is a trunk; chains only link through branches with exactly
+// one successor.
+{
+  const b = board();
+  const at = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  const pr = (n, author, head, base) => ({
+    number: n, head_ref: head, base_ref: base, title: "pr " + n,
+    head_sha: "alpha" + n, committed_at: at, updated_at: at, settled: true, draft: false,
+    reasons: ["reviewer"], checks: "none", lane: "needs-you", author,
+  });
+  b.lanes([
+    // the trunk PR that used to dissolve everything rooted on develop
+    pr(625, "prateekreddy", "develop", "master"),
+    // Rhea's stack, rooted on the trunk
+    pr(613, "dev-rhea", "ladder/chassis-tenants", "develop"),
+    pr(614, "dev-rhea", "ladder/tenants-01-compose", "ladder/chassis-tenants"),
+    pr(615, "dev-rhea", "ladder/tenants-02-tables", "ladder/tenants-01-compose"),
+    // a second stack, rooted on the same trunk
+    pr(670, "prateekreddy", "fix/readiness-abstention-kinds", "develop"),
+    pr(671, "prateekreddy", "fix/readiness-named-findings", "fix/readiness-abstention-kinds"),
+    pr(672, "prateekreddy", "fix/readiness-live-banner", "fix/readiness-named-findings"),
+    // ordinary develop-based rows, which must stay ordinary
+    pr(667, "dev-vale", "worktree-narration-write-guard", "develop"),
+    pr(651, "dev-sixth", "fix/example-topic-7-grounds-heading", "develop"),
+  ]);
+  b.open("alpha");
+  await b.drain();
+
+  t.check("both stacks are recognised, not just whichever won a map slot",
+    (b.pane().match(/pull requests, one change/g) || []).length, 2);
+  t.check("Rhea's stack is one of them",
+    b.pane().includes("3 pull requests, one change") && b.pane().includes("ladder"), true);
+  t.check("the trunk pull request is an ordinary row, not a stack member",
+    b.pane().includes("625") && !b.pane().includes("#625"), true);
+  // 9 PRs: six fold into the two stack rows; 625, 667 and 651 stay loose.
+  t.check("ordinary develop-based rows stay ordinary", b.rows(), 3);
+}
+
 // ---- what you typed into the composer survives a reload ----
 //
 // Reported live on PR 577: notes were written, "draft with skein" answered, the page was reloaded
