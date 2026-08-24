@@ -46,14 +46,21 @@ function world(opts = {}) {
   const src = `
     let revComposing = null;
     let revReading = { repo: "acme", number: 7 };
+    let revQueue = { prs: [] };
+    const revpane = null;
     const revDiffs = new Map(Object.entries(${JSON.stringify(opts.diffs || {})}));
     const revNotes = new Map();
     const renderReview = () => {};
     const closeReading = () => {};
     const loadReview = () => {};
+    const revRow = () => "";
     const toasts = [];
     const toast = said => toasts.push(said);
     ${grab("esc")}
+    ${grab("rk")}
+    ${grab("REV_UNDO_MS")}
+    ${grab("revPending")}
+    ${grab("revDecided")}
     ${grab("revNotesStore")}
     ${grab("revNotesFor")}
     ${grab("revNotesSave")}
@@ -62,6 +69,14 @@ function world(opts = {}) {
     ${grab("openReadingComposer")}
     ${grab("revPost")}
     ${grab("revAct")}
+    ${grab("revHold")}
+    ${grab("revUndo")}
+    ${grab("revTick")}
+    ${grab("revFire")}
+    ${grab("revReceiptHtml")}
+    ${grab("revMarkDone")}
+    ${grab("revRepaintRow")}
+    ${grab("revPendingPaint")}
     ${grab("revMovedNotice")}
     return {
       notesFor: k => revNotesFor(k),
@@ -72,7 +87,11 @@ function world(opts = {}) {
       toasts,
     };
   `;
-  const made = new Function("fetch", "document", "localStorage", src)(fetch, document, localStorage);
+  // SKEIN-162 holds every verdict for an undo window before it posts. These contracts are about
+  // WHAT posts, not when — an immediate timer collapses the window so the payload assertions
+  // read exactly as they did before the hold existed.
+  const made = new Function("fetch", "document", "localStorage", "setTimeout", "clearTimeout", src)(
+    fetch, document, localStorage, fn => { fn(); return 0; }, () => {});
   return { ...made, posts, store };
 }
 

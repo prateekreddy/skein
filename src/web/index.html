@@ -637,6 +637,17 @@
     margin-bottom:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-wrap:wrap;
     align-items:center; gap:6px; }
   .revstale code { color:var(--text-1); }
+  /* SKEIN-162: the pressed control becomes the receipt — success is green where the eye already
+     is, a refusal is red and STAYS until acted on. No toast carries either. */
+  .revreceipt { display:inline-flex; align-items:center; gap:7px; color:var(--done);
+    font-size:12.5px; font-weight:600; }
+  .revreceipt .undoleft { color:var(--faint); font-weight:400;
+    font-variant-numeric:tabular-nums; min-width:2.5ch; }
+  .revreceipt.failed { color:var(--attn); }
+  /* A row acted on this session marks done IN PLACE — green dot, struck title — and does not
+     vanish under you; it leaves on the next natural load. */
+  .revrow.done .revtitle { text-decoration:line-through; text-decoration-color:var(--border-3);
+    color:var(--faint); }
   .revtag.flag { color:var(--accent-2); border-color:var(--accent); }
   .revsignals { border:1px solid var(--border-2); border-left:2px solid var(--accent);
                 border-radius:var(--radius-sm); padding:8px 11px; margin-bottom:11px;
@@ -2636,6 +2647,17 @@ const rk = pr => (pr.repo_id || "") + "#" + pr.number;
 let revFilter = "all";        // all | author | reviewer | mentioned
 let revOpen = new Set();      // PR numbers expanded in place
 let revLoading = false;
+// SKEIN-162: a pressed verdict is held HERE, client-side, for eight seconds before anything
+// reaches GitHub. The control you pressed collapses to a receipt with a live countdown; `undo`
+// inside the window cancels a request that was never made. Keyed by rk; each entry carries the
+// payload exactly as assembled at press time, and walks waiting → posting → posted | failed.
+const REV_UNDO_MS = 8000;
+const revPending = new Map();
+// Rows acted on THIS session, marked done in place (green dot, struck title) without the full
+// loadReview(true) rebuild that used to reflow the pane under the reader. Cleared when the next
+// real queue arrives — by then the server's own fields carry the truth and the row leaves or
+// re-lanes on its own.
+const revDecided = new Set();
 // The last queue seen for each repo, so switching to one you have already looked at paints now
 // rather than after three GraphQL searches. The server keeps its own copy on disk for a cold start;
 // this is the same idea one layer up, for the switch that happens twenty times an hour.
@@ -2859,6 +2881,7 @@ function loadReview(force) {
       if (held.head_sha !== pr.head_sha) held.stale = true;
     }
     revAllowanceFor("*");
+    revDecided.clear();   // the fresh rows carry their own truth; the in-place marks retire
     revQueue = q; revSeen.set("*", q); renderReview();
     // **What skein already knows, before anything is asked for.** One request per repo, no model
     // calls, no rules — see `loadKnownSummaries`. The pump runs after it, so it only ever asks for
@@ -3786,7 +3809,9 @@ function revRow(pr) {
       ${revGist(s)}
       ${revRail(pr)}
     </div>`;
-  return `<div class="revrow${open ? " open" : ""}">${line}${open ? revBody(pr) : ""}</div>`;
+  // data-rk is the repaint hook: SKEIN-162 marks a row done in place, and a row you cannot find
+  // again is a row you can only repaint by rebuilding the pane around it.
+  return `<div class="revrow${open ? " open" : ""}${revDecided.has(rk(pr)) ? " done" : ""}" data-rk="${esc(rk(pr))}">${line}${open ? revBody(pr) : ""}</div>`;
 }
 
 // When this pull request started waiting on YOU — the sort key of the your-move lane.
@@ -3911,8 +3936,11 @@ function revBody(pr) {
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">open on GitHub ↗</a>
     </div>
     ${revDetail(pr)}
-    <div class="revacts">
-      <button type="button" class="revchip go" onclick="openReading('${esc(pr.repo_id)}', ${pr.number})">read the change</button>
+    <div class="revacts">${revPending.has(rk(pr))
+      // SKEIN-162: an act on this row is held, in flight, landed or refused — the strip you
+      // pressed IS where that story shows, not a toast in the opposite corner.
+      ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
+      : `<button type="button" class="revchip go" onclick="openReading('${esc(pr.repo_id)}', ${pr.number})">read the change</button>
       <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
       <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${JSON.stringify(pr.head_ref || "")})">box on this branch</button>
@@ -3921,7 +3949,7 @@ function revBody(pr) {
         : `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, ${JSON.stringify(pr.head_sha || "")})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
       <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
       <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, true)">re-read</button>
-      <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">review the code…</button>
+      <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">review the code…</button>`}
     </div>
     ${revFlowBox(pr)}
     ${revCritiqueHtml(pr)}
@@ -4123,14 +4151,21 @@ function revPost(repo, number, kind, body, comments, draftedAt) {
 /// The acts that reach GitHub under your name. Merge asks first — it is the one thing here that
 /// cannot be undone from this pane, and an approval you did not mean is a sentence to your
 /// colleague where a merge you did not mean is a commit on the base branch.
+///
+/// SKEIN-162: a verdict does not post on the press. The payload is assembled HERE, exactly as it
+/// would have been sent, and held for REV_UNDO_MS — the control you pressed becomes the receipt
+/// (`✓ approved · undo · 7s`), and undo cancels a request that never left the machine. Merge keeps
+/// its confirm and posts immediately: it already asks, and a second window on top of a dialog
+/// would be two undos for the one act that cannot be undone anyway.
 function revAct(repo, number, kind) {
   if (kind === "merge" && !confirm(`Merge #${number}?\n\nThis lands it on the base branch. Approving is separate and has already happened if you did it.`)) return;
+  const key = repo + "#" + number;
   const mine = revComposing && revComposing.number === number && revComposing.repo === repo;
   const body = mine ? revComposing.text : "";
   // Line comments ride only on a verdict — GitHub's review semantics, and the reading view's
   // sentence ("they post with your verdict") is a promise this line keeps.
   const verdict = kind === "approve" || kind === "request-changes" || kind === "comment";
-  const notes = verdict ? revNotesFor(repo + "#" + number) : [];
+  const notes = verdict ? revNotesFor(key) : [];
   // What travels: each note's body AND the line's own text — the anchor that survives a moved
   // head. A note saved before `text` existed sends "", which the server displaces, never guesses.
   const comments = notes.map(n => ({ path: n.path, line: n.line, body: n.body, text: n.text || "" }));
@@ -4140,20 +4175,169 @@ function revAct(repo, number, kind) {
   // DISPLACE a note into the body (harmless), where an over-new one would claim notes were
   // drafted against code they never saw and let a wrong line number stand.
   const draftedAt = notes.length
-    ? ((notes.find(n => n.sha) || {}).sha || ((revDiffs.get(repo + "#" + number) || {}).head_sha) || "")
+    ? ((notes.find(n => n.sha) || {}).sha || ((revDiffs.get(key) || {}).head_sha) || "")
     : "";
-  revPost(repo, number, kind, body, comments, draftedAt).then(d => {
-    if (!d.ok) { toast(d.error || "that did not go through"); return; }
-    toast(`#${number} ${d.text}`);
-    // Posted for real: the saved draft has done its job and must not resurface on the next open.
-    if (mine) { try { localStorage.removeItem(revComposeStore(revComposing)); } catch {} }
-    revComposing = null;
-    if (verdict && notes.length) revNotesClear(repo + "#" + number);
-    if (verdict && revReading && revReading.repo === repo && revReading.number === number) {
-      closeReading(); // the decision is made; the queue is what you return to
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
+  const p = {
+    repo, number, kind, verdict,
+    // The draft's localStorage key, kept until the post truly lands: undo reopens the composer
+    // with every word intact, because nothing was removed on a press that posted nothing.
+    mineStore: mine ? revComposeStore(revComposing) : "",
+    hadNotes: notes.length > 0,
+    url: pr.url || `https://github.com/${repo}/pull/${number}`,
+    send: () => revPost(repo, number, kind, body, comments, draftedAt),
+    state: "waiting", left: Math.round(REV_UNDO_MS / 1000), timer: null, tick: null, error: "", said: "",
+  };
+  // The composer closes now — the receipt replaces it — but only the on-screen copy.
+  if (mine) revComposing = null;
+  if (kind === "merge") {
+    // Immediate — but a verdict still inside its window must not survive to double-post.
+    const had = revPending.get(key);
+    if (had) { if (had.timer) clearTimeout(had.timer); if (had.tick) clearTimeout(had.tick); }
+    revPending.set(key, p);
+    revFire(key);
+    return;
+  }
+  revHold(key, p);
+}
+
+// --- SKEIN-162: hold, undo, fire — feedback where the eye is (docs/review-ux.md §7.1) ----------
+
+/// Start (or replace) the undo window for one PR's act. The timer is global, not the reading
+/// view's: closing the reading or moving to another PR during the countdown must NOT silently
+/// drop a decision you made, so the act still fires when the window lapses, wherever you are by
+/// then. (Closing the whole page is the one way out — the hold is client-side by design; that is
+/// what makes undo free.) A second press inside the window replaces the pending act wholesale.
+function revHold(key, p) {
+  const had = revPending.get(key);
+  if (had) { if (had.timer) clearTimeout(had.timer); if (had.tick) clearTimeout(had.tick); }
+  revPending.set(key, p);
+  p.timer = setTimeout(() => revFire(key), REV_UNDO_MS);
+  p.tick = setTimeout(() => revTick(key), 1000);
+  revPendingPaint(key);
+}
+
+/// Cancel a held act. Nothing was posted, so there is nothing to clean up: the draft and the line
+/// notes are exactly as they were, and the bar returns to its normal state.
+function revUndo(key) {
+  const p = revPending.get(key);
+  if (!p || p.state !== "waiting") return;
+  clearTimeout(p.timer);
+  if (p.tick) clearTimeout(p.tick);
+  revPending.delete(key);
+  revPendingPaint(key);
+}
+
+/// The visible countdown. Cosmetic and deliberately decoupled from the fire timer: a display that
+/// drifts a frame costs nothing, where a fire that depended on the display would.
+function revTick(key) {
+  const p = revPending.get(key);
+  if (!p || p.state !== "waiting") return;
+  p.left = Math.max(0, p.left - 1);
+  const spans = (revpane && revpane.querySelectorAll) ? revpane.querySelectorAll("[data-undo-left]") : [];
+  for (const el of spans) if (el.getAttribute("data-undo-left") === key) el.textContent = `${p.left}s`;
+  if (p.left > 0) p.tick = setTimeout(() => revTick(key), 1000);
+}
+
+/// The window lapsed (or try-again was pressed): the act goes out, byte-identical to what the
+/// press assembled. Success cleans up what the press deliberately left alone, marks the row done
+/// in place, and never calls loadReview(true) — the server's cache invalidation still runs on the
+/// act, so the next natural load agrees; the 2-4s full rebuild is exactly what this replaces.
+function revFire(key) {
+  const p = revPending.get(key);
+  if (!p || p.state === "posting" || p.state === "posted") return;
+  p.state = "posting";
+  p.timer = null;
+  if (p.tick) { clearTimeout(p.tick); p.tick = null; }
+  revPendingPaint(key);
+  p.send().then(d => {
+    if (!d || !d.ok) {
+      // Failure STAYS. The bar wears the refusal until acted on, and the row keeps its accent —
+      // a verdict that silently did not land is the worst outcome this surface can produce.
+      p.state = "failed";
+      p.error = (d && d.error) || "that did not go through";
+      // You may have moved on since the window lapsed; where the bar is not on screen, say it
+      // once out loud too. The sticky bar is still there when you come back to the row.
+      if (!(revReading && revReading.repo === p.repo && revReading.number === p.number)) {
+        toast(`#${p.number} refused: ${p.error}`);
+      }
+      revPendingPaint(key);
+      return;
     }
-    loadReview(true);
+    p.state = "posted";
+    p.said = d.text || "";
+    // Only now that it is real: the saved draft has done its job, the notes have posted.
+    if (p.mineStore) { try { localStorage.removeItem(p.mineStore); } catch {} }
+    if (p.verdict && p.hadNotes) revNotesClear(key);
+    revMarkDone(key, p.kind);
+    revPendingPaint(key);
   });
+}
+
+/// try again — the same payload, not a re-assembly: what you decided is what posts.
+function revRetry(key) {
+  const p = revPending.get(key);
+  if (!p || p.state !== "failed") return;
+  p.error = "";
+  revFire(key);
+}
+
+/// What the pressed control becomes, in every state of the held act. The success path never
+/// toasts — this line, in the control you pressed, IS the feedback.
+function revReceiptHtml(key, p) {
+  const did = { approve: "approved", "request-changes": "changes requested", comment: "commented",
+                archive: "set aside", merge: "merged" }[p.kind] || p.kind;
+  if (p.state === "waiting") {
+    return `<span class="revreceipt">✓ ${esc(did)}</span>
+      <button type="button" class="revchip" onclick="revUndo('${esc(key)}')">undo (u)</button>
+      <span class="revreceipt"><span class="undoleft" data-undo-left="${esc(key)}">${p.left}s</span></span>`;
+  }
+  if (p.state === "posting") return `<span class="revreceipt">✓ ${esc(did)} — posting…</span>`;
+  if (p.state === "posted") return `<span class="revreceipt">✓ ${esc(did)}${p.said ? ` — ${esc(p.said)}` : ""}</span>`;
+  return `<span class="revreceipt failed">✗ ${p.kind === "archive" ? "could not set aside" : "GitHub refused"}: ${esc(p.error)}</span>
+      <button type="button" class="revchip" onclick="revRetry('${esc(key)}')">try again</button>${
+      p.kind === "archive" ? "" : `
+      <a href="${esc(p.url)}" target="_blank" rel="noopener">open on GitHub ↗</a>`}`;
+}
+
+/// The queue row marks done IN PLACE — green dot, struck title — and does not vanish; vanishing
+/// rows in a list you are navigating destroy your place. The pr object itself is updated so any
+/// later full render agrees, and the row leaves on the next natural load.
+function revMarkDone(key, kind) {
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key);
+  if (pr) {
+    if (kind === "archive") pr.lane = "archived";
+    else if (kind !== "merge") {
+      pr.my_review = kind === "approve" ? "approved"
+        : kind === "request-changes" ? "changes-requested" : "commented";
+      pr.review_is_current = true;
+    }
+  }
+  revDecided.add(key);
+  revRepaintRow(key);
+}
+
+/// The one-row repaint this needs: replace that row's element alone, found by its data-rk hook —
+/// never the pane, never the network.
+function revRepaintRow(key) {
+  if (revReading || !revpane || !revpane.querySelector) return;
+  const el = revpane.querySelector(`.revrow[data-rk="${key.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`);
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key);
+  if (el && pr) el.outerHTML = revRow(pr);
+}
+
+/// Repaint the receipt where the control was: the reading's bar when this PR is on screen, that
+/// PR's queue row otherwise. Surgical on purpose — renderReview() would drop scroll and rebuild
+/// the subtree the eye is on, which is the reflow §7.1 exists to end.
+function revPendingPaint(key) {
+  if (revReading) {
+    if (revReading.repo + "#" + revReading.number !== key) return; // reading something else; the receipt waits in the row
+    const bar = revpane && revpane.querySelector && revpane.querySelector(".readbar");
+    if (bar) bar.outerHTML = revBarHtml(revReading.repo, revReading.number);
+    else renderReview();
+    return;
+  }
+  revRepaintRow(key);
 }
 
 // --- The reading view: the change itself, and the only place a verdict lives -------------------
@@ -4180,6 +4364,11 @@ function openReading(repo, number) {
 }
 
 function closeReading() {
+  // A LANDED receipt has been seen; leaving the reading retires it. Waiting and failed stay —
+  // one still owes GitHub the post when its window lapses, the other still owes YOU an answer.
+  const key = revReading ? revReading.repo + "#" + revReading.number : "";
+  const p = key && revPending.get(key);
+  if (p && p.state === "posted") revPending.delete(key);
   revReading = null;
   renderReview();
   if (revpane) revpane.scrollTop = revReturnScroll;
@@ -4244,19 +4433,30 @@ function renderReading() {
     </div>`;
   }
   const notes = revNotesFor(key);
+  return `<div class="revwrap reading">${head}${revMovedNotice(d, notes, pr.head_sha)}${body}${revBarHtml(repo, pr.number)}${revComposeHtml(pr)}</div>`;
+}
+
+// The reading view's verdict bar, its own function so SKEIN-162 can repaint it ALONE: pressing a
+// verdict replaces this bar with the receipt in place, without rebuilding the diff the eye is on.
+// While an act is held / in flight / refused, the receipt IS the bar.
+function revBarHtml(repo, number) {
+  const key = repo + "#" + number;
+  const d = revDiffs.get(key);
+  const notes = revNotesFor(key);
   const canJudge = d && !d.error && ((d.diff || "").trim());
-  const bar = `<div class="readbar">
+  const p = revPending.get(key);
+  if (p) return `<div class="readbar">${revReceiptHtml(key, p)}</div>`;
+  return `<div class="readbar">
       <span class="dim">${notes.length
         ? `${notes.length} line comment${notes.length === 1 ? "" : "s"} waiting — they post with your verdict`
         : canJudge ? "click a line to comment on it" : ""}</span>
       <span class="revspacer"></span>
       ${canJudge ? `
-      <button type="button" class="revchip go" onclick="revAct('${esc(repo)}', ${pr.number}, 'approve')">approve</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${pr.number}, 'request-changes')">request changes…</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${pr.number}, 'comment')">comment…</button>
-      <button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>` : ""}
-    </div>${revComposeHtml(pr)}`;
-  return `<div class="revwrap reading">${head}${revMovedNotice(d, notes, pr.head_sha)}${body}${bar}</div>`;
+      <button type="button" class="revchip go" onclick="revAct('${esc(repo)}', ${number}, 'approve')">approve</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${number}, 'comment')">comment…</button>
+      <button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>` : ""}
+    </div>`;
 }
 
 // The branch moved while — or since — you read. INFORMATIVE, not a gate: posting used to be the
@@ -4360,7 +4560,16 @@ if (typeof revpane !== "undefined" && revpane && revpane.addEventListener) {
     openReadingComposer(ln);
   });
   document.addEventListener("keydown", e => {
-    if (e.key === "Escape" && revReading && !e.target.closest("textarea, input")) closeReading();
+    if (!revReading || e.target.closest("textarea, input")) return;
+    // `u` inside the undo window takes the held act back — the receipt names the key. One key
+    // beside the existing Escape, NOT a keyboard layer; the full keymap is SKEIN-159/151's.
+    if (e.key === "u") {
+      const key = revReading.repo + "#" + revReading.number;
+      const p = revPending.get(key);
+      if (p && p.state === "waiting") { e.preventDefault(); revUndo(key); }
+      return;
+    }
+    if (e.key === "Escape") closeReading();
   });
 }
 
@@ -4659,13 +4868,28 @@ function revSnoozeRed() {
   });
 }
 
+// Set aside rides SKEIN-162's receipt/undo shape too — §7.1 calls it "the cheapest gesture and
+// therefore the one most often mis-aimed after a reflow": the button becomes the receipt, undo
+// inside the window means nothing was ever posted, and the row greys in place rather than the
+// pane rebuilding. Bring-back stays immediate: restoring a row is its own undo.
 function archivePr(id, n, on) {
-  fetch(`/api/repos/${encodeURIComponent(id)}/review/${n}/archive`, {
+  const key = id + "#" + n;
+  const send = () => fetch(`/api/repos/${encodeURIComponent(id)}/review/${n}/archive`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ on })
-  }).then(r => r.json()).then(d => {
-    if (!d.ok) { toast("could not update: " + (d.error || "unknown")); return; }
-    loadReview(true);
-  }).catch(e => toast("could not update: " + String(e.message || e).split("\n")[0]));
+  }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }));
+  if (!on) {
+    send().then(d => {
+      if (!d.ok) { toast("could not update: " + (d.error || "unknown")); return; }
+      loadReview(true);
+    });
+    return;
+  }
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
+  revHold(key, {
+    repo: id, number: n, kind: "archive", verdict: false, mineStore: "", hadNotes: false,
+    url: pr.url || `https://github.com/${id}/pull/${n}`, send,
+    state: "waiting", left: Math.round(REV_UNDO_MS / 1000), timer: null, tick: null, error: "", said: "",
+  });
 }
 
 // ---------- ship: PR · checks · stop · destroy (host-side via gh/sbx) ----------

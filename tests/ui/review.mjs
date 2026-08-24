@@ -670,7 +670,10 @@ await check("and goes stale the moment its module moves", async () => {
 });
 
 console.log("\nsetting aside");
-await check("set aside moves a PR to the archived lane", async () => {
+// SKEIN-162 (§7.1): the press is a receipt in place with an undo window, not an immediate act —
+// nothing posts inside the window, the row does not vanish under the reader, and only the next
+// natural load moves it to the archived lane.
+await check("set aside is a receipt in place — undo cancels, the lapse archives, the next load moves it", async () => {
   const rows = await page.$$("#revpane .revrow");
   for (const row of rows) {
     const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
@@ -679,11 +682,27 @@ await check("set aside moves a PR to the archived lane", async () => {
   await settle();
   const before = await laneTitles("your move");
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
+  await settle(300);
+  const strip = await page.$eval("#revpane .revrow.open .revacts", e => e.textContent || "");
+  if (!/set aside/.test(strip) || !/undo/.test(strip))
+    throw new Error(`the control did not become the receipt: "${strip}"`);
+  const held = await laneTitles("your move");
+  if (held.length !== before.length) throw new Error("the row vanished inside the undo window");
+  // undo: the request never left the machine, and the strip returns.
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('undo')");
+  await settle(300);
+  const restored = await page.$eval("#revpane .revrow.open .revacts", e => e.textContent || "");
+  if (!/set aside/.test(restored) || /undo/.test(restored)) throw new Error("undo did not restore the strip");
+  // Pressed for real: the window lapses, the archive posts, and the row greys IN PLACE.
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
+  await page.waitForSelector("#revpane .revrow.done", { timeout: 15000 });
+  const after = await laneTitles("your move");
+  if (after.length !== before.length) throw new Error("the done row left the lane before the next load");
+  // It leaves on the next natural load, by which time you are elsewhere.
+  await page.click("#revpane .revhead .revchip:has-text('refresh')");
   await settle(900);
   const archived = await laneTitles("archived");
-  if (!archived?.length) throw new Error("nothing reached the archived lane");
-  const after = await laneTitles("your move");
-  if (after.length >= before.length) throw new Error("it was archived but never left your-move");
+  if (!archived?.length) throw new Error("nothing reached the archived lane after the next load");
 });
 
 console.log("\nworkflows");

@@ -97,6 +97,11 @@ function board() {
     ${grab("revNotesFor")}
     ${grab("revNotesSave")}
     ${grab("revNotesClear")}
+    ${grab("REV_UNDO_MS")}
+    ${grab("revPending")}
+    ${grab("revDecided")}
+    ${grab("revReceiptHtml")}
+    ${grab("revBarHtml")}
     const revRenderNotes = () => {};
     const revComposeHtml = () => "";
     const renderDiff = txt => '<div class="diff">' + txt.split(String.fromCharCode(10)).map(l => '<span class="ln">' + l + '</span>').join('') + '</div>';
@@ -761,6 +766,7 @@ function rowWorld() {
     let revCommonChips = new Set();
     const revFlows = new Map();
     ${grab("rk")}
+    ${grab("revDecided")}
     ${grab("revMoved")}
     ${grab("revFlowChip")}
     ${grab("REV_MOVE_WORDS")}
@@ -1092,12 +1098,26 @@ function composeWorld(store) {
   const posts = [];
   const body = `
     ${grab("esc")}
+    ${grab("rk")}
     ${grab("revComposing")}
     ${grab("revComposeStore")}
     ${grab("revComposeSave")}
     ${grab("revCompose")}
     ${grab("revAct")}
+    ${grab("REV_UNDO_MS")}
+    ${grab("revPending")}
+    ${grab("revDecided")}
+    ${grab("revHold")}
+    ${grab("revTick")}
+    ${grab("revFire")}
+    ${grab("revMarkDone")}
+    ${grab("revRepaintRow")}
+    ${grab("revPendingPaint")}
     let revReading = null;
+    let revQueue = { prs: [] };
+    const revpane = null;
+    const revRow = () => "";
+    const document = { getElementById: () => null };
     const revNotes = new Map();
     const revDiffs = new Map();
     ${grab("revNotesStore")}
@@ -1119,7 +1139,9 @@ function composeWorld(store) {
       noteCount: key => revNotesFor(key).length,
     };
   `;
-  return { world: new Function("localStorage", "posts", "setTimeout", body)(store, posts, () => {}), posts };
+  // Immediate timers: SKEIN-162's undo window collapses to zero here, because these contracts are
+  // about the payload and the draft, not the window — undo.mjs owns the window itself.
+  return { world: new Function("localStorage", "posts", "setTimeout", "clearTimeout", body)(store, posts, fn => { fn(); return 0; }, () => {}), posts };
 }
 {
   const store = { data: {}, getItem(k) { return this.data[k] ?? null; }, setItem(k, v) { this.data[k] = v; }, removeItem(k) { delete this.data[k]; } };
