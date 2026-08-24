@@ -665,10 +665,17 @@ fn tried_path(repo_id: &str) -> PathBuf {
 }
 
 fn read_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
-    fs::read_to_string(tried_path(repo_id))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    let mut all: std::collections::BTreeMap<String, String> =
+        fs::read_to_string(tried_path(repo_id))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+    // Notes written before transport failures stopped being noted at all. They recorded failures
+    // that never reached a model — a diff that would not download — and honouring them keeps rows
+    // stuck on errors whose cause is already fixed. Dropped on read; the next write drops them
+    // from the file too.
+    all.retain(|_, why| !why.contains("its diff could not be read"));
+    all
 }
 
 fn note_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
@@ -738,8 +745,16 @@ pub fn read_waiting() -> Vec<String> {
             // A reading that could not be made is written down as tried, or the next pass picks it
             // straight back up — see `tried_path`. The row still says "not summarised", and the
             // button still reads it on request.
+            //
+            // Only when a model call was SPENT, though (`computed`) — that is the cost the note
+            // exists to stop repeating. A failure before the model — the diff would not download,
+            // GitHub was slow — costs one HTTP call to retry, and writing it down here pinned a
+            // bad network minute to the head sha as a permanent error row. Left unnoted, the next
+            // pass simply tries again.
             if matches!(summary.depth, Depth::Unread) {
-                note_tried(&repo.id, pr.number, &pr.head_sha, &summary.unread_because);
+                if summary.computed {
+                    note_tried(&repo.id, pr.number, &pr.head_sha, &summary.unread_because);
+                }
                 continue;
             }
             // Only what actually cost something is reported. A cache hit is not news, and a line
@@ -1169,6 +1184,9 @@ mod tests {
         crate::prq::forget_host_token();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        // While this file exists, the stub fails the diff request — a GitHub having a bad minute.
+        let diff_broken = home.join("diff-broken");
+        let diff_broken_flag = diff_broken.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 use std::io::{Read as _, Write as _};
@@ -1182,27 +1200,31 @@ mod tests {
                     .nth(1)
                     .unwrap_or_default()
                     .to_string();
-                let answer = if head.contains("/user/teams") {
-                    "[]".to_string()
+                let (status, answer) = if head.contains("/pulls/11 HTTP")
+                    && diff_broken_flag.exists()
+                {
+                    (500u16, r#"{"message":"transient"}"#.to_string())
+                } else if head.contains("/user/teams") {
+                    (200, "[]".to_string())
                 } else if head.contains("/user") {
-                    r#"{"login":"me"}"#.to_string()
+                    (200, r#"{"login":"me"}"#.to_string())
                 } else if body.contains("review-requested") {
                     // One pull request, waiting on your review, settled, unread.
-                    r#"{"data":{"search":{"nodes":[{"number":11,"title":"t","url":"u",
+                    (200, r#"{"data":{"search":{"nodes":[{"number":11,"title":"t","url":"u",
                        "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
                        "headRefOid":"sha11","baseRefName":"main",
                        "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
                        "latestReviews":{"nodes":[]},
                        "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]}}}"#
-                        .to_string()
+                        .to_string())
                 } else if head.contains("/graphql") {
-                    r#"{"data":{"search":{"nodes":[]}}}"#.to_string()
+                    (200, r#"{"data":{"search":{"nodes":[]}}}"#.to_string())
                 } else {
-                    "{}".to_string()
+                    (200, "{}".to_string())
                 };
                 let _ = stream.write_all(
                     format!(
-                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                         answer.len()
                     )
                     .as_bytes(),
@@ -1293,6 +1315,46 @@ mod tests {
             "a pull request that could not be read was asked about again — one model call per pass, \
              for ever"
         );
+
+        // **A failure that never reached the model is NOT written down** — the opposite rule from
+        // the one just proved, and they share a boundary: `computed`. A diff that would not
+        // download costs one HTTP call to retry; noting it pinned a bad network minute to the head
+        // sha as a permanent error row (found live, as every big diff "timing out" once and
+        // sticking). So: break the diff endpoint, watch the pass fail WITHOUT asking the model or
+        // writing a note — then heal the endpoint and watch the same head get read, no new commit
+        // and no button pressed.
+        let _ = std::fs::remove_dir_all(crate::prq::review_dir("demo").join("summaries"));
+        let _ = std::fs::remove_file(crate::prq::review_dir("demo").join("read-tried.json"));
+        std::fs::write(&diff_broken, "").unwrap();
+        assert!(
+            read_waiting().is_empty(),
+            "a pull request whose diff would not download was reported as read"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            1,
+            "the model was asked about a diff that never arrived"
+        );
+        // The raw file, not `read_tried` — that loader also filters legacy transport notes out,
+        // and asserting through it let a wrongly-written note pass as an unwritten one.
+        let raw = std::fs::read_to_string(crate::prq::review_dir("demo").join("read-tried.json"))
+            .unwrap_or_default();
+        assert!(
+            !raw.contains("11-sha11"),
+            "a transport failure was pinned to the head sha — it would never retry: {raw}"
+        );
+        std::fs::remove_file(&diff_broken).unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        let healed = read_waiting();
+        assert_eq!(
+            healed.len(),
+            1,
+            "GitHub came back and the reader did not: {healed:?}"
+        );
+        assert!(healed[0].contains("#11"), "{healed:?}");
 
         for key in [
             "SKEIN_HOME",

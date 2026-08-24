@@ -1100,9 +1100,12 @@ pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
 /// numbers rather than dropped: "this file changed and you cannot see it here" is a fact a reviewer
 /// needs, and silence would read as "nothing happened here".
 fn assembled_diff(slug: &str, number: u64, token: &str) -> Result<String, String> {
-    let files = crate::github::get_json(
+    // 120s, not the default 30: a hundred files each carrying its own patch is megabytes of JSON,
+    // and this runs on the background reader's clock, not a cockpit poll's.
+    let files = crate::github::get_json_within(
         &format!("/repos/{slug}/pulls/{number}/files?per_page=100"),
         token,
+        std::time::Duration::from_secs(120),
     )?;
     let files = files.as_array().ok_or("GitHub did not list the files")?;
     if files.is_empty() {
@@ -1151,9 +1154,12 @@ fn assembled_diff(slug: &str, number: u64, token: &str) -> Result<String, String
 /// mode-only change are all files GitHub names here and none of them appear the way a parser would
 /// expect. One page of 100 — a review over that many files is not one this tool is helping with.
 pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
-    Ok(crate::github::get_json(
+    // Same budget as `assembled_diff`, for the same reason: the listing carries each file's patch
+    // whether or not the caller wants it, so on a big change this answer is big.
+    Ok(crate::github::get_json_within(
         &format!("/repos/{slug}/pulls/{number}/files?per_page=100"),
         &host_token()?,
+        std::time::Duration::from_secs(120),
     )?
     .as_array()
     .map(|files| {
