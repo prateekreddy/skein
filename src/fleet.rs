@@ -4654,7 +4654,7 @@ fn heal_logins_script() -> String {
 command -v python3 >/dev/null 2>&1 || exit 0
 for rel in {files}; do
   python3 - "$HOME/$rel" {root}/*/home/"$rel" <<'SKEIN_HEAL'
-import json, os, shutil, sys, tempfile, time
+import json, os, sys, tempfile, time
 
 # Which of these credentials still works, and can the ones that do not be given it?
 #
@@ -4692,6 +4692,31 @@ def life(path):
     return None
 
 
+def merged(source_path, dest_path):
+    """The LOGIN blocks move; nothing else does.
+
+    `mcpOAuth` in particular stays where it is: that block holds per-box grants for MCP servers,
+    and a box's work-tracking gateway belongs to its repository — the same rule the launcher's own
+    credential sync already enforces. Copying the file whole did two wrong things at once: it
+    handed every healed box the donor's tracker identity (so the per-box sync connection stopped
+    meaning anything), and it destroyed the receiver's own grants, which were still valid — they
+    survive a logout, which is exactly why `life()` ignores them when judging the login."""
+    src = json.load(open(source_path))
+    try:
+        dst = json.load(open(dest_path))
+    except Exception:
+        dst = {{}}
+    if not isinstance(dst, dict):
+        dst = {{}}
+    for block in ("claudeAiOauth", "tokens"):
+        if isinstance(src.get(block), dict):
+            dst[block] = src[block]
+    for k in KEYS:
+        if str(src.get(k) or "").strip():
+            dst[k] = src[k]
+    return dst
+
+
 paths = sys.argv[1:]
 alive = [(life(p), p) for p in paths]
 best = max(((v, p) for v, p in alive if v is not None), default=None)
@@ -4705,9 +4730,9 @@ for value, path in alive:
     # running agent reads this file and a half-written one is a logged-out box.
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
-    os.close(fd)
     try:
-        shutil.copyfile(source, tmp)
+        with os.fdopen(fd, "w") as f:
+            json.dump(merged(source, path), f)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
         print(path)
@@ -10370,6 +10395,13 @@ b idle 5000000 4 1048576 1048576
                 r#"{{"claudeAiOauth":{{"accessToken":"a","refreshToken":"r","expiresAt":1,"refreshTokenExpiresAt":{refresh}}}}}"#
             )
         };
+        // The same, carrying an MCP grant — a per-box identity at a work-tracking gateway. The
+        // donor's must not travel; a dead box's own must survive being healed.
+        let cred_with_grant = |refresh: i64, grant: &str| {
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"a","refreshToken":"r","expiresAt":1,"refreshTokenExpiresAt":{refresh}}},"mcpOAuth":{{"sync|gw":{{"accessToken":"{grant}"}}}}}}"#
+            )
+        };
         let put = |at: &std::path::Path, body: &str| {
             std::fs::create_dir_all(at.parent().unwrap()).unwrap();
             std::fs::write(at, body).unwrap();
@@ -10380,11 +10412,11 @@ b idle 5000000 4 1048576 1048576
         // One box was logged into by hand. Two others are dead. A fourth has no HOME at all.
         put(
             &boxes.join("live/home/.claude/.credentials.json"),
-            &cred(future),
+            &cred_with_grant(future, "donor-grant"),
         );
         put(
             &boxes.join("deadA/home/.claude/.credentials.json"),
-            &cred(1),
+            &cred_with_grant(1, "deadA-own-grant"),
         );
         put(
             &boxes.join("deadB/home/.claude/.credentials.json"),
@@ -10411,29 +10443,64 @@ b idle 5000000 4 1048576 1048576
         );
 
         let read = |at: std::path::PathBuf| std::fs::read_to_string(at).unwrap_or_default();
-        let live = cred(future);
+        let parsed = |at: std::path::PathBuf| {
+            serde_json::from_str::<serde_json::Value>(&read(at)).expect("a healed file parses")
+        };
+        let logged_in = |v: &serde_json::Value| {
+            v.get("claudeAiOauth")
+                .and_then(|b| b.get("refreshTokenExpiresAt"))
+                .and_then(|t| t.as_i64())
+                == Some(future)
+        };
+        let grant = |v: &serde_json::Value| {
+            v.get("mcpOAuth")
+                .and_then(|m| m.get("sync|gw"))
+                .and_then(|g| g.get("accessToken"))
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        };
 
-        assert_eq!(
-            read(boxes.join("deadA/home/.claude/.credentials.json")),
-            live,
+        let dead_a = parsed(boxes.join("deadA/home/.claude/.credentials.json"));
+        assert!(
+            logged_in(&dead_a),
             "a box with a dead credential was left logged out while a live one existed — which is \
-             the six-logins-a-day this exists to end"
+             the six-logins-a-day this exists to end: {dead_a}"
         );
+        // **The login moved; the identity did not.** The healed box keeps ITS grant at ITS
+        // gateway — spreading the donor's would make every per-box sync connection setting a
+        // fiction, and destroy a grant that was still valid (they survive a logout).
         assert_eq!(
-            read(boxes.join("deadB/home/.claude/.credentials.json")),
-            live
+            grant(&dead_a).as_deref(),
+            Some("deadA-own-grant"),
+            "healing the login replaced the box's own MCP grant: {dead_a}"
         );
+
+        let dead_b = parsed(boxes.join("deadB/home/.claude/.credentials.json"));
+        assert!(logged_in(&dead_b));
+        assert_eq!(
+            grant(&dead_b),
+            None,
+            "a box that had no MCP grant was handed the donor's: {dead_b}"
+        );
+
         // UP as well as down. The canonical copy was the corpse; the whole point is that a box's
         // login may heal it once it is dead, which the launcher's start-time rule cannot do.
-        assert_eq!(
-            read(home.join(".claude/.credentials.json")),
-            live,
+        let host = parsed(home.join(".claude/.credentials.json"));
+        assert!(
+            logged_in(&host),
             "the fleet's own dead copy was left in place, so the next box to start takes a corpse"
         );
+        assert_eq!(
+            grant(&host),
+            None,
+            "the donor's MCP grant flowed up into the fleet's canonical copy — from where every \
+             new box would inherit it: {host}"
+        );
+
         // Untouched: the one that was already alive, and anything that is not a credential.
         assert_eq!(
             read(boxes.join("live/home/.claude/.credentials.json")),
-            live
+            cred_with_grant(future, "donor-grant")
         );
         assert_eq!(
             read(boxes.join("deadA/home/.claude/settings.json")),
