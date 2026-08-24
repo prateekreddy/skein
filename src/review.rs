@@ -1445,6 +1445,9 @@ pub fn assemble_post(overall: &str, kept: &[Draft]) -> (String, Vec<crate::prq::
             path: d.path.clone(),
             line: d.line,
             body: d.text.clone(),
+            // A Draft never captured the line's own content, and this path refuses a moved head
+            // before posting, so there is nothing to re-anchor with and no need.
+            text: String::new(),
         })
         .collect();
     (body, anchored)
@@ -1482,6 +1485,8 @@ pub fn post_critique(
         crate::prq::Verdict::Comment,
         &body,
         &anchored,
+        // Drafted against the same head the gate above just verified — never a moved-head post.
+        head_sha,
     )?;
     crate::prq::invalidate(&repo.id);
     Ok(said)

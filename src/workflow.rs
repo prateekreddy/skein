@@ -519,24 +519,36 @@ pub fn save(raw: &[u8]) -> Result<Vec<Workflow>, String> {
 /// that cannot read back what it wrote is one that quietly loses a step.
 pub fn to_bytes(flows: &[Workflow]) -> Result<Vec<u8>, String> {
     let written = Written {
-        workflow: flows
-            .iter()
-            .map(|w| WrittenFlow {
-                name: w.name.clone(),
-                matches: w.matches.iter().map(spell_cond).collect(),
-                serial: w.serial,
-                steps: w
-                    .steps
-                    .iter()
-                    .map(|s| WrittenStep {
-                        when: s.when.iter().map(spell_cond).collect(),
-                        act: spell_act(&s.act),
-                    })
-                    .collect(),
-            })
-            .collect(),
+        workflow: flows.iter().map(written_flow).collect(),
     };
     serde_json::to_vec_pretty(&written).map_err(|e| format!("could not write workflows: {e}"))
+}
+
+fn written_flow(w: &Workflow) -> WrittenFlow {
+    WrittenFlow {
+        name: w.name.clone(),
+        matches: w.matches.iter().map(spell_cond).collect(),
+        serial: w.serial,
+        steps: w
+            .steps
+            .iter()
+            .map(|s| WrittenStep {
+                when: s.when.iter().map(spell_cond).collect(),
+                act: spell_act(&s.act),
+            })
+            .collect(),
+    }
+}
+
+/// One workflow in the shape the file has and the editor edits, as JSON.
+///
+/// THE one spelling, shared with [`to_bytes`], because the server used to rebuild this shape by
+/// hand — name, matches, steps — and the hand copy silently dropped `serial` the day it was added.
+/// The owner's file said `"serial": true`; the editor payload said nothing; a save from that editor
+/// would have written the file back WITHOUT it, and the train would have quietly gone parallel. A
+/// second serializer is the same defect as a second parser, and this is its funeral.
+pub fn editor_shape(w: &Workflow) -> serde_json::Value {
+    serde_json::to_value(written_flow(w)).unwrap_or_default()
 }
 
 /// How a condition is written down. The inverse of [`Cond::parse`], and tested against it.
@@ -1012,6 +1024,30 @@ mod tests {
     /// PARSED — so a field the round trip dropped would be a train that quietly went parallel the
     /// first time somebody edited an unrelated workflow.
     #[test]
+    /// The editor payload is the file's own shape — the regression this guards: the server once
+    /// rebuilt it by hand and the copy dropped `serial`, so the cockpit under-reported a running
+    /// train and a save from that editor would have stripped the field from the file.
+    #[test]
+    fn the_editor_shape_carries_serial_and_the_file_spelling() {
+        let flows = from_bytes(
+            br#"{ "workflow": [ { "name": "t", "serial": true,
+                 "steps": [ { "when": ["approved"], "do": "add-label:ci" } ] } ] }"#,
+        )
+        .unwrap();
+        let shape = editor_shape(&flows[0]);
+        assert_eq!(
+            shape.get("serial").and_then(|v| v.as_bool()),
+            Some(true),
+            "the editor payload lost `serial` — the hand-serializer bug is back"
+        );
+        // The step keeps the file's own key for the action.
+        assert_eq!(
+            shape["steps"][0].get("do").and_then(|v| v.as_str()),
+            Some("add-label:ci"),
+            "the editor payload spells the action under `do`, as the file does"
+        );
+    }
+
     fn serial_survives_the_round_trip_and_the_save() {
         let file = br#"{"workflow":[
           {"name":"merge-train","serial":true,"matches":["mine"],"steps":[{"when":[],"do":"merge:squash+delete"}]},

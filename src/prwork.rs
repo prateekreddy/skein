@@ -296,7 +296,105 @@ pub fn clear(repo_id: &str, number: u64) {
     let mut stops = read_stops(repo_id);
     if stops.remove(&number.to_string()).is_some() {
         let _ = write_stops(repo_id, &stops);
+        // A person clearing a stop is an event the timeline must show — without it, a journal
+        // reads "stopped … did …" with no sign of the hand that let it move again.
+        record(
+            repo_id,
+            number,
+            "",
+            0,
+            "cleared",
+            "the stop was cleared — the workflow may act again",
+        );
     }
+}
+
+/// One line of a pull request's workflow history — the durable answer to "what happened to this
+/// one, and in what order".
+///
+/// The stop file says only the *latest* reason; the audit log belongs to the host and mixes every
+/// box's events. This is skein's own per-PR timeline, written the moment something happens, read
+/// oldest-first.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct JournalEntry {
+    /// When, as epoch milliseconds.
+    pub at_ms: i64,
+    /// Which workflow acted. Empty for events no workflow owns — a person clearing a stop.
+    pub flow: String,
+    /// Which step, 1-based. `0` means "not a step": a clear, or a stop written by hand.
+    pub step: usize,
+    /// `"did"` | `"stopped"` | `"cleared"`.
+    pub kind: String,
+    /// The human sentence — the same one the audit and the row carry.
+    pub what: String,
+}
+
+/// Where a repo's workflow journal lives: beside the stops, keyed the same way.
+fn journal_path(repo_id: &str) -> PathBuf {
+    crate::prq::review_dir(repo_id).join("workflow-journal.json")
+}
+
+fn read_journal(repo_id: &str) -> std::collections::BTreeMap<String, Vec<JournalEntry>> {
+    // A corrupt or absent file reads as empty, never as an error: the journal is a record of what
+    // happened, and losing it must not stop anything from happening.
+    std::fs::read_to_string(journal_path(repo_id))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Write one journal entry down, now.
+///
+/// Write-through like the stops file: every event lands on disk before the function returns, so a
+/// server that dies mid-pass has still said what it did. Each pull request keeps its newest 50
+/// entries — a train PR sees a handful of acts on its way to merged, so 50 covers weeks of
+/// stop/clear churn without the file growing without bound.
+fn record(repo_id: &str, number: u64, flow: &str, step: usize, kind: &str, what: &str) {
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut all = read_journal(repo_id);
+    let entries = all.entry(number.to_string()).or_default();
+    entries.push(JournalEntry {
+        at_ms,
+        flow: flow.to_string(),
+        step,
+        kind: kind.to_string(),
+        what: what.to_string(),
+    });
+    if entries.len() > 50 {
+        let drop = entries.len() - 50;
+        entries.drain(..drop);
+    }
+    let path = journal_path(repo_id);
+    let write = || -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let body = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
+        std::fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    if let Err(e) = write() {
+        // Best-effort, said out loud: a journal that could not be written loses history, not
+        // safety — the stop file is the one whose loss re-attempts an action.
+        eprintln!("skein: could not journal #{number}'s workflow event ({e})");
+    }
+}
+
+/// One pull request's workflow history, oldest first.
+pub fn journal(repo_id: &str, number: u64) -> Vec<JournalEntry> {
+    read_journal(repo_id)
+        .remove(&number.to_string())
+        .unwrap_or_default()
+}
+
+/// Every journaled pull request in this repo, in numeric order, each timeline oldest first.
+pub fn journals(repo_id: &str) -> std::collections::BTreeMap<u64, Vec<JournalEntry>> {
+    read_journal(repo_id)
+        .into_iter()
+        .filter_map(|(number, entries)| number.parse::<u64>().ok().map(|n| (n, entries)))
+        .collect()
 }
 
 /// What a workflow would do to one pull request, and why — without doing any of it.
@@ -390,7 +488,12 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
         Act::Flag(why) => {
             // A flag is the workflow saying it has gone as far as it can. Written down like any
             // other stop so the next poll does not simply say it again.
+            //
+            // The journal write sits HERE, beside the stop write, not inside `stop()`: `stop` is
+            // also called by hands other than a workflow's, and those stops are not this flow's
+            // step doing something — journaling them here keeps the flow and step honest.
             stop(repo_id, number, why);
+            record(repo_id, number, &flow.name, chosen.step + 1, "stopped", why);
             return Outcome::Stopped(why.clone());
         }
         Act::AddLabel(label) => add_label(slug, number, label, token)
@@ -431,6 +534,7 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
     match done {
         Ok(what) => {
             crate::warden_client::reported(&format!("pr-workflow:{}", flow.name), &what, &by);
+            record(repo_id, number, &flow.name, chosen.step + 1, "did", &what);
             Outcome::Did(what)
         }
         Err(why) => {
@@ -438,6 +542,7 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
             // just proved stale, and the next poll would make the same one.
             let why = format!("{by} could not be done: {why}");
             stop(repo_id, number, &why);
+            record(repo_id, number, &flow.name, chosen.step + 1, "stopped", &why);
             crate::warden_client::reported(
                 &format!("pr-workflow:{}", flow.name),
                 &format!("stopped on #{number}"),
@@ -560,6 +665,69 @@ fn delete_branch(slug: &str, head_ref: &str, token: &str) -> Result<(), String> 
     .map(|_| ())
 }
 
+/// One serial workflow's train in one repo: who is in line, who is at the front, who has been
+/// passed over — the answer to "what is it working on, and which step is everyone else waiting
+/// behind".
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrainView {
+    /// The serial workflow's name.
+    pub flow: String,
+    /// The one pull request that may act this pass: the oldest carrying PR without a stop. `None`
+    /// when the line is empty or everyone in it is stopped — a train with nobody to move.
+    pub front: Option<u64>,
+    /// Every carrying pull request in train order — oldest first, lowest number — front included.
+    pub line: Vec<u64>,
+    /// Only this flow's carrying pull requests that are stopped, with their reasons, in train
+    /// order. The passed-over, not the whole repo's stop file.
+    pub stopped: Vec<crate::prq::StoppedPr>,
+}
+
+/// Every serial workflow's train in this repo, from the same ordering-and-front rule the tick
+/// acts on.
+///
+/// `prs` is (number, carried flow name) for the non-archived carrying pull requests — the caller
+/// has already decided who carries what, because that needs facts this function should not
+/// re-derive. This is the ONE place the train order and the front are computed: [`sweep`] calls
+/// through it before acting, so a panel drawn from it cannot disagree with what the tick then
+/// does. A non-serial workflow gets no view — a train is the serial thing.
+pub fn trains(repo_id: &str, prs: &[(u64, String)], flows: &[Workflow]) -> Vec<TrainView> {
+    let stops = read_stops(repo_id);
+    flows
+        .iter()
+        .filter(|flow| flow.serial)
+        .map(|flow| {
+            // Oldest first — lowest number, the sort key the owner chose.
+            let mut line: Vec<u64> = prs
+                .iter()
+                .filter(|(_, name)| *name == flow.name)
+                .map(|(number, _)| *number)
+                .collect();
+            line.sort_unstable();
+            // The first one without a stop is the front; a stopped PR is passed over — the "skip
+            // failures and move ahead" (docs/pr-workflow.md, "The merge train").
+            let front = line
+                .iter()
+                .copied()
+                .find(|number| !stops.contains_key(&number.to_string()));
+            let stopped = line
+                .iter()
+                .filter_map(|number| {
+                    stops.get(&number.to_string()).map(|why| crate::prq::StoppedPr {
+                        number: *number,
+                        why: why.clone(),
+                    })
+                })
+                .collect();
+            TrainView {
+                flow: flow.name.clone(),
+                front,
+                line,
+                stopped,
+            }
+        })
+        .collect()
+}
+
 /// One pass over the fleet: every repo skein manages, every pull request a workflow governs, one
 /// step each.
 ///
@@ -634,21 +802,17 @@ pub fn sweep() -> Vec<String> {
         // "skip failures and move ahead" — and everyone behind the front is simply waiting, which
         // is the ordinary state of a train and not an event (`docs/pr-workflow.md`, "The merge
         // train"). A workflow whose every carrying PR is stopped has no front, and nobody acts.
-        let mut fronts = std::collections::BTreeMap::new();
-        for flow in flows.iter().filter(|f| f.serial) {
-            let mut train: Vec<u64> = rows
-                .iter()
-                .filter(|(_, _, name)| *name == flow.name)
-                .map(|(pr, _, _)| pr.number)
-                .collect();
-            train.sort_unstable();
-            if let Some(front) = train
-                .into_iter()
-                .find(|number| stopped(&repo.id, *number).is_none())
-            {
-                fronts.insert(flow.name.clone(), front);
-            }
-        }
+        //
+        // Computed by [`trains`] — the same function the cockpit's train panel reads — so what a
+        // person is shown and what the tick then does cannot be two computations that drift apart.
+        let carrying: Vec<(u64, String)> = rows
+            .iter()
+            .map(|(pr, _, name)| (pr.number, name.clone()))
+            .collect();
+        let fronts: std::collections::BTreeMap<String, u64> = trains(&repo.id, &carrying, &flows)
+            .into_iter()
+            .filter_map(|train| train.front.map(|front| (train.flow, front)))
+            .collect();
         let mut acted_in_repo = false;
         for (pr, facts, name) in &rows {
             let Some(flow) = flows.iter().find(|f| &f.name == name) else {
@@ -1525,5 +1689,214 @@ mod tests {
             std::env::remove_var(key);
         }
         crate::prq::forget_host_token();
+    }
+
+    /// The journal keeps the timeline: an act, a flag, and the hand that cleared it, in order.
+    ///
+    /// The owner's words: *"I need to know exactly what is it working on, which step is it on,
+    /// status of previous steps and so on."* The stops file answers only "why is it stopped now";
+    /// this is the record of what already happened — written where the events happen, so a
+    /// timeline read tomorrow says what the audit said today.
+    #[test]
+    fn the_journal_keeps_the_timeline_of_did_stopped_and_cleared() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let (base, _heard) = github(200);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // An action that lands is a "did", carrying the flow, the 1-based step, and the sentence.
+        let out = perform(
+            &subject("abc"),
+            &flow(),
+            &chosen(Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: false,
+            })),
+            "t",
+        );
+        assert!(matches!(out, Outcome::Did(_)), "{out:?}");
+        let entries = journal("demo", 41);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            (entries[0].kind.as_str(), entries[0].flow.as_str(), entries[0].step),
+            ("did", "ship-mine", 4),
+            "the entry must name the flow and the 1-based step: {entries:?}"
+        );
+        assert!(entries[0].what.contains("merged #41"), "{entries:?}");
+        assert!(entries[0].at_ms > 0, "no timestamp: {entries:?}");
+
+        // A flag is a "stopped", with the workflow's own reason.
+        let out = perform(
+            &subject("abc"),
+            &flow(),
+            &chosen(Act::Flag("CI is red".into())),
+            "t",
+        );
+        assert!(matches!(out, Outcome::Stopped(_)), "{out:?}");
+
+        // And a person clearing the stop is an event too — flow-less, step-less, but on record.
+        clear("demo", 41);
+
+        let entries = journal("demo", 41);
+        let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["did", "stopped", "cleared"],
+            "the timeline is not in the order things happened: {entries:?}"
+        );
+        assert_eq!(entries[1].what, "CI is red");
+        assert_eq!(entries[1].step, 4, "a flag is a step and must say which");
+        assert_eq!(
+            (entries[2].flow.as_str(), entries[2].step),
+            ("", 0),
+            "a clear is nobody's step: {entries:?}"
+        );
+
+        // The other reader carries the same timelines, keyed numerically.
+        let all = journals("demo");
+        assert_eq!(all.keys().copied().collect::<Vec<_>>(), vec![41]);
+        assert_eq!(all[&41].len(), 3);
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
+            std::env::remove_var(key);
+        }
+    }
+
+    /// A failed action journals the same "stopped" it writes to the stops file.
+    #[test]
+    fn a_failed_action_reaches_the_journal_as_stopped() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        let (base, _heard) = github(409);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let out = perform(
+            &subject("abc"),
+            &flow(),
+            &chosen(Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: false,
+            })),
+            "t",
+        );
+        assert!(matches!(out, Outcome::Stopped(_)), "{out:?}");
+        let entries = journal("demo", 41);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].kind, "stopped");
+        assert!(
+            entries[0].what.contains("ship-mine") && entries[0].what.contains("could not be done"),
+            "the journal must keep the failure's own sentence: {entries:?}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
+            std::env::remove_var(key);
+        }
+    }
+
+    /// Each pull request keeps its newest fifty entries, and the oldest fall off.
+    #[test]
+    fn the_journal_caps_each_pull_request_at_its_newest_fifty() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        for i in 1..=55 {
+            record("demo", 7, "train", 1, "did", &format!("event {i}"));
+        }
+        let entries = journal("demo", 7);
+        assert_eq!(entries.len(), 50, "the cap did not hold");
+        assert_eq!(
+            entries[0].what, "event 6",
+            "the OLDEST must fall off, not the newest"
+        );
+        assert_eq!(entries[49].what, "event 55");
+
+        // Another pull request's timeline is untouched by #7's churn.
+        record("demo", 9, "train", 1, "did", "only one");
+        assert_eq!(journal("demo", 9).len(), 1);
+        assert_eq!(journal("demo", 7).len(), 50);
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A corrupt journal reads as empty, never as an error — history lost is not action stopped.
+    #[test]
+    fn a_corrupt_journal_reads_as_empty() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        std::fs::create_dir_all(crate::prq::review_dir("demo")).unwrap();
+        std::fs::write(journal_path("demo"), b"{ this is not json").unwrap();
+        assert!(journal("demo", 7).is_empty());
+        assert!(journals("demo").is_empty());
+        // And the next write recovers rather than failing forever on the bad file.
+        record("demo", 7, "train", 1, "did", "back on the rails");
+        assert_eq!(journal("demo", 7).len(), 1);
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The train view names the front, the whole line, and the passed-over — and only for a
+    /// workflow that is serial, because a train is the serial thing.
+    ///
+    /// This is the panel's read of the same rule the tick acts on ([`sweep`] calls [`trains`]
+    /// too), so what it asserts is the rule itself: oldest first, the first unstopped one is the
+    /// front, a stopped PR is in the line AND named with its reason.
+    #[test]
+    fn a_train_view_names_the_front_the_line_and_the_passed_over() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let flows = crate::workflow::from_bytes(
+            br#"{"workflow":[
+              {"name":"train","serial":true,"steps":[{"when":[],"do":"merge:squash"}]},
+              {"name":"loose","steps":[{"when":[],"do":"add-label:ci"}]}]}"#,
+        )
+        .unwrap();
+        stop("demo", 5, "CI is red");
+
+        // Handed over scrambled, so the order below is the function's own and not the caller's.
+        let prs = vec![
+            (9, "train".to_string()),
+            (3, "loose".to_string()),
+            (5, "train".to_string()),
+            (7, "train".to_string()),
+        ];
+        let views = trains("demo", &prs, &flows);
+        assert_eq!(
+            views.len(),
+            1,
+            "a non-serial workflow got a train view: {views:?}"
+        );
+        let view = &views[0];
+        assert_eq!(view.flow, "train");
+        assert_eq!(
+            view.front,
+            Some(7),
+            "the front must be the oldest UNSTOPPED pull request"
+        );
+        assert_eq!(view.line, vec![5, 7, 9], "train order is oldest first, front included");
+        assert_eq!(view.stopped.len(), 1);
+        assert_eq!(
+            (view.stopped[0].number, view.stopped[0].why.as_str()),
+            (5, "CI is red"),
+            "the passed-over must be named with its reason"
+        );
+
+        // Everyone stopped: a train with nobody to move has no front, and still shows its line.
+        stop("demo", 7, "conflicts");
+        stop("demo", 9, "checks");
+        let views = trains("demo", &prs, &flows);
+        assert_eq!(views[0].front, None);
+        assert_eq!(views[0].line, vec![5, 7, 9]);
+        assert_eq!(views[0].stopped.len(), 3);
+
+        std::env::remove_var("SKEIN_HOME");
     }
 }
