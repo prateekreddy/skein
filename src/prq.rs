@@ -169,6 +169,16 @@ pub struct Pr {
     /// one layer down from the test that protects it.
     #[serde(default)]
     pub mergeable: Option<bool>,
+    /// GitHub's raw verdict on how this head sits against its base — `mergeStateStatus`, kept
+    /// uppercase exactly as GitHub spells it: `BEHIND`, `CLEAN`, `DIRTY`, `BLOCKED`, `UNSTABLE`,
+    /// `UNKNOWN`, …. `BEHIND` is the one a merge train reads: the base has moved, so this cannot
+    /// ride until the base is merged in.
+    ///
+    /// Empty when GitHub did not say — and a queue remembered by an older skein has no such field,
+    /// so it parses as `""`. Same rule as [`Pr::mergeable`]'s `None`: empty is "not known", never
+    /// "current", and a caller that read `""` as `CLEAN` would advance a train on a guess.
+    #[serde(default)]
+    pub merge_state: String,
     /// The reviewer's first question is "can I do this now?", and that is size before anything
     /// else. `Option` so a queue remembered from before these fields is honest: absent renders as
     /// nothing, where a defaulted 0 would claim an empty change.
@@ -222,6 +232,16 @@ pub struct Queue {
     /// Was this read from GitHub just now, or handed over while a fresh one is being fetched?
     #[serde(default = "yes")]
     pub fresh: bool,
+    /// The repository's default branch — the trunk a merge train advances. Filled during a
+    /// refresh from `GET /repos/{slug}` (its `default_branch`), remembered per process like
+    /// [`renamed_to`]'s answer beside it.
+    ///
+    /// Empty is honest "not known", never a branch name: a queue remembered by an older skein has
+    /// no such field and parses as `""`, and a lookup that failed is remembered as `""` rather
+    /// than retried on every poll. A caller treats `""` as "ask again after a restart", not as a
+    /// trunk called nothing.
+    #[serde(default)]
+    pub trunk: String,
 }
 
 /// `Queue::fresh` defaults true: everything that computes one directly has just read GitHub, and a
@@ -362,6 +382,42 @@ static RENAMES: std::sync::Mutex<std::collections::BTreeMap<String, Option<Strin
 /// Forget the resolved names, for tests and for a caller that has just been told one changed.
 pub fn forget_renames() {
     if let Ok(mut seen) = RENAMES.lock() {
+        seen.clear();
+    }
+}
+
+/// The repository's default branch — `main`, `master`, whatever the repo says — for
+/// [`Queue::trunk`].
+///
+/// Remembered per process for [`renamed_to`]'s reason: this is a REST round trip whose answer
+/// changes about never, asked from a poll. A lookup that fails is remembered as `""` — unknown —
+/// rather than retried on every refresh; the cost of being wrong is an empty trunk until a
+/// restart, and [`Queue::trunk`]'s contract is that `""` means "not known", so nothing downstream
+/// mistakes the failure for an answer.
+fn trunk_of(slug: &str) -> String {
+    let mut seen = TRUNKS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(known) = seen.get(slug) {
+        return known.clone();
+    }
+    let trunk = host_token()
+        .ok()
+        .and_then(|token| crate::github::get_json(&format!("/repos/{slug}"), &token).ok())
+        .and_then(|repo| {
+            repo.get("default_branch")
+                .and_then(|b| b.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    seen.insert(slug.to_string(), trunk.clone());
+    trunk
+}
+
+static TRUNKS: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Forget the resolved trunks — for tests, like [`forget_renames`] above.
+pub fn forget_trunks() {
+    if let Ok(mut seen) = TRUNKS.lock() {
         seen.clear();
     }
 }
@@ -575,12 +631,25 @@ pub fn invalidate(repo_id: &str) {
 
 /// Build a repo's review queue. `force` skips the micro-cache.
 pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
-    if !force && !cfg!(test) {
-        let cache = QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, q)) = cache.as_ref().and_then(|m| m.get(&repo.id)) {
-            if at.elapsed() < Duration::from_secs(60) {
-                return Ok(q.clone());
-            }
+    // `ZERO`: nothing is younger than no time at all, so force refreshes past whatever is cached.
+    let max_age = match force {
+        true => Duration::ZERO,
+        false => Duration::from_secs(60),
+    };
+    queue_within(repo, max_age)
+}
+
+/// Build a repo's review queue, serving the remembered in-process copy while it is younger than
+/// `max_age`.
+///
+/// One cache, two budgets. [`queue`]'s sixty seconds fits a pane somebody is looking at; the badge
+/// poller passes ten minutes, because a badge is a number acted on within minutes and every refresh
+/// behind it is three-plus GraphQL searches **per repo, per open tab, every three minutes** — the
+/// steady-state spend that got the owner rate-limited.
+pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
+    if !cfg!(test) {
+        if let Some(young) = unexpired_within(&repo.id, max_age) {
+            return Ok(young);
         }
     }
     let stored = repo_slug(repo)
@@ -698,9 +767,13 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
         let _ = write_snoozed(&repo.id, &kept);
     }
 
+    // Looked up during the refresh, so an answer served from the cache never pays for it — and
+    // the lookup itself is remembered per process besides.
+    let trunk = trunk_of(&slug);
     let q = Queue {
         repo_id: repo.id.clone(),
         slug,
+        trunk,
         viewer: login,
         ai: crate::review::summaries_enabled(),
         prs,
@@ -762,9 +835,18 @@ pub fn remembered(repo_id: &str) -> Option<Queue> {
 /// Separate from [`queue`] so a caller can ask "would this cost a network round trip" without
 /// taking one. That is the whole difference between painting now and painting in four seconds.
 pub fn unexpired(repo_id: &str) -> Option<Queue> {
+    unexpired_within(repo_id, Duration::from_secs(60))
+}
+
+/// The TTL rule itself: the in-process copy, if it is younger than `max_age`.
+///
+/// Its own function rather than three lines inside [`queue_within`], because that path bypasses
+/// the cache under `cfg!(test)` — this is the piece a test can hold, by seeding [`QUEUE_CACHE`]
+/// with a back-stamped entry and asking.
+fn unexpired_within(repo_id: &str, max_age: Duration) -> Option<Queue> {
     let cache = QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let (at, q) = cache.as_ref()?.get(repo_id)?;
-    (at.elapsed() < Duration::from_secs(60)).then(|| q.clone())
+    (at.elapsed() < max_age).then(|| q.clone())
 }
 
 /// The query behind the queue. One call per membership rule, and every field the parser needs.
@@ -779,7 +861,7 @@ query($q: String!, $n: Int!) {
     nodes {
       ... on PullRequest {
         number title url isDraft updatedAt
-        headRefName headRefOid baseRefName reviewDecision mergeable
+        headRefName headRefOid baseRefName reviewDecision mergeable mergeStateStatus
         additions deletions changedFiles
         labels(first: 20) { nodes { name } }
         author { login }
@@ -984,6 +1066,7 @@ fn build_pr(
         settled: settled(&s("committedDate")),
         review_decision,
         mergeable,
+        merge_state: s("mergeStateStatus"),
         additions: item.get("additions").and_then(|v| v.as_u64()),
         deletions: item.get("deletions").and_then(|v| v.as_u64()),
         changed_files: item.get("changedFiles").and_then(|v| v.as_u64()),
@@ -1197,13 +1280,35 @@ pub struct Count {
     /// the pane and notice the repo was missing from it.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub skipped: String,
+    /// PRs whose workflow has stopped and is waiting on a person — the merge train's skips. On the
+    /// badge poll rather than the pane's answer, because the pane is only open when somebody is
+    /// already looking: this is the row that has to reach them when they are not.
+    ///
+    /// **Filled by the counts route, not here.** The stops live in `prwork`'s file, and `prq`
+    /// reading them would put `prq` inside the module cycle (`docs/modules.toml`); the server
+    /// already stands on both modules, so the decoration is its one line. Everything `prq` builds
+    /// leaves this empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped: Vec<StoppedPr>,
+}
+
+/// One pull request a workflow has stopped on, and why — the shape the counts poll carries to the
+/// cockpit's banner row. Defined here beside [`Count`], the payload it rides in; `prwork::stops`
+/// produces it, because the stops file is that module's.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoppedPr {
+    pub number: u64,
+    pub why: String,
 }
 
 /// Take the count for every repo that has a review queue switched on.
 ///
 /// Skips repos with no GitHub remote before touching the network — they cannot have PRs, so asking
-/// would be a guaranteed error rather than a real one. Goes through the same 60s per-repo cache as
-/// the pane, so opening the queue right after a poll costs nothing.
+/// would be a guaranteed error rather than a real one. Goes through the same per-repo cache as the
+/// pane, but under a **ten-minute** budget where the pane insists on sixty seconds: the badge is
+/// "a number you act on within minutes" — the UI's own words for it — so a ten-minute-old answer
+/// is the right answer, and it cuts the steady-state GraphQL spend of a poll that runs every
+/// three minutes per open tab by ~10x. That spend is what got the owner rate-limited.
 pub fn counts() -> Vec<Count> {
     crate::repos::load_repos()
         .into_iter()
@@ -1225,20 +1330,23 @@ pub fn counts() -> Vec<Count> {
                     needs_you: 0,
                     error: String::new(),
                     skipped,
+                    stopped: Vec::new(),
                 };
             }
-            match queue(&repo, false) {
+            match queue_within(&repo, Duration::from_secs(600)) {
                 Ok(q) => Count {
                     repo_id: repo.id,
                     needs_you: q.prs.iter().filter(|p| p.lane == Lane::NeedsYou).count(),
                     error: String::new(),
                     skipped: String::new(),
+                    stopped: Vec::new(),
                 },
                 Err(e) => Count {
                     repo_id: repo.id,
                     needs_you: 0,
                     error: e,
                     skipped: String::new(),
+                    stopped: Vec::new(),
                 },
             }
         })
@@ -1282,6 +1390,7 @@ pub fn merged(force: bool) -> MergedQueue {
         };
         if !skipped.is_empty() {
             out.skipped.push(Count {
+                stopped: Vec::new(),
                 repo_id: repo.id,
                 needs_you: 0,
                 error: String::new(),
@@ -1325,6 +1434,7 @@ pub fn merged(force: bool) -> MergedQueue {
         match queue(&repo, force) {
             Ok(q) => out.queues.push(q),
             Err(e) => out.failed.push(Count {
+                stopped: Vec::new(),
                 repo_id: repo.id,
                 needs_you: 0,
                 error: e,
@@ -1813,6 +1923,195 @@ mod tests {
         forget_renames();
     }
 
+    /// The TTL rule the badge rides on: a remembered in-process queue is served only while it is
+    /// younger than the caller's age budget.
+    ///
+    /// Asserted on `unexpired_within` directly, because `queue_within` bypasses the cache under
+    /// `cfg!(test)` — seeding [`QUEUE_CACHE`] with a back-stamped entry is the only way the rule
+    /// is reachable from a test at all.
+    #[test]
+    fn an_in_process_queue_is_served_only_within_the_callers_age_budget() {
+        // The cache is a process-wide static; the env lock is this file's serialization for those.
+        let _g = crate::testutil::env_lock();
+        // Through serde like the other fixtures here, so fields this test does not care about keep
+        // their real defaults.
+        let remembered: Queue = serde_json::from_value(serde_json::json!({
+            "repo_id": "ttl-probe",
+            "slug": "acme/ttl",
+            "viewer": "me",
+            "ai": false,
+            "prs": [],
+            "blind_spots": [],
+        }))
+        .unwrap();
+        let stamp = |age: Duration| {
+            let at = Instant::now()
+                .checked_sub(age)
+                .expect("this host has been up longer than eleven minutes");
+            QUEUE_CACHE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert_with(HashMap::new)
+                .insert("ttl-probe".to_string(), (at, remembered.clone()));
+        };
+
+        // Nine minutes old: young enough for the badge's ten minutes, far too old for the pane.
+        stamp(Duration::from_secs(9 * 60));
+        assert!(
+            unexpired_within("ttl-probe", Duration::from_secs(600)).is_some(),
+            "a nine-minute-old queue is within a ten-minute budget and was going to be refetched"
+        );
+        assert!(
+            unexpired_within("ttl-probe", Duration::from_secs(60)).is_none(),
+            "the pane's sixty seconds served a nine-minute-old answer as fresh"
+        );
+
+        // Eleven minutes old: past even the badge's budget.
+        stamp(Duration::from_secs(11 * 60));
+        assert!(
+            unexpired_within("ttl-probe", Duration::from_secs(600)).is_none(),
+            "an eleven-minute-old queue outlived the ten-minute budget"
+        );
+
+        invalidate("ttl-probe");
+    }
+
+    /// The badge reads through the ten-minute budget, not the pane's sixty seconds.
+    ///
+    /// Asserted against the source, the way `nothing_here_shells_out_to_gh` is, because the
+    /// runtime path is unreachable from a test: `queue_within` bypasses the cache under
+    /// `cfg!(test)`, so a test that called `counts()` would pass identically on either budget.
+    /// What this pins is the call itself — pointing `counts` back at `queue(&repo, false)` is
+    /// the regression that rebuilt every repo's queue through a 60s cache every three minutes
+    /// per open tab, and it is exactly what this fails on.
+    #[test]
+    fn the_badge_reads_through_a_ten_minute_budget() {
+        let source = std::fs::read_to_string(file!()).expect("this file");
+        let counts = source
+            .split("pub fn counts()")
+            .nth(1)
+            .and_then(|after| after.split("\npub fn ").next())
+            .expect("counts() is in this file");
+        assert!(
+            counts.contains("queue_within(&repo, Duration::from_secs(600))"),
+            "counts() no longer reads through the ten-minute budget:\n{counts}"
+        );
+        assert!(
+            !counts.contains("queue(&repo,"),
+            "counts() went back to the sixty-second path the badge was rate-limited on:\n{counts}"
+        );
+    }
+
+    /// A GitHub whose repository answer carries a default branch, recording every path asked.
+    ///
+    /// Beside [`routing_github`] rather than folded into it: that one exists to tell a rename from
+    /// an empty repository, and this one exists to count how often `/repos/<slug>` is paid for.
+    fn trunk_github() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = asked.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                if length > 0 {
+                    let mut body = vec![0u8; length];
+                    reader.read_exact(&mut body).ok();
+                }
+                recorder.lock().unwrap().push(path.clone());
+                let answer = match path.as_str() {
+                    "/user" => r#"{"login":"me"}"#.to_string(),
+                    p if p.starts_with("/user/teams") => "[]".to_string(),
+                    "/repos/acme/trunky" => {
+                        r#"{"full_name":"acme/trunky","default_branch":"main"}"#.to_string()
+                    }
+                    "/graphql" => r#"{"data":{"search":{"nodes":[]}}}"#.to_string(),
+                    _ => "{}".to_string(),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), asked)
+    }
+
+    /// A refresh fills the repo's trunk, and pays for the lookup once per process.
+    #[test]
+    fn a_refresh_learns_the_trunk_once_and_remembers_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, asked) = trunk_github();
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "trunky",
+            "source": "https://github.com/acme/trunky.git",
+            "work": "",
+            "store": "",
+            "review_queue": true,
+        }))
+        .unwrap();
+        crate::repos::save_repos(std::slice::from_ref(&repo)).unwrap();
+
+        let first = queue(&repo, true).expect("the queue answered");
+        assert_eq!(
+            first.trunk, "main",
+            "the refresh did not learn the repository's default branch"
+        );
+        let repo_asks = || {
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == "/repos/acme/trunky")
+                .count()
+        };
+        let after_first = repo_asks();
+        assert!(after_first >= 1, "nothing ever asked GitHub for the repo");
+
+        let second = queue(&repo, true).expect("the queue answered again");
+        assert_eq!(second.trunk, "main", "the remembered trunk was dropped");
+        assert_eq!(
+            repo_asks(),
+            after_first,
+            "a second refresh paid for the trunk lookup again instead of remembering it"
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+    }
+
     /// The host uses the credential you already gave it, and never asks for another.
     ///
     /// This replaces a test about `gh`'s keyring, because the keyring is no longer reachable from
@@ -2299,6 +2598,7 @@ mod tests {
             "latestReviews": { "nodes": [] },
             "reviewDecision": "APPROVED",
             "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
             "labels": { "nodes": [{ "name": "ci" }, { "name": "needs docs" }] },
             // …and last pushed to three days before that.
             "commits": { "nodes": [{ "commit": {
@@ -2343,6 +2643,18 @@ mod tests {
         assert_eq!(pr.labels, vec!["ci".to_string(), "needs docs".to_string()]);
         assert_eq!(pr.review_decision, "APPROVED");
         assert_eq!(pr.mergeable, Some(true));
+        assert_eq!(
+            pr.merge_state, "BEHIND",
+            "GitHub's merge-state verdict was parsed away — the merge train reads BEHIND to know \
+             the base must be merged in first"
+        );
+        // And it is actually ASKED for, same trap as `committedDate` above: everything here works
+        // on a node handed to it, so without this the field could be one GitHub was never told to
+        // send, and every PR would read as merge-state unknown.
+        assert!(
+            SEARCH_QUERY.contains("mergeStateStatus"),
+            "merge_state is read but never requested: {SEARCH_QUERY}"
+        );
         let conflicting = build_pr(
             &shape(&serde_json::json!({
                 "number": 9, "title": "t", "url": "u", "isDraft": false,
@@ -2384,6 +2696,10 @@ mod tests {
         assert_eq!(
             bare.mergeable, None,
             "GitHub saying nothing about mergeability became an answer"
+        );
+        assert_eq!(
+            bare.merge_state, "",
+            "GitHub saying nothing about the merge state must read as not known, never as current"
         );
     }
 
@@ -2724,7 +3040,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// SKEIN-153: a red row says WHICH check failed, not just that something did. The one-word
     /// `checks` stays for lanes and sorting; the names and links are what turn "failing" from a
     /// dot into an answer. Both context shapes must survive [`shape`]'s flattening — a CheckRun
