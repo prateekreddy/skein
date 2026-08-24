@@ -571,6 +571,34 @@
   .revcrit-row.dropped textarea { opacity:.45; }
   .revfold { cursor:pointer; user-select:none; }
   .revfold:hover .dim { color:var(--text); }
+  /* THE STACK — the rail is drawn, so "fifteen deep" is a length you see, not a count you read. */
+  .revrow.stack > .revline { background:color-mix(in srgb,var(--accent) 5%,transparent); }
+  .stackmark { font:10px var(--mono); color:var(--accent-2); background:var(--accent-bg);
+               border-radius:3px; padding:0 5px; margin-right:2px; flex:none; }
+  .steps     { padding:2px 0 8px; background:var(--inset); border-top:1px solid var(--line); }
+  .step      { display:grid; grid-template-columns:44px 20px 44px minmax(0,1fr) auto;
+               align-items:center; gap:0 9px; padding:3px 10px; min-height:26px; font-size:12.5px;
+               cursor:pointer; }
+  .step .sn  { font:10px var(--mono); color:var(--faint); text-align:right; white-space:nowrap; }
+  .step .node { position:relative; height:26px; }
+  .step .node::before { content:""; position:absolute; left:9px; top:0; bottom:0;
+                        width:1px; background:var(--border-2); }
+  .step:first-of-type .node::before { top:13px; }
+  .step:last-of-type  .node::before { bottom:13px; }
+  .step .node::after  { content:""; position:absolute; left:6px; top:10px; width:7px; height:7px;
+                        border-radius:50%; background:var(--inset); border:1px solid var(--border-3); }
+  .step.done .node::after { background:var(--done); border-color:var(--done); }
+  .step.next .node::after { background:var(--accent); border-color:var(--accent);
+                            box-shadow:0 0 0 3px var(--accent-bg); }
+  .step.done .st { color:var(--faint); text-decoration:line-through;
+                   text-decoration-color:var(--border-3); }
+  .step .st      { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-2); }
+  .step.next .st { color:var(--text); }
+  /* the step whose own title numbers it out of order — say so, do not silently re-sort */
+  .step .misnamed { font:10px var(--mono); color:var(--waiting); white-space:nowrap;
+                    background:color-mix(in srgb,var(--waiting) 14%,transparent);
+                    border-radius:3px; padding:0 5px; }
+  .stackhint { font:11px var(--mono); color:var(--faint); padding:4px 10px 6px 44px; }
   .revanswer > :first-child { margin-top:0; } .revanswer > :last-child { margin-bottom:0; }
   .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
   .txhead { display:flex; align-items:center; gap:10px; position:sticky; top:-14px; z-index:1; margin:-14px -18px 10px;
@@ -2775,23 +2803,43 @@ function renderReview() {
       body += `<div class="revblind"><b>this queue is incomplete</b>${
         blind.map(b => `<div>${esc(b)}</div>`).join("")}</div>`;
     }
+    // Dependent chains collapse into one row each; their members never appear loose anywhere —
+    // fifteen scattered rows that are one change is the wrong-review generator this exists for.
+    const stacks = revChains(shown);
+    const inStack = new Set(stacks.flatMap(st => st.steps.map(rk)));
     for (const [lane, label] of REV_LANES) {
-      const rows = shown.filter(p => p.lane === lane);
+      const loose = shown.filter(p => p.lane === lane && !inStack.has(rk(p)));
+      const laneStacks = stacks.filter(st => revStackLane(st) === lane);
       // Needs-you always shows its heading, even at zero — "nothing needs you" is an answer you
       // came here for, and a missing section reads as a page that failed to load.
-      if (!rows.length && lane !== "needs-you") continue;
+      if (!loose.length && !laneStacks.length && lane !== "needs-you") continue;
       // Not-ready is a count that states its own composition, folded until asked. The heading is
       // the toggle both ways, so nothing about the fold is somewhere else.
       if (lane === "not-ready") {
         body += `<div class="revlane"><h4 class="revfold" onclick="toggleNotReady()">${esc(label)}
-            <span class="revn">${rows.length}</span>
-            <span class="dim">· ${esc(revNotReadyWhy(rows))} — ${revNotReadyOpen ? "click to fold" : "click to expand"}</span></h4>${
-          revNotReadyOpen ? rows.map(revRow).join("") : ""
+            <span class="revn">${loose.length}</span>
+            <span class="dim">· ${esc(revNotReadyWhy(loose))} — ${revNotReadyOpen ? "click to fold" : "click to expand"}</span></h4>${
+          revNotReadyOpen ? loose.map(revRow).join("") : ""
         }</div>`;
         continue;
       }
-      body += `<div class="revlane"><h4>${esc(label)} <span class="revn">${rows.length}</span></h4>${
-        rows.length ? rows.map(revRow).join("")
+      // A stack sorts by its next actionable step, not its tip — the tip is the one PR you
+      // cannot review yet, and it is exactly what floats to the top of a recency sort.
+      const entries = [
+        ...loose.map(p => ({ at: p.updated_at || "", html: revRow(p) })),
+        ...laneStacks.map(st => ({
+          at: (revStackNext(st) || st.steps[0]).updated_at || "",
+          html: revStackRow(st),
+        })),
+      ].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+      // "N decisions from M pull requests": a stack is one entry point and several decisions in a
+      // forced order — the heading says both, which is also how the badge (counting PRs) and the
+      // pane (counting starts) stop disagreeing.
+      const total = loose.length + laneStacks.reduce((n, st) => n + st.steps.length, 0);
+      body += `<div class="revlane"><h4>${esc(label)} <span class="revn">${entries.length}</span>${
+          entries.length !== total ? ` <span class="dim">from ${total} pull requests</span>` : ""
+        }</h4>${
+        entries.length ? entries.map(e => e.html).join("")
                     : `<div class="revempty">nothing here${revFilter !== "all" ? " under this filter" : ""}.</div>`
       }</div>`;
     }
@@ -3658,9 +3706,137 @@ function revCritiqueHtml(pr) {
   </div>`;
 }
 
+// ---- stacks: dependent pull requests are one row, reviewed bottom-up (SKEIN-147/160) ----
+//
+// Detection is `base_ref ∈ {head_ref}` over the queue the pane already holds — no network, no
+// model. Per repo, because a chain never crosses repos, over the MERGED list, because the row
+// must sit among rows that do.
+function revChains(prs) {
+  const out = [];
+  const byRepo = new Map();
+  for (const p of prs) {
+    if (!byRepo.has(p.repo_id)) byRepo.set(p.repo_id, []);
+    byRepo.get(p.repo_id).push(p);
+  }
+  for (const [repo, list] of byRepo) {
+    const byHead = new Map(list.map(p => [p.head_ref, p]));
+    const child = new Map();
+    for (const p of list) if (byHead.has(p.base_ref)) child.set(p.base_ref, p);
+    const roots = list.filter(p => !byHead.has(p.base_ref) && child.has(p.head_ref));
+    for (const r of roots) {
+      const steps = [r];
+      const seen = new Set([rk(r)]);
+      let cur = r;
+      while (child.has(cur.head_ref)) {
+        cur = child.get(cur.head_ref);
+        if (seen.has(rk(cur))) break;   // a loop in branch names must not hang the pane
+        seen.add(rk(cur));
+        steps.push(cur);
+      }
+      if (steps.length > 1) {
+        out.push({ repo_id: repo, steps, name: revStackName(steps), misnamed: revMisnamed(steps) });
+      }
+    }
+  }
+  return out;
+}
+
+// The chain's name: the longest branch-name prefix its members share, cut at a separator.
+function revStackName(steps) {
+  let prefix = steps[0].head_ref || "";
+  for (const s of steps) {
+    const h = s.head_ref || "";
+    let i = 0;
+    while (i < prefix.length && prefix[i] === h[i]) i++;
+    prefix = prefix.slice(0, i);
+  }
+  const cut = Math.max(prefix.lastIndexOf("/"), prefix.lastIndexOf("-"));
+  return (cut > 0 ? prefix.slice(0, cut) : prefix).replace(/[\/-]+$/, "") || steps[0].repo_id;
+}
+
+// The steps whose own titles number them out of order. The reason reverse order is dangerous is
+// that the TITLES carry a competing order that looks authoritative — so the view contradicts them
+// out loud rather than silently re-sorting.
+function revMisnamed(steps) {
+  const num = s => {
+    const m = /\bslice\s+(\d+)/i.exec(s.title || "") || /-(\d\d)[a-z]?-/.exec(s.head_ref || "");
+    return m ? +m[1] : null;
+  };
+  const pad = n => String(n).padStart(2, "0");
+  const out = new Map();
+  let prev = null;
+  for (const s of steps) {
+    const n = num(s);
+    if (n != null && prev != null && n < prev) out.set(s.number, `named ${pad(n)}, sits after ${pad(prev)}`);
+    if (n != null) prev = n;
+  }
+  return out;
+}
+
+// The first step still awaiting you — the only place a review of this stack can start.
+function revStackNext(st) { return st.steps.find(p => p.lane === "needs-you") || null; }
+// A stack sits in the lane of its next actionable step, not of its tip.
+function revStackLane(st) { return revStackNext(st) ? "needs-you" : "waiting"; }
+
+let revStackOpenKey = null;   // which stack is expanded — at most one, ever
+let revStackStep = null;      // rk of the step whose full row is open inside it
+
+function toggleRevStack(key) {
+  revStackOpenKey = revStackOpenKey === key ? null : key;
+  // Exclusive, and not as a preference: fifteen steps is most of a viewport, and a second open
+  // anything makes the queue unnavigable. Opening a stack closes every row; see toggleRevRow for
+  // the other direction.
+  revOpen = new Set();
+  revStackStep = null;
+  renderReview();
+}
+function toggleStackStep(key) {
+  revStackStep = revStackStep === key ? null : key;
+  renderReview();
+}
+
+function revStackRow(st) {
+  const key = "stack:" + st.repo_id + "#" + st.steps[0].number;
+  const open = revStackOpenKey === key;
+  const next = revStackNext(st);
+  const at = next ? st.steps.indexOf(next) + 1 : st.steps.length;
+  const line = `<div class="revline" onclick="toggleRevStack('${esc(key)}')">
+      <span class="revdot ${esc((next || st.steps[0]).checks || "none")}"></span>
+      ${revRepoFilter ? "" : `<span class="revtag repo">${esc(st.repo_id)}</span>`}
+      <span class="stackmark">stack</span>
+      <span class="revtitle">${esc(st.name)} — ${st.steps.length} pull requests, one change</span>
+      <span class="dim">${next
+        ? `you are at step ${at} of ${st.steps.length} · review from the bottom`
+        : `every step is decided`}</span>
+      <span class="revwho">${esc(st.steps[0].author || "")}</span>
+    </div>`;
+  return `<div class="revrow stack${open ? " open" : ""}">${line}${open ? revStackSteps(st) : ""}</div>`;
+}
+
+function revStackSteps(st) {
+  const next = revStackNext(st);
+  const rows = st.steps.map((p, i) => {
+    const decided = p.lane === "waiting";
+    const cls = p === next ? " next" : decided ? " done" : "";
+    const note = st.misnamed.get(p.number);
+    return `<div class="step${cls}" onclick="toggleStackStep('${esc(rk(p))}')">
+        <span class="sn">step ${i + 1}</span><span class="node"></span>
+        <span class="revnum">#${p.number}</span>
+        <span class="st">${esc(p.title || "")}</span>
+        ${note ? `<span class="misnamed">⟨${esc(note)}⟩</span>` : `<span></span>`}
+      </div>${revStackStep === rk(p) ? revBody(p) : ""}`;
+  }).join("");
+  return `<div class="steps">
+      <div class="stackhint">bottom-up: each diff is expressed against the one below it. The order here is the branch graph (base_ref), not the numbers in the titles.</div>
+      ${rows}</div>`;
+}
+
 function toggleRevRow(key) {
   if (revOpen.has(key)) { revOpen.delete(key); renderReview(); return; }
-  revOpen.add(key);
+  // Exclusive (docs/review-ux.md §2.5): opening a row closes every other row and any open stack.
+  revOpen = new Set([key]);
+  revStackOpenKey = null;
+  revStackStep = null;
   renderReview();
   // A drafted review that survived a reload must not look gone (reported live on PR 577: the model
   // call outlived the page, the draft landed on disk, and the panel sat closed saying nothing). If

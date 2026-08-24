@@ -43,6 +43,18 @@ function board() {
     ${grab("rk")}
     ${grab("revMergeQueues")}
     ${grab("revScopeRepo")}
+    ${grab("revChains")}
+    ${grab("revStackName")}
+    ${grab("revMisnamed")}
+    ${grab("revStackNext")}
+    ${grab("revStackLane")}
+    ${grab("revStackOpenKey")}
+    ${grab("revStackStep")}
+    ${grab("toggleRevStack")}
+    ${grab("toggleStackStep")}
+    ${grab("revStackRow")}
+    ${grab("revStackSteps")}
+    ${grab("toggleRevRow")}
     ${grab("revStaleTries")}
     ${grab("REV_STALE_TRIES")}
     ${grab("REV_SUM_AUTO")}
@@ -66,6 +78,7 @@ function board() {
     ${grab("renderReview")}
     // Stubbed: this suite asks WHAT is on screen, not how a row is drawn.
     const revRow = pr => "<row n=" + pr.number + ">";
+    const revBody = () => "";
     const revModsCount = () => "notes";
     const revModsHtml = () => "";
     const revAgo = () => "just now";
@@ -93,6 +106,9 @@ function board() {
       tries: () => revStaleTries,
       fetchOne: (n, repo) => revFetchSummary(repo || "alpha", n, true),
       toggleNR: () => toggleNotReady(),
+      stack: key => toggleRevStack(key),
+      row: key => toggleRevRow(key),
+      openRow: () => [...revOpen],
     };
   `;
   // Settled by default — two hours since the head commit. A pull request skein has no commit date
@@ -564,6 +580,66 @@ function critWorld() {
   const html = world.html({ repo_id: "alpha", number: 9, head_sha: "new" });
   t.check("a stale draft is named", html.includes("Drafted before the latest commits"), true);
   t.check("and posting is off until it is drafted again", html.includes("disabled"), true);
+}
+
+// ---- a stack of dependent pull requests is one row, opened in review order ----
+//
+// The finding behind SKEIN-147: 15 of 29 PRs on the live queue were one linear chain
+// (ladder/tenants-*), scattered across the queue in near-reverse order, with the author's own
+// numbering wrong at one step (#624 "slice 5" sits after "slice 6") — and nothing on any row said
+// the chain existed. The queue below is that chain, in the item's own numbers.
+{
+  const b = board();
+  const at = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  const chainPr = (n, head, base, title) => ({
+    number: n, head_ref: head, base_ref: base, title,
+    head_sha: "alpha" + n, committed_at: at, updated_at: at, settled: true, draft: false,
+    reasons: ["reviewer"], checks: "failing", lane: "needs-you", author: "dev-rhea",
+  });
+  const chain = [
+    chainPr(613, "ladder/chassis-tenants",        "develop",                       "chore(ladder): the tenants chassis, empty"),
+    chainPr(614, "ladder/tenants-01-compose",     "ladder/chassis-tenants",        "tenants slice 1: compose brings the module up"),
+    chainPr(615, "ladder/tenants-02-tables",      "ladder/tenants-01-compose",     "tenants slice 2: the thing tables"),
+    chainPr(616, "ladder/tenants-03-identity",    "ladder/tenants-02-tables",      "tenants slice 3: identity rows carry a tenant"),
+    chainPr(617, "ladder/tenants-04-membership",  "ladder/tenants-03-identity",    "tenants slice 4: membership"),
+    chainPr(618, "ladder/tenants-06-context-seam","ladder/tenants-04-membership",  "tenants slice 6: the context seam"),
+    chainPr(624, "ladder/tenants-05-member-reads","ladder/tenants-06-context-seam","tenants slice 5: member reads go through the seam"),
+    chainPr(626, "ladder/tenants-invites",        "ladder/tenants-05-member-reads","tenants: invitations, expiry and replay"),
+    chainPr(628, "ladder/tenants-billing",        "ladder/tenants-invites",        "tenants: billing rows"),
+    chainPr(631, "ladder/tenants-audit",          "ladder/tenants-billing",        "tenants: the audit trail"),
+    chainPr(627, "ladder/tenants-exports",        "ladder/tenants-audit",          "tenants: exports"),
+    chainPr(632, "ladder/tenants-webhooks",       "ladder/tenants-exports",        "tenants: webhooks"),
+    chainPr(642, "ladder/tenants-quotas",         "ladder/tenants-webhooks",       "tenants: quotas"),
+    chainPr(645, "ladder/tenants-migration",      "ladder/tenants-quotas",         "tenants: the migration"),
+    chainPr(646, "ladder/tenants-cutover",        "ladder/tenants-migration",      "tenants slice 11: cut the old path over"),
+  ];
+  // Scattered, the way the live queue served them — newest tip first — plus one loose PR.
+  const loose = { ...chainPr(700, "fix/null-deref", "develop", "fix a null deref"), checks: "none" };
+  b.lanes([...chain].reverse().concat([loose]));
+  b.open("alpha");
+  await b.drain();
+
+  t.check("the chain is one row, not fifteen",
+    b.pane().includes("15 pull requests, one change"), true);
+  t.check("no chain member appears as a loose row", b.rows(), 1);
+  t.check("named after the branches it shares", b.pane().includes("ladder"), true);
+  t.check("the heading counts starts and pull requests, both",
+    b.pane().includes("from 16 pull requests"), true);
+
+  b.stack("stack:alpha#613");
+  const steps = b.pane().split('class="steps"')[1] || "";
+  const order = [...steps.matchAll(/#(\d+)</g)].map(m => Number(m[1]));
+  t.check("expanding lists every step in the order it must be reviewed",
+    order, [613, 614, 615, 616, 617, 618, 624, 626, 628, 631, 627, 632, 642, 645, 646]);
+  t.check("and contradicts the titles where they lie",
+    steps.includes("named 05, sits after 06"), true);
+  t.check("exactly once — the other steps' names are not second-guessed",
+    (b.pane().match(/named \d\d, sits after/g) || []).length, 1);
+
+  // Exclusive expansion: a stack is most of a viewport, so opening anything else closes it.
+  b.row("alpha#700");
+  t.check("opening a row closes the stack", b.pane().includes('class="steps"'), false);
+  t.check("and the row is the one thing open", b.openRow(), ["alpha#700"]);
 }
 
 // ---- what you typed into the composer survives a reload ----
