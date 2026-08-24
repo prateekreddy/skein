@@ -52,6 +52,8 @@ function board() {
     ${grab("revStackStep")}
     ${grab("toggleRevStack")}
     ${grab("toggleStackStep")}
+    ${grab("revRail")}
+    ${grab("revAge")}
     ${grab("revStackRow")}
     ${grab("revStackSteps")}
     ${grab("toggleRevRow")}
@@ -683,6 +685,89 @@ function critWorld() {
     b.pane().includes("625") && !b.pane().includes("#625"), true);
   // 9 PRs: six fold into the two stack rows; 625, 667 and 651 stay loose.
   t.check("ordinary develop-based rows stay ordinary", b.rows(), 3);
+}
+
+// ---- the row is five cells at one height, and it never says nothing ----
+//
+// Three findings, one row (SKEIN-156/157/158): flex let six rows grow to 62px among 23 at 36px, so
+// a late summary shifted 28 rows under a click; the check dot was red on 25 of 29 rows — a texture,
+// not a signal; and `revGist` returned "" for every row past the read budget, so "read this, it is
+// routine" and "never looked" rendered alike. The real revRow runs here: one grid line, a move
+// mark, and a gist that always states something.
+function rowWorld() {
+  const body = `
+    let revOpen = new Set(), revSums = new Map(), revRepoFilter = "";
+    const revFlows = new Map();
+    ${grab("rk")}
+    ${grab("revMoved")}
+    ${grab("revFlowChip")}
+    ${grab("REV_MOVE_WORDS")}
+    ${grab("revMove")}
+    ${grab("revRail")}
+    ${grab("revAge")}
+    ${grab("revGist")}
+    ${grab("revRow")}
+    const revBody = () => "";
+    const toggleRevRow = () => {};
+    return { row: pr => revRow(pr), gist: s => revGist(s), move: pr => revMove(pr), sums: revSums };
+  `;
+  return new Function("esc", body)(String); // the same esc stub board() uses
+}
+{
+  const w = rowWorld();
+  const pr = (over) => ({ number: 41, repo_id: "alpha", title: "fix the thing", author: "dev-rhea",
+    lane: "needs-you", checks: "failing", updated_at: new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
+    my_review: "none", review_is_current: false, draft: false, reasons: ["reviewer"], ...over });
+
+  // 158/150 — the gist column is never empty, and each state is distinguishable.
+  const unfetched = w.row(pr());
+  t.check("a row skein never fetched says so where you scan", unfetched.includes(">not read<"), true);
+  t.check("and says it as a stated absence, not a value", unfetched.includes('class="gist unknown"'), true);
+  w.sums.set("alpha#41", { depth: "unread", unread_because: "its diff is too large" });
+  t.check("a failed reading carries its reason", w.row(pr()).includes("not read — its diff is too large"), true);
+  w.sums.set("alpha#41", "…");
+  t.check("a reading in flight says so at the same height", w.row(pr()).includes('class="gist reading"'), true);
+  w.sums.set("alpha#41", { depth: "line", line: "moves the audit write behind the lock", flags: [] });
+  const read = w.row(pr());
+  t.check("a summarised row shows the line, not the absence mark", 
+    read.includes("moves the audit write") && !read.includes("gist unknown"), true);
+
+  // 156 — one .revline, and the gist is a cell inside it, not a second line after it.
+  t.check("the row is one line", (read.match(/class="revline"/g) || []).length, 1);
+  t.check("the gist lives inside the line, so its arrival cannot move a row",
+    read.indexOf('class="gist') > read.indexOf('class="revline"')
+      && read.indexOf('class="gist') < read.indexOf("</div>"), true);
+
+  // 157 — the left mark is whose-move, the check dot is gone, and mass-truth chips are gone.
+  t.check("the left mark says your move", read.includes('class="mv yours"'), true);
+  t.check("the check dot is gone from the row", read.includes("revdot"), false);
+  t.check("the reviewer chip is gone — the filter strip already selects on it",
+    read.includes(">reviewer<"), false);
+  t.check("their move draws hollow", w.move(pr({ lane: "waiting" })), "theirs");
+  t.check("a decision that holds draws done", w.move(pr({ my_review: "approved", review_is_current: true })), "done");
+  t.check("archived draws done", w.move(pr({ lane: "archived" })), "done");
+  t.check("a decision the branch moved from under is your move again",
+    w.move(pr({ my_review: "approved", review_is_current: false })), "yours");
+}
+
+// ---- red is a queue-level sentence, not row wallpaper ----
+{
+  const b = board();
+  const at = new Date(Date.now() - 3600 * 1000).toISOString();
+  const pr = (n, checks) => ({ number: n, head_ref: "b" + n, base_ref: "develop", title: "pr " + n,
+    head_sha: "s" + n, committed_at: at, updated_at: at, settled: true, draft: false,
+    reasons: ["reviewer"], checks, lane: "needs-you", author: "x" });
+  b.lanes([pr(1, "failing"), pr(2, "failing"), pr(3, "failing"), pr(4, "passing")]);
+  b.open("alpha");
+  await b.drain();
+  t.check("red said once at the top when it is most of the queue",
+    b.pane().includes("3 of 4 are red"), true);
+
+  const b2 = board();
+  b2.lanes([pr(1, "failing"), pr(2, "passing"), pr(3, "passing"), pr(4, "passing")]);
+  b2.open("alpha");
+  await b2.drain();
+  t.check("a lone failure is not a queue-level story", b2.pane().includes("are red"), false);
 }
 
 // ---- what you typed into the composer survives a reload ----

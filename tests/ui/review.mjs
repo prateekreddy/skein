@@ -21,6 +21,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { serverBinary } from "./lift.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -209,9 +210,10 @@ const freePort = () => new Promise(res => {
 });
 
 async function startServer(fx, port) {
-  const build = spawnSync("cargo", ["build", "--bin", "skein-server"], { cwd: REPO, stdio: "inherit" });
-  if (build.status !== 0) throw new Error("cargo build failed");
-  const srv = spawn(path.join(REPO, "target/debug/skein-server"), {
+  // serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built
+  // via SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the
+  // load that made this suite flake (SKEIN-119 — the story is on serverBinary in lift.mjs).
+  const srv = spawn(serverBinary(), {
     cwd: REPO,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
@@ -232,7 +234,10 @@ async function startServer(fx, port) {
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });
   for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) return srv; } catch {}
+    // The log goes back with the process: the server narrates its failures on stderr (`skein:
+    // reading acme: …` when a mirror cannot be made), and a suite that swallows that sentence
+    // makes every downstream check fail without its diagnosis.
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) return { srv, log: () => log }; } catch {}
     await new Promise(r => setTimeout(r, 100));
   }
   srv.kill();
@@ -266,7 +271,7 @@ const laneTitles = async (label) => page.evaluate(l => {
 // ---------- run ----------
 const fx = await makeFixture();
 const port = await freePort();
-const srv = await startServer(fx, port);
+const { srv, log } = await startServer(fx, port);
 const browser = await chromium.launch();
 page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 page.setDefaultTimeout(4000);
@@ -394,9 +399,9 @@ console.log("\nsummaries");
 // most of the queue never needs opening at all.
 await check("a bug fix states itself on the collapsed row", async () => {
   await page.waitForFunction(
-    () => [...document.querySelectorAll("#revpane .revgist")].some(e => /parser/.test(e.textContent)),
+    () => [...document.querySelectorAll("#revpane .gist")].some(e => /parser/.test(e.textContent)),
     null, { timeout: 15000 });
-  const gists = await page.$$eval("#revpane .revgist", els => els.map(e => e.textContent.trim()));
+  const gists = await page.$$eval("#revpane .gist", els => els.map(e => e.textContent.trim()));
   if (!gists.some(g => g.includes("crashing on empty input")))
     throw new Error(`no one-line summary on the row: ${JSON.stringify(gists)}`);
 });
@@ -415,12 +420,15 @@ await check("a draft is not read unless you ask, and says so rather than looking
   const rows = await page.$$eval("#revpane .revrow", els => els.map(e => ({
     title: e.querySelector(".revtitle")?.textContent.trim() || "",
     draft: !!e.querySelector(".revtag.draft"),
-    gist: e.querySelector(".revgist")?.textContent.trim() || "",
+    gist: e.querySelector(".gist")?.textContent.trim() || "",
+    unread: !!e.querySelector(".gist.unknown"),
   })));
   const wip = rows.find(r => r.title.includes("still moving things around"));
   if (!wip) throw new Error(`the draft is not in the lane at all: ${JSON.stringify(rows.map(r => r.title))}`);
   if (!wip.draft) throw new Error("the draft is not marked as one, so the rule cannot be seen either");
-  if (wip.gist) throw new Error(`a draft was read without being asked: ${wip.gist}`);
+  // The gist is never empty now — an unrequested reading shows as the stated absence, not a line.
+  if (!wip.unread || !wip.gist.startsWith("not read"))
+    throw new Error(`a draft was read without being asked, or hides that it was not: ${wip.gist}`);
 
   // And opening it explains WHY rather than reading as a failure — three different reasons land in
   // that space and only one of them is a setting to change.
@@ -435,6 +443,62 @@ await check("a draft is not read unless you ask, and says so rather than looking
   if (!button) throw new Error("no way to ask for it by hand");
   await page.click(`#revpane .revrow:has-text("still moving things around") .revline`);
   await settle(200);
+});
+
+console.log("\nthe row"); // SKEIN-156/157/158 — one height, whose-move, never silent
+await check("every row states something in its gist — read, reading, or not read", async () => {
+  const gists = await page.$$eval("#revpane .revrow .gist", els => els.map(e => e.textContent.trim()));
+  if (!gists.length) throw new Error("no gist cells at all");
+  const silent = gists.filter(g => !g);
+  if (silent.length) throw new Error(`${silent.length} rows say nothing — silence reads as reassurance`);
+});
+await check("an unread row is visually a stated absence, not a short summary", async () => {
+  const mark = await page.$eval("#revpane .gist.unknown", e => {
+    const cs = getComputedStyle(e);
+    return { deco: cs.textDecorationStyle, style: cs.fontStyle, text: e.textContent.trim() };
+  });
+  if (!mark.text.startsWith("not read")) throw new Error(`the absence does not say so: ${mark.text}`);
+  if (mark.deco !== "dotted" || mark.style !== "italic")
+    throw new Error(`the absence mark is not distinguishable at a glance: ${JSON.stringify(mark)}`);
+});
+await check("a summary landing moves no row", async () => {
+  const before = await page.$$eval("#revpane .revrow", els =>
+    els.map(e => ({ n: e.querySelector(".revnum")?.textContent || "", top: e.getBoundingClientRect().top })));
+  await page.evaluate(() => {
+    const pr = (revQueue.prs || []).find(p => !revSums.get(rk(p)));
+    revSums.set(rk(pr || revQueue.prs[0]), { depth: "line",
+      line: "a synthetic summary long enough to want a second line if anything would give it one",
+      flags: [], yours: [], others: 0, head_sha: (pr || revQueue.prs[0]).head_sha });
+    renderReview();
+  });
+  const after = await page.$$eval("#revpane .revrow", els =>
+    els.map(e => ({ n: e.querySelector(".revnum")?.textContent || "", top: e.getBoundingClientRect().top })));
+  for (const b of before) {
+    const a = after.find(x => x.n === b.n && b.n);
+    if (a && Math.abs(a.top - b.top) > 0)
+      throw new Error(`row ${b.n} moved ${a.top - b.top}px when a summary landed`);
+  }
+});
+await check("rows are one line high, so a day fits on a screen", async () => {
+  const h = await page.$$eval("#revpane .revrow .revline", els =>
+    Math.max(...els.map(e => e.getBoundingClientRect().height)));
+  if (h > 30) throw new Error(`a row is ${h}px — at 29px, 28 rows fit above a 900px fold; at ${h}px they do not`);
+});
+await check("the left mark is whose move, and scarce — not the check dot", async () => {
+  const dots = await page.$$("#revpane .revdot");
+  if (dots.length) throw new Error("the check dot is still in the scan position");
+  const yours = await page.$$("#revpane .mv.yours");
+  const theirs = await page.$$("#revpane .mv.theirs, #revpane .mv.done");
+  if (!yours.length) throw new Error("nothing on screen is marked as your move");
+  if (!theirs.length) throw new Error("every row is lit — a mark true of every row is a texture");
+});
+await check("no chip is true of more than a third of the queue", async () => {
+  const rows = await page.$$eval("#revpane .revrow", els => els.map(e =>
+    [...e.querySelectorAll(".revtag")].map(t => t.textContent.trim().split(" ")[0])));
+  const counts = {};
+  for (const tags of rows) for (const t of new Set(tags)) counts[t] = (counts[t] || 0) + 1;
+  const mass = Object.entries(counts).filter(([, n]) => n > rows.length / 3);
+  if (mass.length) throw new Error(`chips worn by most of the queue: ${JSON.stringify(mass)} of ${rows.length} rows`);
 });
 
 // The tripwire marks belong on the collapsed line, because they are the reason to stop scrolling.
@@ -770,7 +834,13 @@ const failed = results.filter(([ok]) => !ok);
 if (failed.length) {
   const shot = path.join(fx.root, "failure.png");
   await page.screenshot({ path: shot, fullPage: false });
-  console.log(`\n${failed.length} of ${results.length} checks failed`);
+  // The server's own account of the run. When the queue is empty because a mirror could not be
+  // made, the diagnosis is one stderr line (`skein: reading acme: …`) that no assertion can see.
+  console.log(`\nserver log:\n${log().split("\n").slice(-25).join("\n")}`);
+  // Named here as well as inline, because the inline FAIL lines sit above the server log and a
+  // truncated view (browser_suites.rs shows only the tail) would otherwise lose which checks died.
+  console.log(`\n${failed.length} of ${results.length} checks failed:`);
+  for (const [, name] of failed) console.log(`  ✗ ${name}`);
   console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 } else {
   console.log(`\nall ${results.length} checks passed`);

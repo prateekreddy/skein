@@ -453,24 +453,60 @@
   .revlane > h4 { margin:0 0 7px; font:11px var(--mono); text-transform:uppercase; letter-spacing:.07em;
                   color:var(--faint); display:flex; align-items:center; gap:7px; cursor:pointer; }
   .revlane > h4 .revn { color:var(--dim); }
-  .revrow { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel);
-            margin-bottom:6px; overflow:hidden; }
-  .revrow.open { border-color:var(--border-3); }
-  /* The collapsed line is the product: at 30 a day this is what you actually read, so it holds
-     number, title, author and state on ONE line and nothing else competes with the title. */
-  .revline { display:flex; align-items:center; gap:9px; padding:8px 11px; cursor:pointer; }
-  .revline:hover { background:var(--elevated); }
-  .revnum { font:11.5px var(--mono); color:var(--faint); flex:none; }
-  .revtitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  /* THE ROW — grid, not flex: flex let the title take whatever width it wanted and pushed the
+     gist onto a second line (measured live: 6 rows at 62px among 23 at 36px). Five columns at one
+     fixed height is what makes a summary landing INCAPABLE of moving any other row — the click
+     aimed at a row must land on that row, not its displaced neighbour. */
+  .revrow { margin:0; border:0; border-radius:0; background:transparent;
+            border-bottom:1px solid var(--line); }
+  .revrow:first-child { border-top:1px solid var(--line); }
+  .revrow.open { background:var(--panel); }
+  .revline { display:grid; grid-template-columns:14px 46px minmax(0,50fr) minmax(0,32fr) auto;
+             align-items:center; gap:0 10px; padding:4px 10px; min-height:28px; cursor:pointer; }
+  .revline:hover { background:color-mix(in srgb,var(--elevated) 60%,transparent); }
+  .revnum { font:11px var(--mono); color:var(--faint); text-align:right; }
+  .tcell { display:flex; align-items:center; gap:6px; min-width:0; }
+  .revtitle { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
               font-size:13px; color:var(--text); }
-  .revwho { font:11px var(--mono); color:var(--dim); flex:none; }
-  .revdot { width:7px; height:7px; border-radius:50%; flex:none; background:var(--idle); }
-  .revdot.passing { background:var(--done); } .revdot.pending { background:var(--waiting); }
-  .revdot.failing { background:var(--attn); } .revdot.none { background:var(--stale); }
-  .revtag { font:10px var(--mono); color:var(--faint); border:1px solid var(--border-2);
-            border-radius:999px; padding:1px 7px; flex:none; }
-  .revtag.draft { color:var(--waiting); border-color:var(--waiting); }
-  .revtag.moved { color:var(--working); border-color:var(--working); }
+  /* WHOSE MOVE — replaces the check dot in the row's highest-value position. Exactly one of the
+     four states is lit, and it is the one that is yours: the red dot was true of 25 rows in 29,
+     and a signal that takes one value 86% of the time is a texture, not a signal. */
+  .mv { width:9px; height:9px; border-radius:50%; justify-self:center; }
+  .mv.yours { background:var(--accent); box-shadow:0 0 0 3px var(--accent-bg); }
+  .mv.theirs { background:transparent; border:1px solid var(--border-3); }
+  .mv.blocked { background:transparent; border:1px solid var(--border-3);
+                border-radius:2px; transform:rotate(45deg); width:7px; height:7px; }
+  .mv.done { background:var(--done); opacity:.55; }
+  /* THE GIST COLUMN — never empty, never taller than the row. Both are the point: the first is
+     the module's own invariant (silence must not read as reassurance), the second is what stops
+     28 rows shifting 26px while summaries arrive. The dotted underline is the page's one "stated
+     absence" mark, legible at a glance down a column of real sentences. */
+  .gist { font-size:12px; color:var(--text-2); min-width:0;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .gist.unknown { color:var(--faint); font-style:italic;
+                  text-decoration:underline dotted color-mix(in srgb,var(--faint) 55%,transparent);
+                  text-underline-offset:3px; }
+  .gist.reading { color:var(--faint); font-style:italic; }
+  .gist.stale { color:var(--faint); }
+  /* THE RAIL — age first because it is the sort key, and a sort key you cannot see is a sort you
+     cannot audit; then size ("can I do this now" is a shape, not an integer), then who. */
+  .rail { display:grid; grid-template-columns:34px 62px 78px; gap:0 10px;
+          font:11px var(--mono); color:var(--dim); align-items:center; }
+  .rail .age { text-align:right; font-variant-numeric:tabular-nums; }
+  .rail .age.old { color:var(--waiting); }
+  .rail .size { text-align:right; font-variant-numeric:tabular-nums; color:var(--faint); }
+  .rail .who { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* Chips sit at rank 4 of the emphasis ladder: filled faint, never outlined-and-bright. A chip
+     must be true of a minority of rows AND change what you do — the reviewer chip was true of 22
+     in 29 and is gone; the filter strip above is where that axis lives. */
+  .revtag { font:10px var(--mono); border:0; border-radius:3px; padding:0 5px; flex:none;
+            background:var(--elevated); color:var(--dim); }
+  .revtag.draft { background:color-mix(in srgb,var(--waiting) 16%,transparent); color:var(--waiting); }
+  .revtag.moved { background:color-mix(in srgb,var(--working) 16%,transparent); color:var(--working); }
+  /* CI, said once at the top when it is most of the queue: 25 red rows is one broken pipeline,
+     not twenty-five decisions. Demoted, not hidden — the expanded row still says its own checks. */
+  .cired { border-left:2px solid var(--attn); padding:3px 10px; margin:2px 0 8px;
+           font-size:12px; color:var(--text-2); }
   .revbody { border-top:1px solid var(--line); padding:11px 13px; font-size:13px; }
   .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
              display:flex; flex-wrap:wrap; gap:4px 14px; }
@@ -479,16 +515,8 @@
      PR it could not summarise stays at full attention and says so plainly. */
   .revnosum { border:1px dashed var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
               color:var(--text-2); font-size:12.5px; }
-  /* The gist: one line under the title, in the collapsed row. Indented to the title's column so a
-     scan down the page reads as title/gist pairs rather than as two competing columns. */
-  .revgist { padding:0 11px 8px 47px; font-size:12.5px; color:var(--text-2); }
-  .revgist.dim { color:var(--faint); font-style:italic; }
-  .revgist.unread { color:var(--waiting); }
-  /* A reading of an older commit is dimmed rather than coloured: it is still true about the code it
-     read, so it must not shout like a fault — but it must never look like the current answer. */
-  .revgist.stale { color:var(--faint); }
-  .revtag.flow { color:var(--accent); border-color:var(--accent); }
-  .revtag.stopped { color:var(--attn); border-color:var(--attn); }
+  .revtag.flow { background:var(--accent-bg); color:var(--accent-2); }
+  .revtag.stopped { background:color-mix(in srgb,var(--attn) 14%,transparent); color:var(--attn); }
   .revflow { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
     margin-top:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-direction:column; gap:6px; }
   .revflow-head { display:flex; align-items:center; gap:8px; }
@@ -2803,6 +2831,13 @@ function renderReview() {
       body += `<div class="revblind"><b>this queue is incomplete</b>${
         blind.map(b => `<div>${esc(b)}</div>`).join("")}</div>`;
     }
+    // 25 red rows is one broken pipeline, not twenty-five decisions: when red is most of the
+    // queue it is said once, here, and the row's mark says whose move it is instead. Demoted,
+    // not hidden — an opened row still reports its own checks. A lone failure stays row-level.
+    const red = shown.filter(p => p.checks === "failing").length;
+    if (shown.length >= 3 && red > shown.length / 3) {
+      body += `<div class="cired">${red} of ${shown.length} are red — read it as one broken pipeline, not ${red} broken pull requests. Each row still says its own checks when opened.</div>`;
+    }
     // Dependent chains collapse into one row each; their members never appear loose anywhere —
     // fifteen scattered rows that are one change is the wrong-review generator this exists for.
     const stacks = revChains(shown);
@@ -3348,34 +3383,76 @@ function revFetchSummary(id, number, force) {
 
 function revRow(pr) {
   const open = revOpen.has(rk(pr));
-  const reasons = revReasonLabels(pr).map(r => `<span class="revtag">${esc(r)}</span>`).join("");
   const s = revSums.get(rk(pr));
   // The tripwire marks ride on the collapsed line, because they are the reason to stop scrolling.
   const flags = (s && s !== "…" ? (s.flags || []) : [])
     .map(f => `<span class="revtag flag">${esc(f)}</span>`).join("");
+  // A chip must be true of a minority of rows AND change what you do. The reason chips failed both
+  // — "reviewer" was true of 22 rows in 29, and the filter strip above already selects on it — so
+  // what remains is draft, moved, a stopped workflow, and the tripwires. The repo now rides on the
+  // number's tooltip: in the merged view it is an address, not a decision.
+  const chips = `${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
+    revMoved(pr) ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
+  }${revFlowChip(pr)}${flags}`;
   const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
-      <span class="revdot ${esc(pr.checks || "none")}" title="checks: ${esc(pr.checks || "none")}"></span>
-      ${revRepoFilter ? "" : `<span class="revtag repo">${esc(pr.repo_id || "")}</span>`}
-      <span class="revnum">#${pr.number}</span>
-      <span class="revtitle">${esc(pr.title || "")}</span>
-      ${pr.draft ? `<span class="revtag draft">draft</span>` : ""}
-      ${revMoved(pr) ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""}
-      ${revFlowChip(pr)}${flags}${reasons}
-      <span class="revwho">${esc(pr.author || "")}</span>
-    </div>${revGist(s)}`;
+      <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
+      <span class="revnum" title="${esc(pr.repo_id || "")}">#${pr.number}</span>
+      <span class="tcell"><span class="revtitle">${esc(pr.title || "")}</span>${chips}</span>
+      ${revGist(s)}
+      ${revRail(pr)}
+    </div>`;
   return `<div class="revrow${open ? " open" : ""}">${line}${open ? revBody(pr) : ""}</div>`;
 }
 
-// The one line under the title — what this PR is, in the collapsed state. This is the row you
-// actually read at thirty a day, so it says something or it says nothing; it never guesses.
+// Whose move — the one field that changes what you do next, in the row's highest-value position.
+// Exactly one state is lit, and it is the one that is yours; "done" is a decision that still
+// holds; "blocked" is drawn by the stack for a step whose base is unreviewed.
+const REV_MOVE_WORDS = {
+  yours: "your move",
+  theirs: "waiting on someone else",
+  done: "you decided, and it holds",
+  blocked: "waits on an unreviewed base",
+};
+function revMove(pr) {
+  if (pr.lane === "archived") return "done";
+  if (pr.my_review && pr.my_review !== "none" && pr.review_is_current) return "done";
+  return pr.lane === "needs-you" ? "yours" : "theirs";
+}
+
+// Age, then size, then who. Age is first because it is the sort key, and a sort key you cannot see
+// is a sort you cannot audit; amber past three days. Size renders only once the queue carries the
+// fields — the empty cell still occupies its column, so nothing shifts when the numbers arrive.
+function revRail(pr) {
+  const a = revAge(pr.updated_at);
+  const size = pr.changed_files != null
+    ? `${pr.changed_files}f ${(pr.additions || 0) + (pr.deletions || 0)}±` : "";
+  return `<span class="rail"><span class="age${a.old ? " old" : ""}">${esc(a.label)}</span><span class="size">${esc(size)}</span><span class="who">${esc(pr.author || "")}</span></span>`;
+}
+
+// `4.2d`, `20h`, `12m` — compact because the cell is 34px, tabular because it is a column.
+function revAge(iso) {
+  const at = Date.parse(iso || "");
+  if (!at) return { label: "", old: false };
+  const d = Math.max(0, Date.now() - at) / 86400000;
+  const label = d >= 10 ? `${Math.round(d)}d`
+    : d >= 1 ? `${Math.round(d * 10) / 10}d`
+    : d * 24 >= 1 ? `${Math.round(d * 24)}h`
+    : `${Math.max(1, Math.round(d * 1440))}m`;
+  return { label, old: d > 3 };
+}
+
+// The gist cell — what this PR is, on the line you actually scan at thirty a day. It is NEVER
+// empty: the module's rule is that AI only adds scrutiny, so "skein read this and it is routine"
+// and "skein never looked at this" must not render alike — and the empty string was exactly that,
+// on 23 of 29 live rows. All four states are one row high, which is the other half of the
+// contract: a summary landing may change this cell's text, never any row's position.
 function revGist(s) {
-  if (!s) return "";
-  if (s === "…") return `<div class="revgist dim">reading it…</div>`;
-  if (s.depth === "unread") return `<div class="revgist unread">not summarised — ${esc(s.unread_because || "")}</div>`;
-  // A reading of an earlier commit says so on the line you actually read, not only when expanded.
-  // The whole risk of keeping it is that it gets mistaken for a reading of what is there now.
-  return `<div class="revgist${s.stale ? " stale" : ""}">${s.stale
-    ? `<span class="revtag moved">read before the latest commits</span> ` : ""}${esc(s.line || "")}</div>`;
+  if (!s) return `<span class="gist unknown">not read</span>`;
+  if (s === "…") return `<span class="gist reading">reading it…</span>`;
+  if (s.depth === "unread") return `<span class="gist unknown" title="${esc(s.unread_because || "")}">not read — ${esc(s.unread_because || "")}</span>`;
+  // A reading of an earlier commit says so where you scan, not only when expanded — the whole risk
+  // of keeping it is that it gets mistaken for a reading of what is there now.
+  return `<span class="gist${s.stale ? " stale" : ""}">${s.stale ? "read before the latest commits — " : ""}${esc(s.line || "")}</span>`;
 }
 
 function revBody(pr) {
@@ -3814,14 +3891,13 @@ function revStackRow(st) {
   const next = revStackNext(st);
   const at = next ? st.steps.indexOf(next) + 1 : st.steps.length;
   const line = `<div class="revline" onclick="toggleRevStack('${esc(key)}')">
-      <span class="revdot ${esc((next || st.steps[0]).checks || "none")}"></span>
-      ${revRepoFilter ? "" : `<span class="revtag repo">${esc(st.repo_id)}</span>`}
-      <span class="stackmark">stack</span>
-      <span class="revtitle">${esc(st.name)} — ${st.steps.length} pull requests, one change</span>
-      <span class="dim">${next
+      <span class="mv ${next ? "yours" : "done"}" title="${next ? "your move" : "every step is decided"}"></span>
+      <span class="stackmark" title="${esc(st.repo_id)}">stack</span>
+      <span class="tcell"><span class="revtitle">${esc(st.name)} — ${st.steps.length} pull requests, one change</span></span>
+      <span class="gist">${next
         ? `you are at step ${at} of ${st.steps.length} · review from the bottom`
         : `every step is decided`}</span>
-      <span class="revwho">${esc(st.steps[0].author || "")}</span>
+      ${revRail(next || st.steps[0])}
     </div>`;
   return `<div class="revrow stack${open ? " open" : ""}">${line}${open ? revStackSteps(st) : ""}</div>`;
 }
