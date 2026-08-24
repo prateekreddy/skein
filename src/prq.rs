@@ -1052,11 +1052,90 @@ pub fn submit_review(
 
 /// A pull request's diff, as a diff — the media type is the whole of what `gh pr diff` did.
 pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
-    crate::github::get_text(
+    let token = host_token()?;
+    match crate::github::get_text(
         &format!("/repos/{slug}/pulls/{number}"),
-        &host_token()?,
+        &token,
         "application/vnd.github.diff",
-    )
+    ) {
+        Ok(diff) => Ok(diff),
+        // **GitHub refuses to serve a diff over 20,000 lines**, and answers 406:
+        //
+        //     Sorry, the diff exceeded the maximum number of lines (20000)
+        //
+        // Reported live as a pull request that could not be read at all. That refusal is about
+        // SERVING it, not about size being a problem here: `review` truncates every diff to a byte
+        // cap before it reaches a model anyway, so a change this big was always going to be read in
+        // part. The only thing the 406 actually cost was reading it at all.
+        //
+        // So it is assembled from the per-file endpoint, which serves the same hunks a file at a
+        // time. Marked as assembled, because a reader has to know it is looking at part of a change
+        // and not the whole of a small one.
+        Err(why) if why.contains("too_large") || why.contains("exceeded the maximum") => {
+            assembled_diff(slug, number, &token).map_err(|e| {
+                format!(
+                    "its diff is too large for GitHub to serve, and the file list would not \
+                         read either: {e}"
+                )
+            })
+        }
+        Err(why) => Err(why),
+    }
+}
+
+/// A diff put back together from `/pulls/{n}/files`, for the ones GitHub will not serve whole.
+///
+/// Each file comes with its own patch, so this is the same text arriving in pieces — with the header
+/// lines `diff --git` and `+++` that everything downstream keys on, because `shape` and `contracts`
+/// read a diff by those and a stream of bare hunks would parse as nothing.
+///
+/// A file whose patch GitHub also omits (binary, or too large on its own) is named with its
+/// numbers rather than dropped: "this file changed and you cannot see it here" is a fact a reviewer
+/// needs, and silence would read as "nothing happened here".
+fn assembled_diff(slug: &str, number: u64, token: &str) -> Result<String, String> {
+    let files = crate::github::get_json(
+        &format!("/repos/{slug}/pulls/{number}/files?per_page=100"),
+        token,
+    )?;
+    let files = files.as_array().ok_or("GitHub did not list the files")?;
+    if files.is_empty() {
+        return Err("GitHub listed no files for it".into());
+    }
+    let mut out = String::new();
+    for file in files {
+        let name = file
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unnamed)");
+        out.push_str(&format!("diff --git a/{name} b/{name}\n"));
+        match file.get("patch").and_then(|v| v.as_str()) {
+            Some(patch) => {
+                out.push_str(&format!("--- a/{name}\n+++ b/{name}\n"));
+                out.push_str(patch);
+                out.push('\n');
+            }
+            None => {
+                let n = |k: &str| file.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                out.push_str(&format!(
+                    "--- a/{name}\n+++ b/{name}\n@@ no patch available @@\n\
+                     (+{} -{}, {} — GitHub did not include this file's contents)\n",
+                    n("additions"),
+                    n("deletions"),
+                    file.get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("changed"),
+                ));
+            }
+        }
+    }
+    // One page. A change across more than a hundred files is not one this tool is helping with, and
+    // saying so beats a reader assuming they have seen all of it.
+    if files.len() >= 100 {
+        out.push_str(
+            "\n(this pull request touches more than 100 files; only the first 100 are here)\n",
+        );
+    }
+    Ok(out)
 }
 
 /// The paths a pull request touches.
@@ -1628,6 +1707,97 @@ mod tests {
         // Nothing reached the network: `gh` is never invoked for a repo that was not asked, which is
         // what makes reporting them free rather than three round trips each.
         unsafe { std::env::remove_var("SKEIN_HOME") };
+    }
+
+    /// A pull request too big for GitHub to serve a diff for is still readable.
+    ///
+    /// Reported live:
+    ///
+    /// ```text
+    /// not summarised — its diff could not be read: GitHub answered 406: {"message":"Sorry, the
+    /// diff exceeded the maximum number of lines (20000)", … "code":"too_large"}
+    /// ```
+    ///
+    /// GitHub declines to SERVE a diff over 20,000 lines. That is not the same as the size being a
+    /// problem here — `review` truncates every diff to a byte cap before a model sees it, so a
+    /// change this big was always going to be read in part. The 406 cost reading it at all.
+    ///
+    /// Assembled from `/files` instead, and the shape matters as much as the content: everything
+    /// downstream reads a diff by its `diff --git` and `+++` lines, so a stream of bare hunks would
+    /// parse as an empty change and summarise as "nothing here".
+    #[test]
+    fn a_diff_too_large_to_serve_is_assembled_from_its_files() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        forget_host_token();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::{Read as _, Write as _};
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                // GitHub's own answer, word for word.
+                let (status, answer) = if head.contains("/files") {
+                    (
+                        200,
+                        r#"[{"filename":"src/a.rs","status":"modified","additions":2,"deletions":1,
+                             "patch":"@@ -1,3 +1,4 @@\n kept\n-old\n+new\n+more"},
+                           {"filename":"assets/logo.png","status":"modified","additions":0,
+                             "deletions":0}]"#
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        406,
+                        r#"{"message":"Sorry, the diff exceeded the maximum number of lines (20000)",
+                            "errors":[{"resource":"PullRequest","field":"diff","code":"too_large"}]}"#
+                            .to_string(),
+                    )
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let diff =
+            pr_diff_text("acme/thing", 7).expect("a diff GitHub will not serve is still read");
+
+        // The headers everything downstream keys on. Without them `shape` and `contracts` read this
+        // as an empty change, and the pull request summarises as though nothing had happened in it.
+        assert!(
+            diff.contains("diff --git a/src/a.rs b/src/a.rs") && diff.contains("+++ b/src/a.rs"),
+            "the assembled diff is not shaped like a diff: {diff}"
+        );
+        assert!(diff.contains("+new"), "the hunk itself was dropped: {diff}");
+
+        // A file GitHub gave no patch for is NAMED, with its numbers. Dropping it would read as
+        // "nothing happened here", and a binary asset changing is a thing a reviewer wants to know.
+        assert!(
+            diff.contains("assets/logo.png") && diff.contains("no patch available"),
+            "a file with no patch vanished instead of being named: {diff}"
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
     }
 
     /// A pull request says when its HEAD COMMIT landed, not when the pull request was last touched.
