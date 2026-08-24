@@ -1205,14 +1205,22 @@ pub fn submit_review_with_comments(
     slug: &str,
     number: u64,
     head_sha: &str,
+    verdict: Verdict,
     body: &str,
     comments: &[ReviewComment],
 ) -> Result<String, String> {
-    if body.trim().is_empty() && comments.is_empty() {
+    // A bare approval is a complete statement; anything else with neither words nor comments is a
+    // press with nothing behind it.
+    if body.trim().is_empty() && comments.is_empty() && verdict != Verdict::Approve {
         return Err("nothing to post — every comment was dropped and the note is empty.".into());
     }
+    let event = match verdict {
+        Verdict::Approve => "APPROVE",
+        Verdict::RequestChanges => "REQUEST_CHANGES",
+        Verdict::Comment => "COMMENT",
+    };
     let mut payload = serde_json::json!({
-        "event": "COMMENT",
+        "event": event,
         "commit_id": head_sha,
         "body": body.trim(),
     });
@@ -1232,10 +1240,15 @@ pub fn submit_review_with_comments(
         &host_token()?,
         &payload,
     )?;
+    let said = match verdict {
+        Verdict::Approve => "approved",
+        Verdict::RequestChanges => "changes requested",
+        Verdict::Comment => "posted the review",
+    };
     Ok(match comments.len() {
-        0 => "posted the review".into(),
-        1 => "posted 1 comment".into(),
-        n => format!("posted {n} comments"),
+        0 => said.into(),
+        1 => format!("{said} — with 1 line comment"),
+        n => format!("{said} — with {n} line comments"),
     })
 }
 

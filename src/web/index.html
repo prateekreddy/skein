@@ -507,6 +507,30 @@
      not twenty-five decisions. Demoted, not hidden — the expanded row still says its own checks. */
   .cired { border-left:2px solid var(--attn); padding:3px 10px; margin:2px 0 8px;
            font-size:12px; color:var(--text-2); }
+  /* THE READING VIEW — a mode of the pane, built of the page's existing diff components. The
+     verdict bar exists only here: a decision is reachable from where the evidence is. */
+  .readhead { display:flex; align-items:center; gap:9px; padding:7px 10px;
+              border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:2; }
+  .readtitle { font-size:13px; color:var(--text); overflow:hidden; text-overflow:ellipsis;
+               white-space:nowrap; min-width:0; }
+  .readhead a { color:var(--accent-2); font-size:11.5px; margin-left:auto; }
+  .readred { color:var(--attn); }
+  .readwrap { display:grid; grid-template-columns:220px minmax(0,1fr); align-items:start; }
+  .readfiles { position:sticky; top:37px; max-height:calc(100vh - 140px); overflow-y:auto;
+               border-right:1px solid var(--line); padding:6px 0; }
+  .readfiles h5 { margin:6px 10px 2px; font:10px var(--mono); color:var(--faint);
+                  text-transform:uppercase; letter-spacing:.06em; }
+  .readfile { display:flex; gap:8px; padding:2px 10px; font:11px var(--mono); cursor:pointer;
+              align-items:baseline; }
+  .readfile:hover { background:var(--elevated); }
+  /* rtl so the FILENAME survives truncation — the head of a deep path is the least useful part. */
+  .readfile .fp { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                  direction:rtl; text-align:left; color:var(--text-2); flex:1; }
+  .readfile .fn { color:var(--faint); font-variant-numeric:tabular-nums; }
+  .readcut { border-left:2px solid var(--waiting); margin:8px 10px 0; padding:4px 10px;
+             font-size:12px; color:var(--text-2); }
+  .readbar { display:flex; align-items:center; gap:9px; padding:8px 10px; position:sticky;
+             bottom:0; background:var(--bg); border-top:1px solid var(--line); font-size:12px; }
   .revbody { border-top:1px solid var(--line); padding:11px 13px; font-size:13px; }
   .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
              display:flex; flex-wrap:wrap; gap:4px 14px; }
@@ -2805,6 +2829,14 @@ function revMatchesFilter(pr) {
 
 function renderReview() {
   if (!revpane) return;
+  // The reading view is a mode of this pane. It renders INSTEAD of the queue, and Esc puts the
+  // queue back exactly as it was — same scroll, same expanded row — because the queue is the
+  // thing a reader returns to thirty times a day.
+  if (revReading) {
+    revpane.innerHTML = renderReading();
+    revRenderNotes();
+    return;
+  }
   const picker = repos.length > 1
     ? `<select aria-label="Repository filter" onchange="openReview(this.value)">
         <option value=""${revRepoFilter ? "" : " selected"}>all repos</option>${
@@ -3471,13 +3503,10 @@ function revBody(pr) {
     </div>
     ${revDetail(pr)}
     <div class="revacts">
-      <button type="button" class="revchip go" onclick="revAct('${esc(pr.repo_id)}', ${pr.number}, 'approve')">approve</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'comment')">comment…</button>
-      <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip go" onclick="openReading('${esc(pr.repo_id)}', ${pr.number})">read the change</button>
       <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
       <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${JSON.stringify(pr.head_ref || "")})">box on this branch</button>
-      <button type="button" class="revchip" onclick="revAct('${esc(pr.repo_id)}', ${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>
       <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
       <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, true)">re-read</button>
       <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">review the code…</button>
@@ -3591,6 +3620,12 @@ let revComposing = null;   // { repo, number, kind, text, answer, busy }
 // The actual-review panel, per PR: skein drafts comments, YOU keep/drop/edit each one, and only
 // what survives is posted — the server never posts what it stored, only what this pane sends.
 let revCrits = new Map();  // rk(pr) -> { open, busy, posting, critique, drop:Set, posted }
+// The reading view — a MODE of this pane, not a tab or a modal: the queue is the thing you are
+// returning to, so what you left (scroll, expanded row) is state to restore, not rebuild.
+let revReading = null;         // {repo, number} while the change itself is on screen
+let revReturnScroll = 0;       // the queue's scroll offset, put back on Esc
+const revDiffs = new Map();    // rk -> {head_sha, diff, cut} | {error}
+const revNotes = new Map();    // rk -> [{path,line,body}] — line comments; they post WITH a verdict
 
 // What you typed survives a reload. Reported live on PR 577: notes were written, a draft came
 // back, the page was reloaded — and both were gone, because the composer was pure page state.
@@ -3658,10 +3693,10 @@ function revDraft(number) {
   });
 }
 
-function revPost(repo, number, kind, body) {
+function revPost(repo, number, kind, body, comments) {
   return fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/act`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ kind, body: body || "" }),
+    body: JSON.stringify({ kind, body: body || "", comments: comments || [] }),
   }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }));
 }
 
@@ -3672,13 +3707,209 @@ function revAct(repo, number, kind) {
   if (kind === "merge" && !confirm(`Merge #${number}?\n\nThis lands it on the base branch. Approving is separate and has already happened if you did it.`)) return;
   const mine = revComposing && revComposing.number === number && revComposing.repo === repo;
   const body = mine ? revComposing.text : "";
-  revPost(repo, number, kind, body).then(d => {
+  // Line comments ride only on a verdict — GitHub's review semantics, and the reading view's
+  // sentence ("they post with your verdict") is a promise this line keeps.
+  const verdict = kind === "approve" || kind === "request-changes" || kind === "comment";
+  const notes = verdict ? revNotesFor(repo + "#" + number) : [];
+  revPost(repo, number, kind, body, notes).then(d => {
     if (!d.ok) { toast(d.error || "that did not go through"); return; }
     toast(`#${number} ${d.text}`);
     // Posted for real: the saved draft has done its job and must not resurface on the next open.
     if (mine) { try { localStorage.removeItem(revComposeStore(revComposing)); } catch {} }
     revComposing = null;
+    if (verdict && notes.length) revNotesClear(repo + "#" + number);
+    if (verdict && revReading && revReading.repo === repo && revReading.number === number) {
+      closeReading(); // the decision is made; the queue is what you return to
+    }
     loadReview(true);
+  });
+}
+
+// --- The reading view: the change itself, and the only place a verdict lives -------------------
+//
+// SKEIN-148/161. The pane used to contain no code: expanding an unread row rendered a meta line,
+// "Not read yet…", and eight buttons with approve first — a verdict offered next to nothing. The
+// diff skein already fetched for its summaries is now readable here, and the verdict buttons exist
+// ONLY here: a decision is reachable from where the evidence is, and from nowhere else.
+
+function openReading(repo, number) {
+  revReturnScroll = (revpane && revpane.scrollTop) || 0;
+  revReading = { repo, number };
+  const key = repo + "#" + number;
+  if (!revDiffs.has(key)) {
+    fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/diff`)
+      .then(r => r.json())
+      .then(d => { revDiffs.set(key, d); if (revReading && revReading.repo === repo && revReading.number === number) renderReview(); })
+      .catch(e => { revDiffs.set(key, { error: String(e.message || e).split("\n")[0] }); renderReview(); });
+  }
+  // Opening the change is a revealed request, so a summary rides along — but it never GATES the
+  // diff: reading code needs no model, and an unread PR opens exactly as readably as a read one.
+  if (!revSums.get(key)) revFetchSummary(repo, number, false);
+  renderReview();
+}
+
+function closeReading() {
+  revReading = null;
+  renderReview();
+  if (revpane) revpane.scrollTop = revReturnScroll;
+}
+
+// The changed paths, derived from the diff already in hand rather than a second HTTP call.
+function readingFiles(diff) {
+  const files = [];
+  let cur = null;
+  for (const l of (diff || "").split("\n")) {
+    const m = l.match(/^diff --git a\/.* b\/(.*)$/);
+    if (m) { cur = { path: m[1], add: 0, del: 0 }; files.push(cur); continue; }
+    if (!cur) continue;
+    if (l.startsWith("+") && !l.startsWith("+++")) cur.add++;
+    else if (l.startsWith("-") && !l.startsWith("---")) cur.del++;
+  }
+  return files;
+}
+
+function renderReading() {
+  const { repo, number } = revReading;
+  const key = repo + "#" + number;
+  const pr = ((revQueue && revQueue.prs) || []).find(p => p.repo_id === repo && p.number === number) || { repo_id: repo, number };
+  const d = revDiffs.get(key);
+  const s = revSums.get(key);
+  const a = revAge(pr.updated_at);
+  const size = pr.changed_files != null ? `${pr.changed_files}f ${(pr.additions || 0) + (pr.deletions || 0)}±` : "";
+  // Where this sits in its stack, because reviewing step 7 before step 3 is the mistake the stack
+  // row exists to prevent — the reading view must not lose that thread.
+  const chains = revChains(((revQueue && revQueue.prs) || []).filter(p => p.repo_id === repo));
+  const chain = chains.find(st => st.steps.some(x => rk(x) === key));
+  const at = chain ? chain.steps.findIndex(x => rk(x) === key) + 1 : 0;
+  const head = `<div class="readhead">
+      <button type="button" class="revchip" onclick="closeReading()" title="Esc">← queue</button>
+      <span class="revnum">#${pr.number}</span>
+      <span class="readtitle">${esc(pr.title || "")}</span>
+      <span class="dim">${esc(repo)}${chain ? ` · step ${at} of ${chain.steps.length} in ${esc(chain.name)}` : ""}${
+        a.label ? ` · ${esc(a.label)}` : ""}${size ? ` · ${esc(size)}` : ""}${
+        pr.checks === "failing" ? ` · <span class="readred">checks failing</span>` : ""}</span>
+      <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>`;
+  let body;
+  if (!d) {
+    body = `<div class="diff"><div class="note">fetching the change…</div></div>`;
+  } else if (d.error || !((d.diff || "").trim())) {
+    // An unreadable change refuses a verdict rather than offering one next to nothing.
+    body = `<div class="diff"><div class="note">${esc(d.error || "GitHub returned an empty diff for this PR.")}</div></div>`;
+  } else {
+    const files = readingFiles(d.diff);
+    const owned = new Set((s && s !== "…" && s.yours) || []);
+    const fileRow = f => `<div class="readfile" data-goto="${esc(f.path)}" title="${esc(f.path)}">
+        <span class="fp">${esc(f.path)}</span><span class="fn">+${f.add} −${f.del}</span></div>`;
+    const yours = files.filter(f => owned.has(f.path));
+    const rest = files.filter(f => !owned.has(f.path));
+    body = `<div class="readwrap">
+      <div class="readfiles">${
+        yours.length ? `<h5>yours</h5>${yours.map(fileRow).join("")}<h5>not yours</h5>` : ""
+      }${rest.map(fileRow).join("")}</div>
+      <div class="readdiff">${
+        d.cut ? `<div class="readcut">cut for size — the tail of this change is not shown here; the diff ends at a file boundary, and GitHub has the rest.</div>` : ""
+      }${renderDiff(d.diff)}</div>
+    </div>`;
+  }
+  const notes = revNotesFor(key);
+  const canJudge = d && !d.error && ((d.diff || "").trim());
+  const bar = `<div class="readbar">
+      <span class="dim">${notes.length
+        ? `${notes.length} line comment${notes.length === 1 ? "" : "s"} waiting — they post with your verdict`
+        : canJudge ? "click a line to comment on it" : ""}</span>
+      <span class="revspacer"></span>
+      ${canJudge ? `
+      <button type="button" class="revchip go" onclick="revAct('${esc(repo)}', ${pr.number}, 'approve')">approve</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${pr.number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${pr.number}, 'comment')">comment…</button>
+      <button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>` : ""}
+    </div>${revComposeHtml(pr)}`;
+  return `<div class="revwrap reading">${head}${body}${bar}</div>`;
+}
+
+// ---- line comments in the reading view: written on the line, posted with the verdict ----------
+
+function revNotesStore(key) { return `skein.revnotes.${key}`; }
+function revNotesFor(key) {
+  if (!revNotes.has(key)) {
+    let kept = [];
+    try { kept = JSON.parse(localStorage.getItem(revNotesStore(key)) || "[]"); } catch {}
+    revNotes.set(key, Array.isArray(kept) ? kept : []);
+  }
+  return revNotes.get(key);
+}
+function revNotesSave(key) {
+  try { localStorage.setItem(revNotesStore(key), JSON.stringify(revNotesFor(key))); } catch {}
+}
+function revNotesClear(key) {
+  revNotes.set(key, []);
+  try { localStorage.removeItem(revNotesStore(key)); } catch {}
+}
+function revNoteAdd(key, path, line, body) {
+  if (!body) return;
+  revNotesFor(key).push({ path, line: +line, body });
+  revNotesSave(key);
+  renderReview();
+}
+function revNoteRemove(key, idx) {
+  revNotesFor(key).splice(idx, 1);
+  revNotesSave(key);
+  renderReview();
+}
+
+// Saved notes drawn back onto their lines, after the innerHTML pass — the same shape the box
+// diff's renderComments uses, and for the same reason: a comment belongs beside its line.
+function revRenderNotes() {
+  if (!revReading || !revpane || !revpane.querySelectorAll) return;
+  const key = revReading.repo + "#" + revReading.number;
+  const notes = revNotesFor(key);
+  const lns = [...revpane.querySelectorAll(".ln[data-file]")];
+  notes.forEach((c, idx) => {
+    const ln = lns.find(e => e.dataset.file === c.path && +e.dataset.line === c.line);
+    const block = document.createElement("div");
+    block.className = "cmt saved";
+    block.innerHTML = `<span class="ref">${esc(c.path)}:${c.line}</span><div class="body">${esc(c.body)}</div><span class="rm" title="remove">✕</span>`;
+    block.querySelector(".rm").onclick = () => revNoteRemove(key, idx);
+    if (ln) ln.after(block); else revpane.querySelector(".readdiff")?.prepend(block);
+  });
+}
+
+function openReadingComposer(ln) {
+  const key = revReading.repo + "#" + revReading.number;
+  const path = ln.dataset.file, line = ln.dataset.line;
+  const box = document.createElement("div");
+  box.className = "cmt composer";
+  box.innerHTML = `<textarea placeholder="Review comment on ${esc(path)}:${esc(line)} — posts with your verdict…"></textarea>
+    <div class="ca"><span class="ref">${esc(path)}:${esc(line)}</span>
+      <button class="cancel">Cancel</button><button class="primary save">Save</button></div>`;
+  ln.after(box);
+  const ta = box.querySelector("textarea");
+  ta.focus();
+  box.querySelector(".cancel").onclick = () => box.remove();
+  box.querySelector(".save").onclick = () => { revNoteAdd(key, path, line, ta.value.trim()); };
+  ta.addEventListener("keydown", ev => {
+    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); box.querySelector(".save").click(); }
+    else if (ev.key === "Escape") { ev.preventDefault(); box.remove(); }
+    ev.stopPropagation();
+  });
+}
+
+if (typeof revpane !== "undefined" && revpane && revpane.addEventListener) {
+  revpane.addEventListener("click", e => {
+    if (!revReading) return;
+    const go = e.target.closest("[data-goto]");
+    if (go) {
+      const first = [...revpane.querySelectorAll(".ln[data-file]")].find(l => l.dataset.file === go.dataset.goto);
+      if (first) first.scrollIntoView({ block: "start" });
+      return;
+    }
+    const ln = e.target.closest(".ln.cmtable");
+    if (!ln || ln.nextElementSibling?.classList?.contains("composer")) return;
+    openReadingComposer(ln);
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && revReading && !e.target.closest("textarea, input")) closeReading();
   });
 }
 

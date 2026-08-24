@@ -33,6 +33,8 @@ function board() {
     let view = { box: null, mode: "term", kind: "agent" };
     const repos = [{ id: "alpha" }, { id: "beta" }];
     let revQueue = null, revOpen = new Set(), revSums = new Map(), revMods = null;
+    let revReading = null, revReturnScroll = 0;
+    const revDiffs = new Map(), revNotes = new Map();
     let revFilter = "all", revLoading = false, revStaleTimer = null;
     let revRepoFilter = "";
     let revCrits = new Map();
@@ -78,6 +80,17 @@ function board() {
     ${grab("openReview")}
     ${grab("loadReview")}
     ${grab("renderReview")}
+    ${grab("renderReading")}
+    ${grab("readingFiles")}
+    ${grab("openReading")}
+    ${grab("closeReading")}
+    ${grab("revNotesStore")}
+    ${grab("revNotesFor")}
+    ${grab("revNotesSave")}
+    ${grab("revNotesClear")}
+    const revRenderNotes = () => {};
+    const revComposeHtml = () => "";
+    const renderDiff = txt => '<div class="diff">' + txt.split(String.fromCharCode(10)).map(l => '<span class="ln">' + l + '</span>').join('') + '</div>';
     // Stubbed: this suite asks WHAT is on screen, not how a row is drawn.
     const revRow = pr => "<row n=" + pr.number + ">";
     const revBody = () => "";
@@ -111,6 +124,11 @@ function board() {
       stack: key => toggleRevStack(key),
       row: key => toggleRevRow(key),
       openRow: () => [...revOpen],
+      read: (repo, n) => openReading(repo, n),
+      back: () => closeReading(),
+      reading: () => revReading,
+      note: (key, path, line, body) => { revNotesFor(key).push({ path, line, body }); revNotesSave(key); },
+      notes: key => revNotesFor(key).slice(),
     };
   `;
   // Settled by default — two hours since the head commit. A pull request skein has no commit date
@@ -160,6 +178,28 @@ function board() {
     // queues and readings.
     if (/\/workflows$/.test(url) || /\/critique$/.test(url)) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    // The change itself, the shape /api/repos/:id/review/:n/diff serves (SKEIN-148).
+    const rd = url.match(/review\/(\d+)\/diff$/);
+    if (rd) {
+      const diff = [
+        "diff --git a/src/lib.rs b/src/lib.rs",
+        "--- a/src/lib.rs",
+        "+++ b/src/lib.rs",
+        "@@ -1,2 +1,3 @@",
+        " fn keep() {}",
+        "+fn added() {}",
+        " fn tail() {}",
+        "diff --git a/docs/note.md b/docs/note.md",
+        "--- a/docs/note.md",
+        "+++ b/docs/note.md",
+        "@@ -1 +1 @@",
+        "-old line",
+        "+new line",
+      ].join(String.fromCharCode(10));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        head_sha: "sha" + rd[1], diff, cut: false,
+      }) });
     }
     const id = decodeURIComponent(url.match(/repos\/([^/]+)\//)[1]);
     // The bulk read: what skein already holds. This fixture holds nothing — every scenario here is
@@ -770,6 +810,68 @@ function rowWorld() {
   t.check("a lone failure is not a queue-level story", b2.pane().includes("are red"), false);
 }
 
+// ---- the change is readable in the pane, and a verdict lives only where the evidence is ----
+//
+// SKEIN-148/161. The pane used to contain no code: expanding an unread row offered approve first,
+// next to nothing. Now the row's acts are read/set-aside, the reading view shows the diff skein
+// already fetched, and the verdict buttons exist only there.
+{
+  const b = board();
+  b.open("alpha");
+  await b.drain();
+
+  // Asserted against the row body's SOURCE: the board world stubs revRow, so the rendered pane
+  // cannot see what an expanded row would offer — and a vacuous pass here is exactly how approve
+  // would creep back in beside nothing.
+  t.check("the queue's row body offers no verdict",
+    /'approve'|'request-changes'/.test(grab("revBody")), false);
+
+  b.read("alpha", 11);
+  await b.drain();
+  const pane = b.pane();
+  t.check("the reading view shows the change itself", pane.includes("fn added() {}"), true);
+  t.check("both changed files are listed", pane.includes("src/lib.rs") && pane.includes("docs/note.md"), true);
+  t.check("the verdict is reachable from the evidence",
+    /revAct\('alpha', 11, 'approve'\)/.test(pane), true);
+  t.check("opening the change was a revealed request for a reading",
+    b.reads().some(u => u.includes("/11/summary")), true);
+
+  b.back();
+  await b.drain();
+  t.check("esc returns to the queue", b.reading(), null);
+  t.check("and the queue is drawn again, not rebuilt empty", b.rows() > 0, true);
+}
+
+// ---- an unreadable change refuses a verdict rather than offering one next to nothing ----
+{
+  const b = board();
+  b.open("alpha");
+  await b.drain();
+  b.read("alpha", 11);
+  // No drain: the diff has not answered yet.
+  const pane = b.pane();
+  t.check("no diff yet, no verdict yet", /revAct\('alpha', 11, 'approve'\)/.test(pane), false);
+  t.check("and the pane says it is fetching", pane.includes("fetching the change"), true);
+}
+
+// ---- line comments post with the verdict, and are cleared by it ----
+{
+  const store = { data: {}, getItem(k) { return this.data[k] ?? null; }, setItem(k, v) { this.data[k] = v; }, removeItem(k) { delete this.data[k]; } };
+  const { world, posts } = composeWorld(store);
+  world.noteFor("alpha#21", "src/lib.rs", 2, "this write never fsyncs");
+  world.act("alpha", 21, "approve");
+  await new Promise(r => setTimeout(r, 0));
+  t.check("the verdict carried the line comment",
+    posts.length === 1 && posts[0].comments.length === 1 && posts[0].comments[0].path === "src/lib.rs", true);
+  t.check("a posted comment does not linger for the next verdict", world.noteCount("alpha#21"), 0);
+
+  world.noteFor("alpha#22", "a.rs", 1, "x");
+  world.act("alpha", 22, "merge");
+  await new Promise(r => setTimeout(r, 0));
+  t.check("a non-verdict act does not smuggle comments", (posts[1].comments || []).length, 0);
+  t.check("and leaves them waiting for the verdict they belong to", world.noteCount("alpha#22"), 1);
+}
+
 // ---- what you typed into the composer survives a reload ----
 //
 // Reported live on PR 577: notes were written, "draft with skein" answered, the page was reloaded
@@ -784,16 +886,25 @@ function composeWorld(store) {
     ${grab("revComposeSave")}
     ${grab("revCompose")}
     ${grab("revAct")}
+    let revReading = null;
+    const revNotes = new Map();
+    ${grab("revNotesStore")}
+    ${grab("revNotesFor")}
+    ${grab("revNotesSave")}
+    ${grab("revNotesClear")}
+    const closeReading = () => {};
     const renderReview = () => {};
     const toast = () => {};
     const confirm = () => true;
     const loadReview = () => {};
-    const revPost = (repo, number, kind, text) => { posts.push({ repo, number, kind, text }); return Promise.resolve({ ok: true, text: "sent" }); };
+    const revPost = (repo, number, kind, text, comments) => { posts.push({ repo, number, kind, text, comments: comments || [] }); return Promise.resolve({ ok: true, text: "sent" }); };
     return {
       compose: (repo, n, kind) => revCompose(repo, n, kind),
       type: text => { revComposing.text = text; revComposeSave(); },
       text: () => revComposing.text,
       act: (repo, n, kind) => revAct(repo, n, kind),
+      noteFor: (key, path, line, body) => { revNotesFor(key).push({ path, line, body }); revNotesSave(key); },
+      noteCount: key => revNotesFor(key).length,
     };
   `;
   return { world: new Function("localStorage", "posts", "setTimeout", body)(store, posts, () => {}), posts };

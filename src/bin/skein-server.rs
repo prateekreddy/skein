@@ -357,6 +357,7 @@ async fn main() {
         )
         // The shape of a change: which modules moved and how. The same route shape for both
         // sources, because the answer is the same question — `?box=` for a box's branch.
+        .route("/api/repos/:id/review/:number/diff", get(api_pr_reading))
         .route("/api/repos/:id/review/:number/shape", get(api_pr_shape))
         .route("/api/boxes/:name/shape", get(api_box_shape))
         .route("/api/settings", get(api_settings).post(api_set_settings))
@@ -1572,6 +1573,35 @@ struct ActReq {
     /// The review body, the question, or the rough notes — depending on `kind`.
     #[serde(default)]
     body: String,
+    /// Line comments written in the reading view. They post WITH the verdict — GitHub's own review
+    /// semantics — so a verdict kind with comments goes through the review-with-comments call, and
+    /// a non-verdict kind refuses them rather than dropping them silently.
+    #[serde(default)]
+    comments: Vec<skein::prq::ReviewComment>,
+}
+
+/// The change itself, for the reading view — the diff the reader already had a right to, at a
+/// display budget, with an honest `cut` flag. No model call on this path: reading code needs no
+/// summary, so this answers for unread PRs exactly as it does for read ones.
+async fn api_pr_reading(Path((id, number)): Path<(String, u64)>) -> Json<serde_json::Value> {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return Json(serde_json::json!({ "error": "no such repo" }));
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        let queue = skein::prq::queue(&repo, false)?;
+        let pr = queue
+            .prs
+            .iter()
+            .find(|p| p.number == number)
+            .ok_or("that PR is not in your queue")?;
+        skein::review::reading(&queue.slug, pr)
+    })
+    .await;
+    Json(match out {
+        Ok(Ok(r)) => serde_json::to_value(&r).unwrap_or_default(),
+        Ok(Err(e)) => serde_json::json!({ "error": e }),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    })
 }
 
 async fn api_review_act(
@@ -1595,7 +1625,22 @@ async fn api_review_act(
             _ => None,
         };
         let text = match (verdict, req.kind.as_str()) {
+            (Some(v), _) if !req.comments.is_empty() => skein::prq::submit_review_with_comments(
+                &queue.slug,
+                number,
+                &pr.head_sha,
+                v,
+                &req.body,
+                &req.comments,
+            )?,
             (Some(v), _) => skein::prq::submit_review(&queue.slug, number, v, &req.body)?,
+            (None, _) if !req.comments.is_empty() => {
+                return Err(format!(
+                    "line comments post with a verdict — approve, request-changes or comment — \
+                     not with {}",
+                    req.kind
+                ))
+            }
             (None, "merge") => skein::prq::merge(&queue.slug, number)?,
             (None, "ask") => skein::review::ask(&repo, &queue.slug, pr, &req.body)?,
             (None, "draft") => skein::review::draft_comment(&repo, &queue.slug, pr, &req.body)?,

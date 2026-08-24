@@ -542,6 +542,37 @@ await check("the brief says which of it you own", async () => {
   if (!owned.includes("do not own")) throw new Error(`what it left out is not stated: ${owned}`);
 });
 
+console.log("\nreading");
+// SKEIN-148/161: the pane used to contain no code, and approve was the first, highlighted button
+// next to "Not read yet". The change is readable here now, and a verdict exists only beside it.
+await check("an expanded row offers no verdict", async () => {
+  const acts = await page.$$eval("#revpane .revrow.open .revacts .revchip", els => els.map(e => e.textContent.trim()));
+  if (!acts.length) throw new Error("no acts on the open row at all");
+  const verdicts = acts.filter(a => /^approve$|^request changes/.test(a));
+  if (verdicts.length) throw new Error(`the queue still offers a verdict next to nothing: ${JSON.stringify(acts)}`);
+});
+await check("the change itself is readable in the pane", async () => {
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('read the change')");
+  await page.waitForSelector("#revpane .readdiff .diff", { timeout: 15000 });
+  const text = await page.$eval("#revpane .readdiff", e => e.textContent);
+  if (!text.includes("TIMEOUT: u64 = 5"))
+    throw new Error("the diff GitHub serves is not what the pane shows");
+  const files = await page.$$eval("#revpane .readfiles .readfile", els => els.map(e => e.title));
+  if (!files.includes("src/parser.rs")) throw new Error(`the changed file is not listed: ${files}`);
+});
+await check("the verdict is only reachable from where the evidence is", async () => {
+  const bar = await page.$$eval("#revpane .readbar .revchip", els => els.map(e => e.textContent.trim()));
+  if (!bar.includes("approve")) throw new Error(`no approve beside the evidence: ${JSON.stringify(bar)}`);
+});
+await check("esc returns to the queue as it was", async () => {
+  await page.keyboard.press("Escape");
+  await settle(300);
+  const reading = await page.$("#revpane .readbar");
+  if (reading) throw new Error("esc did not leave the reading view");
+  const open = await page.$("#revpane .revrow.open");
+  if (!open) throw new Error("the row that was open before reading is not open after");
+});
+
 console.log("\nacts");
 // Private by construction: an answer that might be published is a different, more careful, less
 // useful answer — so asking must never look like a step on the way to posting.
@@ -562,7 +593,10 @@ await check("asking a question keeps the answer off GitHub", async () => {
 await check("a comment is drafted into the box you edit, not sent", async () => {
   await page.click("#revpane .revcompose .revchip:has-text('cancel')");
   await settle();
-  await page.click("#revpane .revrow.open .revacts .revchip:has-text('comment')");
+  // Verdicts live in the reading view now (SKEIN-161): enter it, and compose beside the evidence.
+  await page.click("#revpane .revrow.open .revacts .revchip:has-text('read the change')");
+  await page.waitForSelector("#revpane .readbar .revchip", { timeout: 15000 });
+  await page.click("#revpane .readbar .revchip:has-text('comment')");
   await settle();
   await page.fill("#rev-compose", "ask them what happens to slow callers");
   await page.click("#revpane .revcompose .revchip:has-text('draft with skein')");

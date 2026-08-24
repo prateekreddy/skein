@@ -1475,8 +1475,14 @@ pub fn post_critique(
         );
     }
     let (body, anchored) = assemble_post(overall, kept);
-    let said =
-        crate::prq::submit_review_with_comments(&queue.slug, number, head_sha, &body, &anchored)?;
+    let said = crate::prq::submit_review_with_comments(
+        &queue.slug,
+        number,
+        head_sha,
+        crate::prq::Verdict::Comment,
+        &body,
+        &anchored,
+    )?;
     crate::prq::invalidate(&repo.id);
     Ok(said)
 }
@@ -1497,6 +1503,36 @@ pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
     // standing to clear a refusal a person has not seen.
     crate::ai::forget_refusal();
     draft_critique(repo, slug, pr).map_err(|fail| fail.why)
+}
+
+/// What the reading view shows: the change itself, at a display budget, cut honestly.
+///
+/// This is the diff `summarise` already fetches and drops — SKEIN-148's finding was that skein
+/// had the diff, had a renderer, and connected neither to pull requests, sending a 30-a-day
+/// reviewer to github.com for the primary act. No model call anywhere on this path: reading the
+/// code needs no summary, so an unread PR opens exactly as readably as a read one.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Reading {
+    pub head_sha: String,
+    pub diff: String,
+    /// The diff was cut at a file boundary to fit the budget. The pane says so rather than
+    /// silently ending — the same honesty rule the summaries follow.
+    pub cut: bool,
+}
+
+/// Ten times the model's critique budget: a person scrolls where a prompt cannot, and the cost of
+/// a bigger answer here is bytes on loopback, not tokens. Still bounded, because "the browser tab
+/// died" is a worse ending than "the tail is on GitHub".
+const READING_BYTES: usize = 3 * CRITIQUE_BYTES;
+
+pub fn reading(slug: &str, pr: &Pr) -> Result<Reading, String> {
+    let raw = crate::prq::pr_diff_text(slug, pr.number)?;
+    let (diff, cut) = truncate_diff(&raw, READING_BYTES);
+    Ok(Reading {
+        head_sha: pr.head_sha.clone(),
+        diff,
+        cut,
+    })
 }
 
 /// A draft that did not happen, and whether it cost a model call. `spent` is the same boundary
