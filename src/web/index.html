@@ -447,7 +447,11 @@
   /* Review: a repo's PR queue. A place you sit in and work down, not an overlay you dismiss —
      which is why it lives in the dock beside diff/session rather than in the modal stack. */
   .revpane.on { display:block; background:var(--inset); overflow-y:auto; }
-  .revwrap { max-width:1000px; margin:0 auto; padding:14px 18px 40px; }
+  /* The queue fills a wide screen: title and gist are the columns being scanned, and past ~1500px
+     the 50fr title column stops gaining legibility. The reading view keeps its narrower measure —
+     a diff is read line by line, not scanned across. */
+  .revwrap { max-width:1500px; margin:0 auto; padding:14px 18px 40px; }
+  .revwrap.reading { max-width:1000px; }
   .revhead { display:flex; align-items:center; gap:10px; position:sticky; top:0; z-index:2;
              margin:-14px -18px 12px; padding:11px 18px; background:var(--inset);
              border-bottom:1px solid var(--line); font:11.5px var(--mono); color:var(--dim); }
@@ -555,13 +559,10 @@
                color:var(--text); font:12px var(--ui); padding:3px 9px; width:190px; }
   .revsearch:focus { border-color:var(--accent); outline:none; }
   .revsearch::placeholder { color:var(--faint); }
-  .revrepos { display:flex; gap:4px; flex-wrap:wrap; align-items:center; min-width:0; }
-  .reprep { font:11px var(--mono); border:1px solid var(--border-2); background:transparent;
-            color:var(--text-2); border-radius:var(--radius-sm); padding:2px 8px; cursor:pointer; }
-  .reprep b { color:var(--dim); font-weight:600; }
-  .reprep.on { border-color:var(--accent); color:var(--text); background:var(--accent-bg); }
-  .reprep.none { opacity:.45; }
-  .reprep .bad { color:var(--error); }
+  /* The repo picker: one select (`.revhead select` carries the base look). A long repo id clips
+     rather than pushing the chips off the row. */
+  .revrepo { max-width:230px; }
+  .revrepo option.none { color:var(--faint); }
   .revbody { border-top:1px solid var(--line); padding:11px 13px; font-size:13px; }
   .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
              display:flex; flex-wrap:wrap; gap:4px 14px; }
@@ -2764,7 +2765,7 @@ function revMergeQueues(m) {
   const stale = (m.queues || []).filter(q => q.fresh === false);
   return {
     ai: m.ai, prs, blind_spots: blind, queues: m.queues || [],
-    // Kept structured as well as folded into the blind strings: the repo strip marks a broken
+    // Kept structured as well as folded into the blind strings: the repo dropdown marks a broken
     // repo with "!", and a mark needs data, not a sentence to re-parse.
     failed: m.failed || [],
     fresh: stale.length === 0,
@@ -2893,27 +2894,35 @@ function renderReview() {
     revRenderNotes();
     return;
   }
-  // Nine repositories are a strip with counts, not a dropdown whose numbers are a tooltip. Repo
-  // and audience are orthogonal axes, which is why this stays apart from the reason chips: merged
+  // Nine repositories were a strip with counts, until nine of them wrapped into six ragged rows
+  // that pushed the queue below the fold (SKEIN-211). Now they are one dropdown — but SKEIN-163's
+  // point survives the change of form: every count and every failure mark lives in the option
+  // TEXT, never in a tooltip, and the closed control names the current choice with its number.
+  // A zero-count repo dims but stays choosable; a repo whose queue could not be built wears "!"
+  // instead of a number it does not have, and its option's title carries the error. Repo and
+  // audience stay orthogonal axes, which is why this stays apart from the reason chips: merged
   // into one group, either picking a repo deselects "to review" or the group stops reading as a
-  // radio — the most common chip-strip bug there is. A zero-count repo dims but stays pressable;
-  // a repo whose queue could not be built wears "!" instead of a number it does not have.
+  // radio. Choosing routes through `openReview` exactly as the strip's click did — a filter over
+  // the merged queue, never a refetch.
   const repoCounts = new Map();
   for (const p of (revQueue && revQueue.prs) || []) {
     if (p.lane === "archived") continue;
     repoCounts.set(p.repo_id, (repoCounts.get(p.repo_id) || 0) + 1);
   }
-  const brokenRepos = new Set(((revQueue && revQueue.failed) || []).map(f => f.repo_id));
+  const brokenRepos = new Map(((revQueue && revQueue.failed) || [])
+    .map(f => [f.repo_id, f.error || "this repo's queue could not be built"]));
   const allCount = [...repoCounts.values()].reduce((a, b) => a + b, 0);
   const picker = repos.length > 1
-    ? `<div class="revrepos">${[
-        `<button type="button" class="reprep${revRepoFilter ? "" : " on"}" onclick="openReview('')">all <b>${allCount}</b></button>`,
+    ? `<select class="revrepo" aria-label="Repository" onchange="openReview(this.value)">${[
+        `<option value=""${revRepoFilter ? "" : " selected"}>all repos · ${allCount}</option>`,
         ...repos.map(r => {
           const n = repoCounts.get(r.id) || 0;
-          return `<button type="button" class="reprep${r.id === revRepoFilter ? " on" : ""}${n || brokenRepos.has(r.id) ? "" : " none"}" onclick="openReview('${esc(r.id)}')">${esc(r.id)} ${
-            brokenRepos.has(r.id) ? `<b class="bad" title="this repo's queue could not be built">!</b>` : `<b>${n}</b>`}</button>`;
+          const broken = brokenRepos.has(r.id);
+          return `<option value="${esc(r.id)}"${r.id === revRepoFilter ? " selected" : ""}${
+            n || broken ? "" : ` class="none"`}${broken ? ` title="${esc(brokenRepos.get(r.id))}"` : ""}>${
+            esc(r.id)} · ${broken ? "!" : n}</option>`;
         }),
-      ].join("")}</div>`
+      ].join("")}</select>`
     : `<span>${esc(revRepoFilter || "all repos")}</span>`;
   const chips = [["all","all"],["author","mine"],["reviewer","to review"],["mentioned","mentioned"]]
     .map(([k, label]) => `<button type="button" class="revchip${revFilter === k ? " on" : ""}" onclick="setRevFilter('${k}')">${esc(label)}</button>`)

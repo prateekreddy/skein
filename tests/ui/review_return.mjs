@@ -833,7 +833,10 @@ function rowWorld() {
   t.check("a lone failure is not a queue-level story", b2.pane().includes("are red"), false);
 }
 
-// ---- nine repositories are a strip with counts, not a dropdown whose numbers are a tooltip ----
+// ---- many repositories are one dropdown, and SKEIN-163's numbers survive inside it ----
+// The strip wrapped nine repos into six ragged rows and pushed the queue below the fold
+// (SKEIN-211), so the FORM changed to a select — but every count and failure mark stays in the
+// option text, readable without opening anything, and choosing still routes through `openReview`.
 {
   const b = board();
   b.serves(["alpha"]);          // beta managed but serving nothing this round
@@ -841,16 +844,35 @@ function rowWorld() {
   b.open("");
   await b.drain();
   const pane = b.pane();
-  t.check("each repo shows its count where it can be read",
-    pane.includes("alpha <b>6</b>") && pane.includes("all <b>6</b>"), true);
+  t.check("the picker is one select, not a pile of buttons",
+    pane.includes(`<select class="revrepo"`) && !pane.includes("reprep"), true);
+  t.check("each repo shows its count in its option text",
+    pane.includes(">alpha · 6</option>") && pane.includes(">all repos · 6</option>"), true);
   t.check("a repo whose queue failed wears ! instead of a number it does not have",
-    /beta <b class="bad"[^>]*>!<\/b>/.test(pane), true);
+    /<option value="beta"[^>]*>\s*beta · !<\/option>/.test(pane), true);
+  t.check("and that option's title is the error itself",
+    /<option value="beta"[^>]*title="boom"/.test(pane), true);
+  t.check("choosing an option is the strip's click, verbatim",
+    pane.includes(`onchange="openReview(this.value)"`), true);
 
   const b2 = board();
   b2.serves(["alpha", "beta"]);
   b2.open("");
   await b2.drain();
-  t.check("two repos, both counted", b2.pane().includes("beta <b>6</b>") && b2.pane().includes("all <b>12</b>"), true);
+  t.check("two repos, both counted",
+    b2.pane().includes(">beta · 6</option>") && b2.pane().includes(">all repos · 12</option>"), true);
+  b2.open("beta");
+  t.check("selecting a repo filters the merged queue to it, without clearing what was read",
+    b2.rows(), 6);
+  t.check("the closed control shows the current selection with its count",
+    /<option value="beta" selected[^>]*>\s*beta · 6<\/option>/.test(b2.pane()), true);
+
+  const b3 = board();
+  b3.serves(["alpha"]);         // beta managed, serving nothing, and NOT broken
+  b3.open("");
+  await b3.drain();
+  t.check("a repo with an empty queue dims but stays choosable",
+    /<option value="beta"[^>]* class="none"[^>]*>\s*beta · 0<\/option>/.test(b3.pane()), true);
 }
 
 // ---- what skein read moves the row, within its lane and never out of it ----
