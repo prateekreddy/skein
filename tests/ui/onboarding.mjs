@@ -28,6 +28,15 @@ function makeFixture() {
   // NOT under /tmp: a box binds its own /tmp over the sandbox's, so a fleet root there would be
   // unreadable from outside — skein refuses it, correctly, and the first draft of this fixture spent
   // a run learning that.
+  // Anything a previous run left behind goes first. The suite deletes its own fixture on the way
+  // out, so what survives is from a run that crashed or was interrupted — and each one is up to
+  // ~180MB of cloned repo. Fifteen of them had accumulated to 356MB before anybody looked.
+  //
+  // Safe at THIS moment specifically: somebody inspecting a kept fixture is not simultaneously
+  // starting a new run.
+  for (const stale of fs.readdirSync(path.join(REPO, "target")).filter(d => d.startsWith("ui-onboard-"))) {
+    try { fs.rmSync(path.join(REPO, "target", stale), { recursive: true, force: true }); } catch {}
+  }
   const root = fs.mkdtempSync(path.join(REPO, "target", "ui-onboard-"));
   // The repo the person is going to register: an ordinary local checkout, which is how anyone with
   // existing work arrives. `skein add <path>` adopts it in place.
@@ -60,12 +69,22 @@ case "$1" in
   create)  touch ${state}/fleet; exit 0 ;;
   # The script is the LAST argument whatever the prefix, exactly as in smoke.mjs: skein addresses a
   # box through its placement, and there is no namespace here to enter.
-  exec)    exec bash -c "\${@: -1}" ;;
+  #
+  # **With a HOME of its own.** The real \`sbx exec\` runs inside a sandbox, where HOME belongs to
+  # that sandbox; here it runs on the machine the test is running on, so without this the scripts
+  # skein sends into a box run against the REAL home of whoever is running the suite. That is not a
+  # theoretical leak: provisioning links \$HOME/shared at the store it was given, so this suite
+  # repointed the shared workspace of the box it ran in at a fixture under target/, and left it
+  # dangling when the fixture was cleaned up. Every run did it again.
+  exec)    exec env HOME=${path.join(root, "guest-home")} bash -c "\${@: -1}" ;;
   ports)   exit 0 ;;
 esac
 exit 0
 `);
   fs.chmodSync(sbx, 0o755);
+  // The home a script sent into a "box" sees. Its own directory, so anything provisioning writes
+  // into HOME lands here and can be asserted, instead of in the home of whoever ran the suite.
+  fs.mkdirSync(path.join(root, "guest-home"));
   fs.mkdirSync(path.join(root, "home"));
   // The API token, written rather than read back: the server mints one at first use, and racing
   // that would make this flaky for a reason unrelated to onboarding. The auth path is still walked
@@ -191,6 +210,13 @@ page.setDefaultTimeout(5000);
 const noise = [];
 page.on("pageerror", e => noise.push(`[pageerror] ${e.message}`));
 page.on("response", r => { if (r.status() >= 500) noise.push(`[${r.status()}] ${r.url()}`); });
+
+// What the runner's own shared workspace pointed at before any of this ran, so the check at the end
+// has something to compare against. Read here rather than there: by then the fixture has been driven
+// through box creation, which is the thing that used to move it.
+const OWN_SHARED = (() => {
+  try { return fs.readlinkSync(path.join(process.env.HOME || "", "shared")); } catch { return null; }
+})();
 
 console.log("\nfirst run");
 await page.goto(`http://127.0.0.1:${port}/?t=${API_TOKEN}`, { waitUntil: "domcontentloaded" });
@@ -396,6 +422,31 @@ await check("and the box ends up on the board", async () => {
   });
   const calls = fs.readFileSync(path.join(fx.root, "sbx.log"), "utf8").split("\n").slice(-10).join("\n");
   throw new Error(`the first box never appeared.\n--- terminal ---\n${pane}\n--- recorded ---\n${why}\n--- last sbx calls ---\n${calls}`);
+});
+
+await check("provisioning ran in the box's home, not in the home of whoever ran this", () => {
+  // The fake `sbx exec` runs the scripts skein sends into a box on THIS machine — there is no
+  // sandbox here to enter. So it runs them with a HOME of its own, and this is the assertion that
+  // says so: box provisioning links `$HOME/shared` at the store it was given, so without that the
+  // suite repoints the shared workspace of the box it is running IN at a fixture under `target/` —
+  // and then deletes the fixture on the way out, leaving a dangling symlink. Every run did it
+  // again, and nothing said a word.
+  const guest = path.join(fx.root, "guest-home", "shared");
+  if (!fs.existsSync(guest)) {
+    throw new Error("nothing linked a shared workspace in the box's home — did provisioning run?");
+  }
+  const at = fs.readlinkSync(guest);
+  if (!at.startsWith(fx.root)) {
+    throw new Error(`the box's shared workspace points outside the fixture: ${at}`);
+  }
+  // And the runner's own is exactly as it was.
+  let mine = null;
+  try { mine = fs.readlinkSync(path.join(process.env.HOME || "", "shared")); } catch {}
+  if (mine !== OWN_SHARED) {
+    throw new Error(
+      `this suite repointed the shared workspace of the box it ran in: ${OWN_SHARED} -> ${mine}`,
+    );
+  }
 });
 
 await check("no page errors and no 5xx along the way", async () => {
