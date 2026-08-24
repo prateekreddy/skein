@@ -1004,7 +1004,7 @@ mod tests {
                     "{}".to_string()
                 } else if head.contains("/graphql") {
                     format!(
-                        r#"{{"data":{{"search":{{"nodes":[{{"number":7,"title":"t","url":"u",
+                        r#"{{"data":{{"q0":{{"nodes":[{{"number":7,"title":"t","url":"u",
                           "isDraft":false,"author":{{"login":"me"}},"headRefName":"feat",
                           "headRefOid":"abc","baseRefName":"main",
                           "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
@@ -1013,7 +1013,7 @@ mod tests {
                           "latestReviews":{{"nodes":[]}},
                           "commits":{{"nodes":[{{"commit":{{
                              "committedDate":"2026-08-23T00:00:00Z",
-                             "statusCheckRollup":{{"contexts":{{"nodes":[{}]}}}}}}}}]}}}}]}}}}}}"#,
+                             "statusCheckRollup":{{"contexts":{{"nodes":[{}]}}}}}}}}]}}}}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
                         match labelled {
                             true => r#"{"name":"ci"}"#,
                             false => "",
@@ -1608,7 +1608,7 @@ mod tests {
                         )
                     };
                     format!(
-                        r#"{{"data":{{"search":{{"nodes":[{},{}]}}}}}}"#,
+                        r#"{{"data":{{"q0":{{"nodes":[{},{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
                         node(9),
                         node(5)
                     )

@@ -644,8 +644,9 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
 ///
 /// One cache, two budgets. [`queue`]'s sixty seconds fits a pane somebody is looking at; the badge
 /// poller passes ten minutes, because a badge is a number acted on within minutes and every refresh
-/// behind it is three-plus GraphQL searches **per repo, per open tab, every three minutes** — the
-/// steady-state spend that got the owner rate-limited.
+/// behind it is a GitHub round trip **per repo, per open tab, every three minutes** — the
+/// steady-state spend that got the owner rate-limited, back when each refresh was five separate
+/// GraphQL searches rather than [`search_prs_all`]'s one.
 pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     if !cfg!(test) {
         if let Some(young) = unexpired_within(&repo.id, max_age) {
@@ -686,9 +687,11 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         );
     }
 
-    // One query per membership rule. Three calls rather than one because GitHub's search cannot
-    // express the union, and a client-side filter over every open PR would be far more expensive on
-    // a busy repo than three narrow searches.
+    // One query per membership rule — GitHub's search cannot express the union, and a client-side
+    // filter over every open PR would be far more expensive on a busy repo than these narrow
+    // searches. They all travel in ONE GraphQL request (`search_prs_all`), aliased q0..qN in this
+    // order — which is also the Reason precedence order, because the merge below keeps reasons in
+    // the order the searches answered.
     let mut searches: Vec<(String, Reason)> = vec![
         (format!("review-requested:{login}"), Reason::Reviewer),
         // Both, because GitHub moves a PR from one to the other the moment you submit any review
@@ -707,8 +710,16 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     let archived_numbers = archived(&repo.id);
     let snoozed_shas = snoozed(&repo.id);
     let mut prs: Vec<Pr> = Vec::new();
-    for (search, reason) in searches {
-        let items = match search_prs(&slug, &search) {
+    let texts: Vec<String> = searches.iter().map(|(s, _)| s.clone()).collect();
+    // A whole-request failure — the network, a 5xx, the rate-limit hold — is EVERY search failing:
+    // each rule still gets its own sentence, because "the queue is partial" is only actionable
+    // when it says which memberships went dark.
+    let outcomes = match search_prs_all(&slug, &texts) {
+        Ok(outcomes) => outcomes,
+        Err(e) => searches.iter().map(|_| Err(e.clone())).collect(),
+    };
+    for ((search, reason), outcome) in searches.iter().zip(outcomes) {
+        let items = match outcome {
             Ok(items) => items,
             Err(e) => {
                 blind_spots.push(format!(
@@ -722,7 +733,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                 continue;
             };
             if let Some(existing) = prs.iter_mut().find(|p| p.number == number) {
-                if !existing.reasons.contains(&reason) {
+                if !existing.reasons.contains(reason) {
                     existing.reasons.push(reason.clone());
                 }
                 continue;
@@ -732,7 +743,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                 number,
                 &login,
                 &repo.id,
-                &reason,
+                reason,
                 &archived_numbers,
                 &snoozed_shas,
             ));
@@ -849,56 +860,127 @@ fn unexpired_within(repo_id: &str, max_age: Duration) -> Option<Queue> {
     (at.elapsed() < max_age).then(|| q.clone())
 }
 
-/// The query behind the queue. One call per membership rule, and every field the parser needs.
+/// Every field the queue's parser needs from one pull request — the node body every search alias
+/// in [`batched_query`] shares.
 ///
 /// GraphQL rather than REST, and not as a preference: a pull request's reviews, the commit each was
-/// left against, and its check rollup are three more REST calls **per pull request**. This returns
-/// all of it for a hundred at once. It is also, underneath, exactly what `gh pr list --json` did —
-/// its field names *are* these — which is why [`shape`] below is almost an identity.
-const SEARCH_QUERY: &str = r#"
-query($q: String!, $n: Int!) {
-  search(query: $q, type: ISSUE, first: $n) {
-    nodes {
-      ... on PullRequest {
-        number title url isDraft updatedAt
-        headRefName headRefOid baseRefName reviewDecision mergeable mergeStateStatus
-        additions deletions changedFiles
-        labels(first: 20) { nodes { name } }
-        author { login }
-        latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
-        commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { nodes {
-          ... on CheckRun { name detailsUrl status conclusion }
-          ... on StatusContext { context targetUrl state }
-        } } } } } }
-      }
-    }
-  }
+/// left against, and its check rollup are three more REST calls **per pull request**. One search
+/// returns all of it for a hundred at once. It is also, underneath, exactly what `gh pr list
+/// --json` did — its field names *are* these — which is why [`shape`] below is almost an identity.
+const PR_FRAGMENT: &str = r#"
+fragment PrFields on PullRequest {
+  number title url isDraft updatedAt
+  headRefName headRefOid baseRefName reviewDecision mergeable mergeStateStatus
+  additions deletions changedFiles
+  labels(first: 20) { nodes { name } }
+  author { login }
+  latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { nodes {
+    ... on CheckRun { name detailsUrl status conclusion }
+    ... on StatusContext { context targetUrl state }
+  } } } } } }
 }"#;
 
-/// One search, returning items in the shape the parser has always read.
-fn search_prs(slug: &str, search: &str) -> Result<Vec<serde_json::Value>, String> {
+/// The refresh's one request: `q0..qN`, each an aliased `search` over its own membership rule,
+/// every alias reading the same node body through [`PR_FRAGMENT`].
+///
+/// Built per refresh rather than kept as a constant because `count` moves with your teams — and
+/// text is all a GraphQL POST is, so there is nothing a constant would buy.
+fn batched_query(count: usize) -> String {
+    use std::fmt::Write as _;
+    let mut vars = String::from("$n: Int!");
+    let mut body = String::new();
+    for i in 0..count {
+        let _ = write!(vars, ", $q{i}: String!");
+        let _ = writeln!(
+            body,
+            "  q{i}: search(query: $q{i}, type: ISSUE, first: $n) {{ nodes {{ ...PrFields }} }}"
+        );
+    }
+    format!("query({vars}) {{\n{body}}}\n{PR_FRAGMENT}")
+}
+
+/// Every membership search of one refresh, in ONE GraphQL request — five requests per repo per
+/// refresh was where nearly all of skein's quota went (SKEIN-209).
+///
+/// The outer `Result` is the request: an `Err` means nothing was asked or nothing answered, and
+/// the caller must report **every** search as missing. The inner ones are per search, in the order
+/// given: GraphQL delivers a failed alias as `data.qN: null` plus an `errors` entry whose `path`
+/// names the alias, and that mapping is what keeps each failure its own blind spot — four good
+/// answers are still four good answers, exactly as they were when each search was its own request.
+fn search_prs_all(
+    slug: &str,
+    searches: &[String],
+) -> Result<Vec<Result<Vec<serde_json::Value>, String>>, String> {
     let token = host_token()?;
-    // `is:pr is:open` and the repo are what `gh pr list --repo … --state open` added for us. Spelled
-    // out here because the search string is now ours to build rather than gh's.
-    let q = format!("repo:{slug} is:pr is:open {search}");
-    let data = crate::github::graphql(
-        SEARCH_QUERY,
-        serde_json::json!({ "q": q, "n": 100 }),
+    let mut variables = serde_json::Map::new();
+    variables.insert("n".into(), serde_json::json!(100));
+    for (i, search) in searches.iter().enumerate() {
+        // `is:pr is:open` and the repo are what `gh pr list --repo … --state open` added for us.
+        // Spelled out here because the search string is now ours to build rather than gh's.
+        variables.insert(
+            format!("q{i}"),
+            serde_json::json!(format!("repo:{slug} is:pr is:open {search}")),
+        );
+    }
+    let (data, errors) = crate::github::graphql_partial(
+        &batched_query(searches.len()),
+        serde_json::Value::Object(variables),
         &token,
     )?;
-    let nodes = data
-        .get("search")
-        .and_then(|s| s.get("nodes"))
-        .and_then(|n| n.as_array())
-        .cloned()
-        .unwrap_or_default();
-    // A search that matches an issue rather than a pull request comes back as an empty object — the
-    // inline fragment simply does not apply — so those are dropped rather than parsed into a PR
-    // with number 0.
-    Ok(nodes
-        .iter()
-        .filter(|node| node.get("number").is_some())
-        .map(shape)
+    Ok((0..searches.len())
+        .map(|i| {
+            let alias = format!("q{i}");
+            match data.get(&alias) {
+                Some(chunk) if !chunk.is_null() => {
+                    let nodes = chunk
+                        .get("nodes")
+                        .and_then(|n| n.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    // A search that matches an issue rather than a pull request comes back as an
+                    // empty object — the fragment simply does not apply — so those are dropped
+                    // rather than parsed into a PR with number 0.
+                    Ok(nodes
+                        .iter()
+                        .filter(|node| node.get("number").is_some())
+                        .map(shape)
+                        .collect())
+                }
+                // This alias came back null or absent: find ITS errors by path. An error that
+                // names no alias is ambient — attributed to every failed alias rather than
+                // dropped, because a blind spot with no reason reads as skein's own fault.
+                _ => {
+                    let mine = errors
+                        .iter()
+                        .filter(|e| {
+                            e.get("path")
+                                .and_then(|p| p.as_array())
+                                .and_then(|p| p.first())
+                                .and_then(|s| s.as_str())
+                                == Some(alias.as_str())
+                        })
+                        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    Err(match mine.is_empty() {
+                        false => mine,
+                        true => {
+                            let ambient = errors
+                                .iter()
+                                .filter(|e| e.get("path").is_none())
+                                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            match ambient.is_empty() {
+                                false => ambient,
+                                true => "GitHub returned no answer for this search".into(),
+                            }
+                        }
+                    })
+                }
+            }
+        })
         .collect())
 }
 
@@ -2015,14 +2097,15 @@ mod tests {
                     "/repos/acme/new-name" => (200, r#"{"full_name":"acme/new-name"}"#.to_string()),
                     "/graphql" => {
                         // The heart of it: the stale name matches nothing, with no error — which is
-                        // what GitHub really does and why the queue went quietly empty.
+                        // what GitHub really does and why the queue went quietly empty. The batched
+                        // wire: one request, aliases q0..q3 (no teams here), each its own search.
                         let hit =
                             body.contains("acme/new-name") && body.contains("review-requested");
                         (
                             200,
                             match hit {
-                                true => r#"{"data":{"search":{"nodes":[{"number":7,"title":"a pull request","url":"u","isDraft":false,"author":{"login":"someone"},"headRefOid":"abc","updatedAt":"2026-08-01T00:00:00Z","latestReviews":{"nodes":[]},"reviewRequests":{"nodes":[]}}]}}}"#.to_string(),
-                                false => r#"{"data":{"search":{"nodes":[]}}}"#.to_string(),
+                                true => r#"{"data":{"q0":{"nodes":[{"number":7,"title":"a pull request","url":"u","isDraft":false,"author":{"login":"someone"},"headRefOid":"abc","updatedAt":"2026-08-01T00:00:00Z","latestReviews":{"nodes":[]},"reviewRequests":{"nodes":[]}}]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string(),
+                                false => r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string(),
                             },
                         )
                     }
@@ -2220,7 +2303,11 @@ mod tests {
                     "/repos/acme/trunky" => {
                         r#"{"full_name":"acme/trunky","default_branch":"main"}"#.to_string()
                     }
-                    "/graphql" => r#"{"data":{"search":{"nodes":[]}}}"#.to_string(),
+                    // The batched wire: every alias answers, or the miss reads as a blind spot.
+                    "/graphql" => {
+                        r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
+                            .to_string()
+                    }
                     _ => "{}".to_string(),
                 };
                 let _ = stream.write_all(
@@ -3088,8 +3175,8 @@ mod tests {
         // would report "do not know", the settle rule would decline to read anything, and the
         // queue would look thoughtfully quiet rather than broken.
         assert!(
-            SEARCH_QUERY.contains("commit { committedDate"),
-            "the head commit's date is read but never requested: {SEARCH_QUERY}"
+            PR_FRAGMENT.contains("commit { committedDate"),
+            "the head commit's date is read but never requested: {PR_FRAGMENT}"
         );
 
         let shaped = shape(&node);
@@ -3129,8 +3216,8 @@ mod tests {
         // on a node handed to it, so without this the field could be one GitHub was never told to
         // send, and every PR would read as merge-state unknown.
         assert!(
-            SEARCH_QUERY.contains("mergeStateStatus"),
-            "merge_state is read but never requested: {SEARCH_QUERY}"
+            PR_FRAGMENT.contains("mergeStateStatus"),
+            "merge_state is read but never requested: {PR_FRAGMENT}"
         );
         let conflicting = build_pr(
             &shape(&serde_json::json!({
@@ -3460,8 +3547,8 @@ mod tests {
             "the size GitHub already sent never made it onto the row"
         );
         assert!(
-            SEARCH_QUERY.contains("additions deletions changedFiles"),
-            "the fields are read but never requested: {SEARCH_QUERY}"
+            PR_FRAGMENT.contains("additions deletions changedFiles"),
+            "the fields are read but never requested: {PR_FRAGMENT}"
         );
 
         let bare = item(r#"{"number":7,"headRefOid":"a","author":{"login":"someone"}}"#);
@@ -3565,12 +3652,12 @@ mod tests {
         // And the fields are actually ASKED for: everything above works on a node handed to it,
         // so without this the names would be read from a reply GitHub was never told to include.
         assert!(
-            SEARCH_QUERY.contains("... on CheckRun { name detailsUrl status conclusion }"),
-            "the CheckRun name/link is read but never requested: {SEARCH_QUERY}"
+            PR_FRAGMENT.contains("... on CheckRun { name detailsUrl status conclusion }"),
+            "the CheckRun name/link is read but never requested: {PR_FRAGMENT}"
         );
         assert!(
-            SEARCH_QUERY.contains("... on StatusContext { context targetUrl state }"),
-            "the StatusContext name/link is read but never requested: {SEARCH_QUERY}"
+            PR_FRAGMENT.contains("... on StatusContext { context targetUrl state }"),
+            "the StatusContext name/link is read but never requested: {PR_FRAGMENT}"
         );
     }
 
@@ -3807,5 +3894,325 @@ mod tests {
         let v = item(r#"{"number":3,"headRefName":"feature/thing"}"#);
         let pr = build_pr(&v, 3, "me", "acme", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(pr.box_name, crate::repos::box_name("acme", "feature/thing"));
+    }
+
+    // ---- SKEIN-209: the five membership searches travel in ONE GraphQL request ----
+
+    /// One PR node as the batched search returns it — the minimum the parser keys on.
+    fn search_node(number: u64) -> String {
+        format!(
+            r#"{{"number":{number},"title":"pr {number}","url":"https://github.com/acme/x/pull/{number}","isDraft":false,"author":{{"login":"someone"}},"headRefName":"feat-{number}","headRefOid":"sha{number}","updatedAt":"2026-08-1{number}T00:00:00Z","latestReviews":{{"nodes":[]}}}}"#
+        )
+    }
+
+    /// A GitHub for the batched wire: `/graphql` answers `status` + `graphql_body`, teams answer
+    /// one team (`acme/core`) when `teams`, and every request is recorded as `"METHOD path body"`
+    /// — the wire is the thing under test, exactly as `fake_github` argues above. `/rate_limit`
+    /// answers an unusable `{}` on purpose: learning a real reset is github.rs's own test's job,
+    /// and the flat fallback hold is all the queue side needs to prove here.
+    fn batched_github(
+        teams: bool,
+        status: u16,
+        graphql_body: String,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let mut parts = request.split_whitespace();
+                let method = parts.next().unwrap_or("").to_string();
+                let path = parts.next().unwrap_or("").to_string();
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut body).ok();
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
+                recorder.lock().unwrap().push(format!("{method} {path} {body}"));
+                let (code, answer) = match path.as_str() {
+                    "/graphql" => (status, graphql_body.clone()),
+                    "/rate_limit" => (200, "{}".to_string()),
+                    p if p.starts_with("/user/teams") => (
+                        200,
+                        match teams {
+                            true => r#"[{"slug":"core","organization":{"login":"acme"}}]"#.into(),
+                            false => "[]".to_string(),
+                        },
+                    ),
+                    "/user" => (200, r#"{"login":"me"}"#.to_string()),
+                    p if p.starts_with("/repos/") => (
+                        200,
+                        format!(
+                            r#"{{"full_name":"{}","default_branch":"main"}}"#,
+                            p.trim_start_matches("/repos/")
+                        ),
+                    ),
+                    _ => (200, "{}".to_string()),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    /// The repo the batched tests refresh. Distinct slugs per test, so the per-process rename and
+    /// trunk caches cannot leak one test's answers into another.
+    fn batched_repo(slug: &str) -> crate::repos::Repo {
+        serde_json::from_value(serde_json::json!({
+            "id": slug.rsplit('/').next().unwrap_or(slug),
+            "source": format!("https://github.com/{slug}.git"),
+            "work": "",
+            "store": "",
+            "review_queue": true,
+        }))
+        .unwrap()
+    }
+
+    /// The recorded `/graphql` requests, whole.
+    fn graphql_requests(seen: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains(" /graphql "))
+            .cloned()
+            .collect()
+    }
+
+    /// The 5→1 cut itself: one refresh is ONE `/graphql` request carrying q0..q4 and the shared
+    /// fragment — and the parsed queue is what five separate requests produced before. The fixture
+    /// is `tests/review_queue.rs`'s "appears once with every reason" case ported to the batched
+    /// wire: a PR found by two rules carries both Reasons, in the order the searches are listed.
+    #[test]
+    fn one_refresh_is_one_graphql_request_carrying_every_membership_rule() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let answer = format!(
+            r#"{{"data":{{"q0":{{"nodes":[{one},{seven}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[{seven}]}},"q3":{{"nodes":[]}},"q4":{{"nodes":[{nine}]}}}}}}"#,
+            one = search_node(1),
+            seven = search_node(7),
+            nine = search_node(9),
+        );
+        let (base, seen) = batched_github(true, 200, answer);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+
+        let q = queue(&batched_repo("acme/batch-one"), true).expect("the queue answered");
+
+        let requests = graphql_requests(&seen);
+        assert_eq!(
+            requests.len(),
+            1,
+            "five membership rules must cost ONE GraphQL request, got {requests:#?}"
+        );
+        let sent = &requests[0];
+        for alias in ["q0", "q1", "q2", "q3", "q4"] {
+            assert!(
+                sent.contains(&format!("{alias}: search(query: ${alias}")),
+                "alias {alias} is missing from the one request: {sent}"
+            );
+        }
+        assert!(
+            sent.contains("fragment PrFields on PullRequest") && sent.contains("...PrFields"),
+            "the aliases must share the PR node through one fragment: {sent}"
+        );
+        for rule in [
+            "review-requested:me",
+            "reviewed-by:me",
+            "author:me",
+            "mentions:me",
+            "team-review-requested:acme/core",
+        ] {
+            assert!(
+                sent.contains(&format!("repo:acme/batch-one is:pr is:open {rule}")),
+                "the `{rule}` search is missing from the variables: {sent}"
+            );
+        }
+
+        // The same queue five requests built: each alias contributes, a PR found by several
+        // aliases appears once with every reason, in search-list order.
+        let mut numbers: Vec<u64> = q.prs.iter().map(|p| p.number).collect();
+        numbers.sort();
+        assert_eq!(numbers, vec![1, 7, 9], "every alias's PRs are in the one queue");
+        let seven = q.prs.iter().find(|p| p.number == 7).unwrap();
+        assert_eq!(
+            seven.reasons,
+            vec![Reason::Reviewer, Reason::Author],
+            "both memberships kept, in query order"
+        );
+        assert_eq!(
+            q.prs.iter().find(|p| p.number == 9).unwrap().reasons,
+            vec![Reason::Team("acme/core".into())]
+        );
+        assert!(q.blind_spots.is_empty(), "nothing was hidden: {:?}", q.blind_spots);
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+    }
+
+    /// GraphQL's partial failure — `data.qN: null` plus an error whose `path` names the alias —
+    /// maps back to ITS search's blind spot, and the aliases that answered still fill the queue.
+    /// This is exactly what five separate requests gave: partial answers beat none.
+    ///
+    /// The failed alias is deliberately a MIDDLE one (`q2`, `author:me`): a mapping that pins
+    /// every failure on the first alias would pass a q0 fixture by accident, and the wrong-rule
+    /// blind spot it produces is precisely the lie this test exists to make loud.
+    #[test]
+    fn a_failed_alias_is_its_own_blind_spot_and_the_rest_still_answer() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let answer = format!(
+            r#"{{"data":{{"q0":{{"nodes":[{five}]}},"q1":{{"nodes":[]}},"q2":null,"q3":{{"nodes":[]}}}},"errors":[{{"message":"HTTP 403: forbidden","path":["q2"]}}]}}"#,
+            five = search_node(5),
+        );
+        let (base, seen) = batched_github(false, 200, answer);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+
+        let q = queue(&batched_repo("acme/batch-partial"), true).expect("the queue answered");
+
+        assert_eq!(graphql_requests(&seen).len(), 1);
+        assert!(
+            q.blind_spots.iter().any(|b| b
+                .contains("the `author:me` query failed, so those PRs are missing")
+                && b.contains("403")),
+            "the failed alias must name ITS membership rule, with GitHub's reason: {:?}",
+            q.blind_spots
+        );
+        for survivor in ["review-requested:me", "reviewed-by:me", "mentions:me"] {
+            assert!(
+                !q.blind_spots.iter().any(|b| b.contains(&format!("`{survivor}` query failed"))),
+                "an alias that answered was reported as failed: {:?}",
+                q.blind_spots
+            );
+        }
+        assert_eq!(
+            q.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+            vec![5],
+            "the aliases that answered still contribute"
+        );
+        assert_eq!(q.prs[0].reasons, vec![Reason::Reviewer]);
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+    }
+
+    /// A whole-request failure — here a 500, live it is just as often the network — is EVERY
+    /// membership rule going dark at once, and each one still gets its own sentence.
+    #[test]
+    fn a_dead_batched_request_reports_every_membership_rule_missing() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, _seen) =
+            batched_github(false, 500, r#"{"message":"boom"}"#.to_string());
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+
+        let q = queue(&batched_repo("acme/batch-dead"), true).expect("the queue still answers");
+
+        assert!(q.prs.is_empty());
+        for rule in ["review-requested:me", "reviewed-by:me", "author:me", "mentions:me"] {
+            assert!(
+                q.blind_spots.iter().any(|b| {
+                    b.contains(&format!("the `{rule}` query failed, so those PRs are missing"))
+                        && b.contains("500")
+                }),
+                "the `{rule}` rule's loss went unreported: {:?}",
+                q.blind_spots
+            );
+        }
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+    }
+
+    /// A rate-limited batch is both at once: every rule's PRs missing, and the hold engaged — the
+    /// next refresh dies at home, never reaching the wire (SKEIN-208's contract, kept through the
+    /// merge into one request).
+    #[test]
+    fn a_rate_limited_batch_engages_the_hold_and_names_every_rule_missing() {
+        let _g = crate::testutil::env_lock();
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, seen) = batched_github(
+            false,
+            200,
+            r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded for user ID 123"}]}"#
+                .to_string(),
+        );
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+
+        let first = queue(&batched_repo("acme/batch-limited"), true)
+            .expect("a rate-limited refresh still answers, with its blind spots");
+        for rule in ["review-requested:me", "reviewed-by:me", "author:me", "mentions:me"] {
+            assert!(
+                first.blind_spots.iter().any(|b| {
+                    b.contains(&format!("the `{rule}` query failed, so those PRs are missing"))
+                        && b.contains("rate limiting skein")
+                }),
+                "a rate-limited batch must name every rule as missing: {:?}",
+                first.blind_spots
+            );
+        }
+
+        // The hold is engaged: the next refresh is refused before the wire — viewer() is the
+        // first call a refresh makes, and it never leaves the process.
+        let second = queue(&batched_repo("acme/batch-limited"), true)
+            .expect_err("a held refresh cannot even identify the viewer");
+        assert!(
+            second.contains("not calling GitHub"),
+            "the refusal says what is happening: {second}"
+        );
+        assert_eq!(
+            graphql_requests(&seen).len(),
+            1,
+            "the second refresh must never reach the server"
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
     }
 }

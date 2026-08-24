@@ -72,29 +72,52 @@ fn stub_github(dir: &Path, login: &str, teams_ok: bool) -> String {
             } else if path.starts_with("/user") {
                 (200, format!(r#"{{"login":"{login}"}}"#))
             } else if path.starts_with("/graphql") {
+                // The batched wire (SKEIN-209): one request, every membership search an alias
+                // `q0..qN`, one variable each. A term with a `fail-<term>` marker answers the way
+                // GitHub delivers a partial failure — `data.qN: null` plus an errors entry whose
+                // `path` names the alias — so the queue's per-rule blind spots stay testable.
                 let sent: serde_json::Value =
                     serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-                let q = sent
+                let mut aliases: Vec<(usize, String)> = sent
                     .get("variables")
-                    .and_then(|v| v.get("q"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                // The term is what follows `is:open ` — the part the caller asked for.
-                let term = q.rsplit("is:open ").next().unwrap_or("").trim().to_string();
-                let safe = safe_term(&term);
-                if root.join(format!("fail-{safe}")).exists() {
-                    (
-                        200,
-                        r#"{"errors":[{"message":"HTTP 403: forbidden"}]}"#.to_string(),
-                    )
-                } else {
-                    let nodes = std::fs::read_to_string(root.join(format!("search-{safe}.json")))
-                        .unwrap_or_else(|_| "[]".to_string());
-                    (
-                        200,
-                        format!(r#"{{"data":{{"search":{{"nodes":{nodes}}}}}}}"#),
-                    )
+                    .and_then(|v| v.as_object())
+                    .map(|vars| {
+                        vars.iter()
+                            .filter_map(|(k, v)| {
+                                let i: usize = k.strip_prefix('q')?.parse().ok()?;
+                                Some((i, v.as_str()?.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                aliases.sort();
+                let mut data = Vec::new();
+                let mut errors = Vec::new();
+                for (i, q) in &aliases {
+                    // The term is what follows `is:open ` — the part the caller asked for.
+                    let term = q.rsplit("is:open ").next().unwrap_or("").trim().to_string();
+                    let safe = safe_term(&term);
+                    if root.join(format!("fail-{safe}")).exists() {
+                        data.push(format!(r#""q{i}":null"#));
+                        errors.push(format!(
+                            r#"{{"message":"HTTP 403: forbidden","path":["q{i}"]}}"#
+                        ));
+                    } else {
+                        let nodes =
+                            std::fs::read_to_string(root.join(format!("search-{safe}.json")))
+                                .unwrap_or_else(|_| "[]".to_string());
+                        data.push(format!(r#""q{i}":{{"nodes":{nodes}}}"#));
+                    }
                 }
+                let payload = match errors.is_empty() {
+                    true => format!(r#"{{"data":{{{}}}}}"#, data.join(",")),
+                    false => format!(
+                        r#"{{"data":{{{}}},"errors":[{}]}}"#,
+                        data.join(","),
+                        errors.join(",")
+                    ),
+                };
+                (200, payload)
             } else {
                 (404, format!(r#"{{"message":"no stub for {path}"}}"#))
             };

@@ -55,6 +55,26 @@ fn set_rate_hold(until: Option<u64>) {
     *rate_hold() = until;
 }
 
+/// Test-only guard: clears the hold on entry AND on drop. A test that engages the hold and then
+/// panics must not leave the rest of the binary refusing to call its fake GitHubs. Every test that
+/// can touch the hold takes one, right after the env lock — `pub(crate)` because the batched
+/// review search's tests in [`crate::prq`] engage the hold too.
+#[cfg(test)]
+pub(crate) struct HoldClear;
+#[cfg(test)]
+impl HoldClear {
+    pub(crate) fn new() -> Self {
+        set_rate_hold(None);
+        HoldClear
+    }
+}
+#[cfg(test)]
+impl Drop for HoldClear {
+    fn drop(&mut self) {
+        set_rate_hold(None);
+    }
+}
+
 /// Now, in epoch seconds — the clock `/rate_limit`'s `reset` values are on.
 fn epoch_now() -> u64 {
     SystemTime::now()
@@ -417,6 +437,61 @@ pub(crate) fn graphql(
     variables: serde_json::Value,
     token: &str,
 ) -> Result<serde_json::Value, String> {
+    let (status, text, value) = graphql_answer(query, variables, token)?;
+    if let Some(errors) = value.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            let said = error_messages(errors);
+            return Err(match said.is_empty() {
+                true => complaint(status, &text),
+                false => said,
+            });
+        }
+    }
+    value
+        .get("data")
+        .cloned()
+        .ok_or_else(|| complaint(status, &text))
+}
+
+/// One GraphQL query, keeping what DID answer. Returns `(data, errors)`: `data` as GitHub sent it
+/// — a failed alias inside it is `null` — and the top-level `errors` array (empty on a clean
+/// answer), each entry carrying GitHub's `path` back to the alias it is about.
+///
+/// The sibling [`graphql`] fails the whole request on any error, which is right for its callers: a
+/// single-field query with errors has no partial worth keeping. This one exists for the batched
+/// review search, where five aliases travel in one request and four good answers must not be
+/// discarded because the fifth failed — the caller maps each errored alias to its own blind spot
+/// instead. Still `Err` when there is nothing to salvage: transport failures, an unreadable body,
+/// a missing or null `data` — and a rate limit engages the hold exactly as everywhere else.
+pub(crate) fn graphql_partial(
+    query: &str,
+    variables: serde_json::Value,
+    token: &str,
+) -> Result<(serde_json::Value, Vec<serde_json::Value>), String> {
+    let (status, text, value) = graphql_answer(query, variables, token)?;
+    let errors = value
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
+    match value.get("data") {
+        // `data: null` with errors is GraphQL's whole-request failure, not a partial one.
+        Some(data) if !data.is_null() => Ok((data.clone(), errors)),
+        _ => Err(match error_messages(&errors).as_str() {
+            "" => complaint(status, &text),
+            said => said.to_string(),
+        }),
+    }
+}
+
+/// The GraphQL wire both entry points share: POST, parse, and the rate-limit check — an HTTP 200
+/// whose errors carry `"type": "RATE_LIMITED"` engages the hold here, so no caller can forget it.
+/// The message text is accepted as a second signal in case the type ever changes spelling.
+fn graphql_answer(
+    query: &str,
+    variables: serde_json::Value,
+    token: &str,
+) -> Result<(u16, String, serde_json::Value), String> {
     let body = serde_json::json!({ "query": query, "variables": variables });
     let url = format!("{}/graphql", api_base());
     let (status, text) = call(
@@ -430,38 +505,30 @@ pub(crate) fn graphql(
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| complaint(status, &text))?;
     if let Some(errors) = value.get("errors").and_then(|e| e.as_array()) {
-        if !errors.is_empty() {
-            let said = errors
-                .iter()
-                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                .collect::<Vec<_>>()
-                .join("; ");
-            // GraphQL's primary rate limit is not a 403: it is an HTTP 200 whose errors carry
-            // `"type": "RATE_LIMITED"` — and GraphQL search is where nearly all of skein's quota
-            // goes, so this shape must engage the hold exactly as a 403 body does. The message
-            // text is accepted as a second signal in case the type ever changes spelling.
-            let limited = errors.iter().any(|e| {
-                e.get("type")
-                    .and_then(|t| t.as_str())
-                    .is_some_and(|t| t.eq_ignore_ascii_case("RATE_LIMITED"))
-            }) || said.to_ascii_lowercase().contains("rate limit");
-            if limited {
-                engage_hold(token);
-                return Err(rate_limit_sentence(match said.is_empty() {
-                    true => "the GraphQL rate limit is exceeded",
-                    false => &said,
-                }));
-            }
-            return Err(match said.is_empty() {
-                true => complaint(status, &text),
-                false => said,
-            });
+        let said = error_messages(errors);
+        let limited = errors.iter().any(|e| {
+            e.get("type")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t.eq_ignore_ascii_case("RATE_LIMITED"))
+        }) || said.to_ascii_lowercase().contains("rate limit");
+        if limited {
+            engage_hold(token);
+            return Err(rate_limit_sentence(match said.is_empty() {
+                true => "the GraphQL rate limit is exceeded",
+                false => &said,
+            }));
         }
     }
-    value
-        .get("data")
-        .cloned()
-        .ok_or_else(|| complaint(status, &text))
+    Ok((status, text, value))
+}
+
+/// GraphQL error entries' messages, joined — empty when none of them carry one.
+fn error_messages(errors: &[serde_json::Value]) -> String {
+    errors
+        .iter()
+        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// GitHub said the quota is spent: find out when it comes back, and stop calling until then.
@@ -660,22 +727,6 @@ mod tests {
             err.contains("rate limiting skein"),
             "the diagnosis is in the sentence: {err}"
         );
-    }
-
-    /// Clears the hold on entry AND on drop: a test that engages it and then panics must not
-    /// leave the rest of the binary refusing to call its fake GitHubs. Every test that can touch
-    /// the hold takes one, right after the env lock.
-    struct HoldClear;
-    impl HoldClear {
-        fn new() -> Self {
-            set_rate_hold(None);
-            HoldClear
-        }
-    }
-    impl Drop for HoldClear {
-        fn drop(&mut self) {
-            set_rate_hold(None);
-        }
     }
 
     /// A GitHub whose quota is spent: everything answers 403 "rate limit", except `/rate_limit`,
