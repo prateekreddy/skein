@@ -842,7 +842,7 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
 
     let raw = match crate::ai::claude_oneshot_telling(
         &stage1_prompt(pr, &yours, others, &diff, cut),
-        None,
+        review_model(None).as_deref(),
         Duration::from_secs(60),
     ) {
         Ok(raw) => raw,
@@ -897,7 +897,7 @@ pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force:
         // `$SKEIN_AI_MODEL` still overrides both stages together.
         match claude_oneshot_with(
             &stage2_prompt(pr, &verdict, &summary.yours, &signals, &full, deep_cut),
-            Some("claude-sonnet-5"),
+            review_model(Some("claude-sonnet-5")).as_deref(),
             Duration::from_secs(180),
         ) {
             Some(detail) => summary.detail = detail,
@@ -1008,8 +1008,12 @@ Their question: {question}
         question = question,
         context = context(slug, pr, repo),
     );
-    claude_oneshot_with(&prompt, Some("claude-sonnet-5"), Duration::from_secs(180))
-        .ok_or_else(|| "no answer came back — the model call failed or timed out.".into())
+    claude_oneshot_with(
+        &prompt,
+        review_model(Some("claude-sonnet-5")).as_deref(),
+        Duration::from_secs(180),
+    )
+    .ok_or_else(|| "no answer came back — the model call failed or timed out.".into())
 }
 
 /// Draft a comment for a PR from your rough intent. Returns text to **edit**, never to post.
@@ -1040,8 +1044,307 @@ Their notes: {intent}
         intent = intent,
         context = context(slug, pr, repo),
     );
-    claude_oneshot_with(&prompt, Some("claude-sonnet-5"), Duration::from_secs(180))
-        .ok_or_else(|| "no draft came back — the model call failed or timed out.".into())
+    claude_oneshot_with(
+        &prompt,
+        review_model(Some("claude-sonnet-5")).as_deref(),
+        Duration::from_secs(180),
+    )
+    .ok_or_else(|| "no draft came back — the model call failed or timed out.".into())
+}
+
+// --- An actual review: comments drafted for a person to vet, then post -------------------------
+//
+// Asked for in the owner's words: "an actual review of the code with option for me go through the
+// comments and then ask to post on PR, do not find issues for the sake of it." Three properties
+// follow from that sentence and everything here serves one of them:
+//
+// 1. **Nothing posts without the person.** Drafting and posting are separate calls, and posting
+//    takes the vetted comments as input — the server never posts what it stored, only what the
+//    person kept (and possibly edited).
+// 2. **A comment lands where the problem is.** Each one is anchored to a file and a NEW-side line,
+//    validated against the diff's own hunks. One the model mis-anchored is not thrown away and not
+//    guessed at — it travels in the review body, marked as such.
+// 3. **A review of one commit is not posted onto another.** The draft carries the head sha it read;
+//    posting against a moved head is refused out loud, with the fix (draft again) named.
+
+/// One drafted review comment. `line` is a NEW-side line number; `anchored` says the diff actually
+/// shows that line, which is GitHub's own condition for accepting the comment there.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Draft {
+    pub path: String,
+    pub line: u64,
+    pub anchored: bool,
+    pub text: String,
+}
+
+/// A drafted review: the overall note and the comments, tied to the commit that was read.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Critique {
+    pub number: u64,
+    pub head_sha: String,
+    /// The reviewer's note on the change as a whole. "nothing to flag" is a complete, valid answer
+    /// — the prompt says so, because a reviewer made to produce findings produces noise.
+    pub overall: String,
+    pub comments: Vec<Draft>,
+    /// The diff was cut at the byte cap, so this review saw part of the change.
+    pub truncated: bool,
+}
+
+fn critique_path(repo_id: &str, number: u64, head_sha: &str) -> PathBuf {
+    crate::prq::review_dir(repo_id)
+        .join("critiques")
+        .join(format!("{number}-{head_sha}.json"))
+}
+
+/// The newest draft for this pull request, whatever commit it was drafted at. The caller compares
+/// `head_sha` with the queue's — same shape as [`known`]: an old draft is shown as old, not hidden.
+pub fn critiqued(repo_id: &str, number: u64) -> Option<Critique> {
+    let dir = crate::prq::review_dir(repo_id).join("critiques");
+    let prefix = format!("{number}-");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(&dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(seen, _)| at > *seen) {
+            best = Some((at, entry.path()));
+        }
+    }
+    serde_json::from_str(&fs::read_to_string(best?.1).ok()?).ok()
+}
+
+fn store_critique(repo_id: &str, c: &Critique) -> Result<(), String> {
+    let path = critique_path(repo_id, c.number, &c.head_sha);
+    let dir = path.parent().ok_or("no parent")?.to_path_buf();
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    write_atomic(
+        &path,
+        &dir,
+        &serde_json::to_vec_pretty(c).map_err(|e| e.to_string())?,
+    )
+}
+
+/// The NEW-side lines the diff actually shows, per file — exactly the lines GitHub accepts a
+/// RIGHT-side review comment on. Context and added lines count; a deleted line exists only on the
+/// left, and a deleted file has no right side at all.
+fn commentable(diff: &str) -> std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> {
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+        Default::default();
+    let mut file: Option<String> = None;
+    let mut line = 0u64;
+    let mut in_hunk = false;
+    for l in diff.lines() {
+        if let Some(rest) = l.strip_prefix("+++ b/") {
+            file = Some(rest.to_string());
+            in_hunk = false;
+        } else if l.starts_with("+++ ") {
+            // `+++ /dev/null` — a deleted file.
+            file = None;
+            in_hunk = false;
+        } else if let Some(hunk) = l.strip_prefix("@@") {
+            line = hunk
+                .split('+')
+                .nth(1)
+                .and_then(|v| v.split([',', ' ']).next())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            in_hunk = line > 0;
+        } else if in_hunk && (l.starts_with('+') || l.starts_with(' ') || l.is_empty()) {
+            // An empty line inside a hunk is a context line whose content is empty.
+            if let Some(f) = &file {
+                map.entry(f.clone()).or_default().insert(line);
+            }
+            line += 1;
+        } else if in_hunk && l.starts_with('-') {
+            // Left side only; the new-file counter does not move.
+        } else {
+            in_hunk = false;
+        }
+    }
+    map
+}
+
+/// The model a review call uses: `$SKEIN_REVIEW_MODEL`, else the setting, else this call's own
+/// default. Layered UNDER `$SKEIN_AI_MODEL`, which `ai::binary_and_model` lets win over everything.
+fn review_model(fallback: Option<&'static str>) -> Option<String> {
+    std::env::var("SKEIN_REVIEW_MODEL")
+        .ok()
+        .filter(|m| !m.is_empty())
+        .or_else(|| {
+            let m = crate::config::load_config().review_model;
+            (!m.trim().is_empty()).then(|| m.trim().to_string())
+        })
+        .or_else(|| fallback.map(str::to_string))
+}
+
+fn critique_prompt(pr: &Pr, diff: &str, cut: bool) -> String {
+    format!(
+        r#"Review this pull request as a careful senior engineer. A human reviewer will go through every comment you produce, keep or drop each one, and post the kept ones under their own name — so every comment must earn its place.
+
+Comment ONLY on actual problems and improvements that matter: bugs, correctness risks, races, security holes, data loss, error paths that can actually fail and are not handled, misleading names or comments that will cause a wrong call later, real performance traps. Do not manufacture findings to seem thorough; do not comment on style, formatting, or preferences; no praise, no hedged maybes, no restating what the diff does. If the change is fine, say so and stop — an empty review is a valid review.
+
+Title: {title}
+Author: {author}
+Branch: {head} into {base}
+{cut_note}
+Format, EXACTLY:
+First line:  OVERALL: <one sentence on the change as a whole, or "nothing to flag">
+Then one block per comment, each ended by a line containing only three dashes:
+FILE: <the path exactly as it appears in the diff>
+LINE: <the line number IN THE NEW FILE this is about — count from the +start in the nearest @@ header. 0 if it is about the change as a whole>
+COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
+---
+
+The diff:
+{diff}"#,
+        title = pr.title,
+        author = pr.author,
+        head = pr.head_ref,
+        base = pr.base_ref,
+        cut_note = if cut {
+            "NOTE: the diff below was cut at a byte cap — you are seeing part of the change.\n"
+        } else {
+            ""
+        },
+        diff = diff,
+    )
+}
+
+/// Parse the model's review. `None` when the answer did not follow the format at all — that is an
+/// answer to show as a failure, not to guess comments out of.
+fn parse_critique(text: &str) -> Option<Critique> {
+    let overall = text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("OVERALL:")
+            .map(|v| v.trim().to_string())
+    })?;
+    let mut comments = Vec::new();
+    for block in text.split("\n---") {
+        let field = |key: &str| {
+            block
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+        };
+        let (Some(path), Some(line)) = (field("FILE:"), field("LINE:")) else {
+            continue;
+        };
+        // The comment is everything from COMMENT: to the end of the block — it may span lines.
+        let Some(at) = block.find("COMMENT:") else {
+            continue;
+        };
+        let body = block[at + "COMMENT:".len()..].trim().to_string();
+        if body.is_empty() {
+            continue;
+        }
+        comments.push(Draft {
+            path,
+            line: line.parse().unwrap_or(0),
+            anchored: false, // decided against the diff by the caller, never by the model
+            text: body,
+        });
+    }
+    Some(Critique {
+        number: 0,
+        head_sha: String::new(),
+        overall,
+        comments,
+        truncated: false,
+    })
+}
+
+/// Fold the vetted comments into what GitHub is told: anchored ones ride as line comments, the
+/// unanchored join the body named by their file, and a dropped one is dropped by never arriving
+/// here. Pure, because this is the step where "what the person kept" becomes "what gets posted" —
+/// the one transformation that must never be wrong quietly.
+pub fn assemble_post(overall: &str, kept: &[Draft]) -> (String, Vec<crate::prq::ReviewComment>) {
+    let mut body = overall.trim().to_string();
+    for d in kept.iter().filter(|d| !d.anchored) {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&format!("**{}**: {}", d.path, d.text));
+    }
+    let anchored = kept
+        .iter()
+        .filter(|d| d.anchored)
+        .map(|d| crate::prq::ReviewComment {
+            path: d.path.clone(),
+            line: d.line,
+            body: d.text.clone(),
+        })
+        .collect();
+    (body, anchored)
+}
+
+/// Post what the person kept, and nothing else — the whole write path, so the rules live where
+/// they can be proven: a review of one commit is not posted onto another, and the payload is
+/// assembled from the VETTED comments handed in, never from what was stored.
+pub fn post_critique(
+    repo: &Repo,
+    number: u64,
+    head_sha: &str,
+    overall: &str,
+    kept: &[Draft],
+) -> Result<String, String> {
+    let queue = crate::prq::queue(repo, false)?;
+    let pr = queue
+        .prs
+        .iter()
+        .find(|p| p.number == number)
+        .ok_or("that PR is not in your queue")?;
+    // The draft was anchored against the commit it read; if the branch moved, the right move is a
+    // fresh draft, and saying so beats GitHub's 422.
+    if pr.head_sha != head_sha {
+        return Err(
+            "the branch has moved since this review was drafted — draft it again against the              new commits before posting."
+                .into(),
+        );
+    }
+    let (body, anchored) = assemble_post(overall, kept);
+    let said =
+        crate::prq::submit_review_with_comments(&queue.slug, number, head_sha, &body, &anchored)?;
+    crate::prq::invalidate(&repo.id);
+    Ok(said)
+}
+
+/// Draft an actual review of the PR: read the diff, produce comments, anchor each against the
+/// hunks, store the draft. Returns it for the pane to lay out for vetting. Costs a model call —
+/// only ever run because a person asked.
+pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
+    if !summaries_enabled() {
+        return Err(
+            "reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes."
+                .into(),
+        );
+    }
+    // A person pressed the button; a standing refusal must never make it do nothing.
+    crate::ai::forget_refusal();
+    let (diff, cut) = pr_diff(slug, pr.number, STAGE2_BYTES)?;
+    if diff.trim().is_empty() {
+        return Err("GitHub returned an empty diff for this PR.".into());
+    }
+    let raw = crate::ai::claude_oneshot_telling(
+        &critique_prompt(pr, &diff, cut),
+        review_model(Some("claude-sonnet-5")).as_deref(),
+        Duration::from_secs(300),
+    )
+    .map_err(|unread| unread.say())?;
+    let mut drafted = parse_critique(&raw).ok_or(
+        "the model's review did not follow the format, so no comments are being offered from it — try again.",
+    )?;
+    let lines = commentable(&diff);
+    for d in &mut drafted.comments {
+        d.anchored = d.line > 0 && lines.get(&d.path).is_some_and(|set| set.contains(&d.line));
+    }
+    drafted.number = pr.number;
+    drafted.head_sha = pr.head_sha.clone();
+    drafted.truncated = cut;
+    store_critique(&repo.id, &drafted)?;
+    Ok(drafted)
 }
 
 #[cfg(test)]
@@ -1818,5 +2121,335 @@ mod tests {
         };
         let paths = vec!["src/a.rs".to_string()];
         assert_eq!(ownership(&repo, &["me".into()], &paths), (vec![], 0));
+    }
+}
+
+#[cfg(test)]
+mod critique_tests {
+    use super::*;
+
+    /// The anchor validator against the shapes a real diff throws: context and added lines count
+    /// on the right side, deleted lines and deleted files do not, and the counter follows the
+    /// hunk headers rather than running on.
+    #[test]
+    fn only_lines_the_diff_shows_on_the_right_side_take_a_comment() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,3 +1,4 @@
+ fn main() {
++    let x = 1;
+     println!(\"hi\");
+ }
+@@ -10,2 +11,1 @@
+-gone
+-also gone
++kept
+diff --git a/dead.rs b/dead.rs
+--- a/dead.rs
++++ /dev/null
+@@ -1,2 +0,0 @@
+-everything
+-left
+";
+        let map = commentable(diff);
+        let a = map.get("src/a.rs").expect("the surviving file is present");
+        // First hunk: new lines 1..=4. Second hunk: only line 11 (the two deletions have no right side).
+        assert_eq!(
+            a.iter().copied().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 11],
+            "right-side lines only, following the hunk headers"
+        );
+        assert!(
+            !map.contains_key("dead.rs"),
+            "a deleted file has no right side to comment on"
+        );
+    }
+
+    /// The model's format parses into drafts, and anchoring is decided by the caller against the
+    /// diff — never taken from the model's own claim.
+    #[test]
+    fn a_drafted_review_is_parsed_and_anchored_against_the_diff_not_the_models_word() {
+        let raw = "\
+OVERALL: one real problem.
+FILE: src/a.rs
+LINE: 2
+COMMENT: x is unused, and hides the real fix.
+Also spans lines.
+---
+FILE: src/a.rs
+LINE: 99
+COMMENT: this one points at a line the diff does not show.
+---
+";
+        let c = parse_critique(raw).expect("a well-formed answer parses");
+        assert_eq!(c.overall, "one real problem.");
+        assert_eq!(c.comments.len(), 2);
+        assert!(
+            c.comments[0].text.contains("Also spans lines."),
+            "a comment keeps its later lines: {:?}",
+            c.comments[0].text
+        );
+        // An answer with no OVERALL did not follow the format: nothing is offered from it.
+        assert!(parse_critique("FILE: x\nLINE: 1\nCOMMENT: y").is_none());
+    }
+
+    /// The one transformation between "what the person kept" and "what gets posted": anchored
+    /// comments ride as line comments, unanchored join the body named by their file, and a
+    /// dropped comment was dropped by never being passed in.
+    #[test]
+    fn what_is_posted_is_exactly_what_was_kept() {
+        let kept = vec![
+            Draft {
+                path: "src/a.rs".into(),
+                line: 2,
+                anchored: true,
+                text: "on the line".into(),
+            },
+            Draft {
+                path: "src/b.rs".into(),
+                line: 0,
+                anchored: false,
+                text: "about the change".into(),
+            },
+        ];
+        let (body, anchored) = assemble_post("overall note", &kept);
+        assert_eq!(anchored.len(), 1, "only the anchored comment rides as one");
+        assert_eq!(anchored[0].path, "src/a.rs");
+        assert_eq!(anchored[0].line, 2);
+        assert!(
+            body.contains("**src/b.rs**: about the change"),
+            "the unanchored comment travels in the body, named: {body}"
+        );
+        assert!(body.starts_with("overall note"), "the note leads: {body}");
+    }
+
+    /// The whole draft path against a stubbed GitHub and a stubbed model: the diff is read, the
+    /// comments anchored against it, the draft stored — and found again from disk, which is what
+    /// makes it survive a server restart.
+    #[test]
+    fn a_draft_is_anchored_stored_and_found_again() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        // A GitHub that serves one diff.
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,4 @@\n fn main() {\n+    let x = 1;\n     println!(\"hi\");\n }\n";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let served = diff.to_string();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read as _, Write as _};
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{served}",
+                        served.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // A model that reviews it: one comment the diff shows, one it does not.
+        let claude = home.join("claude.sh");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf 'OVERALL: one real problem.\\nFILE: src/a.rs\\nLINE: 2\\nCOMMENT: x is unused.\\n---\\nFILE: src/a.rs\\nLINE: 99\\nCOMMENT: nowhere.\\n---\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "demo", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+        let pr = crate::prq::Pr {
+            number: 11,
+            title: "t".into(),
+            author: "someone".into(),
+            url: String::new(),
+            head_ref: "feat".into(),
+            head_sha: "sha11".into(),
+            base_ref: "main".into(),
+            updated_at: String::new(),
+            committed_at: String::new(),
+            settled: true,
+            draft: false,
+            labels: Vec::new(),
+            review_decision: String::new(),
+            mergeable: None,
+            checks: "none".into(),
+            my_review: "none".into(),
+            review_is_current: false,
+            reasons: Vec::new(),
+            lane: crate::prq::Lane::NeedsYou,
+            box_name: String::new(),
+        };
+
+        let drafted = critique(&repo, "acme/thing", &pr).expect("the draft path works end to end");
+        assert_eq!(drafted.comments.len(), 2);
+        assert!(
+            drafted.comments[0].anchored,
+            "line 2 is in the diff, so the comment anchors"
+        );
+        assert!(
+            !drafted.comments[1].anchored,
+            "line 99 is not in the diff — offered for the body, not guessed onto a line"
+        );
+
+        // Found again from disk — the property that makes a draft survive a restart.
+        let found = critiqued("demo", 11).expect("the stored draft is found");
+        assert_eq!(found.head_sha, "sha11");
+        assert_eq!(found.comments, drafted.comments);
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+    }
+
+    /// The write path, whole: a moved head is refused with the fix named, and what reaches GitHub
+    /// is exactly what was handed in — the kept comments on their lines, the unanchored one in the
+    /// body, the commit id pinned to the head the draft read.
+    #[test]
+    fn posting_refuses_a_moved_head_and_sends_exactly_what_was_kept() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        let posted = home.join("posted.json");
+        let posted_at = posted.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read as _, Write as _};
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let body = said
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let answer = if head.contains("/user/teams") {
+                    "[]".to_string()
+                } else if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("POST") && head.contains("/reviews") {
+                    // The thing under test: record exactly what skein said.
+                    std::fs::write(&posted_at, &body).unwrap();
+                    "{}".to_string()
+                } else if body.contains("review-requested") {
+                    r#"{"data":{"search":{"nodes":[{"number":11,"title":"t","url":"u",
+                       "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
+                       "headRefOid":"sha11","baseRefName":"main",
+                       "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
+                       "latestReviews":{"nodes":[]},
+                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]}}}"#
+                        .to_string()
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"search":{"nodes":[]}}}"#.to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "crit", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+        let kept = vec![
+            Draft {
+                path: "src/a.rs".into(),
+                line: 2,
+                anchored: true,
+                text: "on the line".into(),
+            },
+            Draft {
+                path: "src/b.rs".into(),
+                line: 0,
+                anchored: false,
+                text: "about the change".into(),
+            },
+        ];
+
+        // The head the queue reports is sha11; a draft of some earlier commit must not post.
+        let refused = post_critique(&repo, 11, "old-sha", "note", &kept)
+            .expect_err("a moved head must refuse");
+        assert!(
+            refused.contains("has moved") && refused.contains("draft it again"),
+            "the refusal names the fix: {refused}"
+        );
+        assert!(!posted.exists(), "nothing reached GitHub on a refusal");
+
+        post_critique(&repo, 11, "sha11", "note", &kept).expect("a matching head posts");
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
+        assert_eq!(
+            sent["commit_id"], "sha11",
+            "pinned to the commit the draft read"
+        );
+        assert_eq!(sent["event"], "COMMENT");
+        let comments = sent["comments"]
+            .as_array()
+            .expect("line comments ride along");
+        assert_eq!(
+            comments.len(),
+            1,
+            "only the anchored comment sits on a line"
+        );
+        assert_eq!(comments[0]["path"], "src/a.rs");
+        assert_eq!(comments[0]["line"], 2);
+        assert_eq!(comments[0]["side"], "RIGHT");
+        let said_body = sent["body"].as_str().unwrap();
+        assert!(
+            said_body.starts_with("note"),
+            "the overall note leads: {said_body}"
+        );
+        assert!(
+            said_body.contains("**src/b.rs**: about the change"),
+            "the unanchored comment travels in the body, named: {said_body}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
     }
 }

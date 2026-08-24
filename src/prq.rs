@@ -1057,6 +1057,58 @@ pub fn submit_review(
     .into())
 }
 
+/// One vetted line comment on its way to GitHub. Defined here rather than borrowed from
+/// [`crate::review`] because review depends on this module, not the other way round.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ReviewComment {
+    pub path: String,
+    pub line: u64,
+    pub body: String,
+}
+
+/// Post one review carrying line comments — the vetted output of `crate::review::critique`.
+///
+/// `head_sha` is sent as `commit_id` and it is load-bearing: the comments were anchored against
+/// that commit's diff, and GitHub attaches them to whatever commit this names. The caller has
+/// already refused a moved head with a better sentence than GitHub's 422; this is the second lock.
+pub fn submit_review_with_comments(
+    slug: &str,
+    number: u64,
+    head_sha: &str,
+    body: &str,
+    comments: &[ReviewComment],
+) -> Result<String, String> {
+    if body.trim().is_empty() && comments.is_empty() {
+        return Err("nothing to post — every comment was dropped and the note is empty.".into());
+    }
+    let mut payload = serde_json::json!({
+        "event": "COMMENT",
+        "commit_id": head_sha,
+        "body": body.trim(),
+    });
+    if !comments.is_empty() {
+        payload["comments"] = comments
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "path": c.path, "line": c.line, "side": "RIGHT", "body": c.body,
+                })
+            })
+            .collect();
+    }
+    crate::github::send_json(
+        "POST",
+        &format!("/repos/{slug}/pulls/{number}/reviews"),
+        &host_token()?,
+        &payload,
+    )?;
+    Ok(match comments.len() {
+        0 => "posted the review".into(),
+        1 => "posted 1 comment".into(),
+        n => format!("posted {n} comments"),
+    })
+}
+
 /// A pull request's diff, as a diff — the media type is the whole of what `gh pr diff` did.
 pub fn pr_diff_text(slug: &str, number: u64) -> Result<String, String> {
     let token = host_token()?;

@@ -414,4 +414,79 @@ function board() {
   t.check("and everything known or read is on screen", b.sums(), 4);
 }
 
+// ---- the actual review: what the pane posts is exactly what was kept ----
+//
+// The vetting happens HERE, in the pane — the server posts whatever this sends. So the property
+// that "a dropped comment is not posted" lives in `revCritiquePost`, and is proven against the
+// real function with a fetch that records what it was given.
+function critWorld() {
+  const sent = [];
+  const toasts = [];
+  const body = `
+    let view = { repo: "alpha", box: null };
+    ${grab("esc")}
+    ${grab("revCrits")}
+    ${grab("revCritKeep")}
+    ${grab("revCritiquePost")}
+    ${grab("revCritiqueHtml")}
+    const renderReview = () => {};
+    const toast = m => toasts.push(m);
+    const confirm = () => true;
+    const fetch = (url, opts) => {
+      sent.push({ url, body: JSON.parse(opts.body) });
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, text: "posted" }) });
+    };
+    return {
+      seed: (n, critique) => revCrits.set(n, { open: true, busy: false, posting: false, critique, drop: new Set(), posted: "" }),
+      drop: (n, i) => revCritKeep(n, i, false),
+      post: (n, sha) => revCritiquePost(n, sha),
+      html: pr => revCritiqueHtml(pr),
+    };
+  `;
+  return { world: new Function("sent", "toasts", body)(sent, toasts), sent, toasts };
+}
+
+{
+  const { world, sent } = critWorld();
+  world.seed(7, {
+    head_sha: "h1", overall: "note", truncated: false,
+    comments: [
+      { path: "a.rs", line: 2, anchored: true, text: "first" },
+      { path: "b.rs", line: 5, anchored: true, text: "second — to be dropped" },
+      { path: "c.rs", line: 0, anchored: false, text: "third" },
+    ],
+  });
+  world.drop(7, 1);
+  world.post(7, "h1");
+  await new Promise(r => setTimeout(r, 0));
+
+  t.check("one review request went out", sent.length, 1);
+  const posted = sent[0].body;
+  t.check("the dropped comment is not in it", posted.comments.map(c => c.text), ["first", "third"]);
+  t.check("what was kept is sent verbatim, vetted here and nowhere else",
+    posted.comments.every(c => c.text !== "second — to be dropped"), true);
+  t.check("the head the draft read rides along", posted.head_sha, "h1");
+}
+
+{
+  // Everything dropped and no note: refused in the pane, before any request exists to regret.
+  const { world, sent, toasts } = critWorld();
+  world.seed(8, { head_sha: "h1", overall: "", comments: [{ path: "a.rs", line: 2, anchored: true, text: "only" }] });
+  world.drop(8, 0);
+  world.post(8, "h1");
+  await new Promise(r => setTimeout(r, 0));
+  t.check("nothing kept posts nothing", sent.length, 0);
+  t.check("and says so", toasts.length >= 1, true);
+}
+
+{
+  // A draft of an earlier commit: the pane says so and the post button is off — the server would
+  // refuse too, but the person deserves the sentence before the press, not after.
+  const { world } = critWorld();
+  world.seed(9, { head_sha: "old", overall: "x", comments: [] });
+  const html = world.html({ number: 9, head_sha: "new" });
+  t.check("a stale draft is named", html.includes("Drafted before the latest commits"), true);
+  t.check("and posting is off until it is drafted again", html.includes("disabled"), true);
+}
+
 t.done();

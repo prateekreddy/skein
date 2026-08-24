@@ -367,7 +367,9 @@ depends_on = ["mailbox", "repos", "sbx", "util"]
 depends_on = ["config", "deployment", "gitgate", "kit", "place", "registry", "runtime", "sbx", "tracking", "util"]
 
 [current.review]
-depends_on = ["ai", "codeowners", "contracts", "moduledocs", "prq", "repos", "util"]
+# `config` carries the review-model setting — which model reads and reviews PRs is the owner's
+# choice, not a constant. `testutil` is the tests' env-lock and tempdir, nothing in the shipped path.
+depends_on = ["ai", "codeowners", "config", "contracts", "moduledocs", "prq", "repos", "testutil", "util"]
 
 [current.runtime]
 depends_on = ["repos", "util"]

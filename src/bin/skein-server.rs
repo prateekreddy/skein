@@ -340,6 +340,14 @@ async fn main() {
             post(api_set_workflow),
         )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
+        .route(
+            "/api/repos/:id/review/:number/critique",
+            get(api_critique_get).post(api_critique_draft),
+        )
+        .route(
+            "/api/repos/:id/review/:number/critique/post",
+            post(api_critique_post),
+        )
         // The shape of a change: which modules moved and how. The same route shape for both
         // sources, because the answer is the same question — `?box=` for a box's branch.
         .route("/api/repos/:id/review/:number/shape", get(api_pr_shape))
@@ -1268,6 +1276,70 @@ async fn api_review_summary(
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// The draft skein already holds for this PR, off disk, costing nothing. The pane compares its
+/// `head_sha` with the queue's to mark a draft of an earlier commit as such.
+async fn api_critique_get(Path((id, number)): Path<(String, u64)>) -> Response {
+    match tokio::task::spawn_blocking(move || skein::review::critiqued(&id, number)).await {
+        Ok(c) => Json(serde_json::json!({ "ok": true, "critique": c })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Draft an actual review of the PR. A model call — only ever reached by a person pressing the
+/// button, never from a background pass.
+async fn api_critique_draft(Path((id, number)): Path<(String, u64)>) -> Response {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such repo").into_response();
+    };
+    let out = tokio::task::spawn_blocking(move || {
+        let queue = skein::prq::queue(&repo, false)?;
+        let pr = queue
+            .prs
+            .iter()
+            .find(|p| p.number == number)
+            .ok_or("that PR is not in your queue")?;
+        skein::review::critique(&repo, &queue.slug, pr)
+    })
+    .await;
+    match out {
+        Ok(Ok(c)) => Json(serde_json::json!({ "ok": true, "critique": c })).into_response(),
+        Ok(Err(e)) => Json(serde_json::json!({ "ok": false, "error": e })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// What the person kept, and nothing else. The body carries the vetted comments themselves —
+/// the server deliberately does not post what it stored, so an edit or a dropped comment in the
+/// pane is exactly what reaches GitHub.
+#[derive(serde::Deserialize)]
+struct CritiquePostReq {
+    head_sha: String,
+    #[serde(default)]
+    overall: String,
+    #[serde(default)]
+    comments: Vec<skein::review::Draft>,
+}
+
+async fn api_critique_post(
+    Path((id, number)): Path<(String, u64)>,
+    Json(req): Json<CritiquePostReq>,
+) -> Json<serde_json::Value> {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    };
+    // The rules — moved head refused, vetted comments only — live in `review::post_critique`,
+    // where they are proven against a stubbed GitHub.
+    let out = tokio::task::spawn_blocking(move || {
+        skein::review::post_critique(&repo, number, &req.head_sha, &req.overall, &req.comments)
+    })
+    .await;
+    Json(match out {
+        Ok(Ok(text)) => serde_json::json!({ "ok": true, "text": text }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
 }
 
 #[derive(serde::Deserialize)]

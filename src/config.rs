@@ -113,6 +113,12 @@ pub struct Config {
     /// "not summarised" and stays at full attention. See [`crate::review`].
     #[serde(default = "default_true")]
     pub review_summaries: bool,
+    /// Which model reads and reviews pull requests — summaries, questions, drafted comments, and
+    /// the actual review. Empty means each call's own default (summaries stay on the cheap model,
+    /// the writing calls on the stronger one). `$SKEIN_REVIEW_MODEL` overrides, and
+    /// `$SKEIN_AI_MODEL` — the everything-override — still trumps both, as it always has.
+    #[serde(default)]
+    pub review_model: String,
 
     /// May skein act on pull requests on its own — labels, updates, merges, deleted branches?
     ///
@@ -495,6 +501,7 @@ impl Default for Config {
         Config {
             seed_gh_secret: false,
             pr_workflows: false,
+            review_model: String::new(),
             force_gh_secret: false,
             default_agent: default_agent(),
             base_branch: String::new(),

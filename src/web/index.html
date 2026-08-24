@@ -560,6 +560,15 @@
                          padding:8px 10px; font:13px var(--ui); line-height:1.5; }
   .revanswer { margin-top:10px; padding:9px 11px; background:var(--panel); border-radius:var(--radius-sm);
                border-left:2px solid var(--accent); font-size:13px; line-height:1.6; }
+  .revcrit { margin-top:11px; border:1px solid var(--border-2); border-radius:var(--radius-sm);
+             background:var(--inset); padding:10px 11px; }
+  .revcrit textarea { width:100%; background:var(--panel); color:var(--text); resize:vertical;
+                      border:1px solid var(--border-2); border-radius:var(--radius-sm);
+                      padding:8px 10px; font:13px var(--ui); line-height:1.5; }
+  .revcrit-row { margin-top:9px; }
+  .revcrit-row label { display:flex; align-items:center; gap:7px; margin-bottom:4px;
+                       font:12px var(--mono); cursor:pointer; }
+  .revcrit-row.dropped textarea { opacity:.45; }
   .revanswer > :first-child { margin-top:0; } .revanswer > :last-child { margin-bottom:0; }
   .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
   .txhead { display:flex; align-items:center; gap:10px; position:sticky; top:-14px; z-index:1; margin:-14px -18px 10px;
@@ -1448,6 +1457,7 @@
             <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill"></span></span><span class="desc">Rationed Haiku calls on your Claude subscription (no API key) summarise boxes with no journal, and hold back a "proceed?" that is really a decision. <details><summary>why it is off by default</summary>spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</details></span></span><input type="checkbox" id="set-ai" class="switch"></label>
             <p class="set-note" id="set-ainote"></p>
             <label class="set-row"><span class="set-txt"><span class="set-title">Read pull requests</span><span class="desc">Summarise each PR in the review queue, so most of it can be read from the row. <details><summary>why this one is on</summary>It spends on the opposite terms to AI enrichment above, which is why the defaults differ. Enrichment runs unasked over a board that already tells you what you need. A summary is only ever produced for a PR <b>already in your queue</b>, at most <b>once per head commit</b>, and cached — and without it the queue cannot do the job it exists for, which is to spare you reading thirty pull requests a day yourself. Turning it off is a supported state, not a broken one: every PR then reads <i>not summarised</i> and keeps your full attention. skein only ever lowers a PR's depth by having actually read it.</details></span></span><input type="checkbox" id="set-prai" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Review model</span><span class="desc">Which model reads and reviews pull requests — summaries, questions, drafted comments and the actual review. Empty keeps each call's own default: summaries on the cheap model, everything that writes on the stronger one. <code>$SKEIN_REVIEW_MODEL</code> overrides.</span></span><input type="text" id="set-review-model" placeholder="e.g. claude-sonnet-5" spellcheck="false"></label>
           </section>
           <section class="set-pane" data-pane="tracking">
             <p class="set-note" id="set-syncnote"></p>
@@ -3280,8 +3290,10 @@ function revBody(pr) {
       <button type="button" class="revchip" onclick="revAct(${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>
       <button type="button" class="revchip" onclick="archivePr(${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
       <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">re-read</button>
+      <button type="button" class="revchip" onclick="revCritiqueOpen(${pr.number})">review the code…</button>
     </div>
     ${revFlowBox(pr)}
+    ${revCritiqueHtml(pr)}
     ${revComposeHtml(pr)}
   </div>`;
 }
@@ -3385,6 +3397,10 @@ function revFlowBox(pr) {
 // post under your name, which is why the button that sends them says so.
 let revComposing = null;   // { number, kind, text, answer, busy }
 
+// The actual-review panel, per PR: skein drafts comments, YOU keep/drop/edit each one, and only
+// what survives is posted — the server never posts what it stored, only what this pane sends.
+let revCrits = new Map();  // number -> { open, busy, posting, critique, drop:Set, posted }
+
 function revCompose(number, kind) {
   revComposing = { number, kind, text: "", answer: "", busy: false };
   renderReview();
@@ -3458,6 +3474,105 @@ function revAct(number, kind) {
     revComposing = null;
     loadReview(true);
   });
+}
+
+// --- The actual review: drafted comments you vet, then post -----------------------------------
+
+function revCritiqueOpen(number) {
+  const had = revCrits.get(number);
+  if (had && had.open) { had.open = false; renderReview(); return; }
+  const c = { open: true, busy: true, posting: false, critique: null, drop: new Set(), posted: "" };
+  revCrits.set(number, c);
+  renderReview();
+  // What skein already holds, off disk — drafting is a separate, deliberate press.
+  fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/critique`)
+    .then(r => r.json()).catch(() => ({}))
+    .then(d => { c.busy = false; c.critique = d.critique || null; renderReview(); });
+}
+
+function revCritiqueDraft(number) {
+  const c = revCrits.get(number);
+  if (!c || c.busy) return;
+  c.busy = true; c.critique = null; c.drop = new Set(); c.posted = "";
+  renderReview();
+  fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/critique`, { method: "POST" })
+    .then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }))
+    .then(d => {
+      c.busy = false;
+      if (d.ok) c.critique = d.critique; else toast(d.error || "no review came back");
+      renderReview();
+    });
+}
+
+function revCritKeep(number, i, keep) {
+  const c = revCrits.get(number);
+  if (!c) return;
+  if (keep) c.drop.delete(i); else c.drop.add(i);
+  renderReview();
+}
+
+function revCritiquePost(number, headSha) {
+  const c = revCrits.get(number);
+  if (!c || !c.critique || c.posting) return;
+  const kept = c.critique.comments.filter((_, i) => !c.drop.has(i));
+  const n = kept.length;
+  if (!n && !(c.critique.overall || "").trim()) { toast("nothing kept — keep a comment or write an overall note"); return; }
+  if (!confirm(`Post ${n} comment${n === 1 ? "" : "s"} on #${number} as one review, under your name?`)) return;
+  c.posting = true; renderReview();
+  fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/critique/post`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ head_sha: headSha, overall: c.critique.overall || "", comments: kept }),
+  }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }))
+    .then(d => {
+      c.posting = false;
+      if (d.ok) { c.posted = d.text || "posted"; toast(`#${number} ${c.posted}`); }
+      else toast(d.error || "that did not go through");
+      renderReview();
+    });
+}
+
+function revCritiqueHtml(pr) {
+  const c = revCrits.get(pr.number);
+  if (!c || !c.open) return "";
+  const close = `<button type="button" class="revchip" onclick="revCritiqueOpen(${pr.number})">close</button>`;
+  if (c.busy) return `<div class="revcrit"><div class="dim">${c.critique === null && !c.posted
+    ? "reviewing the code… this reads the whole diff, so it can take a few minutes" : "…"}</div></div>`;
+  if (!c.critique) {
+    return `<div class="revcrit"><div>Skein reads the diff and drafts review comments — only actual
+      problems, never nits. You go through them, keep or drop each one, edit freely, and nothing
+      reaches GitHub until you post.</div>
+      <div class="revacts"><button type="button" class="revchip go" onclick="revCritiqueDraft(${pr.number})">review the code</button>${close}</div></div>`;
+  }
+  const k = c.critique;
+  // A review of one commit is never offered against another: the server refuses too, but the honest
+  // pane says it before the button is pressed.
+  const stale = k.head_sha !== pr.head_sha;
+  const staleNote = stale
+    ? `<div class="revstale"><b>Drafted before the latest commits</b> — it reviewed
+        <code>${esc(String(k.head_sha || "").slice(0, 7))}</code> and the branch has moved. Posting is off until it is drafted again.</div>`
+    : "";
+  const cut = k.truncated ? `<div class="dim">The diff was cut at the byte cap — this reviewed part of the change.</div>` : "";
+  const rows = (k.comments || []).map((d, i) => `
+    <div class="revcrit-row${c.drop.has(i) ? " dropped" : ""}">
+      <label><input type="checkbox"${c.drop.has(i) ? "" : " checked"} onchange="revCritKeep(${pr.number}, ${i}, this.checked)">
+        <code>${esc(d.path)}${d.anchored ? `:${d.line}` : ""}</code>
+        ${d.anchored ? "" : `<span class="revtag" title="the diff shows no such line, so this cannot sit on one">will travel in the review body</span>`}</label>
+      <textarea rows="2" oninput="revCrits.get(${pr.number}).critique.comments[${i}].text = this.value"${c.drop.has(i) ? " disabled" : ""}>${esc(d.text)}</textarea>
+    </div>`).join("");
+  const keptN = (k.comments || []).length - c.drop.size;
+  return `<div class="revcrit">
+    ${staleNote}${cut}
+    <div class="revcl">Overall note — leads the review. Skein said: ${k.comments && k.comments.length ? "" : "<b>nothing to flag.</b>"}</div>
+    <textarea rows="2" oninput="revCrits.get(${pr.number}).critique.overall = this.value">${esc(k.overall || "")}</textarea>
+    ${rows}
+    <div class="revacts">
+      ${c.posted
+        ? `<span class="dim">${esc(c.posted)} ✓</span>`
+        : `<button type="button" class="revchip go" onclick="revCritiquePost(${pr.number}, ${JSON.stringify(k.head_sha || "")})"${stale || c.posting ? " disabled" : ""}>${c.posting ? "posting…" : `post ${keptN} comment${keptN === 1 ? "" : "s"} as one review`}</button>`}
+      <button type="button" class="revchip" onclick="revCritiqueDraft(${pr.number})">draft again</button>
+      ${close}
+    </div>
+  </div>`;
 }
 
 function toggleRevRow(n) {
@@ -5445,6 +5560,7 @@ function openSettings(pane = "repos") {
     // `!== false` rather than `!!`: this one defaults ON, so a settings payload from a server that
     // predates the field must read as on, not as off.
     document.getElementById("set-prai").checked = settings.review_summaries !== false;
+    document.getElementById("set-review-model").value = settings.review_model || "";
     // The toggle says what you asked for; this says what would actually happen. "on, but `claude`
     // is not on PATH" is the state a checkbox alone can never show.
     fetch("/api/health").then(r => r.json()).then(h => {
@@ -5829,6 +5945,7 @@ function settingsPayload() {
     ssh_key: document.getElementById("set-sshkey").value.trim(),
     ai_enrichment: document.getElementById("set-ai").checked,
     review_summaries: document.getElementById("set-prai").checked,
+    review_model: document.getElementById("set-review-model").value.trim(),
   };
 }
 // Work-tracking connections are deliberately NOT in the payload: they carry a credential, and it
