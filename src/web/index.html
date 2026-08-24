@@ -37,7 +37,13 @@
       border-bottom:1px solid color-mix(in srgb,var(--accent-2) 30%,transparent); }
   a:hover { color:var(--accent); border-bottom-color:var(--accent); }
 
-  #app { display:flex; height:100vh; overflow:hidden; }
+  /* A column, so the health banner can be a ROW above the app instead of a pill floating over
+     the tab bar — a warning that covers the tabs blocks exactly the work it interrupts. */
+  body { display:flex; flex-direction:column; }
+  #app { display:flex; flex:1 1 auto; min-height:0; overflow:hidden; }
+  #healthban { display:block; width:100%; border:0; cursor:pointer; text-align:left;
+               background:#f0b429; color:#08090b; font:600 12px/1.35 sans-serif; padding:6px 14px;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:none; }
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
   /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
@@ -531,6 +537,10 @@
              font-size:12px; color:var(--text-2); }
   .readbar { display:flex; align-items:center; gap:9px; padding:8px 10px; position:sticky;
              bottom:0; background:var(--bg); border-top:1px solid var(--line); font-size:12px; }
+  .revsearch { background:var(--inset); border:1px solid var(--border-2); border-radius:var(--radius-sm);
+               color:var(--text); font:12px var(--ui); padding:3px 9px; width:190px; }
+  .revsearch:focus { border-color:var(--accent); outline:none; }
+  .revsearch::placeholder { color:var(--faint); }
   .revbody { border-top:1px solid var(--line); padding:11px 13px; font-size:13px; }
   .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
              display:flex; flex-wrap:wrap; gap:4px 14px; }
@@ -2854,7 +2864,8 @@ function renderReview() {
   } else if (revQueue) {
     const shown = (revQueue.prs || [])
       .filter(p => !revRepoFilter || p.repo_id === revRepoFilter)
-      .filter(revMatchesFilter);
+      .filter(revMatchesFilter)
+      .filter(revMatchesSearch);
     // Blind spots first and unmissable. A queue that under-reports silently is worse than no queue,
     // so what it could not see outranks what it could.
     const blind = (revQueue.blind_spots || [])
@@ -2872,7 +2883,9 @@ function renderReview() {
     }
     // Dependent chains collapse into one row each; their members never appear loose anywhere —
     // fifteen scattered rows that are one change is the wrong-review generator this exists for.
-    const stacks = revChains(shown);
+    // A live search dissolves the stacks: their aggregation hides exactly the row the searcher is
+    // after, and a hit inside "15 pull requests, one change" is a hit you cannot see.
+    const stacks = revSearch.trim() ? [] : revChains(shown);
     const inStack = new Set(stacks.flatMap(st => st.steps.map(rk)));
     for (const [lane, label] of REV_LANES) {
       const loose = shown.filter(p => p.lane === lane && !inStack.has(rk(p)));
@@ -2892,13 +2905,20 @@ function renderReview() {
       }
       // A stack sorts by its next actionable step, not its tip — the tip is the one PR you
       // cannot review yet, and it is exactly what floats to the top of a recency sort.
+      //
+      // Your move is ordered by how long it has waited on you, OLDEST first: working from the top
+      // clears what is most likely blocking a colleague. The other lanes keep recency — for your
+      // own PRs, "what moved most recently" is the right question.
+      const key = lane === "needs-you" ? revWaitedSince : (p => p.updated_at || "");
       const entries = [
-        ...loose.map(p => ({ at: p.updated_at || "", html: revRow(p) })),
+        ...loose.map(p => ({ at: key(p), html: revRow(p) })),
         ...laneStacks.map(st => ({
-          at: (revStackNext(st) || st.steps[0]).updated_at || "",
+          at: key(revStackNext(st) || st.steps[0]),
           html: revStackRow(st),
         })),
-      ].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+      ].sort((a, b) => lane === "needs-you"
+        ? String(a.at).localeCompare(String(b.at))
+        : String(b.at).localeCompare(String(a.at)));
       // "N decisions from M pull requests": a stack is one entry point and several decisions in a
       // forced order — the heading says both, which is also how the badge (counting PRs) and the
       // pane (counting starts) stop disagreeing.
@@ -2912,6 +2932,9 @@ function renderReview() {
     }
   }
   revpane.innerHTML = `<div class="revwrap"><div class="revhead">${picker}<div class="revchips">${chips}</div>
+      <input class="revsearch" type="search" placeholder="find a pull request…" value="${esc(revSearch)}"
+        oninput="revSearchSet(this.value)"
+        onkeydown="if (event.key === 'Escape' && this.value) { event.stopPropagation(); revSearchSet(''); }">
       <span class="revspacer"></span>
       ${revScopeRepo() ? `<button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>` : ""}
       <button type="button" class="revchip${revEdit ? " on" : ""}" onclick="toggleWorkflowEditor()">workflows</button>
@@ -3436,6 +3459,35 @@ function revRow(pr) {
   return `<div class="revrow${open ? " open" : ""}">${line}${open ? revBody(pr) : ""}</div>`;
 }
 
+// When this pull request started waiting on YOU — the sort key of the your-move lane.
+//
+// Not createdAt, and not updatedAt-when-avoidable: waiting starts when the head moved after you
+// had reviewed (the commit that invalidated your approval is the moment it came back), and
+// updatedAt is the honest fallback where the request time is not knowable from the search payload.
+// updatedAt DESC was the old order, and it was upside down for a review queue: the PR waiting
+// longest sank to the bottom, and any push — a bot's included — lifted a row to the top.
+function revWaitedSince(p) {
+  const moved = p.my_review && p.my_review !== "none" && !p.review_is_current;
+  return (moved && p.committed_at) || p.updated_at || "";
+}
+
+// Does this row answer the search? Substring, case-insensitive, over everything a person remembers
+// about a pull request: its number, its words, whose it is, and which branches it spans.
+function revMatchesSearch(p) {
+  const q = revSearch.trim().toLowerCase();
+  if (!q) return true;
+  return [String(p.number), p.title, p.author, p.head_ref, p.base_ref, p.repo_id]
+    .some(v => (v || "").toLowerCase().includes(q));
+}
+
+function revSearchSet(v) {
+  revSearch = v;
+  renderReview();
+  // innerHTML replaced the input mid-keystroke: put the caret back where the typist left it.
+  const box = revpane && revpane.querySelector && revpane.querySelector(".revsearch");
+  if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+}
+
 // Whose move — the one field that changes what you do next, in the row's highest-value position.
 // Exactly one state is lit, and it is the one that is yours; "done" is a decision that still
 // holds; "blocked" is drawn by the stack for a step whose base is unreviewed.
@@ -3622,6 +3674,7 @@ let revComposing = null;   // { repo, number, kind, text, answer, busy }
 let revCrits = new Map();  // rk(pr) -> { open, busy, posting, critique, drop:Set, posted }
 // The reading view — a MODE of this pane, not a tab or a modal: the queue is the thing you are
 // returning to, so what you left (scroll, expanded row) is state to restore, not rebuild.
+let revSearch = "";            // the queue's search text — matches number, title, author, branch, repo
 let revReading = null;         // {repo, number} while the change itself is on screen
 let revReturnScroll = 0;       // the queue's scroll offset, put back on Esc
 const revDiffs = new Map();    // rk -> {head_sha, diff, cut} | {error}
@@ -7769,10 +7822,11 @@ function loadHealth() {
     let banner = document.getElementById("healthban");
     if (health.ok) { banner?.remove(); return; }
     if (!banner) {
+      // A row above the app, never a pill over it: floating at the top covered the dock's tab bar,
+      // which blocked exactly the work the warning was interrupting. As body's first flex child it
+      // pushes the app down instead of painting over it, and disappears without leaving a hole.
       banner = document.createElement("button"); banner.id = "healthban";
-      banner.style.cssText = "position:fixed;top:0;right:18px;z-index:61;border:0;cursor:pointer;"
-        + "background:#f0b429;color:#08090b;font:600 12px/1 sans-serif;padding:7px 13px;border-radius:0 0 8px 8px";
-      banner.onclick = () => openSettings("diag"); document.body.append(banner);
+      banner.onclick = () => openSettings("diag"); document.body.prepend(banner);
     }
     // "memory" among them because a fleet with no ceiling has no symptom until the sandbox stops
     // answering — and by then the banner is not what you are looking at.

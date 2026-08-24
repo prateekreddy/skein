@@ -33,7 +33,7 @@ function board() {
     let view = { box: null, mode: "term", kind: "agent" };
     const repos = [{ id: "alpha" }, { id: "beta" }];
     let revQueue = null, revOpen = new Set(), revSums = new Map(), revMods = null;
-    let revReading = null, revReturnScroll = 0;
+    let revReading = null, revReturnScroll = 0, revSearch = "";
     const revDiffs = new Map(), revNotes = new Map();
     let revFilter = "all", revLoading = false, revStaleTimer = null;
     let revRepoFilter = "";
@@ -81,6 +81,9 @@ function board() {
     ${grab("loadReview")}
     ${grab("renderReview")}
     ${grab("renderReading")}
+    ${grab("revWaitedSince")}
+    ${grab("revMatchesSearch")}
+    ${grab("revSearchSet")}
     ${grab("readingFiles")}
     ${grab("openReading")}
     ${grab("closeReading")}
@@ -124,6 +127,7 @@ function board() {
       stack: key => toggleRevStack(key),
       row: key => toggleRevRow(key),
       openRow: () => [...revOpen],
+      search: q => revSearchSet(q),
       read: (repo, n) => openReading(repo, n),
       back: () => closeReading(),
       reading: () => revReading,
@@ -808,6 +812,78 @@ function rowWorld() {
   b2.open("alpha");
   await b2.drain();
   t.check("a lone failure is not a queue-level story", b2.pane().includes("are red"), false);
+}
+
+// ---- your move is ordered by how long it has waited on you, oldest first ----
+//
+// SKEIN-140. updated_at DESC was upside down for a review queue: the PR waiting longest sank to
+// the bottom, and any push — a bot's included — lifted a row to the top. Your move now reads
+// oldest-waiting first (a decided PR whose head moved counts from the commit that invalidated the
+// decision), and the other lanes keep recency, because for your own PRs "what moved most
+// recently" is the right question.
+{
+  const b = board();
+  const ago = h => new Date(Date.now() - h * 3600 * 1000).toISOString();
+  const pr = (n, over) => ({ number: n, head_ref: "b" + n, base_ref: "develop", title: "pr " + n,
+    head_sha: "s" + n, committed_at: ago(2), updated_at: ago(2), settled: true, draft: false,
+    reasons: ["reviewer"], checks: "none", lane: "needs-you", author: "x",
+    my_review: "none", review_is_current: false, ...over });
+  b.lanes([
+    pr(300, { updated_at: ago(0.02) }),                       // pushed a minute ago
+    pr(100, { updated_at: ago(168) }),                        // asked of you a week ago
+    // Decided, then the head moved: waiting since THAT commit, not since the latest touch.
+    pr(200, { my_review: "approved", review_is_current: false,
+              committed_at: ago(72), updated_at: ago(0.01) }),
+    // Their move keeps recency: newest first.
+    pr(400, { lane: "waiting", author: "me", updated_at: ago(50) }),
+    pr(500, { lane: "waiting", author: "me", updated_at: ago(1) }),
+  ]);
+  b.open("alpha");
+  await b.drain();
+  const order = [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1]));
+  t.check("a week-old request outranks a minute-old push",
+    order.slice(0, 3), [100, 200, 300]);
+  t.check("their move keeps recency, newest first", order.slice(3), [500, 400]);
+}
+
+// ---- the search bar: a PR is findable by what you remember about it ----
+{
+  const b = board();
+  const at = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  const pr = (n, title, author, over) => ({ number: n, head_ref: "b" + n, base_ref: "develop",
+    title, head_sha: "s" + n, committed_at: at, updated_at: at, settled: true, draft: false,
+    reasons: ["reviewer"], checks: "none", lane: "needs-you", author, ...over });
+  b.lanes([
+    pr(577, "bedrock transport for the audit path", "dev-sixth"),
+    pr(650, "worktree analysis status", "dev-vale"),
+    pr(613, "chore(ladder): the tenants chassis", "dev-rhea", { head_ref: "ladder/chassis-tenants" }),
+    pr(614, "tenants slice 1: compose", "dev-rhea", { head_ref: "ladder/tenants-01", base_ref: "ladder/chassis-tenants" }),
+    pr(615, "tenants slice 2: tables", "dev-rhea", { head_ref: "ladder/tenants-02", base_ref: "ladder/tenants-01" }),
+  ]);
+  b.open("alpha");
+  await b.drain();
+  t.check("the stack folds before anyone searches", b.pane().includes("pull requests, one change"), true);
+
+  b.search("577");
+  t.check("a number finds its pull request and nothing else",
+    [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1])), [577]);
+  t.check("and the lane heading counts what is shown", b.pane().includes('class="revn">1<'), true);
+
+  b.search("dev-vale");
+  t.check("an author finds their rows",
+    [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1])), [650]);
+
+  // A hit inside a stack must be visible directly: the aggregation hides exactly what the
+  // searcher is after, so a live search dissolves stacks into their matching rows.
+  b.search("615");
+  t.check("a stack step is reachable by search, loose",
+    [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1])), [615]);
+  t.check("and no stack row hides it", b.pane().includes("pull requests, one change"), false);
+
+  b.search("");
+  t.check("clearing restores the full queue",
+    [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1])).length >= 2, true);
+  t.check("and the stack folds back", b.pane().includes("pull requests, one change"), true);
 }
 
 // ---- the change is readable in the pane, and a verdict lives only where the evidence is ----
