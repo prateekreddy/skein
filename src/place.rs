@@ -2145,6 +2145,10 @@ mod tests {
     // than as a diff across a dozen files.
     #[test]
     fn its_own_sandbox_is_reached_exactly_as_it_always_was() {
+        // `exec_argv` reads SKEIN_IN_FLEET (via `unreachable_from_fleet`), and the deployment,
+        // health and namespace tests set it under the shared lock — reading it without that lock
+        // is how this test flaked when a neighbour flipped the variable mid-assertion.
+        let _g = crate::testutil::env_lock();
         let p = Place {
             name: "web-main".into(),
             sandbox: "web-main".into(),

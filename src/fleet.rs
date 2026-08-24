@@ -5193,13 +5193,47 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     let Some(record) = shared_record(name) else {
         return Ok(()); // not skein's to start — see `absent_box_reason`
     };
-    if fleet_liveness().get(name).copied().unwrap_or(false) {
-        return Ok(());
-    }
     let fleet = own_sandbox(&record.sandbox);
-    let (has_tree, has_session) = box_progress(&fleet, name, "skein-shell")?;
+    // "Alive" is the socket's answer, not the record's. For a record from an earlier boot the
+    // sweep deliberately falls back to `has-session` (see `place::liveness_probe`) — and a session
+    // tmux answers for is exactly what a half-failed restart leaves behind: launched, then the
+    // stamp never rewritten. Believing it here is how a box stays unreachable *forever*: every
+    // attach finds it "alive", skips the relaunch, and then refuses at the crossing on the stale
+    // stamp — seen live on lattice-feat-design-codex-claude, 2026-08-24. So a live session only
+    // counts once the record still addresses it.
+    let mut progress = None;
+    let alive = fleet_liveness().get(name).copied().unwrap_or(false) || {
+        let p = box_progress(&fleet, name, "skein-shell")?;
+        progress = Some(p);
+        p.1 // raced with someone else's restart, or the sweep was stale
+    };
+    if alive {
+        match session_reach(&fleet, name, &record)? {
+            Reach::Current => return Ok(()),
+            // Cannot prove whose the session is, and a working box placed before stamps existed
+            // reads exactly like this — so never end it on a guess. The crossing's own refusal
+            // names the fix (`skein restart`) without killing anything.
+            Reach::Unprovable => return Ok(()),
+            Reach::Orphan(why) => {
+                // tmux answers for it, but no crossing can enter it, so it is not the box — it is
+                // what a half-failed restart left running. End it and start over; the tree, the
+                // private HOME and the ceiling survive either way.
+                eprintln!(
+                    "skein: {name} has a session nothing can enter — {why} — so it is being ended \
+                     and {name} started again"
+                );
+                fleet.exec(&stop_script(name, &record), Duration::from_secs(30))?;
+                LIVENESS_GATE.invalidate();
+                progress = None; // the stop just changed both of its answers
+            }
+        }
+    }
+    let (has_tree, has_session) = match progress {
+        Some(p) => p,
+        None => box_progress(&fleet, name, "skein-shell")?,
+    };
     if has_session {
-        return Ok(()); // raced with someone else's restart, or the sweep was stale
+        return Ok(()); // raced with someone else's restart between the checks above
     }
     if !has_tree {
         return Err(format!(
@@ -5249,6 +5283,69 @@ pub fn ensure_box_session(name: &str) -> Result<(), String> {
     // that never happened. The tree, the private HOME and the ceiling are all intact either way.
     eprintln!("skein: {name} had no live session, so it was restarted (its work is untouched)");
     Ok(())
+}
+
+/// The shell that stops a shared box: end its session, then end whatever outlived it.
+///
+/// Its own function because it is a contract rather than a detail — the two steps answer different
+/// halves of "stop the box", and a test can run it against a scratch cgroup without a sandbox.
+/// `tmux kill-server` ends the processes in the server's panes; `cgroup.kill` ends the ones that
+/// left that tree, which is the half that was missing and the reason a closed box went on holding
+/// its memory. See [`box_cgroup_kill`].
+///
+/// The socket is unlinked last. It is what `place::liveness_probe` asks about, so removing it before
+/// the processes are gone would make the box read as stopped while it was still running.
+/// Lives here rather than in `sandbox` because it is built of this module's own pieces — the
+/// namespace look, the cgroup kill, the sweeps — and because [`ensure_box_session`] needs it to end
+/// an orphan session; `sandbox` already leans on `fleet`, and the reverse edge would be a cycle.
+pub(crate) fn stop_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
+    format!(
+        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; {containers}; \
+         {orphans}; rm -f {sock}; exit 0",
+        look = namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
+        sock = sh_quote(&rec.sock),
+        kill = box_cgroup_kill(name),
+        sweep = namespace_sweep(),
+        containers = box_containers_kill(name),
+        orphans = unattributed_containers(),
+    )
+}
+
+/// Whether the record still addresses the live session — the question "alive" does not answer.
+enum Reach {
+    /// The anchor is this boot's process, exactly as recorded: the session is the box.
+    Current,
+    /// A record from before the stamp existed proves nothing in either direction.
+    Unprovable,
+    /// The session answers tmux and no crossing can enter it — the record names another boot, or a
+    /// pid that is gone or reused. The string says which, in [`anchor_matches`]'s words.
+    Orphan(String),
+}
+
+/// Ask the sandbox whether `record` still names the process behind `name`'s live session.
+///
+/// One `sbx exec`, on paths where a session was just observed alive — attach and resume, both
+/// human-initiated. `Err` is the sandbox not answering, which is a different fact from any of the
+/// three [`Reach`] answers and must not be read as one: ending a session on a question that timed
+/// out would end a box for being briefly slow.
+fn session_reach(fleet: &Place, name: &str, record: &PlaceRecord) -> Result<Reach, String> {
+    if record.generation.is_empty() || record.ns_start == 0 {
+        return Ok(Reach::Unprovable);
+    }
+    let out = fleet.exec(
+        &crate::place::anchor_probe(record.ns_pid),
+        Duration::from_secs(10),
+    )?;
+    Ok(match crate::place::parse_anchor_probe(&out) {
+        Some(seen) => match anchor_matches(name, record, &seen) {
+            Ok(()) => Reach::Current,
+            Err(why) => Reach::Orphan(why),
+        },
+        None => Reach::Orphan(format!(
+            "its recorded anchor pid {} no longer exists while its session still answers",
+            record.ns_pid
+        )),
+    })
 }
 
 /// Micro-cache over the fleet's liveness sweep, for the same reason [`crate::sbx::fleet_boxes`] has one:
@@ -6688,6 +6785,118 @@ b idle 5000000 4 1048576 1048576
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
         (log, path)
+    }
+
+    /// A half-failed restart leaves a session tmux answers for and no crossing can enter: launched,
+    /// stamp never rewritten. Seen live (lattice-feat-design-codex-claude, 2026-08-24): the sweep's
+    /// socket fallback called it alive, `ensure_box_session` believed it, and every attach refused
+    /// at the guard — forever, because nothing on any path re-stamped. Alive is not the question;
+    /// addressable is.
+    #[test]
+    fn a_live_session_the_record_cannot_address_is_ended_and_relaunched_not_believed() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::fs::write(
+            home.join("config.json"),
+            serde_json::json!({ "fleet_sandbox": "skein-fleet" }).to_string(),
+        )
+        .unwrap();
+
+        let place = |name: &str, pid: u32, generation: &str, ns_start: u64| {
+            crate::place::record_place(
+                name,
+                &PlaceRecord {
+                    sandbox: "skein-fleet".into(),
+                    ns_pid: pid,
+                    home: format!("/fleet/{name}/home"),
+                    tree: format!("/fleet/{name}/tree"),
+                    sock: format!("/fleet/{name}/session.sock"),
+                    generation: generation.into(),
+                    ns_start,
+                    launcher: String::new(),
+                    ceiling: String::new(),
+                },
+            )
+            .unwrap()
+        };
+        // The wedge: stamped by the previous boot, while every probe below answers from "boot-b".
+        place("wedged-box", 4242, "boot-a", 900);
+        // A healthy neighbour: stamped by the current boot, and its pid still is that process.
+        place("sound-box", 4243, "boot-b", 900);
+        // A record from before stamps existed: alive and unprovable, which must be left alone.
+        place("elder-box", 4244, "", 0);
+
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.join("argv.log");
+        let stopped = home.join("stopped");
+        let fake = bin.join("sbx");
+        // Answers each script by its shape: the sweep calls every box alive (the socket fallback is
+        // exactly what an orphan satisfies), the wedged anchor reads as the previous boot, the
+        // relaunch reports a fresh anchor, and the fresh anchor stamps as the current boot.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nall=\"$*\"\nprintf '%s\\n' \"$all\" >> {log}\ncat >/dev/null\n\
+                 case \"$all\" in\n\
+                 *'tree=0; sess=0'*) if [ -f {stopped} ]; then echo 10; else echo 11; fi ;;\n\
+                 *'answered='*) printf 'wedged-box 1\\nsound-box 1\\nelder-box 1\\n' ;;\n\
+                 *kill-server*) : > {stopped} ;;\n\
+                 *box-session*) echo 'SKEIN_ANCHOR 5001' ;;\n\
+                 *'/proc/4242/stat'*) echo 'boot-b 900' ;;\n\
+                 *'/proc/4243/stat'*) echo 'boot-b 900' ;;\n\
+                 *'/proc/5001/stat'*) echo 'boot-b 901' ;;\n\
+                 esac\nexit 0\n",
+                log = log.display(),
+                stopped = stopped.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        ensure_box_session("wedged-box").expect("the wedge heals rather than erroring");
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        let ended = argv
+            .find("kill-server")
+            .expect("the unaddressable session was believed instead of ended");
+        let relaunched = argv
+            .find("SKEIN_FLEET_LIMITS")
+            .expect("the session was ended but never relaunched");
+        assert!(
+            ended < relaunched,
+            "the relaunch ran before the orphan was ended:\n{argv}"
+        );
+        let after = shared_record("wedged-box").expect("the record survives the heal");
+        assert_eq!(
+            (after.generation.as_str(), after.ns_pid, after.ns_start),
+            ("boot-b", 5001, 901),
+            "the record was not re-stamped, so the next crossing would refuse again"
+        );
+
+        // The healthy neighbour is believed: no session ended, nothing relaunched.
+        std::fs::write(&log, "").unwrap();
+        ensure_box_session("sound-box").expect("a sound box is a no-op");
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !argv.contains("kill-server") && !argv.contains("SKEIN_FLEET_LIMITS"),
+            "a sound box was restarted for being checked:\n{argv}"
+        );
+
+        // Unprovable is not orphaned: ending a session on "cannot tell" could end a working box.
+        std::fs::write(&log, "").unwrap();
+        ensure_box_session("elder-box").expect("an unprovable record is left to the guard");
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            !argv.contains("kill-server"),
+            "a box that predates anchor stamps was killed on a guess:\n{argv}"
+        );
+
+        std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A stand-in agent that answers every request with `body`. Enough for the only question

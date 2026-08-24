@@ -436,7 +436,10 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
         // Settled by the wrapper above, on this branch and on the one below it: the invalidation
         // used to live here, and the `sbx stop` path underneath returned without one.
         return own_sandbox(&rec.sandbox)
-            .exec(&stop_script(name, &rec), Duration::from_secs(30))
+            .exec(
+                &crate::fleet::stop_script(name, &rec),
+                Duration::from_secs(30),
+            )
             .map(|_| ());
     }
     let (_out, err, code) = run_shell(&stop_command(name))?;
@@ -444,29 +447,6 @@ fn stop_box_inner(name: &str) -> Result<(), String> {
         return Err(format!("stop failed (exit {code}): {}", err.trim()));
     }
     Ok(())
-}
-
-/// The shell that stops a shared box: end its session, then end whatever outlived it.
-///
-/// Its own function because it is a contract rather than a detail — the two steps answer different
-/// halves of "stop the box", and a test can run it against a scratch cgroup without a sandbox.
-/// `tmux kill-server` ends the processes in the server's panes; `cgroup.kill` ends the ones that
-/// left that tree, which is the half that was missing and the reason a closed box went on holding
-/// its memory. See [`crate::fleet::box_cgroup_kill`].
-///
-/// The socket is unlinked last. It is what `place::liveness_probe` asks about, so removing it before
-/// the processes are gone would make the box read as stopped while it was still running.
-pub(crate) fn stop_script(name: &str, rec: &crate::place::PlaceRecord) -> String {
-    format!(
-        "{look}; tmux -S {sock} kill-server 2>/dev/null; {kill}; {sweep}; {containers}; \
-         {orphans}; rm -f {sock}; exit 0",
-        look = crate::fleet::namespace_kill(rec.ns_pid, &rec.generation, rec.ns_start),
-        sock = sh_quote(&rec.sock),
-        kill = crate::fleet::box_cgroup_kill(name),
-        sweep = crate::fleet::namespace_sweep(),
-        containers = crate::fleet::box_containers_kill(name),
-        orphans = crate::fleet::unattributed_containers(),
-    )
 }
 
 /// The shell that destroys a shared box: the same ending, and then the box itself.
@@ -1191,7 +1171,10 @@ mod tests {
         let sock = dir.join("session.sock");
         fs::write(&sock, "").unwrap();
 
-        let ran = run_as_root(&stop_script("thing-x", &placed_at(&sock)), &dir);
+        let ran = run_as_root(
+            &crate::fleet::stop_script("thing-x", &placed_at(&sock)),
+            &dir,
+        );
         assert_eq!(ran, 0, "stopping a box must not fail on the way out");
         assert_eq!(
             fs::read_to_string(cg.join("cgroup.kill")).unwrap().trim(),
@@ -1209,7 +1192,10 @@ mod tests {
         let bare_sock = bare.join("session.sock");
         fs::write(&bare_sock, "").unwrap();
         assert_eq!(
-            run_as_root(&stop_script("thing-x", &placed_at(&bare_sock)), &bare),
+            run_as_root(
+                &crate::fleet::stop_script("thing-x", &placed_at(&bare_sock)),
+                &bare
+            ),
             0,
             "a box without a cgroup must stop rather than report an error"
         );
