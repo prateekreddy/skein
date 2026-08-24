@@ -46,6 +46,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # once it has. Bump this whenever an endpoint or its framing changes.
 PROTOCOL = 4
 
+# Which bytes of this file are serving, stamped in by `fleet::ensure_fleet_agent` before the script
+# is written into the sandbox — `agent_revision()` in fleet.rs derives it from this source, comments
+# cut, exactly as the launcher's revision is derived from box-session.sh.
+#
+# This, not PROTOCOL, is what decides whether the running agent is replaced. PROTOCOL moves when an
+# endpoint or its framing changes; most changes to this file move no endpoint at all, and an upgrade
+# gated on the number lands on disk, never runs, and looks shipped. A hash of the source cannot be
+# forgotten the way a bump can.
+#
+# Unstamped is left as the marker itself rather than substituted for something plausible: this file
+# is also run straight out of the repo by tests, and a made-up revision there would be a claim — an
+# unstamped agent compares unequal to every build's revision, which is the safe direction.
+REVISION = "@SKEIN_AGENT_REVISION@"
+
 # Bigger than any script skein sends, small enough that a stray POST cannot exhaust the sandbox.
 MAX_BODY = 1 << 20
 # The ceiling on a streamed write. Nothing is buffered at this size — the body goes through in 64 KB
@@ -180,9 +194,11 @@ class Handler(BaseHTTPRequestHandler):
         # probes to decide whether the agent is worth using, and that decision must not depend on
         # the token being current.
         if self.path == "/health":
-            # The version rides along with the name. An older agent answers the name alone, which
-            # the host reads as protocol 1 — so "no version" is a version, not a parse failure.
-            self._fail(200, f"skein-fleet-agent {PROTOCOL}")
+            # The version and the source revision ride along with the name. An older agent answers
+            # the name alone, which the host reads as protocol 1 — so "no version" is a version,
+            # not a parse failure; likewise "no revision" reads as a revision no build has, which
+            # is what retires an agent from before revisions existed.
+            self._fail(200, f"skein-fleet-agent {PROTOCOL} {REVISION}")
         else:
             self._fail(404, "no")
 

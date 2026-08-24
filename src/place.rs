@@ -429,12 +429,16 @@ pub fn ensure_agent_token() -> Result<String, String> {
 /// **3** since the agent grew `/machine` and the Docker watchdog behind it: an agent an older skein
 /// left running answers 2, has no watchdog, and `heal_fleet_agent` replaces it on that number alone.
 ///
-/// **4** since a 504 carries the tail of what the killed script had printed. That is a behaviour
-/// change and not a wire change, and bumping for it is the point: `retire_stale_agent` leaves a
-/// running agent alone unless this number is higher than the one it answers, so an improvement the
-/// number does not move never reaches a fleet that is already up. The agent would be reinstalled on
-/// disk, the old process would keep serving, and the fix would look shipped. This number is the only
-/// upgrade lever there is, so it moves whenever the agent's behaviour does.
+/// **4** since a 504 carries the tail of what the killed script had printed — bumped when this
+/// number was still the upgrade lever, because an improvement the number did not move never reached
+/// a fleet that was already up: the agent was reinstalled on disk, the old process kept serving,
+/// and the fix looked shipped.
+///
+/// It is not the upgrade lever any more, which returns it to meaning what it says. Whether the
+/// running agent is replaced is decided by the *revision* of its source, reported beside this on
+/// `/health` and compared by `fleet::retire_stale_agent` — a hash cannot be forgotten the way a
+/// bump can. This number still answers the question only it can: which endpoints the client may
+/// call, checked before a body goes down the wire. It moves when an endpoint or its framing does.
 pub const AGENT_PROTOCOL: u32 = 4;
 
 /// The largest body skein will push through the agent. Above it, `sbx exec -i`, which has no
@@ -536,6 +540,17 @@ pub fn agent_answers(port: u16) -> bool {
 /// agent may be older than the host talking to it. Asking is how a newer skein avoids sending an
 /// older agent something it has never heard of.
 pub fn agent_protocol(port: u16) -> Option<u32> {
+    agent_identity(port).map(|(version, _)| version)
+}
+
+/// What the agent on `port` says it is: the protocol it speaks and the revision of the source it
+/// is serving. `None` when nothing there answers as one.
+///
+/// The revision is what `fleet::retire_stale_agent` compares: the protocol says which endpoints may
+/// be called, and moves only when one changes — so it cannot see a change that moves no endpoint,
+/// which is most of them. Empty for an agent from before revisions existed, which compares unequal
+/// to every build's revision, exactly as it should.
+pub fn agent_identity(port: u16) -> Option<(u32, String)> {
     if port == 0 {
         return None;
     }
@@ -548,7 +563,7 @@ pub fn agent_protocol(port: u16) -> Option<u32> {
 /// Keep-alive rather than close, so a caller that is about to write can ask on the very connection
 /// it is going to use — one round trip, no second socket, and no window in which the agent it
 /// probed is not the agent it writes to.
-fn health_over(stream: &mut TcpStream) -> Option<u32> {
+fn health_over(stream: &mut TcpStream) -> Option<(u32, String)> {
     let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n";
     stream.write_all(request.as_bytes()).ok()?;
     let reply = read_reply(stream).ok()?;
@@ -563,7 +578,8 @@ fn health_over(stream: &mut TcpStream) -> Option<u32> {
     // An agent from before versions existed answers with its name alone. That is protocol 1, not a
     // parse failure — treating it as one would make every agent skein has already installed look
     // dead, and take the board back to `sbx exec` for the one thing that was working.
-    Some(words.next().and_then(|v| v.parse().ok()).unwrap_or(1))
+    let version = words.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+    Some((version, words.next().unwrap_or_default().to_string()))
 }
 
 /// The one connection to the in-sandbox agent, held open and reused.
@@ -816,7 +832,7 @@ impl AgentWrite {
         // say so only after the entire body had been sent — with no way back, because an upload's
         // bytes come off a network socket that has already been drained. One round trip, on the
         // connection about to be used, is what makes the fallback below reachable.
-        if health_over(&mut stream)? < AGENT_PROTOCOL {
+        if health_over(&mut stream)?.0 < AGENT_PROTOCOL {
             return None;
         }
         let meta = encode_b64(&serde_json::to_vec(&place.agent_request(script, timeout)).ok()?);

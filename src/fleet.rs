@@ -287,7 +287,7 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
                 sh_quote(&path),
                 sh_quote(&path)
             ),
-            FLEET_AGENT_PY.as_bytes(),
+            stamped_agent().as_bytes(),
             Duration::from_secs(30),
         )
         .map_err(|e| format!("installing the fleet agent in {sandbox}: {e}"))?;
@@ -335,8 +335,17 @@ pub fn ensure_fleet_agent(sandbox: &str) -> Result<String, String> {
     Ok(token)
 }
 
-/// Stop an agent that is older than the one skein has just installed, so the supervisor starts the
-/// new one. A no-op when nothing is serving or what is serving is current.
+/// Stop an agent that is not serving the source skein has just installed, so the supervisor starts
+/// the new one. A no-op when nothing is serving or what is serving is current.
+///
+/// **Revisions, compared for inequality — not the protocol number.** The number moves only when an
+/// endpoint or its framing changes, and most changes to `fleet-agent.py` move no endpoint at all;
+/// gated on the number, those were installed on disk, never run, and looked shipped. The revision
+/// is a hash of the agent's source (comments cut, so a docs edit does not restart the fleet), so
+/// it moves exactly when the script's behaviour can. Inequality rather than an ordering because
+/// there is none to have: the running agent is never legitimately newer than the build talking to
+/// it — skein installs the agent and nothing else does — so "different" can only mean "not what
+/// this build just wrote".
 ///
 /// Silent about failure on purpose: every outcome is recoverable by the code that follows. A kill
 /// that did not land leaves the old agent up, which still carries `/exec`; a kill that landed and a
@@ -345,10 +354,12 @@ fn retire_stale_agent(sandbox: &str) {
     let Some(port) = recorded_agent_port() else {
         return;
     };
-    match crate::place::agent_protocol(port) {
-        // Nothing answering, or already current — `start_fleet_agent` handles both.
+    match crate::place::agent_identity(port) {
+        // Nothing answering, or serving exactly this build's source — `start_fleet_agent` handles
+        // both. An agent from before revisions existed reports none, compares unequal, and is
+        // retired: whatever it is, it is not what was just installed.
         None => return,
-        Some(version) if version >= crate::place::AGENT_PROTOCOL => return,
+        Some((_, revision)) if revision == agent_revision() => return,
         Some(_) => {}
     }
     stop_fleet_agent(sandbox);
@@ -2459,21 +2470,29 @@ const LAUNCHER_REVISION_MARK: &str = "@SKEIN_LAUNCHER_REVISION@";
 /// runs — and the caller is the board, which asks it once per box per tick.
 pub fn launcher_revision() -> String {
     static REVISION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    REVISION
-        .get_or_init(|| {
-            let mut hash = 0xcbf29ce484222325u64;
-            for line in cover_text(BOX_SESSION_SH) {
-                for byte in line.bytes().chain(std::iter::once(b'\n')) {
-                    hash ^= u64::from(byte);
-                    hash = hash.wrapping_mul(0x100000001b3);
-                }
-            }
-            format!("{hash:016x}")
-        })
-        .clone()
+    REVISION.get_or_init(|| revision_of(BOX_SESSION_SH)).clone()
 }
 
-/// The launcher with its comments and blank lines cut — what [`launcher_revision`] hashes.
+/// Would this text behave differently from that one — the hash behind [`launcher_revision`] and
+/// [`agent_revision`], over [`cover_text`].
+///
+/// Private to the module on purpose: the production answers are about the two embedded scripts,
+/// and a public version taking any script would invite a caller to ask about the copy on disk —
+/// which is the question this whole mechanism exists because nobody can answer.
+fn revision_of(script: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for line in cover_text(script) {
+        for byte in line.bytes().chain(std::iter::once(b'\n')) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// A script with its comments and blank lines cut — what [`revision_of`] hashes. `#` opens a
+/// whole-line comment in shell and in Python both, which is what lets one cut serve the launcher
+/// and the agent.
 ///
 /// Whole-line comments only. A `#` mid-line is a comment in shell and is also a character inside
 /// quite ordinary strings here (`#{pid}` is tmux's format language, in the line that reports the
@@ -2493,6 +2512,28 @@ fn cover_text(script: &str) -> impl Iterator<Item = &str> {
 /// carrying a launcher older than the binary talking to it.
 fn stamped_launcher() -> String {
     BOX_SESSION_SH.replace(LAUNCHER_REVISION_MARK, &launcher_revision())
+}
+
+/// The line in `fleet-agent.py` that [`ensure_fleet_agent`] replaces with [`agent_revision`].
+const AGENT_REVISION_MARK: &str = "@SKEIN_AGENT_REVISION@";
+
+/// What this build's fleet agent *does* — content-derived from `fleet-agent.py`, the same way
+/// [`launcher_revision`] is derived from the launcher, and for the same reason: the running agent
+/// outlives the skein that installed it, so there has to be a value that travels with the process,
+/// and a version number somebody must remember to bump is not one. See [`retire_stale_agent`] for
+/// the comparison, and `PROTOCOL`'s neighbour `REVISION` in `fleet-agent.py` for the other half.
+///
+/// Both sides hash the source with the stamp marker still in it — the installed copy differs from
+/// the embedded one at exactly that line, and neither side ever hashes the installed copy.
+pub(crate) fn agent_revision() -> String {
+    static REVISION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    REVISION.get_or_init(|| revision_of(FLEET_AGENT_PY)).clone()
+}
+
+/// The agent's bytes with the revision of those bytes stamped into them — what
+/// [`ensure_fleet_agent`] installs, so the process can answer for its own source on `/health`.
+fn stamped_agent() -> String {
+    FLEET_AGENT_PY.replace(AGENT_REVISION_MARK, &agent_revision())
 }
 
 /// What the launcher said about this box's ceiling: `capped <limits>`, or `uncapped <reason>`.
@@ -3404,7 +3445,36 @@ pub(crate) fn setup_wait_secs() -> u64 {
 /// elapses only when provisioning is still running, and cutting THAT short reports a working box as
 /// a broken one.
 pub(crate) fn initial_setup_wait() -> String {
-    format!("echo 'skein: waiting for box setup…'; n=0; while [ \"$n\" -lt {} ]; do if [ -e /tmp/skein-startup.failed ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; [ ! -e /tmp/skein-startup.ready ] || break; n=$((n + 1)); sleep 1; done; if [ ! -e /tmp/skein-startup.ready ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ", setup_wait_secs())
+    setup_wait_script("/tmp", setup_wait_secs())
+}
+
+/// The wait itself, over marker names that carry the current start's id.
+///
+/// A box's /tmp is `$root/tmp` on disk and a restart keeps it, so the markers of every previous
+/// start are still sitting there when this wait opens — and it opens BEFORE provisioning is
+/// invoked (see [`SETUP_WAIT_MARGIN`]), which is exactly the window a stale marker fills. Bare
+/// names read the previous start's `ready` as this one's — a box whose provisioning timed out came
+/// up "working" — and would read a leftover `failed`, which is tested FIRST, as a refusal of a
+/// start it knows nothing about. So the launcher writes a fresh id into `skein-start-id` on every
+/// launch, the kit suffixes the markers with it, and this reads the same id at run time: a stale
+/// marker is inert, not deleted — deleting `failed` would erase the one record of a start that
+/// genuinely broke. No id file (a per-VM sandbox, whose /tmp dies with it) falls back to the bare
+/// names, which there still mean what they always did.
+///
+/// `markers` is `/tmp` in production; a parameter so the two-consecutive-starts case is testable
+/// against a directory that is not this machine's /tmp.
+fn setup_wait_script(markers: &str, wait_secs: u64) -> String {
+    format!(
+        "echo 'skein: waiting for box setup…'; \
+         sid=$(cat \"{m}/skein-start-id\" 2>/dev/null | tr -cd 'A-Za-z0-9._-'); \
+         ready=\"{m}/skein-startup.ready${{sid:+.$sid}}\"; \
+         failed=\"{m}/skein-startup.failed${{sid:+.$sid}}\"; \
+         n=0; while [ \"$n\" -lt {wait_secs} ]; do \
+         if [ -e \"$failed\" ]; then echo 'skein: box setup failed; inspect /var/log/sbx-kit-startup.log'; tail -40 /var/log/sbx-kit-startup.log 2>/dev/null || true; exit 1; fi; \
+         [ ! -e \"$ready\" ] || break; n=$((n + 1)); sleep 1; done; \
+         if [ ! -e \"$ready\" ]; then echo 'skein: box setup timed out; inspect /var/log/sbx-kit-startup.log'; exit 1; fi; ",
+        m = markers,
+    )
 }
 
 pub fn provision_script(name: &str, store: &str) -> String {
@@ -7204,6 +7274,10 @@ b idle 5000000 4 1048576 1048576
     /// mean a newer agent is serving. Without this, an upgrade lands on disk and never runs: the
     /// setting on, the port answering, and every new endpoint quietly missing while the host falls
     /// back to `sbx exec` for exactly the calls that needed it.
+    ///
+    /// "Older" is decided by the *revision* of the source the agent reports, never by the protocol
+    /// number: the number moves only when an endpoint changes, and a change that moves no endpoint
+    /// used to be exactly the upgrade that landed on disk and never ran.
     #[test]
     fn an_agent_older_than_this_skein_is_retired_so_the_new_one_can_start() {
         let _g = env_lock();
@@ -7236,12 +7310,14 @@ b idle 5000000 4 1048576 1048576
             "the retirement did not go through sbx into the sandbox:\n{argv}"
         );
 
-        // An agent that already speaks this build is left alone. Restarting a healthy one on every
-        // ensure would drop the held connection — and the board's liveness with it — for nothing.
+        // An agent serving exactly this build's source is left alone. Restarting a healthy one on
+        // every ensure would drop the held connection — and the board's liveness with it — for
+        // nothing.
         std::fs::write(&log, "").unwrap();
         let current = fake_agent(format!(
-            "skein-fleet-agent {}",
-            crate::place::AGENT_PROTOCOL
+            "skein-fleet-agent {} {}",
+            crate::place::AGENT_PROTOCOL,
+            agent_revision()
         ));
         std::fs::write(home.join("fleet-agent.port"), current.to_string()).unwrap();
         retire_stale_agent("skein-fleet");
@@ -7251,6 +7327,48 @@ b idle 5000000 4 1048576 1048576
             "a current agent was restarted for no reason"
         );
 
+        // The case the protocol number cannot see, and the reason revisions exist: the script
+        // changed, no endpoint did, so the number the old agent answers is *current*. Gated on the
+        // number this agent survived, the new source sat installed on disk, and the fix looked
+        // shipped while the old process kept serving.
+        std::fs::write(&log, "").unwrap();
+        let edited = fake_agent(format!(
+            "skein-fleet-agent {} {}",
+            crate::place::AGENT_PROTOCOL,
+            revision_of(&format!("{FLEET_AGENT_PY}\nRETRY_BUDGET = 2\n"))
+        ));
+        std::fs::write(home.join("fleet-agent.port"), edited.to_string()).unwrap();
+        retire_stale_agent("skein-fleet");
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("kill-session"),
+            "an agent whose source changed was left serving the old behaviour, because its \
+             protocol number happened to be current"
+        );
+
+        // And a comment-only edit is not a change: the revision must not move for it, so the
+        // running agent is left alone and a docs pass does not restart the fleet.
+        let commented = format!("{FLEET_AGENT_PY}\n# a docs edit, changing nothing\n");
+        assert_eq!(
+            revision_of(&commented),
+            agent_revision(),
+            "a comment moved the agent's revision, so every docs edit would restart the fleet"
+        );
+        std::fs::write(&log, "").unwrap();
+        let documented = fake_agent(format!(
+            "skein-fleet-agent {} {}",
+            crate::place::AGENT_PROTOCOL,
+            revision_of(&commented)
+        ));
+        std::fs::write(home.join("fleet-agent.port"), documented.to_string()).unwrap();
+        retire_stale_agent("skein-fleet");
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap_or_default(),
+            "",
+            "a comment-only edit retired a healthy agent"
+        );
+
         // Nothing recorded means nothing is known to be serving; starting is the next step either
         // way, and killing on a guess would take out an agent that was working.
         std::fs::remove_file(home.join("fleet-agent.port")).unwrap();
@@ -7258,6 +7376,63 @@ b idle 5000000 4 1048576 1048576
         assert_eq!(std::fs::read_to_string(&log).unwrap_or_default(), "");
 
         std::env::set_var("PATH", path);
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// What goes into the sandbox answers `/health` with the revision of what went into the
+    /// sandbox.
+    ///
+    /// Driven through `ensure_fleet_agent` against a fake `sbx` that keeps what it is fed, for the
+    /// same reason `the_installed_launcher_knows_which_launcher_it_is` is: a test of the stamping
+    /// function says nothing about whether the installer uses it, and that wiring is the entire
+    /// mechanism. Worse here than for the launcher, because an unstamped agent is not merely
+    /// silent — it reports the marker itself, compares unequal to every build's revision, and is
+    /// retired on every ensure: a permanent restart loop that reads as a flaky transport.
+    ///
+    /// The marker is left in the repo's own copy on purpose — a made-up revision there would be a
+    /// claim — so what is checked is that the installed bytes never carry it.
+    #[test]
+    fn the_installed_agent_knows_which_source_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let kept = home.join("kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("sbx");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nn=$(ls {dir} | wc -l | tr -d '[:space:]')\ncat > {dir}/$n\n",
+                dir = kept.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+
+        // Allowed to fail after the write: the fake never answers "up", so the start is reported
+        // broken — but the script has been sent by then, and the script is what this is about.
+        let _ = ensure_fleet_agent("skein-fleet");
+
+        std::env::set_var("PATH", &path);
+        let installed = std::fs::read_to_string(kept.join("0")).expect("the agent was sent");
+        assert!(
+            installed.contains("skein-fleet-agent"),
+            "the first thing installed was not the agent"
+        );
+        assert!(
+            !installed.contains(AGENT_REVISION_MARK),
+            "the agent went into the sandbox unstamped: it would answer /health with the marker, \
+             compare unequal to every build, and be retired on every ensure"
+        );
+        assert!(
+            installed.contains(&format!("REVISION = \"{}\"", agent_revision())),
+            "the stamp did not land on the line the agent reads"
+        );
         std::env::remove_var("SKEIN_HOME");
     }
 
@@ -11133,6 +11308,143 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
+    /// The launcher's start-id block, lifted rather than restated — a copy here could mint ids the
+    /// real launcher does not.
+    fn launcher_writes_start_id(tmp: &std::path::Path) -> String {
+        let lines: Vec<&str> = BOX_SESSION_SH.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("start_id=\"$(date"))
+            .expect("the start-id block moved");
+        let block = lines[at..at + 2].join("\n");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "set -uo pipefail; tmp={}; {block}",
+                crate::util::sh_quote(&tmp.to_string_lossy())
+            ))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "the launcher's start-id block failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(tmp.join("skein-start-id"))
+            .expect("the launcher wrote no start id")
+            .trim()
+            .to_string()
+    }
+
+    /// The kit's marker preamble — the same lines the real provisioning computes its handshake
+    /// paths with — run to the point of touching whichever marker the scenario needs.
+    fn kit_marks(dir: &std::path::Path, then: &str) {
+        let lines: Vec<&str> = KIT_STARTUP_SH.lines().collect();
+        let from = lines
+            .iter()
+            .position(|l| l.starts_with("markers=\"$(printenv"))
+            .expect("the kit's marker preamble moved");
+        let to = lines[from..]
+            .iter()
+            .position(|l| l.starts_with("rm -f \"$markers\""))
+            .map(|i| from + i)
+            .expect("the kit's marker cleanup moved");
+        let block = lines[from..=to].join("\n");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("set -uo pipefail; {block}\n{then}"))
+            .env("SKEIN_STARTUP_MARKERS", dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "the kit's marker preamble failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The agent launch's wait, run for real against `dir` standing in for the box's /tmp.
+    fn setup_wait(dir: &std::path::Path, secs: u64) -> (i32, String) {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(setup_wait_script(&dir.to_string_lossy(), secs))
+            .output()
+            .unwrap();
+        let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
+        said.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.code().unwrap_or(-1), said)
+    }
+
+    /// The startup handshake guards a restart, not only a box's first start.
+    ///
+    /// A box's /tmp is `$root/tmp` on disk and a restart keeps it, so both markers of the previous
+    /// start are still there when the next start's setup wait opens — and that wait opens BEFORE
+    /// provisioning runs (see `each_deadline_a_start_depends_on_outlasts_the_one_inside_it`).
+    /// Observed live as the bare-name failure this drives: a box whose provisioning timed out came
+    /// up "working", its wait satisfied by the ready marker of the start before.
+    ///
+    /// Two consecutive starts, three parties, all running their real lines: the launcher mints the
+    /// id, the kit writes the markers, the wait reads them.
+    #[test]
+    fn a_restarted_boxs_agent_launch_waits_for_its_own_starts_provisioning() {
+        let dir = tempdir();
+
+        // Start 1 runs to completion — and, separately, leaves a failure marker behind, which is
+        // what a start whose provisioning was killed leaves via the kit's EXIT trap.
+        let first = launcher_writes_start_id(&dir);
+        kit_marks(&dir, "touch \"$startup_ready\" \"$startup_failed\"");
+        assert!(
+            dir.join(format!("skein-startup.ready.{first}")).exists(),
+            "the kit did not suffix its markers with the start id"
+        );
+
+        // Start 2: the launcher has run, provisioning has not. This is the window the wait opens
+        // in, with both of start 1's markers still on disk.
+        let second = launcher_writes_start_id(&dir);
+        assert_ne!(first, second, "two starts minted the same id");
+        let (code, said) = setup_wait(&dir, 2);
+        assert!(
+            !said.contains("setup failed"),
+            "start 1's failure marker refused a start it knows nothing about: {said}"
+        );
+        assert_eq!(
+            (code, said.contains("timed out")),
+            (1, true),
+            "start 1's ready marker satisfied start 2's wait before its provisioning ran: {said}"
+        );
+
+        // Start 2's provisioning completes, and the same wait now passes.
+        kit_marks(&dir, "touch \"$startup_ready\"");
+        let (code, said) = setup_wait(&dir, 5);
+        assert_eq!(
+            code, 0,
+            "this start's own ready marker was not honoured: {said}"
+        );
+
+        // A failure of THIS start still refuses — the id must not make failed markers decorative.
+        kit_marks(&dir, "touch \"$startup_failed\"");
+        let (code, said) = setup_wait(&dir, 5);
+        assert_eq!(
+            (code, said.contains("setup failed")),
+            (1, true),
+            "this start's own failure marker was ignored: {said}"
+        );
+
+        // And with no id at all — a per-VM sandbox, whose /tmp dies with it — the bare names still
+        // carry the handshake, in both directions.
+        let bare = tempdir();
+        std::fs::write(bare.join("skein-startup.ready"), "").unwrap();
+        let (code, _) = setup_wait(&bare, 2);
+        assert_eq!(code, 0, "the bare ready marker stopped meaning ready");
+        std::fs::write(bare.join("skein-startup.failed"), "").unwrap();
+        let (code, said) = setup_wait(&bare, 2);
+        assert_eq!(
+            (code, said.contains("setup failed")),
+            (1, true),
+            "the bare failure marker stopped refusing: {said}"
+        );
+    }
+
     /// A tracker install that never returns does not stop the box coming up.
     ///
     /// This is the last block of provisioning, and its comment has always said "a box with no
@@ -11338,21 +11650,6 @@ b idle 5000000 4 1048576 1048576
         );
     }
 
-    /// `launcher_revision` reads one constant, so exercising it against an edited copy needs the
-    /// same arithmetic over a string. Kept beside it rather than made public: the production answer
-    /// is about THE launcher, and a version that takes any script would invite a caller to ask
-    /// about the copy on disk — which is the question this whole mechanism exists because nobody
-    /// can answer.
-    fn revision_of(script: &str) -> String {
-        let mut hash = 0xcbf29ce484222325u64;
-        for line in cover_text(script) {
-            for byte in line.bytes().chain(std::iter::once(b'\n')) {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-        }
-        format!("{hash:016x}")
-    }
     /// Three answers and only one of them is "current", because the two ways of not knowing are
     /// both ways of not knowing. A record from before this field and a record from the adoption
     /// path are equally silent about what covers the box, and reading silence as agreement is how

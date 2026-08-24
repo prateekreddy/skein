@@ -506,6 +506,19 @@ mkdir -p "$home" "$tmp" "$tree" "$(dirname "$pidfile")" || exit 1
 # security boundary, but they are not entitled to read them by accident either.
 chmod 700 "$home" "$tmp" 2>/dev/null || true
 
+# Which START this is, for the provisioning handshake. The box's /tmp is $tmp on disk, and a
+# restart keeps it — so the `skein-startup.ready` / `skein-startup.failed` markers the kit writes
+# there outlive the start that wrote them. Read bare, the previous start's `ready` satisfies the
+# next start's setup wait before its provisioning has done anything (a box whose provisioning timed
+# out came up "working"), and a leftover `failed` would refuse every later launch until someone
+# deleted a file by hand — which is also why the fix is NOT to delete markers here: the id makes a
+# stale marker inert without making a persistent one fatal. The kit suffixes its markers with this
+# id and the agent launch waits on the suffixed names, so "ready" can only mean ready for THIS
+# start. Written fresh on every launch, before anything that could read it: provisioning and the
+# setup wait both run inside the namespace this launcher is about to build.
+start_id="$(date -u +%Y%m%d%H%M%S)-$$"
+printf '%s\n' "$start_id" >"$tmp/skein-start-id" || exit 1
+
 # Private by DEFAULT, with a short list of deliberate escapes.
 #
 # The earlier shape was the other way round — share $HOME, bind over the paths known to matter — and

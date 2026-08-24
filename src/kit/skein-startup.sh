@@ -12,10 +12,28 @@ set -uo pipefail
 
 # `sbx create` returns while durable startup is still running. The first Skein attach waits
 # on this provider-neutral handshake so it cannot race dependency or hook installation.
-startup_ready="/tmp/skein-startup.ready"
-startup_failed="/tmp/skein-startup.failed"
+#
+# The markers carry the START's id when there is one. In the fleet, /tmp is the box's $root/tmp on
+# disk and a restart keeps it, so a bare `ready` from the previous start would satisfy the next
+# start's wait before this script had done anything — and a leftover `failed` would refuse starts
+# it knows nothing about. The launcher writes `/tmp/skein-start-id` fresh on every launch
+# (box-session.sh), this suffixes both markers with it, and the setup wait
+# (`fleet::initial_setup_wait`) reads the same id — so a stale marker is inert rather than deleted,
+# which matters because deleting is not an option: a persistent `failed` is tested FIRST by the
+# wait, and a start that cleaned it up could not be told apart from one that never failed. With no
+# id — a per-VM sandbox, whose /tmp dies with it — the bare names carry on meaning what they did.
+# $SKEIN_STARTUP_MARKERS is the test seam for the directory; a box never sets it.
+markers="$(printenv SKEIN_STARTUP_MARKERS 2>/dev/null || true)"
+[ -n "$markers" ] || markers=/tmp
+start_id="$(cat "$markers/skein-start-id" 2>/dev/null | tr -cd 'A-Za-z0-9._-' || true)"
+suffix=""
+[ -z "$start_id" ] || suffix=".$start_id"
+startup_ready="$markers/skein-startup.ready$suffix"
+startup_failed="$markers/skein-startup.failed$suffix"
 startup_done="false"
-rm -f "$startup_ready" "$startup_failed"
+# Every start's markers, not only this one's: earlier starts' are inert now, so they are litter,
+# and /tmp here is disk that a box keeps for as long as it lives.
+rm -f "$markers"/skein-startup.ready* "$markers"/skein-startup.failed*
 trap '[ "$startup_done" = "true" ] || touch "$startup_failed" 2>/dev/null || true' EXIT
 
 # Direct (non-clone) mode already has an in-repo .claude → nothing to provision.
