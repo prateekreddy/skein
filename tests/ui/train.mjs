@@ -29,11 +29,16 @@ function board(counts) {
   };
   const src = `
     let revCounts = ${JSON.stringify(counts)};
+    let revFlows = new Map();
+    let revFlowsOn = null;
     ${grab("esc")}
+    ${grab("revTrainPaused")}
     ${grab("renderTrainBanner")}
     ${grab("renderRevBadge")}
     return {
       poll: cs => { if (cs !== undefined) revCounts = cs; renderRevBadge(); },
+      // What the workflows payload last said the fleet switch was — the banner's only source.
+      heard: on => { revFlowsOn = on; },
     };
   `;
   const made = new Function("document", src)(document);
@@ -75,6 +80,23 @@ function board(counts) {
   t.check("a stop arriving on a later poll raises it", !!b.banner(), true);
   b.poll([{ repo_id: "alpha", needs_you: 3, error: "", skipped: "", stopped: [] }]);
   t.check("and the train moving again takes it down", b.banner(), null);
+}
+
+// ---- stops while workflows are paused: the banner says so, from data already on hand ----
+{
+  const stopped = [{ repo_id: "alpha", needs_you: 1, error: "", skipped: "",
+                     stopped: [{ number: 7, why: "CI failed" }] }];
+  const b = board(stopped);
+  b.poll();
+  t.check("with the switch state unheard, the banner claims nothing about pausing",
+    b.text().includes("paused"), false);
+  b.heard(false);
+  b.poll();
+  t.check("stops while workflows are off say paused, and what that means",
+    b.text().includes("workflows are paused — nothing will act until resumed"), true);
+  b.heard(true);
+  b.poll();
+  t.check("and resuming takes the sentence away", b.text().includes("paused"), false);
 }
 
 // ---- an older server: entries with no `stopped` field at all ----

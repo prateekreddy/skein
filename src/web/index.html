@@ -579,6 +579,31 @@
   .revflow-head span { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint); }
   .revflow-stop { color:var(--attn); display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
   .revflow-off { color:var(--waiting); }
+  /* The merge-train panel, at the top of the workflows pane: the switch, the front, the line. */
+  .revtrain { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
+    margin:0 0 8px; display:flex; flex-direction:column; gap:8px; font-size:12.5px; color:var(--text-2); }
+  .revtrain-state { display:flex; align-items:center; gap:10px; font-weight:600; color:var(--text); }
+  .revtrain-off { color:var(--attn); font-weight:400; }
+  /* Paused is unmistakable: the body dims as one block, and the state line says so in words. */
+  .revtrain.off .revtrain-body { opacity:.45; }
+  .revtrain-body { display:flex; flex-direction:column; gap:8px; }
+  .revtrain-repo h5 { margin:0 0 4px; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+    color:var(--faint); font-weight:600; }
+  .revtrain-flow { font-weight:600; margin:2px 0; }
+  .revtrain-now { margin:0 0 2px; }
+  .revtrain-car { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:2px 0 2px 8px;
+    border-left:2px solid transparent; }
+  .revtrain-car.front { border-left-color:var(--accent); }
+  .revtrain-car.stopped .revtrain-doing { color:var(--attn); }
+  .revtrain-pos { flex:0 0 34px; text-align:right; color:var(--faint); font-variant-numeric:tabular-nums; }
+  .revtrain .trainnum { border:0; background:none; color:var(--accent-2); font:inherit; cursor:pointer;
+    text-decoration:underline; padding:0; }
+  .revtrain-doing { color:var(--dim); }
+  .revtrain-log { margin:2px 0 6px 44px; display:flex; flex-direction:column; gap:2px; font:11.5px var(--mono); }
+  .revtrain-log .when { color:var(--faint); display:inline-block; min-width:44px; }
+  .revtrain-log .kind { color:var(--dim); display:inline-block; min-width:110px; }
+  .revtrain-log .stopped .kind { color:var(--attn); }
+  .revtrain-log .cleared .kind { color:var(--done); }
   /* The editor. Steps are numbered and stacked because their ORDER is their meaning — the first one
      that applies is the one that happens — so it has to look like a sequence, not like a set. */
   .revflow-edit { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
@@ -2727,6 +2752,12 @@ function renderTrainBanner() {
     ...stops.map(c => `<button type="button" class="trainrepo" onclick="openReview('${esc(c.repo_id)}')">${esc(c.repo_id)}: ${
       c.stopped.map(s => `#${esc(s.number)} (${esc(String(s.why || "needs you").split(".")[0])})`).join(" · ")
     }</button>`),
+    // Stops with the engine switched off are a different sentence: nothing will retry these, or
+    // move anything else, until somebody resumes. Known from payloads already fetched — this
+    // banner never earns a request of its own.
+    ...(revTrainPaused()
+      ? [`<span class="trainlead">· and workflows are paused — nothing will act until resumed</span>`]
+      : []),
   ].join("");
 }
 
@@ -3185,7 +3216,14 @@ function loadWorkflows() {
     const id = qq.repo_id;
     fetch(`/api/repos/${encodeURIComponent(id)}/workflows`)
       .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-      .then(w => { if (revHeld) { revFlows.set(id, w); renderReview(); } })
+      .then(w => {
+        if (!revHeld) return;
+        // The payload names the fleet switch too; keeping `revFlowsOn` on the freshest answer is
+        // what lets the train panel and banner say "paused" without a request of their own.
+        if (w.enabled !== undefined) revFlowsOn = !!w.enabled;
+        revFlows.set(id, w);
+        renderReview();
+      })
       // A workflow file with a typo in it answers 502 here, and the row says so — see `revFlowBox`.
       .catch(e => { if (revHeld) { revFlows.set(id, { error: String(e.message || e).split("\n")[0] }); renderReview(); } });
   }
@@ -3437,7 +3475,11 @@ function revEditHtml() {
   }).join("");
   // Said where the steps are, not in a settings page: the first step that applies is the one that
   // happens, and somebody dragging a step up is changing the workflow's meaning.
+  //
+  // The train panel rides at the top of the same pane: the person editing what the train DOES and
+  // the person watching what it IS DOING are the same person, arriving by the same button.
   return `<div class="revmods">
+    ${revTrainHtml()}
     <div class="dim">The first step whose conditions all hold is the one that happens, one per pass.</div>
     ${flows}
     ${revEditSaying ? `<div class="revblind"><b>not saved</b><div>${esc(revEditSaying)}</div></div>` : ""}
@@ -3446,6 +3488,174 @@ function revEditHtml() {
       <span class="revspacer"></span>
       <button type="button" class="revchip go" onclick="revEditSave()">save</button>
     </div>
+  </div>`;
+}
+
+// ---------- the merge train, watched ----------
+//
+// The owner is automating merges and asked for exactly two things: "I need to know exactly what is
+// it working on, which step is it on, status of previous steps" — and "I should be able to pause it
+// or resume it at any point". So the workflows pane opens with this panel: the engine's one switch
+// with its one button, and per repo each serial workflow's train — the front PR with its step
+// spelled out, the whole line in train order, every stop with its reason and the same
+// let-it-run-again button the row has, and each PR's journal of what already happened.
+//
+// Drawn from what the pane already fetches: `revFlows`, one GET /api/repos/:id/workflows per repo,
+// whose payload a new-enough server extends with `trains` per repo and `journal` per PR. An older
+// server sends neither, and the panel says what standing alone can — no crash, no invented front.
+let revTrainOpen = new Set();   // "repo#number" whose journal timeline is unfolded in the panel
+// The fleet's workflow switch as the server last SAID it — from GET /api/workflows after a
+// pause/resume, or from the per-repo payloads as they land. null = never heard. The pause button
+// paints from this, never from its own click.
+let revFlowsOn = null;
+
+// Is the switch known to be off? Read from what is already on hand, never a request of its own:
+// the train banner asks this on every counts poll.
+function revTrainPaused() {
+  if (revFlowsOn !== null) return !revFlowsOn;
+  for (const f of revFlows.values()) if (f && f.enabled !== undefined) return f.enabled === false;
+  return false;
+}
+
+// Pause or resume everything. One fleet-wide switch (`pr_workflows`) rather than per-train levers:
+// the engine re-reads it every sweep and there is no mid-step to interrupt, so flipping it takes
+// effect at once. The POST carries ONLY the flipped field — /api/settings merges — and the repaint
+// comes from re-reading GET /api/workflows: the panel shows what the server says the switch is,
+// never what the click hoped.
+function revTrainToggle(on) {
+  fetch("/api/settings", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pr_workflows: !!on }),
+  })
+    .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+    .then(() => fetch("/api/workflows"))
+    .then(r => r.json())
+    .then(d => {
+      revFlowsOn = !!d.enabled;
+      toast(revFlowsOn ? "workflows resumed" : "workflows paused — nothing will act");
+      loadWorkflows();          // the per-repo payloads carry `enabled` too; keep them agreeing
+      renderReview();
+    })
+    .catch(e => toast(String(e.message || e).split("\n")[0]));
+}
+
+// A number in the panel is one click into that pull request's row in the queue — the same open the
+// banner's repo click uses, plus the row expansion the row's own click would do.
+function revTrainGo(id, number) {
+  openReview(id);
+  const key = id + "#" + number;
+  if (!revOpen.has(key)) toggleRevRow(key);
+}
+
+function revTrainLog(key) {
+  if (!revTrainOpen.delete(key)) revTrainOpen.add(key);
+  renderReview();
+}
+
+// `#123`, clickable. Same esc-into-onclick pattern as the banner's repo button.
+function revTrainNumBtn(id, n) {
+  return `<button type="button" class="trainnum" onclick="revTrainGo('${esc(id)}', ${Number(n)})" title="open #${Number(n)} in the queue">#${Number(n)}</button>`;
+}
+
+// The queue's title for a PR, when the queue has it loaded; the panel must not fetch for one.
+function revTrainTitle(id, n) {
+  const pr = ((revQueue && revQueue.prs) || []).find(p => p.repo_id === id && p.number === Number(n));
+  return (pr && pr.title) || "";
+}
+
+// When, in the queue's own relative vocabulary — `revAge` is the pane's age helper, and the
+// journal's epoch stamp only needs dressing as an ISO date to use it.
+function revTrainWhen(ms) {
+  return revAge(new Date(ms || 0).toISOString()).label || "now";
+}
+
+// One pull request's timeline, oldest first exactly as the server sends it. A "cleared" entry is a
+// person's act — the hand that let the train move again — and reads as one.
+function revTrainJournal(log) {
+  if (!log || !log.length) return `<div class="revtrain-log"><span class="dim">no history recorded yet</span></div>`;
+  return `<div class="revtrain-log">${log.map(e => `<div class="${esc(e.kind)}">
+      <span class="when">${esc(revTrainWhen(e.at_ms))}</span>
+      <span class="kind">${esc(e.kind === "cleared" ? "cleared by hand" : e.kind)}</span>
+      <span>${esc(e.what || "")}</span>
+    </div>`).join("")}</div>`;
+}
+
+// An older server sends no `trains`. Standing still says which pull requests each workflow carries,
+// and the train's own order is lowest-number-first — so the panel degrades to that list, claiming
+// no front it was not told (no `front` key at all, which is how `revTrainLine` knows not to guess).
+function revTrainsFromStanding(prs) {
+  const byFlow = new Map();
+  for (const [n, st] of Object.entries(prs || {})) {
+    if (!st || !st.workflow) continue;
+    if (!byFlow.has(st.workflow)) byFlow.set(st.workflow, []);
+    byFlow.get(st.workflow).push(Number(n));
+  }
+  return [...byFlow.entries()].map(([flow, line]) => ({
+    flow,
+    line: line.sort((a, b) => a - b),
+    stopped: line.filter(n => (prs[n] || {}).stopped).map(n => ({ number: n, why: prs[n].stopped })),
+  }));
+}
+
+// One train: what it is working on NOW, spelled out, then every car in order.
+function revTrainLine(id, tr, f) {
+  const prs = f.prs || {};
+  const st = n => prs[n] || { workflow: "", how: "", next: "", step: 0, stopped: "" };
+  const journalOf = n => st(n).journal || (f.journals || {})[n];
+  const front = "front" in tr ? tr.front : undefined;
+  const fs = front == null ? null : st(front);
+  const title = n => { const s = revTrainTitle(id, n); return s ? `<span class="revtrain-title">${esc(s)}</span>` : ""; };
+  // Three honest now-lines: a front (its step, from the same standing the row shows), a train
+  // whose every PR is stopped (the server said `front: null`), and an older server that never said
+  // (no `front` key — the panel claims nothing it was not told).
+  const now = front === undefined
+    ? ""
+    : front === null
+      ? `<div class="revtrain-now dim">nobody can move — the line is empty or everyone in it is stopped</div>`
+      : `<div class="revtrain-now">now: ${revTrainNumBtn(id, front)} ${title(front)} — ${
+          fs.next ? `step ${fs.step} — <code>${esc(fs.next)}</code>` : `waiting — nothing applies right now`}</div>`;
+  const stopsBy = new Map((tr.stopped || []).map(s => [Number(s.number), s.why]));
+  const cars = (tr.line || []).map((n, i) => {
+    const s = st(n);
+    const key = id + "#" + n;
+    const why = stopsBy.has(Number(n)) ? stopsBy.get(Number(n)) : s.stopped;
+    const doing = why ? `stopped — ${why}` : s.next ? String(s.next).split(":")[0] : "waiting";
+    const open = revTrainOpen.has(key);
+    return `<div class="revtrain-car${n === front ? " front" : ""}${why ? " stopped" : ""}">
+        <span class="revtrain-pos">${i + 1}</span>
+        ${revTrainNumBtn(id, n)}${n === front ? `<span class="revtag flow">front</span>` : ""}
+        ${title(n)}
+        <span class="revtrain-doing">${esc(doing)}</span>
+        ${why ? `<button type="button" class="revchip" onclick="revClearStop('${esc(id)}', ${Number(n)})">let it run again</button>` : ""}
+        <button type="button" class="revchip${open ? " on" : ""}" onclick="revTrainLog('${esc(key)}')">history</button>
+      </div>${open ? revTrainJournal(journalOf(n)) : ""}`;
+  }).join("");
+  return `<div class="revtrain-flow">${esc(tr.flow)}</div>${now}${cars}`;
+}
+
+// One repo's trains. Nothing to show — no serial workflow carrying anything — is no section.
+function revTrainRepo(id, f) {
+  const trains = (f.trains !== undefined ? f.trains || [] : revTrainsFromStanding(f.prs))
+    .filter(tr => (tr.line || []).length);
+  if (!trains.length) return "";
+  return `<div class="revtrain-repo"><h5>${esc(id)}</h5>${trains.map(tr => revTrainLine(id, tr, f)).join("")}</div>`;
+}
+
+// The panel itself. Empty when no repo has a train to show — the editor is then the whole pane.
+function revTrainHtml() {
+  const sections = [...revFlows.entries()]
+    .filter(([, f]) => f && !f.error)
+    .map(([id, f]) => revTrainRepo(id, f))
+    .filter(Boolean);
+  if (!sections.length) return "";
+  const paused = revTrainPaused();
+  return `<div class="revtrain${paused ? " off" : ""}">
+    <div class="revtrain-state">
+      <span>merge train — ${paused ? "paused" : "running"}</span>
+      <button type="button" class="revchip${paused ? " go" : ""}" onclick="revTrainToggle(${paused})">${paused ? "resume" : "pause"}</button>
+      ${paused ? `<span class="revtrain-off">paused — nothing will act</span>` : ""}
+    </div>
+    <div class="revtrain-body">${sections.join("")}</div>
   </div>`;
 }
 
