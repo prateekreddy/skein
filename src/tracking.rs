@@ -918,6 +918,7 @@ mod tests {
         )
         .unwrap();
         save_repos(&[Repo {
+            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             source_tree: "/w".into(),
@@ -981,6 +982,7 @@ mod tests {
         )
         .unwrap();
         save_repos(&[Repo {
+            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             source_tree: "/w".into(),
@@ -1053,6 +1055,7 @@ mod tests {
         // A *registered* repo with nothing picked is not a gap: it is "not tracked", and no number
         // of connections may override that.
         save_repos(&[Repo {
+            read_prs: false,
             id: "stray".into(),
             source: "/s".into(),
             source_tree: "/w".into(),
@@ -1090,6 +1093,7 @@ mod tests {
         .unwrap();
         fs::write(dir.join("plane-token"), "plane_api_secret\n").unwrap();
         let repo = |id: &str, gw: &str| Repo {
+            read_prs: false,
             id: id.into(),
             source: format!("/src/{id}"),
             source_tree: "/w".into(),
@@ -1175,6 +1179,7 @@ mod tests {
         )
         .unwrap();
         save_repos(&[Repo {
+            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             source_tree: "/w".into(),
@@ -1883,6 +1888,7 @@ mod tests {
         }])
         .unwrap();
         let repo = Repo {
+            read_prs: false,
             id: "r1".into(),
             source: "s".into(),
             source_tree: "/w".into(),

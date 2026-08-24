@@ -2508,19 +2508,16 @@ const REV_SETTLE_MS = 60 * 60 * 1000;
 
 // Has this pull request been quiet long enough to be worth reading?
 //
-// **An unknown commit date reads as settled**, which is the opposite of what it looks like it should
-// be. The first version treated "skein does not know" as "not settled", on the reasoning that GitHub
-// staying silent is not evidence of age — true, but it makes one missing field switch the whole
-// feature off: nothing is ever read, on any PR, and the row explains the silence with a sentence
-// about a branch still moving that skein has no evidence for. The browser suite caught exactly that,
-// which is what its fixtures are for.
+// **Skein's answer, not the page's.** This used to be computed here from `committed_at`, and the
+// moment a server-side reader existed there were two copies of the same hour — the pane saying
+// "waiting" while the reader was already reading, with nothing to say which was right. The rule
+// lives in `prq::settled` now; this reads the answer, and the countdown below is only ever text.
 //
-// So the rule applies where there is something to apply it to, and where there is not, skein does
-// what it did before the rule existed. A feature that declines to work is worse than one that
-// occasionally reads a busy branch.
+// `!== false` rather than truthiness: a queue served by an older skein has no such field, and the
+// honest reading of a missing answer is the one the rule itself takes — do what was done before it
+// existed.
 function revSettled(pr) {
-  const at = Date.parse(pr.committed_at || "");
-  return !at || Date.now() - at >= REV_SETTLE_MS;
+  return pr.settled !== false;
 }
 
 // What the row says while it is waiting, in the shortest true form.
@@ -2714,6 +2711,7 @@ function renderReview() {
       <span class="revspacer"></span>
       <button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>
       <button type="button" class="revchip${revEdit ? " on" : ""}" onclick="toggleWorkflowEditor()">workflows</button>
+      ${revReadChip()}
       ${revQueue && revQueue.fresh === false
         ? `<span class="revage" title="the last queue skein read, shown while it fetches the current one">read ${esc(revAgo(revQueue.as_of))} · refreshing</span>`
         : ""}
@@ -2847,6 +2845,38 @@ function revWorkflowPost(number, body) {
   })
     .then(r => r.json())
     .then(d => { if (!d.ok) toast(d.error || "that did not stick"); loadWorkflows(); })
+    .catch(e => toast(String(e.message || e).split("\n")[0]));
+}
+
+// Whether skein reads this repo's pull requests with nobody watching.
+//
+// Per repo, off until somebody says so, and shown where the queue is rather than in a settings page:
+// this is the switch that decides whether skein spends model calls on its own, and the person
+// deciding is looking at the queue it would spend them on.
+function revReadChip() {
+  if (!revFlows || revFlows.read_prs === undefined) return "";
+  const on = !!revFlows.read_prs;
+  return `<button type="button" class="revchip${on ? " on" : ""}"
+    title="${on
+      ? "skein reads the pull requests waiting on you here, once they have been quiet for an hour"
+      : "nothing is read unless you ask — turn this on to have the ones waiting on you read for you"}"
+    onclick="revSetReading(${!on})">read ahead${on ? " · on" : ""}</button>`;
+}
+
+function revSetReading(on) {
+  const id = revHeld;
+  if (!id) return;
+  fetch(`/api/repos/${encodeURIComponent(id)}/reading`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { toast(d.error || "that did not stick"); return; }
+      toast(on
+        ? "skein will read the pull requests waiting on you here"
+        : "skein will not read anything here unless you ask");
+      loadWorkflows();
+    })
     .catch(e => toast(String(e.message || e).split("\n")[0]));
 }
 

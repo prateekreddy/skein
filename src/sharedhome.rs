@@ -217,6 +217,7 @@ mod tests {
 
         env::set_var("SKEIN_HOME", &skein_home);
         save_repos(&[Repo {
+            read_prs: false,
             id: "demo".into(),
             source: work.to_string_lossy().into_owned(),
             source_tree: work.to_string_lossy().into_owned(),

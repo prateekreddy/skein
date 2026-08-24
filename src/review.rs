@@ -568,6 +568,131 @@ PR #{number}: {title}
 ///
 /// Never returns an error: a PR that could not be read is a [`Depth::Unread`] summary carrying the
 /// reason, because the caller's only sane response to a failure here is to show you the PR anyway.
+/// What the background reader has already tried and failed to read, per head commit.
+///
+/// **Why a failure needs remembering at all.** A reading that fails is deliberately NOT cached —
+/// caching it would make a failure read as a reading, which is the rule the whole `unread` shape
+/// exists for. But the background pass picks work by "has no reading at this head", so an
+/// uncacheable failure is picked again on the next pass, and the one after: a pull request whose
+/// model call fails costs a model call every ten minutes, for ever. That is the most expensive
+/// mistake available in this module, and it is invisible — the pane shows the same "not summarised"
+/// row throughout.
+///
+/// So the reader keeps its own note of what it tried. Nothing else consults it: **the button in the
+/// row does not**, because a person pressing "read it" is saying they think it will work now, and a
+/// standing failure must never make a button do nothing (same rule as `ai::forget_refusal`).
+fn tried_path(repo_id: &str) -> PathBuf {
+    crate::prq::review_dir(repo_id).join("read-tried.json")
+}
+
+fn read_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
+    fs::read_to_string(tried_path(repo_id))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn note_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
+    let mut all = read_tried(repo_id);
+    all.insert(format!("{number}-{head_sha}"), why.to_string());
+    // Bounded: this is per head commit, so a busy repo would otherwise grow one entry per push for
+    // ever. The pruning that drops stale summaries has the same job and the same shape.
+    if all.len() > 200 {
+        let drop: Vec<_> = all.keys().take(all.len() - 200).cloned().collect();
+        for key in drop {
+            all.remove(&key);
+        }
+    }
+    let path = tried_path(repo_id);
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+        if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
+            let _ = write_atomic(&path, dir, &bytes);
+        }
+    }
+}
+
+/// How many pull requests one background pass reads.
+///
+/// Burst control, not a budget: the budget is the SCOPE — pull requests somebody asked you to
+/// review, in a repo you switched reading on for (the owner's own answer, SKEIN-185). This only
+/// stops a queue that has been quiet all week from firing thirty model calls in one minute when it
+/// finally settles.
+const READ_PER_PASS: usize = 3;
+
+/// Read the pull requests waiting on you, in the repos you asked skein to read, with nobody
+/// watching.
+///
+/// **Three things bound this, and two of them are the owner's answers rather than my guesses:**
+///
+/// * a repo reads nothing until `read_prs` is switched on for it, so the feature costs exactly
+///   nothing on a fleet nobody has opted in;
+/// * only pull requests where you are the REVIEWER — your own do not need summarising for you, and
+///   being mentioned is not a request to review. This is why there is no daily quota: the scope is
+///   the budget, and a number would only bound the damage of reading the wrong things;
+/// * settled ([`crate::prq::settled`]), not a draft, and not already read at this head.
+///
+/// Returns what it read, for the server's log.
+pub fn read_waiting() -> Vec<String> {
+    if !summaries_enabled() {
+        return Vec::new();
+    }
+    let mut read = Vec::new();
+    for repo in crate::repos::load_repos() {
+        if !repo.read_prs {
+            continue;
+        }
+        let Ok(queue) = crate::prq::queue(&repo, false) else {
+            continue;
+        };
+        if !queue.ai {
+            continue;
+        }
+        let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
+        for pr in queue.prs.iter().filter(|pr| worth_reading(&repo.id, pr)) {
+            if read.len() >= READ_PER_PASS {
+                return read;
+            }
+            // Never `force`: a reading already on disk for this head is the answer, and asking again
+            // would spend a model call to be told what skein already knows.
+            let summary = summarise(&repo, &queue.slug, pr, &identities, false);
+            // A reading that could not be made is written down as tried, or the next pass picks it
+            // straight back up — see `tried_path`. The row still says "not summarised", and the
+            // button still reads it on request.
+            if matches!(summary.depth, Depth::Unread) {
+                note_tried(&repo.id, pr.number, &pr.head_sha, &summary.unread_because);
+                continue;
+            }
+            // Only what actually cost something is reported. A cache hit is not news, and a line
+            // per cache hit would bury the ones that are.
+            if summary.computed {
+                read.push(format!("{}: read #{}", repo.id, pr.number));
+            }
+        }
+    }
+    read
+}
+
+/// Is this a pull request skein should read for you, unasked?
+fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
+    // Somebody asked you to review it — personally or through a team you are in. A team request IS
+    // a review request; the queue's own filter says so, and dropping those here would silently
+    // exclude exactly the pull requests the team query was added to find.
+    let asked = pr.reasons.iter().any(|r| {
+        matches!(r, crate::prq::Reason::Reviewer) || matches!(r, crate::prq::Reason::Team(_))
+    });
+    asked
+        && matches!(pr.lane, crate::prq::Lane::NeedsYou)
+        && !pr.draft
+        && pr.settled
+        // A reading of THIS head. One of an earlier commit is kept and shown as such (SKEIN-184),
+        // but it is not a reason to leave the current one unread.
+        && cached(repo_id, pr.number, &pr.head_sha).is_none()
+        // Tried at this head and could not be read. Not for ever: a new commit is a new key, and
+        // asking for it by hand goes nowhere near this.
+        && !read_tried(repo_id).contains_key(&format!("{}-{}", pr.number, pr.head_sha))
+}
+
 pub fn summarise(repo: &Repo, slug: &str, pr: &Pr, identities: &[String], force: bool) -> Summary {
     // Somebody pressed "read it". Whatever the model refused with last time, they are entitled to
     // find out whether it still refuses — a standing refusal must never make a button do nothing.
@@ -827,6 +952,280 @@ Their notes: {intent}
 
 #[cfg(test)]
 mod tests {
+
+    /// What skein reads with nobody watching, and — mostly — what it does not.
+    ///
+    /// The two limits are the owner's own, and they are limits of SCOPE rather than of number:
+    ///
+    /// * "only ones where I mark the automatic reading enabled" — a repo reads nothing until it is
+    ///   switched on, so the ordinary state of this feature on a fleet is that it costs nothing;
+    /// * "read only PRs where I am reviewer" — your own pull requests do not need summarising for
+    ///   you, and being mentioned is not a request to review.
+    ///
+    /// Which is why there is no daily quota. A number bounds the damage of reading the wrong things;
+    /// a scope stops reading them. This asserts the scope, one exclusion at a time, because every
+    /// one of them is a model call that would otherwise be spent while nobody is looking.
+    #[cfg(unix)]
+    #[test]
+    fn what_it_reads_unwatched_is_what_you_were_asked_to_review() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        // A `claude` that answers stage one in the format the prompt demands. The shared stub does
+        // not, and an answer that does not parse is an UNREAD summary — which would make this test
+        // assert the failure path while looking like it asserted the happy one.
+        let claude = home.join("claude-stage1.sh");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+
+        let pr = |number: u64, reason: crate::prq::Reason, lane: crate::prq::Lane| crate::prq::Pr {
+            number,
+            title: "t".into(),
+            author: "someone".into(),
+            url: String::new(),
+            head_ref: "feat".into(),
+            head_sha: format!("sha{number}"),
+            base_ref: "main".into(),
+            draft: false,
+            updated_at: String::new(),
+            committed_at: String::new(),
+            settled: true,
+            labels: Vec::new(),
+            review_decision: String::new(),
+            mergeable: None,
+            checks: "none".into(),
+            my_review: "none".into(),
+            review_is_current: false,
+            reasons: vec![reason],
+            lane,
+            box_name: String::new(),
+        };
+        use crate::prq::{Lane, Reason};
+
+        // Asked to review it, personally or through a team: both are review requests, and dropping
+        // the team one here would silently exclude the pull requests the team query exists to find.
+        assert!(worth_reading(
+            "demo",
+            &pr(1, Reason::Reviewer, Lane::NeedsYou)
+        ));
+        assert!(worth_reading(
+            "demo",
+            &pr(2, Reason::Team("infra".into()), Lane::NeedsYou)
+        ));
+
+        // Yours. You know what is in it.
+        assert!(!worth_reading(
+            "demo",
+            &pr(3, Reason::Author, Lane::NeedsYou)
+        ));
+        // Mentioned in a comment is not a request to review.
+        assert!(!worth_reading(
+            "demo",
+            &pr(4, Reason::Mentioned, Lane::NeedsYou)
+        ));
+        // Already decided on, or set aside: not waiting on you.
+        assert!(!worth_reading(
+            "demo",
+            &pr(5, Reason::Reviewer, Lane::Waiting)
+        ));
+        assert!(!worth_reading(
+            "demo",
+            &pr(6, Reason::Reviewer, Lane::Archived)
+        ));
+
+        // A draft is the author saying it is not finished.
+        let mut draft = pr(7, Reason::Reviewer, Lane::NeedsYou);
+        draft.draft = true;
+        assert!(!worth_reading("demo", &draft));
+
+        // Still being pushed to: reading it describes a commit about to be replaced.
+        let mut moving = pr(8, Reason::Reviewer, Lane::NeedsYou);
+        moving.settled = false;
+        assert!(!worth_reading("demo", &moving));
+
+        // And one already read AT THIS HEAD is not read again — the single most expensive mistake
+        // available here, since it would spend a model call every pass, for ever, on every row.
+        let already = pr(9, Reason::Reviewer, Lane::NeedsYou);
+        assert!(worth_reading("demo", &already));
+        store(
+            "demo",
+            &Summary {
+                number: 9,
+                head_sha: already.head_sha.clone(),
+                depth: Depth::Line,
+                line: "read".into(),
+                detail: String::new(),
+                flags: Vec::new(),
+                signals: Vec::new(),
+                yours: Vec::new(),
+                others: 0,
+                unread_because: String::new(),
+                computed: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            !worth_reading("demo", &already),
+            "a pull request already read at this commit would be read again, every pass"
+        );
+
+        // A repo nobody switched on reads nothing, whatever is in its queue.
+        //
+        // Asserted against a GitHub that ANSWERS, and both ways round. The first version of this
+        // checked only that the pass read nothing with consent off — and passed with the consent
+        // check deleted, because the queue could not be read at all in the fixture. A test that
+        // cannot tell "declined" from "failed" is not testing consent.
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::{Read as _, Write as _};
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let body = said
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let answer = if head.contains("/user/teams") {
+                    "[]".to_string()
+                } else if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if body.contains("review-requested") {
+                    // One pull request, waiting on your review, settled, unread.
+                    r#"{"data":{"search":{"nodes":[{"number":11,"title":"t","url":"u",
+                       "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
+                       "headRefOid":"sha11","baseRefName":"main",
+                       "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
+                       "latestReviews":{"nodes":[]},
+                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]}}}"#
+                        .to_string()
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"search":{"nodes":[]}}}"#.to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "source": "https://github.com/acme/thing.git",
+            "source_tree": "",
+            "store": "",
+            "read_prs": false,
+        }))
+        .unwrap()])
+        .unwrap();
+        assert!(
+            read_waiting().is_empty(),
+            "a repo nobody switched reading on for was read anyway"
+        );
+
+        // And with consent given, the same queue IS read — which is what makes the assertion above
+        // mean "it declined" rather than "it could not".
+        crate::repos::set_read_prs("demo", true).unwrap();
+        let read = read_waiting();
+        assert_eq!(
+            read.len(),
+            1,
+            "the repo was switched on and nothing was read: {read:?}"
+        );
+        assert!(read[0].contains("#11"), "{read:?}");
+
+        // Twice does not read twice: the second pass finds the reading already on disk for this
+        // head, which is the difference between a background reader and a standing order.
+        // Twice does not read twice. Whether the reading succeeded or failed, the next pass leaves
+        // it alone: a success is cached at this head, and a failure is written down as tried —
+        // without which a pull request whose model call fails costs one every pass, for ever, while
+        // the pane shows the same "not summarised" row throughout.
+        assert!(
+            read_waiting().is_empty(),
+            "the same pull request was read again on the next pass"
+        );
+
+        // **And a reading that FAILS is not tried again either**, which is the expensive half. A
+        // failed reading is deliberately not cached — caching it would make a failure read as a
+        // reading — so without a note of the attempt the pass picks it straight back up: one model
+        // call every ten minutes, for ever, while the pane shows the same "not summarised" row.
+        //
+        // Observed by counting how often the CLI is actually run, because "it returned nothing"
+        // looks identical whether or not it asked.
+        let asked = home.join("asked");
+        let broken = home.join("claude-broken.sh");
+        std::fs::write(
+            &broken,
+            format!(
+                "#!/bin/sh\necho x >> {}\nprintf 'no format here'\n",
+                asked.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &broken,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &broken);
+        // Forget the good reading, so #11 is due again.
+        std::fs::remove_dir_all(crate::prq::review_dir("demo").join("summaries")).unwrap();
+
+        assert!(
+            read_waiting().is_empty(),
+            "an unreadable answer was reported as a reading"
+        );
+        let after_one = std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(after_one, 1, "the reader did not ask once: {after_one}");
+
+        read_waiting();
+        let after_two = std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            after_two, 1,
+            "a pull request that could not be read was asked about again — one model call per pass, \
+             for ever"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+    }
 
     /// An answer served from the cache does not report as having cost anything.
     ///
@@ -1196,6 +1595,7 @@ mod tests {
     #[test]
     fn ownership_of_a_repo_without_codeowners_narrows_nothing() {
         let repo = Repo {
+            read_prs: false,
             id: "r".into(),
             source: "https://github.com/a/b".into(),
             source_tree: "/nonexistent-path-for-this-test".into(),

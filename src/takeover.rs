@@ -513,6 +513,7 @@ mod tests {
         assert!(!log.exists(), "a refusal must not have touched the box");
 
         save_repos(&[Repo {
+            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             source_tree: home.join("work").to_string_lossy().into_owned(),

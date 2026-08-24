@@ -383,6 +383,7 @@ mod tests {
         let store = home.join("store/.claude");
         std::fs::create_dir_all(store.join("mailbox")).unwrap();
         let _ = save_repos(&[Repo {
+            read_prs: false,
             id: "web".into(),
             source: "https://example.com/web.git".into(),
             source_tree: String::new(),
@@ -549,6 +550,7 @@ mod tests {
         fs::create_dir_all(store_b.join("mailbox")).unwrap();
         save_repos(&[
             Repo {
+                read_prs: false,
                 id: "a".into(),
                 source: "a".into(),
                 source_tree: "a".into(),
@@ -560,6 +562,7 @@ mod tests {
                 sync_gateway_url: String::new(),
             },
             Repo {
+                read_prs: false,
                 id: "b".into(),
                 source: "b".into(),
                 source_tree: "b".into(),

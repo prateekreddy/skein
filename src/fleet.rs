@@ -9115,6 +9115,7 @@ b idle 5000000 4 1048576 1048576
         git(&["remote", "add", "origin", "git@gitlab.example.com:o/r.git"]);
 
         save_repos(&[Repo {
+            read_prs: false,
             id: "adopted".into(),
             // Adopted in place: the source is the checkout, not a URL.
             source: work.to_string_lossy().into_owned(),
@@ -9165,6 +9166,7 @@ b idle 5000000 4 1048576 1048576
         git(&["config", "user.name", "Host Default"]);
         git(&["config", "user.email", "host@example.com"]);
         let repo = Repo {
+            read_prs: false,
             id: "web".into(),
             source: work.to_string_lossy().into_owned(),
             source_tree: work.to_string_lossy().into_owned(),
@@ -9637,6 +9639,7 @@ b idle 5000000 4 1048576 1048576
             fs::create_dir_all(store.join(dir)).unwrap();
         }
         let repo = Repo {
+            read_prs: false,
             id: "bridge".into(),
             source: String::new(),
             source_tree: String::new(),
@@ -9716,6 +9719,7 @@ b idle 5000000 4 1048576 1048576
         git(&origin, &["commit", "-m", "one"]);
 
         let repo = Repo {
+            read_prs: false,
             id: "bridge".into(),
             source: origin.to_string_lossy().into_owned(),
             source_tree: origin.to_string_lossy().into_owned(),
@@ -9811,6 +9815,7 @@ b idle 5000000 4 1048576 1048576
     /// volume — the ordinary shape, and the one the property below is measured against.
     fn repo_at(id: &str, work: &str, store: &str) -> crate::repos::Repo {
         crate::repos::Repo {
+            read_prs: false,
             id: id.into(),
             source: work.into(),
             source_tree: work.into(),
@@ -9994,6 +9999,7 @@ b idle 5000000 4 1048576 1048576
             std::fs::create_dir_all(d).unwrap();
         }
         crate::repos::save_repos(&[crate::repos::Repo {
+            read_prs: false,
             id: "thing".into(),
             source: work.to_string_lossy().into_owned(),
             source_tree: work.to_string_lossy().into_owned(),

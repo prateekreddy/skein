@@ -81,6 +81,22 @@ pub struct Pr {
     /// it is discussed — which is exactly backwards for deciding whether a PR has settled enough to
     /// be worth reading.
     ///
+    /// Has it been quiet long enough to be worth reading without being asked?
+    ///
+    /// **Decided here, once.** The rule started in the page, and the moment a server-side reader
+    /// existed there were two copies of "an hour" — which is not a bug yet and is exactly how one
+    /// starts: the pane says "waiting" while the server is already reading, and nobody can say
+    /// which is right. Now the page renders this answer and the reader acts on it.
+    ///
+    /// An unknown commit date reads as settled, which is the opposite of what it looks like it
+    /// should be — see [`settled`].
+    ///
+    /// Defaulted, and defaulted to TRUE: a queue remembered on disk by an older skein has no such
+    /// field, and without a default the whole remembered queue fails to parse — which turns a new
+    /// field into an empty pane. The value matches the rule: what skein does not know about does
+    /// not hold anything back.
+    #[serde(default = "settled_by_default")]
+    pub settled: bool,
     /// Empty when GitHub did not say. "Do not know" is not "long ago" and must never be REPORTED as
     /// one — nothing may tell somebody a branch is still moving on the strength of an absent field.
     /// What a caller DOES about it is a separate decision, and the review pane makes the opposite
@@ -769,6 +785,7 @@ fn build_pr(
                     .collect()
             })
             .unwrap_or_default(),
+        settled: settled(&s("committedDate")),
         review_decision: s("reviewDecision"),
         // GitHub's enum, kept as three states rather than two. See the field.
         mergeable: match item.get("mergeable").and_then(|v| v.as_str()) {
@@ -824,6 +841,40 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
 /// Any failure anywhere is failing; otherwise any incomplete run is pending. Failing wins over
 /// pending because a red check is information you act on now, and a queue that showed "pending"
 /// for a PR with a broken build would be hiding the useful half.
+fn settled_by_default() -> bool {
+    true
+}
+
+/// How long a pull request must go without a commit before skein reads it unasked.
+///
+/// A branch somebody is actively pushing to is the worst thing to spend a reading on: the reading
+/// describes a commit that is about to stop being the head, and the next poll spends another. The
+/// owner asked for an hour, which is also about the shortest gap that reliably means "they have
+/// stopped for now" rather than "they are between commits".
+pub const SETTLE: Duration = Duration::from_secs(60 * 60);
+
+/// Has this head commit been sitting still for [`SETTLE`]?
+///
+/// **An unknown date reads as SETTLED**, which is the opposite of the obvious answer. GitHub's
+/// silence is not evidence of age — true — but treating it as "not settled" makes one missing field
+/// switch the whole feature off: nothing is read, on any pull request, with the row explaining the
+/// silence by a branch movement skein has no evidence for. A browser suite caught exactly that. The
+/// rule applies where there is something to apply it to; where there is not, skein does what it did
+/// before the rule existed.
+///
+/// Reporting is a separate matter and unchanged: nothing may TELL somebody a branch is still moving
+/// on the strength of an absent field.
+pub fn settled(committed_at: &str) -> bool {
+    let Ok(at) = chrono::DateTime::parse_from_rfc3339(committed_at) else {
+        return true;
+    };
+    match (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).to_std() {
+        Ok(since) => since >= SETTLE,
+        // A commit dated in the future is a clock skew, not a settled branch.
+        Err(_) => false,
+    }
+}
+
 fn rollup(item: &serde_json::Value) -> String {
     let Some(checks) = item.get("statusCheckRollup").and_then(|v| v.as_array()) else {
         return "none".into();

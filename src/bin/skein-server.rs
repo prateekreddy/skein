@@ -155,6 +155,28 @@ async fn main() {
             }
         }
     });
+    // **Reading the queue you have to work, before you open it.** Nothing here until a repo is
+    // switched on for it, and then only pull requests somebody asked you to review — the owner's
+    // own limits, and the reason there is no daily quota: the scope is the budget.
+    //
+    // Ten minutes. This is the one tick that spends money, and what it waits for is a branch going
+    // quiet for an HOUR, so a faster pass would only ask the same question sooner and get the same
+    // answer. Three per pass keeps a queue that settles all at once from firing thirty model calls
+    // in a minute.
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(600));
+        loop {
+            tick.tick().await;
+            match tokio::task::spawn_blocking(skein::review::read_waiting).await {
+                Ok(read) => {
+                    for what in read {
+                        eprintln!("skein: {what}");
+                    }
+                }
+                Err(e) => eprintln!("skein: the reading pass did not finish ({e})"),
+            }
+        }
+    });
     // **What makes a workflow automation rather than a button.** One pass over every repo skein
     // manages, one step per pull request, and the pass is the only thing that acts.
     //
@@ -307,6 +329,7 @@ async fn main() {
             get(api_review_summary),
         )
         .route("/api/repos/:id/workflows", get(api_workflows))
+        .route("/api/repos/:id/reading", post(api_set_reading))
         .route(
             "/api/workflows",
             get(api_workflow_file).put(api_save_workflows),
@@ -1246,6 +1269,26 @@ async fn api_review_summary(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ReadingReq {
+    on: bool,
+}
+
+/// Say whether skein may read this repo's pull requests with nobody watching.
+///
+/// Its own route, for the same reason it is its own setter: this is the switch that decides whether
+/// skein spends model calls on its own, and it should not be reachable as a side effect of saving
+/// something else.
+async fn api_set_reading(
+    Path(id): Path<String>,
+    Json(r): Json<ReadingReq>,
+) -> Json<serde_json::Value> {
+    match skein::repos::set_read_prs(&id, r.on) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "on": r.on })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
 /// The fleet's workflows, and every word one can be written with.
 ///
 /// The vocabulary is served rather than hard-coded in the page for the same reason the tables exist
@@ -1324,6 +1367,7 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
         }
         Ok::<_, String>(serde_json::json!({
             "enabled": skein::prwork::enabled(),
+            "read_prs": repo.read_prs,
             "defined": flows.iter().map(|f| serde_json::json!({
                 "name": f.name,
                 "matches": f.matches.iter().map(skein::workflow::spell_cond).collect::<Vec<_>>(),

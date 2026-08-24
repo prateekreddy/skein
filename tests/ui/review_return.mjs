@@ -65,6 +65,7 @@ function board() {
     const loadWorkflows = () => {};
     let revEdit = null;
     const revEditHtml = () => "";
+    const revReadChip = () => "";
     return {
       open: id => openReview(id),
       // Clicking a box: the dock's own view change, verbatim from \`showBox\`.
@@ -93,6 +94,9 @@ function board() {
       draft: false,
       head_sha: id + n + (moved.includes(n) ? "-moved" : ""),
       committed_at: hot.includes(n) ? new Date().toISOString() : SETTLED,
+      // The server's answer, not the page's. `prq::settled` decides; the page renders it, so a
+      // fixture that only carried the timestamp would be testing a rule the page no longer has.
+      settled: !hot.includes(n),
       reasons: ["reviewer"],
     })),
     blind_spots: [],

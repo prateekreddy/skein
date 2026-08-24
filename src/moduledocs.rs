@@ -442,6 +442,7 @@ mod tests {
         git(&work, &["add", "-A"]);
         git(&work, &["commit", "-q", "-m", "one"]);
         let repo = Repo {
+            read_prs: false,
             id: "r".into(),
             // Adopted in place, not a URL: the mirror's origin is then this checkout, so
             // `publish()` fetches from a path on disk instead of reaching for the network.

@@ -254,6 +254,7 @@ mod tests {
         env::set_var("SKEIN_HOME", &home);
         env::set_var("SKEIN_REGISTRY", legacy.join("sandboxes.json"));
         let repo = Repo {
+            read_prs: false,
             id: "demo".into(),
             source: work.display().to_string(),
             source_tree: work.display().to_string(),

@@ -930,6 +930,7 @@ mod tests {
         .unwrap();
         let store = home.join("st").join(".claude");
         let repo = Repo {
+            read_prs: false,
             id: "thing".into(),
             source: "s".into(),
             source_tree: "/work/thing".into(),
@@ -977,6 +978,7 @@ mod tests {
         })
         .unwrap();
         let repo = Repo {
+            read_prs: false,
             id: "skein".into(),
             source: "s".into(),
             source_tree: "/work/skein".into(),
@@ -1055,6 +1057,7 @@ mod tests {
         env::set_var("SKEIN_HOME", &home);
         env::remove_var("SKEIN_LAUNCH_CMD");
         save_repos(&[Repo {
+            read_prs: false,
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
             source_tree: home.join("repos/web/work").to_string_lossy().into(),
@@ -1108,6 +1111,7 @@ mod tests {
         env::remove_var("SKEIN_LAUNCH_CMD");
         placed("web-feat-x");
         let repo = Repo {
+            read_prs: false,
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
             source_tree: home.join("repos/web/work").to_string_lossy().into(),

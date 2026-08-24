@@ -587,6 +587,7 @@ mod tests {
 
         // The host end: skein copies what the manifest names into the store.
         let repo = Repo {
+            read_prs: false,
             id: "demo".into(),
             source: work.to_string_lossy().into_owned(),
             source_tree: work.to_string_lossy().into_owned(),

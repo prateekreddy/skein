@@ -44,6 +44,14 @@ pub struct Repo {
     #[serde(default, alias = "work")]
     pub source_tree: String,
     pub store: String, // host shared `.claude` store
+    /// May skein read this repo's pull requests without being asked, with nobody watching?
+    ///
+    /// **Off unless it is switched on, per repo.** The owner's rule: "only ones where I mark the
+    /// automatic reading enabled". Every other setting here describes how a repo is worked; this one
+    /// decides whether skein spends model calls on it while nobody is looking, so a registry entry
+    /// added for an unrelated reason cannot start costing money.
+    #[serde(default)]
+    pub read_prs: bool,
     #[serde(default = "default_agent")]
     pub agent: String, // runtime adapter id (see `supported_runtimes`)
     /// The Plane project this repo's work is tracked in — a project URL or a bare uuid, kept
@@ -108,6 +116,24 @@ fn read_repos_uncached() -> Vec<Repo> {
         .ok()
         .and_then(|t| serde_json::from_str::<Vec<Repo>>(&t).ok())
         .unwrap_or_default()
+}
+
+/// Say whether skein may read this repo's pull requests unattended.
+///
+/// Its own function rather than a general "update this repo" one: this is the only field that
+/// decides whether skein spends money on its own, and a route that could set it as a side effect of
+/// editing something else is a route that turns it on by accident.
+pub fn set_read_prs(id: &str, on: bool) -> Result<(), String> {
+    let mut repos = load_repos();
+    let Some(repo) = repos.iter_mut().find(|r| r.id == id) else {
+        return Err(format!("no repo called {id:?}"));
+    };
+    repo.read_prs = on;
+    save_repos(&repos)?;
+    // The list is cached for a second; without this, switching reading on and then asking what is
+    // on reports the old answer, which reads as the switch not working.
+    *REPOS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    Ok(())
 }
 
 /// Persist the repo list to `~/.skein/repos.json` (pretty, atomic).
@@ -785,6 +811,8 @@ pub fn add_repo(
         source: source.to_string(),
         source_tree: source_tree.to_string_lossy().into_owned(),
         store: store.to_string_lossy().into_owned(),
+        // A repo skein has just been told about reads nothing on its own until somebody says so.
+        read_prs: false,
         agent: agent
             .map(|s| s.to_string())
             .unwrap_or_else(|| load_config().default_agent),
@@ -1152,6 +1180,7 @@ mod tests {
                     for n in 0..EACH {
                         update_repos(|repos| {
                             repos.push(Repo {
+                                read_prs: false,
                                 id: format!("{who}{n}"),
                                 source: String::new(),
                                 source_tree: String::new(),
@@ -1274,6 +1303,7 @@ mod tests {
         env::set_var("SKEIN_HOME", &home);
         let repos = vec![
             Repo {
+                read_prs: false,
                 id: "web".into(),
                 source: "s".into(),
                 source_tree: "/w".into(),
@@ -1285,6 +1315,7 @@ mod tests {
                 sync_gateway_url: String::new(),
             },
             Repo {
+                read_prs: false,
                 id: "web-api".into(),
                 source: "s".into(),
                 source_tree: "/w".into(),
@@ -1316,6 +1347,7 @@ mod tests {
         let store = home.join("st").join(".claude");
         fs::create_dir_all(&store).unwrap();
         let repos = vec![Repo {
+            read_prs: false,
             id: "thing".into(),
             source: "s".into(),
             source_tree: "/w".into(),
@@ -1381,6 +1413,7 @@ mod tests {
         let dir = tempdir();
         env::set_var("SKEIN_HOME", &dir);
         save_repos(&[Repo {
+            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             source_tree: "/w".into(),
@@ -1529,6 +1562,7 @@ mod tests {
         // Registered WITHOUT going through `add_repo`, which would make the mirror as a side effect
         // and leave nothing for the racing readers to do.
         let repo = Repo {
+            read_prs: false,
             id: "proj".into(),
             source: checkout.to_string_lossy().to_string(),
             source_tree: checkout.to_string_lossy().to_string(),

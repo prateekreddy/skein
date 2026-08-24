@@ -753,6 +753,7 @@ mod tests {
         );
         // And a name already taken by a fleet box must not be handed out again.
         let repo = Repo {
+            read_prs: false,
             id: "web".into(),
             source: String::new(),
             source_tree: String::new(),
