@@ -144,6 +144,15 @@ pub struct Pr {
     /// one layer down from the test that protects it.
     #[serde(default)]
     pub mergeable: Option<bool>,
+    /// The reviewer's first question is "can I do this now?", and that is size before anything
+    /// else. `Option` so a queue remembered from before these fields is honest: absent renders as
+    /// nothing, where a defaulted 0 would claim an empty change.
+    #[serde(default)]
+    pub additions: Option<u64>,
+    #[serde(default)]
+    pub deletions: Option<u64>,
+    #[serde(default)]
+    pub changed_files: Option<u64>,
     /// "approved" | "changes-requested" | "commented" | "none" — *your* last review.
     pub my_review: String,
     /// Was that review submitted against the current head? False after new commits land, which is
@@ -649,6 +658,7 @@ query($q: String!, $n: Int!) {
       ... on PullRequest {
         number title url isDraft updatedAt
         headRefName headRefOid baseRefName reviewDecision mergeable
+        additions deletions changedFiles
         labels(first: 20) { nodes { name } }
         author { login }
         latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
@@ -825,6 +835,9 @@ fn build_pr(
         settled: settled(&s("committedDate")),
         review_decision: s("reviewDecision"),
         mergeable,
+        additions: item.get("additions").and_then(|v| v.as_u64()),
+        deletions: item.get("deletions").and_then(|v| v.as_u64()),
+        changed_files: item.get("changedFiles").and_then(|v| v.as_u64()),
         checks,
         my_review,
         review_is_current,
@@ -2305,6 +2318,46 @@ mod tests {
             build_pr(&yours, 4, "me", "repo", &Reason::Author, &[]).lane,
             Lane::Waiting,
             "you authored it — the next review is somebody else's to give"
+        );
+
+        // UNKNOWN is what GitHub says for a while after every push — it is "not yet computed",
+        // never "conflicted", and a freshly pushed PR must not fall out of your lane for it.
+        let fresh = item(
+            r#"{"number":5,"headRefOid":"a","author":{"login":"someone"},"mergeable":"UNKNOWN"}"#,
+        );
+        assert_eq!(
+            build_pr(&fresh, 5, "me", "repo", &Reason::Reviewer, &[]).lane,
+            Lane::NeedsYou,
+            "mergeability GitHub has not computed is not a reason to demote"
+        );
+    }
+
+    /// The reviewer's first question is "can I do this now?" — size, before anything else. The
+    /// search answers it in the same call, and absence stays absent: a queue remembered from
+    /// before these fields must render nothing rather than claim an empty change.
+    #[test]
+    fn a_row_can_say_how_big_the_change_is_before_it_is_opened() {
+        let sized = item(
+            r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
+                "additions":120,"deletions":18,"changedFiles":6}"#,
+        );
+        let pr = build_pr(&sized, 6, "me", "repo", &Reason::Reviewer, &[]);
+        assert_eq!(
+            (pr.additions, pr.deletions, pr.changed_files),
+            (Some(120), Some(18), Some(6)),
+            "the size GitHub already sent never made it onto the row"
+        );
+        assert!(
+            SEARCH_QUERY.contains("additions deletions changedFiles"),
+            "the fields are read but never requested: {SEARCH_QUERY}"
+        );
+
+        let bare = item(r#"{"number":7,"headRefOid":"a","author":{"login":"someone"}}"#);
+        let pr = build_pr(&bare, 7, "me", "repo", &Reason::Reviewer, &[]);
+        assert_eq!(
+            (pr.additions, pr.deletions, pr.changed_files),
+            (None, None, None),
+            "absent size must stay absent — a defaulted 0 claims an empty change"
         );
 
         let awaiting = item(r#"{"number":5,"headRefOid":"a","author":{"login":"someone"}}"#);

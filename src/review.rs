@@ -725,12 +725,22 @@ fn tried_path(repo_id: &str) -> PathBuf {
     crate::prq::review_dir(repo_id).join("read-tried.json")
 }
 
+/// The same note, kept for review drafts. A separate file rather than a shared one because the
+/// keys are the same `number-sha` shape, and in one file a summary that failed would silence the
+/// draft that was never attempted — the two costs are rationed independently.
+fn critique_tried_path(repo_id: &str) -> PathBuf {
+    crate::prq::review_dir(repo_id).join("critique-tried.json")
+}
+
+fn tried_at(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
 fn read_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
-    let mut all: std::collections::BTreeMap<String, String> =
-        fs::read_to_string(tried_path(repo_id))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+    let mut all = tried_at(&tried_path(repo_id));
     // Notes written before transport failures stopped being noted at all. They recorded failures
     // that never reached a model — a diff that would not download — and honouring them keeps rows
     // stuck on errors whose cause is already fixed. Dropped on read; the next write drops them
@@ -739,8 +749,17 @@ fn read_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
     all
 }
 
-fn note_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
-    let mut all = read_tried(repo_id);
+fn critique_tried(repo_id: &str) -> std::collections::BTreeMap<String, String> {
+    tried_at(&critique_tried_path(repo_id))
+}
+
+fn note_into(
+    path: &std::path::Path,
+    mut all: std::collections::BTreeMap<String, String>,
+    number: u64,
+    head_sha: &str,
+    why: &str,
+) {
     all.insert(format!("{number}-{head_sha}"), why.to_string());
     // Bounded: this is per head commit, so a busy repo would otherwise grow one entry per push for
     // ever. The pruning that drops stale summaries has the same job and the same shape.
@@ -750,13 +769,34 @@ fn note_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
             all.remove(&key);
         }
     }
-    let path = tried_path(repo_id);
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
         if let Ok(bytes) = serde_json::to_vec_pretty(&all) {
-            let _ = write_atomic(&path, dir, &bytes);
+            let _ = write_atomic(path, dir, &bytes);
         }
     }
+}
+
+fn note_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
+    // Read through `read_tried`, not `tried_at`, so its legacy-note filter still gets its
+    // "dropped from the file on the next write".
+    note_into(
+        &tried_path(repo_id),
+        read_tried(repo_id),
+        number,
+        head_sha,
+        why,
+    )
+}
+
+fn note_critique_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
+    note_into(
+        &critique_tried_path(repo_id),
+        critique_tried(repo_id),
+        number,
+        head_sha,
+        why,
+    )
 }
 
 /// How many pull requests one background pass reads.
@@ -796,36 +836,96 @@ pub fn read_waiting() -> Vec<String> {
             continue;
         }
         let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        for pr in queue.prs.iter().filter(|pr| worth_reading(&repo.id, pr)) {
+        for pr in queue.prs.iter() {
+            let read_it = worth_reading(&repo.id, pr);
+            // The critique door is the same doorway reading uses — lane, draft, settled — so a PR
+            // the reader would not summarise cannot enter the pass through its second half. What
+            // it deliberately does NOT require is an uncached summary: the queue this feature
+            // landed on was already summarised at its current heads, and "drafted alongside the
+            // summary" must cover those rows too, not only heads that move later.
+            let draft_it = matches!(pr.lane, crate::prq::Lane::NeedsYou)
+                && !pr.draft
+                && pr.settled
+                && worth_critiquing(&repo.id, pr, &queue.viewer);
+            if !read_it && !draft_it {
+                continue;
+            }
             if read.len() >= READ_PER_PASS {
                 return read;
             }
-            // Never `force`: a reading already on disk for this head is the answer, and asking again
-            // would spend a model call to be told what skein already knows.
-            let summary = summarise(&repo, &queue.slug, pr, &identities, false);
-            // A reading that could not be made is written down as tried, or the next pass picks it
-            // straight back up — see `tried_path`. The row still says "not summarised", and the
-            // button still reads it on request.
-            //
-            // Only when a model call was SPENT, though (`computed`) — that is the cost the note
-            // exists to stop repeating. A failure before the model — the diff would not download,
-            // GitHub was slow — costs one HTTP call to retry, and writing it down here pinned a
-            // bad network minute to the head sha as a permanent error row. Left unnoted, the next
-            // pass simply tries again.
-            if matches!(summary.depth, Depth::Unread) {
-                if summary.computed {
-                    note_tried(&repo.id, pr.number, &pr.head_sha, &summary.unread_because);
+            if read_it {
+                // Never `force`: a reading already on disk for this head is the answer, and asking
+                // again would spend a model call to be told what skein already knows.
+                let summary = summarise(&repo, &queue.slug, pr, &identities, false);
+                // A reading that could not be made is written down as tried, or the next pass picks
+                // it straight back up — see `tried_path`. The row still says "not summarised", and
+                // the button still reads it on request.
+                //
+                // Only when a model call was SPENT, though (`computed`) — that is the cost the note
+                // exists to stop repeating. A failure before the model — the diff would not
+                // download, GitHub was slow — costs one HTTP call to retry, and writing it down
+                // here pinned a bad network minute to the head sha as a permanent error row. Left
+                // unnoted, the next pass simply tries again. A PR that could not even be
+                // summarised earns no draft either: the same diff feeds both.
+                if matches!(summary.depth, Depth::Unread) {
+                    if summary.computed {
+                        note_tried(&repo.id, pr.number, &pr.head_sha, &summary.unread_because);
+                    }
+                    continue;
                 }
-                continue;
+                // Only what actually cost something is reported. A cache hit is not news, and a
+                // line per cache hit would bury the ones that are.
+                if summary.computed {
+                    read.push(format!("{}: read #{}", repo.id, pr.number));
+                }
             }
-            // Only what actually cost something is reported. A cache hit is not news, and a line
-            // per cache hit would bury the ones that are.
-            if summary.computed {
-                read.push(format!("{}: read #{}", repo.id, pr.number));
+            // The reader's second half: where the review is yours to give, draft it in the same
+            // pass, so opening the row finds summary AND review waiting instead of costing a
+            // second round trip.
+            if draft_it {
+                match draft_critique(&repo, &queue.slug, pr) {
+                    Ok(_) => read.push(format!("{}: drafted a review for #{}", repo.id, pr.number)),
+                    // Non-fatal by construction: the summary above already stands, the row simply
+                    // opens without a draft and the button still drafts on request. Noted only
+                    // when a model call was SPENT — the same boundary the summary path draws with
+                    // `computed`, or a bad network minute pins "no draft" to this head for ever.
+                    Err(fail) if fail.spent => {
+                        note_critique_tried(&repo.id, pr.number, &pr.head_sha, &fail.why)
+                    }
+                    Err(_) => {}
+                }
             }
         }
     }
     read
+}
+
+/// Is the review of this pull request yours to give — and therefore worth drafting, unasked?
+///
+/// A narrower question than [`worth_reading`]'s, because the spend is bigger: a summary tells you
+/// about a PR you are involved in for any reason, a drafted review presumes you will be the one
+/// reviewing. Yours to give means asked (personally or through a team — a team request IS a
+/// review request, same rule as `worth_reading`), already reviewing (you acted once and the PR is
+/// still open), or your own pull request. Being mentioned is somebody talking *about* you, not a
+/// request to review, and must never cost the model call a draft is.
+fn worth_critiquing(repo_id: &str, pr: &Pr, viewer: &str) -> bool {
+    let yours_to_give = pr.author == viewer
+        || pr.reasons.iter().any(|r| {
+            matches!(
+                r,
+                crate::prq::Reason::Reviewer
+                    | crate::prq::Reason::Reviewed
+                    | crate::prq::Reason::Team(_)
+            )
+        });
+    yours_to_give
+        // Never twice for one `(number, head_sha)` — the stored draft IS the answer at this head,
+        // the same key discipline as the summary cache, and for the same money reason. A new
+        // commit is a new key, so a moved head drafts again exactly as it summarises again.
+        && !critiqued(repo_id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha)
+        // Tried at this head and could not be drafted. Only the background consults this note —
+        // the button in the pane goes nowhere near it, same rule as `tried_path`.
+        && !critique_tried(repo_id).contains_key(&format!("{}-{}", pr.number, pr.head_sha))
 }
 
 /// Is this a pull request skein should read for you, unasked?
@@ -1383,7 +1483,8 @@ pub fn post_critique(
 
 /// Draft an actual review of the PR: read the diff, produce comments, anchor each against the
 /// hunks, store the draft. Returns it for the pane to lay out for vetting. Costs a model call —
-/// only ever run because a person asked.
+/// run because a person asked, or by the background reader for a PR whose review is yours to give
+/// (see [`worth_critiquing`]).
 pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
     if !summaries_enabled() {
         return Err(
@@ -1391,21 +1492,42 @@ pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
                 .into(),
         );
     }
-    // A person pressed the button; a standing refusal must never make it do nothing.
+    // A person pressed the button; a standing refusal must never make it do nothing. The
+    // background reader deliberately does not come through here — an unattended pass has no
+    // standing to clear a refusal a person has not seen.
     crate::ai::forget_refusal();
-    let (diff, cut) = pr_diff(slug, pr.number, CRITIQUE_BYTES)?;
+    draft_critique(repo, slug, pr).map_err(|fail| fail.why)
+}
+
+/// A draft that did not happen, and whether it cost a model call. `spent` is the same boundary
+/// [`Summary::computed`] draws: everything from the model call onward counts (a `claude` that is
+/// not logged in fails instantly and free, and an unnoted failure is retried every pass, for
+/// ever), while a diff that would not download costs one HTTP call to retry and must not be
+/// pinned to the head sha as permanent.
+struct CritiqueFail {
+    why: String,
+    spent: bool,
+}
+
+fn draft_critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, CritiqueFail> {
+    let free = |why: String| CritiqueFail { why, spent: false };
+    let spent = |why: String| CritiqueFail { why, spent: true };
+    let (diff, cut) = pr_diff(slug, pr.number, CRITIQUE_BYTES).map_err(free)?;
     if diff.trim().is_empty() {
-        return Err("GitHub returned an empty diff for this PR.".into());
+        return Err(free("GitHub returned an empty diff for this PR.".into()));
     }
     let raw = crate::ai::claude_oneshot_telling(
         &critique_prompt(pr, &diff, cut),
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(300),
     )
-    .map_err(|unread| unread.say())?;
-    let mut drafted = parse_critique(&raw).ok_or(
-        "the model's review did not follow the format, so no comments are being offered from it — try again.",
-    )?;
+    .map_err(|unread| spent(unread.say()))?;
+    let mut drafted = parse_critique(&raw).ok_or_else(|| {
+        spent(
+            "the model's review did not follow the format, so no comments are being offered from it — try again."
+                .into(),
+        )
+    })?;
     let lines = commentable(&diff);
     for d in &mut drafted.comments {
         d.anchored = d.line > 0 && lines.get(&d.path).is_some_and(|set| set.contains(&d.line));
@@ -1413,7 +1535,9 @@ pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
     drafted.number = pr.number;
     drafted.head_sha = pr.head_sha.clone();
     drafted.truncated = cut;
-    store_critique(&repo.id, &drafted)?;
+    // Spent: the model already answered, and losing the write is worth noting rather than
+    // re-buying the answer next pass.
+    store_critique(&repo.id, &drafted).map_err(spent)?;
     Ok(drafted)
 }
 
@@ -1486,6 +1610,9 @@ mod tests {
             labels: Vec::new(),
             review_decision: String::new(),
             mergeable: None,
+            additions: None,
+            deletions: None,
+            changed_files: None,
             checks: "none".into(),
             my_review: "none".into(),
             review_is_current: false,
@@ -1754,6 +1881,285 @@ mod tests {
             std::env::remove_var(key);
         }
         crate::prq::forget_host_token();
+    }
+
+    /// A GitHub that answers with two pull requests — #21 waiting on your review, #22 where you
+    /// are only mentioned — and a `claude` that answers whichever prompt it is handed: the stage-1
+    /// shape for summaries, the OVERALL shape for review drafts. Review calls are counted into a
+    /// file, because "it drafted nothing" looks identical whether or not the model was asked, and
+    /// the dedupe test below is ABOUT how often it was asked.
+    #[cfg(unix)]
+    fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let reviews_asked = home.join("reviews-asked");
+        let claude = home.join("claude-both.sh");
+        // The review prompt is the only one carrying the literal `OVERALL:`; the stage prompts ask
+        // for KIND/LINE. Branching on the prompt is what lets ONE binary serve a pass that now
+        // makes two different model calls per pull request.
+        std::fs::write(
+            &claude,
+            format!(
+                "#!/bin/sh\ncase \"$4\" in\n  *OVERALL:*) echo x >> {count}; printf 'OVERALL: nothing to flag\\n';;\n  *) printf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n';;\nesac\n",
+                count = reviews_asked.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::{Read as _, Write as _};
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let body = said
+                    .split("\r\n\r\n")
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let node = |number: u64| {
+                    format!(
+                        r#"{{"number":{number},"title":"t","url":"u",
+                           "isDraft":false,"author":{{"login":"someone"}},"headRefName":"feat",
+                           "headRefOid":"sha{number}","baseRefName":"main",
+                           "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
+                           "latestReviews":{{"nodes":[]}},
+                           "commits":{{"nodes":[{{"commit":{{"committedDate":"2020-01-01T00:00:00Z"}}}}]}}}}"#
+                    )
+                };
+                let answer = if head.contains("/user/teams") {
+                    "[]".to_string()
+                } else if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if body.contains("review-requested:") {
+                    format!(r#"{{"data":{{"search":{{"nodes":[{}]}}}}}}"#, node(21))
+                } else if body.contains("mentions:") {
+                    format!(r#"{{"data":{{"search":{{"nodes":[{}]}}}}}}"#, node(22))
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"search":{"nodes":[]}}}"#.to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
+            "id": "crit",
+            "source": "https://github.com/acme/thing.git",
+            "source_tree": "",
+            "store": "",
+            "read_prs": true,
+        }))
+        .unwrap()])
+        .unwrap();
+        // The queue micro-cache outlives a test's SKEIN_HOME; a stale hit would answer with a
+        // queue read against another test's stub.
+        crate::prq::invalidate("crit");
+        reviews_asked
+    }
+
+    #[cfg(unix)]
+    fn drafting_teardown() {
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::invalidate("crit");
+        crate::prq::forget_host_token();
+    }
+
+    /// The reader opens summary and drafted review in one go: a pull request waiting on YOUR
+    /// review comes out of the background pass with both stored, so expanding the row costs
+    /// nothing and asks nothing. No HTTP pane involved — the pass alone must do it.
+    #[cfg(unix)]
+    #[test]
+    fn the_reader_drafts_the_review_where_it_is_yours_to_give() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let _asked = drafting_fixture(home);
+
+        let read = read_waiting();
+        assert!(
+            cached("crit", 21, "sha21").is_some(),
+            "the pass did not summarise the PR waiting on you: {read:?}"
+        );
+        let drafted = critiqued("crit", 21);
+        assert!(
+            drafted.as_ref().is_some_and(|c| c.head_sha == "sha21"),
+            "the pass summarised #21 but drafted no review for it — summary and draft must arrive together: {read:?}"
+        );
+
+        drafting_teardown();
+    }
+
+    /// Being mentioned is somebody talking ABOUT you. It gets no unrequested review draft — each
+    /// draft is a paid model call, and the scope is the budget (same rule as `worth_reading`).
+    ///
+    /// Asserted end-to-end AND at the predicate: today `worth_reading` already keeps a
+    /// mentioned-only PR out of the pass entirely, so the guard inside the pass only bites the day
+    /// the reading rule widens — which is exactly when nobody will be looking at it.
+    #[cfg(unix)]
+    #[test]
+    fn a_mention_is_not_a_request_for_a_drafted_review() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let _asked = drafting_fixture(home);
+
+        let _ = read_waiting();
+        assert!(
+            critiqued("crit", 22).is_none(),
+            "a PR you were only mentioned on got an unrequested review draft — a paid model call nobody asked for"
+        );
+
+        let pr = |author: &str, reasons: Vec<crate::prq::Reason>| crate::prq::Pr {
+            number: 90,
+            title: "t".into(),
+            author: author.into(),
+            url: String::new(),
+            head_ref: "feat".into(),
+            head_sha: "sha90".into(),
+            base_ref: "main".into(),
+            draft: false,
+            updated_at: String::new(),
+            committed_at: String::new(),
+            settled: true,
+            labels: Vec::new(),
+            review_decision: String::new(),
+            mergeable: None,
+            additions: None,
+            deletions: None,
+            changed_files: None,
+            checks: "none".into(),
+            my_review: "none".into(),
+            review_is_current: false,
+            reasons,
+            lane: crate::prq::Lane::NeedsYou,
+            box_name: String::new(),
+        };
+        use crate::prq::Reason;
+        // Yours to give: asked personally, asked through a team, already in the conversation as a
+        // reviewer, or your own pull request.
+        assert!(worth_critiquing(
+            "crit",
+            &pr("someone", vec![Reason::Reviewer]),
+            "me"
+        ));
+        assert!(worth_critiquing(
+            "crit",
+            &pr("someone", vec![Reason::Team("infra".into())]),
+            "me"
+        ));
+        assert!(worth_critiquing(
+            "crit",
+            &pr("someone", vec![Reason::Reviewed]),
+            "me"
+        ));
+        assert!(
+            worth_critiquing("crit", &pr("me", vec![Reason::Author]), "me"),
+            "your own pull request is yours to review"
+        );
+        assert!(
+            !worth_critiquing("crit", &pr("someone", vec![Reason::Mentioned]), "me"),
+            "mentioned-only is not a request to review, and must not spend a draft"
+        );
+
+        drafting_teardown();
+    }
+
+    /// Never twice for one `(number, head_sha)`. The summary being wiped forces the pass to walk
+    /// the same PR again — the exact spot where a missing dedupe re-buys the draft — and the count
+    /// of model calls, not the presence of a draft, is what tells the two apart.
+    #[cfg(unix)]
+    #[test]
+    fn a_review_already_drafted_at_this_head_is_not_bought_twice() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let asked = drafting_fixture(home);
+
+        let _ = read_waiting();
+        let once = std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(once, 1, "the first pass should draft exactly one review");
+
+        std::fs::remove_dir_all(crate::prq::review_dir("crit").join("summaries")).unwrap();
+        let _ = read_waiting();
+        let twice = std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            twice, 1,
+            "a review already drafted at this head was drafted again — one model call per pass, for ever"
+        );
+
+        drafting_teardown();
+    }
+
+    /// The queue this feature landed on was already summarised at its current heads. If the pass
+    /// only reaches PRs whose summary is still to be made, those rows never get a draft until
+    /// their heads move — the reader would open summary-and-no-review for exactly the pull
+    /// requests it was built for. The critique door must open on a cached summary too.
+    #[cfg(unix)]
+    #[test]
+    fn a_summary_already_on_disk_still_earns_its_draft() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let asked = drafting_fixture(home);
+
+        // First pass: summary and draft both land, as the feature promises.
+        let _ = read_waiting();
+        assert!(cached("crit", 21, "sha21").is_some());
+        assert!(critiqued("crit", 21).is_some());
+
+        // The draft is gone, the summary is not — the pre-feature shape of every live row.
+        std::fs::remove_dir_all(crate::prq::review_dir("crit").join("critiques")).unwrap();
+        let _ = read_waiting();
+        assert!(
+            critiqued("crit", 21).is_some_and(|c| c.head_sha == "sha21"),
+            "a PR summarised at this head before the feature landed never gets its draft — the \
+             critique door only opens where a summary is still to be made"
+        );
+        let calls = std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            calls, 2,
+            "the redraft is one model call, the cached summary none"
+        );
+
+        drafting_teardown();
     }
 
     /// What skein already holds is handed over in one go, and an older reading is marked, not lost.
@@ -2420,6 +2826,9 @@ COMMENT: this one points at a line the diff does not show.
             labels: Vec::new(),
             review_decision: String::new(),
             mergeable: None,
+            additions: None,
+            deletions: None,
+            changed_files: None,
             checks: "none".into(),
             my_review: "none".into(),
             review_is_current: false,
