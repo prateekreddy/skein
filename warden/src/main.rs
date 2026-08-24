@@ -3,9 +3,11 @@
 //! Run it on the host, outside the fleet. It listens on loopback and nothing else; see
 //! [`skein_warden::serve`] for why that is the answer and when it has to change.
 //!
-//! Its state lives beside skein's, under `~/.skein/warden/`, and it is **a thing to back up**
-//! (§8.2): the outcome store is what makes a retried destroy safe, and the audit log is the only
-//! account of the fleet's privileged operations that skein did not write itself.
+//! Its state lives under the volume root — `{$SKEIN_HOME | ~/.skein}/warden/`, the derivation
+//! [`skein_warden::home`] explains, `$SKEIN_WARDEN_HOME` overriding for tests and development —
+//! and it is **a thing to back up** (§8.2): the outcome store is what makes a retried destroy
+//! safe, and the audit log is the only account of the fleet's privileged operations that skein
+//! did not write itself.
 
 use skein_warden::approval::Console;
 use skein_warden::audit::Log;
@@ -25,12 +27,12 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(WHERE_SKEIN_LOOKS);
-    let home = std::env::var("SKEIN_WARDEN_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-                .join(".skein/warden")
-        });
+    // Derived from the volume root, so the secret below sits under the cover skein derives over
+    // the same root (§9.5 R5) — `home()` says why, and `warden_client::secret` is the other end.
+    let home = skein_warden::home();
+    // A secret from before the home followed the volume is moved in, not re-minted — the pairing
+    // survives the path change, and nothing secret-shaped stays at the uncovered old default.
+    skein_warden::secret::adopt_left_behind(&home);
 
     let listener = match bind(port) {
         Ok(listener) => listener,

@@ -257,26 +257,48 @@ pub struct Warden {
 
 /// Where the shared secret is (§9.5 R5), derived the same way on both sides.
 ///
+/// **From the volume root, because that is what the cover is derived over.** R5 puts the secret
+/// "under the cover of requirement 2", and the cover follows `$SKEIN_HOME`; a secret at a fixed
+/// `~/.skein/warden` held R5 only while the volume sat at its default — repoint the volume (the
+/// documented backup flow does: `SKEIN_HOME=~/.skein-backup-<date> skein repoint`) and the cover
+/// moved while the secret stayed behind, uncovered. So the home is `{$SKEIN_HOME | ~/.skein}/warden`
+/// — under the cover for every volume location, by construction. `$SKEIN_WARDEN_HOME` stays as the
+/// explicit override at both ends, for tests and development, and setting it is the operator
+/// deliberately stepping outside the covered world: nothing re-derives a cover over it.
+///
 /// **Not read from `config`.** The rule this module keeps — and `docs/modules.toml` states — is that
 /// a client which had to ask `config` or `fleet` anything is a client the thing it is talking about
-/// could shape. So the path comes from the environment, exactly as the address does: the warden's
-/// own home (`$SKEIN_WARDEN_HOME`, or `$HOME/.skein/warden`), which is what `warden/src/main.rs`
-/// uses, and the file in it the warden mints.
+/// could shape. So the chain above is resolved from the environment directly, reproducing
+/// `config::skein_home` (`src/config.rs`) rather than calling it — the same reading, including
+/// "empty is unset" — and `warden/src/lib.rs`'s `home()` spells the identical chain on the other
+/// end, with the roundtrip test to fail if they drift.
 ///
 /// **skein only reads.** One minter — the warden, which owns the directory — because two would each
 /// write a different value and the mismatch would look exactly like an intruder, which is the
-/// loudest possible failure for the most boring possible cause.
+/// loudest possible failure for the most boring possible cause. The old fixed default is kept only
+/// as a read-side courtesy for upgrade skew: a warden started before the home followed the volume
+/// still holds the bytes at `~/.skein/warden/secret`, and moving that file is the warden's job
+/// (`warden/src/secret.rs`, `adopt_left_behind`), never this reader's.
 fn secret() -> String {
-    let home = std::env::var("SKEIN_WARDEN_HOME")
+    let read = |home: &std::path::Path| {
+        std::fs::read_to_string(home.join("secret"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(overridden) = std::env::var_os("SKEIN_WARDEN_HOME").filter(|s| !s.is_empty()) {
+        return read(std::path::Path::new(&overridden)).unwrap_or_default();
+    }
+    let host_home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+    let volume = std::env::var_os("SKEIN_HOME")
+        .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-                .join(".skein/warden")
-        });
-    std::fs::read_to_string(home.join("secret"))
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+        .unwrap_or_else(|| std::path::PathBuf::from(&host_home).join(".skein"));
+    read(&volume.join("warden")).unwrap_or_else(|| {
+        // The skew courtesy: nothing at the derived home yet, so answer a warden that read the
+        // old default at ITS start. On a default install the two paths are the same file.
+        read(&std::path::PathBuf::from(&host_home).join(".skein/warden")).unwrap_or_default()
+    })
 }
 
 /// What the observation endpoint reports.
@@ -712,6 +734,64 @@ mod tests {
         // And a reply that is not JSON at all still lands somewhere honest.
         let junk = read_answer(500, "gateway error", "op-1").unwrap();
         assert_eq!(junk, Answered::Failed("gateway error".into()));
+    }
+
+    /// The secret is read from under the volume, wherever the volume is (§9.5 R5).
+    ///
+    /// The middle rung is the one that was broken: `$SKEIN_HOME` set, `$SKEIN_WARDEN_HOME` not —
+    /// the repointed-volume case, where a fixed `~/.skein/warden` sat outside the cover.
+    #[test]
+    fn the_secret_is_read_from_under_the_volume() {
+        let _g = crate::testutil::env_lock();
+        let volume = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &*volume);
+        std::env::remove_var("SKEIN_WARDEN_HOME");
+        std::fs::create_dir_all(volume.join("warden")).unwrap();
+        std::fs::write(volume.join("warden/secret"), "under-the-cover\n").unwrap();
+        assert_eq!(secret(), "under-the-cover");
+
+        // The explicit override wins over the volume — the operator leaving the covered world.
+        let outside = crate::testutil::tempdir();
+        std::fs::write(outside.join("secret"), "deliberately-elsewhere\n").unwrap();
+        std::env::set_var("SKEIN_WARDEN_HOME", &*outside);
+        assert_eq!(secret(), "deliberately-elsewhere");
+        // And empty is unset, the same reading `skein_home()` gives `$SKEIN_HOME`.
+        std::env::set_var("SKEIN_WARDEN_HOME", "");
+        assert_eq!(secret(), "under-the-cover");
+        std::env::remove_var("SKEIN_WARDEN_HOME");
+    }
+
+    /// While the derived home is empty, a warden still holding the old default's bytes is answered.
+    ///
+    /// Read-only, deliberately: the warden owns the move (`warden/src/secret.rs`,
+    /// `adopt_left_behind`), and this courtesy exists for the window between upgrading skein and
+    /// restarting a long-running warden. The moment the derived home has a secret, it wins.
+    #[test]
+    fn a_warden_still_on_the_old_default_is_answered_until_the_derived_home_fills() {
+        let _g = crate::testutil::env_lock();
+        let host_home = crate::testutil::tempdir();
+        let volume = crate::testutil::tempdir();
+        let was = std::env::var_os("HOME");
+        std::env::set_var("HOME", &*host_home);
+        std::env::set_var("SKEIN_HOME", &*volume);
+        std::env::remove_var("SKEIN_WARDEN_HOME");
+
+        std::fs::create_dir_all(host_home.join(".skein/warden")).unwrap();
+        std::fs::write(host_home.join(".skein/warden/secret"), "old-pairing\n").unwrap();
+        assert_eq!(secret(), "old-pairing", "the skew window was not answered");
+        assert!(
+            host_home.join(".skein/warden/secret").exists(),
+            "the reader moved the file — writing is the warden's alone"
+        );
+
+        std::fs::create_dir_all(volume.join("warden")).unwrap();
+        std::fs::write(volume.join("warden/secret"), "moved-in\n").unwrap();
+        assert_eq!(secret(), "moved-in", "the derived home did not win once it had a secret");
+
+        match was {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     /// A warden that is not there says what to do about it.

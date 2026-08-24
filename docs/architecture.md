@@ -1317,6 +1317,16 @@ other way and a still earlier one claimed the rest waited on the split; neither 
 5. **The warden authenticates with a secret under the cover of requirement 2.** A mount cover hides
    it regardless of uid; cross-userns `/proc` access is already denied, so a box cannot lift it out of
    skein's memory either.
+
+   "Under the cover" holds by construction, not by coincidence of defaults: both ends derive the
+   secret's home from the volume root — `{$SKEIN_HOME | ~/.skein}/warden` (`warden/src/lib.rs`
+   `home()`, `src/warden_client.rs` `secret()`) — the same root the cover is derived over, so R5
+   is established for every volume location, not only `~/.skein`. A secret found at the old fixed
+   default is **moved** to the derived home by the warden at start — moved rather than re-minted,
+   so the existing pairing survives and nothing secret-shaped stays at an uncovered path — and it
+   is instance-scoped on the volume: a migration drops it and the warden re-mints
+   (`src/volume.rs` `INSTANCE_SCOPED`). `$SKEIN_WARDEN_HOME` still overrides both ends, for tests
+   and development, and setting it is the operator explicitly stepping outside the cover.
 6. **The audit log is written by the warden, on the host, on a path no box's mount view includes.**
    "Append-only" is unenforceable on a path a uid-1000 box can reach — there is no `chattr +a`
    without `CAP_LINUX_IMMUTABLE`.

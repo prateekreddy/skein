@@ -10541,6 +10541,15 @@ b idle 5000000 4 1048576 1048576
         set_box_privileged("web-main", true).unwrap();
         crate::place::record_place("web-main", &crate::place::PlaceRecord::default()).unwrap();
         crate::config::save_config(&crate::config::Config::default()).unwrap();
+        // The warden's pairing secret, at the home both ends derive from the volume root
+        // (`warden_client::secret`, `warden/src/lib.rs` `home()`) — written by hand because its
+        // real writer is the warden binary, a crate this one deliberately does not depend on.
+        // §9.5 R5 is "a secret under the cover", and this walk is the cover's proof; deriving the
+        // home from `skein_home()` is what makes the secret land inside it for every volume
+        // location. `$SKEIN_WARDEN_HOME` can still point it elsewhere, and that is the operator
+        // explicitly leaving the covered world — not a case this test speaks for.
+        std::fs::create_dir_all(skein_home().join("warden")).unwrap();
+        std::fs::write(skein_home().join("warden/secret"), "0123456789abcdef").unwrap();
 
         // One repo of each shape: managed (work and store under the volume) and adopted in place.
         let outside = tempdir();

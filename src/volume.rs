@@ -404,7 +404,8 @@ pub fn migrate(target: &str) -> Result<String, String> {
     // **Dropped, not copied.** These are scoped to one installation, and two volumes holding the
     // same fleet-agent token is exactly the "machine-global secret" the design says skein does not
     // have — untrue on day one if a migration duplicates one. They are re-minted on the next start,
-    // which is what `ensure_agent_token` and its port sibling already do when they find nothing.
+    // which is what `ensure_agent_token` and its port sibling already do when they find nothing —
+    // and what the warden's `kept_in` does for `warden/secret` at its next start.
     //
     // The port matters as much as the token and for a duller reason: a copied port sends the new
     // installation's agent at whatever is listening on the old one's.
@@ -454,7 +455,13 @@ pub fn migrate(target: &str) -> Result<String, String> {
 /// A migration copies the work and re-mints these. Two volumes holding the same fleet-agent token
 /// would make "skein has no machine-global secret" untrue the moment anybody used the feature, and a
 /// copied port aims the new installation's agent at whatever answers on the old one's.
-pub const INSTANCE_SCOPED: &[&str] = &["fleet-agent.token", "fleet-agent.port"];
+///
+/// `warden/secret` is the same kind as the token beside it: a pairing between one host's skein and
+/// one host's warden (§9.5 R5 — its home is derived from the volume root so the cover holds over
+/// it). It travelling to a second volume would be a machine-pairing secret moving like data; the
+/// warden re-mints at the new home when it finds nothing (`warden/src/secret.rs`, `kept_in`),
+/// exactly as the agent token's writers do.
+pub const INSTANCE_SCOPED: &[&str] = &["fleet-agent.token", "fleet-agent.port", "warden/secret"];
 
 /// Rewrite the paths a moved installation records about itself.
 ///
@@ -767,8 +774,16 @@ mod tests {
         let home = tempdir();
         std::env::set_var("SKEIN_HOME", &home);
         populate(&home);
+        // `warden/secret` is the one this list gained last: the warden's pairing with this host's
+        // skein, which used to be copied as data because nothing named it here.
+        assert!(
+            INSTANCE_SCOPED.contains(&"warden/secret"),
+            "the warden's pairing secret left the instance-scoped list, so a migration copies it"
+        );
         for scoped in INSTANCE_SCOPED {
-            fs::write(home.join(scoped), b"instance-scoped").unwrap();
+            let path = home.join(scoped);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"instance-scoped").unwrap();
         }
         // Not instance-scoped, and the distinction is the whole of `docs/delivery.md` §4.1a. The
         // fleet-agent token and port are re-minted because two volumes holding the same one make
