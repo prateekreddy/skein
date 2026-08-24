@@ -25,11 +25,12 @@ import { fileURLToPath } from "node:url";
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 // ---------- fixture ----------
-// Four PRs, each one a state the pane has to get right:
-//   #1 unreviewed              → needs you
-//   #2 approved on the head    → waiting
-//   #3 approved, then moved on → needs you (the case that returns work to you)
-//   #4 authored by you         → the "mine" filter
+// Five PRs, each one a state the pane has to get right (lanes say WHOSE MOVE it is, SKEIN-139):
+//   #1 unreviewed              → your move
+//   #2 approved on the head    → their move (you decided; it moves without you)
+//   #3 approved, then moved on → your move (the case that returns work to you)
+//   #4 authored by you         → their move, and the "mine" filter
+//   #5 a draft                 → not ready (counted and stated, folded, never hidden)
 /// A GitHub the size of what skein asks for: `/user`, `/user/teams`, one GraphQL search, a diff and
 /// a file list. Answers from the fixture files written beside it.
 ///
@@ -284,15 +285,15 @@ await check("the count reaches the button without opening the pane", async () =>
   await page.waitForFunction(() => document.querySelector("#revbtn .revbadge"), null, { timeout: 15000 });
   const badge = await mustSee("#revbtn .revbadge", "the review badge");
   const n = (await badge.textContent()).trim();
-  // Four: three ready and one draft. A draft whose review was requested still needs you — the rule
-  // about drafts is that skein does not spend a model call reading one unasked, not that it hides
-  // one from the count. Those are different promises and conflating them would make a PR someone
-  // asked you to look at disappear.
-  if (n !== "4") throw new Error(`expected the four needs-you PRs, got ${JSON.stringify(n)}`);
+  // Two: the unreviewed PR and the one your approval no longer covers. The draft is NOT here —
+  // it is not your move, it is counted in the not-ready fold where nothing hides — and your own
+  // PR is their move. This count is the whole point of SKEIN-139: the badge says what you can
+  // act on now, not everything with your name near it.
+  if (n !== "2") throw new Error(`expected the two your-move PRs, got ${JSON.stringify(n)}`);
 });
 await check("and its tooltip names the repo the count came from", async () => {
   const title = await page.$eval("#revbtn", e => e.title);
-  if (!/acme: 4/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
+  if (!/acme: 2/.test(title)) throw new Error(`the breakdown is missing: ${title}`);
 });
 // Turning a repo off must stop skein asking GitHub about it — while still saying that is why there is
 // nothing to show. It used to vanish from the counts entirely, which made "nothing needs you" and
@@ -334,18 +335,22 @@ await check("the dock opens even though no box is running", async () => {
 });
 
 console.log("\nlanes");
-await check("an unreviewed PR needs you", async () => {
-  const titles = await laneTitles("needs you");
-  if (!titles) throw new Error("there is no 'needs you' lane on screen");
-  if (!titles.some(t => t.includes("null deref"))) throw new Error(`not in needs-you: ${JSON.stringify(titles)}`);
+await check("an unreviewed PR is your move", async () => {
+  const titles = await laneTitles("your move");
+  if (!titles) throw new Error("there is no 'your move' lane on screen");
+  if (!titles.some(t => t.includes("null deref"))) throw new Error(`not in your-move: ${JSON.stringify(titles)}`);
 });
-await check("a PR you approved on its current head is waiting, not asking again", async () => {
-  const titles = await laneTitles("waiting");
-  if (!titles?.some(t => t.includes("retry flag"))) throw new Error(`not in waiting: ${JSON.stringify(titles)}`);
+await check("a PR you approved on its current head is their move, not asking again", async () => {
+  const titles = await laneTitles("their move");
+  if (!titles?.some(t => t.includes("retry flag"))) throw new Error(`not in their-move: ${JSON.stringify(titles)}`);
+});
+await check("and so is the one you authored — your problem as an author is not review work", async () => {
+  const titles = await laneTitles("their move");
+  if (!titles?.some(t => t.includes("store layout"))) throw new Error(`not in their-move: ${JSON.stringify(titles)}`);
 });
 // The case the whole head-SHA design exists for.
 await check("commits landing after your approval bring it back to you", async () => {
-  const titles = await laneTitles("needs you");
+  const titles = await laneTitles("your move");
   if (!titles.some(t => t.includes("default timeout")))
     throw new Error(`an approval that new commits invalidated did not return: ${JSON.stringify(titles)}`);
 });
@@ -394,6 +399,15 @@ await check("a bug fix states itself on the collapsed row", async () => {
   const gists = await page.$$eval("#revpane .revgist", els => els.map(e => e.textContent.trim()));
   if (!gists.some(g => g.includes("crashing on empty input")))
     throw new Error(`no one-line summary on the row: ${JSON.stringify(gists)}`);
+});
+await check("a draft is not ready, and the fold states its own composition", async () => {
+  // The draft is not hidden and not your move: it is a COUNT with its reason, one click open.
+  const fold = await page.$("#revpane .revlane h4.revfold");
+  if (!fold) throw new Error("there is no not-ready fold on screen");
+  const said = await fold.textContent();
+  if (!/1 draft/.test(said)) throw new Error(`the fold does not state its composition: ${said.trim()}`);
+  await fold.click();
+  await settle(300);
 });
 await check("a draft is not read unless you ask, and says so rather than looking failed", async () => {
   // Every non-draft in this lane has a gist by now (the check above waited for one). A draft that
@@ -565,13 +579,13 @@ await check("set aside moves a PR to the archived lane", async () => {
     if (t.includes("default timeout") && !(await row.$(".revbody"))) { await row.click(); break; }
   }
   await settle();
-  const before = await laneTitles("needs you");
+  const before = await laneTitles("your move");
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
   await settle(900);
   const archived = await laneTitles("archived");
   if (!archived?.length) throw new Error("nothing reached the archived lane");
-  const after = await laneTitles("needs you");
-  if (after.length >= before.length) throw new Error("it was archived but never left needs-you");
+  const after = await laneTitles("your move");
+  if (after.length >= before.length) throw new Error("it was archived but never left your-move");
 });
 
 console.log("\nworkflows");

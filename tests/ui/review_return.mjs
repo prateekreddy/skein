@@ -45,6 +45,9 @@ function board() {
     ${grab("revSumRepo")}
     ${grab("revHeld")}
     ${grab("REV_LANES")}
+    ${grab("revNotReadyOpen")}
+    ${grab("toggleNotReady")}
+    ${grab("revNotReadyWhy")}
     ${grab("REV_SETTLE_MS")}
     ${grab("revSettled")}
     ${grab("revSettlesIn")}
@@ -83,6 +86,7 @@ function board() {
       expand: n => { revOpen.add(n); },
       tries: () => revStaleTries,
       fetchOne: n => revFetchSummary(n, true),
+      toggleNR: () => toggleNotReady(),
     };
   `;
   // Settled by default — two hours since the head commit. A pull request skein has no commit date
@@ -92,10 +96,11 @@ function board() {
   let hot = [];            // numbers whose head commit landed just now
   let moved = [];          // numbers whose head has moved since it was read
   let fresh = true;          // whether the server has the current list yet
+  let laneRows = null;       // when set, the queue serves exactly these rows
   const queue = id => ({
     ai: true,
     fresh,
-    prs: [1, 2, 3, 4, 5, 6].map(n => ({
+    prs: laneRows || [1, 2, 3, 4, 5, 6].map(n => ({
       number: n,
       lane: "needs-you",
       draft: false,
@@ -108,6 +113,7 @@ function board() {
     })),
     blind_spots: [],
   });
+  const lanes = rows => { laneRows = rows; };
   // Answers on demand rather than immediately, so a test can look at the pane between a request and
   // its answer — which is where both defects lived.
   let pending = [];
@@ -172,6 +178,8 @@ function board() {
   return {
     ...made,
     settle,
+    lanes,
+    pane: () => revpane.innerHTML,
     // Everything, until it stops asking.
     drain: async () => { for (let i = 0; i < 20 && pending.length; i++) await settle(); },
     refuse: id => { refuse = id; },
@@ -412,6 +420,39 @@ function board() {
   const asked = b.reads().map(u => Number(u.match(/review\/(\d+)\/summary/)[1])).sort();
   t.check("only what is missing is asked for", asked, [2, 3, 4]);
   t.check("and everything known or read is on screen", b.sums(), 4);
+}
+
+// ---- a lane says whose move it is, not whether you have already acted ----
+//
+// The done-when fixture from SKEIN-139, at the pane: a red PR, a draft, a conflicted one, one of
+// yours and one genuinely awaiting you — the last is the only row in "your move", the not-ready
+// three are a COUNT that states its own composition, and expanding it is one click. Nothing is
+// hidden: the rows are all there behind the fold.
+{
+  const b = board();
+  const at = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  const pr = (n, extra) => ({
+    number: n, head_sha: "alpha" + n, committed_at: at, settled: true, draft: false,
+    reasons: ["reviewer"], checks: "none", ...extra,
+  });
+  b.lanes([
+    pr(1, { lane: "not-ready", checks: "failing" }),
+    pr(2, { lane: "not-ready", draft: true }),
+    pr(3, { lane: "not-ready", mergeable: false }),
+    pr(4, { lane: "waiting", reasons: ["author"] }),
+    pr(5, { lane: "needs-you" }),
+  ]);
+  b.open("alpha");
+  await b.drain();
+
+  t.check("whose-move lanes are on screen",
+    ["your move", "their move", "not ready"].every(l => b.pane().includes(l)), true);
+  t.check("only the actionable rows are drawn while not-ready is folded", b.rows(), 2);
+  t.check("the fold states its own composition",
+    b.pane().includes("1 failing checks, 1 draft, 1 conflicted"), true);
+
+  b.toggleNR();
+  t.check("one click and every not-ready row is there — folded is not hidden", b.rows(), 5);
 }
 
 // ---- the actual review: what the pane posts is exactly what was kept ----

@@ -34,10 +34,17 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Lane {
-    /// Open, yours, and you have not submitted a decision on the *current* head commit.
+    /// **Your move**: somebody is waiting on your review and nothing stops you giving it — not a
+    /// draft, checks not failing, not conflicted. This is the lane the badge counts, so it holds
+    /// only what you can actually act on now.
     NeedsYou,
-    /// You have decided on the current head (approved or requested changes); it is not merged.
+    /// **Their move**: you authored it, or you already decided on the *current* head commit
+    /// (approved or requested changes). Either way the next act belongs to somebody else.
     Waiting,
+    /// **Not ready for review**: a draft, failing checks, or unmergeable — reviewing it now would
+    /// be reviewing something its author is still going to change. Shown as a count with its
+    /// reasons rather than as rows: nothing is hidden, it is just not claiming to be your problem.
+    NotReady,
     /// You have set it aside by hand — it is open, but not going to move for reasons skein has no
     /// way to know.
     Archived,
@@ -742,31 +749,48 @@ fn build_pr(
     let head_sha = s("headRefOid");
     let head_ref = s("headRefName");
     let (my_review, review_is_current) = my_review_state(item, login, &head_sha);
+    let author = item
+        .get("author")
+        .and_then(|a| a.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let draft = item
+        .get("isDraft")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // GitHub's enum, kept as three states rather than two. See the field.
+    let mergeable = match item.get("mergeable").and_then(|v| v.as_str()) {
+        Some("MERGEABLE") => Some(true),
+        Some("CONFLICTING") => Some(false),
+        _ => None,
+    };
+    let checks = rollup(item);
+    // Whose move is it? Decided from READINESS, not from whether you have acted — the change that
+    // took a 29-row "needs you" on the live fleet down to the two that were actually yours to do.
+    // Yours-or-decided outranks not-ready on purpose: your own red PR is your problem as an
+    // AUTHOR, and this queue is the reviewer's; it must not resurface there as review work.
     let lane = if archived_numbers.contains(&number) {
         Lane::Archived
-    } else if review_is_current && matches!(my_review.as_str(), "approved" | "changes-requested") {
+    } else if author == login
+        || (review_is_current && matches!(my_review.as_str(), "approved" | "changes-requested"))
+    {
         Lane::Waiting
+    } else if draft || checks == "failing" || mergeable == Some(false) {
+        Lane::NotReady
     } else {
         Lane::NeedsYou
     };
     Pr {
         number,
         title: s("title"),
-        author: item
-            .get("author")
-            .and_then(|a| a.get("login"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        author,
         url: s("url"),
         box_name: crate::repos::box_name(repo_id, &head_ref),
         head_ref,
         head_sha,
         base_ref: s("baseRefName"),
-        draft: item
-            .get("isDraft")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        draft,
         updated_at: s("updatedAt"),
         committed_at: s("committedDate"),
         labels: item
@@ -781,13 +805,8 @@ fn build_pr(
             .unwrap_or_default(),
         settled: settled(&s("committedDate")),
         review_decision: s("reviewDecision"),
-        // GitHub's enum, kept as three states rather than two. See the field.
-        mergeable: match item.get("mergeable").and_then(|v| v.as_str()) {
-            Some("MERGEABLE") => Some(true),
-            Some("CONFLICTING") => Some(false),
-            _ => None,
-        },
-        checks: rollup(item),
+        mergeable,
+        checks,
         my_review,
         review_is_current,
         reasons: vec![reason.clone()],
@@ -2143,6 +2162,67 @@ mod tests {
         );
         let pr = build_pr(&v, 3, "me", "repo", &Reason::Author, &[]);
         assert_eq!(pr.lane, Lane::Waiting);
+    }
+
+    /// The done-when fixture from SKEIN-139: a red PR, a draft, a conflicted one, one of yours,
+    /// and one genuinely awaiting you — readiness decides the lane, not whether you have acted.
+    #[test]
+    fn a_lane_says_whose_move_it_is_not_whether_you_acted() {
+        let red = item(
+            r#"{"number":1,"headRefOid":"a","author":{"login":"someone"},
+                "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
+        );
+        assert_eq!(
+            build_pr(&red, 1, "me", "repo", &Reason::Reviewer, &[]).lane,
+            Lane::NotReady,
+            "failing checks: reviewing it now reviews code its author must change"
+        );
+
+        let draft =
+            item(r#"{"number":2,"headRefOid":"a","author":{"login":"someone"},"isDraft":true}"#);
+        assert_eq!(
+            build_pr(&draft, 2, "me", "repo", &Reason::Reviewer, &[]).lane,
+            Lane::NotReady,
+            "a draft is its author saying it is not finished"
+        );
+
+        let conflicted = item(
+            r#"{"number":3,"headRefOid":"a","author":{"login":"someone"},"mergeable":"CONFLICTING"}"#,
+        );
+        assert_eq!(
+            build_pr(&conflicted, 3, "me", "repo", &Reason::Reviewer, &[]).lane,
+            Lane::NotReady,
+            "unmergeable: the branch has to move before a review of it means anything"
+        );
+
+        // Yours, even red: your problem as an AUTHOR, and this queue is the reviewer's.
+        let yours = item(
+            r#"{"number":4,"headRefOid":"a","author":{"login":"me"},
+                "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
+        );
+        assert_eq!(
+            build_pr(&yours, 4, "me", "repo", &Reason::Author, &[]).lane,
+            Lane::Waiting,
+            "you authored it — the next review is somebody else's to give"
+        );
+
+        let awaiting = item(r#"{"number":5,"headRefOid":"a","author":{"login":"someone"}}"#);
+        assert_eq!(
+            build_pr(&awaiting, 5, "me", "repo", &Reason::Reviewer, &[]).lane,
+            Lane::NeedsYou,
+            "green, settled, not yours, undecided: genuinely your move"
+        );
+
+        // Pending checks are not failing checks: a PR mid-CI is still yours to start reading.
+        let pending = item(
+            r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
+                "statusCheckRollup":[{"status":"IN_PROGRESS"}]}"#,
+        );
+        assert_eq!(
+            build_pr(&pending, 6, "me", "repo", &Reason::Reviewer, &[]).lane,
+            Lane::NeedsYou,
+            "pending is not failing — waiting for green to read is a choice, not a gate"
+        );
     }
 
     #[test]

@@ -165,6 +165,9 @@ fn need_of_pr(pr: &Pr) -> Need {
         // mapping them together because they share a word would put what you have finished with
         // above what is asking you a question.
         Lane::Waiting => Need::Machine,
+        // Not ready for review — a draft, failing checks, a conflict. Its author is still moving;
+        // machine-quiet, like Waiting, because nothing here waits on you.
+        Lane::NotReady => Need::Machine,
         // You set it aside for a reason skein cannot know. Still there, deliberately quiet.
         Lane::Archived => Need::Gone,
     }
@@ -233,6 +236,7 @@ pub fn who_needs_you() -> Vec<Row> {
                 state: match pr.lane {
                     Lane::NeedsYou => "needs-review",
                     Lane::Waiting => "reviewed",
+                    Lane::NotReady => "not-ready",
                     Lane::Archived => "set-aside",
                 }
                 .to_string(),
