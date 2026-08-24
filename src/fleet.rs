@@ -5697,6 +5697,55 @@ pub fn fleet_login(runtime: &str) -> Result<(), String> {
     }
 }
 
+/// The login command as something a server can spawn on a PTY it owns, rather than run attached
+/// to its own terminal. Same guard and same argv as [`fleet_login`] — this exists because the
+/// cockpit's login route needs the (program, argv) shape and `login_argv` is deliberately private:
+/// which sandbox the login runs in is this module's decision, not a caller's.
+pub fn login_spawn_argv(runtime: &str) -> Result<(&'static str, Vec<String>), String> {
+    let sandbox = fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err("no fleet sandbox configured".into());
+    }
+    Ok(login_argv(&sandbox, runtime))
+}
+
+/// Everything a successful login must be followed by, run **in the process that calls it** — which
+/// is the point. `skein login` used to run this tail inline in the CLI process, and the
+/// long-running server's refusal memory (`ai`'s remembered refusal) was untouched: the fleet kept
+/// declining model calls over a credential that had just been fixed. The server's login route
+/// calls this so the memory that clears is the one that was refusing.
+///
+/// Returns the outcome as sentences rather than printing them, because the two callers speak
+/// different surfaces: `cmd_login` eprintlns them, the login WebSocket sends them down the socket.
+pub fn after_login(runtime: &str) -> Vec<String> {
+    // The model may have been refusing every call because of the credential that just changed.
+    crate::ai::forget_refusal();
+    // And into the boxes that already exist. Without this the line above was the whole story, and
+    // the story was "restart twelve boxes or sign in twelve times" — which is what sharing a login
+    // exists to prevent. Best-effort: the login itself succeeded, and failing now would report a
+    // working login as a failure.
+    vec![share_outcome(runtime, share_login_with_boxes())]
+}
+
+/// The one sentence [`after_login`] says about handing the login to running boxes. Split from the
+/// call so every arm is testable without a sandbox to share into.
+fn share_outcome(runtime: &str, shared: Result<Vec<String>, String>) -> String {
+    match shared {
+        Ok(reached) if reached.is_empty() => format!(
+            "every new box inherits this {runtime} login; there are no existing boxes to give it to"
+        ),
+        Ok(reached) => format!(
+            "every new box inherits this {runtime} login, and {} existing box(es) now hold it: {}",
+            reached.len(),
+            reached.join(", ")
+        ),
+        Err(why) => format!(
+            "logged in, but could not hand it to the boxes already running ({why}) — they pick it \
+             up when their session next starts"
+        ),
+    }
+}
+
 /// The program and arguments a `skein login` runs, split out so both shapes can be read.
 ///
 /// The same command either way; what differs is whether skein has to get to the sandbox first. In
@@ -12206,6 +12255,69 @@ b idle 5000000 4 1048576 1048576
             argv.last(),
             in_fleet_argv.last(),
             "the two deployments log in differently, which is a second thing to keep in step"
+        );
+    }
+
+    /// `after_login` exists so the post-login tail runs in the process whose state it fixes. Run
+    /// from the CLI it cleared the CLI's refusal memory while the server kept declining model
+    /// calls over a credential that had just been renewed — the gap the login route closes. The
+    /// refusal half is observable through `ai`'s test probes; the share half is pinned on the one
+    /// arm a unit test reaches deterministically (a config that names no sandbox), because every
+    /// other arm needs a sandbox to actually share into.
+    #[test]
+    fn after_login_clears_this_processes_refusal_and_says_what_the_share_did() {
+        // env_lock guards the refusal memory as well as the env: `REFUSED` is process-global, and
+        // every test that manufactures refusals serializes on this lock (see ai's tests).
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        // Explicitly empty, not merely absent: the absent default is "skein-fleet", and a test
+        // relying on it would try to share a login into a real sandbox.
+        std::fs::write(crate::config::config_json(), r#"{"fleet_sandbox": ""}"#).unwrap();
+
+        crate::ai::plant_refusal_for_test();
+        assert!(
+            crate::ai::refusal_standing_for_test(),
+            "the probe must plant a refusal for this test to mean anything"
+        );
+        let said = after_login("claude");
+        assert!(
+            !crate::ai::refusal_standing_for_test(),
+            "a fresh login must clear the standing refusal in THIS process — that is after_login's \
+             reason to exist"
+        );
+        assert_eq!(said.len(), 1, "one outcome sentence, got: {said:?}");
+        assert!(
+            said[0].contains("no fleet sandbox configured")
+                && said[0].contains("session next starts"),
+            "the share outcome must say why it could not hand the login over and what happens \
+             instead: {}",
+            said[0]
+        );
+
+        crate::ai::forget_refusal(); // leave the shared static as found
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// Every arm of the share sentence, without a sandbox to share into. The wording is the
+    /// contract: the CLI prints these lines and the login socket sends them, so a drifted sentence
+    /// drifts on two surfaces at once.
+    #[test]
+    fn the_share_outcome_has_a_sentence_for_each_arm() {
+        let none = share_outcome("claude", Ok(vec![]));
+        assert!(
+            none.contains("no existing boxes"),
+            "an empty fleet must be told it lost nothing: {none}"
+        );
+        let some = share_outcome("claude", Ok(vec!["alpha".into(), "beta".into()]));
+        assert!(
+            some.contains("2 existing box(es)") && some.contains("alpha, beta"),
+            "the boxes that now hold the login must be named: {some}"
+        );
+        let err = share_outcome("claude", Err("sandbox down".into()));
+        assert!(
+            err.contains("sandbox down") && err.contains("session next starts"),
+            "a failed share must carry the why and the recovery: {err}"
         );
     }
 }

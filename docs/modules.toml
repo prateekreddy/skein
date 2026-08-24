@@ -268,6 +268,11 @@ depends_on = ["answer", "place", "sandbox", "sbx", "source", "util"]
 # port it listens on, and publishing would forward a port to the machine skein stands on. And
 # `skein login` runs its command directly instead of through `sbx exec -it`.
 depends_on = [
+  # `ai` for one call: `after_login` clears the model-refusal memory in the process that ran the
+  # login (SKEIN-212). The tail used to live in the CLI, where clearing it fixed the wrong process —
+  # the server kept declining model calls over a credential that had just been renewed. The
+  # dependency is the fix: whoever completes a login is the one holding the memory that must forget.
+  "ai",
   "attempt",
   "config",
   "deployment",

@@ -222,6 +222,24 @@ pub fn forget_refusal() {
     }
 }
 
+/// Test probes for the refusal memory, which is deliberately private otherwise.
+/// `fleet::after_login` promises to clear the standing refusal, and clearing has no effect
+/// observable from outside this module — these let its test plant one and watch it go. Hold
+/// `testutil::env_lock` around them: `REFUSED` is process-global, and every test that manufactures
+/// refusals serializes on that lock (see `a_model_call_that_fails_says_which_failure_it_was`).
+#[cfg(test)]
+pub(crate) fn plant_refusal_for_test() {
+    remember_refusal(&Unread::Refused {
+        code: "1".into(),
+        said: "planted by a test".into(),
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn refusal_standing_for_test() -> bool {
+    standing_refusal().is_some()
+}
+
 /// The refusal being repeated back, if there is one.
 fn standing_refusal() -> Option<Unread> {
     REFUSED
