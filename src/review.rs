@@ -430,10 +430,71 @@ fn fresh(path: &std::path::Path) -> bool {
 /// attention, not to spend it.
 const STAGE1_BYTES: usize = 40_000;
 const STAGE2_BYTES: usize = 140_000;
+/// The actual review reads more than a summary does: a summary of half a change is still a fair
+/// summary, while a review that never saw a file cannot say anything about it. Sized to fit the
+/// stronger model's context with room for the answer.
+const CRITIQUE_BYTES: usize = 300_000;
 
 /// The PR's diff, and whether it was cut short.
 fn pr_diff(slug: &str, number: u64, limit: usize) -> Result<(String, bool), String> {
-    Ok(truncate(&crate::prq::pr_diff_text(slug, number)?, limit))
+    Ok(truncate_diff(
+        &crate::prq::pr_diff_text(slug, number)?,
+        limit,
+    ))
+}
+
+/// Cut a diff at a FILE boundary under the limit, and name every file that fell off.
+///
+/// The blind byte cut used to stop mid-hunk — reported live as a review saying "the diff was
+/// truncated mid-file (inside the new transport.rs…), so I can't confirm…", a guess-list of what
+/// it had not seen. A reader told exactly which files are missing says "these five files were not
+/// read" instead of guessing at the shape of the tail; and a cut that lands between files never
+/// leaves half a hunk to be mistaken for the whole change.
+///
+/// One file bigger than the whole limit still has to be cut mid-file — there is no boundary to
+/// prefer — and then the note says that instead.
+fn truncate_diff(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
+        return (text.to_string(), false);
+    }
+    // The last file boundary that fits. Boundaries are `diff --git ` at line start.
+    let cut_at = text[..limit]
+        .match_indices("\ndiff --git ")
+        .last()
+        .map(|(i, _)| i + 1)
+        .filter(|&i| i > 1);
+    let Some(cut_at) = cut_at else {
+        // The first file alone exceeds the limit: nothing better than the old cut, said plainly.
+        let (mut head, _) = truncate(text, limit);
+        head.push_str(
+            "\n\n(cut for size MID-FILE: this one file is larger than the whole reading budget)\n",
+        );
+        return (head, true);
+    };
+    let dropped: Vec<&str> = text[cut_at..]
+        .lines()
+        .filter_map(|l| l.strip_prefix("diff --git a/"))
+        .filter_map(|rest| rest.split(" b/").next())
+        .collect();
+    let mut head = text[..cut_at].to_string();
+    let named = dropped
+        .iter()
+        .take(20)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    head.push_str(&format!(
+        "\n(cut for size: {} more file{} not shown — {}{})\n",
+        dropped.len(),
+        if dropped.len() == 1 { "" } else { "s" },
+        named,
+        if dropped.len() > 20 {
+            format!(", and {} more", dropped.len() - 20)
+        } else {
+            String::new()
+        },
+    ));
+    (head, true)
 }
 
 /// Cut on a character boundary, reporting whether anything was dropped.
@@ -1206,7 +1267,9 @@ The diff:
         head = pr.head_ref,
         base = pr.base_ref,
         cut_note = if cut {
-            "NOTE: the diff below was cut at a byte cap — you are seeing part of the change.\n"
+            "NOTE: the diff below was cut at a byte cap — you are seeing part of the change. \
+             The cut names the files that are missing; do not guess about them, and say your \
+             review does not cover them.\n"
         } else {
             ""
         },
@@ -1323,7 +1386,7 @@ pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
     }
     // A person pressed the button; a standing refusal must never make it do nothing.
     crate::ai::forget_refusal();
-    let (diff, cut) = pr_diff(slug, pr.number, STAGE2_BYTES)?;
+    let (diff, cut) = pr_diff(slug, pr.number, CRITIQUE_BYTES)?;
     if diff.trim().is_empty() {
         return Err("GitHub returned an empty diff for this PR.".into());
     }
@@ -2127,6 +2190,48 @@ mod tests {
 #[cfg(test)]
 mod critique_tests {
     use super::*;
+
+    /// The cut lands between files and names what fell off — the answer to a live report of a
+    /// review saying "the diff was truncated mid-file … so I can't confirm", a guess about a tail
+    /// it could have simply been told.
+    #[test]
+    fn a_cut_diff_ends_at_a_file_boundary_and_names_what_is_missing() {
+        let one =
+            "diff --git a/kept.rs b/kept.rs\n--- a/kept.rs\n+++ b/kept.rs\n@@ -1 +1 @@\n+kept\n";
+        let two =
+            "diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ b/gone.rs\n@@ -1 +1 @@\n+gone\n";
+        let three =
+            "diff --git a/also.rs b/also.rs\n--- a/also.rs\n+++ b/also.rs\n@@ -1 +1 @@\n+also\n";
+        let diff = format!("{one}{two}{three}");
+        // A limit that lands INSIDE the second file.
+        let (head, cut) = truncate_diff(&diff, one.len() + 20);
+        assert!(cut);
+        assert!(
+            head.contains("+kept") && !head.contains("+gone"),
+            "the cut lands between files, never inside one: {head}"
+        );
+        assert!(
+            head.contains("2 more files not shown — gone.rs, also.rs"),
+            "what fell off is named, not guessed at: {head}"
+        );
+
+        // One file larger than the whole budget: mid-file is unavoidable, and said.
+        let big = format!(
+            "diff --git a/big.rs b/big.rs\n--- a/big.rs\n+++ b/big.rs\n{}",
+            "+x\n".repeat(50)
+        );
+        let (head, cut) = truncate_diff(&big, 60);
+        assert!(cut);
+        assert!(
+            head.contains("MID-FILE"),
+            "an unavoidable mid-file cut says so: {head}"
+        );
+
+        // Under the limit: untouched.
+        let (whole, cut) = truncate_diff(&diff, 10_000);
+        assert!(!cut);
+        assert_eq!(whole, diff);
+    }
 
     /// The anchor validator against the shapes a real diff throws: context and added lines count
     /// on the right side, deleted lines and deleted files do not, and the counter follows the
