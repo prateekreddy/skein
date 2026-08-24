@@ -84,6 +84,7 @@ function board() {
     ${grab("revSnoozeRed")}
     ${grab("renderReview")}
     ${grab("renderReading")}
+    ${grab("revMovedNotice")}
     ${grab("revWaitedSince")}
     ${grab("revReadBand")}
     ${grab("revMoved")}
@@ -1098,6 +1099,7 @@ function composeWorld(store) {
     ${grab("revAct")}
     let revReading = null;
     const revNotes = new Map();
+    const revDiffs = new Map();
     ${grab("revNotesStore")}
     ${grab("revNotesFor")}
     ${grab("revNotesSave")}

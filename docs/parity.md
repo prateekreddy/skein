@@ -18,8 +18,8 @@ so it is checked like one. Updating it is one line, and the failure says which.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 92   (NOT '.route("' — that gives 80)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 156 unique, 159 occurrences
-grep -c 'function ' src/web/index.html                          # 349
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 159 unique, 162 occurrences
+grep -c 'function ' src/web/index.html                          # 355
 sed -n '39,125p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 

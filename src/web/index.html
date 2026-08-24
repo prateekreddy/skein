@@ -55,6 +55,15 @@
                          padding:0; text-align:left; max-width:100%; white-space:nowrap;
                          overflow:hidden; text-overflow:ellipsis;
                          text-decoration:underline dotted; text-underline-offset:2px; }
+  /* The third kind of ROW: the fleet lost a credential. Not the amber "environment" (#healthban),
+     not the attn-red "a machine needs a decision" (#trainban) — the --error hot amber the palette
+     reserves for API failure, because that is what this is: every model call is being declined. */
+  #loginban { display:flex; flex-wrap:wrap; align-items:center; column-gap:10px; row-gap:2px;
+              width:100%; flex:none; background:var(--error); color:#08090b;
+              font:600 12px/1.35 sans-serif; padding:6px 14px; }
+  #loginban .loginfix { border:1px solid #08090b; background:none; color:inherit; font:inherit;
+                        cursor:pointer; border-radius:999px; padding:1px 10px; flex:none; }
+  #loginban .loginfix:hover { background:rgba(0,0,0,.14); }
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
   /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
@@ -858,8 +867,13 @@
   .pal-foot { display:flex; gap:14px; padding:8px 14px; border-top:1px solid var(--border); font-size:11px; color:var(--faint); }
 
   /* mailbox + new-box overlays */
-  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #fleetnew { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
-  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #fleetnew.open { display:flex; justify-content:center; align-items:flex-start; }
+  #mbx, #newbox, #settings, #addrepo, #boxset, #subq, #gitq, #fleetnew, #loginterm { position:fixed; inset:0; z-index:60; display:none; padding-top:10vh; background:rgba(5,7,10,.55); backdrop-filter:blur(3px); }
+  #mbx.open, #newbox.open, #settings.open, #addrepo.open, #boxset.open, #subq.open, #gitq.open, #fleetnew.open, #loginterm.open { display:flex; justify-content:center; align-items:flex-start; }
+  /* the login terminal: a one-shot PTY in the modal stack — not the dock, whose sessions persist,
+     reconnect and belong to boxes; this flow ENDS when its socket does */
+  .lt-card { max-width:860px; height:min(70vh, 560px); }
+  #lt-host { flex:1; min-height:0; background:#08090b; border-radius:0 0 12px 12px; padding:8px; }
+  #lt-host .xterm { height:100%; }
   /* package requests: one row per ask, with the decision on it */
   .sq-pkgs { font-family:var(--mono); font-size:12px; color:var(--text); word-break:break-all; }
   .sq-meta { font-size:11px; color:var(--faint); margin-top:3px; }
@@ -1362,6 +1376,15 @@
     <div class="mbx-card">
       <div class="mbx-head"><b>Package requests</b><span class="sub">installed once, for every box in the fleet</span><span class="x" onclick="closeSubq()">✕</span></div>
       <div class="mbx-list" id="subq-list"></div>
+    </div>
+  </div>
+
+  <!-- The fleet's login, repaired from the page: a one-shot interactive login on a server PTY.
+       The coaching line is here as well as on the socket, because the socket's copy scrolls. -->
+  <div id="loginterm" aria-hidden="true">
+    <div class="mbx-card lt-card">
+      <div class="mbx-head"><b>Log in</b><span class="sub" id="lt-coach">type /login inside, then /exit when done</span><span class="x" onclick="closeLoginTerminal()">✕</span></div>
+      <div id="lt-host"></div>
     </div>
   </div>
 
@@ -4016,7 +4039,11 @@ let revCommonChips = new Set(); // chip kinds worn by most of the queue this ren
 let revReading = null;         // {repo, number} while the change itself is on screen
 let revReturnScroll = 0;       // the queue's scroll offset, put back on Esc
 const revDiffs = new Map();    // rk -> {head_sha, diff, cut} | {error}
-const revNotes = new Map();    // rk -> [{path,line,body}] — line comments; they post WITH a verdict
+// Line comments; they post WITH a verdict. `text` is the drafted line's own content (the durable
+// anchor the server re-anchors by when the head moves — SKEIN-214) and `sha` the head it was
+// drafted against. Notes saved before either existed still parse: missing text reads as "", which
+// the server displaces into the review body rather than mis-anchoring — harmless by design.
+const revNotes = new Map();    // rk -> [{path,line,body,text,sha}]
 
 // What you typed survives a reload. Reported live on PR 577: notes were written, a draft came
 // back, the page was reloaded — and both were gone, because the composer was pure page state.
@@ -4084,10 +4111,12 @@ function revDraft(number) {
   });
 }
 
-function revPost(repo, number, kind, body, comments) {
+function revPost(repo, number, kind, body, comments, draftedAt) {
   return fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/act`, {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ kind, body: body || "", comments: comments || [] }),
+    // `drafted_at` rides with the comments: the head their line numbers were read against. Empty
+    // means "assume current"; a trailing sha makes the server re-anchor instead of refuse.
+    body: JSON.stringify({ kind, body: body || "", comments: comments || [], drafted_at: draftedAt || "" }),
   }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }));
 }
 
@@ -4102,7 +4131,18 @@ function revAct(repo, number, kind) {
   // sentence ("they post with your verdict") is a promise this line keeps.
   const verdict = kind === "approve" || kind === "request-changes" || kind === "comment";
   const notes = verdict ? revNotesFor(repo + "#" + number) : [];
-  revPost(repo, number, kind, body, notes).then(d => {
+  // What travels: each note's body AND the line's own text — the anchor that survives a moved
+  // head. A note saved before `text` existed sends "", which the server displaces, never guesses.
+  const comments = notes.map(n => ({ path: n.path, line: n.line, body: n.body, text: n.text || "" }));
+  // One drafted_at for the batch. Notes can span two heads (a push landed mid-read); send the
+  // OLDEST — notes append in creation order, so the first sha-carrying note is it. The server
+  // re-anchors every comment by its text against the live diff, so an over-old base can only
+  // DISPLACE a note into the body (harmless), where an over-new one would claim notes were
+  // drafted against code they never saw and let a wrong line number stand.
+  const draftedAt = notes.length
+    ? ((notes.find(n => n.sha) || {}).sha || ((revDiffs.get(repo + "#" + number) || {}).head_sha) || "")
+    : "";
+  revPost(repo, number, kind, body, comments, draftedAt).then(d => {
     if (!d.ok) { toast(d.error || "that did not go through"); return; }
     toast(`#${number} ${d.text}`);
     // Posted for real: the saved draft has done its job and must not resurface on the next open.
@@ -4216,7 +4256,18 @@ function renderReading() {
       <button type="button" class="revchip" onclick="revCompose('${esc(repo)}', ${pr.number}, 'comment')">comment…</button>
       <button type="button" class="revchip" onclick="revAct('${esc(repo)}', ${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>` : ""}
     </div>${revComposeHtml(pr)}`;
-  return `<div class="revwrap reading">${head}${body}${bar}</div>`;
+  return `<div class="revwrap reading">${head}${revMovedNotice(d, notes, pr.head_sha)}${body}${bar}</div>`;
+}
+
+// The branch moved while — or since — you read. INFORMATIVE, not a gate: posting used to be the
+// thing a moved head took away, and SKEIN-214's whole point is that the post now goes anyway (the
+// server re-anchors matching lines by their text and folds the rest into the body). The stale
+// marking itself stays, because "you read an old commit" is still true and worth knowing.
+function revMovedNotice(d, notes, headSha) {
+  const base = ((notes || []).find(n => n.sha) || {}).sha || ((d || {}).head_sha) || "";
+  if (!base || !headSha || base === headSha) return "";
+  return `<div class="revstale">the branch moved since you read — matching lines will carry your
+    comments at their new place; the rest post as a general note naming <code>${esc(base.slice(0, 7))}</code></div>`;
 }
 
 // ---- line comments in the reading view: written on the line, posted with the verdict ----------
@@ -4237,9 +4288,9 @@ function revNotesClear(key) {
   revNotes.set(key, []);
   try { localStorage.removeItem(revNotesStore(key)); } catch {}
 }
-function revNoteAdd(key, path, line, body) {
+function revNoteAdd(key, path, line, body, text, sha) {
   if (!body) return;
-  revNotesFor(key).push({ path, line: +line, body });
+  revNotesFor(key).push({ path, line: +line, body, text: text || "", sha: sha || "" });
   revNotesSave(key);
   renderReview();
 }
@@ -4269,6 +4320,15 @@ function revRenderNotes() {
 function openReadingComposer(ln) {
   const key = revReading.repo + "#" + revReading.number;
   const path = ln.dataset.file, line = ln.dataset.line;
+  // The line's own content, marker stripped — the anchor that lets this note survive a moved head
+  // (the server searches the NEW diff for exactly this text). Read from the rendered row rather
+  // than re-parsing the diff: what you commented on is what you were shown. An empty diff line
+  // renders as a lone non-breaking space (&nbsp;); normalising it back out keeps "blank line" as
+  // "", which the server treats as unanchorable and displaces — the honest fallback.
+  const lineText = (ln.textContent || "").replace(/^[+\- ]/, "").replace(/^ $/, "");
+  // The head this reading actually shows — revDiffs is what the pane rendered, so its sha is the
+  // one the line number means. pr.head_sha may already be newer than what is on screen.
+  const draftedSha = (revDiffs.get(key) || {}).head_sha || "";
   const box = document.createElement("div");
   box.className = "cmt composer";
   box.innerHTML = `<textarea placeholder="Review comment on ${esc(path)}:${esc(line)} — posts with your verdict…"></textarea>
@@ -4278,7 +4338,7 @@ function openReadingComposer(ln) {
   const ta = box.querySelector("textarea");
   ta.focus();
   box.querySelector(".cancel").onclick = () => box.remove();
-  box.querySelector(".save").onclick = () => { revNoteAdd(key, path, line, ta.value.trim()); };
+  box.querySelector(".save").onclick = () => { revNoteAdd(key, path, line, ta.value.trim(), lineText, draftedSha); };
   ta.addEventListener("keydown", ev => {
     if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); box.querySelector(".save").click(); }
     else if (ev.key === "Escape") { ev.preventDefault(); box.remove(); }
@@ -8191,6 +8251,9 @@ function loadHealth() {
     // otherwise the steps sit unticked until the next box event, which on an empty fleet never comes.
     if (hadNoReport || !boxes.length) render(boxes || []);
     renderDiagnostics();
+    // Before the `health.ok` early return: a fleet can be healthy by every environment check and
+    // still hold a dead credential, and this banner rides the same poll rather than earning one.
+    renderLoginBanner(health.expired_logins || []);
     let banner = document.getElementById("healthban");
     if (health.ok) { banner?.remove(); return; }
     if (!banner) {
@@ -8230,6 +8293,77 @@ function loadHealth() {
     ].join("\n");
   }).catch(() => {});
 }
+
+// ---------- the fleet's login, repaired from the page (SKEIN-212) ----------
+// The owner's ask, verbatim: "there should be a popup that this happened and ask me to login.
+// There should be an easy way to do it. I just click something, a session opens I login there and
+// then it closes and everything else starts working."
+//
+// The "popup" is a ROW (the #healthban/#trainban rule: a banner pushes the app down, never covers
+// it), and the "something to click" opens a one-shot terminal onto GET /api/login/:runtime/terminal
+// — a WebSocket the server bridges to a PTY running the interactive login. The terminal lives in
+// the modal stack (the #mbx pattern), NOT the dock: dock sessions belong to boxes, persist into
+// localStorage, and reconnect when their socket drops — and a login socket dropping means the flow
+// is OVER, which is the exact opposite contract.
+
+// A row per expired runtime, because each needs its own login and each button names its own flow.
+function renderLoginBanner(expired) {
+  let ban = document.getElementById("loginban");
+  if (!expired.length) { ban?.remove(); return; }
+  if (!ban) { ban = document.createElement("div"); ban.id = "loginban"; document.body.prepend(ban); }
+  ban.innerHTML = expired.map(l => `<span>the fleet's ${esc(l.runtime)} login expired — summaries, critiques and workflows are declining model calls</span>`
+    + `<button type="button" class="loginfix" onclick="openLoginTerminal('${esc(l.runtime)}')">log in${expired.length > 1 ? ` to ${esc(l.runtime)}` : ""}</button>`).join("");
+}
+
+// Its own function so a test can hold the opener to the exact URL the server routes.
+function loginTerminalUrl(runtime) { return `/api/login/${encodeURIComponent(runtime)}/terminal`; }
+
+let loginTermState = null;   // { ws, term, runtime, said } while the login overlay is open
+function openLoginTerminal(runtime) {
+  if (loginTermState) return;   // one login at a time — a second click while one is open is a no-op
+  const shell = document.getElementById("loginterm"), host = document.getElementById("lt-host");
+  shell.classList.add("open");
+  host.innerHTML = "";
+  // The same construction as the dock's terminals (createSession) — same font, theme and renderer
+  // reasoning apply — minus everything tied to a box: no statusline, no persistence, no reconnect.
+  const term = new Terminal({ fontFamily:"ui-monospace,'JetBrains Mono','SF Mono',Menlo,monospace", fontSize:13,
+    cursorBlink:false, customGlyphs:true, scrollback:8000,
+    theme:{ background:"#08090b", foreground:"#e6edf3", cursor:"#7c7cf0" } });
+  const fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open(host);
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}${loginTerminalUrl(runtime)}`);
+  ws.binaryType = "arraybuffer";
+  const st = loginTermState = { ws, term, runtime, said: "" };
+  const sendSize = () => { if (ws.readyState === 1) ws.send(JSON.stringify({ resize:{ cols:term.cols, rows:term.rows } })); };
+  ws.onopen = () => { requestAnimationFrame(() => { fit.fit(); sendSize(); term.focus(); }); };
+  ws.onmessage = e => {
+    if (typeof e.data === "string") {
+      // PTY bytes come as binary frames; a text frame is the server's own voice — the coaching
+      // line, then the post-login outcome. The LAST of those is what the toast surfaces, and the
+      // coaching line is excluded so abandoning the flow does not toast an instruction.
+      const line = e.data.replace(/^skein:\s*/, "").trim();
+      if (line && !line.startsWith("type /login")) st.said = line;
+      term.write(e.data);
+    } else term.write(new Uint8Array(e.data));
+  };
+  // Socket close IS the end of the flow, success or not (the server's contract): drop the surface,
+  // re-read health ONCE so the banner repaints from the answer — gone if the login is live now —
+  // and surface the server's final sentence.
+  ws.onclose = () => {
+    if (loginTermState !== st) return;
+    loginTermState = null;
+    try { term.dispose(); } catch {}
+    shell.classList.remove("open");
+    host.innerHTML = "";
+    loadHealth();
+    toast(st.said || `${runtime} login closed — nothing changed`);
+  };
+  term.onData(d => { if (ws.readyState === 1) ws.send(new TextEncoder().encode(d)); });
+  term.onResize(sendSize);
+}
+// The ✕. Closing the socket is how a login flow ends — cleanup lives on `onclose`, so a flow the
+// server ends and a flow you abandon leave through the same door.
+function closeLoginTerminal() { try { loginTermState?.ws.close(); } catch {} }
 
 // ---------- fleet gauges ----------
 // Every box in the fleet shares one VM's memory, disk and cores, and until this strip existed the
