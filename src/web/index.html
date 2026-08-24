@@ -44,6 +44,17 @@
   #healthban { display:block; width:100%; border:0; cursor:pointer; text-align:left;
                background:#f0b429; color:#08090b; font:600 12px/1.35 sans-serif; padding:6px 14px;
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:none; }
+  /* The merge train's stops: the same kind of ROW as #healthban, but a different message — not
+     "a box is stale" (amber, environment) but "a machine needs your decision" (attn-red, work).
+     Each repo is its own click target, straight into that repo's review queue. */
+  #trainban { display:flex; flex-wrap:wrap; align-items:baseline; column-gap:14px; row-gap:2px;
+              width:100%; flex:none; background:var(--attn); color:#08090b;
+              font:600 12px/1.35 sans-serif; padding:6px 14px; }
+  #trainban .trainlead { flex:none; }
+  #trainban .trainrepo { border:0; background:none; color:inherit; font:inherit; cursor:pointer;
+                         padding:0; text-align:left; max-width:100%; white-space:nowrap;
+                         overflow:hidden; text-overflow:ellipsis;
+                         text-decoration:underline dotted; text-underline-offset:2px; }
   #left { flex:1 1 0; min-width:0; overflow-y:auto; }
   .wrap { max-width:920px; margin:0 auto; padding:26px 20px 64px; }
   /* docked: the fleet collapses to a narrow sidebar/tab-rail; the dock gets the rest */
@@ -496,10 +507,13 @@
   .gist.stale { color:var(--faint); }
   /* THE RAIL — age first because it is the sort key, and a sort key you cannot see is a sort you
      cannot audit; then size ("can I do this now" is a shape, not an integer), then who. */
-  .rail { display:grid; grid-template-columns:34px 62px 78px; gap:0 10px;
+  .rail { display:grid; grid-template-columns:34px 92px 78px; gap:0 10px;
           font:11px var(--mono); color:var(--dim); align-items:center; }
-  .rail .age { text-align:right; font-variant-numeric:tabular-nums; }
-  .rail .age.old { color:var(--waiting); }
+  /* `revage`, not the fleet's `age` — tickAges owns that class and rewrites it every second.
+     The 12px and nowrap the global `.age` rule used to contribute are restated here. */
+  .rail .revage { text-align:right; font-variant-numeric:tabular-nums; font-size:12px;
+                  white-space:nowrap; }
+  .rail .revage.old { color:var(--waiting); }
   .rail .size { text-align:right; font-variant-numeric:tabular-nums; color:var(--faint); }
   .rail .who { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* Chips sit at rank 4 of the emphasis ladder: filled faint, never outlined-and-bright. A chip
@@ -2668,6 +2682,9 @@ function pollReviewCounts() {
   }).catch(() => {});
 }
 function renderRevBadge() {
+  // Same poll, same moment: the train's stops arrive on the counts the badge is drawn from, so the
+  // banner costs no request of its own and can never disagree with the badge about what is known.
+  renderTrainBanner();
   const btn = document.getElementById("revbtn");
   if (!btn) return;
   const total = revCounts.reduce((n, c) => n + (c.needs_you || 0), 0);
@@ -2691,6 +2708,25 @@ function renderRevBadge() {
     ...(unasked.length ? ["", "not looked at:"] : []),
     ...unasked.map(c => `  ${c.repo_id}: ${c.skipped}`),
   ].join("\n");
+}
+// The merge train's stops, as a ROW above the app like #healthban — prepended to body's flex
+// column so it pushes the app down rather than covering the tab bar it is interrupting. A stopped
+// PR is a decision only a person can make, and the repo's segment is the one click that opens it.
+// An entry from an older server carries no `stopped` field at all; that reads as "nothing
+// stopped", never as an error.
+function renderTrainBanner() {
+  const stops = revCounts.filter(c => (c.stopped || []).length);
+  let ban = document.getElementById("trainban");
+  if (!stops.length) { ban?.remove(); return; }
+  if (!ban) { ban = document.createElement("div"); ban.id = "trainban"; document.body.prepend(ban); }
+  ban.innerHTML = [
+    `<span class="trainlead">merge train stopped —</span>`,
+    // Reasons kept to their first sentence: the row must say enough to decide whether to look now,
+    // and no more — the full story is one click away in the review pane.
+    ...stops.map(c => `<button type="button" class="trainrepo" onclick="openReview('${esc(c.repo_id)}')">${esc(c.repo_id)}: ${
+      c.stopped.map(s => `#${esc(s.number)} (${esc(String(s.why || "needs you").split(".")[0])})`).join(" · ")
+    }</button>`),
+  ].join("");
 }
 
 function openReview(repoId) {
@@ -3569,11 +3605,23 @@ function revMove(pr) {
 // Age, then size, then who. Age is first because it is the sort key, and a sort key you cannot see
 // is a sort you cannot audit; amber past three days. Size renders only once the queue carries the
 // fields — the empty cell still occupies its column, so nothing shifts when the numbers arrive.
+//
+// The age cell is `revage`, never the fleet's `age`: `tickAges` rewrites EVERY `.age` in the
+// document from its `data-secs` once a second, and a review row carries none — so the true age
+// painted here was stomped to ageNow's "?" one tick after render, for the life of the page.
 function revRail(pr) {
   const a = revAge(pr.updated_at);
-  const size = pr.changed_files != null
-    ? `${pr.changed_files}f ${(pr.additions || 0) + (pr.deletions || 0)}±` : "";
-  return `<span class="rail"><span class="age${a.old ? " old" : ""}">${esc(a.label)}</span><span class="size">${esc(size)}</span><span class="who">${esc(pr.author || "")}</span></span>`;
+  const sz = revSize(pr);
+  return `<span class="rail"><span class="revage${a.old ? " old" : ""}">${esc(a.label)}</span><span class="size"${sz ? ` title="${esc(sz.title)}"` : ""}>${sz ? esc(sz.label) : ""}</span><span class="who">${esc(pr.author || "")}</span></span>`;
+}
+// `7 files ±782`, with the whole story on hover — the old `7f 782±` read as a cipher to the person
+// the column exists for. Null while the queue does not carry the numbers; the caller renders an
+// empty cell that still holds its column.
+function revSize(pr) {
+  if (pr.changed_files == null) return null;
+  const files = `${pr.changed_files} file${pr.changed_files === 1 ? "" : "s"}`;
+  return { label: `${files} ±${(pr.additions || 0) + (pr.deletions || 0)}`,
+           title: `+${pr.additions || 0} −${pr.deletions || 0} across ${files}` };
 }
 
 // `4.2d`, `20h`, `12m` — compact because the cell is 34px, tabular because it is a column.
@@ -3899,7 +3947,7 @@ function renderReading() {
   const d = revDiffs.get(key);
   const s = revSums.get(key);
   const a = revAge(pr.updated_at);
-  const size = pr.changed_files != null ? `${pr.changed_files}f ${(pr.additions || 0) + (pr.deletions || 0)}±` : "";
+  const sz = revSize(pr);
   // Where this sits in its stack, because reviewing step 7 before step 3 is the mistake the stack
   // row exists to prevent — the reading view must not lose that thread.
   const chains = revChains(((revQueue && revQueue.prs) || []).filter(p => p.repo_id === repo));
@@ -3910,7 +3958,7 @@ function renderReading() {
       <span class="revnum">#${pr.number}</span>
       <span class="readtitle">${esc(pr.title || "")}</span>
       <span class="dim">${esc(repo)}${chain ? ` · step ${at} of ${chain.steps.length} in ${esc(chain.name)}` : ""}${
-        a.label ? ` · ${esc(a.label)}` : ""}${size ? ` · ${esc(size)}` : ""}${
+        a.label ? ` · ${esc(a.label)}` : ""}${sz ? ` · <span title="${esc(sz.title)}">${esc(sz.label)}</span>` : ""}${
         pr.checks === "failing" ? ` · <span class="readred">${esc((pr.failing_checks || [])[0]?.name ? "failing: " + (pr.failing_checks)[0].name : "checks failing")}</span>` : ""}</span>
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">GitHub ↗</a>
     </div>`;

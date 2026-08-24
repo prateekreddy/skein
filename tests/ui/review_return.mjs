@@ -55,6 +55,7 @@ function board() {
     ${grab("toggleRevStack")}
     ${grab("toggleStackStep")}
     ${grab("revRail")}
+    ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revStackRow")}
     ${grab("revStackSteps")}
@@ -764,6 +765,7 @@ function rowWorld() {
     ${grab("REV_MOVE_WORDS")}
     ${grab("revMove")}
     ${grab("revRail")}
+    ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revGist")}
     ${grab("revRow")}
