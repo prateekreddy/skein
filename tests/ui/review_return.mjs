@@ -79,9 +79,13 @@ function board() {
     ${grab("revMatchesFilter")}
     ${grab("openReview")}
     ${grab("loadReview")}
+    ${grab("revSnooze")}
+    ${grab("revSnoozeRed")}
     ${grab("renderReview")}
     ${grab("renderReading")}
     ${grab("revWaitedSince")}
+    ${grab("revReadBand")}
+    ${grab("revMoved")}
     ${grab("revMatchesSearch")}
     ${grab("revSearchSet")}
     ${grab("readingFiles")}
@@ -128,6 +132,9 @@ function board() {
       row: key => toggleRevRow(key),
       openRow: () => [...revOpen],
       search: q => revSearchSet(q),
+      common: () => [...revCommonChips],
+      bands: () => ((revQueue && revQueue.prs) || []).map(p => [p.number, revReadBand(p)]),
+      snoozeRed: () => revSnoozeRed(),
       read: (repo, n) => openReading(repo, n),
       back: () => closeReading(),
       reading: () => revReading,
@@ -166,6 +173,7 @@ function board() {
   // its answer — which is where both defects lived.
   let pending = [];
   let refuse = null;              // a repo whose summaries the server will not serve
+  let brokenRepos = [];           // repos whose queue the merged answer reports as failed
   let known = {};                 // readings already on disk, as the bulk route answers them
   const fetch = (url) => {
     asked.push(url);
@@ -174,7 +182,9 @@ function board() {
       return new Promise(resolve => pending.push(() => resolve({
         ok: true,
         text: () => Promise.resolve(JSON.stringify({
-          ai: true, queues: served.map(queue), failed: [], skipped: [],
+          ai: true, queues: served.map(queue),
+          failed: brokenRepos.map(id => ({ repo_id: id, needs_you: 0, error: "boom", skipped: "" })),
+          skipped: [],
         })),
       })));
     }
@@ -182,6 +192,9 @@ function board() {
     // queues and readings.
     if (/\/workflows$/.test(url) || /\/critique$/.test(url)) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    if (/\/snooze$/.test(url)) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
     }
     // The change itself, the shape /api/repos/:id/review/:n/diff serves (SKEIN-148).
     const rd = url.match(/review\/(\d+)\/diff$/);
@@ -270,6 +283,7 @@ function board() {
     serves: ids => { served = ids; },
     // The server has not caught up yet: it hands over the copy it remembers.
     stale: on => { fresh = !on; },
+    broken: ids => { brokenRepos = ids; },
     // What the page asked to be woken for, and how long it wanted to wait.
     waits: () => waits.slice(),
     fire: () => { const due = waits.map(w => w.fn); waits.length = 0; due.forEach(f => f()); },
@@ -281,6 +295,7 @@ function board() {
     moved: ns => { moved = ns; },
     // Summary requests only — the queue's own fetches are not what these counts are about.
     reads: () => asked.filter(u => /review\/\d+\/summary/.test(u)),
+    posts: () => asked.filter(u => u.includes("/snooze")),
   };
 }
 
@@ -741,6 +756,7 @@ function critWorld() {
 function rowWorld() {
   const body = `
     let revOpen = new Set(), revSums = new Map(), revRepoFilter = "";
+    let revCommonChips = new Set();
     const revFlows = new Map();
     ${grab("rk")}
     ${grab("revMoved")}
@@ -753,7 +769,8 @@ function rowWorld() {
     ${grab("revRow")}
     const revBody = () => "";
     const toggleRevRow = () => {};
-    return { row: pr => revRow(pr), gist: s => revGist(s), move: pr => revMove(pr), sums: revSums };
+    return { row: pr => revRow(pr), gist: s => revGist(s), move: pr => revMove(pr), sums: revSums,
+             commons: kinds => { revCommonChips = new Set(kinds); } };
   `;
   return new Function("esc", body)(String); // the same esc stub board() uses
 }
@@ -812,6 +829,99 @@ function rowWorld() {
   b2.open("alpha");
   await b2.drain();
   t.check("a lone failure is not a queue-level story", b2.pane().includes("are red"), false);
+}
+
+// ---- nine repositories are a strip with counts, not a dropdown whose numbers are a tooltip ----
+{
+  const b = board();
+  b.serves(["alpha"]);          // beta managed but serving nothing this round
+  b.broken(["beta"]);
+  b.open("");
+  await b.drain();
+  const pane = b.pane();
+  t.check("each repo shows its count where it can be read",
+    pane.includes("alpha <b>6</b>") && pane.includes("all <b>6</b>"), true);
+  t.check("a repo whose queue failed wears ! instead of a number it does not have",
+    /beta <b class="bad"[^>]*>!<\/b>/.test(pane), true);
+
+  const b2 = board();
+  b2.serves(["alpha", "beta"]);
+  b2.open("");
+  await b2.drain();
+  t.check("two repos, both counted", b2.pane().includes("beta <b>6</b>") && b2.pane().includes("all <b>12</b>"), true);
+}
+
+// ---- what skein read moves the row, within its lane and never out of it ----
+{
+  const b = board();
+  const at = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  b.holds({
+    1: { number: 1, head_sha: "alpha1", depth: "line", line: "changes a default", flags: ["default"] },
+    3: { number: 3, head_sha: "alpha3", depth: "line", line: "routine bump", flags: [] },
+  });
+  // The pump would read the rest and leave nothing unread to sort around — refusing its fetches
+  // keeps 2/4/5/6 genuinely unread (the transient "could not reach" IS the unread state).
+  b.refuse("alpha");
+  b.open("alpha");
+  await b.drain();
+  b.search("");   // one explicit re-render with everything landed
+  const order = [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1]));
+
+  const pos = n => order.indexOf(n);
+  t.check("a flagged reading lifts its row above the unread",
+    order.length === 6 && pos(1) === 0 && pos(3) === 5, true);
+  t.check("and nothing the model said removed a row from its lane",
+    order.includes(1) && order.includes(3), true);
+}
+
+// ---- chips stay scarce: wallpaper kinds are demoted, and the rest are capped ----
+{
+  const b = board();
+  b.holds({
+    1: { number: 1, head_sha: "alpha1", depth: "line", line: "a", flags: ["behaviour", "default"] },
+    2: { number: 2, head_sha: "alpha2", depth: "line", line: "b", flags: ["behaviour"] },
+    3: { number: 3, head_sha: "alpha3", depth: "line", line: "c", flags: ["behaviour"] },
+  });
+  b.open("alpha");
+  await b.drain();
+  t.check("a flag most of the queue wears is texture, not signal",
+    b.common().includes("behaviour") && !b.common().includes("default"), true);
+
+  const w = rowWorld();
+  const pr = { number: 41, repo_id: "alpha", title: "t", author: "a", lane: "needs-you", checks: "none",
+    updated_at: new Date().toISOString(), my_review: "none", review_is_current: false, draft: false, reasons: [] };
+  w.sums.set("alpha#41", { depth: "line", line: "x", flags: ["schema", "default", "interface", "ux"] });
+  const row = w.row(pr);
+  t.check("at most two flag chips ride the row, the rest fold into +n",
+    (row.match(/revtag flag/g) || []).length === 3 && row.includes(">+2<"), true);
+  w.commons(["schema", "default", "interface", "ux"]);
+  t.check("a row wearing only wallpaper wears nothing",
+    (w.row(pr).match(/revtag flag/g) || []).length, 0);
+}
+
+// ---- twenty-six red pull requests are one decision ----
+//
+// SKEIN-144: the same judgement — "not until CI is green" — was per-row or nowhere. One press now
+// snoozes every red row still in your lane at the head it shows, and each returns on its own when
+// its author pushes (the sha stops matching — no timer, no memory, no undo to remember).
+{
+  const b = board();
+  const at = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  const pr = (n, checks, over) => ({ number: n, head_ref: "b" + n, base_ref: "develop",
+    title: "pr " + n, head_sha: "s" + n, committed_at: at, updated_at: at, settled: true,
+    draft: false, reasons: ["reviewer"], checks, lane: "needs-you", author: "x", ...over });
+  b.lanes([
+    pr(1, "failing"), pr(2, "failing"), pr(3, "passing"),
+    pr(4, "failing", { lane: "waiting" }),   // red but not yours — not swept
+  ]);
+  b.open("alpha");
+  await b.drain();
+  t.check("the red line offers the one decision", b.pane().includes("set the red ones aside"), true);
+  b.snoozeRed();
+  await b.drain();
+  const posts = b.posts();
+  t.check("one snooze per red row in your lane, and only those",
+    posts.filter(u => /\/(1|2)\/snooze$/.test(u)).length === 2 && posts.length === 2, true);
 }
 
 // ---- your move is ordered by how long it has waited on you, oldest first ----

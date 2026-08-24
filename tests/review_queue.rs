@@ -360,6 +360,60 @@ fn archiving_moves_a_pr_out_of_needs_you_and_back() {
     assert_eq!(q.prs[0].lane, skein::prq::Lane::NeedsYou);
 }
 
+/// SKEIN-144: "not until CI is green" is not an archive. A snooze is keyed to the head sha it was
+/// taken at, so the author's next push — the thing that turns red rows green here — is what brings
+/// the row back, with no act and no timer. The archive keeps its own semantics untouched
+/// (`archiving_moves_a_pr_out_of_needs_you_and_back` above): that one holds until a human says so.
+#[test]
+fn a_snoozed_pr_leaves_needs_you_and_returns_when_its_head_moves() {
+    let (_env, dir) = setup("me", false);
+    // pr_json(1, …) reports head sha1 — the sha the reviewer's row was showing.
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", pr_json(1, "red until pushed", "")),
+    );
+    skein::prq::set_snoozed("acme", 1, Some("sha1")).unwrap();
+    skein::prq::set_snoozed("acme", 42, Some("gone")).unwrap(); // merged since
+
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    assert_eq!(
+        q.prs[0].lane,
+        skein::prq::Lane::Archived,
+        "out of Needs you"
+    );
+    assert!(
+        q.prs[0].snoozed,
+        "and the row says why: set aside, not archived"
+    );
+    assert_eq!(
+        skein::prq::snoozed("acme"),
+        std::collections::BTreeMap::from([(1u64, "sha1".to_string())]),
+        "a snooze on a PR that is no longer open is pruned like the archive is"
+    );
+
+    // The author pushes: same PR, new head. Nobody calls anything.
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!(
+            "[{}]",
+            pr_json(1, "red until pushed", "").replace("sha1", "sha1b")
+        ),
+    );
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    assert_eq!(
+        q.prs[0].lane,
+        skein::prq::Lane::NeedsYou,
+        "the push IS the un-snooze — the row returns by itself"
+    );
+    assert!(!q.prs[0].snoozed);
+    assert!(
+        skein::prq::snoozed("acme").is_empty(),
+        "the spent entry is dropped, so a revert to the old sha cannot re-hide the row"
+    );
+}
+
 /// An archived PR that is no longer open is dead weight in the file. Pruning must not be able to
 /// hide a still-open PR, so it only ever removes numbers absent from the fetched open set.
 #[test]
@@ -516,5 +570,79 @@ fn the_merged_queue_paints_what_it_remembers_instead_of_blocking() {
     assert_eq!(
         m.queues[0].prs.iter().map(|p| p.number).collect::<Vec<_>>(),
         vec![31]
+    );
+}
+
+/// SKEIN-206, reported live as "we aren't bombarding github right?" — we were. The pane retries a
+/// stale answer at 4s/8s/16s/…, every retry landed in `merged(false)`, and each one spawned its
+/// own FORCED background refresh: one pane-open ran several concurrent fetches per repo, four
+/// GraphQL searches each. The guard admits one refresh per repo, and the refresh is un-forced so
+/// a sibling's result that just landed is served from the cache instead of fetched again.
+#[test]
+fn an_expired_repo_refreshes_once_no_matter_how_many_panes_ask() {
+    let (_env, dir) = setup("me", false);
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", pr_json(2, "waiting", "")),
+    );
+    let mut r = repo("mq-guard");
+    r.id = "mq-guard".into();
+    skein::repos::save_repos(&[r.clone()]).unwrap();
+    let hits = || {
+        std::fs::read_to_string(dir.join("hits.log"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    // Prime the remembered copy, then measure what exactly ONE fetch costs in requests — asserted
+    // as a measurement rather than a constant so the count cannot silently drift from the query
+    // list it is really about.
+    assert!(skein::prq::queue(&r, true).is_ok());
+    let before = hits();
+    assert!(skein::prq::queue(&r, true).is_ok());
+    let per_fetch = hits() - before;
+    assert!(per_fetch > 0, "the stub must actually have been asked");
+
+    // The server restarts: in-process cache gone (expired, as far as merged() can tell), the
+    // remembered copy on disk intact — the exact state every pane-open finds after a deploy.
+    skein::prq::invalidate("mq-guard");
+
+    // The retry storm: three merged reads in quick succession, none willing to block.
+    let base = hits();
+    for _ in 0..3 {
+        let m = skein::prq::merged(false);
+        assert_eq!(
+            m.queues[0].prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+            vec![2],
+            "every ask is still answered, from whichever copy is at hand"
+        );
+    }
+
+    // Let the lone background refresh land: wait for its requests, then a beat longer to catch
+    // any sibling that should not exist.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while hits() - base < per_fetch && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert_eq!(
+        hits() - base,
+        per_fetch,
+        "three panes asked while the repo was expired; GitHub was fetched exactly once"
+    );
+
+    // And once the refresh has landed, the next ask serves the fresh copy for free.
+    let settled = hits();
+    let m = skein::prq::merged(false);
+    assert!(
+        m.queues[0].fresh,
+        "the landed refresh is what the pane gets now"
+    );
+    assert_eq!(
+        hits(),
+        settled,
+        "a fresh cache answers without spending another request"
     );
 }

@@ -541,6 +541,13 @@
                color:var(--text); font:12px var(--ui); padding:3px 9px; width:190px; }
   .revsearch:focus { border-color:var(--accent); outline:none; }
   .revsearch::placeholder { color:var(--faint); }
+  .revrepos { display:flex; gap:4px; flex-wrap:wrap; align-items:center; min-width:0; }
+  .reprep { font:11px var(--mono); border:1px solid var(--border-2); background:transparent;
+            color:var(--text-2); border-radius:var(--radius-sm); padding:2px 8px; cursor:pointer; }
+  .reprep b { color:var(--dim); font-weight:600; }
+  .reprep.on { border-color:var(--accent); color:var(--text); background:var(--accent-bg); }
+  .reprep.none { opacity:.45; }
+  .reprep .bad { color:var(--error); }
   .revbody { border-top:1px solid var(--line); padding:11px 13px; font-size:13px; }
   .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
              display:flex; flex-wrap:wrap; gap:4px 14px; }
@@ -2721,6 +2728,9 @@ function revMergeQueues(m) {
   const stale = (m.queues || []).filter(q => q.fresh === false);
   return {
     ai: m.ai, prs, blind_spots: blind, queues: m.queues || [],
+    // Kept structured as well as folded into the blind strings: the repo strip marks a broken
+    // repo with "!", and a mark needs data, not a sentence to re-parse.
+    failed: m.failed || [],
     fresh: stale.length === 0,
     staleRepos: stale.map(q => ({ repo_id: q.repo_id, as_of: q.as_of })),
   };
@@ -2847,11 +2857,27 @@ function renderReview() {
     revRenderNotes();
     return;
   }
+  // Nine repositories are a strip with counts, not a dropdown whose numbers are a tooltip. Repo
+  // and audience are orthogonal axes, which is why this stays apart from the reason chips: merged
+  // into one group, either picking a repo deselects "to review" or the group stops reading as a
+  // radio — the most common chip-strip bug there is. A zero-count repo dims but stays pressable;
+  // a repo whose queue could not be built wears "!" instead of a number it does not have.
+  const repoCounts = new Map();
+  for (const p of (revQueue && revQueue.prs) || []) {
+    if (p.lane === "archived") continue;
+    repoCounts.set(p.repo_id, (repoCounts.get(p.repo_id) || 0) + 1);
+  }
+  const brokenRepos = new Set(((revQueue && revQueue.failed) || []).map(f => f.repo_id));
+  const allCount = [...repoCounts.values()].reduce((a, b) => a + b, 0);
   const picker = repos.length > 1
-    ? `<select aria-label="Repository filter" onchange="openReview(this.value)">
-        <option value=""${revRepoFilter ? "" : " selected"}>all repos</option>${
-        repos.map(r => `<option value="${esc(r.id)}"${r.id === revRepoFilter ? " selected" : ""}>${esc(r.id)}</option>`).join("")
-      }</select>`
+    ? `<div class="revrepos">${[
+        `<button type="button" class="reprep${revRepoFilter ? "" : " on"}" onclick="openReview('')">all <b>${allCount}</b></button>`,
+        ...repos.map(r => {
+          const n = repoCounts.get(r.id) || 0;
+          return `<button type="button" class="reprep${r.id === revRepoFilter ? " on" : ""}${n || brokenRepos.has(r.id) ? "" : " none"}" onclick="openReview('${esc(r.id)}')">${esc(r.id)} ${
+            brokenRepos.has(r.id) ? `<b class="bad" title="this repo's queue could not be built">!</b>` : `<b>${n}</b>`}</button>`;
+        }),
+      ].join("")}</div>`
     : `<span>${esc(revRepoFilter || "all repos")}</span>`;
   const chips = [["all","all"],["author","mine"],["reviewer","to review"],["mentioned","mentioned"]]
     .map(([k, label]) => `<button type="button" class="revchip${revFilter === k ? " on" : ""}" onclick="setRevFilter('${k}')">${esc(label)}</button>`)
@@ -2879,8 +2905,24 @@ function renderReview() {
     // not hidden — an opened row still reports its own checks. A lone failure stays row-level.
     const red = shown.filter(p => p.checks === "failing").length;
     if (shown.length >= 3 && red > shown.length / 3) {
-      body += `<div class="cired">${red} of ${shown.length} are red — read it as one broken pipeline, not ${red} broken pull requests. Each row still says its own checks when opened.</div>`;
+      body += `<div class="cired">${red} of ${shown.length} are red — read it as one broken pipeline, not ${red} broken pull requests. Each row still says its own checks when opened.
+        <button type="button" class="revchip" onclick="revSnoozeRed()" title="each returns on its own when its author pushes">set the red ones aside until they move</button></div>`;
     }
+    // A chip must be true of a MINORITY of rows — the design's own test, applied at render time
+    // because the model's tripwire flags turned out to fire on most rows ("behaviour" on 80% of a
+    // live queue), and four chips per row squeezed every title into an ellipsis. A kind worn by
+    // more than a third of the visible queue is texture, not signal: it leaves the collapsed rows
+    // (the expanded brief still carries everything), and what survives is capped at two.
+    revCommonChips = (() => {
+      const freq = new Map();
+      for (const p of shown) {
+        const s2 = revSums.get(rk(p));
+        const kinds = new Set((s2 && s2 !== "…" ? (s2.flags || []) : []));
+        if (revMoved(p)) kinds.add("moved");
+        for (const k of kinds) freq.set(k, (freq.get(k) || 0) + 1);
+      }
+      return new Set([...freq].filter(([, n]) => shown.length >= 3 && n > shown.length / 3).map(([k]) => k));
+    })();
     // Dependent chains collapse into one row each; their members never appear loose anywhere —
     // fifteen scattered rows that are one change is the wrong-review generator this exists for.
     // A live search dissolves the stacks: their aggregation hides exactly the row the searcher is
@@ -2910,15 +2952,22 @@ function renderReview() {
       // clears what is most likely blocking a colleague. The other lanes keep recency — for your
       // own PRs, "what moved most recently" is the right question.
       const key = lane === "needs-you" ? revWaitedSince : (p => p.updated_at || "");
+      // What skein read moves the row WITHIN its lane, never across lanes: a tripwire flag lifts a
+      // row above the unread, a routine verdict sinks below them, and nothing the model says can
+      // take a PR out of the lane its readiness put it in — AI adds scrutiny, never removes it. A
+      // wrong promotion costs a glance; a wrong demotion costs a missed regression.
       const entries = [
-        ...loose.map(p => ({ at: key(p), html: revRow(p) })),
+        ...loose.map(p => ({ band: revReadBand(p), at: key(p), html: revRow(p) })),
         ...laneStacks.map(st => ({
+          band: 1,
           at: key(revStackNext(st) || st.steps[0]),
           html: revStackRow(st),
         })),
-      ].sort((a, b) => lane === "needs-you"
-        ? String(a.at).localeCompare(String(b.at))
-        : String(b.at).localeCompare(String(a.at)));
+      ].sort((a, b) => (lane === "needs-you" && a.band !== b.band)
+        ? a.band - b.band
+        : lane === "needs-you"
+          ? String(a.at).localeCompare(String(b.at))
+          : String(b.at).localeCompare(String(a.at)));
       // "N decisions from M pull requests": a stack is one entry point and several decisions in a
       // forced order — the heading says both, which is also how the badge (counting PRs) and the
       // pane (counting starts) stop disagreeing.
@@ -3440,14 +3489,17 @@ function revRow(pr) {
   const open = revOpen.has(rk(pr));
   const s = revSums.get(rk(pr));
   // The tripwire marks ride on the collapsed line, because they are the reason to stop scrolling.
-  const flags = (s && s !== "…" ? (s.flags || []) : [])
-    .map(f => `<span class="revtag flag">${esc(f)}</span>`).join("");
-  // A chip must be true of a minority of rows AND change what you do. The reason chips failed both
-  // — "reviewer" was true of 22 rows in 29, and the filter strip above already selects on it — so
-  // what remains is draft, moved, a stopped workflow, and the tripwires. The repo now rides on the
-  // number's tooltip: in the merged view it is an address, not a decision.
+  // A chip must be true of a minority of rows AND change what you do. The reason chips failed
+  // both and are gone; a flag kind the whole queue wears this render (revCommonChips) is dropped
+  // too, and what survives is capped at two so the title keeps its column — the expanded brief
+  // still lists every flag. The moved chip obeys the same rule: when a whole wave of heads moved,
+  // the wave is the story, and the stale-reading note in the gist still marks each row.
+  const rawFlags = (s && s !== "…" ? (s.flags || []) : []).filter(f => !revCommonChips.has(f));
+  const flags = rawFlags.slice(0, 2)
+    .map(f => `<span class="revtag flag">${esc(f)}</span>`).join("")
+    + (rawFlags.length > 2 ? `<span class="revtag flag" title="${esc(rawFlags.slice(2).join(", "))}">+${rawFlags.length - 2}</span>` : "");
   const chips = `${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
-    revMoved(pr) ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
+    revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
   }${revFlowChip(pr)}${flags}`;
   const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
       <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
@@ -3469,6 +3521,17 @@ function revRow(pr) {
 function revWaitedSince(p) {
   const moved = p.my_review && p.my_review !== "none" && !p.review_is_current;
   return (moved && p.committed_at) || p.updated_at || "";
+}
+
+// The most expensive artefact in the product is a reading, and an unused judgement is a cost with
+// no return: a tripwire flag lifts a row (band 0), the unread hold the middle (band 1), and a
+// routine verdict sinks (band 2) — always inside the lane readiness chose, per the module's own
+// rule that AI only adds scrutiny.
+function revReadBand(p) {
+  const s = revSums.get(rk(p));
+  if (!s || s === "…" || s.depth === "unread") return 1;
+  if ((s.flags || []).length) return 0;
+  return 2;
 }
 
 // Does this row answer the search? Substring, case-insensitive, over everything a person remembers
@@ -3549,7 +3612,11 @@ function revBody(pr) {
   return `<div class="revbody">
     <div class="revmeta">
       <span>${esc(pr.head_ref || "")} → ${esc(pr.base_ref || "")}</span>
-      <span>checks ${esc(pr.checks || "none")}</span>
+      <span>checks ${esc(pr.checks || "none")}${(pr.failing_checks || []).length
+        ? ` — ${(pr.failing_checks).map(c => c.url
+            ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>`
+            : esc(c.name)).join(", ")}`
+        : ""}</span>
       <span>${mine}</span>
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">open on GitHub ↗</a>
     </div>
@@ -3559,7 +3626,10 @@ function revBody(pr) {
       <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
       <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${JSON.stringify(pr.head_ref || "")})">box on this branch</button>
-      <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
+      ${pr.snoozed
+        ? `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, '')" title="it would come back on its own at the author's next push">bring back now</button>`
+        : `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, ${JSON.stringify(pr.head_sha || "")})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
+      <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
       <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, true)">re-read</button>
       <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">review the code…</button>
     </div>
@@ -3675,6 +3745,7 @@ let revCrits = new Map();  // rk(pr) -> { open, busy, posting, critique, drop:Se
 // The reading view — a MODE of this pane, not a tab or a modal: the queue is the thing you are
 // returning to, so what you left (scroll, expanded row) is state to restore, not rebuild.
 let revSearch = "";            // the queue's search text — matches number, title, author, branch, repo
+let revCommonChips = new Set(); // chip kinds worn by most of the queue this render — wallpaper, not signal
 let revReading = null;         // {repo, number} while the change itself is on screen
 let revReturnScroll = 0;       // the queue's scroll offset, put back on Esc
 const revDiffs = new Map();    // rk -> {head_sha, diff, cut} | {error}
@@ -3840,7 +3911,7 @@ function renderReading() {
       <span class="readtitle">${esc(pr.title || "")}</span>
       <span class="dim">${esc(repo)}${chain ? ` · step ${at} of ${chain.steps.length} in ${esc(chain.name)}` : ""}${
         a.label ? ` · ${esc(a.label)}` : ""}${size ? ` · ${esc(size)}` : ""}${
-        pr.checks === "failing" ? ` · <span class="readred">checks failing</span>` : ""}</span>
+        pr.checks === "failing" ? ` · <span class="readred">${esc((pr.failing_checks || [])[0]?.name ? "failing: " + (pr.failing_checks)[0].name : "checks failing")}</span>` : ""}</span>
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">GitHub ↗</a>
     </div>`;
   let body;
@@ -4225,6 +4296,40 @@ function toggleRevRow(key) {
         renderReview();
       });
   }
+}
+
+// Set aside until the head moves (SKEIN-144) — the other instrument beside the archive: an
+// archive holds until a human undoes it, a snooze holds until the AUTHOR acts. Empty sha is the
+// by-hand return; the ordinary ending is the author's next push un-matching the stored sha.
+function revSnooze(id, n, sha) {
+  fetch(`/api/repos/${encodeURIComponent(id)}/review/${n}/snooze`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ head_sha: sha || "" }),
+  }).then(r => r.json()).then(d => {
+    if (!d.ok) { toast(d.error || "that did not go through"); return; }
+    toast(sha ? `#${n} set aside — back at the author's next push` : `#${n} is back`);
+    loadReview(true);
+  }).catch(() => toast("that did not go through"));
+}
+
+// One decision, not twenty-six: every red row still in your lane, set aside at the head it shows.
+// Composed here from rows the page is already holding, so the sweep cannot disagree with the
+// screen that was clicked — each returns on its own when its author pushes.
+function revSnoozeRed() {
+  const rows = ((revQueue && revQueue.prs) || []).filter(p =>
+    (!revRepoFilter || p.repo_id === revRepoFilter)
+    && p.checks === "failing" && p.lane === "needs-you" && p.head_sha);
+  if (!rows.length) { toast("nothing red is waiting on you"); return; }
+  Promise.all(rows.map(p =>
+    fetch(`/api/repos/${encodeURIComponent(p.repo_id)}/review/${p.number}/snooze`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ head_sha: p.head_sha }),
+    }).then(r => r.json()).catch(() => ({ ok: false }))
+  )).then(results => {
+    const ok = results.filter(r => r && r.ok).length;
+    toast(`${ok} of ${rows.length} set aside — each returns when its author pushes`);
+    loadReview(true);
+  });
 }
 
 function archivePr(id, n, on) {

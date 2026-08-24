@@ -22,7 +22,7 @@ use crate::config::skein_home;
 use crate::repos::Repo;
 use crate::util::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -76,6 +76,25 @@ pub enum Reason {
     Team(String),
 }
 
+/// One failing context out of the check rollup: the name a human knows the check by, and where
+/// its log lives.
+///
+/// [`Pr::checks`] keeps the one-word verdict — lanes and sorting want a word — but a word cannot
+/// answer the question a red row actually raises, "which one?", and answering it today costs a
+/// click through to GitHub per row (SKEIN-153).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedCheck {
+    pub name: String,
+    /// Where the failure's detail lives. Empty when the rollup carried no link — absence stays
+    /// absent, and the page renders a name without a link rather than a link to nowhere.
+    #[serde(default)]
+    pub url: String,
+}
+
+/// How many failing contexts a row names. A cap, not a summary: fifty red checks are one broken
+/// pipeline, and naming five says "at least these" without turning the row into a log.
+pub const FAILING_CHECKS_SHOWN: usize = 5;
+
 /// One PR in the queue.
 ///
 /// Fields are pulled defensively from `gh`'s JSON: a field this version of `gh` does not emit
@@ -124,6 +143,12 @@ pub struct Pr {
     pub committed_at: String,
     /// "passing" | "pending" | "failing" | "none".
     pub checks: String,
+    /// WHICH contexts are behind a "failing", by name — capped at [`FAILING_CHECKS_SHOWN`],
+    /// deduplicated, in rollup order. Empty whenever `checks` is not "failing". Defaulted so a
+    /// queue remembered by an older skein still parses; empty renders as nothing, which is what an
+    /// older queue honestly knew.
+    #[serde(default)]
+    pub failing_checks: Vec<FailedCheck>,
     /// Every label on it, by name. What a workflow adds to start CI and reads to know it did.
     #[serde(default)]
     pub labels: Vec<String>,
@@ -160,6 +185,12 @@ pub struct Pr {
     pub review_is_current: bool,
     pub reasons: Vec<Reason>,
     pub lane: Lane,
+    /// Why an [`Lane::Archived`] row is there: `true` when it was set aside *until the head moves*
+    /// (SKEIN-144) rather than archived outright. The lane is deliberately shared — both mean "not
+    /// claiming your attention" — but the endings differ (a human act versus the author's next
+    /// push), so the page needs to know which story to tell. Defaulted for remembered queues.
+    #[serde(default)]
+    pub snoozed: bool,
     /// The deterministic box name for this branch — whether or not one exists yet.
     pub box_name: String,
 }
@@ -445,6 +476,51 @@ fn write_archive(repo_id: &str, list: &[u64]) -> Result<(), String> {
     write_atomic(&archive_path(repo_id), &dir, &bytes)
 }
 
+fn snooze_path(repo_id: &str) -> PathBuf {
+    review_dir(repo_id).join("snoozed.json")
+}
+
+/// PRs set aside *until their head moves*: number → the head sha it was set aside at.
+///
+/// A second store beside [`archived`] rather than a flag on it, because the two end differently
+/// and mixing them loses the ending: an archive holds until a human undoes it, a snooze holds
+/// until the BRANCH answers — the next push is the author acting on the red the snooze was
+/// waiting out, which is exactly the moment the row should return by itself (SKEIN-144). The sha
+/// is what makes that automatic: an entry whose sha no longer matches the open PR's head is
+/// simply ignored, so un-snoozing needs no poller and no act.
+pub fn snoozed(repo_id: &str) -> BTreeMap<u64, String> {
+    fs::read_to_string(snooze_path(repo_id))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Snooze one PR at a head, or (`None`) bring it back by hand. Idempotent, like [`set_archived`]:
+/// a retried request must not flip a row back out of where you already moved it.
+///
+/// The ordinary ending is nobody calling the `None` arm at all — a push stops the sha matching
+/// and the row returns on its own.
+pub fn set_snoozed(repo_id: &str, number: u64, head_sha: Option<&str>) -> Result<(), String> {
+    let mut map = snoozed(repo_id);
+    let changed = match head_sha {
+        // An empty sha would hide the row forever on a PR whose head GitHub did not report —
+        // build_pr refuses to match it, so refusing to store it keeps the file free of dead weight.
+        Some(sha) if !sha.is_empty() => map.insert(number, sha.to_string()).as_deref() != Some(sha),
+        _ => map.remove(&number).is_some(),
+    };
+    if !changed {
+        return Ok(());
+    }
+    write_snoozed(repo_id, &map)
+}
+
+fn write_snoozed(repo_id: &str, map: &BTreeMap<u64, String>) -> Result<(), String> {
+    let dir = review_dir(repo_id);
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let bytes = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
+    write_atomic(&snooze_path(repo_id), &dir, &bytes)
+}
+
 // ───────────────────────────── fetching ─────────────────────────────
 
 /// 60s micro-cache **per repo**, for the same reason [`crate::repos::REPOS_CACHE`] exists: the
@@ -455,6 +531,36 @@ fn write_archive(repo_id: &str, list: &[u64]) -> Result<(), String> {
 /// the queue switched on. A single slot would let each repo evict the last one and turn a cache
 /// into a guaranteed miss — the exact opposite of what it is for.
 static QUEUE_CACHE: Mutex<Option<HashMap<String, (Instant, Queue)>>> = Mutex::new(None);
+
+/// Repos with a background refresh already in flight, so [`merged`] never runs two at once for
+/// one repo (SKEIN-206). A `Vec` because `Mutex::new(Vec::new())` is const and the fleet has
+/// single-digit repos — a set would buy nothing.
+static REFRESHING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Membership in [`REFRESHING`] for one repo, ended by `Drop` — so the slot frees on the
+/// refresh thread's every exit, an errored fetch and a panic included. A slot that leaked would
+/// be worse than the duplicate it prevents: that repo would never refresh in the background
+/// again, and the pane would repaint yesterday's queue forever.
+struct RefreshRunning(String);
+
+impl RefreshRunning {
+    /// Take the slot for `repo_id`, or `None` when a refresh is already running there.
+    fn begin(repo_id: &str) -> Option<Self> {
+        let mut running = REFRESHING.lock().unwrap_or_else(|e| e.into_inner());
+        if running.iter().any(|id| id == repo_id) {
+            return None;
+        }
+        running.push(repo_id.to_string());
+        Some(Self(repo_id.to_string()))
+    }
+}
+
+impl Drop for RefreshRunning {
+    fn drop(&mut self) {
+        let mut running = REFRESHING.lock().unwrap_or_else(|e| e.into_inner());
+        running.retain(|id| id != &self.0);
+    }
+}
 
 /// Drop one repo's cached queue — after an act that changes a PR's state, so the next read shows it.
 pub fn invalidate(repo_id: &str) {
@@ -530,6 +636,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
     }
 
     let archived_numbers = archived(&repo.id);
+    let snoozed_shas = snoozed(&repo.id);
     let mut prs: Vec<Pr> = Vec::new();
     for (search, reason) in searches {
         let items = match search_prs(&slug, &search) {
@@ -558,6 +665,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
                 &repo.id,
                 &reason,
                 &archived_numbers,
+                &snoozed_shas,
             ));
         }
     }
@@ -574,6 +682,20 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
             .filter(|n| open.contains(n))
             .collect();
         let _ = write_archive(&repo.id, &kept);
+    }
+
+    // A snooze ends itself. An entry stops matching the moment the PR closes or its head moves,
+    // and from then on it is dead weight that could only ever do harm — a branch reverted to the
+    // old sha would re-hide a row nobody asked to hide. Kept only while the sha still names an
+    // open PR's current head. Same safety direction as the archive prune above: this can only
+    // ever DROP a hold, which returns a row, which is more of your attention rather than less.
+    let live = |n: &u64, sha: &String| prs.iter().any(|p| p.number == *n && &p.head_sha == sha);
+    if snoozed_shas.iter().any(|(n, sha)| !live(n, sha)) {
+        let kept: BTreeMap<u64, String> = snoozed_shas
+            .into_iter()
+            .filter(|(n, sha)| live(n, sha))
+            .collect();
+        let _ = write_snoozed(&repo.id, &kept);
     }
 
     let q = Queue {
@@ -663,8 +785,8 @@ query($q: String!, $n: Int!) {
         author { login }
         latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
         commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { nodes {
-          ... on CheckRun { status conclusion }
-          ... on StatusContext { state }
+          ... on CheckRun { name detailsUrl status conclusion }
+          ... on StatusContext { context targetUrl state }
         } } } } } }
       }
     }
@@ -763,6 +885,7 @@ fn build_pr(
     repo_id: &str,
     reason: &Reason,
     archived_numbers: &[u64],
+    snoozed_shas: &BTreeMap<u64, String>,
 ) -> Pr {
     let s = |k: &str| {
         item.get(k)
@@ -790,6 +913,12 @@ fn build_pr(
         _ => None,
     };
     let checks = rollup(item);
+    let review_decision = s("reviewDecision");
+    // Set aside until the head moves (SKEIN-144): the snooze names the sha it was taken at, so
+    // the author's next push — not a timer, not an act — is what brings the row back: the entry
+    // stops matching and is ignored. An empty head matches nothing on purpose: "GitHub did not
+    // say" must never be what keeps a row hidden.
+    let snoozed = !head_sha.is_empty() && snoozed_shas.get(&number) == Some(&head_sha);
     // Whose move is it? Decided from READINESS, not from whether you have acted — the change that
     // took a 29-row "needs you" on the live fleet down to the ones actually yours to do.
     // Yours-or-decided outranks not-ready on purpose: your own red PR is your problem as an
@@ -799,7 +928,7 @@ fn build_pr(
     // workflow applies the CI label on approval — so an unreviewed PR being red says nothing
     // about whether it can be reviewed, and treating red as not-ready removed live PRs from the
     // reviewer's view. The dot on the row still says red; the lane says whose move it is.
-    let lane = if archived_numbers.contains(&number) {
+    let lane = if archived_numbers.contains(&number) || snoozed {
         Lane::Archived
     } else if author == login
         || (review_is_current && matches!(my_review.as_str(), "approved" | "changes-requested"))
@@ -807,6 +936,26 @@ fn build_pr(
         Lane::Waiting
     } else if draft || mergeable == Some(false) {
         Lane::NotReady
+    } else if review_decision == "APPROVED"
+        && !(matches!(my_review.as_str(), "approved" | "changes-requested") && !review_is_current)
+    {
+        // GitHub's own verdict is read, not just fetched (SKEIN-142). `reviewDecision` is the
+        // repository's authority on "does this still need somebody" — branch protection and
+        // CODEOWNERS, rules skein cannot see — where `my_review` is the authority on "does it
+        // need ME". APPROVED means someone's review already satisfied the repo, so the PR is not
+        // review work any more; it waits on a merge, not on you.
+        //
+        // Two deliberate asymmetries:
+        //   - Empty means the repo REQUIRES no review, and must not demote: the queue's whole
+        //     purpose is repos where review is social rather than enforced, and demoting on
+        //     silence would empty it exactly there. CHANGES_REQUESTED / REVIEW_REQUIRED fall
+        //     through to the behaviour that always held.
+        //   - Where the two authorities disagree — GitHub says APPROVED but YOUR decision was
+        //     left against an older head — the person-level fact wins and the PR returns to you,
+        //     the guard above. Skein is right about the person: the repo being satisfied does not
+        //     mean you have seen what was pushed after you decided, and hiding that behind a
+        //     repo-level fact is how a stale approval merges.
+        Lane::Waiting
     } else {
         Lane::NeedsYou
     };
@@ -833,16 +982,18 @@ fn build_pr(
             })
             .unwrap_or_default(),
         settled: settled(&s("committedDate")),
-        review_decision: s("reviewDecision"),
+        review_decision,
         mergeable,
         additions: item.get("additions").and_then(|v| v.as_u64()),
         deletions: item.get("deletions").and_then(|v| v.as_u64()),
         changed_files: item.get("changedFiles").and_then(|v| v.as_u64()),
         checks,
+        failing_checks: failing_contexts(item),
         my_review,
         review_is_current,
         reasons: vec![reason.clone()],
         lane,
+        snoozed,
     }
 }
 
@@ -881,11 +1032,7 @@ fn my_review_state(item: &serde_json::Value, login: &str, head_sha: &str) -> (St
     (state.into(), current)
 }
 
-/// Reduce `statusCheckRollup` to four words.
-///
-/// Any failure anywhere is failing; otherwise any incomplete run is pending. Failing wins over
-/// pending because a red check is information you act on now, and a queue that showed "pending"
-/// for a PR with a broken build would be hiding the useful half.
+/// Serde default for [`Pr::settled`] — see that field for why an absent date reads as settled.
 fn settled_by_default() -> bool {
     true
 }
@@ -933,6 +1080,41 @@ pub(crate) fn newest_first(prs: &mut [Pr]) {
     prs.sort_by_key(|pr| std::cmp::Reverse(pr.number));
 }
 
+/// One context's verdict. The single place "failing" is defined, shared by [`rollup`] (the word
+/// on the row) and [`failing_contexts`] (the names under it) — two copies of this classification
+/// is a row that says "failing" while naming nothing, or names a check its own dot calls green.
+enum CheckVerdict {
+    Failing,
+    Pending,
+    Passing,
+}
+
+fn verdict(c: &serde_json::Value) -> CheckVerdict {
+    // A CheckRun carries `status`/`conclusion`; a classic StatusContext carries only `state`,
+    // whose values (SUCCESS, FAILURE, ERROR, PENDING…) overlap enough to share the match.
+    let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let conclusion = c
+        .get("conclusion")
+        .and_then(|v| v.as_str())
+        .or_else(|| c.get("state").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    match conclusion {
+        "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "ERROR" => {
+            CheckVerdict::Failing
+        }
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => CheckVerdict::Passing,
+        // A conclusion this code does not know on a COMPLETED run is treated as failing — the
+        // over-report direction — where an incomplete run is merely pending.
+        _ if status == "COMPLETED" => CheckVerdict::Failing,
+        _ => CheckVerdict::Pending,
+    }
+}
+
+/// Reduce `statusCheckRollup` to four words.
+///
+/// Any failure anywhere is failing; otherwise any incomplete run is pending. Failing wins over
+/// pending because a red check is information you act on now, and a queue that showed "pending"
+/// for a PR with a broken build would be hiding the useful half.
 fn rollup(item: &serde_json::Value) -> String {
     let Some(checks) = item.get("statusCheckRollup").and_then(|v| v.as_array()) else {
         return "none".into();
@@ -940,35 +1122,61 @@ fn rollup(item: &serde_json::Value) -> String {
     if checks.is_empty() {
         return "none".into();
     }
-    let (mut failing, mut pending) = (false, false);
+    let mut pending = false;
     for c in checks {
-        let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        let conclusion = c
-            .get("conclusion")
-            .and_then(|v| v.as_str())
-            .or_else(|| c.get("state").and_then(|v| v.as_str()))
-            .unwrap_or("");
-        match conclusion {
-            "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"
-            | "ERROR" => failing = true,
-            "SUCCESS" | "NEUTRAL" | "SKIPPED" => {}
-            _ => {
-                if status == "COMPLETED" {
-                    failing = true;
-                } else {
-                    pending = true;
-                }
-            }
+        match verdict(c) {
+            CheckVerdict::Failing => return "failing".into(),
+            CheckVerdict::Pending => pending = true,
+            CheckVerdict::Passing => {}
         }
     }
-    if failing {
-        "failing"
-    } else if pending {
-        "pending"
-    } else {
-        "passing"
+    if pending { "pending" } else { "passing" }.into()
+}
+
+/// WHICH contexts are behind a red rollup — name and detail link, first [`FAILING_CHECKS_SHOWN`]
+/// in rollup order, deduplicated by name (SKEIN-153).
+///
+/// Deduplicated because re-runs of one check arrive as repeated contexts, and a row that says
+/// "build, build, build" answers the question worse than one that says "build". A failing context
+/// GitHub gave no name for is skipped rather than shown blank: the one-word `checks` verdict
+/// still says "failing", so nothing is hidden — there is just no name to show for it.
+fn failing_contexts(item: &serde_json::Value) -> Vec<FailedCheck> {
+    let Some(checks) = item.get("statusCheckRollup").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<FailedCheck> = Vec::new();
+    for c in checks {
+        if !matches!(verdict(c), CheckVerdict::Failing) {
+            continue;
+        }
+        // A CheckRun names itself `name` and links `detailsUrl`; a StatusContext is named by its
+        // `context` and links `targetUrl`. Same fields the query asks for, per branch.
+        let Some(name) = c
+            .get("name")
+            .and_then(|v| v.as_str())
+            .or_else(|| c.get("context").and_then(|v| v.as_str()))
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        if out.iter().any(|f| f.name == name) {
+            continue;
+        }
+        let url = c
+            .get("detailsUrl")
+            .and_then(|v| v.as_str())
+            .or_else(|| c.get("targetUrl").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        out.push(FailedCheck {
+            name: name.to_string(),
+            url,
+        });
+        if out.len() == FAILING_CHECKS_SHOWN {
+            break;
+        }
     }
-    .into()
+    out
 }
 
 /// How many PRs are waiting on you, per repo — the badge's whole content.
@@ -1095,10 +1303,21 @@ pub fn merged(force: bool) -> MergedQueue {
                 // pane's follow-up ask (it retries a stale answer on its own) is a hit. A plain
                 // thread, because this module is synchronous and the caller already runs it off
                 // the async runtime.
-                let refresh = repo.clone();
-                std::thread::spawn(move || {
-                    let _ = queue(&refresh, true);
-                });
+                //
+                // At most ONE per repo (SKEIN-206). The pane retries a stale answer at
+                // 4s/8s/16s/…, and every retry lands here — without the guard each one spawned
+                // its own refresh, so a single pane-open ran several concurrent fetches per repo,
+                // four GraphQL searches each: "we aren't bombarding github right?" We were. The
+                // refresh is also NOT forced: force is for a human's explicit "try again", and a
+                // sibling's refresh landing first should be answered from the cache it just
+                // filled, not fetched a second time.
+                if let Some(running) = RefreshRunning::begin(&repo.id) {
+                    let refresh = repo.clone();
+                    std::thread::spawn(move || {
+                        let _running = running;
+                        let _ = queue(&refresh, false);
+                    });
+                }
                 out.queues.push(old);
                 continue;
             }
@@ -1950,6 +2169,7 @@ mod tests {
                 "acme",
                 &Reason::Author,
                 &[],
+                &BTreeMap::new(),
             )
         })
         .collect();
@@ -2096,7 +2316,15 @@ mod tests {
         );
 
         let shaped = shape(&node);
-        let pr = build_pr(&shaped, 7, "me", "acme", &Reason::Author, &[]);
+        let pr = build_pr(
+            &shaped,
+            7,
+            "me",
+            "acme",
+            &Reason::Author,
+            &[],
+            &BTreeMap::new(),
+        );
         assert_eq!(
             pr.committed_at, "2026-08-20T09:00:00Z",
             "the queue is carrying the pull request's own timestamp, so a PR that was merely \
@@ -2127,6 +2355,7 @@ mod tests {
             "acme",
             &Reason::Author,
             &[],
+            &BTreeMap::new(),
         );
         assert_eq!(conflicting.mergeable, Some(false));
         assert!(
@@ -2142,7 +2371,15 @@ mod tests {
             "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
             "latestReviews": { "nodes": [] },
         }));
-        let bare = build_pr(&bare, 8, "me", "acme", &Reason::Author, &[]);
+        let bare = build_pr(
+            &bare,
+            8,
+            "me",
+            "acme",
+            &Reason::Author,
+            &[],
+            &BTreeMap::new(),
+        );
         assert_eq!(bare.committed_at, "");
         assert_eq!(
             bare.mergeable, None,
@@ -2267,14 +2504,30 @@ mod tests {
     #[test]
     fn an_archived_pr_lands_in_the_archived_lane() {
         let v = item(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
-        let pr = build_pr(&v, 3, "me", "repo", &Reason::Reviewer, &[3]);
+        let pr = build_pr(
+            &v,
+            3,
+            "me",
+            "repo",
+            &Reason::Reviewer,
+            &[3],
+            &BTreeMap::new(),
+        );
         assert_eq!(pr.lane, Lane::Archived);
     }
 
     #[test]
     fn an_unreviewed_pr_needs_you() {
         let v = item(r#"{"number":3,"headRefOid":"abc","title":"t"}"#);
-        let pr = build_pr(&v, 3, "me", "repo", &Reason::Reviewer, &[]);
+        let pr = build_pr(
+            &v,
+            3,
+            "me",
+            "repo",
+            &Reason::Reviewer,
+            &[],
+            &BTreeMap::new(),
+        );
         assert_eq!(pr.lane, Lane::NeedsYou);
         assert_eq!(pr.checks, "none");
     }
@@ -2284,7 +2537,7 @@ mod tests {
         let v = item(
             r#"{"number":3,"headRefOid":"abc","latestReviews":[{"author":{"login":"me"},"state":"CHANGES_REQUESTED","commit":{"oid":"abc"}}]}"#,
         );
-        let pr = build_pr(&v, 3, "me", "repo", &Reason::Author, &[]);
+        let pr = build_pr(&v, 3, "me", "repo", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(pr.lane, Lane::Waiting);
     }
 
@@ -2300,7 +2553,16 @@ mod tests {
                 "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
         );
         assert_eq!(
-            build_pr(&red, 1, "me", "repo", &Reason::Reviewer, &[]).lane,
+            build_pr(
+                &red,
+                1,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
             Lane::NeedsYou,
             "failing checks do not excuse the review — on this fleet CI follows review"
         );
@@ -2308,7 +2570,16 @@ mod tests {
         let draft =
             item(r#"{"number":2,"headRefOid":"a","author":{"login":"someone"},"isDraft":true}"#);
         assert_eq!(
-            build_pr(&draft, 2, "me", "repo", &Reason::Reviewer, &[]).lane,
+            build_pr(
+                &draft,
+                2,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
             Lane::NotReady,
             "a draft is its author saying it is not finished"
         );
@@ -2317,7 +2588,16 @@ mod tests {
             r#"{"number":3,"headRefOid":"a","author":{"login":"someone"},"mergeable":"CONFLICTING"}"#,
         );
         assert_eq!(
-            build_pr(&conflicted, 3, "me", "repo", &Reason::Reviewer, &[]).lane,
+            build_pr(
+                &conflicted,
+                3,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
             Lane::NotReady,
             "unmergeable: the branch has to move before a review of it means anything"
         );
@@ -2328,7 +2608,16 @@ mod tests {
                 "statusCheckRollup":[{"status":"COMPLETED","conclusion":"FAILURE"}]}"#,
         );
         assert_eq!(
-            build_pr(&yours, 4, "me", "repo", &Reason::Author, &[]).lane,
+            build_pr(
+                &yours,
+                4,
+                "me",
+                "repo",
+                &Reason::Author,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
             Lane::Waiting,
             "you authored it — the next review is somebody else's to give"
         );
@@ -2339,7 +2628,16 @@ mod tests {
             r#"{"number":5,"headRefOid":"a","author":{"login":"someone"},"mergeable":"UNKNOWN"}"#,
         );
         assert_eq!(
-            build_pr(&fresh, 5, "me", "repo", &Reason::Reviewer, &[]).lane,
+            build_pr(
+                &fresh,
+                5,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
             Lane::NeedsYou,
             "mergeability GitHub has not computed is not a reason to demote"
         );
@@ -2354,7 +2652,15 @@ mod tests {
             r#"{"number":6,"headRefOid":"a","author":{"login":"someone"},
                 "additions":120,"deletions":18,"changedFiles":6}"#,
         );
-        let pr = build_pr(&sized, 6, "me", "repo", &Reason::Reviewer, &[]);
+        let pr = build_pr(
+            &sized,
+            6,
+            "me",
+            "repo",
+            &Reason::Reviewer,
+            &[],
+            &BTreeMap::new(),
+        );
         assert_eq!(
             (pr.additions, pr.deletions, pr.changed_files),
             (Some(120), Some(18), Some(6)),
@@ -2366,7 +2672,15 @@ mod tests {
         );
 
         let bare = item(r#"{"number":7,"headRefOid":"a","author":{"login":"someone"}}"#);
-        let pr = build_pr(&bare, 7, "me", "repo", &Reason::Reviewer, &[]);
+        let pr = build_pr(
+            &bare,
+            7,
+            "me",
+            "repo",
+            &Reason::Reviewer,
+            &[],
+            &BTreeMap::new(),
+        );
         assert_eq!(
             (pr.additions, pr.deletions, pr.changed_files),
             (None, None, None),
@@ -2375,7 +2689,16 @@ mod tests {
 
         let awaiting = item(r#"{"number":5,"headRefOid":"a","author":{"login":"someone"}}"#);
         assert_eq!(
-            build_pr(&awaiting, 5, "me", "repo", &Reason::Reviewer, &[]).lane,
+            build_pr(
+                &awaiting,
+                5,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
             Lane::NeedsYou,
             "green, settled, not yours, undecided: genuinely your move"
         );
@@ -2386,16 +2709,311 @@ mod tests {
                 "statusCheckRollup":[{"status":"IN_PROGRESS"}]}"#,
         );
         assert_eq!(
-            build_pr(&pending, 6, "me", "repo", &Reason::Reviewer, &[]).lane,
+            build_pr(
+                &pending,
+                6,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
             Lane::NeedsYou,
             "pending is not failing — waiting for green to read is a choice, not a gate"
         );
     }
 
     #[test]
+    /// SKEIN-153: a red row says WHICH check failed, not just that something did. The one-word
+    /// `checks` stays for lanes and sorting; the names and links are what turn "failing" from a
+    /// dot into an answer. Both context shapes must survive [`shape`]'s flattening — a CheckRun
+    /// names itself `name`/`detailsUrl`, a classic StatusContext `context`/`targetUrl`.
+    #[test]
+    fn a_red_row_names_the_checks_that_failed_with_their_links() {
+        let node = serde_json::json!({
+            "number": 8, "title": "t", "url": "u", "isDraft": false,
+            "author": {"login": "someone"}, "headRefName": "f", "headRefOid": "a",
+            "baseRefName": "main", "updatedAt": "2026-08-23T12:00:00Z",
+            "latestReviews": {"nodes": []},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
+                {"name": "build", "detailsUrl": "https://ci/build/1",
+                 "status": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "lint", "detailsUrl": "https://ci/lint/1",
+                 "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"context": "deploy/preview", "targetUrl": "https://status/preview",
+                 "state": "FAILURE"},
+            ]}}}}]},
+        });
+        let pr = build_pr(
+            &shape(&node),
+            8,
+            "me",
+            "acme",
+            &Reason::Reviewer,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(pr.checks, "failing", "the one-word verdict is unchanged");
+        assert_eq!(
+            pr.failing_checks,
+            vec![
+                FailedCheck {
+                    name: "build".into(),
+                    url: "https://ci/build/1".into()
+                },
+                FailedCheck {
+                    name: "deploy/preview".into(),
+                    url: "https://status/preview".into()
+                },
+            ],
+            "the failing contexts by name and link, in rollup order — the green one is not news"
+        );
+
+        // And the fields are actually ASKED for: everything above works on a node handed to it,
+        // so without this the names would be read from a reply GitHub was never told to include.
+        assert!(
+            SEARCH_QUERY.contains("... on CheckRun { name detailsUrl status conclusion }"),
+            "the CheckRun name/link is read but never requested: {SEARCH_QUERY}"
+        );
+        assert!(
+            SEARCH_QUERY.contains("... on StatusContext { context targetUrl state }"),
+            "the StatusContext name/link is read but never requested: {SEARCH_QUERY}"
+        );
+    }
+
+    /// The cap and the dedupe: re-runs of one check arrive as repeated contexts, and fifty red
+    /// checks are one broken pipeline — the row names the first [`FAILING_CHECKS_SHOWN`] distinct
+    /// ones and stops. Absence stays absent throughout: a green rollup names nothing, a missing
+    /// link renders as no link, and a queue remembered before the field existed still parses.
+    #[test]
+    fn failing_check_names_are_deduplicated_capped_and_absent_when_green() {
+        // Seven failing contexts, but "build" three times (re-runs) and one nameless: five slots,
+        // taken in order by the distinct named ones.
+        let red = item(
+            r#"{"statusCheckRollup":[
+                {"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"FAILURE"},
+                {"name":"build","detailsUrl":"https://ci/2","status":"COMPLETED","conclusion":"FAILURE"},
+                {"status":"COMPLETED","conclusion":"FAILURE"},
+                {"name":"unit","status":"COMPLETED","conclusion":"FAILURE"},
+                {"name":"e2e","status":"COMPLETED","conclusion":"TIMED_OUT"},
+                {"context":"style","state":"ERROR"},
+                {"name":"build","detailsUrl":"https://ci/3","status":"COMPLETED","conclusion":"FAILURE"},
+                {"name":"docs","status":"COMPLETED","conclusion":"CANCELLED"},
+                {"name":"pack","status":"COMPLETED","conclusion":"FAILURE"},
+                {"name":"sixth","status":"COMPLETED","conclusion":"FAILURE"}
+            ]}"#,
+        );
+        let named = failing_contexts(&red);
+        assert_eq!(named.len(), FAILING_CHECKS_SHOWN, "capped, not the log");
+        let names: Vec<&str> = named.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["build", "unit", "e2e", "style", "docs"],
+            "distinct names in rollup order — the nameless one is skipped, the word already says failing"
+        );
+        assert_eq!(
+            named[0].url, "https://ci/1",
+            "a re-run does not steal the first run's link"
+        );
+        assert_eq!(named[1].url, "", "a rollup with no link stays linkless");
+
+        let green = item(
+            r#"{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}"#,
+        );
+        assert!(
+            failing_contexts(&green).is_empty(),
+            "nothing failed, nothing to name"
+        );
+
+        // A queue remembered on disk by an older skein has neither new field, and must not stop
+        // parsing over it — that failure mode turns a new field into an empty pane.
+        let old: Pr = serde_json::from_value(serde_json::json!({
+            "number": 7, "title": "t", "author": "a", "url": "u",
+            "head_ref": "f", "head_sha": "s", "base_ref": "main",
+            "draft": false, "updated_at": "", "committed_at": "",
+            "checks": "failing", "my_review": "none", "review_is_current": false,
+            "reasons": [], "lane": "needs-you", "box_name": "b",
+        }))
+        .expect("a remembered queue from before these fields must stay readable");
+        assert!(old.failing_checks.is_empty());
+        assert!(!old.snoozed);
+    }
+
+    /// SKEIN-142: GitHub's own verdict on the pull request is READ, not just fetched.
+    /// `reviewDecision` is the repository's authority on "does this still need somebody" — branch
+    /// protection and CODEOWNERS, rules skein cannot see — where `my_review` stays the authority
+    /// on "does it need ME". Where the two disagree, the person-level fact wins.
+    #[test]
+    fn githubs_approval_moves_review_work_off_you_but_never_hides_your_stale_review() {
+        // Somebody else's approval satisfied the repo: not review work any more — it waits on a
+        // merge, not on you.
+        let theirs = item(
+            r#"{"number":1,"headRefOid":"a","author":{"login":"someone"},"reviewDecision":"APPROVED"}"#,
+        );
+        assert_eq!(
+            build_pr(
+                &theirs,
+                1,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
+            Lane::Waiting,
+            "the repository is satisfied and the queue is for review work"
+        );
+
+        // Empty means the repo REQUIRES no review — the queue's whole purpose is repos where
+        // review is social rather than enforced, and demoting on silence would empty it there.
+        let unenforced = item(
+            r#"{"number":2,"headRefOid":"a","author":{"login":"someone"},"reviewDecision":""}"#,
+        );
+        assert_eq!(
+            build_pr(
+                &unenforced,
+                2,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
+            Lane::NeedsYou,
+            "no required review is not the same fact as an approved one"
+        );
+
+        // The disagreement: GitHub says APPROVED, but YOUR approval was left against an older
+        // head. Skein is right about the person — new commits you have not seen return the PR to
+        // you, and the repo-level fact must not hide the person-level one.
+        let stale_mine = item(
+            r#"{"number":3,"headRefOid":"new","author":{"login":"someone"},
+                "reviewDecision":"APPROVED",
+                "latestReviews":[{"author":{"login":"me"},"state":"APPROVED","commit":{"oid":"old"}}]}"#,
+        );
+        assert_eq!(
+            build_pr(
+                &stale_mine,
+                3,
+                "me",
+                "repo",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new()
+            )
+            .lane,
+            Lane::NeedsYou,
+            "your approval is outdated — the existing return-to-you rule still wins"
+        );
+
+        // The other two words change nothing.
+        for decision in ["CHANGES_REQUESTED", "REVIEW_REQUIRED"] {
+            let pr = item(&format!(
+                r#"{{"number":4,"headRefOid":"a","author":{{"login":"someone"}},"reviewDecision":"{decision}"}}"#
+            ));
+            assert_eq!(
+                build_pr(
+                    &pr,
+                    4,
+                    "me",
+                    "repo",
+                    &Reason::Reviewer,
+                    &[],
+                    &BTreeMap::new()
+                )
+                .lane,
+                Lane::NeedsYou,
+                "{decision} keeps the behaviour that always held"
+            );
+        }
+    }
+
+    /// SKEIN-144: set aside *until the head moves*. The snooze names the sha it was taken at, so
+    /// the author's next push — not an act, not a timer — is what brings the row back: the entry
+    /// stops matching and is ignored.
+    #[test]
+    fn a_snooze_holds_a_pr_only_at_the_head_it_was_set_aside_at() {
+        let held = BTreeMap::from([(3u64, "abc".to_string())]);
+
+        let same = item(r#"{"number":3,"headRefOid":"abc","author":{"login":"someone"}}"#);
+        let pr = build_pr(&same, 3, "me", "repo", &Reason::Reviewer, &[], &held);
+        assert_eq!(
+            pr.lane,
+            Lane::Archived,
+            "out of Needs you while the head sits"
+        );
+        assert!(pr.snoozed, "the row can say WHY it is set aside");
+
+        let moved = item(r#"{"number":3,"headRefOid":"def","author":{"login":"someone"}}"#);
+        let pr = build_pr(&moved, 3, "me", "repo", &Reason::Reviewer, &[], &held);
+        assert_eq!(
+            pr.lane,
+            Lane::NeedsYou,
+            "the push IS the un-snooze — the row returns with no action"
+        );
+        assert!(!pr.snoozed);
+
+        // "GitHub did not say" must never be what keeps a row hidden: an absent head matches no
+        // snooze, even one whose stored sha is somehow empty too.
+        let unknown = item(r#"{"number":9,"author":{"login":"someone"}}"#);
+        let empty_sha = BTreeMap::from([(9u64, String::new())]);
+        let pr = build_pr(
+            &unknown,
+            9,
+            "me",
+            "repo",
+            &Reason::Reviewer,
+            &[],
+            &empty_sha,
+        );
+        assert_eq!(pr.lane, Lane::NeedsYou);
+
+        // Archived outright is the other instrument, and the reason stays distinguishable.
+        let pr = build_pr(
+            &same,
+            3,
+            "me",
+            "repo",
+            &Reason::Reviewer,
+            &[3],
+            &BTreeMap::new(),
+        );
+        assert_eq!(pr.lane, Lane::Archived);
+        assert!(!pr.snoozed, "archived-forever is not a snooze");
+    }
+
+    #[test]
+    fn snoozes_are_idempotent_re_aimable_and_cleared_by_hand_with_none() {
+        let _home = fresh_home();
+        set_snoozed("r", 7, Some("abc")).unwrap();
+        set_snoozed("r", 7, Some("abc")).unwrap();
+        assert_eq!(snoozed("r"), BTreeMap::from([(7u64, "abc".to_string())]));
+
+        // Snoozing again at a newer head re-aims the hold rather than stacking one.
+        set_snoozed("r", 7, Some("def")).unwrap();
+        assert_eq!(snoozed("r"), BTreeMap::from([(7u64, "def".to_string())]));
+
+        set_snoozed("r", 7, None).unwrap();
+        set_snoozed("r", 7, None).unwrap();
+        assert!(snoozed("r").is_empty());
+
+        // An empty sha is refused, not stored: build_pr would never match it, so storing it could
+        // only ever be dead weight in the file.
+        set_snoozed("r", 9, Some("")).unwrap();
+        assert!(snoozed("r").is_empty());
+
+        // Per repo, like the archive.
+        set_snoozed("one", 4, Some("s")).unwrap();
+        assert!(snoozed("two").is_empty());
+    }
+
+    #[test]
     fn the_box_name_is_derived_from_the_head_branch() {
         let v = item(r#"{"number":3,"headRefName":"feature/thing"}"#);
-        let pr = build_pr(&v, 3, "me", "acme", &Reason::Author, &[]);
+        let pr = build_pr(&v, 3, "me", "acme", &Reason::Author, &[], &BTreeMap::new());
         assert_eq!(pr.box_name, crate::repos::box_name("acme", "feature/thing"));
     }
 }

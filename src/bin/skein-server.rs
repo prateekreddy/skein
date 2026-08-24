@@ -332,6 +332,10 @@ async fn main() {
             post(api_review_archive),
         )
         .route(
+            "/api/repos/:id/review/:number/snooze",
+            post(api_review_snooze),
+        )
+        .route(
             "/api/repos/:id/review/:number/summary",
             get(api_review_summary),
         )
@@ -1186,6 +1190,42 @@ async fn api_review_archive(
 ) -> Json<serde_json::Value> {
     let res = tokio::task::spawn_blocking(move || {
         let r = skein::prq::set_archived(&id, number, req.on);
+        skein::prq::invalidate(&id);
+        r
+    })
+    .await;
+    Json(match res {
+        Ok(Ok(())) => serde_json::json!({ "ok": true }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+#[derive(Deserialize)]
+struct SnoozeReq {
+    /// The head the row was showing when it was set aside. Sent by the client rather than read
+    /// server-side so the hold is on what the REVIEWER saw: a push that lands between the row
+    /// rendering and the click makes the shas disagree, and the row stays visible — the safe
+    /// direction. Empty brings the PR back by hand; the ordinary ending is nobody calling that
+    /// at all, because the author's next push stops the sha matching on its own.
+    head_sha: String,
+}
+
+/// Set one PR aside *until its head moves* (SKEIN-144). The other instrument beside `archive`:
+/// an archive holds until a human undoes it, a snooze holds until the AUTHOR acts — which is
+/// what "not until CI is green" actually means on a fleet where red waits on somebody's push.
+///
+/// One PR per call, deliberately. "Clear every red row" is a queue-level act, but it is the
+/// page's to compose from rows it is already holding (each carries `head_sha` and `checks`) —
+/// a server-side sweep would have to re-answer "which rows are red" and could disagree with the
+/// screen the click was aimed at.
+async fn api_review_snooze(
+    Path((id, number)): Path<(String, u64)>,
+    Json(req): Json<SnoozeReq>,
+) -> Json<serde_json::Value> {
+    let res = tokio::task::spawn_blocking(move || {
+        let sha = (!req.head_sha.is_empty()).then_some(req.head_sha.as_str());
+        let r = skein::prq::set_snoozed(&id, number, sha);
         skein::prq::invalidate(&id);
         r
     })
