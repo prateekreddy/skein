@@ -62,6 +62,14 @@ pub enum Reason {
     Author,
     /// Your review was requested, personally.
     Reviewer,
+    /// You have reviewed it — commented, approved, or asked for changes — and it is still open.
+    ///
+    /// Its own search because of a GitHub semantic that silently empties the queue: submitting ANY
+    /// review, a comment-only one included, removes you from `review-requested:`. So the moment
+    /// you acted on a pull request it vanished from every query this queue ran — reported live as
+    /// "PR 577 is still not visible while it is clearly open", the day after a drafted comment was
+    /// posted to it. Acting on your queue must never be what empties it.
+    Reviewed,
     /// You were mentioned in the body or a comment.
     Mentioned,
     /// A team you belong to was asked to review — invisible to the personal query, see [`viewer`].
@@ -499,6 +507,9 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
     // a busy repo than three narrow searches.
     let mut searches: Vec<(String, Reason)> = vec![
         (format!("review-requested:{login}"), Reason::Reviewer),
+        // Both, because GitHub moves a PR from one to the other the moment you submit any review
+        // — see [`Reason::Reviewed`]. Without the second, acting on your queue empties it.
+        (format!("reviewed-by:{login}"), Reason::Reviewed),
         (format!("author:{login}"), Reason::Author),
         (format!("mentions:{login}"), Reason::Mentioned),
     ];
@@ -1056,6 +1067,28 @@ pub fn merged(force: bool) -> MergedQueue {
                 skipped,
             });
             continue;
+        }
+        // **Paint now, refresh behind — per repo**, the same rule the per-repo route has. The
+        // first version of this called `queue()` cold and the pane blocked on every repo's three
+        // GraphQL searches again, which is the exact regression the remembered copies exist to
+        // prevent. `force` is the explicit refresh and always waits.
+        if !force {
+            if let Some(fresh) = unexpired(&repo.id) {
+                out.queues.push(fresh);
+                continue;
+            }
+            if let Some(old) = remembered(&repo.id) {
+                // The refresh nobody is waiting for: it lands in the cache and on disk, so the
+                // pane's follow-up ask (it retries a stale answer on its own) is a hit. A plain
+                // thread, because this module is synchronous and the caller already runs it off
+                // the async runtime.
+                let refresh = repo.clone();
+                std::thread::spawn(move || {
+                    let _ = queue(&refresh, true);
+                });
+                out.queues.push(old);
+                continue;
+            }
         }
         match queue(&repo, force) {
             Ok(q) => out.queues.push(q),

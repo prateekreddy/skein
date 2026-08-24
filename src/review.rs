@@ -834,7 +834,12 @@ fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
     // a review request; the queue's own filter says so, and dropping those here would silently
     // exclude exactly the pull requests the team query was added to find.
     let asked = pr.reasons.iter().any(|r| {
-        matches!(r, crate::prq::Reason::Reviewer) || matches!(r, crate::prq::Reason::Team(_))
+        matches!(
+            r,
+            crate::prq::Reason::Reviewer
+                | crate::prq::Reason::Reviewed
+                | crate::prq::Reason::Team(_)
+        )
     });
     asked
         && matches!(pr.lane, crate::prq::Lane::NeedsYou)

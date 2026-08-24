@@ -2771,7 +2771,7 @@ function revMatchesFilter(pr) {
   const rs = (pr.reasons || []).map(r => typeof r === "string" ? r : "team");
   // A team review request IS a review request — filtering to "reviewer" and hiding the PRs a team
   // of yours was asked to review would drop exactly the rows the team query was added to find.
-  if (revFilter === "reviewer") return rs.includes("reviewer") || rs.includes("team");
+  if (revFilter === "reviewer") return rs.includes("reviewer") || rs.includes("reviewed") || rs.includes("team");
   return rs.includes(revFilter);
 }
 

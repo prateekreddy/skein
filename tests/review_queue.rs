@@ -451,3 +451,70 @@ fn the_merged_queue_is_every_repo_and_costs_no_extra_github_call() {
         "the merged queue serves what counts() already built — zero further GitHub requests"
     );
 }
+
+/// GitHub removes you from `review-requested:` the moment you submit ANY review — a comment-only
+/// one included. So the day after the owner posted a drafted comment on PR 577, it was gone from
+/// every search the queue ran: "PR 577 is still not visible while it is clearly open". Acting on
+/// your queue must never be what empties it, which is what the `reviewed-by:` search is for.
+#[test]
+fn a_pull_request_you_have_reviewed_stays_in_the_queue() {
+    let (_env, dir) = setup("me", true);
+    // 577, the day after: no longer review-requested, only reviewed-by.
+    put_search(
+        &dir,
+        "reviewed-by:me",
+        &format!(
+            "[{}]",
+            pr_json(577, "research documents land in bedrock", "")
+        ),
+    );
+    let mut r = repo("mq-reviewed");
+    r.id = "mq-reviewed".into();
+    skein::repos::save_repos(&[r.clone()]).unwrap();
+
+    let q = skein::prq::queue(&r, false).unwrap();
+    assert_eq!(
+        q.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+        vec![577],
+        "a PR you have reviewed vanished from the queue"
+    );
+    assert!(
+        q.prs[0].reasons.contains(&skein::prq::Reason::Reviewed),
+        "the row says why it is here: {:?}",
+        q.prs[0].reasons
+    );
+    // A comment is deliberately not a decision, so it is still your move.
+    assert_eq!(q.prs[0].lane, skein::prq::Lane::NeedsYou);
+}
+
+/// The merged queue paints what it remembers instead of blocking — per repo, the same rule the
+/// per-repo route has. Regressed once: `merged()` called `queue()` cold and the pane waited on
+/// every repo's searches again ("the PRs page is again waiting on refreshing on first loads").
+#[test]
+fn the_merged_queue_paints_what_it_remembers_instead_of_blocking() {
+    let (_env, dir) = setup("me", true);
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", pr_json(31, "waiting", "")),
+    );
+    let mut r = repo("mq-paint");
+    r.id = "mq-paint".into();
+    skein::repos::save_repos(&[r.clone()]).unwrap();
+
+    // A first read writes the remembered copy to disk…
+    assert!(skein::prq::queue(&r, false).unwrap().fresh);
+    // …then the server restarts: the in-process cache is gone, the disk copy is not.
+    skein::prq::invalidate("mq-paint");
+
+    let m = skein::prq::merged(false);
+    assert_eq!(m.queues.len(), 1);
+    assert!(
+        !m.queues[0].fresh,
+        "a cold merged read must hand over the remembered copy, marked, not block on GitHub"
+    );
+    assert_eq!(
+        m.queues[0].prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+        vec![31]
+    );
+}
