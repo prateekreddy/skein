@@ -17,18 +17,51 @@
 //! tidier and would add a TLS stack, a dependency tree and a second way of doing what already works.
 //! curl is present on every macOS and every ordinary Linux, and skein already required it.
 //!
-//! **What it deliberately does not do:** retry, rate-limit, or paginate on its own. A queue that
-//! retried behind your back would turn one slow answer into four, and the callers here want a
-//! partial answer they can report ("this query failed, so those PRs are missing") far more than they
-//! want a complete one that took a minute.
+//! **What it deliberately does not do:** retry or paginate on its own. A queue that retried behind
+//! your back would turn one slow answer into four, and the callers here want a partial answer they
+//! can report ("this query failed, so those PRs are missing") far more than they want a complete
+//! one that took a minute.
+//!
+//! **What it does refuse: spending calls it knows will fail.** Once GitHub answers a rate limit,
+//! every call short-circuits with the resume time until the quota resets — the reset learned from
+//! the free `/rate_limit` endpoint, which never counts against any quota and is therefore the one
+//! path a hold lets through. This is not a retry: nothing is ever re-sent. Before the hold, a dead
+//! quota still met ~45 doomed requests per refresh cycle, each one pure cost against the secondary
+//! limit's patience.
 
 use crate::util::output_with_timeout_why;
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicU64;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Per-process counter for request-body temp names, so two threads never pick the same one.
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+/// Epoch seconds until which GitHub must not be called, when a rate limit is in force. One value
+/// for the whole process, because the limit is per-token and every caller here shares the token:
+/// once the quota is spent, the ~45 requests a refresh cycle fires would all fail the same way.
+static RATE_HOLD: Mutex<Option<u64>> = Mutex::new(None);
+
+/// The hold, poison-tolerant for the same reason as [`crate::testutil::env_lock`]: the value is a
+/// timestamp, and there is no invariant a panicking test could have corrupted.
+fn rate_hold() -> std::sync::MutexGuard<'static, Option<u64>> {
+    RATE_HOLD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Test-only: set or clear the hold directly, so a test can expire one without waiting for it.
+#[cfg(test)]
+fn set_rate_hold(until: Option<u64>) {
+    *rate_hold() = until;
+}
+
+/// Now, in epoch seconds — the clock `/rate_limit`'s `reset` values are on.
+fn epoch_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Where the API lives. `$SKEIN_GITHUB_API` points it at a stub — the seam the browser tests drive,
 /// replacing the fake `gh` binary they used to put on `$PATH`.
@@ -72,6 +105,24 @@ fn call(
     timeout: Duration,
 ) -> Result<(u16, String), String> {
     use std::io::Write;
+    // The hold, checked before anything is spent. `/rate_limit` is exempt: it is free, and it is
+    // the endpoint the hold itself is learned from, so gating it would leave no way back out.
+    let exempt = url.ends_with("/rate_limit");
+    if !exempt {
+        let mut hold = rate_hold();
+        if let Some(until) = *hold {
+            let now = epoch_now();
+            if now < until {
+                let minutes = (until - now).div_ceil(60);
+                return Err(format!(
+                    "GitHub is rate limiting skein — resuming in about {minutes}m; until then \
+                     skein is not calling GitHub at all, and what you see is the last answer it \
+                     holds."
+                ));
+            }
+            *hold = None;
+        }
+    }
     // The body goes to a file and the token stays on stdin, because both cannot have stdin: curl
     // reads `--config -` and `--data-binary @-` from the same place, and whichever gets there first
     // consumes the other's input. Found the direct way — the stub API received a curl config as its
@@ -239,6 +290,11 @@ fn call(
         Some((body, status)) => (body.to_string(), status.trim().parse().unwrap_or(0)),
         None => (String::new(), text.trim().parse().unwrap_or(0)),
     };
+    // A rate-limited answer engages the hold — but never from the `/rate_limit` call itself, which
+    // is how engaging learns the reset without recursing.
+    if !exempt && rate_limited(status, &body).is_some() {
+        engage_hold(token);
+    }
     Ok((status, body))
 }
 
@@ -380,6 +436,22 @@ pub(crate) fn graphql(
                 .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
                 .collect::<Vec<_>>()
                 .join("; ");
+            // GraphQL's primary rate limit is not a 403: it is an HTTP 200 whose errors carry
+            // `"type": "RATE_LIMITED"` — and GraphQL search is where nearly all of skein's quota
+            // goes, so this shape must engage the hold exactly as a 403 body does. The message
+            // text is accepted as a second signal in case the type ever changes spelling.
+            let limited = errors.iter().any(|e| {
+                e.get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t.eq_ignore_ascii_case("RATE_LIMITED"))
+            }) || said.to_ascii_lowercase().contains("rate limit");
+            if limited {
+                engage_hold(token);
+                return Err(rate_limit_sentence(match said.is_empty() {
+                    true => "the GraphQL rate limit is exceeded",
+                    false => &said,
+                }));
+            }
             return Err(match said.is_empty() {
                 true => complaint(status, &text),
                 false => said,
@@ -392,13 +464,64 @@ pub(crate) fn graphql(
         .ok_or_else(|| complaint(status, &text))
 }
 
+/// GitHub said the quota is spent: find out when it comes back, and stop calling until then.
+///
+/// The when comes from `GET /rate_limit`, which reports every resource's quota and **never counts
+/// against any of them** — the one question that stays free when everything else is refused. The
+/// hold ends at the soonest `reset` of a resource that is actually out (`remaining` 0), because
+/// that is the earliest moment any call could succeed again. An unusable answer means a flat
+/// fifteen minutes.
+fn engage_hold(token: &str) {
+    let now = epoch_now();
+    let until = rate_reset_after(token, now).unwrap_or(now + 15 * 60);
+    *rate_hold() = Some(until);
+    let minutes = until.saturating_sub(now).div_ceil(60).max(1);
+    eprintln!(
+        "skein: GitHub rate limit hit — not calling GitHub for about {minutes}m, resuming around \
+         {:02}:{:02} UTC",
+        (until / 3600) % 24,
+        (until / 60) % 60
+    );
+}
+
+/// When the soonest spent resource resets, read from `/rate_limit`. `None` when the endpoint could
+/// not answer or nothing qualifies — the caller then falls back to a flat wait rather than guess.
+fn rate_reset_after(token: &str, now: u64) -> Option<u64> {
+    let (status, body) = call(
+        "GET",
+        &format!("{}/rate_limit", api_base()),
+        token,
+        None,
+        "application/vnd.github+json",
+        Duration::from_secs(10),
+    )
+    .ok()?;
+    if !(200..=299).contains(&status) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let resources = value.get("resources")?;
+    ["core", "search", "graphql"]
+        .into_iter()
+        .filter_map(|name| resources.get(name))
+        .filter(|r| r.get("remaining").and_then(|v| v.as_u64()) == Some(0))
+        .filter_map(|r| r.get("reset").and_then(|v| v.as_u64()))
+        .filter(|reset| *reset > now)
+        .min()
+}
+
 /// The sentence for a rate limit, when the answer is one. GitHub's 403/429 bodies say "API rate
 /// limit exceeded" or "secondary rate limit"; named plainly here because a person reading "GitHub
 /// said 403" reasonably asks whether skein is being rate limited, and the answer was on hand.
 fn rate_limited(status: u16, said: &str) -> Option<String> {
-    (matches!(status, 403 | 429) && said.to_ascii_lowercase().contains("rate limit")).then(|| {
-        format!("GitHub is rate limiting skein — it said: {said}. It resets on its own; nothing here needs fixing.")
-    })
+    (matches!(status, 403 | 429) && said.to_ascii_lowercase().contains("rate limit"))
+        .then(|| rate_limit_sentence(said))
+}
+
+/// The one sentence for a rate limit, wherever it shows up — a 403/429 body or a GraphQL 200 —
+/// so both doors report the same fact the same way.
+fn rate_limit_sentence(said: &str) -> String {
+    format!("GitHub is rate limiting skein — it said: {said}. Skein stops calling GitHub until the limit resets; nothing here needs fixing.")
 }
 
 /// Turn a body into JSON, or into the best sentence available about why not.
@@ -523,6 +646,7 @@ mod tests {
     #[test]
     fn a_rate_limit_is_named_rather_than_left_as_a_status_code() {
         let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
         let api = one_shot_github(
             403,
             br#"{"message":"API rate limit exceeded for installation ID 1."}"#.to_vec(),
@@ -535,6 +659,236 @@ mod tests {
         assert!(
             err.contains("rate limiting skein"),
             "the diagnosis is in the sentence: {err}"
+        );
+    }
+
+    /// Clears the hold on entry AND on drop: a test that engages it and then panics must not
+    /// leave the rest of the binary refusing to call its fake GitHubs. Every test that can touch
+    /// the hold takes one, right after the env lock.
+    struct HoldClear;
+    impl HoldClear {
+        fn new() -> Self {
+            set_rate_hold(None);
+            HoldClear
+        }
+    }
+    impl Drop for HoldClear {
+        fn drop(&mut self) {
+            set_rate_hold(None);
+        }
+    }
+
+    /// A GitHub whose quota is spent: everything answers 403 "rate limit", except `/rate_limit`,
+    /// which reports core out (resetting at `reset`) and graphql out an hour later. Counts what it
+    /// is asked, per path, so a test can prove a call never arrived.
+    fn spent_github(
+        reset: u64,
+    ) -> (
+        String,
+        std::sync::Arc<AtomicU64>,
+        std::sync::Arc<AtomicU64>,
+    ) {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let spent = std::sync::Arc::new(AtomicU64::new(0));
+        let quota = std::sync::Arc::new(AtomicU64::new(0));
+        let (spent_count, quota_count) = (spent.clone(), quota.clone());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let (status, body) = if request.starts_with("GET /rate_limit") {
+                    quota_count.fetch_add(1, Ordering::SeqCst);
+                    (
+                        200u16,
+                        format!(
+                            r#"{{"resources":{{"core":{{"remaining":0,"reset":{reset}}},"search":{{"remaining":30,"reset":{reset}}},"graphql":{{"remaining":0,"reset":{}}}}}}}"#,
+                            reset + 3600
+                        ),
+                    )
+                } else {
+                    spent_count.fetch_add(1, Ordering::SeqCst);
+                    (
+                        403u16,
+                        r#"{"message":"API rate limit exceeded for user ID 1."}"#.to_string(),
+                    )
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), spent, quota)
+    }
+
+    /// The regression SKEIN-208 exists for: once the quota was dead, every refresh still fired
+    /// ~45 doomed requests. The first rate-limited answer must engage a hold read from
+    /// `/rate_limit` — ending at the SOONEST spent reset (core here, not graphql's an hour later)
+    /// — and the second call must die at home, never reaching the wire.
+    #[test]
+    fn a_spent_quota_stops_the_next_call_before_it_leaves_the_process() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let reset = epoch_now() + 600;
+        let (api, spent, quota) = spent_github(reset);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let first = get_json("/user", "token");
+        let second = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let first = first.expect_err("a spent quota is an error");
+        assert!(
+            first.contains("rate limiting skein"),
+            "the first call reports the limit: {first}"
+        );
+        assert_eq!(
+            *rate_hold(),
+            Some(reset),
+            "the hold ends at the SOONEST spent reset, not the latest"
+        );
+        let second = second.expect_err("a held call is an error");
+        assert!(
+            second.contains("resuming in about 10m"),
+            "the refusal names the wait: {second}"
+        );
+        assert_eq!(
+            spent.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second call must never reach the server"
+        );
+        assert_eq!(
+            quota.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "engaging asks /rate_limit exactly once"
+        );
+    }
+
+    /// A hold is a timer, not a switch: once its moment passes, calls flow again without anyone
+    /// resetting anything — and the spent hold is cleared on the way through.
+    #[test]
+    fn an_elapsed_hold_lets_calls_reach_github_again() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        set_rate_hold(Some(epoch_now() - 5));
+        let api = one_shot_github(200, br#"{"fine":true}"#.to_vec(), false);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let got = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let got = got.expect("an elapsed hold must not block");
+        assert_eq!(got.get("fine").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            *rate_hold(),
+            None,
+            "an elapsed hold is cleared once a call passes it"
+        );
+    }
+
+    /// `/rate_limit` is the door a hold must leave open: it is free, and it is where the hold's
+    /// end is learned, so a hold that gated it could never be re-measured.
+    #[test]
+    fn the_rate_limit_endpoint_passes_through_an_active_hold() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        set_rate_hold(Some(epoch_now() + 600));
+        let api = one_shot_github(200, br#"{"resources":{}}"#.to_vec(), false);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let quota = get_json("/rate_limit", "token");
+        let other = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        quota.expect("/rate_limit must pass through a hold");
+        let other = other.expect_err("everything else must not");
+        assert!(
+            other.contains("not calling GitHub"),
+            "the refusal says what is happening: {other}"
+        );
+    }
+
+    /// A GitHub whose GraphQL quota is spent the way it actually spends: `/graphql` answers HTTP
+    /// 200 with a `RATE_LIMITED` errors array, and `/rate_limit` reports graphql out until
+    /// `reset`. Counts per path, so a test can prove a call never arrived.
+    fn graphql_spent_github(
+        reset: u64,
+    ) -> (
+        String,
+        std::sync::Arc<AtomicU64>,
+        std::sync::Arc<AtomicU64>,
+    ) {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let gql = std::sync::Arc::new(AtomicU64::new(0));
+        let quota = std::sync::Arc::new(AtomicU64::new(0));
+        let (gql_count, quota_count) = (gql.clone(), quota.clone());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body = if request.starts_with("GET /rate_limit") {
+                    quota_count.fetch_add(1, Ordering::SeqCst);
+                    format!(
+                        r#"{{"resources":{{"core":{{"remaining":4000,"reset":{reset}}},"search":{{"remaining":30,"reset":{reset}}},"graphql":{{"remaining":0,"reset":{reset}}}}}}}"#
+                    )
+                } else {
+                    gql_count.fetch_add(1, Ordering::SeqCst);
+                    r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded for user ID 123"}]}"#
+                        .to_string()
+                };
+                let head = format!(
+                    "HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), gql, quota)
+    }
+
+    /// The shape the live failure took: GraphQL's primary rate limit is an HTTP 200 whose errors
+    /// say `"type": "RATE_LIMITED"` — no 403 anywhere — and GraphQL search is where nearly all of
+    /// skein's quota goes. It must engage the hold exactly as a 403 body does: the first call
+    /// names the wait, the second dies at home.
+    #[test]
+    fn a_graphql_rate_limit_inside_a_200_engages_the_hold() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let reset = epoch_now() + 600;
+        let (api, gql, quota) = graphql_spent_github(reset);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let first = graphql("query { x }", serde_json::json!({}), "token");
+        let second = graphql("query { x }", serde_json::json!({}), "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let first = first.expect_err("a spent GraphQL quota is an error");
+        assert!(
+            first.contains("rate limiting skein") && first.contains("stops calling"),
+            "the 200 is reported as the rate limit it is: {first}"
+        );
+        assert_eq!(
+            *rate_hold(),
+            Some(reset),
+            "a 200-shaped rate limit engages the hold at graphql's reset"
+        );
+        let second = second.expect_err("a held call is an error");
+        assert!(
+            second.contains("resuming in about 10m"),
+            "the refusal names the wait: {second}"
+        );
+        assert_eq!(
+            gql.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second call must never reach the server"
+        );
+        assert_eq!(
+            quota.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "engaging asks /rate_limit exactly once"
         );
     }
 }
