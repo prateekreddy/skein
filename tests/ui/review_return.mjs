@@ -34,10 +34,15 @@ function board() {
     const repos = [{ id: "alpha" }, { id: "beta" }];
     let revQueue = null, revOpen = new Set(), revSums = new Map(), revMods = null;
     let revFilter = "all", revLoading = false, revStaleTimer = null;
+    let revRepoFilter = "";
+    let revCrits = new Map();
     let revModsOpen = false, revCounts = [];
     let revSumBusy = 0;
     const REV_SUM_PARALLEL = 3;
     ${grab("revSeen")}
+    ${grab("rk")}
+    ${grab("revMergeQueues")}
+    ${grab("revScopeRepo")}
     ${grab("revStaleTries")}
     ${grab("REV_STALE_TRIES")}
     ${grab("REV_SUM_AUTO")}
@@ -80,12 +85,13 @@ function board() {
       box: name => { view = { box: name, mode: "term", kind: "agent" }; },
       rows: () => (revpane.innerHTML.match(/<row /g) || []).length,
       sums: () => [...revSums.values()].filter(s => s !== "…").length,
-      got: n => revSums.get(n),
+      got: (n, repo) => revSums.get((repo || "alpha") + "#" + n),
       open_rows: () => revOpen.size,
+      openKeys: () => [...revOpen],
       spent: () => revSumAuto,
-      expand: n => { revOpen.add(n); },
+      expand: (n, repo) => { revOpen.add((repo || "alpha") + "#" + n); },
       tries: () => revStaleTries,
-      fetchOne: n => revFetchSummary(n, true),
+      fetchOne: (n, repo) => revFetchSummary(repo || "alpha", n, true),
       toggleNR: () => toggleNotReady(),
     };
   `;
@@ -98,6 +104,7 @@ function board() {
   let fresh = true;          // whether the server has the current list yet
   let laneRows = null;       // when set, the queue serves exactly these rows
   const queue = id => ({
+    repo_id: id,
     ai: true,
     fresh,
     prs: laneRows || [1, 2, 3, 4, 5, 6].map(n => ({
@@ -114,14 +121,29 @@ function board() {
     blind_spots: [],
   });
   const lanes = rows => { laneRows = rows; };
+  let served = ["alpha"];    // which repos the merged answer carries
   // Answers on demand rather than immediately, so a test can look at the pane between a request and
   // its answer — which is where both defects lived.
   let pending = [];
   let refuse = null;              // a repo whose summaries the server will not serve
   let known = {};                 // readings already on disk, as the bulk route answers them
   const fetch = (url) => {
-    const id = decodeURIComponent(url.match(/repos\/([^/]+)\/review/)[1]);
     asked.push(url);
+    // The merged queue: every repo in one answer, the shape the pane opens on (SKEIN-146).
+    if (/^\/api\/review($|\?)/.test(url)) {
+      return new Promise(resolve => pending.push(() => resolve({
+        ok: true,
+        text: () => Promise.resolve(JSON.stringify({
+          ai: true, queues: served.map(queue), failed: [], skipped: [],
+        })),
+      })));
+    }
+    // Per-repo workflow state and stored critiques: nothing, immediately — these worlds are about
+    // queues and readings.
+    if (/\/workflows$/.test(url) || /\/critique$/.test(url)) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    const id = decodeURIComponent(url.match(/repos\/([^/]+)\//)[1]);
     // The bulk read: what skein already holds. This fixture holds nothing — every scenario here is
     // about what the pane ASKS for, so an empty answer keeps the pump as the only source and the
     // assertions about it meaningful.
@@ -183,6 +205,7 @@ function board() {
     // Everything, until it stops asking.
     drain: async () => { for (let i = 0; i < 20 && pending.length; i++) await settle(); },
     refuse: id => { refuse = id; },
+    serves: ids => { served = ids; },
     // The server has not caught up yet: it hands over the copy it remembers.
     stale: on => { fresh = !on; },
     // What the page asked to be woken for, and how long it wanted to wait.
@@ -229,24 +252,32 @@ function board() {
   t.check("which asked for nothing further", b.reads().length, before);
 }
 
-// ---- a real repo switch, made from a box view: nothing is carried across ----
+// ---- two repos, one queue: a repo is a filter, and filtering forgets nothing ----
 //
-// The half that keeps the fix above honest. PR numbers collide across repos, so alpha's #2 must
-// never open as beta's #2 — and the switch that proves it is the one made from a box view, where
-// `view.repo` is undefined and the old guard could not tell the two cases apart.
+// The old rule — "switching repos drops the previous repo's summaries" — existed because PR
+// numbers collide and the maps were keyed by number alone. The merged queue keys every row by
+// `repo#number` instead, so alpha's #2 can never open as beta's #2 — and with the collision gone,
+// forgetting stops being a safety measure and becomes a bug (SKEIN-175). What was read for one
+// repo stays read while you look at another.
 {
   const b = board();
+  b.serves(["alpha", "beta"]);
+  // Every reading already on disk, in both repos — free, so the counts here are about keeping,
+  // not spending.
+  b.holds(Object.fromEntries([1, 2, 3, 4, 5, 6].map(n =>
+    [n, { number: n, head_sha: "x" + n, depth: "line", line: "read " + n }])));
   b.open("alpha");
   await b.drain();
+  t.check("the filtered view shows one repo's rows", b.rows(), 6);
+  t.check("while both repos' readings are held", b.sums(), 12);
   b.expand(2);
 
   b.box("some-box");
   b.open("beta");
-  t.check("switching repos drops the previous repo's summaries", b.sums(), 0);
-  t.check("and its expansions", b.open_rows(), 0);
-  t.check("and the new repo gets its own allowance", b.spent(), 0);
+  t.check("filtering to another repo keeps every reading", b.sums(), 12);
+  t.check("and alpha's expansion is alpha's, not beta's #2", b.openKeys(), ["alpha#2"]);
   await b.drain();
-  t.check("the new repo's queue is what is shown", b.rows(), 6);
+  t.check("beta's six rows are what is shown", b.rows(), 6);
 }
 
 // ---- a summary that lands while you are looking at a box ----
@@ -464,8 +495,9 @@ function critWorld() {
   const sent = [];
   const toasts = [];
   const body = `
-    let view = { repo: "alpha", box: null };
+    let view = { repo: "*", box: null };
     ${grab("esc")}
+    ${grab("rk")}
     ${grab("revCrits")}
     ${grab("revCritKeep")}
     ${grab("revCritiquePost")}
@@ -478,9 +510,9 @@ function critWorld() {
       return Promise.resolve({ json: () => Promise.resolve({ ok: true, text: "posted" }) });
     };
     return {
-      seed: (n, critique) => revCrits.set(n, { open: true, busy: false, posting: false, critique, drop: new Set(), posted: "" }),
-      drop: (n, i) => revCritKeep(n, i, false),
-      post: (n, sha) => revCritiquePost(n, sha),
+      seed: (repo, n, critique) => revCrits.set(repo + "#" + n, { open: true, busy: false, posting: false, critique, drop: new Set(), posted: "" }),
+      drop: (repo, n, i) => revCritKeep(repo + "#" + n, i, false),
+      post: (repo, n, sha) => revCritiquePost(repo, n, sha),
       html: pr => revCritiqueHtml(pr),
     };
   `;
@@ -489,7 +521,7 @@ function critWorld() {
 
 {
   const { world, sent } = critWorld();
-  world.seed(7, {
+  world.seed("alpha", 7, {
     head_sha: "h1", overall: "note", truncated: false,
     comments: [
       { path: "a.rs", line: 2, anchored: true, text: "first" },
@@ -497,8 +529,8 @@ function critWorld() {
       { path: "c.rs", line: 0, anchored: false, text: "third" },
     ],
   });
-  world.drop(7, 1);
-  world.post(7, "h1");
+  world.drop("alpha", 7, 1);
+  world.post("alpha", 7, "h1");
   await new Promise(r => setTimeout(r, 0));
 
   t.check("one review request went out", sent.length, 1);
@@ -507,14 +539,15 @@ function critWorld() {
   t.check("what was kept is sent verbatim, vetted here and nowhere else",
     posted.comments.every(c => c.text !== "second — to be dropped"), true);
   t.check("the head the draft read rides along", posted.head_sha, "h1");
+  t.check("it posts to the row's own repo", sent[0].url.includes("/repos/alpha/"), true);
 }
 
 {
   // Everything dropped and no note: refused in the pane, before any request exists to regret.
   const { world, sent, toasts } = critWorld();
-  world.seed(8, { head_sha: "h1", overall: "", comments: [{ path: "a.rs", line: 2, anchored: true, text: "only" }] });
-  world.drop(8, 0);
-  world.post(8, "h1");
+  world.seed("alpha", 8, { head_sha: "h1", overall: "", comments: [{ path: "a.rs", line: 2, anchored: true, text: "only" }] });
+  world.drop("alpha", 8, 0);
+  world.post("alpha", 8, "h1");
   await new Promise(r => setTimeout(r, 0));
   t.check("nothing kept posts nothing", sent.length, 0);
   t.check("and says so", toasts.length >= 1, true);
@@ -524,10 +557,57 @@ function critWorld() {
   // A draft of an earlier commit: the pane says so and the post button is off — the server would
   // refuse too, but the person deserves the sentence before the press, not after.
   const { world } = critWorld();
-  world.seed(9, { head_sha: "old", overall: "x", comments: [] });
-  const html = world.html({ number: 9, head_sha: "new" });
+  world.seed("alpha", 9, { head_sha: "old", overall: "x", comments: [] });
+  const html = world.html({ repo_id: "alpha", number: 9, head_sha: "new" });
   t.check("a stale draft is named", html.includes("Drafted before the latest commits"), true);
   t.check("and posting is off until it is drafted again", html.includes("disabled"), true);
+}
+
+// ---- what you typed into the composer survives a reload ----
+//
+// Reported live on PR 577: notes were written, "draft with skein" answered, the page was reloaded
+// while another call ran — and both were gone, because the composer was pure page state. It is
+// saved per (repo, PR, kind) now, restored on reopen, and cleared only by an actual post.
+function composeWorld(store) {
+  const posts = [];
+  const body = `
+    ${grab("esc")}
+    ${grab("revComposing")}
+    ${grab("revComposeStore")}
+    ${grab("revComposeSave")}
+    ${grab("revCompose")}
+    ${grab("revAct")}
+    const renderReview = () => {};
+    const toast = () => {};
+    const confirm = () => true;
+    const loadReview = () => {};
+    const revPost = (repo, number, kind, text) => { posts.push({ repo, number, kind, text }); return Promise.resolve({ ok: true, text: "sent" }); };
+    return {
+      compose: (repo, n, kind) => revCompose(repo, n, kind),
+      type: text => { revComposing.text = text; revComposeSave(); },
+      text: () => revComposing.text,
+      act: (repo, n, kind) => revAct(repo, n, kind),
+    };
+  `;
+  return { world: new Function("localStorage", "posts", "setTimeout", body)(store, posts, () => {}), posts };
+}
+{
+  const store = { data: {}, getItem(k) { return this.data[k] ?? null; }, setItem(k, v) { this.data[k] = v; }, removeItem(k) { delete this.data[k]; } };
+  const { world: first } = composeWorld(store);
+  first.compose("alpha", 577, "comment");
+  first.type("the audit-write path never fsyncs");
+
+  // The reload: a fresh page over the same browser storage.
+  const { world: second } = composeWorld(store);
+  second.compose("alpha", 577, "comment");
+  t.check("what you typed survives a reload", second.text(), "the audit-write path never fsyncs");
+
+  // Posting is the one thing that clears it — the draft has done its job.
+  second.act("alpha", 577, "comment");
+  await new Promise(r => setTimeout(r, 0));
+  const { world: third } = composeWorld(store);
+  third.compose("alpha", 577, "comment");
+  t.check("a posted draft does not resurface", third.text(), "");
 }
 
 t.done();

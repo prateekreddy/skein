@@ -27,6 +27,18 @@ fn stub_github(dir: &Path, login: &str, teams_ok: bool) -> String {
     let login = login.to_string();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            // One line per request, so a test can assert what an operation COSTS in GitHub calls —
+            // the merged queue's whole promise is a number here staying put.
+            {
+                use std::io::Write as _;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(root.join("hits.log"))
+                {
+                    let _ = f.write_all(b"x\n");
+                }
+            }
             let mut stream = stream;
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request = String::new();
@@ -376,4 +388,66 @@ fn a_repo_with_no_github_remote_has_no_queue() {
     r.source = "/Users/me/code/thing".into();
     let err = skein::prq::queue(&r, true).unwrap_err();
     assert!(err.contains("no GitHub remote"), "{err}");
+}
+
+/// The merged queue (SKEIN-146): every repo in one answer, a switched-off repo reported rather
+/// than omitted — and NOT ONE GitHub request beyond what the badge's own poll already spends,
+/// because it serves what `counts()` built. Provable only here: the in-process queue cache is
+/// disabled under `cfg!(test)`, and this crate compiles the library without it.
+#[test]
+fn the_merged_queue_is_every_repo_and_costs_no_extra_github_call() {
+    let (_env, dir) = setup("me", true);
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", pr_json(11, "waiting", "")),
+    );
+
+    let mut one = repo("mq-one");
+    let mut two = repo("mq-two");
+    let mut dark = repo("mq-dark");
+    one.id = "mq-one".into();
+    two.id = "mq-two".into();
+    dark.review_queue = false;
+    skein::repos::save_repos(&[one, two, dark]).unwrap();
+
+    let hits = || {
+        std::fs::read_to_string(dir.join("hits.log"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    // The badge's poll runs first, as it does live — this is what fills the cache.
+    let counts = skein::prq::counts();
+    assert_eq!(counts.iter().filter(|c| c.skipped.is_empty()).count(), 2);
+    let spent_on_counts = hits();
+    assert!(
+        spent_on_counts > 0,
+        "the stub must actually have been asked"
+    );
+
+    let m = skein::prq::merged(false);
+    assert_eq!(m.queues.len(), 2, "every asked repo is in the one answer");
+    let ids: Vec<_> = m.queues.iter().map(|q| q.repo_id.as_str()).collect();
+    assert_eq!(ids, ["mq-one", "mq-two"]);
+    for q in &m.queues {
+        assert_eq!(
+            q.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+            vec![11],
+            "each repo's own rows survive the merge ({})",
+            q.repo_id
+        );
+    }
+    assert_eq!(
+        m.skipped.len(),
+        1,
+        "a repo skein chose not to ask about is reported, never omitted"
+    );
+    assert_eq!(m.skipped[0].repo_id, "mq-dark");
+    assert_eq!(
+        hits(),
+        spent_on_counts,
+        "the merged queue serves what counts() already built — zero further GitHub requests"
+    );
 }

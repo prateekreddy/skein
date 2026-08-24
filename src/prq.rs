@@ -1005,6 +1005,63 @@ pub fn counts() -> Vec<Count> {
         .collect()
 }
 
+/// Every repo's queue, in one answer — the merged review the pane opens on (SKEIN-146).
+///
+/// **This costs no GitHub call the badge was not already costing.** `counts()` builds the complete
+/// queue for every repo each poll and throws away everything but one integer; this returns what it
+/// built. Same per-repo cache, same remembered copies — one repo answering slowly (`fresh: false`)
+/// or failing does not stale or sink the others, which is why the shape is a list of queues and a
+/// list of failures rather than one flattened result that could only be as good as its worst repo.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergedQueue {
+    /// The one global switch, said once — the per-queue `ai` repeats it, but the pane asks the
+    /// merged answer, not a queue it may not have.
+    pub ai: bool,
+    pub queues: Vec<Queue>,
+    /// Repos that could not be read, each with its reason. Attributed, never pooled: "a repo
+    /// failed" hides exactly the information that decides whether you care.
+    pub failed: Vec<Count>,
+    /// Repos skein deliberately did not ask about — queue switched off, or no GitHub remote.
+    /// Reported rather than omitted, same rule as `counts()`: "never looked" and "nothing waiting"
+    /// must not be the same silence.
+    pub skipped: Vec<Count>,
+}
+
+pub fn merged(force: bool) -> MergedQueue {
+    let mut out = MergedQueue {
+        ai: crate::review::summaries_enabled(),
+        queues: Vec::new(),
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for repo in crate::repos::load_repos() {
+        let skipped = match (repo.review_queue, repo_slug(&repo)) {
+            (false, _) => "review queue is switched off for this repo".to_string(),
+            (true, None) => "no GitHub remote, so there are no pull requests to list".to_string(),
+            (true, Some(_)) => String::new(),
+        };
+        if !skipped.is_empty() {
+            out.skipped.push(Count {
+                repo_id: repo.id,
+                needs_you: 0,
+                error: String::new(),
+                skipped,
+            });
+            continue;
+        }
+        match queue(&repo, force) {
+            Ok(q) => out.queues.push(q),
+            Err(e) => out.failed.push(Count {
+                repo_id: repo.id,
+                needs_you: 0,
+                error: e,
+                skipped: String::new(),
+            }),
+        }
+    }
+    out
+}
+
 // ───────────────────────────── acting on a PR ─────────────────────────────
 
 /// The three things a review can say, in GitHub's own vocabulary.

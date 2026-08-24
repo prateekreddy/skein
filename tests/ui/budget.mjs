@@ -28,11 +28,12 @@ function board({ computed, prs = 29 }) {
     ${grab("revHeld")}
     let revSumBusy = 0;
     let revSums = new Map();
+    ${grab("rk")}
     const view = { repo: "acme" };
     const renderReview = () => {};
     const revQueue = {
       ai: true,
-      prs: Array.from({ length: ${prs} }, (_, i) => ({ number: i + 1, lane: "needs-you", draft: false })),
+      prs: Array.from({ length: ${prs} }, (_, i) => ({ number: i + 1, repo_id: "acme", lane: "needs-you", draft: false })),
     };
     ${grab("REV_SETTLE_MS")}
     ${grab("revSettled")}

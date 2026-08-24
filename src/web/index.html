@@ -2468,7 +2468,11 @@ function renderDockbar() {
 //
 // Nothing here polls. The queue costs three `gh` round trips, so it loads when you open it and when
 // you ask — never on the fleet's 2s tick.
-let revQueue = null;          // last fetched queue for view.repo
+let revQueue = null;          // last fetched merged queue (every repo, rows tagged repo_id)
+let revRepoFilter = "";       // "" = all repos; a repo id narrows the view, it never refetches
+// One key for every per-PR map. PR numbers collide across repos, and the merged queue holds all of
+// them at once — keying by number alone would open #12 of one repo when #12 of another was clicked.
+const rk = pr => (pr.repo_id || "") + "#" + pr.number;
 let revFilter = "all";        // all | author | reviewer | mentioned
 let revOpen = new Set();      // PR numbers expanded in place
 let revLoading = false;
@@ -2486,7 +2490,7 @@ let revHeld = null;
 // Read separately from the queue, and on purpose. The queue is what GitHub says and is cached for a
 // minute; this is skein's own answer about it, and it changes the instant somebody assigns a
 // workflow. Folded together, choosing a workflow would not show up until GitHub was read again.
-let revFlows = null;
+let revFlows = new Map();  // repo_id -> that repo's workflow state (or {error})
 let revStaleTimer = null;
 // How many times the pane has asked again for a queue that came back remembered rather than fresh.
 //
@@ -2593,58 +2597,68 @@ function renderRevBadge() {
 }
 
 function openReview(repoId) {
-  const id = repoId || view.repo || localStorage.getItem("skein.reviewRepo") || (repos[0] && repos[0].id);
-  if (!id) { toast("add a repo first — review lists the PRs of a repo skein manages"); return; }
+  if (!repos.length) { toast("add a repo first — review lists the PRs of the repos skein manages"); return; }
   document.body.classList.remove("show-fleet");
-  try { localStorage.setItem("skein.reviewRepo", id); } catch {}
-  // Switching repos must not carry the previous repo's expansions: PR numbers collide across repos,
-  // so #12 of one would silently open #12 of the other.
+  // One queue across every repo (SKEIN-146). A repo id here is a FILTER over the merged list, not a
+  // mode: choosing one never refetches and never clears, so what was read for one repo survives
+  // looking at another. PR-number collisions are handled by `rk`, not by forgetting.
   //
-  // Asked of `revHeld` — the repo this state BELONGS to — and not of `view.repo`, which is the repo
-  // the view happens to name. A box view names no repo, so leaving review for a box and coming back
-  // read as a repo switch and threw all of it away: every summary that had been read, and every row
-  // that had been expanded. Reported as "I clicked a box and went back to PRs and the entire thing
-  // disappears" — with the pane then re-reading, from a server cache, what it had just discarded.
-  if (revHeld && revHeld !== id) {
-    revQueue = null; revOpen = new Set(); revSums = new Map(); revMods = null; revFlows = null;
-  }
-  revHeld = id;
+  // A bare press of the review button keeps the filter you last chose; the picker's own "" is an
+  // explicit "all repos" and does reset it.
+  revRepoFilter = repoId !== undefined ? repoId : (localStorage.getItem("skein.reviewRepo") || "");
+  try { localStorage.setItem("skein.reviewRepo", revRepoFilter); } catch {}
+  revHeld = "*";
   // Here as well as after the queue lands: the allowance governs what is read WITHOUT being asked,
   // and between this moment and the queue arriving there is a remembered queue on screen that the
-  // pump can already act on. Settling it late gives a repo you open second whatever the first had
-  // left of it.
-  revAllowanceFor(id);
-  view = { box: null, mode: "review", kind: "agent", repo: id };
+  // pump can already act on.
+  revAllowanceFor("*");
+  view = { box: null, mode: "review", kind: "agent", repo: revRepoFilter || "*" };
   applyView();
   loadReview();
 }
 
+// One list from many queues. Per-repo `fresh`/`as_of` survive the merge — one slow repo must not
+// stale the others — and every blind spot and failure is attributed to the repo it came from,
+// because "a repo failed" hides exactly the information that decides whether you care.
+function revMergeQueues(m) {
+  const prs = [];
+  for (const qq of m.queues || []) for (const pr of qq.prs || []) prs.push({ ...pr, repo_id: qq.repo_id });
+  // Recency within a lane: one repo's numbers-descending, made comparable across repos.
+  prs.sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+  const blind = [];
+  for (const qq of m.queues || []) for (const b of qq.blind_spots || []) blind.push(`${qq.repo_id}: ${b}`);
+  for (const f of m.failed || []) blind.push(`${f.repo_id}: this repo's queue could not be built — ${f.error}`);
+  const stale = (m.queues || []).filter(q => q.fresh === false);
+  return {
+    ai: m.ai, prs, blind_spots: blind, queues: m.queues || [],
+    fresh: stale.length === 0,
+    staleRepos: stale.map(q => ({ repo_id: q.repo_id, as_of: q.as_of })),
+  };
+}
+
 function loadReview(force) {
-  const id = view.repo;
-  if (!id) return;
-  // Whatever is already known for THIS repo, on screen before the request goes out. `revQueue` is
-  // whatever the last repo left behind, so it is replaced rather than kept — showing one repo's
-  // pull requests under another's name is worse than showing none.
-  revQueue = revSeen.get(id) || null;
+  // Whatever is already known, on screen before the request goes out.
+  revQueue = revSeen.get("*") || null;
   // A load somebody ASKED for starts the chase again: pressing refresh after giving up should not
   // inherit the exhausted counter and give up immediately.
   if (force) revStaleTries = 0;
   revLoading = true; renderReview();
-  fetch(`/api/repos/${encodeURIComponent(id)}/review${force ? "?force=1" : ""}`).then(async r => {
+  fetch(`/api/review${force ? "?force=1" : ""}`).then(async r => {
     const text = await r.text();
     if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
     return JSON.parse(text);
-  }).then(q => {
+  }).then(m => {
     revLoading = false;
-    if (view.repo !== id) return;   // you switched repos while this was in flight
+    if (!revHeld) return;   // you left review while this was in flight
+    const q = revMergeQueues(m);
     // A summary is keyed to a head commit; when the branch moves, the old one describes code that
     // is no longer there. Dropping it here is what makes a re-review actually get re-read.
     for (const pr of q.prs || []) {
-      const held = revSums.get(pr.number);
+      const held = revSums.get(rk(pr));
       if (!held || held === "…") continue;
       // A row that could not be REACHED is not a reading at all — asking again is the whole point,
       // and this is the moment to allow it.
-      if (held.transient) { revSums.delete(pr.number); continue; }
+      if (held.transient) { revSums.delete(rk(pr)); continue; }
       // A reading of a commit that is no longer the head is KEPT, and marked. It used to be deleted
       // here, which is what made the pump read the PR again on its own: a branch pushed to five
       // times was read five times and none of those readings survived to be compared against.
@@ -2653,12 +2667,12 @@ function loadReview(force) {
       // remove it", and a stale reading shown as current would remove it. Re-reading is a click.
       if (held.head_sha !== pr.head_sha) held.stale = true;
     }
-    revAllowanceFor(id);
-    revQueue = q; revSeen.set(id, q); renderReview();
-    // **What skein already knows, before anything is asked for.** One request, no model calls, no
-    // rules — see `loadKnownSummaries`. The pump runs after it, so it only ever asks for readings
-    // that do not exist yet.
-    loadKnownSummaries(id);
+    revAllowanceFor("*");
+    revQueue = q; revSeen.set("*", q); renderReview();
+    // **What skein already knows, before anything is asked for.** One request per repo, no model
+    // calls, no rules — see `loadKnownSummaries`. The pump runs after it, so it only ever asks for
+    // readings that do not exist yet.
+    for (const qq of q.queues) loadKnownSummaries(qq.repo_id);
     loadWorkflows();
     // `fresh: false` means the server handed over its remembered copy and went to fetch the real
     // one. Ask again shortly — by then it is a cache hit, not another wait. Once: if the second ask
@@ -2670,19 +2684,21 @@ function loadReview(force) {
       // more often for the same reason.
       const wait = 4000 * 2 ** revStaleTries;
       revStaleTries++;
-      revStaleTimer = setTimeout(() => { if (revHeld === id) loadReview(); }, wait);
+      revStaleTimer = setTimeout(() => { if (revHeld) loadReview(); }, wait);
     }
     // Fresh: the chase is over, and the next stale answer starts its own.
     if (q.fresh !== false) revStaleTries = 0;
-    // The pane just fetched this repo for real; fold that into the badge rather than waiting up to
-    // three minutes for the poller to rediscover a number we already have.
-    const n = (q.prs || []).filter(p => p.lane === "needs-you").length;
-    const row = revCounts.find(c => c.repo_id === id);
-    if (row) { row.needs_you = n; row.error = ""; } else revCounts.push({ repo_id: id, needs_you: n, error: "" });
+    // The pane just fetched every repo for real; fold that into the badge rather than waiting up
+    // to three minutes for the poller to rediscover numbers we already have.
+    for (const qq of q.queues) {
+      const n = (qq.prs || []).filter(p => p.lane === "needs-you").length;
+      const row = revCounts.find(c => c.repo_id === qq.repo_id);
+      if (row) { row.needs_you = n; row.error = ""; } else revCounts.push({ repo_id: qq.repo_id, needs_you: n, error: "" });
+    }
     renderRevBadge();
   }).catch(e => {
     revLoading = false;
-    if (view.repo !== id) return;
+    if (!revHeld) return;
     revQueue = { error: String(e.message || e).split("\n")[0], prs: [], blind_spots: [] };
     renderReview();
   });
@@ -2735,12 +2751,12 @@ function revMatchesFilter(pr) {
 
 function renderReview() {
   if (!revpane) return;
-  const id = view.repo;
   const picker = repos.length > 1
-    ? `<select aria-label="Repository" onchange="openReview(this.value)">${
-        repos.map(r => `<option value="${esc(r.id)}"${r.id === id ? " selected" : ""}>${esc(r.id)}</option>`).join("")
+    ? `<select aria-label="Repository filter" onchange="openReview(this.value)">
+        <option value=""${revRepoFilter ? "" : " selected"}>all repos</option>${
+        repos.map(r => `<option value="${esc(r.id)}"${r.id === revRepoFilter ? " selected" : ""}>${esc(r.id)}</option>`).join("")
       }</select>`
-    : `<span>${esc(id || "")}</span>`;
+    : `<span>${esc(revRepoFilter || "all repos")}</span>`;
   const chips = [["all","all"],["author","mine"],["reviewer","to review"],["mentioned","mentioned"]]
     .map(([k, label]) => `<button type="button" class="revchip${revFilter === k ? " on" : ""}" onclick="setRevFilter('${k}')">${esc(label)}</button>`)
     .join("");
@@ -2750,12 +2766,16 @@ function renderReview() {
   } else if (revQueue && revQueue.error) {
     body = `<div class="revblind"><b>the queue could not be built</b><div>${esc(revQueue.error)}</div></div>`;
   } else if (revQueue) {
-    const shown = (revQueue.prs || []).filter(revMatchesFilter);
+    const shown = (revQueue.prs || [])
+      .filter(p => !revRepoFilter || p.repo_id === revRepoFilter)
+      .filter(revMatchesFilter);
     // Blind spots first and unmissable. A queue that under-reports silently is worse than no queue,
     // so what it could not see outranks what it could.
-    if ((revQueue.blind_spots || []).length) {
+    const blind = (revQueue.blind_spots || [])
+      .filter(b => !revRepoFilter || b.startsWith(revRepoFilter + ":"));
+    if (blind.length) {
       body += `<div class="revblind"><b>this queue is incomplete</b>${
-        revQueue.blind_spots.map(b => `<div>${esc(b)}</div>`).join("")}</div>`;
+        blind.map(b => `<div>${esc(b)}</div>`).join("")}</div>`;
     }
     for (const [lane, label] of REV_LANES) {
       const rows = shown.filter(p => p.lane === lane);
@@ -2780,11 +2800,12 @@ function renderReview() {
   }
   revpane.innerHTML = `<div class="revwrap"><div class="revhead">${picker}<div class="revchips">${chips}</div>
       <span class="revspacer"></span>
-      <button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>
+      ${revScopeRepo() ? `<button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>` : ""}
       <button type="button" class="revchip${revEdit ? " on" : ""}" onclick="toggleWorkflowEditor()">workflows</button>
       ${revReadChip()}
       ${revQueue && revQueue.fresh === false
-        ? `<span class="revage" title="These are the pull requests skein last read. It is fetching the current list; the count on the review button may already be the newer one.">read ${esc(revAgo(revQueue.as_of))} · ${
+        ? `<span class="revage" title="These repos are showing the pull requests skein last read; it is fetching their current lists. The others are current — one slow repo does not stale the rest.">${
+            esc((revQueue.staleRepos || []).map(r => `${r.repo_id} read ${revAgo(r.as_of)}`).join(", "))} · ${
             revStaleTries >= REV_STALE_TRIES
               ? `still fetching — <button type="button" class="revchip" onclick="loadReview(true)">try again</button>`
               : "refreshing"}</span>`
@@ -2809,6 +2830,15 @@ function revAgo(iso) {
 
 function setRevFilter(k) { revFilter = k; renderReview(); }
 
+// The repo that repo-scoped chrome (the notes pane, the read-ahead switch) belongs to: the filter
+// you chose, or the only repo on screen. With several repos and no filter there is no honest
+// answer, and the chrome waits rather than guessing.
+function revScopeRepo() {
+  if (revRepoFilter) return revRepoFilter;
+  const qs = revQueue && revQueue.queues;
+  return qs && qs.length === 1 ? qs[0].repo_id : "";
+}
+
 // ---------- standing notes on the repo's modules ----------
 //
 // These answer *questions*, not summaries: a diff carries its own before-state, but a question is
@@ -2820,7 +2850,8 @@ let revModsOpen = false;
 let revWriting = "";       // the module being written right now
 
 function loadModules() {
-  fetch(`/api/repos/${encodeURIComponent(view.repo)}/modules`).then(r => r.json())
+  if (!revScopeRepo()) return;
+  fetch(`/api/repos/${encodeURIComponent(revScopeRepo())}/modules`).then(r => r.json())
     .then(ms => { revMods = ms || []; renderReview(); }).catch(() => {});
 }
 function toggleMods() {
@@ -2831,7 +2862,7 @@ function toggleMods() {
 function writeModule(path) {
   if (revWriting) { toast("one at a time — each note takes a minute"); return; }
   revWriting = path; renderReview();
-  fetch(`/api/repos/${encodeURIComponent(view.repo)}/modules/write`, {
+  fetch(`/api/repos/${encodeURIComponent(revScopeRepo())}/modules/write`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path }),
   }).then(r => r.json()).then(d => {
     revWriting = "";
@@ -2900,50 +2931,49 @@ function loadKnownSummaries(id) {
   fetch(`/api/repos/${encodeURIComponent(id)}/review/summaries`)
     .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
     .then(known => {
-      if (revHeld !== id) return;
+      if (!revHeld) return;
       for (const [number, s] of Object.entries(known || {})) {
-        const n = Number(number);
+        const key = id + "#" + Number(number);
         // A reading the page already has for THIS head is not replaced: it may be one that has just
         // landed from a forced re-read, and the copy on disk is the older answer.
-        const held = revSums.get(n);
+        const held = revSums.get(key);
         if (held && held !== "…" && !held.stale && !held.transient) continue;
-        revSums.set(n, s);
+        revSums.set(key, s);
       }
       renderReview();
       // Only now. Anything still missing is genuinely unread, which is what the limits are for.
       revPumpSummaries();
     })
-    .catch(() => { if (revHeld === id) revPumpSummaries(); });
+    .catch(() => { if (revHeld) revPumpSummaries(); });
 }
 
 // What workflows exist, and what each pull request's is doing. Cheap: it reads the cached queue and
 // skein's own files, and touches GitHub only when the queue cache has aged out.
 function loadWorkflows() {
-  const id = revHeld;
-  if (!id) return;
-  fetch(`/api/repos/${encodeURIComponent(id)}/workflows`)
-    .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-    .then(w => { if (revHeld === id) { revFlows = w; renderReview(); } })
-    // A workflow file with a typo in it answers 502 here, and the row says so — see `revFlowBox`.
-    .catch(e => { if (revHeld === id) { revFlows = { error: String(e.message || e).split("\n")[0] }; renderReview(); } });
+  if (!revHeld || !revQueue) return;
+  for (const qq of revQueue.queues || []) {
+    const id = qq.repo_id;
+    fetch(`/api/repos/${encodeURIComponent(id)}/workflows`)
+      .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+      .then(w => { if (revHeld) { revFlows.set(id, w); renderReview(); } })
+      // A workflow file with a typo in it answers 502 here, and the row says so — see `revFlowBox`.
+      .catch(e => { if (revHeld) { revFlows.set(id, { error: String(e.message || e).split("\n")[0] }); renderReview(); } });
+  }
 }
 
 // Put a workflow on one pull request, take it off, or let the rules decide again.
-function revSetWorkflow(number, choice) {
-  const id = revHeld;
-  if (!id) return;
+function revSetWorkflow(repo, number, choice) {
   // Three answers, not two: a name, the empty string (excluded by hand — no rule may claim it), and
   // "let the rules decide", which forgets the choice. See `prwork::Carries`.
   const body = choice === "__rules" ? { unassign: true } : { name: choice };
-  revWorkflowPost(number, body);
+  revWorkflowPost(repo, number, body);
 }
 
 // Let a stopped workflow run again. Deliberately not bundled with the picker: a person clearing a
 // stop is saying "I fixed it", not "change what governs this".
-function revClearStop(number) { revWorkflowPost(number, { clear_stop: true }); }
+function revClearStop(repo, number) { revWorkflowPost(repo, number, { clear_stop: true }); }
 
-function revWorkflowPost(number, body) {
-  const id = revHeld;
+function revWorkflowPost(id, number, body) {
   if (!id) return;
   fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/workflow`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -2959,8 +2989,12 @@ function revWorkflowPost(number, body) {
 // this is the switch that decides whether skein spends model calls on its own, and the person
 // deciding is looking at the queue it would spend them on.
 function revReadChip() {
-  if (!revFlows || revFlows.read_prs === undefined) return "";
-  const on = !!revFlows.read_prs;
+  // Per-repo consent needs a repo: with the whole fleet on screen there is no honest single
+  // toggle, so the chip appears when the view is narrowed to one repo, and the row-level workflow
+  // box still says what governs each pull request.
+  const flows = revScopeRepo() ? revFlows.get(revScopeRepo()) : null;
+  if (!flows || flows.read_prs === undefined) return "";
+  const on = !!flows.read_prs;
   return `<button type="button" class="revchip${on ? " on" : ""}"
     title="${on
       ? "skein reads the pull requests waiting on you here, once they have been quiet for an hour"
@@ -2969,7 +3003,7 @@ function revReadChip() {
 }
 
 function revSetReading(on) {
-  const id = revHeld;
+  const id = revScopeRepo();
   if (!id) return;
   fetch(`/api/repos/${encodeURIComponent(id)}/reading`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }),
@@ -3187,7 +3221,8 @@ function revEditHtml() {
 
 // What this pull request's workflow is, in one word for the collapsed line.
 function revFlowChip(pr) {
-  const st = revFlows && revFlows.prs && revFlows.prs[pr.number];
+  const flows = revFlows.get(pr.repo_id);
+  const st = flows && flows.prs && flows.prs[pr.number];
   if (!st || !st.workflow) return "";
   if (st.stopped) {
     return `<span class="revtag stopped" title="${esc(st.stopped)}">${esc(st.workflow)} · stopped</span>`;
@@ -3207,26 +3242,24 @@ function revPumpSummaries() {
     // rule is about what happens on its own, not about what you can have.
     // Settled, and not a draft. Both are the same rule in different clothes: skein spends a reading
     // on its own only where the author has stopped changing the answer.
-    .filter(p => p.lane === "needs-you" && !p.draft && revSettled(p) && !revSums.has(p.number))
-    .map(p => p.number);
+    .filter(p => p.lane === "needs-you" && !p.draft && revSettled(p) && !revSums.has(rk(p)));
   // The allowance is spent on the ANSWER, not on the asking — see `revFetchSummary`. Up to
   // REV_SUM_PARALLEL-1 may be in flight past the limit, which is the price of not blocking; a
   // handful is the overshoot, not a multiple.
   while (revSumBusy < REV_SUM_PARALLEL && revSumAuto < REV_SUM_AUTO && want.length) {
-    revFetchSummary(want.shift());
+    const p = want.shift();
+    revFetchSummary(p.repo_id, p.number);
   }
 }
 
-function revFetchSummary(number, force) {
-  // The repo this queue BELONGS to, never the one the view happens to name. Read from `view.repo`,
-  // any summary the pump started while you were looking at a box asked for
-  // `/api/repos/undefined/review/N/summary`, and the server's honest 404 — "no such repo" — was
-  // written into the row as its reading. The guard below was `view.repo === id`, which is
-  // `undefined === undefined`, so it stored it rather than dropping it.
-  const id = revHeld;
-  if (!id) return;
+function revFetchSummary(id, number, force) {
+  // The repo the ROW belongs to, passed by the row itself — never the one the view happens to
+  // name. The merged queue holds every repo at once, so there is no "current repo" to fall back
+  // on, which is what used to send the pump to `/api/repos/undefined/…`.
+  if (!id || !revHeld) return;
+  const key = id + "#" + number;
   revSumBusy++;
-  revSums.set(number, "…");
+  revSums.set(key, "…");
   renderReview();
   fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/summary${force ? "?force=1" : ""}`)
     .then(async r => {
@@ -3235,8 +3268,8 @@ function revFetchSummary(number, force) {
       return JSON.parse(text);
     })
     .then(s => {
-      if (revHeld !== id) return;   // you switched repos while this was in flight
-      revSums.set(number, s);
+      if (!revHeld) return;   // you left review while this was in flight
+      revSums.set(key, s);
       // **Only what actually cost something.** This counted requests, and a request answered from
       // the cache on disk costs nothing — so a reload spent the whole allowance on free answers and
       // every row past the sixth was never read, on any reload, for ever. Strictly worse than no
@@ -3258,9 +3291,9 @@ function revFetchSummary(number, force) {
       // dropped by the stale-head rule below — by ACCIDENT, because it happens to have no head to
       // compare — and the rule that is supposed to govern this ("a failure to reach is not an
       // answer") would be dead code that nothing could test.
-      if (revHeld === id) revSums.set(number, {
+      if (revHeld) revSums.set(key, {
         number, depth: "unread", line: "", detail: "", flags: [], yours: [], others: 0, transient: true,
-        head_sha: ((revQueue && revQueue.prs || []).find(p => p.number === number) || {}).head_sha,
+        head_sha: ((revQueue && revQueue.prs || []).find(p => p.repo_id === id && p.number === number) || {}).head_sha,
         unread_because: "skein could not reach its own summary for this PR: " + String(e.message || e).split("\n")[0],
       });
     })
@@ -3268,14 +3301,15 @@ function revFetchSummary(number, force) {
 }
 
 function revRow(pr) {
-  const open = revOpen.has(pr.number);
+  const open = revOpen.has(rk(pr));
   const reasons = revReasonLabels(pr).map(r => `<span class="revtag">${esc(r)}</span>`).join("");
-  const s = revSums.get(pr.number);
+  const s = revSums.get(rk(pr));
   // The tripwire marks ride on the collapsed line, because they are the reason to stop scrolling.
   const flags = (s && s !== "…" ? (s.flags || []) : [])
     .map(f => `<span class="revtag flag">${esc(f)}</span>`).join("");
-  const line = `<div class="revline" onclick="toggleRevRow(${pr.number})">
+  const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
       <span class="revdot ${esc(pr.checks || "none")}" title="checks: ${esc(pr.checks || "none")}"></span>
+      ${revRepoFilter ? "" : `<span class="revtag repo">${esc(pr.repo_id || "")}</span>`}
       <span class="revnum">#${pr.number}</span>
       <span class="revtitle">${esc(pr.title || "")}</span>
       ${pr.draft ? `<span class="revtag draft">draft</span>` : ""}
@@ -3314,16 +3348,16 @@ function revBody(pr) {
     </div>
     ${revDetail(pr)}
     <div class="revacts">
-      <button type="button" class="revchip go" onclick="revAct(${pr.number}, 'approve')">approve</button>
-      <button type="button" class="revchip" onclick="revCompose(${pr.number}, 'comment')">comment…</button>
-      <button type="button" class="revchip" onclick="revCompose(${pr.number}, 'request-changes')">request changes…</button>
-      <button type="button" class="revchip" onclick="revCompose(${pr.number}, 'ask')">ask…</button>
+      <button type="button" class="revchip go" onclick="revAct('${esc(pr.repo_id)}', ${pr.number}, 'approve')">approve</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'comment')">comment…</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'request-changes')">request changes…</button>
+      <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
-      <button type="button" class="revchip" onclick="openNewBoxFor('${esc(view.repo)}', ${JSON.stringify(pr.head_ref || "")})">box on this branch</button>
-      <button type="button" class="revchip" onclick="revAct(${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>
-      <button type="button" class="revchip" onclick="archivePr(${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
-      <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">re-read</button>
-      <button type="button" class="revchip" onclick="revCritiqueOpen(${pr.number})">review the code…</button>
+      <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${JSON.stringify(pr.head_ref || "")})">box on this branch</button>
+      <button type="button" class="revchip" onclick="revAct('${esc(pr.repo_id)}', ${pr.number}, 'merge')" title="separate from approving: with a protected base your approval is one of several">merge</button>
+      <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>
+      <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, true)">re-read</button>
+      <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">review the code…</button>
     </div>
     ${revFlowBox(pr)}
     ${revCritiqueHtml(pr)}
@@ -3336,7 +3370,7 @@ function revBody(pr) {
 // A PR skein has not read must never render as an empty, calm space — that reads as "nothing here",
 // which is the one thing it must not mean. So the absence is drawn as loudly as the presence.
 function revDetail(pr) {
-  const s = revSums.get(pr.number);
+  const s = revSums.get(rk(pr));
   if (!s) {
     // Which reason, because three different ones land here and only one of them is a setting to
     // change. "Not read yet" alone reads as a failure on a draft that skein is deliberately leaving
@@ -3352,7 +3386,7 @@ function revDetail(pr) {
               revSettlesIn(pr) ? ` — ${esc(revSettlesIn(pr))}` : ""}. Reading it now describes a commit that is about to be replaced.`
           : " Only the first few in this lane are read for you, so the fleet keeps its rate limit.";
     return `<div class="revnosum">Not read yet.${why}${revQueue && !revQueue.ai ? ""
-      : ` <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">read it</button>`}</div>`;
+      : ` <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, true)">read it</button>`}</div>`;
   }
   if (s === "…") return `<div class="revnosum">reading it…</div>`;
   if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")} Read this one yourself.</div>`;
@@ -3361,7 +3395,7 @@ function revDetail(pr) {
   const stale = s.stale
     ? `<div class="revstale"><b>This was read before the latest commits.</b> It describes
         <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>, and the branch has moved since.
-        <button type="button" class="revchip" onclick="revFetchSummary(${pr.number}, true)">read it again</button></div>`
+        <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, true)">read it again</button></div>`
     : "";
   const owned = (s.yours || []).length
     ? `<div class="revowned">yours: ${(s.yours || []).map(p => `<code>${esc(p)}</code>`).join(" ")}${
@@ -3386,14 +3420,15 @@ function revDetail(pr) {
 // before they can trust it: what it WOULD do (the same evaluator the tick uses, so the preview
 // cannot disagree with what happens), who decided it should — a rule or you — and how to stop it.
 function revFlowBox(pr) {
-  if (!revFlows) return "";
-  if (revFlows.error) {
+  const flows = revFlows.get(pr.repo_id);
+  if (!flows) return "";
+  if (flows.error) {
     // A workflow file with a typo in it loads none of them, deliberately (half an automation is
     // worse than none), and the pull request is the place somebody will notice.
-    return `<div class="revflow"><b>Workflows are not running.</b> ${esc(revFlows.error)}</div>`;
+    return `<div class="revflow"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;
   }
-  const defined = revFlows.defined || [];
-  const st = (revFlows.prs || {})[pr.number] || { workflow: "", how: "none", next: "", step: 0, stopped: "" };
+  const defined = flows.defined || [];
+  const st = (flows.prs || {})[pr.number] || { workflow: "", how: "none", next: "", step: 0, stopped: "" };
   const chosen = st.how === "assigned" ? st.workflow : st.how === "excluded" ? "" : "__rules";
   const options = [
     `<option value="__rules"${chosen === "__rules" ? " selected" : ""}>let the rules decide</option>`,
@@ -3405,7 +3440,7 @@ function revFlowBox(pr) {
   // are deciding whether to let it run.
   const where = st.stopped
     ? `<div class="revflow-stop"><b>Stopped.</b> ${esc(st.stopped)}
-        <button type="button" class="revchip" onclick="revClearStop(${pr.number})">let it run again</button></div>`
+        <button type="button" class="revchip" onclick="revClearStop('${esc(pr.repo_id)}', ${pr.number})">let it run again</button></div>`
     : !st.workflow
       ? `<div class="dim">Nothing governs this pull request${st.how === "excluded" ? " — you left it out" : ""}.</div>`
       : st.next
@@ -3415,27 +3450,39 @@ function revFlowBox(pr) {
 
   // Said once, here, rather than on every row: with the switch off none of this acts, and a person
   // reading "next: merge" deserves to know whether that is a plan or a prediction.
-  const off = revFlows.enabled === false && st.workflow
+  const off = flows.enabled === false && st.workflow
     ? `<div class="revflow-off">Workflows are switched off for this fleet, so nothing will happen on its own.</div>`
     : "";
 
   return `<div class="revflow">
     <div class="revflow-head"><span>workflow</span>
-      <select aria-label="Workflow for this pull request" onchange="revSetWorkflow(${pr.number}, this.value)">${options}</select>
+      <select aria-label="Workflow for this pull request" onchange="revSetWorkflow('${esc(pr.repo_id)}', ${pr.number}, this.value)">${options}</select>
     </div>${where}${off}
   </div>`;
 }
 
 // The composer: one box for the three things that need words. `ask` stays private; the other two
 // post under your name, which is why the button that sends them says so.
-let revComposing = null;   // { number, kind, text, answer, busy }
+let revComposing = null;   // { repo, number, kind, text, answer, busy }
 
 // The actual-review panel, per PR: skein drafts comments, YOU keep/drop/edit each one, and only
 // what survives is posted — the server never posts what it stored, only what this pane sends.
-let revCrits = new Map();  // number -> { open, busy, posting, critique, drop:Set, posted }
+let revCrits = new Map();  // rk(pr) -> { open, busy, posting, critique, drop:Set, posted }
 
-function revCompose(number, kind) {
-  revComposing = { number, kind, text: "", answer: "", busy: false };
+// What you typed survives a reload. Reported live on PR 577: notes were written, a draft came
+// back, the page was reloaded — and both were gone, because the composer was pure page state.
+// Saved per (repo, PR, kind) on every keystroke and every draft, restored on reopen, cleared only
+// when the thing is actually posted.
+function revComposeStore(c) { return `skein.revdraft.${c.repo}#${c.number}.${c.kind}`; }
+function revComposeSave() {
+  const c = revComposing;
+  if (!c) return;
+  try { localStorage.setItem(revComposeStore(c), JSON.stringify({ text: c.text, answer: c.answer })); } catch {}
+}
+function revCompose(repo, number, kind) {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(revComposeStore({ repo, number, kind })) || "null"); } catch {}
+  revComposing = { repo, number, kind, text: (saved && saved.text) || "", answer: (saved && saved.answer) || "", busy: false };
   renderReview();
   setTimeout(() => document.getElementById("rev-compose")?.focus(), 30);
 }
@@ -3443,7 +3490,7 @@ function revComposeClose() { revComposing = null; renderReview(); }
 
 function revComposeHtml(pr) {
   const c = revComposing;
-  if (!c || c.number !== pr.number) return "";
+  if (!c || c.number !== pr.number || c.repo !== pr.repo_id) return "";
   const asking = c.kind === "ask";
   const label = asking ? "Ask about this PR — the answer stays between you and skein."
     : c.kind === "comment" ? "Comment — posted to GitHub under your name."
@@ -3451,13 +3498,13 @@ function revComposeHtml(pr) {
   return `<div class="revcompose">
     <div class="revcl">${esc(label)}</div>
     <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
-      oninput="revComposing.text = this.value">${esc(c.text)}</textarea>
+      oninput="revComposing.text = this.value; revComposeSave()">${esc(c.text)}</textarea>
     ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
     <div class="revacts">
       ${asking
         ? `<button type="button" class="revchip go" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "thinking…" : "ask"}</button>`
         : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
-           <button type="button" class="revchip go" onclick="revAct(${pr.number}, '${c.kind}')"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
+           <button type="button" class="revchip go" onclick="revAct('${esc(pr.repo_id)}', ${pr.number}, '${c.kind}')"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
     </div>
   </div>`;
@@ -3468,9 +3515,9 @@ function revAsk(number) {
   const c = revComposing;
   if (!c || !c.text.trim()) { toast("ask something first"); return; }
   c.busy = true; renderReview();
-  revPost(number, "ask", c.text).then(d => {
+  revPost(c.repo, number, "ask", c.text).then(d => {
     c.busy = false;
-    if (d.ok) c.answer = d.text; else toast(d.error || "no answer");
+    if (d.ok) { c.answer = d.text; revComposeSave(); } else toast(d.error || "no answer");
     renderReview();
   });
 }
@@ -3481,15 +3528,15 @@ function revDraft(number) {
   const c = revComposing;
   if (!c || !c.text.trim()) { toast("say roughly what you want to tell them"); return; }
   c.busy = true; renderReview();
-  revPost(number, "draft", c.text).then(d => {
+  revPost(c.repo, number, "draft", c.text).then(d => {
     c.busy = false;
-    if (d.ok) c.text = d.text; else toast(d.error || "could not draft");
+    if (d.ok) { c.text = d.text; revComposeSave(); } else toast(d.error || "could not draft");
     renderReview();
   });
 }
 
-function revPost(number, kind, body) {
-  return fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/act`, {
+function revPost(repo, number, kind, body) {
+  return fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/act`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ kind, body: body || "" }),
   }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }));
@@ -3498,12 +3545,15 @@ function revPost(number, kind, body) {
 /// The acts that reach GitHub under your name. Merge asks first — it is the one thing here that
 /// cannot be undone from this pane, and an approval you did not mean is a sentence to your
 /// colleague where a merge you did not mean is a commit on the base branch.
-function revAct(number, kind) {
+function revAct(repo, number, kind) {
   if (kind === "merge" && !confirm(`Merge #${number}?\n\nThis lands it on the base branch. Approving is separate and has already happened if you did it.`)) return;
-  const body = revComposing && revComposing.number === number ? revComposing.text : "";
-  revPost(number, kind, body).then(d => {
+  const mine = revComposing && revComposing.number === number && revComposing.repo === repo;
+  const body = mine ? revComposing.text : "";
+  revPost(repo, number, kind, body).then(d => {
     if (!d.ok) { toast(d.error || "that did not go through"); return; }
     toast(`#${number} ${d.text}`);
+    // Posted for real: the saved draft has done its job and must not resurface on the next open.
+    if (mine) { try { localStorage.removeItem(revComposeStore(revComposing)); } catch {} }
     revComposing = null;
     loadReview(true);
   });
@@ -3511,24 +3561,25 @@ function revAct(number, kind) {
 
 // --- The actual review: drafted comments you vet, then post -----------------------------------
 
-function revCritiqueOpen(number) {
-  const had = revCrits.get(number);
+function revCritiqueOpen(repo, number) {
+  const key = repo + "#" + number;
+  const had = revCrits.get(key);
   if (had && had.open) { had.open = false; renderReview(); return; }
   const c = { open: true, busy: true, posting: false, critique: null, drop: new Set(), posted: "" };
-  revCrits.set(number, c);
+  revCrits.set(key, c);
   renderReview();
   // What skein already holds, off disk — drafting is a separate, deliberate press.
-  fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/critique`)
+  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/critique`)
     .then(r => r.json()).catch(() => ({}))
     .then(d => { c.busy = false; c.critique = d.critique || null; renderReview(); });
 }
 
-function revCritiqueDraft(number) {
-  const c = revCrits.get(number);
+function revCritiqueDraft(repo, number) {
+  const c = revCrits.get(repo + "#" + number);
   if (!c || c.busy) return;
   c.busy = true; c.critique = null; c.drop = new Set(); c.posted = "";
   renderReview();
-  fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/critique`, { method: "POST" })
+  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/critique`, { method: "POST" })
     .then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }))
     .then(d => {
       c.busy = false;
@@ -3537,22 +3588,22 @@ function revCritiqueDraft(number) {
     });
 }
 
-function revCritKeep(number, i, keep) {
-  const c = revCrits.get(number);
+function revCritKeep(key, i, keep) {
+  const c = revCrits.get(key);
   if (!c) return;
   if (keep) c.drop.delete(i); else c.drop.add(i);
   renderReview();
 }
 
-function revCritiquePost(number, headSha) {
-  const c = revCrits.get(number);
+function revCritiquePost(repo, number, headSha) {
+  const c = revCrits.get(repo + "#" + number);
   if (!c || !c.critique || c.posting) return;
   const kept = c.critique.comments.filter((_, i) => !c.drop.has(i));
   const n = kept.length;
   if (!n && !(c.critique.overall || "").trim()) { toast("nothing kept — keep a comment or write an overall note"); return; }
   if (!confirm(`Post ${n} comment${n === 1 ? "" : "s"} on #${number} as one review, under your name?`)) return;
   c.posting = true; renderReview();
-  fetch(`/api/repos/${encodeURIComponent(view.repo)}/review/${number}/critique/post`, {
+  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/critique/post`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ head_sha: headSha, overall: c.critique.overall || "", comments: kept }),
   }).then(r => r.json()).catch(e => ({ ok: false, error: String(e.message || e).split("\n")[0] }))
@@ -3565,16 +3616,17 @@ function revCritiquePost(number, headSha) {
 }
 
 function revCritiqueHtml(pr) {
-  const c = revCrits.get(pr.number);
+  const key = rk(pr);
+  const c = revCrits.get(key);
   if (!c || !c.open) return "";
-  const close = `<button type="button" class="revchip" onclick="revCritiqueOpen(${pr.number})">close</button>`;
+  const close = `<button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">close</button>`;
   if (c.busy) return `<div class="revcrit"><div class="dim">${c.critique === null && !c.posted
     ? "reviewing the code… this reads the whole diff, so it can take a few minutes" : "…"}</div></div>`;
   if (!c.critique) {
     return `<div class="revcrit"><div>Skein reads the diff and drafts review comments — only actual
       problems, never nits. You go through them, keep or drop each one, edit freely, and nothing
       reaches GitHub until you post.</div>
-      <div class="revacts"><button type="button" class="revchip go" onclick="revCritiqueDraft(${pr.number})">review the code</button>${close}</div></div>`;
+      <div class="revacts"><button type="button" class="revchip go" onclick="revCritiqueDraft('${esc(pr.repo_id)}', ${pr.number})">review the code</button>${close}</div></div>`;
   }
   const k = c.critique;
   // A review of one commit is never offered against another: the server refuses too, but the honest
@@ -3587,34 +3639,48 @@ function revCritiqueHtml(pr) {
   const cut = k.truncated ? `<div class="dim">The diff was cut at the byte cap — this reviewed part of the change.</div>` : "";
   const rows = (k.comments || []).map((d, i) => `
     <div class="revcrit-row${c.drop.has(i) ? " dropped" : ""}">
-      <label><input type="checkbox"${c.drop.has(i) ? "" : " checked"} onchange="revCritKeep(${pr.number}, ${i}, this.checked)">
+      <label><input type="checkbox"${c.drop.has(i) ? "" : " checked"} onchange="revCritKeep('${esc(key)}', ${i}, this.checked)">
         <code>${esc(d.path)}${d.anchored ? `:${d.line}` : ""}</code>
         ${d.anchored ? "" : `<span class="revtag" title="the diff shows no such line, so this cannot sit on one">will travel in the review body</span>`}</label>
-      <textarea rows="2" oninput="revCrits.get(${pr.number}).critique.comments[${i}].text = this.value"${c.drop.has(i) ? " disabled" : ""}>${esc(d.text)}</textarea>
+      <textarea rows="2" oninput="revCrits.get('${esc(key)}').critique.comments[${i}].text = this.value"${c.drop.has(i) ? " disabled" : ""}>${esc(d.text)}</textarea>
     </div>`).join("");
   const keptN = (k.comments || []).length - c.drop.size;
   return `<div class="revcrit">
     ${staleNote}${cut}
     <div class="revcl">Overall note — leads the review. Skein said: ${k.comments && k.comments.length ? "" : "<b>nothing to flag.</b>"}</div>
-    <textarea rows="2" oninput="revCrits.get(${pr.number}).critique.overall = this.value">${esc(k.overall || "")}</textarea>
+    <textarea rows="2" oninput="revCrits.get('${esc(key)}').critique.overall = this.value">${esc(k.overall || "")}</textarea>
     ${rows}
     <div class="revacts">
       ${c.posted
         ? `<span class="dim">${esc(c.posted)} ✓</span>`
-        : `<button type="button" class="revchip go" onclick="revCritiquePost(${pr.number}, ${JSON.stringify(k.head_sha || "")})"${stale || c.posting ? " disabled" : ""}>${c.posting ? "posting…" : `post ${keptN} comment${keptN === 1 ? "" : "s"} as one review`}</button>`}
-      <button type="button" class="revchip" onclick="revCritiqueDraft(${pr.number})">draft again</button>
+        : `<button type="button" class="revchip go" onclick="revCritiquePost('${esc(pr.repo_id)}', ${pr.number}, ${JSON.stringify(k.head_sha || "")})"${stale || c.posting ? " disabled" : ""}>${c.posting ? "posting…" : `post ${keptN} comment${keptN === 1 ? "" : "s"} as one review`}</button>`}
+      <button type="button" class="revchip" onclick="revCritiqueDraft('${esc(pr.repo_id)}', ${pr.number})">draft again</button>
       ${close}
     </div>
   </div>`;
 }
 
-function toggleRevRow(n) {
-  if (revOpen.has(n)) revOpen.delete(n); else revOpen.add(n);
+function toggleRevRow(key) {
+  if (revOpen.has(key)) { revOpen.delete(key); renderReview(); return; }
+  revOpen.add(key);
   renderReview();
+  // A drafted review that survived a reload must not look gone (reported live on PR 577: the model
+  // call outlived the page, the draft landed on disk, and the panel sat closed saying nothing). If
+  // a stored draft exists for this row, the panel opens itself with it — a disk read, never a
+  // model call.
+  const [repo, number] = [key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1))];
+  if (!revCrits.has(key)) {
+    fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/critique`)
+      .then(r => r.json()).catch(() => ({}))
+      .then(d => {
+        if (!d || !d.critique || revCrits.has(key)) return;
+        revCrits.set(key, { open: true, busy: false, posting: false, critique: d.critique, drop: new Set(), posted: "" });
+        renderReview();
+      });
+  }
 }
 
-function archivePr(n, on) {
-  const id = view.repo;
+function archivePr(id, n, on) {
   fetch(`/api/repos/${encodeURIComponent(id)}/review/${n}/archive`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ on })
   }).then(r => r.json()).then(d => {
