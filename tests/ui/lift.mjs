@@ -4,6 +4,7 @@
 //
 // Shared by `voice.mjs` and `tabs.mjs`. It lives here rather than being copied into each because it
 // is a brace matcher, and two copies of a subtle brace matcher is one that quietly drifts.
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -37,6 +38,28 @@ export function grab(name) {
     }
   }
   throw new Error(`could not lift \`${name}\` out of index.html — did it get renamed?`);
+}
+
+// The `skein-server` binary the browser suites drive — one resolver, because the build policy is
+// the part that must not drift between them.
+//
+// Each suite used to run `cargo build --bin skein-server` itself, which under `cargo test` meant a
+// second cargo re-taking the build-directory lock and re-walking the dependency graph mid-run — on
+// a box where other builds share that lock, an open-ended stall and a burst of load right as the
+// suites' own timeouts start ticking. That contention is SKEIN-119: review.mjs failed its
+// ownership check about one workspace run in four, and never standalone.
+//
+// So there are two paths, and both must keep working:
+// - Driven from tests/browser_suites.rs, SKEIN_SERVER_BIN names the binary the surrounding
+//   `cargo test` has ALREADY built (`CARGO_BIN_EXE_skein-server`), and no cargo runs here at all.
+// - Run by hand (`node tests/ui/review.mjs`), the variable is absent and the build happens here,
+//   exactly as before — a fresh checkout still needs only the one command.
+export function serverBinary() {
+  const given = process.env.SKEIN_SERVER_BIN;
+  if (given) return given;
+  const build = spawnSync("cargo", ["build", "--bin", "skein-server"], { cwd: root, stdio: "inherit" });
+  if (build.status !== 0) throw new Error("cargo build failed");
+  return join(root, "target", "debug", "skein-server");
 }
 
 // The tiny assert harness both suites share.

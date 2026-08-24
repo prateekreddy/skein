@@ -57,6 +57,15 @@ fn repo() -> &'static Path {
 fn run(suite: &str) -> Option<(bool, String)> {
     let out = Command::new("node")
         .arg(format!("tests/ui/{suite}.mjs"))
+        // The `skein-server` this `cargo test` has already built — compiling this test file is what
+        // forces cargo to build it (`env!` would not resolve otherwise), so the path exists before
+        // any suite runs. Handing it over is what stops the browser suites running `cargo build`
+        // themselves: a second cargo inside this one re-takes the build-directory lock — shared, on
+        // a busy box, with every other build — and re-walks the dependency graph, and that stall
+        // plus burst of load right as the suites' timeouts start ticking is what made review.mjs
+        // fail its ownership check about one workspace run in four, never standalone (SKEIN-119).
+        // Run by hand, `node tests/ui/<suite>.mjs` has no such variable and builds for itself.
+        .env("SKEIN_SERVER_BIN", env!("CARGO_BIN_EXE_skein-server"))
         .current_dir(repo())
         .output()
         .ok()?;
@@ -71,10 +80,12 @@ fn run(suite: &str) -> Option<(bool, String)> {
 /// The tail of a suite's output — the part that says what failed.
 ///
 /// Whole output would bury the answer: `smoke` prints 57 lines when it is happy. The failures are at
-/// the end, and every one of these suites ends with its own summary.
+/// the end, and every one of these suites ends with its own summary. 40 lines rather than 25 because
+/// a failing browser suite now ends with the server's own stderr as well (`skein: reading acme: …`
+/// is often the entire diagnosis), and the window has to hold both that and the failed checks.
 fn tail(said: &str) -> String {
     let lines: Vec<&str> = said.lines().collect();
-    lines[lines.len().saturating_sub(25)..].join("\n")
+    lines[lines.len().saturating_sub(40)..].join("\n")
 }
 
 /// Is Playwright's chromium actually installed, rather than just listed in a package.json?

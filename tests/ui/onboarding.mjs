@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { serverBinary } from "./lift.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const API_TOKEN = "t".repeat(64);
@@ -148,9 +149,10 @@ const freePort = () => new Promise(res => {
 });
 
 async function startServer(fx, port, wardenPort) {
-  const build = spawnSync("cargo", ["build", "--bin", "skein-server"], { cwd: REPO, stdio: "inherit" });
-  if (build.status !== 0) throw new Error("cargo build failed");
-  const srv = spawn(path.join(REPO, "target/debug/skein-server"), {
+  // serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built
+  // via SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the
+  // load that made the review suite flake (SKEIN-119 — the story is on serverBinary in lift.mjs).
+  const srv = spawn(serverBinary(), {
     cwd: REPO,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
@@ -457,7 +459,11 @@ const failed = results.filter(([ok]) => !ok);
 if (failed.length) {
   console.log(`\nserver log:\n${log().split("\n").slice(-25).join("\n")}`);
 }
-console.log(failed.length ? `\n${failed.length} of ${results.length} checks failed` : `\nall ${results.length} checks passed`);
+// Failed checks named at the very end, after the server log, so a truncated view (browser_suites.rs
+// shows only the tail) still says which checks died.
+console.log(failed.length
+  ? `\n${failed.length} of ${results.length} checks failed:\n${failed.map(([, n]) => `  ✗ ${n}`).join("\n")}`
+  : `\nall ${results.length} checks passed`);
 await browser.close();
 srv.kill();
 warden.server.close();

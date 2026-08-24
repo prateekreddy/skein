@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { serverBinary } from "./lift.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BOX = "smoke-box";
@@ -146,9 +147,10 @@ const freePort = () => new Promise(res => {
 });
 
 async function startServer(fx, port) {
-  const build = spawnSync("cargo", ["build", "--bin", "skein-server"], { cwd: REPO, stdio: "inherit" });
-  if (build.status !== 0) throw new Error("cargo build failed");
-  const srv = spawn(path.join(REPO, "target/debug/skein-server"), {
+  // serverBinary() only builds when run by hand; under `cargo test` the binary arrives pre-built
+  // via SKEIN_SERVER_BIN, because a nested cargo fighting the outer one for the build lock is the
+  // load that made the review suite flake (SKEIN-119 — the story is on serverBinary in lift.mjs).
+  const srv = spawn(serverBinary(), {
     cwd: REPO,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
@@ -169,7 +171,9 @@ async function startServer(fx, port) {
   srv.stdout.on("data", d => { log += d; });
   srv.stderr.on("data", d => { log += d; });
   for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) return srv; } catch {}
+    // The log goes back with the process: the server narrates its failures on stderr, and a suite
+    // that swallows that makes every downstream check fail without its diagnosis.
+    try { if ((await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers: authHeader() })).ok) return { srv, log: () => log }; } catch {}
     await new Promise(r => setTimeout(r, 100));
   }
   srv.kill();
@@ -199,7 +203,7 @@ const openTab = async mode => { await page.evaluate(m => showBox(BOXNAME, m), mo
 // ---------- run ----------
 const fx = makeFixture();
 const port = await freePort();
-const srv = await startServer(fx, port);
+const { srv, log } = await startServer(fx, port);
 const browser = await chromium.launch();
 page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 // A failing check must report in seconds, not sit on Playwright's 30s default: when the page is
@@ -841,7 +845,12 @@ const failed = results.filter(([ok]) => !ok);
 if (failed.length) {
   const shot = path.join(fx.root, "failure.png");
   await page.screenshot({ path: shot, fullPage: false });
-  console.log(`\n${failed.length} of ${results.length} checks failed`);
+  // The server's own account of the run — its stderr carries the diagnosis no assertion can see.
+  console.log(`\nserver log:\n${log().split("\n").slice(-25).join("\n")}`);
+  // Named here as well as inline, because the inline FAIL lines sit above the server log and a
+  // truncated view (browser_suites.rs shows only the tail) would otherwise lose which checks died.
+  console.log(`\n${failed.length} of ${results.length} checks failed:`);
+  for (const [, name] of failed) console.log(`  ✗ ${name}`);
   console.log(`screenshot: ${shot}\nfixture kept for inspection: ${fx.root}`);
 } else {
   console.log(`\nall ${results.length} checks passed`);

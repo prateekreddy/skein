@@ -31,38 +31,92 @@ fn token_home(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-/// One request over a fresh `Connection: close` socket → (status, full raw response incl. headers).
-fn http_get(addr: &str, path: &str) -> (u16, String) {
-    let mut s = TcpStream::connect(addr).unwrap();
-    s.write_all(
-        format!(
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\
-             Connection: close\r\n\r\n"
-        )
-        .as_bytes(),
-    )
-    .unwrap();
+/// How many times a request is tried, and the pause before try n+1 (`BACKOFF * n`).
+///
+/// SKEIN-173: under a loaded machine one run died inside `http_post` — `read_to_end` hit a dropped
+/// connection, the bare `unwrap` panicked, and the suite failed on a socket accident instead of an
+/// assertion (707/707 green on re-run). A dropped connection is not what any test here tests, so
+/// the helpers retry it a bounded number of times; what they must never do, on any path, is fail
+/// without naming the request that died and the socket error that killed it — an anonymous panic
+/// teaches people to re-run instead of read.
+const TRIES: u32 = 3;
+const BACKOFF: Duration = Duration::from_millis(200);
+
+/// Send one raw request on a fresh socket and read to EOF. Every socket-level failure comes back
+/// as `Err` — including a response so truncated it has no status line, which is the same dropped
+/// connection wearing a different face — so the caller can retry all of them the same way.
+fn send_once(addr: &str, raw: &[u8]) -> std::io::Result<(u16, String)> {
+    let mut s = TcpStream::connect(addr)?;
+    s.write_all(raw)?;
     let mut buf = Vec::new();
-    s.read_to_end(&mut buf).unwrap();
+    s.read_to_end(&mut buf)?;
     let text = String::from_utf8_lossy(&buf).into_owned();
     let status = text
         .lines()
         .next()
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse().ok())
-        .unwrap();
-    (status, text)
+        .ok_or_else(|| {
+            std::io::Error::other(format!("no status line in a {}-byte response", buf.len()))
+        })?;
+    Ok((status, text))
+}
+
+/// The retry wrapper under `http_get` and `http_post`. `what` names the request being made
+/// ("GET /api/boxes") and appears in the panic, with the last socket error, when every try failed.
+fn send(addr: &str, what: &str, raw: &[u8]) -> (u16, String) {
+    let mut last = None;
+    for attempt in 1..=TRIES {
+        match send_once(addr, raw) {
+            Ok(got) => return got,
+            Err(e) => last = Some(e),
+        }
+        if attempt < TRIES {
+            std::thread::sleep(BACKOFF * attempt);
+        }
+    }
+    panic!(
+        "{what} to {addr} failed {TRIES} times; last error: {}",
+        last.unwrap()
+    );
+}
+
+/// One request over a fresh `Connection: close` socket → (status, full raw response incl. headers).
+fn http_get(addr: &str, path: &str) -> (u16, String) {
+    let raw = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    send(addr, &format!("GET {path}"), raw.as_bytes())
 }
 
 /// One GET that reads for at most `patience` — for a stream, which never closes.
 fn http_get_for(addr: &str, path: &str, patience: Duration) -> (u16, String) {
-    let mut s = TcpStream::connect(addr).unwrap();
-    s.set_read_timeout(Some(patience)).unwrap();
-    s.write_all(
-        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\r\n")
-            .as_bytes(),
-    )
-    .unwrap();
+    let raw =
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\r\n");
+    let mut last = None;
+    for attempt in 1..=TRIES {
+        match stream_once(addr, raw.as_bytes(), patience) {
+            Ok(got) => return got,
+            Err(e) => last = Some(e),
+        }
+        if attempt < TRIES {
+            std::thread::sleep(BACKOFF * attempt);
+        }
+    }
+    panic!(
+        "GET {path} (stream) to {addr} failed {TRIES} times; last error: {}",
+        last.unwrap()
+    );
+}
+
+/// One attempt at a stream read. `Err` only when the connection died before a single byte arrived
+/// — the retryable shape. Once bytes are in hand they are returned whatever ends the read, because
+/// partial evidence in an assertion message beats a retry that throws it away.
+fn stream_once(addr: &str, raw: &[u8], patience: Duration) -> std::io::Result<(u16, String)> {
+    let mut s = TcpStream::connect(addr)?;
+    s.set_read_timeout(Some(patience))?;
+    s.write_all(raw)?;
     // **Bounded, not read-to-end.** A stream does not end, and a producer that keeps sending keeps
     // `read_to_end` reading — which is a test that hangs rather than one that fails. Enough bytes
     // for the headers and the opening event is the whole question here.
@@ -79,6 +133,16 @@ fn http_get_for(addr: &str, path: &str, patience: Duration) -> (u16, String) {
                     break;
                 }
             }
+            // Patience ran out: the normal end of reading a quiet stream, not a dead socket.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break
+            }
+            Err(e) if got == 0 => return Err(e),
             Err(_) => break,
         }
     }
@@ -90,32 +154,23 @@ fn http_get_for(addr: &str, path: &str, patience: Duration) -> (u16, String) {
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
-    (status, text)
+    Ok((status, text))
 }
 
 /// One POST with a raw body + headers → (status, full raw response).
+///
+/// A retried POST is re-sent whole. In the sliver where the first attempt was applied and only its
+/// response was lost, the second answer reports the collision and the caller's assertion prints it
+/// — a named failure, which is still strictly better than the socket panic it replaces.
 fn http_post(addr: &str, path: &str, headers: &str, body: &[u8]) -> (u16, String) {
-    let mut s = TcpStream::connect(addr).unwrap();
-    s.write_all(
-        format!(
-            "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\
-             Connection: close\r\nContent-Length: {}\r\n{headers}\r\n",
-            body.len()
-        )
-        .as_bytes(),
+    let mut raw = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {API_TOKEN}\r\n\
+         Connection: close\r\nContent-Length: {}\r\n{headers}\r\n",
+        body.len()
     )
-    .unwrap();
-    s.write_all(body).unwrap();
-    let mut buf = Vec::new();
-    s.read_to_end(&mut buf).unwrap();
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    let status = text
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|c| c.parse().ok())
-        .unwrap();
-    (status, text)
+    .into_bytes();
+    raw.extend_from_slice(body);
+    send(addr, &format!("POST {path}"), &raw)
 }
 
 /// Kill the server when the test ends, however it ends.
