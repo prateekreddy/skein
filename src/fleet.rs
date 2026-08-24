@@ -4619,6 +4619,87 @@ fn carries_login(bytes: &[u8]) -> bool {
     has(v.get("claudeAiOauth")) || has(v.get("tokens")) || has(Some(&v))
 }
 
+/// What the host holds for one runtime — three-valued, because two of the states used to be one.
+///
+/// [`carries_login`] answers "is there a login here" and nothing else; it never looks at expiry.
+/// That was the right question for propagation (a dead token still seeds boxes — a heal can replace
+/// it, where nothing can replace a void) and the wrong one for reporting: on a fleet-wide logout
+/// every surface said "signed in", so the symptom read as "each box needs a login" instead of "the
+/// fleet's credential is dead". This type is the reporting answer; propagation keeps asking
+/// [`carries_login`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginState {
+    /// A credential a box can use, or refresh into one.
+    Live,
+    /// Tokens are present but the refresh token died then — every box holds the same dead one,
+    /// and the fix is one `skein login`, not one per box.
+    Expired { at_ms: i64 },
+    /// No credential: missing file, unparseable, or a logout's husk with its tokens blanked.
+    Absent,
+}
+
+/// Judge one credentials file, against `now_ms`.
+///
+/// **`refreshTokenExpiresAt`, not `expiresAt`** — the same eyes as the launcher's heal script
+/// (`life()` in [`heal_logins_script`]) and as [`refreshable_login_at`]: the access token expires
+/// in hours and is renewed without being asked, so a past `expiresAt` is the ordinary state of a
+/// healthy login. Like the heal script, only a positive number counts as a recorded expiry, and a
+/// shape that records none is `Live` — the honest reading of "it did not say" is not "it is dead".
+/// The block that carries the tokens is the block whose expiry is believed, first one wins, which
+/// is the heal script's walk exactly; `the_host_and_the_launcher_agree_on_what_a_login_is` holds
+/// the two implementations together.
+fn login_state(bytes: &[u8], now_ms: i64) -> LoginState {
+    if !carries_login(bytes) {
+        return LoginState::Absent;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return LoginState::Absent;
+    };
+    for block in [v.get("claudeAiOauth"), v.get("tokens"), Some(&v)]
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b.as_object())
+    {
+        let carries = LOGIN_KEYS.iter().any(|k| {
+            block
+                .get(*k)
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| !t.trim().is_empty())
+        });
+        if !carries {
+            continue;
+        }
+        let dies = ["refreshTokenExpiresAt", "refresh_token_expires_at"]
+            .iter()
+            .filter_map(|k| block.get(*k).and_then(|d| d.as_i64()).filter(|d| *d > 0))
+            .next();
+        return match dies {
+            Some(at_ms) if at_ms <= now_ms => LoginState::Expired { at_ms },
+            _ => LoginState::Live,
+        };
+    }
+    // Unreachable while `carries_login` and the walk above agree on what carrying means — but if
+    // they ever drift, declining to report a login is the direction that only under-claims.
+    LoginState::Absent
+}
+
+/// One runtime's login as the host reports it. Reporting only — nothing that seeds or heals reads
+/// this; those paths keep [`carries_login`] and [`heal_logins_script`]'s own judgement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLogin {
+    pub runtime: &'static str,
+    pub state: LoginState,
+}
+
+/// A runtime whose kept credential has died, and when — the "when" is what turns "each box wants a
+/// login" into "the fleet's credential died Tuesday". Serialized into `/api/health`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExpiredLogin {
+    pub runtime: String,
+    /// RFC3339, UTC.
+    pub expired_at: String,
+}
+
 /// Keep the fleet's login on the host, and put it back into a sandbox that has none.
 ///
 /// `skein login` writes into the sandbox's own HOME, which is VM-local — so a resize destroyed it
@@ -5043,24 +5124,57 @@ pub fn login_home() -> Option<std::path::PathBuf> {
     refreshable_login_at(&home).then_some(home)
 }
 
-/// Which runtimes have a login the fleet can hand to a new box.
+/// Every runtime the fleet could hold a login for, each with its [`LoginState`].
 ///
 /// Read from the host's own copy under `fleet-home`, not from the sandbox: this answers the first
 /// question a new user has ("did `skein login` work?") and it must answer it with the fleet down,
-/// during setup, before any box exists. `carries_login` rather than "the file is there", because a
-/// logged-out agent leaves the file in place with its tokens blanked.
-pub fn signed_in_runtimes() -> Vec<String> {
+/// during setup, before any box exists.
+pub fn runtime_logins() -> Vec<RuntimeLogin> {
     let dir = fleet_home_dir();
+    let now_ms = chrono::Utc::now().timestamp_millis();
     LOGIN_FILES
         .iter()
-        .filter(|rel| {
-            std::fs::read(dir.join(rel))
-                .map(|b| carries_login(&b))
-                .unwrap_or(false)
+        .map(|rel| RuntimeLogin {
+            runtime: match rel.starts_with(".codex") {
+                true => "codex",
+                false => "claude",
+            },
+            state: match std::fs::read(dir.join(rel)) {
+                Ok(bytes) => login_state(&bytes, now_ms),
+                Err(_) => LoginState::Absent,
+            },
         })
-        .map(|rel| match rel.starts_with(".codex") {
-            true => "codex".to_string(),
-            false => "claude".to_string(),
+        .collect()
+}
+
+/// Which runtimes have a login the fleet can hand to a new box **that still works**.
+///
+/// [`LoginState::Live`] only. An expired credential is deliberately not "signed in": reporting it
+/// as one is how a fleet-wide logout read as "each box needs a login". It is also not dropped from
+/// what flows — seeding and healing keep the dead token, which a heal can refresh where a void
+/// cannot be; [`expired_logins`] is where it is reported instead.
+pub fn signed_in_runtimes() -> Vec<String> {
+    runtime_logins()
+        .into_iter()
+        .filter(|l| matches!(l.state, LoginState::Live))
+        .map(|l| l.runtime.to_string())
+        .collect()
+}
+
+/// The runtimes whose kept credential has died, with when — see [`ExpiredLogin`].
+pub fn expired_logins() -> Vec<ExpiredLogin> {
+    runtime_logins()
+        .into_iter()
+        .filter_map(|l| match l.state {
+            LoginState::Expired { at_ms } => Some(ExpiredLogin {
+                runtime: l.runtime.to_string(),
+                expired_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at_ms)
+                    .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                    // A timestamp outside chrono's range is still a death date, just not a sayable
+                    // one; the raw milliseconds beat inventing a calendar date.
+                    .unwrap_or_else(|| format!("{at_ms}ms")),
+            }),
+            _ => None,
         })
         .collect()
 }
@@ -6363,6 +6477,13 @@ b idle 5000000 4 1048576 1048576
     ///
     /// The mcpOAuth case is the one worth having: those grants SURVIVE a logout, so counting them
     /// would make every husk look like a login and put the original bug straight back.
+    ///
+    /// **And they must not disagree about what a DEAD login is.** The second phase drives the heal
+    /// script's own `life()` — the judgement that decides what propagates — against the host's
+    /// [`login_state`], on `refreshTokenExpiresAt`. The host side went years asking only "is a
+    /// token string non-empty", so a credential that expired days ago reported as signed in and a
+    /// fleet-wide logout read as "each box needs a login" instead of "the fleet's credential is
+    /// dead".
     #[test]
     fn the_host_and_the_launcher_agree_on_what_a_login_is() {
         let dir = tempdir();
@@ -6413,6 +6534,94 @@ b idle 5000000 4 1048576 1048576
                 carries_login(body.as_bytes()),
                 want,
                 "the host disagrees about `{body}`"
+            );
+        }
+
+        // Phase two: expiry. The launcher-side judge with expiry eyes is the heal script's
+        // `life()`, extracted from the very string [`heal_logins`] executes — a copy here would be
+        // the drift this test exists to prevent. Its trailing driver (which WRITES files) is cut
+        // at the `paths =` line and replaced with one that only asks.
+        let script = heal_logins_script();
+        let judge = script
+            .split_once("<<'SKEIN_HEAL'\n")
+            .expect("the heal script embeds its python in a SKEIN_HEAL heredoc")
+            .1
+            .split_once("\nSKEIN_HEAL")
+            .expect("the SKEIN_HEAL heredoc is unterminated")
+            .0
+            .split_once("\npaths = sys.argv[1:]")
+            .expect("the heal python no longer ends in the driver this test cuts off")
+            .0
+            .to_string()
+            + "\nprint('alive' if life(sys.argv[1]) is not None else 'dead')\n";
+        // 1_000_000_000_000 is 2001 (dead under any clock this test runs on);
+        // 253402300799000 is year 9999.
+        const PAST: i64 = 1_000_000_000_000;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let expiries: [(&str, LoginState, &str); 7] = [
+            (
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r","refreshTokenExpiresAt":253402300799000}}"#,
+                LoginState::Live,
+                "alive",
+            ),
+            (
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r","refreshTokenExpiresAt":1000000000000}}"#,
+                LoginState::Expired { at_ms: PAST },
+                "dead",
+            ),
+            // No expiry recorded: an older shape, and "it did not say" is not "it is dead".
+            (
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r"}}"#,
+                LoginState::Live,
+                "alive",
+            ),
+            // The doctrine case: a past `expiresAt` is the ordinary state of a healthy login —
+            // the ACCESS token dies in hours and is renewed unasked. Only the refresh expiry rules.
+            (
+                r#"{"claudeAiOauth":{"accessToken":"sk","refreshToken":"r","expiresAt":1000000000000,"refreshTokenExpiresAt":253402300799000}}"#,
+                LoginState::Live,
+                "alive",
+            ),
+            // A husk outranks nothing, whatever expiry it claims: blanked tokens are not a login.
+            (
+                r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","refreshTokenExpiresAt":253402300799000}}"#,
+                LoginState::Absent,
+                "dead",
+            ),
+            (
+                r#"{"tokens":{"access_token":"a","refresh_token":"b","refresh_token_expires_at":1000000000000}}"#,
+                LoginState::Expired { at_ms: PAST },
+                "dead",
+            ),
+            (
+                r#"{"mcpOAuth":{"sync|a":{"accessToken":"grant","refreshTokenExpiresAt":253402300799000}}}"#,
+                LoginState::Absent,
+                "dead",
+            ),
+        ];
+        for (body, host_wants, launcher_says) in expiries {
+            let p = root.join("cred.json");
+            std::fs::write(&p, body).unwrap();
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&judge)
+                .arg(&p)
+                .output()
+                .expect("python3 to run the heal script's life()");
+            let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(
+                said,
+                launcher_says,
+                "the heal script disagrees about `{body}`: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let host = login_state(body.as_bytes(), now_ms);
+            assert_eq!(host, host_wants, "the host disagrees about `{body}`");
+            assert_eq!(
+                matches!(host, LoginState::Live),
+                said == "alive",
+                "host and launcher disagree on whether `{body}` still works — the fleet would \
+                 heal in one direction and report in the other"
             );
         }
     }

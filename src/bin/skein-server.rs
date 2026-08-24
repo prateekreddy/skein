@@ -55,7 +55,13 @@ fn refuse_unknown_args(args: &[String]) -> Option<String> {
              fleet commands live on the other binary: `skein ls`, `skein doctor`, `skein attach <box>`.",
             env!("CARGO_PKG_VERSION")
         )),
-        Some("--version" | "-v") => Some(format!("skein-server {}", env!("CARGO_PKG_VERSION"))),
+        // The revision beside the package version, because the package version is 0.1.0 forever:
+        // "which build is serving" was twice answerable only by grepping served HTML.
+        Some("--version" | "-v") => Some(format!(
+            "skein-server {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            skein::health::BUILD_REVISION
+        )),
         Some(other) => Some(format!(
             "skein-server takes no arguments (got {other:?}) — it is the web cockpit, not the CLI.\n\
              did you mean `skein {other}`?   (build both: cargo build --release)"
@@ -1986,6 +1992,9 @@ async fn api_health() -> Json<skein::health::HealthReport> {
             // than everything it was asked about.
             .unwrap_or_else(|error| skein::health::HealthReport {
                 ok: false,
+                // The one field a crashed health task can still answer: it is about the binary,
+                // not about anything the task had to go and ask.
+                build: skein::health::BUILD_REVISION,
                 registry: skein::health::HealthCheck::unknown(format!(
                     "the health check itself failed: {error}"
                 )),
@@ -2000,6 +2009,7 @@ async fn api_health() -> Json<skein::health::HealthReport> {
                 warden: skein::health::HealthCheck::unknown("the health check itself failed"),
                 cover: skein::health::HealthCheck::unknown("the health check itself failed"),
                 logins: Vec::new(),
+                expired_logins: Vec::new(),
                 dark_boxes: Vec::new(),
                 stale_boxes: Vec::new(),
                 uncovered_boxes: Vec::new(),

@@ -9,10 +9,73 @@
 //! Bytes, not strings. A stylesheet is text and a font is not, and `include_str!` is a decision that
 //! the asset layer is text-only — which it stops being the moment a build emits one image.
 
+//! It also stamps the revision the binary was built from (`SKEIN_BUILD_REVISION`), because
+//! `--version`, `/api/health` and `skein doctor` all need to answer "which build is this?" — a
+//! question that cost real time twice while every surface could only say `0.1.0`.
+
 use std::fmt::Write as _;
 use std::path::Path;
+use std::process::Command;
+
+/// `git describe --always --dirty`, or `None` when git (or the checkout) is absent.
+///
+/// The `-dirty` marker matters as much as the sha: a binary built from an edited tree is the other
+/// thing that looks like a clean deploy and is not.
+fn git_revision() -> Option<String> {
+    let out = Command::new("git")
+        .args(["describe", "--always", "--dirty"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let rev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!rev.is_empty()).then_some(rev)
+}
+
+/// Stamp `SKEIN_BUILD_REVISION`, and watch the things that change its answer.
+///
+/// Cargo only reruns a build script for paths it was told about, so without these lines the stamp
+/// freezes at whatever was true the last time `src/web/vendor` changed: a new commit, a branch
+/// switch, or an edit that makes the tree dirty would all ship under the old revision — which is
+/// the exact lie this stamp exists to end.
+fn stamp_revision() {
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    if let Some(dir) = git_dir {
+        let head = Path::new(&dir).join("HEAD");
+        println!("cargo:rerun-if-changed={}", head.display());
+        // HEAD is usually one indirection away from the commit: follow it to the current ref, so a
+        // commit on the same branch (which rewrites the ref, not HEAD) restamps too.
+        if let Ok(head_body) = std::fs::read_to_string(&head) {
+            if let Some(reference) = head_body.strip_prefix("ref: ") {
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    Path::new(&dir).join(reference.trim()).display()
+                );
+            }
+        }
+        // The two inputs of `-dirty`: the index, and the tree it is compared against. `src` is a
+        // directory watch, which cargo walks — cheap next to the compile this rerun sits beside.
+        println!(
+            "cargo:rerun-if-changed={}",
+            Path::new(&dir).join("index").display()
+        );
+        println!("cargo:rerun-if-changed=src");
+    }
+    // "unknown" and never the package version: 0.1.0 masquerading as a revision is the state this
+    // stamp exists to end, and an honest "unknown" at least says the question was not answered.
+    let rev = git_revision().unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=SKEIN_BUILD_REVISION={rev}");
+}
 
 fn main() {
+    stamp_revision();
+
     let dir = Path::new("src/web/vendor");
     // Without this, adding a file to the directory does not rebuild the table that lists it — the
     // asset would simply not exist, with nothing said.

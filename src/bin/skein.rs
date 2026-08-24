@@ -6,8 +6,6 @@ use std::env;
 use std::io::ErrorKind;
 use std::process::Command;
 
-const VERSION: &str = "0.1.0";
-
 // ANSI styling (the only thing we hand-roll; the web UI uses CSS).
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -117,7 +115,14 @@ fn main() {
             None => Err("usage: skein attach <box>".to_string()),
         },
         "version" | "--version" | "-v" => {
-            println!("skein {VERSION}");
+            // Package version from the manifest (a hardcoded copy here had already drifted once),
+            // revision from the build stamp — the package version alone is 0.1.0 forever and
+            // cannot answer "which build is this".
+            println!(
+                "skein {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                skein::health::BUILD_REVISION
+            );
             Ok(())
         }
         "help" | "--help" | "-h" => {
@@ -411,7 +416,12 @@ fn cmd_doctor() -> Result<(), String> {
     const OK: &str = "\x1b[32m✓\x1b[0m";
     const BAD: &str = "\x1b[31m✗\x1b[0m";
     const WARN: &str = "\x1b[33m!\x1b[0m";
-    println!("{BOLD}skein doctor{RESET}\n");
+    // The build first: half of doctor's use is "did the restart pick up the fix", and every line
+    // below is a claim made BY some build — unattributed, they were twice pinned on the wrong one.
+    println!(
+        "{BOLD}skein doctor{RESET} {DIM}build {}{RESET}\n",
+        skein::health::BUILD_REVISION
+    );
 
     match load_registry() {
         Ok((b, p)) => println!(
@@ -559,6 +569,51 @@ fn cmd_doctor() -> Result<(), String> {
                  GH_TOKEN, or add a read token in Settings → GitHub & keys. A GitHub App cannot do \
                  this one: an installation token is not a person{RESET}"
             ),
+        }
+    }
+
+    // Which agent logins the fleet holds, three-valued per runtime. "Expired" gets its own word
+    // because it used to be reported as signed in: on a fleet-wide logout every surface said so,
+    // and the symptom read as "each box needs a login" instead of "the fleet's credential is dead".
+    {
+        use skein::fleet::LoginState;
+        let logins = skein::fleet::runtime_logins();
+        let said = logins
+            .iter()
+            .map(|l| match l.state {
+                LoginState::Live => format!("{} signed in", l.runtime),
+                LoginState::Expired { at_ms } => format!(
+                    "{} expired {}",
+                    l.runtime,
+                    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at_ms)
+                        .map(|t| t.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| format!("{at_ms}ms"))
+                ),
+                LoginState::Absent => format!("{} none", l.runtime),
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let expired = logins
+            .iter()
+            .filter(|l| matches!(l.state, LoginState::Expired { .. }))
+            .map(|l| l.runtime)
+            .collect::<Vec<_>>();
+        if !expired.is_empty() {
+            println!("{BAD} logins        {said}");
+            println!(
+                "{DIM}              → every box holds the same dead token, so each one only LOOKS \
+                 like it wants its own sign-in; one `skein login {}` heals the whole fleet{RESET}",
+                expired[0]
+            );
+        } else if logins.iter().any(|l| matches!(l.state, LoginState::Live)) {
+            println!("{OK} logins        {DIM}{said} — every new box inherits this{RESET}");
+        } else {
+            // Not a fault: all three model-credential paths are opt-in and a fleet on API keys
+            // never has a login here.
+            println!(
+                "{WARN} logins        none — `skein login <runtime>` signs the fleet in once \
+                 {DIM}(unless the fleet runs on API keys){RESET}"
+            );
         }
     }
 

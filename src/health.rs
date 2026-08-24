@@ -20,6 +20,16 @@ use std::path::Path;
 /// [`crate::fleet::fleet_exists`] returns `Option<bool>` with exactly this comment. This is that
 /// knowledge, everywhere a check is made.
 ///
+/// The revision this binary was built from: `git describe --always --dirty`, stamped by build.rs.
+///
+/// This is the answer to "which build is serving?", and it exists because the question was
+/// unanswerable twice at real cost: a restart mis-diagnosed as a stale fleet agent because nothing
+/// could name the binary, and "is the fix deployed" settled only by grepping served HTML for marker
+/// strings. `--dirty` is load-bearing — a binary from an edited tree is the other thing that looks
+/// like a clean deploy and is not. "unknown" when git was absent at build time; never the package
+/// version, which is 0.1.0 forever and answers a different question.
+pub const BUILD_REVISION: &str = env!("SKEIN_BUILD_REVISION");
+
 /// **`Unknown` may never drive a doer.** It may only be reported. Whatever would act on
 /// `Unsatisfied` must do nothing at all on `Unknown` — the honest response to "I could not tell" is
 /// to say so and wait, never to guess in the direction that happens to be cheap to write.
@@ -149,6 +159,10 @@ const THROTTLE_NOTICEABLE: f64 = 60.0;
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthReport {
     pub ok: bool,
+    /// Which build is answering: [`BUILD_REVISION`]. On the report because /api/health is the one
+    /// surface every deployment serves — the cockpit, curl, and a box all reach it — so it is where
+    /// "is the fix deployed" gets answered without grepping HTML for marker strings.
+    pub build: &'static str,
     pub registry: HealthCheck,
     pub sbx: HealthCheck,
     pub git: HealthCheck,
@@ -185,10 +199,19 @@ pub struct HealthReport {
     /// current and always says nothing about the boxes already running. The answer travels with
     /// each box instead, in its placement record.
     pub cover: HealthCheck,
-    /// Which agent runtimes have a login every new box will inherit. Empty means `skein login` has
-    /// not been run — the single most common way a first run goes quiet, since each box then comes
-    /// up sitting at a sign-in prompt doing nothing.
+    /// Which agent runtimes have a login every new box will inherit **and can still use**. Empty
+    /// means `skein login` has not been run — the single most common way a first run goes quiet,
+    /// since each box then comes up sitting at a sign-in prompt doing nothing. A credential whose
+    /// refresh token has died is deliberately not in this list: it used to be, and on a fleet-wide
+    /// logout every surface then said "signed in", so the symptom read as "each box needs a login"
+    /// instead of "the fleet's credential is dead".
     pub logins: Vec<String>,
+    /// Runtimes holding a credential whose refresh token has already died, and when it died.
+    /// Beside `logins` rather than folded into it because the two states need different sentences:
+    /// absent is "run `skein login`", expired is "one login heals every box — they all hold the
+    /// same dead token". The dead token still seeds and heals boxes (reported here, never removed:
+    /// a box with nothing is worse off than a box with a token a heal can replace).
+    pub expired_logins: Vec<crate::fleet::ExpiredLogin>,
     pub dark_boxes: Vec<String>,
     pub stale_boxes: Vec<String>,
     /// Running boxes whose mount namespace was built by an older `box-session.sh`.
@@ -818,6 +841,7 @@ pub fn health_report() -> HealthReport {
 
     HealthReport {
         ok,
+        build: BUILD_REVISION,
         registry,
         sbx,
         git,
@@ -830,6 +854,7 @@ pub fn health_report() -> HealthReport {
         warden,
         cover,
         logins: crate::fleet::signed_in_runtimes(),
+        expired_logins: crate::fleet::expired_logins(),
         dark_boxes,
         stale_boxes,
         uncovered_boxes,
@@ -842,6 +867,31 @@ pub fn health_report() -> HealthReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A running skein must say which build it is — with a revision, not a version number.
+    ///
+    /// The package version is 0.1.0 forever, so a `--version` or health field carrying it answers
+    /// nothing; and "unknown" is the honest fallback for a build outside git, which this repo is
+    /// not. Both mis-answers cost real time: a restart mis-diagnosed as a stale fleet agent, and
+    /// "is the fix deployed" settled by grepping served HTML for marker strings. This test runs in
+    /// a git checkout by construction, so a placeholder here means the stamp in build.rs broke.
+    #[test]
+    fn the_build_names_a_real_revision() {
+        assert!(
+            !BUILD_REVISION.trim().is_empty(),
+            "the build stamp is empty — nothing skein serves can say which build it is"
+        );
+        assert_ne!(
+            BUILD_REVISION, "unknown",
+            "built inside a git checkout, yet the stamp is the no-git fallback"
+        );
+        assert_ne!(
+            BUILD_REVISION,
+            env!("CARGO_PKG_VERSION"),
+            "the package version masquerading as a revision — it is 0.1.0 forever and identifies \
+             nothing"
+        );
+    }
 
     /// The three states, and what each one is allowed to cause.
     ///
