@@ -1,0 +1,24 @@
+
+✻ Brewed for 31s · 2 shells, 1 monitor still running
+
+● Background command "Run the full lib db-tests tier and confirm the moved tests ran" completed (exit code 0)
+
+  Ran 1 shell command
+
+● 3140 passed, 0 failed — and all three moved tests ran under their new capability path, same count as before the move. Committing:
+
+  Running 1 shell command…
+
+* Fixing the style-version class… (10s · ↓ 283 tokens)
+  ⎿  ◼ Stop cosmetic edits invalidating pinned proposals (#3, #9)
+     ✔ Fix the stale-async-write class in the personalization page (#5, #7)
+     ✔ Fix the effect-writes-its-own-dependency class (#4)
+     ✔ Fix the UI-asserts-what-it-cannot-verify class in example-org-1 (#2, #8)
+     ✔ Make the source scanner parse string literals in both modes (#6)
+      … +3 completed
+                                                                                            ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── gadget-demo-optimize-AI ──
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  CTX ███░░░░░░░░░ 27% 271.6k/1.0M │ 5H  ░░░░░░░░░░░░ 3%→8% 3h10m left │ 7D  ▒▒▒▒▒▒▒▒▒▒▒░ 1%→92% 6d22h left │ $5.86 │ Opus 5
+  ⏵⏵ auto mode on · 1 shell, 1 monitor · ← for agents

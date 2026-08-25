@@ -1,0 +1,24 @@
+
+  Open, both mine, both awaiting review:
+  - #500 — the tenancy test fix. Should land first, so #499 goes green honestly rather than by re-roll.
+  - #499 — the backend-scope filter, which skips the Rust tiers for the 29% of commits that can't affect them.
+
+  Filed, not started: THING-404 (the baseline migration's check-then-create role, uncorrectable in place because sqlx checksums applied migrations), 411 (fixed, PR
+  open), 412 (nine candidate sites for the same pool-taint shape), 394 (converge gate.sh onto the tracked script now that it's on master), 395 (nextest), 396 (master
+  is prettier-red and CI can't see it).
+
+  I closed the item honestly about the miss: the route I proposed bought 3%, and the actual win came from somewhere I hadn't looked. That's recorded on the item
+  rather than smoothed over, because the next person to optimise this will reach for parallelism first too.
+
+  The remaining levers, under your no-more-resources constraint, are both "less work": consolidating the 97 test binaries, and cratification — which now has a
+  measured justification rather than an architectural one, since dep-info confirms any backend/src change invalidates every test binary while the crate stays whole.
+
+  Nothing is running and nothing is claimed. Good stopping point unless you want me to pick up one of those.
+
+✻ Worked for 1m 12s · 1 shell, 1 monitor still running
+                                                                                                                              new task? /clear to save 508.2k tokens
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── gadget-demo-refactoring ──
+❯ merge 500 then 499
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  CTX ██████░░░░░░ 51% 507.6k/1.0M │ 5H  ██▒░░░░░░░░░ 17%→29% 2h1m left │ 7D  ████████▒▒▒▒ 72%→143% 3d11h left │ $73.73 │ Opus 5
+  ⏵⏵ auto mode on · PR #500 · 1 shell, 1 monitor · ← for agents

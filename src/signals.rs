@@ -391,6 +391,28 @@ fn starts_like_status(trimmed: &str) -> bool {
     matches!(trimmed.chars().next(), Some(c) if !c.is_alphanumeric() && !"●⎿>❯›\"'".contains(c))
 }
 
+/// The furniture Claude Code draws between its status line and its composer — everything the scan
+/// upward from the composer must step over before it reaches the line that says what the pane is
+/// doing. Every glyph here was observed in that position on a live fleet pane:
+///
+/// | glyph | what it is | seen on |
+/// |---|---|---|
+/// | `─` | a rule, with or without the box name in it | every box |
+/// | `✘` | the right-aligned `Auto-update failed` notice | every box |
+/// | `⎿` | a tool result, and the panel rows nested under one | every box |
+/// | `✔` `◼` `…` | the running tool's todo panel and its `… +3 completed` footer | `gadget-demo-optimize-AI` |
+/// | `⏵` `⏸` | the mode footer, when a short pane puts it above the composer | `example-box-6` |
+///
+/// Deliberately a **skip** list, not a classifier: chrome nobody has catalogued yet stops the scan
+/// early, which reads as "not busy" — exactly today's behaviour, never something worse. And the
+/// spinner frames (`· ✢ * ✶ ✻ ✽`) are pointedly absent, so a status line can never be stepped over.
+fn is_chrome(line: &str) -> bool {
+    matches!(
+        line.trim().chars().next(),
+        Some('─' | '✘' | '⎿' | '✔' | '◼' | '…' | '⏵' | '⏸')
+    )
+}
+
 /// Claude Code compacting *now*, told apart from the record of a compact that already finished.
 /// Skein's own PreCompact hook prints `[… box-status.sh compacting] completed successfully` into
 /// the transcript of every box in the fleet, and `⎿  Compacted (ctrl+o…)` sits above it — both
@@ -494,24 +516,28 @@ pub(crate) fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
     // anything matching further up is the agent *displaying* one — a captured fixture in a diff, a
     // log being catted — not the pane's own. (Caught on live data: this file's own test fixtures were
     // on screen while being edited.)
-    // …and the bottom is the *composer*, not the last line of the pane. Rules, the context meter,
-    // the mode footer and — the case that named this — the agents panel all sit below it, and a box
-    // running four agents puts twelve lines of chrome under its own status line (captured live,
-    // 2026-08-24: the board read `waiting` for nine minutes at a pane that was mid-turn). Cutting at
-    // the composer keeps the window pointed at the status region however much chrome follows it.
     // …and when the composer is on screen it, not the last line of the pane, is the bottom: rules,
-    // the context meter, the mode footer and — the case that named this — the agents panel all sit
-    // *below* it, and a box running four agents puts twelve lines of chrome under its own status
-    // line (captured live 2026-08-24: the board read `waiting` for nine minutes at a pane that was
-    // mid-turn). Above the composer the window is tight, because the status line is the line
-    // directly above it, give or take a right-aligned notice and the rule.
-    let region: Vec<&String> = match obs.tail.iter().rposition(|l| matches!(l.trim(), "❯" | ">")) {
+    // the context meter, the mode footer and the agents panel all sit *below* it, and a box running
+    // four agents puts twelve lines of chrome under its own status line (captured live 2026-08-24:
+    // the board read `waiting` for nine minutes at a pane that was mid-turn).
+    //
+    // Above the composer the window is not a line COUNT either, because Claude Code renders the
+    // running tool's own panel *between* the status line and the composer: a live box with a todo
+    // list open put seven chrome rows there, and a four-line window read it as idle (captured live
+    // 2026-08-25, `gadget-demo-optimize-AI` — the board said `waiting` from screen at a pane
+    // whose status line was `* Fixing the style-version class… (10s · ↓ 283 tokens)`, age 0,
+    // moving 1). Both windows were guesses at a distance. The line itself is what the pane means:
+    // **the status line is the last non-chrome line above the composer** (see [`is_chrome`]).
+    let region: Vec<&String> = match obs.tail.iter().rposition(|l| matches!(l.trim(), "❯" | ">"))
+    {
         Some(composer) => obs.tail[..composer]
             .iter()
             .rev()
             .filter(|l| !l.trim().is_empty())
-            .take(4)
+            .skip_while(|l| is_chrome(l))
+            .take(1)
             .collect(),
+        // No composer on screen: nothing anchors the scan, so fall back to the bottom of the pane.
         None => obs
             .tail
             .iter()
@@ -1347,6 +1373,130 @@ mod tests {
             "  ⏵⏵ auto mode on (shift+tab to cycle)",
         ];
         assert_eq!(classify_pane("claude", &obs(compacting)), Screen::Busy);
+    }
+
+    #[test]
+    fn a_running_tools_todo_panel_does_not_bury_the_status_line() {
+        // Captured live 2026-08-25 from gadget-demo-optimize-AI, paired with the board in the same
+        // breath: the board said `waiting` **from screen** while this pane carried
+        // `* Fixing the style-version class… (10s · ↓ 283 tokens)` at age 0, moving 1 — a turn
+        // visibly running. Claude Code renders the running tool's todo panel BETWEEN the status
+        // line and the composer, so seven chrome rows sat under it and a window measured in lines
+        // could not reach it. Note the spinner frame here is the plain ASCII `*`, which is why the
+        // glyph test is a denylist.
+        let real = captured(
+            include_str!(
+                "../tests/fixtures/panes/claude-waiting.gadget-optimize-AI.todo-panel.2026-08-25.txt"
+            ),
+            "_ gadget-demo-optimize-AI",
+            46809,
+        );
+        assert_eq!(
+            classify_pane("claude", &real),
+            Screen::Busy,
+            "a todo panel below the status line is chrome, not the end of the pane"
+        );
+        // The rows that buried it are chrome; the status line above them never is.
+        assert!(is_chrome(
+            "     ✔ Fix the effect-writes-its-own-dependency class (#4)"
+        ));
+        assert!(is_chrome("      … +3 completed"));
+        assert!(is_chrome(
+            "  ⎿ \u{a0}◼ Stop cosmetic edits invalidating pinned proposals (#3, #9)"
+        ));
+        assert!(!is_chrome(
+            "* Fixing the style-version class… (10s · ↓ 283 tokens)"
+        ));
+        assert!(!is_chrome("✻ Waiting for 4 background agents to finish"));
+    }
+
+    #[test]
+    fn three_consecutive_samples_of_one_live_turn_do_not_flap() {
+        // The flap detector's own food, captured 2026-08-25 from gadget-demo-optimize-AI while it
+        // worked: three samples seconds apart (ts 1787630193 / …230 / …234, age 0-1, moving 1) of a
+        // single turn, its elapsed time advancing 1m35s → 2m12s → 2m16s and its spinner cycling
+        // `*` → `·` → `·`. The board said `waiting` **from screen** for all three. This is the shape
+        // the original defect flapped on, so consecutive samples of one turn must classify
+        // identically — the failure that matters is not "wrong once" but "wrong every other tick".
+        let states: Vec<Screen> = ["a", "b", "c"]
+            .iter()
+            .map(|tag| {
+                let txt = std::fs::read_to_string(format!(
+                    "tests/fixtures/panes/claude-waiting.gadget-optimize-AI.working-series-{tag}.2026-08-25.txt"
+                ))
+                .expect("fixture");
+                classify_pane("claude", &captured(&txt, "_ gadget-demo-optimize-AI", 46923))
+            })
+            .collect();
+        assert_eq!(
+            states,
+            vec![Screen::Busy, Screen::Busy, Screen::Busy],
+            "one turn, three ticks — a state that changes between them is the flap this grammar exists to prevent"
+        );
+        // `·` is a spinner frame, not a bullet: the denylist has to let it through.
+        assert!(is_working_status_line(
+            "· Fixing the style-version class… (2m 12s · ↓ 7.8k tokens)"
+        ));
+        assert!(is_working_status_line(
+            "* Fixing the style-version class… (1m 35s · ↓ 5.0k tokens)"
+        ));
+    }
+
+    #[test]
+    fn a_second_repos_box_reads_the_same_finished_compact_the_same_way() {
+        // Captured live 2026-08-25 from gadget-demo-feat-topic-research-codex-claude-2 — a
+        // different repo, a different box, the same `/compact` hook log, and the board had been
+        // saying `working` for ten hours. Carried because one capture of a shape proves the shape
+        // was real; two from unrelated repos prove it is what every box in the fleet looks like.
+        // Its completion marker also carries a suffix this grammar had never seen
+        // (`✻ Sautéed for 1m 18s · 1 monitor still running`), which must stay a completion marker.
+        let real = captured(
+            include_str!(
+                "../tests/fixtures/panes/claude-working.gadget-case2.idle-after-compact.2026-08-25.txt"
+            ),
+            "_ gadget-demo-feat-topic-research-codex-claude-2",
+            47181,
+        );
+        assert_eq!(classify_pane("claude", &real), Screen::Waiting);
+        assert!(!is_working_status_line(
+            "✻ Sautéed for 1m 18s · 1 monitor still running"
+        ));
+    }
+
+    #[test]
+    fn an_idle_pane_and_a_composer_holding_queued_text_both_read_waiting() {
+        // Two more shapes off the same live fleet, 2026-08-25, both genuinely idle.
+        //
+        // The first is the plain idle screen this item asks for and a clean-room box cannot produce:
+        // no dialog, no compact, no panel — just a `※ recap:` line, the operator's statusline and a
+        // bare composer, after 633s of quiet.
+        let idle = captured(
+            include_str!(
+                "../tests/fixtures/panes/claude-stale.example-box-5.idle-recap.2026-08-25.txt"
+            ),
+            "_ gadget-demo-example-box-5",
+            -1,
+        );
+        assert_eq!(classify_pane("claude", &idle), Screen::Waiting);
+
+        // The second is the case that shows the composer anchor is not the whole story: the operator
+        // had typed `merge 500 then 499` into the composer without sending it, so the prompt row is
+        // `❯\u{a0}merge 500 then 499` and NOTHING in the pane trims to a bare `❯`. The anchor finds no
+        // composer and the scan falls back to the bottom of the pane, which lands on the completion
+        // marker `✻ Worked for 1m 12s · 1 shell, 1 monitor still running` — not a working line, so
+        // the answer is right. It is right by the fallback, though, not by the anchor: a box that
+        // was BUSY with text queued would need the fallback to reach past whatever panel was open.
+        // Recorded rather than fixed, because no live pane has yet shown that combination.
+        let queued = captured(
+            include_str!("../tests/fixtures/panes/claude-unlisted.refactoring.queued-composer.2026-08-25.txt"),
+            "_ gadget-demo-refactoring",
+            -1,
+        );
+        assert_eq!(classify_pane("claude", &queued), Screen::Waiting);
+        assert!(
+            !queued.tail.iter().any(|l| matches!(l.trim(), "❯" | ">")),
+            "this capture is only interesting while its composer carries queued text"
+        );
     }
 
     #[test]
