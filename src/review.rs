@@ -1047,9 +1047,16 @@ fn note_critique_tried(repo_id: &str, number: u64, head_sha: &str, why: &str) {
 /// How many pull requests one background pass reads.
 ///
 /// Burst control, not a budget: the budgets are the SCOPE — pull requests somebody asked you to
-/// review, in a repo you switched reading on for (the owner's own answer, SKEIN-185) — and the
-/// day's spend ceiling (`Config::review_reads_per_day`). This only stops a queue that has been
-/// quiet all week from firing thirty model calls in one minute when it finally settles.
+/// review or that you opened yourself, in a repo you switched reading on for (the owner's own
+/// answers, SKEIN-185 and SKEIN-265) — and the day's spend ceiling
+/// (`Config::review_reads_per_day`). This only stops a queue that has been quiet all week from
+/// firing thirty model calls in one minute when it finally settles.
+///
+/// Counted in LINES REPORTED, not in pull requests, so a row that produced a summary and a review
+/// spends two of it: a pass works through two merged visits, three summary-only ones. That is the
+/// behaviour that was already here — the merged call landed before this constant was re-read — and
+/// it is left alone deliberately, because the thing it bounds is a burst and a stack of ten
+/// therefore takes five passes rather than four.
 const READ_PER_PASS: usize = 3;
 
 /// Read the pull requests waiting on you, in the repos you asked skein to read, with nobody
@@ -1059,11 +1066,13 @@ const READ_PER_PASS: usize = 3;
 ///
 /// * a repo reads nothing until `read_prs` is switched on for it, so the feature costs exactly
 ///   nothing on a fleet nobody has opted in;
-/// * only pull requests where you are the REVIEWER — your own do not need summarising for you, and
-///   being mentioned is not a request to review. The scope is the first budget; the day's spend
-///   ceiling (`Config::review_reads_per_day`, enforced inside [`summarise`] and the critique
-///   drafter) is the second, and this pass obeys the same counter as every button press — one
-///   budget, not two;
+/// * only pull requests somebody asked you to review, **and the ones you opened yourself** — the
+///   owner's decision of 2026-08-25 (SKEIN-265), on a fleet where every open pull request was
+///   theirs and the surface therefore did nothing at all. Being mentioned is still not a request to
+///   read. The scope is the first budget; the day's spend ceiling (`Config::review_reads_per_day`,
+///   enforced inside [`summarise`] and the critique drafter) is the second, and this pass obeys the
+///   same counter as every button press — one budget, not two. An authored row costs ONE unit for
+///   summary and review together, because [`summarise`] merges them into a single call;
 /// * not a draft, and not already read at this head. **Not settled** — the hour a branch had to
 ///   stand still before skein would read it was removed on the owner's instruction (2026-08-24)
 ///   once the budget became the money guard and re-anchoring made a draft against a moving head
@@ -1087,19 +1096,36 @@ pub fn read_waiting() -> Vec<String> {
             continue;
         }
         let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        // The budget is spent from the TOP of the lane as the pane shows it — oldest-waiting
-        // first — not in the queue's transport order (`prq::newest_first`, number descending) and
-        // never by most-recently-touched. The order is the pane's own, mirrored by
-        // [`waited_since`] from `revWaitedSince` and the needs-you lane sort in
-        // `src/web/index.html`: what the reader spends the day's money on must be the rows the
-        // person will read first, or the ceiling starves exactly the pull requests that have
-        // waited longest.
+        // The budget is spent from the TOP of the pane, lane by lane, in the pane's own order —
+        // not in the queue's transport order (`prq::newest_first`, number descending). Two lanes
+        // are read now (see [`worth_a_visit`]) and each keeps ITS own sort, mirrored field for
+        // field from `src/web/index.html`:
+        //
+        //   * **your move** first, oldest-waiting first ([`waited_since`], from `revWaitedSince`
+        //     and the needs-you lane sort). Somebody else is blocked on these, so they take the
+        //     day's money before anything of yours does — widening the scope must not push a
+        //     colleague's review request behind a stack you opened this morning.
+        //   * **their move** second, most-recently-updated first — `index.html`'s own rule for
+        //     that lane, and its reason: "for your own PRs, what moved most recently is the right
+        //     question".
+        //
+        // What the reader spends the day's money on must be the rows the person will read first,
+        // or the ceiling starves exactly the pull requests at the top of the pane.
         let mut waiting: Vec<&Pr> = queue.prs.iter().collect();
-        waiting.sort_by(|a, b| waited_since(a).cmp(waited_since(b)));
+        waiting.sort_by(|a, b| {
+            let rank = |pr: &Pr| u8::from(!matches!(pr.lane, crate::prq::Lane::NeedsYou));
+            rank(a).cmp(&rank(b)).then_with(|| {
+                if matches!(a.lane, crate::prq::Lane::NeedsYou) {
+                    waited_since(a).cmp(waited_since(b))
+                } else {
+                    b.updated_at.cmp(&a.updated_at)
+                }
+            })
+        });
         for pr in waiting {
-            // The one doorway both halves share: waiting on you, and actually proposed. Checked
-            // first so rows in other lanes cost no disk scans at all.
-            if !matches!(pr.lane, crate::prq::Lane::NeedsYou) || pr.draft {
+            // The one doorway both halves share. Checked first so rows in lanes nobody reads cost
+            // no disk scans at all.
+            if !worth_a_visit(pr) {
                 continue;
             }
             let read_it = worth_reading(&repo.id, pr);
@@ -1156,7 +1182,7 @@ pub fn read_waiting() -> Vec<String> {
             // The reader's second half — the DRAFT-ONLY door, for a row whose summary is already
             // on disk at this head (the visit above covers the rest, and `worth_critiquing`
             // re-checked here sees anything it just drafted or noted). Same doorway reading uses
-            // — the lane/draft gate at the top of the loop — and no settle hour: the daily budget
+            // — [`worth_a_visit`] at the top of the loop — and no settle hour: the daily budget
             // is the money guard now (owner decision, 2026-08-24), and re-anchoring made a moving
             // head postable.
             let draft_it = worth_critiquing(&repo.id, pr, &queue.viewer);
@@ -1204,6 +1230,51 @@ fn waited_since(pr: &Pr) -> &str {
     }
 }
 
+/// Did YOU open this pull request? The queue's own answer: `Reason::Author` is the row that came
+/// back from the `author:<you>` search (`src/prq.rs:700`), so this needs no viewer to ask.
+///
+/// [`worth_critiquing`] asks the same question from the other end (`pr.author == viewer`), because
+/// there it already has the viewer in hand.
+fn yours(pr: &Pr) -> bool {
+    pr.reasons.contains(&crate::prq::Reason::Author)
+}
+
+/// Is this pull request in a lane skein reads at all, unasked? **The one doorway** — the background
+/// pass, the reading predicate and the merged summary-and-review call all ask it, so the lane rule
+/// cannot drift between them.
+///
+/// Two lanes, and the second is the owner's decision of 2026-08-25 (SKEIN-265), asked as "should an
+/// authored pull request be read, drafted, or both, and in which lane" and answered **"both, in
+/// waiting, on the same call"**:
+///
+///   * [`Lane::NeedsYou`] — somebody is waiting on your review. The lane this pass was built for.
+///   * [`Lane::Waiting`] — **only when you opened it**. Not the whole lane: a PR you already
+///     decided on sits here too, and it has had your attention already. `src/prq.rs:1190-1196`
+///     files every pull request you authored here and nowhere else, which is why the fleet this was
+///     reported on — ten open PRs, every one the owner's — got nothing at all from a reader that
+///     only read `NeedsYou`.
+///
+/// [`Lane::NotReady`] and [`Lane::Archived`] stay out: not-ready is its author still changing the
+/// answer, archived is you saying it will not move.
+///
+/// A **draft** is refused whichever lane it is in, and that is not about authorship: it is the
+/// author saying the change is not finished. It has to be checked here rather than left to the
+/// lane, because a draft you opened yourself is `Lane::Waiting`, not `Lane::NotReady` — the
+/// yours-or-decided arm at `src/prq.rs:1190` outranks the draft arm below it.
+///
+/// [`Lane::NeedsYou`]: crate::prq::Lane::NeedsYou
+/// [`Lane::Waiting`]: crate::prq::Lane::Waiting
+/// [`Lane::NotReady`]: crate::prq::Lane::NotReady
+/// [`Lane::Archived`]: crate::prq::Lane::Archived
+fn worth_a_visit(pr: &Pr) -> bool {
+    !pr.draft
+        && match pr.lane {
+            crate::prq::Lane::NeedsYou => true,
+            crate::prq::Lane::Waiting => yours(pr),
+            crate::prq::Lane::NotReady | crate::prq::Lane::Archived => false,
+        }
+}
+
 /// Is the review of this pull request yours to give — and therefore worth drafting, unasked?
 ///
 /// A narrower question than [`worth_reading`]'s, because the spend is bigger: a summary tells you
@@ -1212,6 +1283,11 @@ fn waited_since(pr: &Pr) -> &str {
 /// review request, same rule as `worth_reading`), already reviewing (you acted once and the PR is
 /// still open), or your own pull request. Being mentioned is somebody talking *about* you, not a
 /// request to review, and must never cost the model call a draft is.
+///
+/// It says nothing about the LANE — [`worth_a_visit`] is the one place that does, and every caller
+/// asks both. That division is what the authored case turned on: "yours to give" has always
+/// included your own pull request, so the thing that kept a review off every PR the owner opened
+/// was never this predicate but the `Lane::NeedsYou` test its callers wrapped it in.
 fn worth_critiquing(repo_id: &str, pr: &Pr, viewer: &str) -> bool {
     let yours_to_give = pr.author == viewer
         || pr.reasons.iter().any(|r| {
@@ -1233,6 +1309,17 @@ fn worth_critiquing(repo_id: &str, pr: &Pr, viewer: &str) -> bool {
 }
 
 /// Is this a pull request skein should read for you, unasked?
+///
+/// Two ways in, and the lane each arrives in is [`worth_a_visit`]'s question, not this one's:
+///
+///   * somebody **asked** you to review it, and it is your move;
+///   * **you opened it**, and it is therefore in the waiting lane. The owner's decision of
+///     2026-08-25 (SKEIN-265): a summary of your own pull request is what the agent that wrote it
+///     actually changed, which is exactly what its author does not know. It arrives on the SAME
+///     model call as the drafted review — see `summarise`'s `draft_due` — so widening the scope
+///     buys both halves for one unit of the day's budget, not two.
+///
+/// Being **mentioned** is still not a way in: somebody talking about you is not a request to read.
 fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
     // Somebody asked you to review it — personally or through a team you are in. A team request IS
     // a review request; the queue's own filter says so, and dropping those here would silently
@@ -1245,9 +1332,9 @@ fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
                 | crate::prq::Reason::Team(_)
         )
     });
-    asked
-        && matches!(pr.lane, crate::prq::Lane::NeedsYou)
-        && !pr.draft
+    (asked || yours(pr))
+        // The lane, and the draft rule, in one place for every caller.
+        && worth_a_visit(pr)
         // NO settle gate, any more. It required an hour of quiet before reading — the owner's
         // decision (2026-08-24) removed it: the daily spend ceiling (`Config::review_reads_per_day`,
         // enforced in `summarise` and the critique drafter) is now THE money guard, and re-anchoring
@@ -1343,11 +1430,15 @@ pub fn summarise(
     // rows needing a summary only — involved, but the review is not yours — keep the cheap
     // two-stage path below. Either visit is ONE unit of the day's budget: the unit is the pull
     // request analysed, not the number of things the analysis produced.
-    let draft_due = identities.first().is_some_and(|viewer| {
-        matches!(pr.lane, crate::prq::Lane::NeedsYou)
-            && !pr.draft
-            && worth_critiquing(&repo.id, pr, viewer)
-    });
+    //
+    // The lane test is [`worth_a_visit`]'s, shared with the reader — which is what puts a pull
+    // request you OPENED down this path rather than the cheap summary-only one (SKEIN-265, the
+    // owner's "both, in waiting, on the same call"). Split, the two halves would cost two model
+    // calls and two budget units for the one row: the reader's summary here, and the second door
+    // in `read_waiting` drafting the review afterwards.
+    let draft_due = identities
+        .first()
+        .is_some_and(|viewer| worth_a_visit(pr) && worth_critiquing(&repo.id, pr, viewer));
     if draft_due {
         // Counted the moment the model is about to be asked — a call that then fails still spent.
         note_spent_if_unasked(trigger, &repo.id, &day);
@@ -2388,30 +2479,49 @@ mod tests {
             &pr(2, Reason::Team("infra".into()), Lane::NeedsYou)
         ));
 
-        // Yours. You know what is in it.
-        assert!(!worth_reading(
-            "demo",
-            &pr(3, Reason::Author, Lane::NeedsYou)
-        ));
+        // **Yours, in the waiting lane** — the owner's decision, SKEIN-265. `Lane::Waiting` is the
+        // only lane a pull request you opened is ever in (`src/prq.rs:1190-1196`), so refusing it
+        // was refusing every pull request on a fleet where the owner writes them all.
+        assert!(
+            worth_reading("demo", &pr(3, Reason::Author, Lane::Waiting)),
+            "a pull request you opened yourself is not read — on a fleet where every PR is yours, \
+             that is the whole surface doing nothing"
+        );
         // Mentioned in a comment is not a request to review.
         assert!(!worth_reading(
             "demo",
             &pr(4, Reason::Mentioned, Lane::NeedsYou)
         ));
-        // Already decided on, or set aside: not waiting on you.
-        assert!(!worth_reading(
-            "demo",
-            &pr(5, Reason::Reviewer, Lane::Waiting)
-        ));
+        // The rest of the waiting lane stays out: somebody ELSE's pull request you have already
+        // decided on has had your attention, and the widening is about authorship, not the lane.
+        assert!(
+            !worth_reading("demo", &pr(5, Reason::Reviewer, Lane::Waiting)),
+            "a PR you already decided on was read again — the waiting lane was widened wholesale \
+             instead of for the ones you wrote"
+        );
         assert!(!worth_reading(
             "demo",
             &pr(6, Reason::Reviewer, Lane::Archived)
         ));
+        // Set aside by hand, and yours: still out. Archived is you saying it will not move.
+        assert!(
+            !worth_reading("demo", &pr(10, Reason::Author, Lane::Archived)),
+            "a pull request you set aside was read anyway"
+        );
 
         // A draft is the author saying it is not finished.
         let mut draft = pr(7, Reason::Reviewer, Lane::NeedsYou);
         draft.draft = true;
         assert!(!worth_reading("demo", &draft));
+        // And your OWN draft, which is the case authorship could have swallowed: `src/prq.rs:1190`
+        // files it in `Lane::Waiting` rather than `Lane::NotReady`, so the lane alone would have
+        // let it through and only the draft test keeps it out.
+        let mut mine_draft = pr(11, Reason::Author, Lane::Waiting);
+        mine_draft.draft = true;
+        assert!(
+            !worth_reading("demo", &mine_draft),
+            "a draft you opened was read — a draft is you saying it is not finished, whoever wrote it"
+        );
 
         // A branch still being pushed to IS read now — the settle hour is gone (owner decision,
         // 2026-08-24). The daily budget is the money guard, and re-anchoring by line text made a
@@ -2663,6 +2773,27 @@ mod tests {
     /// 2026-08-24), so the pass must read and draft a branch that is still moving.
     #[cfg(unix)]
     fn drafting_fixture(home: &std::path::Path) -> std::path::PathBuf {
+        drafting_fixture_for(home, "crit", false)
+    }
+
+    /// The same wire, serving the OTHER shape this pass has to work: a queue where every pull
+    /// request is one YOU opened (`q2`, the `author:` search) — #31 proposed and #32 still a
+    /// draft, both in `Lane::Waiting` because that is where `src/prq.rs:1190` files what you wrote.
+    ///
+    /// One fixture rather than two, because the thing the authored tests assert is a COUNT of model
+    /// calls and diff downloads, and a second stub would be a second place for that accounting to
+    /// be wrong in.
+    #[cfg(unix)]
+    fn authored_fixture(home: &std::path::Path) -> std::path::PathBuf {
+        drafting_fixture_for(home, "mine", true)
+    }
+
+    #[cfg(unix)]
+    fn drafting_fixture_for(
+        home: &std::path::Path,
+        repo_id: &'static str,
+        authored: bool,
+    ) -> std::path::PathBuf {
         std::env::set_var("SKEIN_HOME", home);
         std::env::set_var("SKEIN_REVIEW_AI", "on");
         let reviews_asked = home.join("reviews-asked");
@@ -2716,10 +2847,10 @@ mod tests {
                 // that is still moving.
                 let committed =
                     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                let node = |number: u64| {
+                let node = |number: u64, author: &str, draft: bool| {
                     format!(
                         r#"{{"number":{number},"title":"t","url":"u",
-                           "isDraft":false,"author":{{"login":"someone"}},"headRefName":"feat",
+                           "isDraft":{draft},"author":{{"login":"{author}"}},"headRefName":"feat",
                            "headRefOid":"sha{number}","baseRefName":"main",
                            "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
                            "latestReviews":{{"nodes":[]}},
@@ -2727,16 +2858,23 @@ mod tests {
                     )
                 };
                 // The batched wire (SKEIN-209): q0 review-requested, q1 reviewed-by, q2 author,
-                // q3 mentions — #21 waits on your review, #22 only mentions you.
+                // q3 mentions — #21 waits on your review, #22 only mentions you. In the authored
+                // shape, q2 instead: #31 yours and proposed, #32 yours and still a draft.
                 let answer = if head.contains("/user/teams") {
                     "[]".to_string()
                 } else if head.contains("/user") {
                     r#"{"login":"me"}"#.to_string()
+                } else if body.contains("review-requested:") && authored {
+                    format!(
+                        r#"{{"data":{{"q0":{{"nodes":[]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[{},{}]}},"q3":{{"nodes":[]}}}}}}"#,
+                        node(31, "me", false),
+                        node(32, "me", true)
+                    )
                 } else if body.contains("review-requested:") {
                     format!(
                         r#"{{"data":{{"q0":{{"nodes":[{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[{}]}}}}}}"#,
-                        node(21),
-                        node(22)
+                        node(21, "someone", false),
+                        node(22, "someone", false)
                     )
                 } else if head.contains("/graphql") {
                     r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
@@ -2761,7 +2899,7 @@ mod tests {
         let checkout = home.join("checkout");
         checkout_fixture(&checkout);
         crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
-            "id": "crit",
+            "id": repo_id,
             "source": "https://github.com/acme/thing.git",
             "source_tree": checkout.to_string_lossy(),
             "store": "",
@@ -2771,12 +2909,17 @@ mod tests {
         .unwrap();
         // The queue micro-cache outlives a test's SKEIN_HOME; a stale hit would answer with a
         // queue read against another test's stub.
-        crate::prq::invalidate("crit");
+        crate::prq::invalidate(repo_id);
         reviews_asked
     }
 
     #[cfg(unix)]
     fn drafting_teardown() {
+        drafting_teardown_for("crit")
+    }
+
+    #[cfg(unix)]
+    fn drafting_teardown_for(repo_id: &str) {
         for key in [
             "SKEIN_HOME",
             "SKEIN_REVIEW_AI",
@@ -2786,7 +2929,7 @@ mod tests {
         ] {
             std::env::remove_var(key);
         }
-        crate::prq::invalidate("crit");
+        crate::prq::invalidate(repo_id);
         crate::prq::forget_host_token();
     }
 
@@ -2838,6 +2981,118 @@ mod tests {
         );
 
         drafting_teardown();
+    }
+
+    /// **The pull requests you wrote yourself are read and reviewed, on one call.** The shape this
+    /// whole feature was reported on: a fleet whose only open pull requests are the owner's, where
+    /// every row answered "not summarised" for ever because the reader worked `Lane::NeedsYou` and
+    /// a PR you opened is never in it (`src/prq.rs:1190`).
+    ///
+    /// The owner's decision, asked as read/draft/both and in which lane: **"both, in waiting, on
+    /// the same call"** (SKEIN-265). So all three halves are asserted at once, and the third is the
+    /// one that costs money if it is wrong:
+    ///
+    ///   * the summary is on disk for the authored PR;
+    ///   * the drafted review is too, at the same head;
+    ///   * and it was **ONE** model call and **ONE** diff download for both — not a summary now and
+    ///     a review from the second door afterwards, which is the same row for two budget units.
+    ///
+    /// The draft #32 is the control: yours as well, in the same lane, and refused — because a draft
+    /// is the author saying it is not finished, and that has nothing to do with who wrote it.
+    #[cfg(unix)]
+    #[test]
+    fn your_own_pull_requests_are_read_and_reviewed_in_one_call() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let asked = authored_fixture(home);
+
+        let read = read_waiting();
+        assert!(
+            cached("mine", 31, "sha31").is_some(),
+            "the pass read nothing on a queue of pull requests you opened — the surface that \
+             reported this bug does nothing at all: {read:?}"
+        );
+        assert!(
+            critiqued("mine", 31).is_some_and(|c| c.head_sha == "sha31"),
+            "your own pull request was summarised and not reviewed — the decision was both: {read:?}"
+        );
+
+        // Your own DRAFT is still refused, and refused before the wire: no summary, no review, and
+        // no diff downloaded to decide it with. `src/prq.rs:1190` puts it in `Lane::Waiting` beside
+        // #31, so nothing but the draft test itself is keeping it out. Asserted BEFORE the call
+        // count below, because a doorway that lost its draft rule shows up there as a second model
+        // call, and "two calls" is the wrong sentence for it.
+        assert!(
+            cached("mine", 32, "sha32").is_none() && critiqued("mine", 32).is_none(),
+            "a draft you opened was read — a draft is the author saying it is not finished"
+        );
+
+        // One call, and it was the MERGED one: the stub tags each invocation with the prompt shape
+        // it saw, so "merged" twice or "merged" then "critique" both fail here rather than being
+        // invisible in a passing disk assertion.
+        let calls = std::fs::read_to_string(&asked).unwrap_or_default();
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            vec!["merged"],
+            "summary and review of your own PR must be ONE merged model call — one budget unit, \
+             not two"
+        );
+        let hits = std::fs::read_to_string(home.join("hits")).unwrap_or_default();
+        let diff_fetches = hits
+            .lines()
+            .filter(|l| l.starts_with("GET") && l.contains("/pulls/31 "))
+            .count();
+        assert_eq!(
+            diff_fetches, 1,
+            "one head must cost one diff download for both outputs: {hits}"
+        );
+
+        // And nothing was downloaded to decide it with either.
+        assert_eq!(
+            hits.lines()
+                .filter(|l| l.starts_with("GET") && l.contains("/pulls/32 "))
+                .count(),
+            0,
+            "a draft's diff was downloaded before it was refused: {hits}"
+        );
+
+        // And not again on the next pass: the reading and the draft on disk at this head are the
+        // answer. Same money rule as every other door here.
+        let _ = read_waiting();
+        assert_eq!(
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .count(),
+            1,
+            "your own pull request was re-read on the next pass — one model call every ten \
+             minutes, for ever"
+        );
+
+        // **The live shape this was reported in** (SKEIN-265, the fleet check of 2026-08-25): a
+        // stack whose rows were all read by hand — `Trigger::Asked`, which never consults
+        // `worth_reading` — and one row that ended up with a summary and no review. There is no
+        // merged call to re-run for it: the summary is already on disk at this head, so the visit
+        // above is skipped entirely and the DRAFT-ONLY door is the whole fix. It has to open for a
+        // pull request you opened yourself, or that row stays draftless until its head moves.
+        std::fs::remove_dir_all(crate::prq::review_dir("mine").join("critiques")).unwrap();
+        let _ = read_waiting();
+        assert!(
+            critiqued("mine", 31).is_some_and(|c| c.head_sha == "sha31"),
+            "a pull request of yours that was already summarised never gets its review — the \
+             draft-only door does not open for your own rows"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["merged", "critique"],
+            "the redraft is one standalone call and the cached summary none"
+        );
+
+        drafting_teardown_for("mine");
     }
 
     /// Being mentioned is somebody talking ABOUT you. It gets no unrequested review draft — each
@@ -3923,10 +4178,16 @@ mod tests {
         drafting_teardown();
     }
 
-    /// The budget is spent from the TOP of the lane as the pane shows it — oldest-waiting first
-    /// (`revWaitedSince` in index.html, mirrored by `waited_since`) — never newest-number and
-    /// never most-recently-touched. Three waiting rows, budget for two: the two that have waited
-    /// longest are read, the most recently touched is not.
+    /// The budget is spent from the TOP of the PANE, lane by lane. Within **your move**, oldest-
+    /// waiting first (`revWaitedSince` in index.html, mirrored by `waited_since`) — never
+    /// newest-number and never most-recently-touched. Three rows there, budget for two: the two
+    /// that have waited longest are read, the most recently touched is not.
+    ///
+    /// And a fourth row that is **yours** — read now (SKEIN-265), sitting in the waiting lane, and
+    /// older than every other row — comes AFTER all of them, however long it has been there. That
+    /// is the ordering half of widening the scope: a colleague blocked on your review must not end
+    /// up behind a stack you opened this morning, and `waited_since` alone would have put your own
+    /// pull request first.
     #[cfg(unix)]
     #[test]
     fn the_budget_is_spent_on_the_lanes_oldest_waiting_rows_first() {
@@ -3959,10 +4220,10 @@ mod tests {
                 // Three PRs waiting on your review. updatedAt is the waited-since key here (no
                 // review of yours on any): #31 has waited longest, then #33, then #32 — while
                 // the NUMBER order and the most-recently-touched order both put #32/#33 first.
-                let node = |number: u64, updated: &str| {
+                let node = |number: u64, updated: &str, author: &str| {
                     format!(
                         r#"{{"number":{number},"title":"t","url":"u",
-                           "isDraft":false,"author":{{"login":"someone"}},"headRefName":"feat",
+                           "isDraft":false,"author":{{"login":"{author}"}},"headRefName":"feat",
                            "headRefOid":"sha{number}","baseRefName":"main",
                            "updatedAt":"{updated}","reviewDecision":"REVIEW_REQUIRED",
                            "latestReviews":{{"nodes":[]}},
@@ -3975,10 +4236,12 @@ mod tests {
                     r#"{"login":"me"}"#.to_string()
                 } else if body.contains("review-requested:") {
                     format!(
-                        r#"{{"data":{{"q0":{{"nodes":[{},{},{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
-                        node(31, "2020-01-01T00:00:00Z"),
-                        node(32, "2020-01-03T00:00:00Z"),
-                        node(33, "2020-01-02T00:00:00Z"),
+                        r#"{{"data":{{"q0":{{"nodes":[{},{},{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[{}]}},"q3":{{"nodes":[]}}}}}}"#,
+                        node(31, "2020-01-01T00:00:00Z", "someone"),
+                        node(32, "2020-01-03T00:00:00Z", "someone"),
+                        node(33, "2020-01-02T00:00:00Z", "someone"),
+                        // Yours, and the oldest row in the queue by a year.
+                        node(34, "2019-01-01T00:00:00Z", "me"),
                     )
                 } else if head.contains("/graphql") {
                     r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
@@ -4014,7 +4277,7 @@ mod tests {
         .unwrap();
         // Every head already has its drafted review, so each visit is summary-only: WHICH rows
         // are read is then purely the ordering under test, with one unit per row.
-        for n in [31u64, 32, 33] {
+        for n in [31u64, 32, 33, 34] {
             store_critique(
                 "ord",
                 &Critique {
@@ -4032,6 +4295,13 @@ mod tests {
         assert!(
             cached("ord", 31, "sha31").is_some(),
             "the row that waited longest was skipped"
+        );
+        // Before the rest: the oldest row in the whole queue is the one YOU opened, and it is not
+        // what the budget bought. Asserted here so a lost lane rank says whose row took the money.
+        assert!(
+            cached("ord", 34, "sha34").is_none(),
+            "a pull request YOU opened took the day's budget from a colleague's review request — \
+             your own rows are read with what is left, not first"
         );
         assert!(
             cached("ord", 33, "sha33").is_some(),
