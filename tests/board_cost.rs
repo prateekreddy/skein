@@ -209,6 +209,81 @@ fn a_board_tick_forks_exactly_what_its_signals_declare() {
          tick, per open browser tab"
     );
 
+    // ---- in-fleet: the two remaining forks were transport, and there is no transport ----
+    //
+    // This is the half that makes the declaration mean something. `board_tick` SUMS what
+    // `signal.rs` declares, so asserting the declaration is 0 would only prove that a constant was
+    // edited. The counting `PATH` above is what makes it a measurement: every program skein can
+    // spawn writes a line before it runs, so a local implementation that quietly shelled out — a
+    // `du` per box, a `tmux has-session` per box — is counted here and fails the comparison.
+    //
+    // The boxes are given real contents first, so the walk has something to walk and the socket
+    // path is actually taken. Measured against an empty fleet root, both would return early and
+    // this would pass while proving nothing.
+    registry(&reg, true);
+    let fleet_root = root.join("boxes");
+    for i in 0..BOXES {
+        let dir = fleet_root.join(format!("cost-{i}"));
+        fs::create_dir_all(dir.join("tree/nested")).unwrap();
+        fs::write(dir.join("tree/file"), vec![b'x'; 4096]).unwrap();
+        fs::write(dir.join("tree/nested/deeper"), vec![b'y'; 8192]).unwrap();
+    }
+    std::env::set_var("SKEIN_IN_FLEET", "1");
+
+    // The gates must be cleared or this measures nothing at all — and "nothing at all" reads as a
+    // pass, since an unasked signal forks exactly as little as a local one. `cfg!(test)` is FALSE
+    // from `tests/`: the library linked here was built without it, so the "no gate under test"
+    // escape inside the module does not apply and the disk answer is remembered for 30s. The first
+    // draft of this measured a warm gate and reported a triumphant 0; the assertion below that the
+    // walk answered for every box is what caught it.
+    skein::fleet::disturbing(
+        &[
+            skein::signal::Remembered::BoxDisk,
+            skein::signal::Remembered::BoxLiveness,
+        ],
+        || {},
+    );
+
+    let in_fleet = tick(&log);
+    assert_eq!(
+        in_fleet,
+        board_tick(BOXES, 0, Gates::Cold).spawns,
+        "an in-fleet cold tick forked {in_fleet} processes and `signal::board_tick` declares {}",
+        board_tick(BOXES, 0, Gates::Cold).spawns
+    );
+    assert_eq!(
+        in_fleet, 0,
+        "in-fleet a board tick must fork NOTHING: the disk walk is a walk and the liveness sweep \
+         is a `/proc` read plus a socket connect. A fork counted here is a local implementation \
+         shelling out — which is how the branch fallback reached twelve forks a tick (SKEIN-49)."
+    );
+
+    // The assertion that stops the two above from passing against an implementation that simply
+    // does nothing: the walk must actually produce figures for every box.
+    let usage = skein::fleet::fleet_disk_usage();
+    assert_eq!(
+        usage.len(),
+        BOXES as usize,
+        "the in-fleet walk answered for {} of {BOXES} boxes — a tick that forks nothing because it \
+         observes nothing is not the thing being tested: {usage:?}",
+        usage.len()
+    );
+    assert!(
+        usage.values().all(|mb| *mb >= 1),
+        "every box here holds 12 KiB, and `du -sxm` rounds up — a 0 means the walk counted \
+         nothing: {usage:?}"
+    );
+
+    // And it is still one pass for the whole fleet, not one per box. Twelve boxes cost what one
+    // costs; if this ever reads as per-box, the count above would have caught the forking kind and
+    // this catches the kind that merely got slower.
+    assert_eq!(
+        board_tick(1, 0, Gates::Cold).spawns,
+        board_tick(BOXES, 0, Gates::Cold).spawns,
+        "the fleet signals must stay Scale::PerPass — one call for the whole fleet"
+    );
+
+    std::env::remove_var("SKEIN_IN_FLEET");
     std::env::remove_var("SKEIN_REGISTRY");
     std::env::remove_var("SKEIN_SPAWN_LOG");
     std::env::set_var("PATH", real_path);

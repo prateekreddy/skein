@@ -485,4 +485,10 @@ depends_on = []
 # Note the name — this is §14's `signal` module, which today holds the primitive's *declaration*
 # (budgets, costs, cadence, sources). `signals` beside it is the current code that computes
 # observations, and the two meet when that is rewritten against §14.
-depends_on = ["source"]
+#
+# `deployment` because a cost is a claim about what a signal SPENDS, and after SKEIN-60 two of them
+# spend differently depending on where skein runs: on a host the box disk and liveness signals each
+# cost one `sbx exec`, and in the fleet they cost a local walk and a `/proc` read — no fork at all.
+# A declaration that could not say which is a declaration that is wrong in one deployment, and the
+# whole point of these numbers is that `tests/board_cost.rs` can hold the code to them.
+depends_on = ["deployment", "source"]

@@ -362,11 +362,15 @@ impl Signal {
             // Asks the sandbox manager. No §2.3 Source reaches that, and none should be invented:
             // when the observation endpoint replaces it (§8.3) this becomes `http`.
             Signal::FleetListing => &[],
-            // A `du` over the fleet root. The volume, so `file`.
+            // A `du` over the fleet root, or the same walk in-process when skein is in the fleet.
+            // The volume either way, so `file` — and the `sbx exec` that used to wrap it was
+            // transport, never a Source of its own (docs/sources.toml says so).
             Signal::FleetDisk => &[File],
-            // `/proc/<pid>/stat` for every anchored box, then `tmux -S <sock> has-session` for the
-            // ones the anchors could not decide — which is per box and per tick, and is why this
-            // returns two.
+            // `/proc/<pid>/stat` for every anchored box, then the box's tmux socket for the ones
+            // the anchors could not decide — which is per box and per tick, and is why this returns
+            // two. Both deployments spell both: host-driven the socket is asked by `tmux -S <sock>
+            // has-session` inside one `sbx exec`, and in-fleet by connecting to it directly, which
+            // is the same question with no process in front of it.
             Signal::FleetLiveness => &[File, Socket],
             Signal::Registry
             | Signal::BoxPlacement
@@ -469,12 +473,26 @@ impl Signal {
                 "`sbx ls --json`, src/sbx.rs `fleet_boxes` — asked by `board::foreign_views` when \
                  somebody wants it, and by nothing on a tick",
             ),
-            Signal::FleetDisk => {
-                Cost::forks(1, "one `sbx exec` du, src/fleet.rs `fleet_disk_usage`")
-            }
-            Signal::FleetLiveness => {
-                Cost::forks(1, "one `sbx exec` sweep, src/fleet.rs `fleet_liveness`")
-            }
+            // Both of these cost a fork on the host and nothing in the fleet, because the fork
+            // was the *transport* and not the observation: `sbx exec` is how a host reaches into
+            // the sandbox, and skein-in-fleet is already there (delivery §3 4c, SKEIN-60). The
+            // basis has to move with the number — one that still cited `sbx exec` after the
+            // `sbx exec` was gone would be a lie the next budget derivation inherits.
+            Signal::FleetDisk => match crate::deployment::in_fleet() {
+                false => Cost::forks(1, "one `sbx exec` du, src/fleet.rs `fleet_disk_usage`"),
+                true => Cost::free(
+                    "one walk of the fleet root, src/fleet.rs `local_disk_usage` — the same single \
+                     pass `du -sxm <root>/*/` made, with no process to make it",
+                ),
+            },
+            Signal::FleetLiveness => match crate::deployment::in_fleet() {
+                false => Cost::forks(1, "one `sbx exec` sweep, src/fleet.rs `fleet_liveness`"),
+                true => Cost::free(
+                    "one `/proc/<pid>/stat` read per anchored box and one socket connect per box \
+                     the anchors could not decide, src/place.rs `local_liveness` — files and a \
+                     socket, which is what `sources()` already claimed this was",
+                ),
+            },
             Signal::Registry => Cost::free("one JSON file, src/registry.rs `all_sandboxes`"),
             Signal::BoxPlacement => {
                 Cost::free("one JSON file per box, src/place.rs `placed_boxes`")

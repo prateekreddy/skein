@@ -228,6 +228,83 @@ pub(crate) fn liveness_probe(root: &str, anchors: &[(String, u32, String, u64)])
     out
 }
 
+/// [`liveness_probe`] as a read: the same decision, in this process, with nothing forked.
+///
+/// Deliberately **not** deployment-aware — it is the local half, and `fleet::fleet_liveness` is the
+/// one place that decides which half to use. A second unit asking where skein runs would be a
+/// second place to keep in step, and `deployment::CONSULTED_BY` exists to stop exactly that.
+///
+/// The two answers are the same two the probe gives, and the fidelity matters more than it looks:
+/// a sweep that decided liveness differently from the stamp would make boxes flap between running
+/// and stopped with nothing about them changing.
+///
+///   * **the anchor**, for a box whose record can decide it — `(boot_id, starttime)` against the
+///     record. `starttime` is field 22 of `/proc/<pid>/stat`, taken after the last `)` because a
+///     process's comm can itself contain spaces and parens; that is what the probe's `sed`/`cut`
+///     does and this parses it the same way.
+///   * **the socket**, for every box the anchors could not decide — no record, no stamp, or a
+///     record from an earlier boot. `tmux -S <sock> has-session` asked whether *a* tmux server is
+///     listening there, and connecting to the socket asks precisely that: a server accepts, a stale
+///     socket file refuses. §2.3's `socket`, and the reason `FleetLiveness` names two Sources.
+///
+/// The fallback's direction is not symmetric and is kept that way: calling a live box stopped
+/// invites somebody to start a second one over its work, so an undecidable box is asked rather
+/// than assumed dead.
+pub(crate) fn local_liveness(
+    root: &str,
+    anchors: &[(String, u32, String, u64)],
+) -> std::collections::HashMap<String, bool> {
+    let mut out = std::collections::HashMap::new();
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|b| b.trim().to_string())
+        .unwrap_or_default();
+    for (name, pid, generation, start) in anchors {
+        // A record from a different boot, or one with no stamp, decides nothing — left to the
+        // socket loop rather than reporting a pid that names some other process now.
+        if generation.is_empty() || *start == 0 || *generation != boot {
+            continue;
+        }
+        let seen = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| parse_proc_starttime(&stat));
+        out.insert(name.clone(), seen == Some(*start));
+    }
+    // Every box the anchors could not decide, by the old question. The directory listing is also
+    // what finds a box with no placement record at all.
+    let Ok(entries) = fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if out.contains_key(&name) {
+            continue;
+        }
+        let sock = path.join("session.sock");
+        // A connect and an immediate drop. Nothing is sent, so this cannot disturb the server it
+        // is asking about — and a socket file with no server behind it refuses rather than hanging.
+        let live = std::os::unix::net::UnixStream::connect(&sock).is_ok();
+        out.insert(name, live);
+    }
+    out
+}
+
+/// `starttime` — field 22 of `/proc/<pid>/stat`, counted from after the final `)`.
+///
+/// Split on the last `)` rather than the first, and on `)` rather than on whitespace, because a
+/// process's `comm` is arbitrary bytes in parens: a box named `foo bar)baz` would break every
+/// simpler parse, and the failure would be a box reported dead while it ran.
+fn parse_proc_starttime(stat: &str) -> Option<u64> {
+    let after = stat.rsplit_once(')')?.1;
+    // Field 22 overall is field 20 of what follows the comm — the probe's `cut -d' ' -f20`.
+    after.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// Read what [`anchor_probe`] printed: `(generation, start)`, or `None` if either is missing.
 pub(crate) fn parse_anchor_probe(out: &str) -> Option<(String, u64)> {
     let line = out.lines().rev().find(|l| !l.trim().is_empty())?;

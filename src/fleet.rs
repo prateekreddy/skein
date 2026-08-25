@@ -2996,12 +2996,96 @@ pub fn fleet_disk_usage() -> std::collections::HashMap<String, u64> {
     };
     DISK_GATE
         .get(fresh, move || {
+            // In-fleet the fleet root is a local path, so the `du` is a walk and the `sbx exec`
+            // around it was only ever transport (SKEIN-60). Still **one pass for the whole fleet**
+            // — `local_disk_usage` lists the root once and walks what it finds, so this stays
+            // `Scale::PerPass`. A walk per box, driven from the board's row loop, is the shape that
+            // took the branch fallback to twelve forks a tick (SKEIN-49).
+            if crate::deployment::in_fleet() {
+                return Some(local_disk_usage(&fleet_root()));
+            }
             let out = own_sandbox(&sandbox)
                 .exec(&disk_usage_script(&fleet_root()), Duration::from_secs(60))
                 .ok()?;
             Some(parse_disk_usage(&out))
         })
         .unwrap_or_default()
+}
+
+/// [`disk_usage_script`] as a walk: what `du -sxm <root>/*/` answers, without a process.
+///
+/// Each rule here is one of `du`'s flags, kept rather than reimplemented loosely — a disk figure
+/// that disagrees with the one the host-driven path produced would show up as boxes changing size
+/// at the moment skein moved, which reads as a skein bug rather than a change of method:
+///
+///   * **`-x`** — stay on the fleet root's own filesystem. A box's store is a host mount, and
+///     walking virtiofs to count bytes that are not on this disk is both slow and wrong. Compared
+///     by device id, which is what `-x` compares.
+///   * **`-m`** — MiB, rounded **up**, per box. `du` reports whole units and rounds up, so a box
+///     holding one byte reads as 1 rather than 0.
+///   * **blocks, not lengths** — `du` counts allocated blocks (512 bytes each), so a sparse file
+///     costs what it occupies rather than what it claims. `len()` would over-report every one.
+///   * **hardlinks once** — `du` counts an inode the first time it meets it. Tracked per box, which
+///     is where `du -s` per box would also count them.
+///   * **`2>/dev/null || true`** — an unreadable directory is skipped and the walk goes on. That is
+///     not a rare case: boxes create unreadable directories in ordinary work, and one of them used
+///     to throw away the disk figures for the entire fleet.
+fn local_disk_usage(root: &str) -> std::collections::HashMap<String, u64> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = std::collections::HashMap::new();
+    // One listing of the root, then a walk per entry it names — the same single pass `du
+    // <root>/*/` makes, and the reason this is not driven from the board's per-box loop.
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out; // no fleet root yet is an empty answer, exactly as a `du` that printed nothing
+    };
+    let on_disk = std::fs::metadata(root).map(|m| m.dev()).ok();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // `<root>/*/` is directories only — the glob does not match plain files.
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        // The box directory's own blocks count too — `du -s <dir>` includes the directory it was
+        // pointed at, not only what is under it. Verified against `du -sx --block-size=512` on a
+        // fixture tree; without this every box reads one directory short.
+        let mut bytes: u64 = 0;
+        let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            seen.insert((meta.dev(), meta.ino()));
+            bytes += meta.blocks() * 512;
+        }
+        let mut stack = vec![path];
+        while let Some(dir) = stack.pop() {
+            // Unreadable is skipped, never fatal.
+            let Ok(kids) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for kid in kids.flatten() {
+                // `DirEntry::metadata` does not traverse a symlink, which is the behaviour wanted
+                // here: `du` does not follow them either, and following one out of the tree would
+                // count another box's bytes against this one.
+                let Ok(meta) = kid.metadata() else {
+                    continue;
+                };
+                if on_disk.is_some_and(|dev| meta.dev() != dev) {
+                    continue; // `-x`
+                }
+                if !seen.insert((meta.dev(), meta.ino())) {
+                    continue; // a hardlink already counted
+                }
+                bytes += meta.blocks() * 512;
+                if meta.is_dir() {
+                    stack.push(kid.path());
+                }
+            }
+        }
+        const MIB: u64 = 1024 * 1024;
+        out.insert(name, bytes.div_ceil(MIB));
+    }
+    out
 }
 
 /// `du` over every box, and the `|| true` is the entire point of this being its own function.
@@ -5942,6 +6026,13 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
                 .into_iter()
                 .map(|(name, record)| (name, record.ns_pid, record.generation, record.ns_start))
                 .collect();
+            // In-fleet `/proc` and the boxes' sockets are local, so the sweep is a read and a
+            // connect rather than an exec (SKEIN-60). Still one pass for the whole fleet: the
+            // anchors are gathered once above and the undecided boxes come from one directory
+            // listing, so this stays `Scale::PerPass`.
+            if crate::deployment::in_fleet() {
+                return Some(crate::place::local_liveness(&fleet_root(), &anchors));
+            }
             let script = crate::place::liveness_probe(&fleet_root(), &anchors);
             let out = own_sandbox(&sandbox)
                 .exec(&script, Duration::from_secs(15))
@@ -7144,6 +7235,63 @@ b idle 5000000 4 1048576 1048576
         assert!(
             got.contains_key("web-main"),
             "the box with the unreadable directory still has a total: {got:?}"
+        );
+    }
+
+    /// The walk answers what `du -sxm` answers, compared against the real `du` on the same tree.
+    ///
+    /// Derived rather than asserted, because "it does what du does" is the kind of claim that is
+    /// true when written and false a year later. The tree carries the four cases where a loose
+    /// reimplementation drifts, each of which was checked against real `du` output before this was
+    /// written: a **sparse** file (du counts blocks, so `len()` over-reports it by a factor of
+    /// thousands), a **hardlink** (du counts the inode once — `du --count-links` was 56 blocks
+    /// against 48 without), a **symlink** pointing outside the tree (not followed, or another
+    /// box's bytes land on this one), and the **box directory's own blocks**, which `du -s`
+    /// includes and a walk of its children alone misses.
+    #[test]
+    fn the_local_walk_answers_what_du_answers() {
+        if std::process::Command::new("sh")
+            .args(["-c", "command -v du"])
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: no `du` to compare against");
+            return;
+        }
+        let dir = tempdir();
+        let root = dir.as_ref() as &std::path::Path;
+        for b in ["web-main", "api"] {
+            std::fs::create_dir_all(root.join(b).join("tree/nested")).unwrap();
+            std::fs::write(root.join(b).join("tree/f"), vec![7u8; 40_000]).unwrap();
+            std::fs::write(root.join(b).join("tree/nested/g"), vec![9u8; 12_000]).unwrap();
+        }
+        // A sparse file: 8 MiB of apparent length occupying almost no blocks. This is the case
+        // that separates counting blocks from counting lengths.
+        let sparse = std::fs::File::create(root.join("web-main/tree/sparse")).unwrap();
+        sparse.set_len(8 * 1024 * 1024).unwrap();
+        drop(sparse);
+        std::fs::hard_link(
+            root.join("web-main/tree/f"),
+            root.join("web-main/tree/linked"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join("web-main/tree/out")).unwrap();
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(disk_usage_script(&root.display().to_string()))
+            .output()
+            .expect("sh to run the disk script");
+        let want = parse_disk_usage(&String::from_utf8_lossy(&out.stdout));
+        let got = local_disk_usage(&root.display().to_string());
+
+        assert!(!want.is_empty(), "the comparison has nothing in it");
+        assert_eq!(
+            got, want,
+            "the in-fleet walk and `du -sxm` disagree. They are the same figure shown in the same \
+             place, so a box that changed size the day skein moved inside reads as a skein bug \
+             rather than a change of method.\n  walk: {got:?}\n  du:   {want:?}"
         );
     }
 

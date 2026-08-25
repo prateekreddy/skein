@@ -226,6 +226,15 @@ mod tests {
              the first as well would run the command in skein's own sandbox instead.",
         ),
         (
+            "signal",
+            "what a board tick costs. `FleetDisk` and `FleetLiveness` each fork once on a host and \
+             nothing in the fleet \u{2014} the fork was the *transport*, `sbx exec`, and in-fleet \
+             skein is already there. The basis strings move with the numbers, because a budget \
+             that still cited `sbx exec` after it was gone would be re-derived wrong by the next \
+             person to read it. `tests/board_cost.rs` counts a real tick against this declaration \
+             in both deployments, so the two cannot drift.",
+        ),
+        (
         "bin/skein",
         "`skein doctor` reports which deployment it is and what is reachable from it. Reporting \
          only \u{2014} the first caller, and deliberately one that changes no behaviour, so the \
