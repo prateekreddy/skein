@@ -123,6 +123,13 @@ function world(opts = {}) {
     // A row says whether a review is drafted for it (SKEIN-216), so drawing one needs these.
     ${grab("revCrits")}
     ${grab("revDraftedReview")}
+    // SKEIN-273: skein's review block approves WITH the review it is showing. The act is a verdict
+    // and rides this file's hold, so it is proven here rather than beside the critique panel.
+    ${grab("revReviewToPost")}
+    ${grab("revApproveWithReview")}
+    ${grab("revApproveWithReviewHtml")}
+    ${grab("revDraftSection")}
+    ${grab("revCritActsHtml")}
     ${grab("revReadyChip")}
     // The row's own read control (SKEIN-228).
     ${grab("revReadAgain")}
@@ -138,6 +145,18 @@ function world(opts = {}) {
       receipt: k => revReceiptHtml(k, revPending.get(k)),
       note: (key, path, line, body, text, sha) => { revNotesFor(key).push({ path, line, body, text, sha }); revNotesSave(key); },
       notes: key => revNotesFor(key).length,
+      // SKEIN-273. "read" is the draft as the row's read-only section sees it — off the summary
+      // payload, exactly where revDraftedReview looks; "vetting" is the same draft with the
+      // keep/drop panel open on it, which is the copy that wins when both could answer.
+      // (No backticks anywhere in this block: the whole world is one template literal.)
+      read: (key, critique) => revSums.set(key, { has_critique: true, critique }),
+      vetting: (key, critique, drop) =>
+        revCrits.set(key, { open: true, busy: false, posting: false, critique,
+                            drop: new Set(drop || []), posted: "", hold: null, said: "" }),
+      approveWith: (r, n) => revApproveWithReview(r, n),
+      willPost: pr => revReviewToPost(pr),
+      section: pr => revDraftSection(pr),
+      critActs: pr => revCritActsHtml(pr),
       prs: () => revQueue.prs,
       decided: () => [...revDecided],
       renders: () => renders,
@@ -294,6 +313,150 @@ const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lan
     [w.posts.length, w.posts[0].url, w.posts[0].body], [1, "/api/repos/acme/review/7/archive", { on: true }]);
   t.check("the row greys in place rather than the pane rebuilding",
     [w.prs()[0].lane, w.row().includes("done"), w.reloads()], ["archived", true, 0]);
+}
+
+// --- SKEIN-273: skein's review block approves WITH the review it is showing --------------------
+//
+// Reported live on #684. skein had read the commit and said "nothing to flag — this is pure
+// composition wiring"; the owner said "in this case, there were no comments so it was good to go so
+// I want to approve with comments you have shown", and there was no control that did it —
+// `review::post_critique` hardcodes `Verdict::Comment` (src/review.rs:2194), so a drafted review
+// could be posted as a comment and in no other way.
+//
+// The act is a VERDICT, so it rides this file's hold rather than the critique panel's own, and that
+// is why it is proven here: `revPending` is what `u` reaches (index.html:5324), what marks the row
+// approved in place, and what makes a second press inside the window replace the first instead of
+// posting one review twice.
+//
+// What did NOT move, asserted elsewhere so this stays about the new act: the bare queue row offers
+// no verdict (review_return.mjs, "no verdict is reachable from a row that is not showing the diff")
+// and `a` outside the reading view still refuses out loud (reviewkeys.mjs:616).
+const FLAG_NOTHING = { number: 7, head_sha: SHA, truncated: false,
+                       overall: "nothing to flag — this is pure composition wiring", comments: [] };
+const SIGNED = "— skein drafted this review from `aaaa111`; I read it and approved as written.";
+const DRAFT = { number: 7, head_sha: SHA, truncated: false, overall: "the lock is taken twice", comments: [
+  { path: "src/seam.rs", line: 46, anchored: true, text: "membership() is cached per-request",
+    line_text: "let tenant = req.session();" },
+  // No such line in the diff, so it cannot sit on one — the panel's own "will travel in the review
+  // body" tag, kept as a promise by folding it into the body.
+  { path: "src/gone.rs", line: 3, anchored: false, text: "this file is not in the diff", line_text: "" },
+  { path: "src/nit.rs", line: 9, anchored: true, text: "a nit you dropped", line_text: "let z = 0;" },
+]};
+
+{
+  const w = world({ prs: [{ ...PR, head_sha: SHA }] });
+  w.read("acme#7", FLAG_NOTHING);
+  const pr = w.prs()[0];
+  const offered = w.section(pr);
+  t.check("skein's review block offers the approval its own words would make",
+    offered.includes(">approve with this review</button>"), true);
+  t.check("and says, beside the control, what pressing it puts on GitHub",
+    offered.includes("approve posts skein's note above as the approval"), true);
+  t.check("naming the commit that reading was of",
+    offered.includes("the commit <code>aaaa111</code> it read"), true);
+  t.check("with the exact body it will send on the control itself",
+    offered.includes("posts exactly this as the approval:")
+      && offered.includes("nothing to flag — this is pure composition wiring")
+      && offered.includes(SIGNED), true);
+
+  w.approveWith("acme", 7);
+  await settle();
+  t.check("pressing it sends nothing — the eight seconds are the reader's", w.posts.length, 0);
+  t.check("the act is held as the verdict it is, on the pull request's own hold",
+    [(w.pending("acme#7") || {}).state, (w.pending("acme#7") || {}).kind], ["waiting", "approve"]);
+  const held = w.section(pr);
+  t.check("and the block that offered it wears the receipt, in place",
+    held.includes("✓ approved") && held.includes("undo (u)") && held.includes(">8s<"), true);
+  t.check("with the control gone, so a second press cannot double-post",
+    held.includes("approve with this review"), false);
+  t.check("the press repainted the row itself, and asked for no render that could be deferred",
+    [w.row().includes('data-rk="acme#7"'), w.renders()], [true, 0]);
+
+  w.advance(7999);
+  await settle();
+  t.check("a millisecond before the window closes, GitHub still knows nothing", w.posts.length, 0);
+  w.advance(1);
+  await settle();
+  t.check("the lapse posts exactly once, to the act route",
+    w.posts.map(p => p.url), ["/api/repos/acme/review/7/act"]);
+  const sent = w.posts[0].body;
+  t.check("as an approval — the verdict the pane could not reach before", sent.kind, "approve");
+  t.check("carrying skein's own sentence as the approval body",
+    sent.body.startsWith("nothing to flag — this is pure composition wiring"), true);
+  t.check("over a line saying whose reading it was, so the colleague who gets it can tell",
+    sent.body.endsWith(SIGNED), true);
+  t.check("against the commit skein read", sent.drafted_at, SHA);
+  t.check("and the queue row is approved in place, without a reload",
+    [w.prs()[0].my_review, w.prs()[0].review_is_current, w.reloads()], ["approved", true, 0]);
+}
+
+{
+  const w = world({ prs: [{ ...PR, head_sha: SHA }] });
+  w.read("acme#7", FLAG_NOTHING);
+  w.approveWith("acme", 7);
+  w.undo("acme#7");
+  w.advance(20000);
+  await settle();
+  t.check("undo inside the window means GitHub never hears of it",
+    [w.posts.length, w.pending("acme#7")], [0, undefined]);
+  t.check("and skein's review block offers the approval again",
+    w.section(w.prs()[0]).includes("approve with this review"), true);
+}
+
+{
+  const w = world({ prs: [{ ...PR, head_sha: SHA }] });
+  w.vetting("acme#7", DRAFT, [2]);          // the nit dropped in the panel, the other two kept
+  const pr = w.prs()[0];
+  const acts = w.critActs(pr);
+  t.check("the vetting panel offers the approval beside posting the same review as a comment",
+    [acts.includes(">approve with this review</button>"), acts.includes("as one review")], [true, true]);
+  t.check("and says how many line comments ride with the verdict",
+    acts.includes("carrying 1 line comment,"), true);
+
+  w.approveWith("acme", 7);
+  const after = w.critActs(pr);
+  t.check("a held verdict takes BOTH controls away — one review must not post twice",
+    [after.includes("approve with this review"), after.includes("as one review")], [false, false]);
+  t.check("and the panel wears the verdict's receipt where the press was",
+    after.includes("✓ approved") && after.includes("undo (u)"), true);
+
+  w.advance(8000);
+  await settle();
+  const sent = w.posts[0].body;
+  t.check("the kept anchored comment travels as a line comment, anchored by its line's own text",
+    sent.comments,
+    [{ path: "src/seam.rs", line: 46, body: "membership() is cached per-request", text: "let tenant = req.session();" }]);
+  t.check("the dropped one travels nowhere",
+    JSON.stringify(sent).includes("a nit you dropped"), false);
+  t.check("and the unanchored one folds into the body under its file, as review::assemble_post does",
+    sent.body.includes("**src/gone.rs**: this file is not in the diff"), true);
+}
+
+{
+  const w = world({ prs: [{ ...PR, head_sha: SHA }] });
+  w.read("acme#7", FLAG_NOTHING);
+  w.note("acme#7", "src/lib.rs", 12, "why 1?", "let x = 1;", SHA);
+  t.check("a line comment you wrote yourself is not swept into skein's approval unannounced",
+    w.section(w.prs()[0]).includes("Your 1 line comment stays waiting"), true);
+  w.approveWith("acme", 7);
+  w.advance(8000);
+  await settle();
+  t.check("and it is not in what posted", w.posts[0].body.comments, []);
+  t.check("nor taken away from you — the reading still owes it a verdict of yours",
+    w.notes("acme#7"), 1);
+}
+
+{
+  const w = world({ prs: [{ ...PR, head_sha: SHA }] });
+  // Everything dropped and nothing written: there is no review left to approve WITH, and a bare
+  // approval is what the reading view's `approve` is for.
+  w.vetting("acme#7", { ...DRAFT, overall: "   " }, [0, 1, 2]);
+  w.approveWith("acme", 7);
+  await settle();
+  t.check("an approval with nothing left in it is refused, not signed by skein alone",
+    [w.posts.length, w.pending("acme#7")], [0, undefined]);
+  t.check("and says why, where the press was",
+    w.toasts.some(s => /nothing kept/.test(s)), true);
 }
 
 t.done();

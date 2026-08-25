@@ -4586,9 +4586,13 @@ function revDraftSection(pr) {
     <b>skein's review of this commit</b>
     <div class="revdraft-overall">${k.overall ? esc(k.overall) : "Nothing to flag."}</div>
     ${cut}${rows}
-    <div class="revacts">
+    <div class="revacts">${revPending.has(rk(pr))
+      // SKEIN-273 put a verdict in this block, so SKEIN-162's receipt belongs in it too: the
+      // control you pressed is where the story of the act shows, not a toast in the far corner.
+      ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
+      : `${revApproveWithReviewHtml(pr)}
       <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">${
-        n ? `go through ${n} comment${n === 1 ? "" : "s"} and post…` : "open it to edit and post…"}</button>
+        n ? `go through ${n} comment${n === 1 ? "" : "s"} and post…` : "open it to edit and post…"}</button>`}
     </div>
   </div>`;
 }
@@ -5608,6 +5612,135 @@ function revCritiqueFire(key) {
   });
 }
 
+// ---- approving WITH skein's review, from the block that holds it (SKEIN-273) ------------------
+//
+// The gap, reported live on #684: skein's review of the commit read "nothing to flag — this is
+// pure composition wiring", and the owner said "in this case, there were no comments so it was
+// good to go so I want to approve with comments you have shown". There was no control that did it.
+// `review::post_critique` hardcodes `Verdict::Comment` in src/review.rs, so a drafted review
+// could be posted as a comment and in no other way — the one thing you could not do with skein's
+// reading was agree with it. Approving meant opening the diff and pressing approve there, at which
+// point skein's sentence is not what posts.
+//
+// It goes HERE and nowhere else. Every verdict in the reading view is gated on a fetched diff
+// (`revBarHtml`'s `canJudge`) and the keyboard refuses `a` out loud anywhere else (the
+// `rev-approve` case, :5363-66) —
+// "you cannot approve from a surface that is not showing you the change" (docs/review-ux.md §6),
+// which is also why the comment at :4959 exists. skein's review block is not such a surface: it IS
+// a reading of the commit it names, printed directly above the control. The bare queue row still
+// offers no verdict and `a` still refuses; neither moved.
+//
+// No server change was needed and none was made: `api_review_act` in src/bin/skein-server.rs
+// already takes `kind: "approve"` with a body and a comments array, and calls
+// `prq::submit_review_with_comments` when there are comments and `prq::submit_review` when not.
+
+/// What approving with skein's review would send: the body GitHub is given, the line comments that
+/// ride with it, and the commit the draft read.
+///
+/// ONE derivation, used by both the control that describes the post and the press that makes it,
+/// so the sentence on screen cannot describe a payload other than the one that goes out.
+function revReviewToPost(pr) {
+  const key = rk(pr);
+  const c = revCrits.get(key);
+  // Whichever copy of skein's review is on screen: the vetting panel's while it is open — edited
+  // text, dropped comments and all — and the read-only section's otherwise. `revDraftSection` goes
+  // silent while the panel is open, so exactly one of the two is ever drawn and there is one answer.
+  const k = (c && c.critique) || revDraftedReview(pr);
+  if (!k) return null;
+  const drop = (c && c.drop) || new Set();
+  const kept = (k.comments || []).filter((_, i) => !drop.has(i));
+  // The same fold `review::assemble_post` does in src/review.rs, and it has to happen here
+  // because `/act` is handed line comments, not drafts: an unanchored comment names no line the
+  // diff has, and GitHub refuses the WHOLE review for one such comment. It travels in the body
+  // under its file instead, which is what the panel's own "will travel in the review body" tag
+  // has been promising the reader all along.
+  let body = String(k.overall || "").trim();
+  for (const d of kept) {
+    if (d.anchored) continue;
+    body += `${body ? "\n\n" : ""}**${d.path}**: ${d.text}`;
+  }
+  const comments = kept.filter(d => d.anchored).map(d => ({
+    path: d.path, line: d.line, body: d.text,
+    // The drafted line's own content — the anchor `prq::re_anchor` searches the live diff for when
+    // the branch has moved since. Empty displaces the comment into the body rather than guessing.
+    text: d.line_text || "",
+  }));
+  const sha = String(k.head_sha || "").slice(0, 7);
+  // Whose words these are, IN THE RECORD. The approval posts under the reader's own GitHub account,
+  // so without this line a colleague reads skein's sentences as a human's — and the one thing an
+  // approval must never do is misreport who read the change. It is the last line of the body, so
+  // it survives everything above it being skein's.
+  const signed = `${body ? `${body}\n\n` : ""}${sha
+    ? `— skein drafted this review from \`${sha}\`; I read it and approved as written.`
+    : "— skein drafted this review; I read it and approved as written."}`;
+  return { review: k, kept, body, signed, comments, sha, draftedAt: k.head_sha || "" };
+}
+
+/// Approve this pull request with skein's review as the approval body.
+///
+/// **Held in `revPending`, not in the critique panel's own `c.hold`, and the choice is the whole
+/// design of this act.** `revCritiquePost` took its own hold deliberately (:5552): `revPending` is
+/// keyed by pull request, so posting the review as a COMMENT and then approving — two acts a reader
+/// makes in a row, both wanted — would have the second overwrite the first and one would never
+/// fire. This act is not that. It IS a verdict, it is the SAME words as that comment post, and the
+/// two are alternatives rather than a sequence: pressing both must post once, not twice, and
+/// `revHold`'s "a second press inside the window replaces the pending act wholesale" is exactly
+/// that rule. `revPending` is also what everything else a verdict owes hangs off — `u` in queue mode
+/// takes back `revLastActKey` (:5328), `revFire` marks the row approved in place through
+/// `revMarkDone`, and the row's own strip already wears the receipt for whatever is pending on it.
+/// A verdict held anywhere else would be a verdict `u` cannot reach and the queue does not know about.
+function revApproveWithReview(repo, number) {
+  const key = repo + "#" + number;
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || { repo_id: repo, number };
+  const post = revReviewToPost(pr);
+  if (!post) { toast("there is no drafted review on this pull request to approve with"); return; }
+  // A bare approval is a complete statement and the reading view's `approve` is where you make one.
+  // THIS control's promise is "approve with these words", so with no words it has nothing to keep.
+  if (!post.body && !post.comments.length) {
+    toast("nothing kept — keep a comment or write an overall note before approving with this review");
+    return;
+  }
+  const { signed, comments, draftedAt } = post;
+  revHold(key, {
+    repo, number, kind: "approve", verdict: true,
+    // No composer draft was involved, and the reading view's hand-written line notes are NOT
+    // carried: they can have been drafted against a different commit from the one skein read, and
+    // `drafted_at` is one sha for the whole batch — sending both under this draft's sha is the
+    // SKEIN-230 shape, where two heads compare equal and vetted comments post onto dead
+    // coordinates. They stay in their store, the control says so, and the reading view still posts
+    // them with a verdict of yours.
+    mineStore: "", hadNotes: false,
+    url: pr.url || `https://github.com/${repo}/pull/${number}`,
+    send: () => revPost(repo, number, "approve", signed, comments, draftedAt),
+    state: "waiting", left: Math.round(REV_UNDO_MS / 1000), timer: null, tick: null, error: "", said: "",
+  });
+  // `revHold` → `revPendingPaint` → `revRepaintRow` has already swapped this row's element, receipt
+  // and all. That is the press's repaint and it is DOM surgery, not a render, so nothing can defer
+  // it — the failure §6 rule 2 creates and `renderReviewNow` exists to avoid cannot arise here.
+}
+
+/// The control, and the sentence that says what it will post.
+///
+/// Saying so is not decoration. The words are skein's and the account is the reader's, so the
+/// reader has to be able to see the exact body before pressing — it is on the control's own tooltip,
+/// character for character, assembled by the same function that sends it — and the colleague who
+/// receives it has to be able to tell whose reading it was, which is the trailer the body is signed
+/// with. Empty when there is no drafted review, so the two blocks that call it need no guard.
+function revApproveWithReviewHtml(pr) {
+  const post = revReviewToPost(pr);
+  if (!post) return "";
+  const n = post.comments.length;
+  const waiting = revNotesFor(rk(pr)).length;
+  return `<span class="dim">approve posts skein's note above as the approval${
+      n ? `, carrying ${n} line comment${n === 1 ? "" : "s"}` : ""
+    }, over a line naming skein${post.sha ? ` and the commit <code>${esc(post.sha)}</code> it read` : ""}.${
+      waiting ? ` Your ${waiting} line comment${waiting === 1 ? " stays" : "s stay"} waiting — this posts skein's review, not yours.` : ""
+    }</span>
+    <button type="button" class="revchip go" title="posts exactly this as the approval:
+
+${esc(post.signed)}" onclick="revApproveWithReview('${esc(pr.repo_id)}', ${pr.number})">approve with this review</button>`;
+}
+
 // The panel's action strip, repainted ALONE — surgical for the same reason `revPendingPaint` is:
 // the answer to a press has to become visible whether or not the reader is mid-word in another
 // drafted comment, and a whole render at that moment would take their caret with it.
@@ -5628,16 +5761,24 @@ function revCritActsHtml(pr) {
   if (!c || !c.critique) return "";
   const k = c.critique;
   const keptN = (k.comments || []).length - c.drop.size;
+  // SKEIN-273: a verdict on this pull request — held, in flight, landed or refused — is the same
+  // story the row's own strip tells (`revBody`), and it takes BOTH buttons away rather than one.
+  // "post as one review" offered beside an approval carrying the very same words is how one review
+  // gets posted twice; and the receipt has to appear where the approve control was pressed.
+  const held = revPending.get(key);
   const said = c.hold
     ? `<span class="revreceipt">✓ posting ${c.hold.n} comment${c.hold.n === 1 ? "" : "s"} as one review</span>
        <button type="button" class="revchip" onclick="revCritiqueUndo('${esc(key)}')">undo</button>
        <span class="revreceipt"><span class="undoleft" data-crit-left="${esc(key)}">${c.hold.left}s</span></span>`
-    : c.posting
+    : held
+      ? revReceiptHtml(key, held)
+      : c.posting
       ? `<span class="revreceipt">✓ posting…</span>`
       : c.posted
         ? `<span class="revreceipt">✓ ${esc(c.posted)}</span>`
         : `${c.said ? `<span class="revreceipt failed">✗ GitHub refused: ${esc(c.said)}</span>` : ""}
-           <button type="button" class="revchip go" onclick="revCritiquePost('${esc(pr.repo_id)}', ${pr.number}, ${esc(JSON.stringify(k.head_sha || ""))})">post ${keptN} comment${keptN === 1 ? "" : "s"} as one review</button>`;
+           <button type="button" class="revchip go" onclick="revCritiquePost('${esc(pr.repo_id)}', ${pr.number}, ${esc(JSON.stringify(k.head_sha || ""))})">post ${keptN} comment${keptN === 1 ? "" : "s"} as one review</button>
+           ${revApproveWithReviewHtml(pr)}`;
   return `<div class="revacts revcritacts" data-critacts="${esc(key)}">${said}
       <button type="button" class="revchip" onclick="revCritiqueDraft('${esc(pr.repo_id)}', ${pr.number})">draft again</button>
       <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">close</button>

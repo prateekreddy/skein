@@ -404,6 +404,36 @@ verdict buttons in the queue at all.
 thing, here". Rebinding it to leave the product would train exactly the wrong reflex. GitHub is
 `g h`.
 
+#### The one verdict outside the reading view, and why it does not break the rule
+
+**skein's own review block approves with the review it is showing** — one chip, no key
+(`revApproveWithReview`, SKEIN-273). Read against the rule above it looks like the thing the rule
+forbids, and it is worth writing down why it is not.
+
+The rule is *"you cannot approve from a surface that is not showing you the change"*, not *"approve
+lives only in the reading view"*. The reading view was where a verdict could go because it is where
+the evidence is. skein's review block is a second such surface: it prints a reading **of the named
+commit** — the overall note, every drafted comment, the file and line each one sits on, and a stale
+marking when the branch has moved past it — directly above the control. Approving there is agreeing
+with what is on screen, which is exactly what the rule protects.
+
+Three things hold it to that, and a change that drops any of them puts the rule back in play:
+
+1. **The words that post are the ones printed above the control**, assembled by the same function
+   that describes them (`revReviewToPost`), with the exact body on the control's own tooltip. A
+   control that could post something other than what it shows is a verdict next to nothing again.
+2. **The approval is signed.** The post goes out under the reader's GitHub account, so the body's
+   last line names skein and the commit it read. An approval that misreports who read the change is
+   worse than no approval control at all.
+3. **Nothing else moved.** The bare queue row still offers no verdict, `a` outside the reading view
+   still refuses out loud, and the reading view's `revBarHtml` is still gated on a fetched diff. The
+   exception is one block, reached by a press, on a surface that had to be opened to exist.
+
+It rides `revPending` — the same hold, receipt and `u` as every other verdict (§7.1) — rather than
+the critique panel's own hold, because it *is* a verdict: it must mark the row approved in place, be
+undoable from the queue, and be replaced rather than doubled when a second verdict lands inside the
+same eight seconds.
+
 ### Focus rules — the part that has to be written down
 
 1. **Selection is a PR number, never an index.** Given §2.3, an index-based selection would drift off

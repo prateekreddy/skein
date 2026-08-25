@@ -19,7 +19,7 @@ so it is checked like one. Updating it is one line, and the failure says which.
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 92   (NOT '.route("' — that gives 80)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 159 unique, 162 occurrences
-grep -c 'function ' src/web/index.html                          # 401
+grep -c 'function ' src/web/index.html                          # 405
 sed -n '39,125p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -103,6 +103,12 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - The pull-request queue. **Six actions, not one**: approve, request-changes, comment, **merge**,
   **ask** (Q&A against the PR), **draft** (model-drafted comment). Merge is destructive and must not
   hide behind a verb.
+- **Approving with skein's own review** — from the block that shows the reading, one control posts
+  it as the approval body, carrying the kept line comments and signed with the commit skein read so
+  the colleague who receives it can tell whose words they are (`revApproveWithReview`, SKEIN-273).
+  It is the one verdict outside the reading view, and it is allowed there for the reason the rest
+  are not: that block *is* a reading of the commit it names. The bare row still offers none, and the
+  keyboard still refuses `a` off the diff.
 - **CODEOWNERS parsing and ownership attribution**, including the gitignore-anchoring rule and the
   fact that team-requested reviews are not returned by `review-requested:@me`.
 - **Contract signals** — a mechanical diff scanner that escalates a PR the model called boring,

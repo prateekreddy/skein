@@ -880,6 +880,22 @@ await check("an expanded row offers no verdict", async () => {
   const verdicts = acts.filter(a => /^approve$|^request changes/.test(a));
   if (verdicts.length) throw new Error(`the queue still offers a verdict next to nothing: ${JSON.stringify(acts)}`);
 });
+// SKEIN-273 put ONE verdict on an expanded row — approve with skein's own review — and the check
+// above goes on passing only because that chip's text is not exactly "approve", which is luck
+// rather than a rule. So state the rule it must obey: the row's own strip still offers no verdict
+// at all, and any approve that exists sits inside the block that shows the reading it would post.
+await check("the one verdict an expanded row may hold is inside skein's reading of it", async () => {
+  const own = await page.$$eval("#revpane .revrow.open .revrowacts .revchip",
+    els => els.map(e => e.textContent.trim()));
+  if (own.some(a => /approve|request changes|merge/i.test(a)))
+    throw new Error(`the row's own control strip offers a verdict: ${JSON.stringify(own)}`);
+  const stray = await page.$$eval("#revpane .revrow.open .revchip", els => els
+    .filter(e => /approve/i.test(e.textContent))
+    .filter(e => !e.closest(".revdraft, .revcrit"))
+    .map(e => e.textContent.trim()));
+  if (stray.length)
+    throw new Error(`an approve sits outside the block showing the change it posts: ${JSON.stringify(stray)}`);
+});
 await check("the change itself is readable in the pane", async () => {
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('read the change')");
   await page.waitForSelector("#revpane .readdiff .diff", { timeout: 15000 });
@@ -1402,6 +1418,33 @@ await check("a browser that refuses every dialog can no longer swallow the press
     throw new Error(`the press left no receipt where the button was: ${said.slice(0, 200)}`);
   if (!/undo/.test(said)) throw new Error(`a receipt with no way back inside its window: ${said}`);
   // Taken back, so the checks below start from a press of their own.
+  await page.click("#revpane .revcritacts .revchip:has-text('undo')");
+  await settle(200);
+  await mustSee("#revpane .revcritacts .revchip:has-text('post')", "the post control, back");
+});
+// SKEIN-273, reported live on #684: skein said "nothing to flag" and there was no way to agree with
+// it — `review::post_critique` can only post a drafted review as a COMMENT. The check is in a real
+// browser for the reason this whole file exists: the report was about a control that was not on
+// screen, and a chip nothing draws is exactly the failure `#gitq` shipped with.
+await check("skein's review can be approved WITH, from the block that shows it", async () => {
+  const chip = "#revpane .revcritacts .revchip:has-text('approve with this review')";
+  await mustSee(chip, "the approve-with-this-review control");
+  const says = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
+  if (!/approve posts skein's note above as the approval/.test(says))
+    throw new Error(`the control does not say what it will post: ${says.slice(0, 200)}`);
+  const willSend = await page.getAttribute(chip, "title");
+  if (!/skein drafted this review/.test(willSend || ""))
+    throw new Error(`the exact body is not on the control, so what posts is unseen: ${willSend}`);
+  await page.click(chip);
+  await settle(200);
+  const held = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
+  if (!/✓ approved/.test(held))
+    throw new Error(`the press left no receipt where the control was: ${held.slice(0, 200)}`);
+  if (!/undo/.test(held)) throw new Error(`a held approval with no way back: ${held}`);
+  if (/approve with this review|as one review/.test(held))
+    throw new Error(`a held approval still offers a press that would post the same words again: ${held}`);
+  // Taken back inside the window — so nothing reaches the fixture's GitHub from a check that is
+  // about the eight seconds before it would, and the post below starts from a strip of its own.
   await page.click("#revpane .revcritacts .revchip:has-text('undo')");
   await settle(200);
   await mustSee("#revpane .revcritacts .revchip:has-text('post')", "the post control, back");

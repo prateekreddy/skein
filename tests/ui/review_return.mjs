@@ -677,6 +677,18 @@ function critWorld() {
     ${grab("revCritActsPaint")}
     ${grab("revCritActsHtml")}
     ${grab("revCritiqueHtml")}
+    // The strip offers a second control now — approve with this review (SKEIN-273) — and stands
+    // down for a verdict already held on the pull request, so it reaches the verdict hold and the
+    // receipt that hold draws. Whether either is right is undo.mjs's, which owns the window; here
+    // they only have to exist so the panel can be drawn at all.
+    let revSums = new Map(), revNotes = new Map();
+    ${grab("revPending")}
+    ${grab("revReceiptHtml")}
+    ${grab("revNotesStore")}
+    ${grab("revNotesFor")}
+    ${grab("revDraftedReview")}
+    ${grab("revReviewToPost")}
+    ${grab("revApproveWithReviewHtml")}
     // Which render each press asked for. The press-time one must be the FORCING one — a press that
     // paints only once the reader lets go of a selection is a press that looks like it did nothing.
     const renderReview = () => painted.push("deferred");
@@ -998,6 +1010,16 @@ function rowWorld() {
     ${grab("revCrits")}
     ${grab("revDraftedReview")}
     ${grab("revReadyChip")}
+    // The read-only section now offers a verdict of its own — approve with this review (SKEIN-273)
+    // — and stands down for one already held on the pull request, so it reaches the verdict hold,
+    // the receipt that hold draws, and the reading view's hand-written notes it deliberately does
+    // not carry.
+    let revNotes = new Map();
+    ${grab("revReceiptHtml")}
+    ${grab("revNotesStore")}
+    ${grab("revNotesFor")}
+    ${grab("revReviewToPost")}
+    ${grab("revApproveWithReviewHtml")}
     ${grab("revDraftSection")}
     // The row's own read control (SKEIN-228).
     ${grab("revReadAgain")}
