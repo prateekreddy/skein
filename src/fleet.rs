@@ -5519,12 +5519,30 @@ done
 /// **And it runs on a tick, not at box start.** The launcher's rule fires when a box's session
 /// starts, so a login typed inside a running box healed nothing until that box was restarted — a
 /// cure worse than the disease. Returns the paths it wrote, so the caller can say what changed.
+///
+/// **The last leg, which used to be missing.** Everything above happens inside the sandbox, between
+/// `$HOME` and the box roots. Nothing that reports a login reads any of those: [`runtime_logins`]
+/// reads `fleet-home` on the HOST and nothing else, and `expired_logins`, [`signed_in_runtimes`],
+/// `skein doctor` and the cockpit's sign-in banner are all built from it. The only thing that ever
+/// wrote `fleet-home` was [`sync_fleet_login`], called from `ensure_fleet` and from a resize — so a
+/// login typed inside a box could travel the whole way to the sandbox's HOME on this tick and STILL
+/// leave the banner up, correctly, for as long as the fleet was not rebuilt. The person had done
+/// the work and skein threw it away; SKEIN-294 is that gap.
+///
+/// So the tick carries it the rest of the way, in the order the two legs have to happen: heal the
+/// sandbox from whichever box holds the working login, then save the sandbox's copy to the host's.
+/// It costs two more `cat`s a minute and almost never writes — [`login_move`] returns `Neither` when
+/// the two copies are already the same bytes, which is the ordinary case and which the mtime that
+/// `login_written_ms` reads depends on.
 pub fn heal_logins() -> Result<Vec<String>, String> {
     let sandbox = fleet_sandbox();
     if sandbox.is_empty() {
         return Err("no fleet sandbox configured".into());
     }
     let told = own_sandbox(&sandbox).exec(&heal_logins_script(), Duration::from_secs(60))?;
+    // After the heal and not before: the copy worth keeping is the one the election above just
+    // settled on, and reading `$HOME` first would save whatever it was about to replace.
+    sync_fleet_login(&sandbox);
     Ok(told
         .lines()
         .map(str::trim)
@@ -5967,6 +5985,7 @@ pub fn expired_logins() -> Vec<ExpiredLogin> {
 pub fn sync_fleet_login(sandbox: &str) {
     let fleet = own_sandbox(sandbox);
     let dir = fleet_home_dir();
+    let now_ms = chrono::Utc::now().timestamp_millis();
     for rel in LOGIN_FILES {
         let host = dir.join(rel);
         let in_sandbox = fleet
@@ -5976,7 +5995,7 @@ pub fn sync_fleet_login(sandbox: &str) {
             )
             .unwrap_or_default();
         let saved = std::fs::read(&host).ok();
-        match login_move(&in_sandbox, saved.as_deref()) {
+        match login_move(&in_sandbox, saved.as_deref(), now_ms) {
             LoginMove::Save => {
                 if let Some(parent) = host.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -6017,12 +6036,43 @@ enum LoginMove {
 ///
 /// "The sandbox has a file" was the old test, and a husk is a file. A logged-out sandbox therefore
 /// overwrote a perfectly good saved login, and after that there was nothing left to heal from.
-fn login_move(in_sandbox: &[u8], on_host: Option<&[u8]>) -> LoginMove {
-    if carries_login(in_sandbox) {
-        return LoginMove::Save;
+///
+/// **Then the same hole one notch along.** The husk was caught and the *expired* credential was
+/// not: [`carries_login`] never looks at expiry, so a sandbox holding an invalidated token still
+/// answered "I have a login" and still overwrote the host's live one. That was survivable while
+/// this ran twice in a fleet's life — at `ensure_fleet` and at a resize. [`heal_logins`] now runs
+/// it every minute, and at that frequency the window is not a window: any minute the sandbox's copy
+/// is dead and the host's is not, the kept copy is destroyed and there is nothing left to restore
+/// from. So the question this asks is [`login_state`]'s, not [`carries_login`]'s — which is also
+/// the question the launcher's `login_life` has always asked one layer down.
+///
+/// A dead token is still not worthless: a heal can refresh one where it cannot conjure a void. So
+/// it fills an empty kept copy, and never displaces a working one.
+fn login_move(in_sandbox: &[u8], on_host: Option<&[u8]>, now_ms: i64) -> LoginMove {
+    // Two copies of the same bytes have nowhere to move. **Not an optimisation.**
+    // [`login_written_ms`] reads this file's MTIME as the evidence that a credential was replaced
+    // since a refusal was recorded against it (`crate::ai`'s refusal memory), so rewriting
+    // identical bytes on every tick would report a brand-new credential every minute and clear
+    // every remembered refusal forever — a memo that can never stand is the same bug as one that
+    // can never be cleared, pointed the other way.
+    if on_host == Some(in_sandbox) {
+        return LoginMove::Neither;
     }
-    match on_host {
-        Some(saved) if carries_login(saved) => LoginMove::Restore,
+    let here = login_state(in_sandbox, now_ms);
+    let there = on_host.map_or(LoginState::Absent, |saved| login_state(saved, now_ms));
+    match (here, there) {
+        // A working sandbox copy is the fleet's login. This is the leg a box-side `/login` travels:
+        // the heal script has just carried it from the box's private HOME into the sandbox's, and
+        // this carries it the rest of the way to the file every surface reads.
+        (LoginState::Live, _) => LoginMove::Save,
+        // The sandbox's is dead or gone and the host's still works — put the host's back. Covers a
+        // freshly rebuilt sandbox (empty HOME), a logged-out one (a husk), and the case this rule
+        // was widened for: an invalidated token, which used to win here.
+        (_, LoginState::Live) => LoginMove::Restore,
+        // Neither works, so the only question left is whether anything is there at all.
+        (LoginState::Expired { .. }, LoginState::Absent) => LoginMove::Save,
+        (LoginState::Absent, LoginState::Expired { .. }) => LoginMove::Restore,
+        // Two corpses, or two voids. Moving one over the other changes nothing and costs an mtime.
         _ => LoginMove::Neither,
     }
 }
@@ -7417,24 +7467,237 @@ b idle 5000000 4 1048576 1048576
     /// from. Same shape as the bug the launcher was already fixed for, one layer up and untested.
     #[test]
     fn a_logged_out_sandbox_cannot_destroy_the_fleets_kept_login() {
+        let now = 1_700_000_000_000i64;
         let login = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
         let husk = br#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#;
 
         // The regression, and the only case that loses data.
         assert_eq!(
-            login_move(husk, Some(login)),
+            login_move(husk, Some(login), now),
             LoginMove::Restore,
             "a logged-out sandbox overwrote the host's saved login"
         );
         // A live sandbox is the live copy; the host follows it, including across a token refresh.
-        assert_eq!(login_move(login, Some(husk)), LoginMove::Save);
-        assert_eq!(login_move(login, None), LoginMove::Save);
+        assert_eq!(login_move(login, Some(husk), now), LoginMove::Save);
+        assert_eq!(login_move(login, None, now), LoginMove::Save);
         // A freshly rebuilt sandbox: empty HOME, and the host has the answer.
-        assert_eq!(login_move(b"", Some(login)), LoginMove::Restore);
+        assert_eq!(login_move(b"", Some(login), now), LoginMove::Restore);
         // Nothing anywhere is normal on API keys, and writing a husk into a sandbox helps nobody.
-        assert_eq!(login_move(b"", None), LoginMove::Neither);
-        assert_eq!(login_move(husk, Some(husk)), LoginMove::Neither);
-        assert_eq!(login_move(husk, None), LoginMove::Neither);
+        assert_eq!(login_move(b"", None, now), LoginMove::Neither);
+        assert_eq!(login_move(husk, Some(husk), now), LoginMove::Neither);
+        assert_eq!(login_move(husk, None, now), LoginMove::Neither);
+    }
+
+    /// The same hole one notch along: an *invalidated* sandbox login is not a login either.
+    ///
+    /// A husk was caught; an expired credential was not, because the test was [`carries_login`],
+    /// which never looks at expiry. That was survivable while [`sync_fleet_login`] ran twice in a
+    /// fleet's life. [`heal_logins`] now runs it every minute, and at that rate "a window where the
+    /// sandbox's copy is dead and the host's is not" is simply Tuesday: the kept copy is destroyed
+    /// and there is then nothing left to restore from — which is the exact sentence
+    /// `a_logged_out_sandbox_cannot_destroy_the_fleets_kept_login` exists to prevent.
+    #[test]
+    fn an_invalidated_sandbox_login_cannot_destroy_the_fleets_kept_one_either() {
+        let now = 1_700_000_000_000i64;
+        let live = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        let dead = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"sk-old","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            now - 1
+        );
+        let dead = dead.as_bytes();
+
+        // The point of the whole test. Before this, `carries_login(dead)` was true and this Saved.
+        assert_eq!(
+            login_move(dead, Some(live), now),
+            LoginMove::Restore,
+            "an expired sandbox credential overwrote the host's working one"
+        );
+        // A dead token still beats a void: a heal can refresh one and cannot conjure the other, so
+        // an empty kept copy is filled rather than left empty.
+        assert_eq!(login_move(dead, None, now), LoginMove::Save);
+        assert_eq!(login_move(b"", Some(dead), now), LoginMove::Restore);
+        // Two corpses. Moving one over the other buys nothing and costs the mtime below.
+        let other_dead = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"sk-other","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            now - 2
+        );
+        assert_eq!(
+            login_move(dead, Some(other_dead.as_bytes()), now),
+            LoginMove::Neither
+        );
+        // And a live sandbox still wins over a dead host copy, which is the leg a box-side login
+        // travels once the heal script has carried it into the sandbox's HOME.
+        assert_eq!(login_move(live, Some(dead), now), LoginMove::Save);
+    }
+
+    /// The whole journey a box-side `/login` has to walk, driven end to end.
+    ///
+    /// **This is SKEIN-294.** The two legs were each right and the second one did not run. Leg one
+    /// is [`heal_logins_script`], which elects the best credential among the sandbox's `$HOME` and
+    /// every box root and heals the dead ones — it already carried a box's login UP into the
+    /// sandbox, every minute, on the host's authority rather than the box's. Leg two is
+    /// [`sync_fleet_login`], which writes `fleet-home` — the ONLY file anything reporting a login
+    /// reads ([`runtime_logins`] and everything built on it: `expired_logins`,
+    /// [`signed_in_runtimes`], `skein doctor`, the cockpit's banner). Leg two was called from
+    /// `ensure_fleet` and from a resize, and nowhere else. So a person could log in inside a box,
+    /// watch leg one carry it up within the minute, and still be looking at a banner saying the
+    /// fleet is signed out — correctly, because `fleet-home` still held the dead one. The work was
+    /// done and thrown away.
+    ///
+    /// Driven by RUNNING the real script against a fixture and feeding its actual output bytes to
+    /// the real decision, because the failure was precisely that two correct halves did not meet:
+    /// asserting on either half alone is what let this survive.
+    #[test]
+    fn a_login_typed_inside_a_box_reaches_the_file_the_banner_reads() {
+        // `SKEIN_FLEET_ROOT` is process-wide and three tests in this file set it to build a script.
+        // Without this they interleave and each reads a fixture root belonging to another test —
+        // which is how `a_shared_login_reaches_every_box_and_never_comes_back_up` began failing
+        // when this test was added, having been latent since it was written.
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let boxes = crate::testutil::tempdir();
+        let boxes = boxes.as_ref() as &std::path::Path;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let live = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"sk-typed-in-a-box","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            now_ms + 86_400_000
+        );
+        // The state the fleet is in at the exact moment somebody logs in inside a box: invalidated
+        // everywhere. Not a husk — a husk was already caught. This is a real token that died.
+        let dead = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"sk-invalidated","refreshToken":"r","refreshTokenExpiresAt":{}}}}}"#,
+            now_ms - 1
+        );
+
+        let sandbox_home = home.join(".claude/.credentials.json");
+        std::fs::create_dir_all(sandbox_home.parent().unwrap()).unwrap();
+        std::fs::write(&sandbox_home, dead.as_bytes()).unwrap();
+        for (name, cred) in [("web-main", &live), ("api-worker", &dead)] {
+            let h = boxes.join(name).join("home/.claude");
+            std::fs::create_dir_all(&h).unwrap();
+            std::fs::write(h.join(".credentials.json"), cred.as_bytes()).unwrap();
+        }
+
+        std::env::set_var("SKEIN_FLEET_ROOT", boxes);
+        let script = heal_logins_script();
+        std::env::remove_var("SKEIN_FLEET_ROOT");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", home)
+            .output()
+            .expect("bash");
+        assert!(out.status.success(), "the heal script failed: {out:?}");
+
+        // Leg one: the box's login is now the sandbox's. This part already worked.
+        let in_sandbox = std::fs::read(&sandbox_home).unwrap();
+        assert!(
+            String::from_utf8_lossy(&in_sandbox).contains("sk-typed-in-a-box"),
+            "the heal did not carry the box's login up into the sandbox's HOME"
+        );
+
+        // Leg two, and the whole point: the host's kept copy — the file the banner reads — takes
+        // it. Before SKEIN-294 nothing called this between one `ensure_fleet` and the next.
+        assert_eq!(
+            login_move(&in_sandbox, Some(dead.as_bytes()), now_ms),
+            LoginMove::Save,
+            "the login reached the sandbox and stopped there; `fleet-home` kept the dead token, so \
+             every surface that reports a login still says the fleet is signed out"
+        );
+        // And the tick that now runs both legs must be idle once they agree, or the mtime
+        // `login_written_ms` reads would be reset every minute.
+        assert_eq!(
+            login_move(&in_sandbox, Some(&in_sandbox), now_ms),
+            LoginMove::Neither
+        );
+    }
+
+    /// The tick runs BOTH legs, and in the order that makes the second one mean anything.
+    ///
+    /// **Source-shaped, and it says so.** The boundary between the two legs is
+    /// `own_sandbox(..).exec(..)` — a command inside a running sandbox — which no test on this
+    /// machine can cross, so `heal_logins` itself cannot be driven. That leaves the wiring as the
+    /// only thing left to check, and the wiring is exactly what was missing: both halves of
+    /// SKEIN-294 were individually correct and individually tested, and the bug was that nothing
+    /// called the second one. `a_login_typed_inside_a_box_reaches_the_file_the_banner_reads` drives
+    /// the real script and the real decision and still passes with the call deleted — which is what
+    /// sent me here.
+    ///
+    /// What it does not prove: that either leg works. Those are that test's job and
+    /// `an_invalidated_sandbox_login_cannot_destroy_the_fleets_kept_one_either`'s. This proves only
+    /// that the two are joined, which is the one thing they can never prove about each other.
+    ///
+    /// The precedent is `the_host_and_the_launcher_agree_on_what_a_login_is`, which reads the very
+    /// string `heal_logins` executes for the same reason: the alternative to reading the source is
+    /// not a better test, it is no test.
+    #[test]
+    fn the_login_tick_saves_the_fleets_copy_after_healing_it() {
+        let body = fn_body(include_str!("fleet.rs"), "pub fn heal_logins()");
+        let exec = body.find(".exec(").expect(
+            "heal_logins no longer runs the heal script; this test is reading the wrong fn",
+        );
+        let save = body.find("sync_fleet_login(").unwrap_or_else(|| {
+            panic!(
+                "the login tick heals the sandbox and never writes `fleet-home`, so a login typed \
+                 inside a box reaches the sandbox and stops there — every surface that reports a \
+                 login reads `fleet-home` and would still say the fleet is signed out (SKEIN-294)"
+            )
+        });
+        assert!(
+            save > exec,
+            "`fleet-home` is written BEFORE the heal, so it keeps the copy the heal is about to \
+             replace — the sandbox's, not the one the election settles on"
+        );
+    }
+
+    /// One function's body, brace-matched from its signature.
+    ///
+    /// Brace-matched rather than "up to the next `\n}`", for the reason `tools/module-check.py`
+    /// gives about cutting test modules: the cheap version stops at the first nested block and
+    /// everything below it becomes invisible — which for a check like the one above would mean
+    /// silently passing on a body it never read.
+    fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+        let at = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("no `{signature}` in this file"));
+        let open = at + src[at..].find('{').expect("a fn with no body");
+        let mut depth = 0usize;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[open..open + i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after `{signature}`")
+    }
+
+    /// Rewriting the same bytes is not free, because something reads the mtime.
+    ///
+    /// `login_written_ms` treats `fleet-home`'s mtime as evidence that the credential was REPLACED
+    /// since a refusal was recorded against it, and `crate::ai`'s refusal memory clears itself on
+    /// that evidence. [`heal_logins`] runs [`sync_fleet_login`] every minute; if an unchanged file
+    /// were rewritten each time, every remembered refusal would be cleared every minute and the
+    /// memory would never hold — the mirror image of the memo that can never be cleared, and just
+    /// as useless.
+    #[test]
+    fn an_unchanged_login_is_not_rewritten_every_minute() {
+        let now = 1_700_000_000_000i64;
+        let login = br#"{"claudeAiOauth":{"accessToken":"sk-live","refreshToken":"r"}}"#;
+        assert_eq!(
+            login_move(login, Some(login), now),
+            LoginMove::Neither,
+            "the tick would rewrite an identical credential and reset the mtime a refusal is judged against"
+        );
+        // Including when there is nothing to write on either side.
+        assert_eq!(login_move(b"", Some(b""), now), LoginMove::Neither);
     }
 
     /// The host and the launcher must not disagree about what a login is.
@@ -11840,6 +12103,9 @@ b idle 5000000 4 1048576 1048576
     /// the launcher's whole security argument is that a box may never write the fleet's copy.
     #[test]
     fn a_shared_login_reaches_every_box_and_never_comes_back_up() {
+        // See the note in `a_login_typed_inside_a_box_reaches_the_file_the_banner_reads`:
+        // `SKEIN_FLEET_ROOT` is process-wide, and this test read another test's fixture root.
+        let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         let boxes = crate::testutil::tempdir();
@@ -11944,6 +12210,9 @@ b idle 5000000 4 1048576 1048576
     #[cfg(target_os = "linux")]
     #[test]
     fn one_live_login_heals_every_box_whose_own_is_dead() {
+        // `SKEIN_FLEET_ROOT` is process-wide; see the note in
+        // `a_login_typed_inside_a_box_reaches_the_file_the_banner_reads`.
+        let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         let boxes = crate::testutil::tempdir();
@@ -12088,6 +12357,9 @@ b idle 5000000 4 1048576 1048576
     #[cfg(target_os = "linux")]
     #[test]
     fn healing_does_nothing_when_there_is_nothing_to_heal() {
+        // `SKEIN_FLEET_ROOT` is process-wide; see the note in
+        // `a_login_typed_inside_a_box_reaches_the_file_the_banner_reads`.
+        let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         let home = home.as_ref() as &std::path::Path;
         let boxes = crate::testutil::tempdir();

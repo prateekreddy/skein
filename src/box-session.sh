@@ -751,9 +751,17 @@ for rel in ".claude/.credentials.json" ".codex/auth.json"; do
     if better_login "$canon_life" "$mine_life" "$canon" "$mine"; then
       merge_login "$canon" "$mine"
     else
-      # Its own is the better one and it keeps it — but it stays here. Said out loud, because a box
-      # whose login silently does not reach the fleet looks like a fleet that has stopped sharing.
-      echo "skein: ${SKEIN_BOX:-this box} has a longer-lived $rel than the fleet's, and a box cannot write the fleet's copy; run \`skein login\` on the host to share one" >&2
+      # Its own is the better one and it keeps it — but it does not write the fleet's copy from
+      # here, and that rule is not softening: nothing in a file a box writes is evidence about that
+      # file.
+      #
+      # It no longer has to. The host's `heal_logins` tick walks every box root once a minute,
+      # elects the longest-lived credential among them and the sandbox's, and — since SKEIN-294 —
+      # carries the result on to `fleet-home`, which is the file every surface that reports a login
+      # actually reads. Same gate, applied by the host on its own authority instead of by the box on
+      # its own say-so. So this is a wait, not a dead end, and it is said out loud because a minute
+      # of apparent nothing looks exactly like a fleet that has stopped sharing.
+      echo "skein: ${SKEIN_BOX:-this box} has a longer-lived $rel than the fleet's; a box cannot write the fleet's copy, so the host will carry it up within the minute" >&2
     fi
   elif [ -n "$canon_life" ]; then
     merge_login "$canon" "$mine"

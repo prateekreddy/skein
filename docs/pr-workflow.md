@@ -115,14 +115,49 @@ The owner's second ask, 2026-08-24: per repo, take the oldest fully-approved PRs
 apply the CI-enabling label, and merge+delete when green — one at a time; stacks too; skip anything
 that fails and say so. Three decisions, made by the owner:
 
-- **Serial.** One PR at a time per repo. Only the front of the train is rebased, labeled and
-  merged; everyone else waits. A parallel train re-runs CI on every sibling after every merge — the
-  re-run tax and the API spend are why serial won.
+- **Serial.** One PR at a time per serial workflow. Only the front of that workflow's train is
+  rebased, labeled and merged; everyone else in it waits. A parallel train re-runs CI on every
+  sibling after every merge — the re-run tax and the API spend are why serial won.
+
+  **The unit is the workflow, not the repo**, and the difference is worth stating because the
+  obvious reading is wrong. `sweep` builds one front *per flow name*, a `BTreeMap<String, u64>`
+  keyed by `train.flow` (`grep -n 'let fronts' src/prwork.rs`), and then gates each pull request on
+  it (`grep -n 'flow.serial && fronts.get' src/prwork.rs`). Two
+  serial workflows carrying pull requests in the same repo therefore have two fronts, and two pull
+  requests act in one pass. That is the code's actual guarantee; a repo running one train, which is
+  the configuration this was designed for, cannot tell the difference. A repo running two gets back
+  exactly the re-run tax serial was chosen to avoid, so if a second train is ever wanted, the
+  decision to re-take is whether the front should be keyed on the repo instead.
 - **Any fully-approved PR**, not just the owner's. The train acts on the fleet's credential, so
   every label, merge and branch deletion shows under the owner's name (`prq::host_token`'s
   contract).
 - **Stacks: merge the approved prefix.** Not atomic — the train ships from the bottom up as far as
   approvals reach.
+
+### Which acts carry a head anchor, and which two cannot
+
+`expectedHeadOid` above is the anchor discipline — prove the thing is what you think before acting
+on it. It is worth writing down that **two of the train's four acts carry it and two do not**,
+because the code's own comment reads as though all four did — see
+`grep -n 'passed to every action' src/prwork.rs` — and that is the more dangerous direction to be
+wrong in.
+
+| act | carries the head skein decided on? | where |
+|---|---|---|
+| `update:rebase` / `update:merge` | **yes** — `expectedHeadOid` | `grep -n 'expectedHeadOid' src/prwork.rs` |
+| `merge:*` | **yes** — `sha` | `grep -n '"sha": head_sha' src/prwork.rs` |
+| `add-label:*` | **no** | `grep -n 'fn add_label' src/prwork.rs` — POSTs to `/repos/{slug}/issues/{number}/labels`, body `{ "labels": [label] }`, no head |
+| `remove-label:*` | **no** | `grep -n 'fn remove_label' src/prwork.rs` — DELETEs `/repos/{slug}/issues/{number}/labels/{label}`, no head |
+
+The two that do not are not an oversight and not fixable here: **GitHub's issue-labels API accepts
+no head parameter at all**, on either verb. There is nothing to send.
+
+What that costs, stated plainly rather than left implied: `add-label:ci-queue` is the step that
+*starts CI*, and it is one of the two unanchored ones. So a push that lands between skein reading
+the queue and skein applying the label starts a CI run against a head skein has never seen. The
+train does not merge on it — `merge:*` re-checks with `sha` and GitHub answers 409 if the branch
+moved — so the failure mode is a wasted CI run and a front that has to go round again, not a merge
+of unreviewed code. The anchor is on the acts where being wrong would ship something.
 
 ### Stacks need no stack model
 
@@ -142,7 +177,7 @@ Three conditions and one workflow property, all answerable from the queue skein 
 | `behind` | GitHub's `mergeStateStatus` is `BEHIND` — the base has commits this branch lacks |
 | `current` | known **not** behind. `UNKNOWN` satisfies neither, same discipline as `mergeable` |
 | `base:trunk` | the PR's base ref is the repository's default branch |
-| `"serial": true` | on a workflow: per repo, order carrying PRs oldest-first (lowest number); only the first one without a stop acts. A stopped PR is passed over — that is the "skip and move ahead" |
+| `"serial": true` | on a workflow: one at a time per **(repo, workflow)** — not per repo; order this workflow's carrying PRs oldest-first (lowest number); only the first one without a stop acts. A stopped PR is passed over — that is the "skip and move ahead" |
 
 ### How a skip reaches the owner
 

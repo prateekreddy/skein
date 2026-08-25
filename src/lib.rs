@@ -3,8 +3,8 @@
 //! `skein` (the CLI) and `skein-server` (the cockpit) are two front ends over one crate; neither
 //! owns behaviour the other cannot reach, which is why they cannot disagree about what a box is
 //! doing. See `docs/architecture.md` for where this is going, and `docs/inventory.md` for what it
-//! does today. (`ARCHITECTURE.md` at the root describes the per-VM system this replaced and is
-//! **stale** — it still says ratatui and Svelte.)
+//! does today. (`ARCHITECTURE.md` at the root is a signpost to those two and nothing else — it was
+//! retired from describing the per-VM system in SKEIN-222.)
 //!
 //! **This file declares modules and nothing else.** It held ~2,570 lines of implementation until
 //! SKEIN-25, and the cost was that a reference into any of it was spelled `crate::X` — a root path

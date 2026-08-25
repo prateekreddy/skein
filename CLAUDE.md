@@ -31,8 +31,9 @@ Work in progress on branch `in-fleet`. Four documents, and they are meant to be 
 | `docs/parity.md` | the acceptance gate — what the rewrite must still do |
 | `docs/delivery.md` | sequence, migration, and the landmines |
 
-`ARCHITECTURE.md` at the root describes the current system and is **stale** — it still describes
-ratatui, Svelte and per-box microVM kernels. Do not trust it.
+`ARCHITECTURE.md` at the root is a **signpost to these four and nothing else** (SKEIN-222). It used
+to describe ratatui, Svelte and per-box microVM kernels, and had to be disclaimed here; it now makes
+no claim about the code, so there is nothing left in it to go stale.
 
 ### Two rules these documents were written to enforce
 

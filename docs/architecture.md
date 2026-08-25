@@ -6,8 +6,9 @@ contradicts something skein does today, it is because the current behaviour was 
 to be the better answer — not because it was overlooked.
 
 Companion documents: `docs/delivery.md` (sequence, migration, landmines) and `docs/parity.md` (the
-audited capability inventory). The root `ARCHITECTURE.md` describes today's system and is **stale**
-— it still describes ratatui, Svelte and per-box microVM kernels. It should be retired, not trusted.
+audited capability inventory). The root `ARCHITECTURE.md` no longer describes anything: it was
+retired to a signpost pointing here (SKEIN-222), after the version that described ratatui, Svelte and
+per-box microVM kernels had to be disclaimed in `CLAUDE.md`.
 
 Organised primitives-first: §2 states the five things skein is built from, §3 shows every feature as
 a composition. **A feature that cannot be written as a composition means the primitive set is wrong**,
