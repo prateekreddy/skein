@@ -70,9 +70,33 @@ if [ -L "$store/skein" ]; then store="$(dirname "$(readlink "$store/skein")")"; 
 
 # The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
 # signal on it makes every box write one file and the board see none of them report.
-# SKEIN_BOX is exported by box-session.sh, the only thing that knows which box a process is
-# in. A legacy box has no SKEIN_BOX and is alone in its VM, where the two are the same name.
-vmid="${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}}"
+# SKEIN_BOX is exported by box-session.sh and by every placement hop into a shared box (`wrap` in
+# src/place.rs) — the only things that know which box a process is in.
+#
+# The old fallback chain ran on to SANDBOX_VM_ID and then `hostname` unconditionally, and both of
+# those name the SANDBOX. What decides whether that is sound is which world this box lives in, and
+# SKEIN_TMUX_SOCK answers exactly that: `pane_observer_start` (src/runtime.rs) exports the box's own
+# tmux socket under the shared model and exports nothing at all when the sandbox IS the box. So
+#   · SKEIN_BOX set         — that is the box, whatever else is in the environment;
+#   · unset, and no socket  — a legacy box, alone in its VM, where the two names are the same
+#                             string. Unchanged: this is the path that has always worked;
+#   · unset, with a socket  — a shared sandbox and no identity. Writing under SANDBOX_VM_ID here
+#                             files this box's screen under a name that is not its own, and
+#                             overwrites whichever box does own that name. Refuse.
+#
+# Refusing is the conservative half of a pair: a box with no observation reads as "hooks only" on
+# the board, which is TRUE and says so, whereas an observation filed under the wrong box is
+# well-formed, fresh, and renders as that box's turn state with nothing to mark it. Measured
+# residue of the writing version: five separate repo stores each hold a `skein-fleet.pane.json` —
+# the fleet sandbox's name, and no box's — written within five minutes of each other on
+# 2026-08-04, one per box, every box's screen landing on a file the board never asks for.
+if [ -n "${SKEIN_BOX:-}" ]; then
+  vmid="$SKEIN_BOX"
+elif [ -z "${SKEIN_TMUX_SOCK:-}" ]; then
+  vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
+else
+  exit 0
+fi
 vmid="${vmid//\//-}"
 dir="$store/status"
 mkdir -p "$dir" 2>/dev/null || exit 0
@@ -96,8 +120,18 @@ write_obs() { # $1 = activity epoch, $2 = age, $3 = moving(0|1), $4 = dead(0|1),
   local tmp lines line first=1
   tmp="$(mktemp "$dir/.pane.XXXXXX" 2>/dev/null)" || return 0
   {
-    printf '{"contract":1,"ts":%s,"activity":%s,"age":%s,"moving":%s,"dead":%s,"session":"%s","title":"%s","title_age":%s,"cmd":"%s","tail":[' \
-      "$EPOCHSECONDS" "$1" "$2" "$3" "$4" "$(esc "$sess")" "$(esc "$5")" "${8:--1}" "$(esc "$6")"
+    # `box` says WHOSE screen this is, inside the observation, so the filename is a claim the reader
+    # can check instead of a claim it has to believe (`pane_is_ours`, src/signals.rs). The guard
+    # above means the probe never writes the wrong name; this means a file that somehow carries one
+    # anyway — an old probe's leftovers, a copied store, a restored backup — is refused rather than
+    # classified as the box it was filed under.
+    #
+    # Deliberately NOT a contract bump: `contract` says what the EXISTING fields mean, and this adds
+    # a field without changing any of them. A reader that has never heard of `box` ignores it (serde
+    # drops unknown keys), so bumping would only make every current skein call every new observation
+    # "newer" and go dark on the whole fleet at once — the failure PANE_CONTRACT exists to prevent.
+    printf '{"contract":1,"box":"%s","ts":%s,"activity":%s,"age":%s,"moving":%s,"dead":%s,"session":"%s","title":"%s","title_age":%s,"cmd":"%s","tail":[' \
+      "$(esc "$vmid")" "$EPOCHSECONDS" "$1" "$2" "$3" "$4" "$(esc "$sess")" "$(esc "$5")" "${8:--1}" "$(esc "$6")"
     while IFS= read -r line; do
       [ "$first" = 1 ] || printf ','
       first=0

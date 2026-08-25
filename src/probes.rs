@@ -1591,6 +1591,151 @@ mod tests {
         assert_eq!(status("old-style-box")["status"], "waiting");
     }
 
+    /// **A screen observation must be the box's own, and the reader must be able to check.**
+    ///
+    /// The same identity trap as the test above, in the one signal where getting it wrong is
+    /// invisible. `box-status.sh` misfiled makes a box report *nothing* — a hole you can see. A
+    /// screen observation misfiled is well-formed, fresh, and classifies perfectly, so it renders
+    /// as that box's turn state with nothing to mark it: a box that needs you reads as busy, or
+    /// the reverse, and the board looks entirely normal.
+    ///
+    /// The residue is on disk and it is unambiguous. Five separate repo stores under
+    /// `~/.skein/repos/*/store/.claude/status/` each hold a `skein-fleet.pane.json` — `skein-fleet`
+    /// is `config::default_fleet_sandbox`, the SANDBOX's name, and no box has ever been called
+    /// that. All five were written within five minutes of one another on 2026-08-04, one per box,
+    /// each `dead:1` with an empty title. That is every box in the shared sandbox falling through
+    /// `${SKEIN_BOX:-${SANDBOX_VM_ID:-...}}` to the sandbox's name at once (`wrap` in src/place.rs
+    /// describes the same event from the launcher's side).
+    ///
+    /// Two halves, and the test drives both, because each covers what the other cannot:
+    ///   · the probe refuses to write when it cannot establish which box it is in — which fixes
+    ///     new observations but says nothing about a file already on disk;
+    ///   · the observation names its box, so the reader can refuse one that names someone else —
+    ///     which is the only thing that helps when the writer was some other, older probe.
+    #[test]
+    fn a_screen_observation_is_filed_under_its_own_box_and_says_which() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = env_lock();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let script = store.join("skein").join("bin").join("box-pane.sh");
+        let project_dir = store.parent().unwrap().to_path_buf();
+        let status = store.join("status");
+
+        // A stub tmux that fails, which is what the script sees when the agent's window is gone.
+        // That path writes exactly one observation and exits, so the script terminates on its own
+        // and the test needs no tmux server, no timeout and no kill — and it is still the real
+        // `write_obs`, which is where the box's name has to appear.
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("tmux");
+        fs::write(&stub, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        // `sock` is the tell. `pane_observer_start` (src/runtime.rs) exports SKEIN_TMUX_SOCK for a
+        // box in a shared sandbox and exports nothing when the sandbox IS the box, so it is the one
+        // thing already in the environment that says whether SANDBOX_VM_ID names this box or the
+        // thing holding it.
+        let run = |skein_box: Option<&str>, sock: Option<&str>| {
+            let mut c = Command::new("bash");
+            c.arg(&script)
+                .arg("skein-agent")
+                .env("PATH", &path)
+                .env("CLAUDE_PROJECT_DIR", &project_dir)
+                // What every box in one sandbox agrees on, and why it is not an identity.
+                .env("SANDBOX_VM_ID", "skein-fleet")
+                .stdin(Stdio::null());
+            match skein_box {
+                Some(b) => c.env("SKEIN_BOX", b),
+                None => c.env_remove("SKEIN_BOX"),
+            };
+            match sock {
+                Some(s) => c.env("SKEIN_TMUX_SOCK", s),
+                None => c.env_remove("SKEIN_TMUX_SOCK"),
+            };
+            let out = c.output().expect("run box-pane.sh");
+            assert!(out.status.success(), "box-pane.sh exited {:?}", out.status);
+            out
+        };
+        let obs = |name: &str| -> Option<crate::signals::PaneObs> {
+            let p = status.join(format!("{name}.pane.json"));
+            serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
+        };
+
+        // 1. The box says who it is. That name is the filename AND it is inside the file.
+        run(Some("alpha"), Some("/no/such/session.sock"));
+        let alpha = obs("alpha").expect("alpha wrote no observation");
+        assert_eq!(
+            alpha.box_name, "alpha",
+            "the observation must name the box it is about, or the filename is a claim nothing \
+             can check"
+        );
+
+        // 2. A shared sandbox with no SKEIN_BOX: the old chain would have written
+        //    `skein-fleet.pane.json` here, over whatever was already there. Nothing is written.
+        run(None, Some("/no/such/session.sock"));
+        assert!(
+            !status.join("skein-fleet.pane.json").exists(),
+            "a box with no identity filed its screen under the sandbox's name — the 2026-08-04 \
+             residue, reproduced"
+        );
+        let host = String::from_utf8_lossy(
+            &Command::new("hostname")
+                .output()
+                .map(|o| o.stdout)
+                .unwrap_or_default(),
+        )
+        .trim()
+        .to_string();
+        if !host.is_empty() {
+            assert!(
+                !status.join(format!("{host}.pane.json")).exists(),
+                "and not under the hostname either, which in a shared sandbox is the same trap"
+            );
+        }
+
+        // 3. A legacy box — no SKEIN_BOX and no socket, alone in its VM, where the VM name IS the
+        //    box name. Unchanged: refusing here would take the screen away from every box that has
+        //    not been migrated, to prevent a collision that cannot happen with one box per VM.
+        run(None, None);
+        let legacy = obs("skein-fleet").expect("a legacy box must still report under its VM name");
+        assert_eq!(legacy.box_name, "skein-fleet");
+
+        // 4. The reader's half. `alpha`'s own observation is hers; read under any other name it is
+        //    refused rather than classified, and `screen_health` says which fault it is — "none"
+        //    would send somebody to restart an observer that is running fine.
+        assert!(crate::signals::pane_usable(&alpha, "alpha"));
+        assert!(!crate::signals::pane_usable(&alpha, "beta"));
+        assert_eq!(
+            crate::signals::screen_health("claude", "beta", Some(&alpha), true),
+            "misfiled"
+        );
+        assert_eq!(
+            crate::signals::screen_health("claude", "alpha", Some(&alpha), true),
+            ""
+        );
+
+        // 5. And an observation from a probe that predates the field is still read. Every box in
+        //    the fleet is running one until it is reattached, and refusing them would turn a
+        //    hypothetical misattribution into a certain, fleet-wide loss of the screen signal.
+        let old = crate::signals::PaneObs {
+            box_name: String::new(),
+            ..alpha.clone()
+        };
+        assert!(
+            crate::signals::pane_usable(&old, "anybody"),
+            "an observation that names nobody could not be checked — that is not the same as \
+             being wrong"
+        );
+    }
+
     /// Linux only: drives `box-token-usage.sh` as a script, in the userland it is installed into.
     #[cfg(target_os = "linux")]
     #[test]

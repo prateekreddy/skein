@@ -172,6 +172,21 @@ pub struct PaneObs {
     /// defaults and that shape is exactly what shipped.
     #[serde(default)]
     pub contract: u32,
+    /// **Whose screen this is** — the box `box-pane.sh` believed it was observing when it wrote.
+    ///
+    /// The filename is only a claim about ownership, and until this field existed it was one the
+    /// reader had to take on trust: `read_pane_raw(name)` opened `<name>.pane.json` and handed
+    /// whatever it found to `classify_pane` as that box's screen. A misfiled observation is the
+    /// worst possible shape for that — well-formed, fresh, and rendering as another box's turn
+    /// state with nothing to mark it, so a box that needs you reads as busy or the reverse.
+    ///
+    /// Empty from a probe that predates the field. That is `health::Level::Unknown` — could not be
+    /// checked, not a fault and not a pass — and it is accepted, because refusing it would take the
+    /// screen half of turn-state away from every box still running an older probe, which is a
+    /// certain loss traded against a possible one. A *non-empty* name that disagrees with the file
+    /// it came out of is the fault, and [`pane_is_ours`] refuses it.
+    #[serde(default, rename = "box")]
+    pub box_name: String,
 }
 
 /// The pane-observation contract this build understands.
@@ -225,12 +240,33 @@ pub(crate) fn pane_is_readable(obs: &PaneObs) -> bool {
     obs.contract <= PANE_CONTRACT
 }
 
+/// Is this observation the box's own? See [`PaneObs::box_name`].
+///
+/// An observation that names nobody passes: it came from a probe that could not say, and treating
+/// "unknown" as "wrong" would blind every box still running one. An observation that names someone
+/// else fails, and a caller that gets `false` must refuse it rather than classify it — the whole
+/// hazard is that the wrong box's screen classifies perfectly well.
+pub(crate) fn pane_is_ours(obs: &PaneObs, name: &str) -> bool {
+    obs.box_name.is_empty() || obs.box_name == name
+}
+
+/// **May this observation be classified as this box's screen?** — the three refusals, in one place.
+///
+/// One definition because there are two callers with one file read between them: `read_pane` for
+/// everything that just wants the usable observation, and the board, which reads the file once and
+/// needs both the verdict and [`screen_health`]'s reason for it. Applied separately they drifted —
+/// the board disclosed a newer-contract observation in the badge and then classified it anyway,
+/// which is the same shape of fault as the misfiling this now refuses: the row says the screen is
+/// not contributing while rendering what the screen said.
+pub(crate) fn pane_usable(obs: &PaneObs, name: &str) -> bool {
+    pane_is_ours(obs, name) && pane_is_readable(obs) && pane_is_fresh(obs)
+}
+
 /// The level observation for a box, or `None` when there is no observer, it died, its last sample
-/// is too old to trust, or it was written to a contract this build does not know.
+/// is too old to trust, it was written to a contract this build does not know, or it turns out to
+/// be another box's screen filed under this one's name.
 pub fn read_pane(name: &str) -> Option<PaneObs> {
-    read_pane_raw(name)
-        .filter(pane_is_readable)
-        .filter(pane_is_fresh)
+    read_pane_raw(name).filter(|obs| pane_usable(obs, name))
 }
 
 /// Whether the **screen** half of turn-state is contributing for this box, and if not, why.
@@ -250,7 +286,16 @@ pub fn read_pane(name: &str) -> Option<PaneObs> {
 ///   skipped rather than parsed as if they meant what they used to. Different fault, different fix
 ///   from `unreadable`: that one is a TUI this grammar has not seen, this one is a skein that is
 ///   behind its own probe.
-pub fn screen_health(runtime: &str, raw: Option<&PaneObs>, running: bool) -> &'static str {
+/// * `"misfiled"` — the observation under this box's name says it is a different box's screen, so
+///   it is refused. Distinct from `none` because the recipe differs in the part that matters: this
+///   is not a missing observer, it is one that could not establish which box it was in, and the
+///   file on disk is somebody else's turn state.
+pub fn screen_health(
+    runtime: &str,
+    name: &str,
+    raw: Option<&PaneObs>,
+    running: bool,
+) -> &'static str {
     if !running {
         return "";
     }
@@ -259,6 +304,10 @@ pub fn screen_health(runtime: &str, raw: Option<&PaneObs>, running: bool) -> &'s
     }
     match raw {
         None => "none",
+        // First, because attribution is prior to every other question here: an observation that is
+        // not this box's tells us nothing about this box's probe, so calling it stale or newer
+        // would send somebody to fix a probe that is fine.
+        Some(obs) if !pane_is_ours(obs, name) => "misfiled",
         // Before staleness, because a newer contract is a statement about the whole observation:
         // calling it stale would send somebody to restart an observer that is working perfectly.
         Some(obs) if !pane_is_readable(obs) => "newer",
@@ -1112,10 +1161,13 @@ mod tests {
         // working perfectly, and `unreadable` would send them to report a TUI change that has not
         // happened.
         assert_eq!(
-            screen_health("claude", Some(&at(PANE_CONTRACT + 1)), true),
+            screen_health("claude", "web-main", Some(&at(PANE_CONTRACT + 1)), true),
             "newer"
         );
-        assert_eq!(screen_health("claude", Some(&at(PANE_CONTRACT)), true), "");
+        assert_eq!(
+            screen_health("claude", "web-main", Some(&at(PANE_CONTRACT)), true),
+            ""
+        );
 
         // The probe and the reader agree on the number, which is the whole point of having one.
         assert!(
@@ -1132,15 +1184,21 @@ mod tests {
             ..Default::default()
         };
         // Reading the screen: no caveat to show.
-        assert_eq!(screen_health("claude", Some(&fresh()), true), "");
+        assert_eq!(
+            screen_health("claude", "web-main", Some(&fresh()), true),
+            ""
+        );
         // No observer has ever written: the common case until a box is reattached.
-        assert_eq!(screen_health("claude", None, true), "none");
+        assert_eq!(screen_health("claude", "web-main", None, true), "none");
         // An observer that stopped — the agent session went away, or it was killed.
         let stopped = PaneObs {
             ts: Utc::now().timestamp() - (PANE_FRESH_SECS + 5),
             ..fresh()
         };
-        assert_eq!(screen_health("claude", Some(&stopped), true), "stale");
+        assert_eq!(
+            screen_health("claude", "web-main", Some(&stopped), true),
+            "stale"
+        );
         // A screen the grammar does not recognise. Distinct from "stale" because the fix is
         // different: this one is a skein bug to report, not a box to reattach.
         let unreadable = PaneObs {
@@ -1148,20 +1206,23 @@ mod tests {
             ..fresh()
         };
         assert_eq!(
-            screen_health("claude", Some(&unreadable), true),
+            screen_health("claude", "web-main", Some(&unreadable), true),
             "unreadable"
         );
         // A runtime with no grammar at all is hooks-only by design, not by fault.
-        assert_eq!(screen_health("gemini", None, true), "unsupported");
+        assert_eq!(
+            screen_health("gemini", "web-main", None, true),
+            "unsupported"
+        );
         assert!(has_screen_grammar("claude") && has_screen_grammar("codex"));
         assert!(!has_screen_grammar("gemini"));
         // A box that isn't running has no screen to read, so there is nothing to caveat.
         for h in [None, Some(&fresh()), Some(&stopped)] {
-            assert_eq!(screen_health("claude", h, false), "");
+            assert_eq!(screen_health("claude", "web-main", h, false), "");
         }
         // A crashed agent is a real reading, not a failure to read one.
         let dead = PaneObs { dead: 1, ..fresh() };
-        assert_eq!(screen_health("claude", Some(&dead), true), "");
+        assert_eq!(screen_health("claude", "web-main", Some(&dead), true), "");
     }
 
     #[test]

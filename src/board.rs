@@ -20,7 +20,7 @@ use crate::runtime::{default_agent, valid_runtime};
 use crate::sbx::{box_liveness, fleet_boxes, git_branch_for, Liveness};
 use crate::signals::{
     classify_message, classify_pane, current_status_detail, current_task, fuse_status,
-    is_generic_wait, pane_is_fresh, probe_is_stale, read_pane_raw, screen_health, session_signal,
+    is_generic_wait, pane_usable, probe_is_stale, read_pane_raw, screen_health, session_signal,
     status_edge, title_activity, Pause, Screen, TITLE_FRESH_SECS,
 };
 use crate::tracking::sync_docs_available;
@@ -124,8 +124,22 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             // Turn-state: the level observation of the box's own screen, fused with the hook edges
             // (docs/turn-state.md §4.3). With no observation this is exactly the edge signal, so a
             // box running an older probe behaves as it always did.
+            //
+            // Every reason `screen_health` can give for the screen half not contributing has to be
+            // applied HERE too, or the row says "not reading the screen" in the badge and renders
+            // the screen's verdict in the status anyway. This spelled out one of the three by hand
+            // and so was missing the other two, which is why it is now `pane_usable` — the same
+            // predicate `read_pane` applies, named once so the two cannot drift again:
+            //   · `pane_is_ours` — the filename is a claim about whose screen this is, and until
+            //     the probe wrote the box name into the observation it was one nothing could
+            //     check. A misfiled observation classifies perfectly, which is what makes it bad.
+            //   · `pane_is_readable` — PANE_CONTRACT's own doc says a newer observation "is
+            //     treated as no observation, the board falls back to hook edges exactly as it does
+            //     for a box with no observer". The board disclosed it and then classified it.
+            // The raw observation is kept beside it because `screen_health` needs what was on disk
+            // to say WHICH of the three refused it.
             let raw_pane = read_pane_raw(&name);
-            let pane = raw_pane.clone().filter(pane_is_fresh);
+            let pane = raw_pane.clone().filter(|obs| pane_usable(obs, &name));
             let level = pane
                 .as_ref()
                 .map(|obs| (classify_pane(&agent, obs), obs.ts));
@@ -248,7 +262,12 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             // The other half's health: a box can be perfectly wired for hooks and still be blind to
             // its own screen (no observer, an observer that stopped, a screen we can't parse), which
             // is invisible unless we say it.
-            let screen = screen_health(&agent, raw_pane.as_ref(), live == Some(Liveness::Running));
+            let screen = screen_health(
+                &agent,
+                &name,
+                raw_pane.as_ref(),
+                live == Some(Liveness::Running),
+            );
             // Read once and asked twice below: whether skein placed this box at all, and which
             // cover it was placed under.
             let record = shared_record(&name);
@@ -371,7 +390,8 @@ pub struct BoxView {
     /// [`crate::signals::StatusFrom`] — the last one is a healthy observer whose reading lost to a
     /// newer edge, which nothing disclosed before it existed.
     pub status_from: String,
-    /// "" | "none" | "stale" | "unreadable" | "unsupported". See [`screen_health`]. Without it,
+    /// "" | "none" | "stale" | "unreadable" | "unsupported" | "newer" | "misfiled". See
+    /// [`screen_health`]. Without it,
     /// falling back to hook-only turn state looks exactly like everything working.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub screen_health: String,
