@@ -1345,14 +1345,11 @@ async fn api_review_summary(
             .find(|p| p.number == number)
             .ok_or("that PR is not in your queue")?;
         let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        Ok::<_, String>(skein::review::summarise(
-            &repo,
-            &queue.slug,
-            pr,
-            &identities,
-            force,
-            trigger,
-        ))
+        let summary = skein::review::summarise(&repo, &queue.slug, pr, &identities, force, trigger);
+        // The same shape the bulk route answers, built by `review` rather than assembled here: one
+        // visit produces the summary AND the review in one model call now, and a route that
+        // answered only half of that made the page wait for a refresh to learn the other half.
+        Ok::<_, String>(skein::review::known_at(&repo.id, summary, &pr.head_sha))
     })
     .await;
     match out {

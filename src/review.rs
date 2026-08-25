@@ -241,6 +241,28 @@ pub struct Known {
     pub has_critique: bool,
 }
 
+/// One reading, and the review drafted at the same head — the shape [`known`] answers in bulk,
+/// for the route that reads a single pull request.
+///
+/// It exists so the rule "the drafted review at THIS head" is written once. The bulk payload has
+/// carried the draft since the model call was merged, and the single-PR route answered a bare
+/// [`Summary`], so a reading somebody had just asked for came back with no mention of the review
+/// produced in the same breath — the page learned about it a refresh later. The client compensated
+/// by merging the two itself, which is a second implementation of this line, and a second
+/// implementation of a payload rule is what dropped `serial` from a workflow twice.
+///
+/// `stale` is false by construction: the caller has just computed a reading FOR `head_sha`, so
+/// there is no older vintage to disclose. `known` keeps its own arm for the cached-and-moved case.
+pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
+    let critique = critiqued(repo_id, summary.number).filter(|c| c.head_sha == head_sha);
+    Known {
+        summary,
+        stale: false,
+        has_critique: critique.is_some(),
+        critique,
+    }
+}
+
 /// Every reading skein already holds for these pull requests, off disk, costing nothing.
 ///
 /// **Why this exists as a bulk read.** The pane used to discover an existing reading only by asking
@@ -1042,7 +1064,11 @@ const READ_PER_PASS: usize = 3;
 ///   ceiling (`Config::review_reads_per_day`, enforced inside [`summarise`] and the critique
 ///   drafter) is the second, and this pass obeys the same counter as every button press — one
 ///   budget, not two;
-/// * settled ([`crate::prq::settled`]), not a draft, and not already read at this head.
+/// * not a draft, and not already read at this head. **Not settled** — the hour a branch had to
+///   stand still before skein would read it was removed on the owner's instruction (2026-08-24)
+///   once the budget became the money guard and re-anchoring made a draft against a moving head
+///   postable; `worth_reading` no longer asks, and `read_waiting`'s own test reads an unsettled
+///   branch on purpose.
 ///
 /// Returns what it read, for the server's log.
 pub fn read_waiting() -> Vec<String> {
@@ -4172,6 +4198,67 @@ mod tests {
             wire.get("critique").is_none(),
             "absent must be an absent KEY, so an older client never sees it: {wire}"
         );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// One pull request, read now, answers the same shape the bulk read answers (SKEIN-236).
+    ///
+    /// The merged model call produces the summary and the review together, so a route that answers
+    /// only the summary makes the page wait for a refresh to learn about the other half — and the
+    /// client that compensates becomes a second place deciding what "the draft at THIS head" means.
+    #[test]
+    fn a_reading_asked_for_now_carries_the_review_drafted_with_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let summary = |number: u64, head: &str| Summary {
+            number,
+            head_sha: head.into(),
+            depth: Depth::Line,
+            computed: true,
+            budget_stopped: false,
+            line: "it changes a thing.".into(),
+            detail: String::new(),
+            flags: Vec::new(),
+            signals: Vec::new(),
+            yours: Vec::new(),
+            others: 0,
+            ownership_unknown: String::new(),
+            unread_because: String::new(),
+        };
+        store_critique(
+            "demo",
+            &Critique {
+                number: 7,
+                head_sha: "now".into(),
+                overall: "one thing to look at.".into(),
+                comments: Vec::new(),
+                truncated: false,
+            },
+        )
+        .unwrap();
+
+        let fresh = known_at("demo", summary(7, "now"), "now");
+        assert!(
+            fresh.has_critique && fresh.critique.is_some(),
+            "the review drafted in the same call did not ride the answer"
+        );
+        assert!(
+            !fresh.stale,
+            "a reading computed FOR this head cannot be a reading of an earlier one"
+        );
+
+        // The same rule the bulk payload keeps: a draft of an earlier commit is not offered as if
+        // it had read this one, and it is an absent KEY rather than a null.
+        let moved = known_at("demo", summary(7, "later"), "later");
+        assert!(!moved.has_critique && moved.critique.is_none());
+        let wire = serde_json::to_value(&moved).unwrap();
+        assert!(wire.get("critique").is_none(), "{wire}");
+        // …and the summary is still the whole of what it was, flattened as the bulk shape flattens.
+        assert_eq!(wire["number"], 7);
+        assert_eq!(wire["head_sha"], "later");
 
         std::env::remove_var("SKEIN_HOME");
     }
