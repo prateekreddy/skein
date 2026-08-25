@@ -402,6 +402,54 @@ untrue on day one. Same for the seeded `sbx secret` and its `gh-secret-seeded` m
 outlives the store that recorded it, so losing only the marker means a keyring prompt at every server
 start.
 
+### 4.1b Files named after the fleet sandbox, which belong to no box
+
+A file keyed on the *sandbox's* name is not a box's anything, and a fresh fleet must not inherit
+them or start making more. Both halves are measured, on this host, 2026-08-25:
+
+```
+find /Users/you/.skein/repos/*/store/.claude \
+     \( -name 'skein-fleet' -o -name 'skein-fleet.*' \) | wc -l          # 36, in 5 stores
+find /Users/you/.skein/repos/*/store/.claude \
+     \( -name 'skein-fleet' -o -name 'skein-fleet.*' \) -newermt 2026-08-05   # 2
+```
+
+**Do not carry the 36.** `skein-fleet` is `config::default_fleet_sandbox`, no box has ever been
+called that, and `board::load_views` strips the name from the board — so every one of them is
+already invisible from every surface and nothing reads it. They predate the `box` field in the
+observation, so they name nobody: `signals::signal_is_ours` passes them (correctly — a signal that
+names nobody cannot be checked), the `misfiled` badge cannot reach them, and no future attribution
+work can, by construction. A file with no name in it can never be proven wrong. The only thing that
+makes dropping them safe is that the name is the sandbox's; **prefix matching is not safe** —
+`store/.claude/skein/launch/skein-fleetsmoke.json` is a real box's file and starts with the same
+eleven characters.
+
+**The two are the part that matters**, because they say the class is still being produced:
+
+| file | last written | what it is |
+|---|---|---|
+| `gadget-demo/store/.claude/workflow-journal/skein-fleet.tsv` | 2026-08-25 18:10 | 240,952 bytes, 2,474 lines, **157 distinct session slugs fused into one file** — 3.6× the largest correctly-named sibling in the same directory |
+| `gadget-demo/store/.claude/slice-gate/skein-fleet` | 2026-08-25 17:06 | the per-box gate state, shared by every box in the sandbox |
+
+Neither is written by skein. They are the *repo's own* hooks, in that repo's store
+(`.claude/hooks/wf-journal.sh:33`, `.claude/hooks/slice-gate.sh:28`), and both spell the box as
+
+```sh
+vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
+```
+
+which is precisely the chain SKEIN-224 removed from skein's own probes — and in a shared sandbox
+every box in it answers to the same string. `wf-journal.sh`'s own comment says the shards exist "so
+that boxes in the same folder each append to their own shard": the intent is per-box, the effect is
+one file, and nothing anywhere reports the difference.
+
+So the rule the recreation has to carry is not about these two files. It is that **`SKEIN_BOX` is
+the identity contract and skein is the only thing that knows it.** Fixing skein's probes fixed
+skein's probes. A store also holds hooks skein did not write — a repo's own, and a handoff snapshot
+of them — and those keep the old chain until somebody tells them, which nothing does. A fresh fleet
+regrows this on day one unless coming up includes announcing the contract to hooks skein does not
+own, or refusing to run one that has not read it (SKEIN-322).
+
 ### 4.2 Breaks quietly rather than loudly
 
 - **Every config field has a serde default**, so a format change reads as "the user chose the

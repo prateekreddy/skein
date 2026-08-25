@@ -352,6 +352,12 @@ async fn main() {
             post(api_set_workflow),
         )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
+        // Resolve only: the one write the PR panel is allowed to make (SKEIN-300, SKEIN-305).
+        // Both directions live here because the undo is the same act with the flag flipped.
+        .route(
+            "/api/repos/:id/review/:number/thread",
+            post(api_review_thread),
+        )
         .route(
             "/api/repos/:id/review/:number/critique",
             get(api_critique_get).post(api_critique_draft),
@@ -1099,12 +1105,97 @@ async fn api_write_module(
     })
 }
 
+/// **One answer to "are summaries on?", in a payload that carries the question twice** (SKEIN-299).
+///
+/// `Queue::ai` is filled from `review::summaries_enabled()` when the queue is REFRESHED, and then
+/// travels with the queue into the sixty-second micro-cache and onto disk. `MergedQueue::ai` is
+/// computed when the payload is assembled, and that is the one the pane reads
+/// (`src/web/index.html`: `ai: m.ai`, then `revQueue.ai`). Both serialise as `ai`. So toggling the
+/// switch and then being served from cache or from `prq::remembered` put the same fact in one
+/// response twice with different answers — and the stale one was stale by construction, not by
+/// accident: nothing about a cached queue ever revisits it.
+///
+/// **The switch is a live fact about this machine, not a property of the queue that was fetched.**
+/// So it is answered at the moment of serving, on every path a `Queue` leaves this binary by.
+///
+/// Written here rather than by deleting `Queue::ai` because removing a serialised field is `prq`'s
+/// call, not this file's — and the payload has to stop contradicting itself either way. The day the
+/// field goes, this function goes with it.
+///
+/// `on` is passed in rather than read here so the merged payload cannot disagree with ITSELF: its
+/// queues are stamped with the very value its own `ai` carries, not with a second reading of the
+/// switch taken a moment later.
+fn settle_switch(queues: &mut [skein::prq::Queue], on: bool) {
+    for queue in queues {
+        queue.ai = on;
+    }
+}
+
+/// Which of these queues skein may tidy readings against, and what to hand [`skein::review::prune`]
+/// for each — `(repo id, slug, every open PR and its head)`.
+///
+/// **Its own function because pruning had exactly one caller and that caller had none** (SKEIN-252).
+/// `review::prune` was wired only into `GET /api/repos/:id/review`, and nothing asks for that route:
+/// the pane opens on the merged answer instead (`src/web/index.html`), so
+/// `summaries/<number>-<head_sha>.json` accumulated one file per PR per head commit for ever, and
+/// merged pull requests kept all of theirs. `prune`'s own doc opens "Nothing used to", which had
+/// become true again.
+///
+/// Two guards, and both are about not deleting something skein still wants:
+///
+/// * **`whole`** (SKEIN-231). `prune` reads a pull request's ABSENCE from this list as a reason to
+///   go and ask whether it is closed. A membership search cut off at its page makes every pull
+///   request past the hundredth absent for a reason that has nothing to do with it, and each of
+///   their summaries would then pay a `pr_is_open` REST call, on every pane open, for ever.
+/// * **`fresh`**. The superseded-head rule deletes a summary whose sha is not the one this queue
+///   reports — which is only safe if the queue's idea of the head is current. A queue read back off
+///   disk (`prq::remembered`, which stamps `fresh = false`) can be arbitrarily old, and pruning
+///   against one could delete the reading of the commit the pull request is actually at now. The
+///   dead route pruned only after a live `prq::queue` call; this keeps exactly that rule while
+///   moving it to a route somebody calls.
+///
+/// The slug comes from the QUEUE rather than from `prq::repo_slug`, so a repository that has been
+/// renamed is asked about under the name GitHub knows it by (`queue_within` follows the rename
+/// before it fills this in).
+fn prunable(queues: &[skein::prq::Queue]) -> Vec<(String, String, Vec<(u64, String)>)> {
+    queues
+        .iter()
+        .filter(|q| q.whole && q.fresh && !q.slug.is_empty())
+        .map(|q| {
+            let open = q
+                .prs
+                .iter()
+                .map(|pr| (pr.number, pr.head_sha.clone()))
+                .collect();
+            (q.repo_id.clone(), q.slug.clone(), open)
+        })
+        .collect()
+}
+
+/// The housekeeping a queue answer owes, run BEHIND it.
+///
+/// Detached, and after the answer is built: pruning may ask GitHub whether a pull request is closed,
+/// and doing that on the way to the response would spend somebody's pane-open on tidying files they
+/// cannot see. Nothing here has an answer the caller is waiting for.
+fn prune_behind(queues: &[skein::prq::Queue]) {
+    for (id, slug, open) in prunable(queues) {
+        tokio::task::spawn_blocking(move || skein::review::prune(&id, &slug, &open));
+    }
+}
+
 /// Every repo's queue in one answer — what the pane opens on. Serves what the counts poll already
 /// builds; `?force=1` re-reads GitHub.
+///
+/// **This is where readings are tidied** (SKEIN-252), because this is the route that runs.
 async fn api_review_merged(Query(q): Query<HashMap<String, String>>) -> Response {
     let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
     match tokio::task::spawn_blocking(move || skein::prq::merged(force)).await {
-        Ok(m) => Json(m).into_response(),
+        Ok(mut m) => {
+            let on = m.ai;
+            settle_switch(&mut m.queues, on);
+            prune_behind(&m.queues);
+            Json(m).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -1154,6 +1245,8 @@ async fn api_review_queue(
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
+    // Read once, so all three exits below answer the switch identically (SKEIN-299).
+    let on_now = skein::review::summaries_enabled();
     // **Paint now, refresh behind.** Opening this tab used to block on three GraphQL searches per
     // repo plus the viewer lookup, so a cold cache showed nothing at all until every one of them
     // came back. What it was being compared against is a blank panel, and the last queue beats a
@@ -1163,10 +1256,11 @@ async fn api_review_queue(
     // `force` is the explicit refresh and always waits, because somebody who pressed it is asking
     // for the new answer rather than for a fast one.
     if !force {
-        if let Some(fresh) = skein::prq::unexpired(&id) {
+        if let Some(mut fresh) = skein::prq::unexpired(&id) {
+            settle_switch(std::slice::from_mut(&mut fresh), on_now);
             return Json(fresh).into_response();
         }
-        if let Some(old) = skein::prq::remembered(&id) {
+        if let Some(mut old) = skein::prq::remembered(&id) {
             // The refresh nobody is waiting for. Its result lands in the cache and on disk, so the
             // client's next ask — a few seconds later — is a cache hit rather than another wait.
             //
@@ -1187,30 +1281,16 @@ async fn api_review_queue(
             tokio::task::spawn_blocking(move || {
                 let _ = skein::prq::queue(&repo, false);
             });
+            settle_switch(std::slice::from_mut(&mut old), on_now);
             return Json(old).into_response();
         }
     }
-    let slug = skein::prq::repo_slug(&repo);
     match tokio::task::spawn_blocking(move || skein::prq::queue(&repo, force)).await {
-        Ok(Ok(queue)) => {
-            // Housekeeping AFTER the answer, never before it. Pruning asks GitHub about summaries
-            // whose PR is no longer in your lane, and doing that on the way to the response would
-            // spend somebody's tab-open on tidying up files they cannot see. Detached: the queue is
-            // already on its way out, and nothing here has an answer the caller is waiting for.
-            // And only against a queue that saw everything (SKEIN-231). `prune` reads a pull
-            // request's ABSENCE from this list — a search cut off at its page makes every pull
-            // request past the hundredth absent for a reason that has nothing to do with it, and
-            // the summaries of those pay a `pr_is_open` REST call each, on every tab open, for
-            // ever. `whole` is the queue's own word for whether absence means anything here.
-            if let Some(slug) = slug.filter(|_| queue.whole) {
-                let open: Vec<(u64, String)> = queue
-                    .prs
-                    .iter()
-                    .map(|pr| (pr.number, pr.head_sha.clone()))
-                    .collect();
-                let id = queue.repo_id.clone();
-                tokio::task::spawn_blocking(move || skein::review::prune(&id, &slug, &open));
-            }
+        Ok(Ok(mut queue)) => {
+            // The same rule as the merged route, spelled once (SKEIN-252). It used to be written
+            // out here, and here alone — which is how the pruning came to have no caller at all.
+            prune_behind(std::slice::from_ref(&queue));
+            settle_switch(std::slice::from_mut(&mut queue), on_now);
             Json(queue).into_response()
         }
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
@@ -1522,14 +1602,33 @@ async fn api_critique_get(Path((id, number)): Path<(String, u64)>) -> Response {
     }
 }
 
-/// Draft an actual review of the PR. A model call — only ever reached by a person pressing the
-/// button, never from a background pass.
+/// Draft an actual review of the PR. A model call.
 ///
 /// It is ONE reading, not a second analysis (SKEIN-263): `review::critique` runs the same forced
 /// visit `/review/:n/summary?force=1` runs, and stores the summary and the review together — so
 /// the row and the draft under it can never describe two different readings of one commit. The
 /// viewer goes with it for the summary half's ownership attribution, off the queue this already
 /// read.
+///
+/// **Nobody calls this, and that is the answer rather than a gap** (SKEIN-308). It is a
+/// hand-only endpoint: reachable by asking for it, and served for that.
+///
+/// It used to say "only ever reached by a person pressing the button". The button is gone —
+/// `revCritiqueDraft` was deleted in `6578a74`, when a reading and the review beside it became one
+/// visit, and the page now drafts by forcing `/review/:n/summary`. What is left in
+/// `src/web/index.html` are two bare `fetch(url)` of this same path, which are GETs answered by
+/// [`api_critique_get`], the free disk read registered on the other half of this route.
+///
+/// **A caller is the one answer that was NOT wanted.** Wiring the page back to this POST would
+/// rebuild a second way to produce a drafted review, beside the one-visit path — which is the
+/// mistake SKEIN-243 is named after: two producers of one record drift, and the row ends up
+/// describing a different reading from the draft under it. Deleting the route is the owner's call
+/// and is deliberately not taken here; until it is taken, this comment is what stops the next
+/// reader concluding the handler is simply unreachable and giving it a caller to "fix" it.
+///
+/// `cockpit_routes::every_method_this_router_registers_has_a_caller_or_a_declared_reason` holds
+/// the pair `(this path, POST)` in its declared list, so the day a page does call it, that test
+/// fails and both this paragraph and that line have to go.
 async fn api_critique_draft(Path((id, number)): Path<(String, u64)>) -> Response {
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
@@ -1757,7 +1856,17 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
         for pr in &queue.prs {
             let facts = skein::prwork::facts_of(pr, &queue.viewer, &queue.trunk);
             let standing = skein::prwork::standing(&repo.id, pr.number, &facts, &flows);
-            if !standing.workflow.is_empty() && !matches!(pr.lane, skein::prq::Lane::Archived) {
+            // **`holding` too, not just `workflow`** (SKEIN-326). A holding pull request — assigned
+            // by hand, its workflow's own `matches` not met (SKEIN-279) — carries a non-empty
+            // `standing.workflow` ON PURPOSE, so the row can still show which workflow somebody
+            // chose. But `prwork::sweep` acts on `Carries::acting`, not `Carries::name`, and skips
+            // it. Without this condition the panel drew it as a car, and as the FRONT if it had the
+            // lowest number, while the tick's front was somebody else — which is precisely what the
+            // comment above says must not happen.
+            if !standing.workflow.is_empty()
+                && standing.holding.is_empty()
+                && !matches!(pr.lane, skein::prq::Lane::Archived)
+            {
                 carrying.push((pr.number, standing.workflow.clone()));
             }
             let mut entry = serde_json::to_value(standing).unwrap_or_default();
@@ -1962,6 +2071,70 @@ async fn api_review_act(
             skein::prq::invalidate(&id);
         }
         Ok::<_, String>(text)
+    })
+    .await;
+    Json(match out {
+        Ok(Ok(text)) => serde_json::json!({ "ok": true, "text": text }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    })
+}
+
+/// Resolve one review thread, or put it back.
+///
+/// **The only write SKEIN-300 grants on the PR panel.** Replies stay on GitHub — the owner chose
+/// "resolve only" over "reply and resolve" — so this route can do exactly one thing, and the
+/// `resolved` flag is which direction rather than which action.
+#[derive(Deserialize)]
+struct ThreadReq {
+    /// GitHub's node id for the thread: `prq::ReviewThread::id`, which the queue payload has
+    /// carried since SKEIN-301. It is the argument `resolveReviewThread` takes, and a thread
+    /// fetched without it cannot be resolved from here.
+    thread_id: String,
+    /// `true` resolves. `false` is the UNDO the pane's eight-second window presses (SKEIN-162),
+    /// and it is a real retraction — `unresolveReviewThread` — rather than a row that redraws
+    /// itself while GitHub still says resolved.
+    #[serde(default)]
+    resolved: bool,
+}
+
+/// One review thread marked resolved on GitHub, or unmarked.
+///
+/// **Both directions invalidate the queue**, on the same rule as the verdict arm of
+/// [`api_review_act`]: anything that touched GitHub changed what the row should say, and the queue
+/// is cached for sixty seconds — without this the unresolved count on the row would sit at its old
+/// value until the cache aged out, which on an undo is the row disagreeing with GitHub in the
+/// direction that matters.
+///
+/// **It does not read the queue.** A resolve derives everything it needs from the thread id it was
+/// handed, exactly as `review::post_critique` derives what it addresses without a refresh
+/// (SKEIN-272): a GitHub READ failing must never be able to make a resolve impossible and then
+/// report it in the refresh's words. The repo is looked up only to refuse an id this fleet does not
+/// manage, and to name what to invalidate.
+///
+/// `number` is not sent to GitHub — the mutation takes a thread id and nothing else — and is here
+/// because the receipt has to say what was pressed. A receipt reading "resolved" with no subject is
+/// the feedback complaint the owner already made about approve: "doesn't really have feedback. So
+/// when I click idk if it went through or not."
+async fn api_review_thread(
+    Path((id, number)): Path<(String, u64)>,
+    Json(req): Json<ThreadReq>,
+) -> Json<serde_json::Value> {
+    if !skein::repos::load_repos().iter().any(|r| r.id == id) {
+        return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        match req.resolved {
+            true => skein::prq::resolve_review_thread(&req.thread_id)?,
+            false => skein::prq::unresolve_review_thread(&req.thread_id)?,
+        }
+        // Only after GitHub agreed. Invalidating on the way IN would drop a good cache for a
+        // mutation that then failed, and hand the next refresh the bill for it.
+        skein::prq::invalidate(&id);
+        Ok::<_, String>(match req.resolved {
+            true => format!("resolved a thread on #{number}"),
+            false => format!("reopened a thread on #{number}"),
+        })
     })
     .await;
     Json(match out {
@@ -4151,6 +4324,26 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
 }
 
 #[cfg(test)]
+/// `SKEIN_HOME`, `SKEIN_GITHUB_API` and `GH_TOKEN` are PROCESS-wide, and `cargo` runs these
+/// tests as threads in one process. Two of them point skein at different GitHubs at the same
+/// time and one gets the other's — which is SKEIN-307, and the reason this is a lock rather
+/// than a comment asking people to be careful.
+///
+/// **At file scope, not inside a test module.** This binary has TWO — `tests` and
+/// `review_routes` — and they are threads of one process. A lock inside either serialises
+/// that module against itself and nothing else, which is how `origin_guard_honours_allowlist`
+/// came to write `$SKEIN_ALLOWED_ORIGINS` with three siblings in the other module holding a
+/// lock it could not take (SKEIN-307).
+///
+/// Not `#[serial]`: this crate has no such dependency, and a `Mutex` held for the body of the
+/// test is the same guarantee. Poisoning is recovered from rather than propagated — a test
+/// that already failed must not turn every other test in this module red as well.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
 mod tests {
     use super::{flag, origin_ok, refuse_unknown_args, slow_down};
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
@@ -4292,6 +4485,10 @@ mod tests {
 
     #[test]
     fn origin_guard_honours_allowlist() {
+        // This binary's own lock, held by three sibling tests. Without it, the window between the
+        // set and the remove below is one in which any other test in this binary reads an
+        // allowlist it never asked for (SKEIN-307).
+        let _env = super::env_lock();
         std::env::set_var("SKEIN_ALLOWED_ORIGINS", "proxy.local, other.host");
         assert!(origin_ok(&with_origin(Some("https://proxy.local"))));
         assert!(!origin_ok(&with_origin(Some("https://nope.local"))));
@@ -4368,6 +4565,59 @@ mod review_routes {
         .unwrap();
     }
 
+    /// A GitHub that answers one scripted body per request and records `"<path> <body>"`.
+    ///
+    /// A real socket rather than a stubbed function, on the same reasoning `prq`'s own fake is
+    /// built that way: what is worth asserting about a mutation is the WIRE — which field GitHub
+    /// was asked for, and whether the thread id travelled as a variable rather than spliced into
+    /// the query text. A stub would agree with whatever the caller did.
+    fn scripted_github(
+        replies: Vec<&'static str>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            for (nth, stream) in listener.incoming().flatten().enumerate() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                let _ = reader.read_line(&mut request);
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                // The body is read by Content-Length rather than to EOF: the connection is still
+                // open, so reading to EOF would block until the client gave up.
+                let mut length = 0usize;
+                let mut header = String::new();
+                while reader.read_line(&mut header).unwrap_or(0) > 0 {
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                    header.clear();
+                }
+                let mut body = vec![0u8; length];
+                let _ = reader.read_exact(&mut body);
+                recorder
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("{path} {}", String::from_utf8_lossy(&body)));
+                let reply = replies.get(nth).copied().unwrap_or("{\"data\":{}}");
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
     /// Point skein at a GitHub that is not there. Port 1 refuses instantly, so a route that goes
     /// looking fails in milliseconds and this test stays fast — what is asserted is WHETHER it
     /// goes, not how long it waits when it does.
@@ -4411,6 +4661,7 @@ mod review_routes {
     /// remembered one.
     #[tokio::test]
     async fn the_review_pane_answers_with_no_github_to_ask() {
+        let _env = super::env_lock();
         let home = home_for("291");
         remember_a_queue(&home);
         remember_a_reading(&home);
@@ -4476,6 +4727,434 @@ mod review_routes {
         );
 
         forget_github(&home);
+    }
+
+    /// **A press on a thread resolves it on GitHub, and the undo really unresolves it**
+    /// (SKEIN-305, the only write SKEIN-300 grants on the PR panel).
+    ///
+    /// Asserted on the wire, because the two ways this can be wrong are both invisible from the
+    /// return value:
+    ///
+    ///   * the undo sending nothing, or sending `resolveReviewThread` again — a row that redraws
+    ///     itself while GitHub still says resolved, which is the eight-second window (SKEIN-162)
+    ///     being cosmetic;
+    ///   * the thread id spliced into the query text instead of travelling as a variable, which
+    ///     works right up until an id contains a character GraphQL reads.
+    ///
+    /// And the failure direction, which matters more than either: a GitHub error must come back
+    /// `ok: false`, so the pane never opens an undo window over a resolve that did not happen.
+    #[tokio::test]
+    async fn a_press_resolves_a_thread_on_github_and_the_undo_really_unresolves_it() {
+        let _env = super::env_lock();
+        let home = home_for("305");
+        let (api, seen) = scripted_github(vec![
+            r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true}}}}"#,
+            r#"{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":false}}}}"#,
+            r#"{"errors":[{"message":"Could not resolve to a node with the global id of 'nope'"}]}"#,
+        ]);
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        std::env::set_var("GH_TOKEN", "not-a-real-token");
+
+        let press = |resolved: bool, id: &str| {
+            let id = id.to_string();
+            async move {
+                let Json(v) = api_review_thread(
+                    Path(("demo".to_string(), 7)),
+                    Json(ThreadReq {
+                        thread_id: id,
+                        resolved,
+                    }),
+                )
+                .await;
+                v
+            }
+        };
+
+        let done = press(true, "PRRT_1").await;
+        assert_eq!(done["ok"], true, "the resolve did not go through: {done}");
+        // The receipt has to say WHAT was pressed. "doesn't really have feedback. So when I click
+        // idk if it went through or not" is the complaint this route was written against.
+        assert!(
+            done["text"].as_str().unwrap_or_default().contains("#7"),
+            "the receipt does not name the pull request it acted on: {done}"
+        );
+
+        let undone = press(false, "PRRT_1").await;
+        assert_eq!(undone["ok"], true, "the undo did not go through: {undone}");
+
+        // A repo this fleet does not manage is refused before any of that, and without a request.
+        let Json(stranger) = api_review_thread(
+            Path(("not-a-repo".to_string(), 7)),
+            Json(ThreadReq {
+                thread_id: "PRRT_1".into(),
+                resolved: true,
+            }),
+        )
+        .await;
+        assert_eq!(stranger["ok"], false, "{stranger}");
+
+        // A GitHub error is a failure, not a silent success — the undo window must not open over
+        // a write that never landed.
+        let refused = press(true, "nope").await;
+        assert_eq!(
+            refused["ok"], false,
+            "a GraphQL error was reported as a resolved thread: {refused}"
+        );
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("global id"),
+            "GitHub's own reason did not reach the pane: {refused}"
+        );
+
+        let sent = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            sent.len(),
+            3,
+            "one request per press, and none for the repo that does not exist: {sent:?}"
+        );
+        for (nth, undo) in [false, true].into_iter().enumerate() {
+            let (path, body) = sent[nth].split_once(' ').expect("a path and a body");
+            assert_eq!(path, "/graphql", "not a GraphQL request: {}", sent[nth]);
+            let body: serde_json::Value = serde_json::from_str(body).expect("a JSON request");
+            let query = body["query"].as_str().unwrap_or_default();
+            assert!(
+                query.contains("resolveReviewThread"),
+                "press {nth} sent no resolve mutation at all: {query}"
+            );
+            // GitHub's two mutations differ by a prefix, and one name CONTAINS the other — so
+            // "does it mention unresolve" is the only question that tells them apart, and asking
+            // it the obvious way (`contains(field) && !contains(other)`) passes for the undo and
+            // fails for the resolve. This test made that mistake first.
+            assert_eq!(
+                query.contains("unresolveReviewThread"),
+                undo,
+                "press {nth} sent the wrong direction — the eight-second window is cosmetic \
+                 unless the undo carries the `un`: {query}"
+            );
+            assert_eq!(
+                body["variables"]["id"], "PRRT_1",
+                "the thread id did not travel as a variable: {body}"
+            );
+            assert!(
+                !query.contains("PRRT_1"),
+                "the thread id was spliced into the query text: {query}"
+            );
+        }
+
+        forget_github(&home);
+    }
+
+    /// The queue is cached for sixty seconds, so anything that touched GitHub has to drop it —
+    /// otherwise the row's unresolved count sits at its old value until the cache ages out, and on
+    /// an UNDO that is the row disagreeing with GitHub in the direction that matters.
+    ///
+    /// Read from the source rather than driven, and deliberately: seeding `prq`'s in-process cache
+    /// from outside the crate is exactly what SKEIN-314 says no test can do yet, and this item is
+    /// not the place to fix that. What can be checked without it is that the call is there and is
+    /// unconditional — the verdict arm's `invalidate` is guarded by a `matches!` on the kind, and
+    /// a resolve route that grew the same guard would be the same bug with a new name.
+    #[test]
+    fn resolving_a_thread_drops_the_cached_queue_the_row_is_drawn_from() {
+        let me = include_str!("skein-server.rs");
+        let handler = near(me, "async fn api_review_thread(", 0, 40);
+        // Assembled, so this assertion is not one of its own hits.
+        let call = format!("skein::prq::{}(&id)", "invalidate");
+        assert!(
+            handler.contains(call.as_str()),
+            "the resolve route does not invalidate the queue it changed:\n{handler}"
+        );
+        assert!(
+            !handler.contains("matches!"),
+            "the resolve route grew a condition on invalidating — both directions touched GitHub, \
+             so both change what the row should say:\n{handler}"
+        );
+    }
+
+    /// One stored reading, on disk exactly where `review::prune` looks for it.
+    fn a_reading_at(
+        home: &std::path::Path,
+        repo: &str,
+        number: u64,
+        sha: &str,
+    ) -> std::path::PathBuf {
+        let dir = home.join("review").join(repo).join("summaries");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{number}-{sha}.json"));
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "number": number, "head_sha": sha, "depth": "line", "line": "it changes a thing",
+                "detail": "", "flags": [], "yours": [], "others": 0, "signals": [],
+                "unread_because": "", "computed": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    /// A queue value with only the fields the pruning rule reads set to anything meaningful.
+    fn a_queue(repo_id: &str, whole: bool, fresh: bool, prs: &[(u64, &str)]) -> skein::prq::Queue {
+        let mut q: skein::prq::Queue = serde_json::from_value(serde_json::json!({
+            "repo_id": repo_id, "slug": "acme/thing", "viewer": "you", "ai": true,
+            "blind_spots": [], "as_of": "2026-08-25T09:00:00Z", "fresh": fresh,
+            "whole": whole, "trunk": "main", "prs": [],
+        }))
+        .expect("the queue shape moved under this fixture");
+        q.prs = prs
+            .iter()
+            .map(|(number, sha)| {
+                serde_json::from_value(serde_json::json!({
+                    "number": number, "title": "t", "author": "someone",
+                    "url": "https://github.com/acme/thing/pull/1",
+                    "head_ref": "b", "head_sha": sha, "base_ref": "main", "draft": false,
+                    "updated_at": "2026-08-25T08:00:00Z", "committed_at": "2026-08-25T08:00:00Z",
+                    "checks": "passing", "my_review": "", "review_is_current": false,
+                    "reasons": ["reviewer"], "lane": "needs-you", "box_name": "",
+                }))
+                .expect("the PR shape moved under this fixture")
+            })
+            .collect();
+        q
+    }
+
+    /// **A held pull request is not a car, so it can never be drawn as the front** (SKEIN-326).
+    ///
+    /// SKEIN-279 changed what an assignment means: it says WHICH workflow is responsible, never
+    /// that its conditions are met. A pull request whose conditions are unmet is *held* — no clock,
+    /// nothing written down, and deliberately not carried for the purpose of acting, so
+    /// `prwork::sweep` passes over it.
+    ///
+    /// `standing.workflow` stays non-empty on a held pull request ON PURPOSE — the row's chooser
+    /// must still show which workflow somebody picked — so building the train line from that field
+    /// alone put the held one in the line, and as the FRONT when it had the lowest number. The
+    /// panel then promised an act the tick would never take, which is what the comment three lines
+    /// above the fix says must not happen. The owner is reading this panel as a dry run with the
+    /// train switched OFF; a wrong front there is what would make him switch it on.
+    ///
+    /// Both pull requests carry the SAME workflow, assigned the same way, and differ only in
+    /// whether its `matches` hold. That is the whole distinction, so it is the whole fixture.
+    #[tokio::test]
+    async fn a_held_pull_request_is_kept_out_of_the_train_line_the_panel_draws() {
+        let _env = super::env_lock();
+        let home = home_for("326");
+        no_github(&home);
+
+        // One serial workflow that acts only on an approved pull request.
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"ship","matches":["approved"],"serial":true,
+                 "steps":[{"when":[],"do":"merge:squash"}]}]}"#,
+        )
+        .unwrap();
+
+        // #7 is NOT approved, #9 is. Both are assigned `ship` by hand.
+        let dir = home.join("review").join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pr = |number: u64, decision: &str| {
+            serde_json::json!({
+                "number": number, "title": "t", "author": "someone",
+                "url": "https://github.com/acme/thing/pull/1",
+                "head_ref": "b", "head_sha": "sha", "base_ref": "main", "draft": false,
+                "updated_at": "2026-08-25T08:00:00Z", "committed_at": "2026-08-25T08:00:00Z",
+                "checks": "passing", "my_review": "", "review_is_current": false,
+                "review_decision": decision,
+                "reasons": ["reviewer"], "lane": "needs-you", "box_name": "",
+            })
+        };
+        std::fs::write(
+            dir.join("queue.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "repo_id": "demo", "slug": "acme/thing", "viewer": "you", "ai": true,
+                "blind_spots": [], "as_of": "2026-08-25T09:00:00Z", "fresh": true,
+                "whole": true, "trunk": "main",
+                "prs": [pr(7, "REVIEW_REQUIRED"), pr(9, "APPROVED")],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        skein::prwork::assign("demo", 7, "ship").unwrap();
+        skein::prwork::assign("demo", 9, "ship").unwrap();
+
+        let (status, _, body) = read(api_workflows(Path("demo".into())).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let payload: serde_json::Value = serde_json::from_str(&body).expect("a JSON payload");
+
+        // The fixture has to actually produce a HELD standing, or this test asserts nothing.
+        assert_eq!(
+            payload["prs"]["7"]["workflow"], "ship",
+            "the row must still show which workflow was chosen: {body}"
+        );
+        assert!(
+            !payload["prs"]["7"]["holding"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "#7 is not held, so this test is not about SKEIN-326 at all: {body}"
+        );
+        assert_eq!(payload["prs"]["9"]["workflow"], "ship");
+
+        let train = &payload["trains"][0];
+        assert_eq!(train["flow"], "ship", "{body}");
+        assert_eq!(
+            train["line"],
+            serde_json::json!([9]),
+            "a held pull request was drawn as a car — the tick passes over it, so the panel \
+             promises an act that will never be taken"
+        );
+        assert_eq!(
+            train["front"], 9,
+            "the panel's front is not the tick's front: #7 is held and #9 is what acts"
+        );
+
+        forget_github(&home);
+    }
+
+    /// **One payload, one answer to "are summaries on?"** (SKEIN-299).
+    ///
+    /// `Queue::ai` is stamped when the queue is REFRESHED and then rides into the micro-cache and
+    /// onto disk; `MergedQueue::ai` is computed when the payload is assembled, and it is the one
+    /// the pane reads. Both serialise as `ai`, so a queue served from `prq::remembered` after the
+    /// switch was toggled put the same fact in one response twice, disagreeing — and the stale one
+    /// was stale by construction, since nothing about a cached queue ever revisits it.
+    ///
+    /// The fixture is the disagreement itself: a remembered queue written with `"ai": true`, read
+    /// back while the switch says OFF. Before the fix the response carried `queues[0].ai == true`
+    /// beside `ai == false`.
+    ///
+    /// **`tests/queue_field_readers.rs` cannot catch this and is not meant to** — it matches by
+    /// field NAME against the page, and both payloads spell it `ai`, so the page's single read
+    /// vouches for both. That looseness is documented in `docs/queue-fields.md`; a name shared
+    /// between two payloads is exactly where it goes blind, so the guard has to be here.
+    #[tokio::test]
+    async fn the_summaries_switch_is_answered_once_per_payload_not_once_per_cache_vintage() {
+        let _env = super::env_lock();
+        let home = home_for("299");
+        remember_a_queue(&home);
+        no_github(&home);
+        // The remembered queue on disk says summaries were on when it was fetched.
+        std::env::set_var("SKEIN_REVIEW_AI", "off");
+
+        let (status, _, body) = read(api_review_merged(Query(HashMap::new())).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let payload: serde_json::Value = serde_json::from_str(&body).expect("a JSON payload");
+
+        assert_eq!(
+            payload["ai"], false,
+            "the merged answer did not read the switch at all: {body}"
+        );
+        let queues = payload["queues"].as_array().expect("queues");
+        assert!(
+            !queues.is_empty(),
+            "the fixture did not reach the payload, so this test asserts nothing: {body}"
+        );
+        for queue in queues {
+            assert_eq!(
+                queue["ai"], payload["ai"],
+                "one payload answered `are summaries on?` two ways — the pane reads the merged \
+                 field, and a cached queue kept the answer from whenever it was last refreshed"
+            );
+        }
+
+        std::env::remove_var("SKEIN_REVIEW_AI");
+        forget_github(&home);
+    }
+
+    /// **Readings of a commit that has been replaced are actually deleted now** (SKEIN-252).
+    ///
+    /// `review::prune` had exactly one caller — the handler for `GET /api/repos/:id/review` — and
+    /// that route has none: the pane opens on the merged answer. So `summaries/<n>-<sha>.json`
+    /// accumulated one file per pull request per head commit, for ever. The unit behaviour was
+    /// already covered by `review::tests::pruning_drops_replaced_commits_and_keeps_what_it_cannot_
+    /// ask_about`; what no test could show was that anything CALLED it.
+    ///
+    /// Driven through `prune_behind`, the spawner both queue routes now share, and awaited by
+    /// polling because it is deliberately detached — the housekeeping runs behind the answer, not
+    /// in front of it. No GitHub: every file here belongs to a pull request that IS in the queue,
+    /// so only the superseded-head rule runs, and that one asks nobody.
+    #[tokio::test]
+    async fn the_pruning_actually_runs_and_only_against_a_queue_it_can_trust() {
+        let _env = super::env_lock();
+        let home = home_for("252");
+        std::env::set_var("SKEIN_HOME", &home);
+
+        // Open at `now`, with two readings of commits it has moved past.
+        let current = a_reading_at(&home, "live", 7, "now");
+        let stale = [
+            a_reading_at(&home, "live", 7, "before"),
+            a_reading_at(&home, "live", 7, "earlier"),
+        ];
+        // The same shape under a repo whose queue did not see everything.
+        let partial = [
+            a_reading_at(&home, "partial", 7, "before"),
+            a_reading_at(&home, "partial", 7, "earlier"),
+        ];
+        // And one whose queue came back off disk rather than from GitHub.
+        let remembered = [
+            a_reading_at(&home, "stale", 7, "before"),
+            a_reading_at(&home, "stale", 7, "earlier"),
+        ];
+
+        prune_behind(&[
+            a_queue("live", true, true, &[(7, "now")]),
+            a_queue("partial", false, true, &[(7, "now")]),
+            a_queue("stale", true, false, &[(7, "now")]),
+        ]);
+
+        // Detached, so wait for it rather than assuming it has run. Generous: what is being
+        // asserted is that it happens at all, not how fast.
+        let left = || stale.iter().filter(|p| p.exists()).count();
+        for _ in 0..100 {
+            if left() < 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            left(),
+            1,
+            "nothing was pruned — `review::prune` is wired to a route again, but that route is not \
+             the one the pane opens, so summaries still accumulate one file per head for ever"
+        );
+        assert!(
+            current.exists(),
+            "the reading of the commit in front of the reader was deleted"
+        );
+        assert!(
+            partial.iter().all(|p| p.exists()),
+            "a queue that did NOT see everything was pruned against (SKEIN-231): absence from a \
+             search cut off at its page says nothing about a pull request"
+        );
+        assert!(
+            remembered.iter().all(|p| p.exists()),
+            "a queue read back off disk was pruned against — its idea of the head can be \
+             arbitrarily old, so this can delete the reading of the commit the PR is at NOW"
+        );
+
+        forget_github(&home);
+    }
+
+    /// The route the pane actually opens is the one that owns the pruning, and it is the ONLY
+    /// owner — because "two callers, one of them dead" is how this started.
+    #[test]
+    fn the_route_the_pane_opens_is_what_prunes() {
+        let me = include_str!("skein-server.rs");
+        assert!(
+            near(me, "async fn api_review_merged(", 0, 12).contains("prune_behind(&m.queues)"),
+            "the merged queue route — the one `src/web/index.html` opens on — does not prune"
+        );
+        // Assembled, so this assertion is not one of its own hits.
+        let direct = format!("skein::review::{}(", "prune");
+        assert_eq!(
+            me.matches(direct.as_str()).count(),
+            1,
+            "`review::prune` is called from somewhere other than `prune_behind` — the guards that \
+             decide when pruning is safe live there, and a second call site does not have them"
+        );
     }
 
     /// The lines of `source` around `needle` — `before` lines above it and `after` below.
@@ -4615,19 +5294,112 @@ mod cockpit_routes {
     /// the broken path, the gate would find it served, and the check would pass by having read its
     /// own fixture as a router entry. It did, once.
     fn registered(server: &str) -> Vec<&str> {
+        entries(server).into_iter().map(|(path, _)| path).collect()
+    }
+
+    /// The same entries, each with the HTTP methods it registers — `("/api/x", ["get", "post"])`.
+    ///
+    /// **Paths alone cannot see a handler whose callers all use another verb** (SKEIN-308).
+    /// `POST /api/repos/:id/review/:number/critique` is the standalone drafter, a model call. The
+    /// page fetches that exact path twice and both are bare `fetch(url)` — GET, answered by
+    /// `api_critique_get`, a free disk read. A path-only scan sees a served path with a caller and
+    /// says nothing, so the POST handler sat reachable only by typing the URL.
+    ///
+    /// Read by walking each router registration to its matching paren, rather than by finding the
+    /// next quote: the router spells its longer entries across several lines, and the method sits
+    /// below the path.
+    ///
+    /// **The token is assembled rather than written**, and that is not fussiness: `docs/parity.md`
+    /// counts this binary's routes by grepping its source for the router's own call, so spelling it
+    /// here — in code OR in a comment — adds to a number meant to count the router. It did, in the
+    /// first draft of this function: three occurrences, and the count went 93 → 96.
+    fn entries(server: &str) -> Vec<(&str, Vec<&str>)> {
+        const VERBS: [&str; 5] = ["get", "post", "put", "delete", "patch"];
+        const CALL: &str = concat!(".", "route", "(");
         let mut out = Vec::new();
-        let mut rest = server;
-        while let Some(at) = rest.find("\"/api/") {
-            rest = &rest[at + 1..];
-            if let Some(end) = rest.find('"') {
-                let path = &rest[..end];
-                if !path.contains('{') && !path.contains('$') {
-                    out.push(path);
+        let mut at = 0usize;
+        while let Some(found) = server[at..].find(CALL) {
+            let open = at + found + CALL.len();
+            // The whole call, by paren balance. `end` falls back to the end of the source, so a
+            // call that never closes still advances the scan rather than spinning on itself.
+            let mut depth = 1usize;
+            let mut end = server.len();
+            for (i, c) in server[open..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i;
+                            break;
+                        }
+                    }
+                    _ => {}
                 }
-                rest = &rest[end..];
             }
+            at = end;
+            let call = &server[open..end];
+            // The path is the call's first string literal; the handlers are everything after it.
+            let Some(quote) = call.find('"') else {
+                continue;
+            };
+            let Some(shut) = call[quote + 1..].find('"') else {
+                continue;
+            };
+            let path = &call[quote + 1..quote + 1 + shut];
+            // A candidate carrying `{` or `$` is not a route and is dropped. This file's own tests
+            // quote URLs, and one of them quotes the URL that 404s: without this the table would
+            // contain the broken path, the gate would find it served, and the check would pass by
+            // having read its own fixture as a router entry. It did, once.
+            if !path.starts_with("/api/") || path.contains('{') || path.contains('$') {
+                continue;
+            }
+            let handlers = &call[quote + 1 + shut..];
+            let methods = VERBS
+                .into_iter()
+                .filter(|verb| {
+                    handlers.match_indices(verb).any(|(i, _)| {
+                        // A verb, not the tail of a handler's name: `get(api_critique_get)` holds
+                        // the word twice and only one of them is the method.
+                        handlers[i + verb.len()..].starts_with('(')
+                            && !handlers[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                    })
+                })
+                .collect();
+            out.push((path, methods));
         }
         out
+    }
+
+    /// The verb a `fetch` of the URL just scanned will actually send.
+    ///
+    /// `after` is everything following the URL literal — the rest of its line, and the lines below
+    /// it, because the options object is written under the call. Two narrowings keep this from
+    /// reading somebody else's request: the window is bounded, and it stops at the next `fetch(`,
+    /// so two calls close together cannot lend each other a method.
+    ///
+    /// **Absent means GET**, which is `fetch`'s own rule rather than a guess — so the failure mode
+    /// of a missed `method:` is this reporting a POST as a GET. That direction costs a miss; the
+    /// other would cost a false accusation, and a false accusation is what gets a gate deleted.
+    fn method_at(after: &str) -> &'static str {
+        let rest = after.trim_start_matches(['"', '\'', '`']);
+        if rest.trim_start().starts_with(')') {
+            return "GET";
+        }
+        // Bounded by CHARS, not bytes: these files are full of em dashes and arrows, and slicing
+        // one in half panics.
+        let mut window: String = rest.chars().take(400).collect();
+        if let Some(next) = window.find("fetch(") {
+            window.truncate(next);
+        }
+        for verb in ["POST", "PUT", "DELETE", "PATCH", "GET"] {
+            if window.contains(&format!("method: \"{verb}\""))
+                || window.contains(&format!("method:\"{verb}\""))
+            {
+                return verb;
+            }
+        }
+        "GET"
     }
 
     /// Every `/api/…` path a page can BUILD, as `(1-based line, path)` with `${…}` left standing.
@@ -4636,9 +5408,10 @@ mod cockpit_routes {
     /// string literal — a quote or a backtick immediately before it — and a line that starts a
     /// comment is skipped, because these files discuss routes in comments as often as they call
     /// them (`index.html` mentions `/api/repos/undefined/…` in a note about a bug that is fixed).
-    fn asked_for(page: &str) -> Vec<(usize, String)> {
+    fn asked_for(page: &str) -> Vec<(usize, String, &'static str)> {
+        let lines: Vec<&str> = page.lines().collect();
         let mut out = Vec::new();
-        for (n, line) in page.lines().enumerate() {
+        for (n, line) in lines.iter().enumerate() {
             let t = line.trim_start();
             if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
                 continue;
@@ -4649,7 +5422,14 @@ mod cockpit_routes {
                     continue;
                 }
                 if line[i + 1..].starts_with("/api/") {
-                    out.push((n + 1, url_at(&line[i + 1..])));
+                    let (path, used) = url_at(&line[i + 1..]);
+                    // Everything after the URL: the rest of its line, then the lines the options
+                    // object is written on. Twelve is comfortably past the longest here.
+                    let after = std::iter::once(&line[i + 1 + used..])
+                        .chain(lines[n + 1..].iter().take(12).copied())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    out.push((n + 1, path, method_at(&after)));
                 }
             }
         }
@@ -4661,7 +5441,7 @@ mod cockpit_routes {
     /// `${…}` is copied through as a placeholder — with brace counting, or
     /// `${encodeURIComponent(name)}` ends the path at its own closing paren and every box route in
     /// the cockpit reads as unserved.
-    fn url_at(rest: &str) -> String {
+    fn url_at(rest: &str) -> (String, usize) {
         let b = rest.as_bytes();
         let mut out = String::new();
         let mut i = 0;
@@ -4698,7 +5478,9 @@ mod cockpit_routes {
             out.push(b[i] as char);
             i += 1;
         }
-        out
+        // The offset it stopped at, so the caller can read what follows the URL — which is where
+        // `method:` lives, and the whole of what SKEIN-308's gate needs.
+        (out, i)
     }
 
     /// Would this route answer that ask?
@@ -4743,7 +5525,7 @@ mod cockpit_routes {
         let mut asks = 0;
         let mut missing = Vec::new();
         for (name, page) in pages {
-            for (line, path) in asked_for(page) {
+            for (line, path, _) in asked_for(page) {
                 asks += 1;
                 if !routes.iter().any(|r| serves(r, &path)) {
                     missing.push(format!("{name}:{line} asks {path}"));
@@ -4768,6 +5550,254 @@ mod cockpit_routes {
              as its own generic failure:\n  {}",
             missing.len(),
             missing.join("\n  ")
+        );
+    }
+
+    /// Every `/api/…` request the pages make — `(file, line, path, the verb it will send)`.
+    fn every_ask() -> Vec<(&'static str, usize, String, &'static str)> {
+        [
+            ("src/web/index.html", include_str!("../web/index.html")),
+            ("src/web/v2.html", include_str!("../web/v2.html")),
+        ]
+        .into_iter()
+        .flat_map(|(name, page)| {
+            asked_for(page)
+                .into_iter()
+                .map(move |(line, path, method)| (name, line, path, method))
+        })
+        .collect()
+    }
+
+    /// **The page must not ask a verb this router does not register on that path.**
+    ///
+    /// The sibling of `the_cockpit_never_asks_for_a_route_this_server_does_not_serve`, one level
+    /// finer. A path both sides agree on still 405s if the page POSTs where the router only took a
+    /// GET, and axum answers that with a bare `Method Not Allowed` the page reports as its own
+    /// generic failure — exactly the shape of SKEIN-246, which cost a working tab and a green suite.
+    #[test]
+    fn the_cockpit_never_asks_a_method_this_server_does_not_register() {
+        let routes = entries(include_str!("skein-server.rs"));
+        assert!(
+            routes.len() > 60,
+            "the route scan found {} entries — it stopped reading the router",
+            routes.len()
+        );
+        let mut wrong = Vec::new();
+        for (name, line, path, method) in every_ask() {
+            // **A literal ending in `/` is half a URL, and this declines to judge it.**
+            // `revokeGitq` builds its path by concatenation —
+            // `"/api/fleet/git-grants/" + encodeURIComponent(box) + "/" + …` — so the scanner sees
+            // the prefix and cannot know two segments follow. The path-only gate passes it by
+            // accident, because a `:param` route matches the empty last segment; judging its
+            // METHOD against that route would be a false accusation, and a false accusation is
+            // what gets a gate deleted rather than fixed.
+            if path.ends_with('/') {
+                continue;
+            }
+            // Only where the PATH is served: a path nothing serves is the sibling test's failure,
+            // and reporting it twice makes one bug look like two.
+            if !routes.iter().any(|(route, _)| serves(route, &path)) {
+                continue;
+            }
+            let served = routes
+                .iter()
+                .filter(|(route, _)| serves(route, &path))
+                .any(|(_, methods)| methods.iter().any(|m| m.eq_ignore_ascii_case(method)));
+            if !served {
+                wrong.push(format!("{name}:{line} sends {method} to {path}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "the cockpit sends {} request(s) with a method the matching route does not register, \
+             so each is a 405 the page reports as its own generic failure:\n  {}",
+            wrong.len(),
+            wrong.join("\n  ")
+        );
+    }
+
+    /// **A handler nobody calls says who is expected to call it** (SKEIN-308).
+    ///
+    /// The bug this exists for: `POST /api/repos/:id/review/:number/critique` is the standalone
+    /// drafter and costs a model call. The page fetches that exact path twice and both are bare
+    /// `fetch(url)` — GET, answered by the free disk read beside it — because `revCritiqueDraft`,
+    /// the one POST caller, was deleted in `6578a74` when the summary and the review became one
+    /// visit (SKEIN-263). A path-only scan sees a served path with a caller and says nothing.
+    ///
+    /// So: every registered `(path, method)` the pages never ask for is listed HERE, with why.
+    /// Exact both ways — a new unasked surface has to be declared, and a declaration that stops
+    /// being true has to be deleted, which is the half that keeps the list from becoming folklore.
+    ///
+    /// **This list is not a to-do.** Several of these are right: an `EventSource`, a WebSocket
+    /// upgrade and an `<a href>` are not `fetch` calls and never will be. What the list buys is
+    /// that each one had to be written down by somebody who knew which kind it was.
+    ///
+    /// A URL the page builds by CONCATENATION reads here as its literal prefix, so it counts as a
+    /// caller for any route that prefix matches and its longer siblings look unasked. That is the
+    /// safe direction — a spurious line in this list costs one sentence, where the other way round
+    /// is a gate accusing working code — and the sibling test declines to judge those asks at all.
+    #[test]
+    fn every_method_this_router_registers_has_a_caller_or_a_declared_reason() {
+        // (path, method, why it has no `fetch` in the pages)
+        let declared: &[(&str, &str, &str)] = &[
+            (
+                "/api/repos/:id/review",
+                "GET",
+                "no caller at all; the pane opens on the merged /api/review. SKEIN-327 is the \
+                 owner's keep-or-delete call, and SKEIN-252 no longer depends on the answer",
+            ),
+            (
+                "/api/repos/:id/review/:number/critique",
+                "POST",
+                "SKEIN-308: the standalone drafter, a model call. Its only caller, \
+                 `revCritiqueDraft`, went in 6578a74 when a summary and the review beside it \
+                 became ONE visit (SKEIN-263). Kept as a hand-only endpoint rather than deleted \
+                 — deleting an API surface is the owner's call — and `api_critique_draft`'s doc \
+                 says so. Giving it a caller would rebuild the second drafting path SKEIN-243 was \
+                 about, so a caller is the one answer that is NOT wanted here",
+            ),
+            (
+                "/api/repos/:id/review/:number/shape",
+                "GET",
+                "SKEIN-246: it HAS a caller, and the caller asks a URL that does not exist — \
+                 src/web/vendor/cockpit.js builds /api/pr/:repo/:n/shape. Not scanned above, for \
+                 the reason the sibling test spells out",
+            ),
+            ("/api/boxes/:name/shape", "GET", "same client, same bug"),
+            (
+                "/api/machine/doorstep",
+                "GET",
+                "asked by `skein doctor` and by the host, not by a page",
+            ),
+            (
+                "/api/machine/pressure",
+                "GET",
+                "asked by `skein doctor` and by the host, not by a page",
+            ),
+            (
+                "/api/fleet/git-grants/:name/:repo",
+                "DELETE",
+                "`revokeGitq` DOES call it. The scanner cannot see that: the page builds this one \
+                 by concatenation — `\"/api/fleet/git-grants/\" + encodeURIComponent(box) + \"/\" \
+                 + …` — so the literal is a prefix with no idea two segments follow. A miss, not \
+                 an unasked handler",
+            ),
+            (
+                "/api/acts/:id/stream",
+                "GET",
+                "an EventSource, not a fetch — this scanner reads fetch calls",
+            ),
+            (
+                "/api/away",
+                "GET",
+                "the away digest is opened as a page, not fetched",
+            ),
+            (
+                "/api/away/seen",
+                "POST",
+                "posted by the away digest's own inline script, which is served from src/ and not \
+                 scanned here",
+            ),
+            (
+                "/api/boxes/:name/terminal",
+                "GET",
+                "a WebSocket upgrade — xterm opens it, no fetch is involved",
+            ),
+        ];
+
+        let routes = entries(include_str!("skein-server.rs"));
+        let asks = every_ask();
+        let unasked: Vec<(&str, &str)> = routes
+            .iter()
+            .flat_map(|(path, methods)| methods.iter().map(move |m| (*path, *m)))
+            .filter(|(path, method)| {
+                !asks.iter().any(|(_, _, ask, asked_method)| {
+                    asked_method.eq_ignore_ascii_case(method) && serves(path, ask)
+                })
+            })
+            .collect();
+
+        let undeclared: Vec<String> = unasked
+            .iter()
+            .filter(|(path, method)| {
+                !declared
+                    .iter()
+                    .any(|(p, m, _)| p == path && m.eq_ignore_ascii_case(method))
+            })
+            .map(|(path, method)| format!("{} {path}", method.to_uppercase()))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "this router registers {} handler(s) no page asks for, and nothing says why:\n  {}\n\n             Either give it a caller, or add it to the list above with the reason. A handler \
+             reachable only by typing its URL is not dead code in the compiler's sense, and no \
+             failure will ever mention it.",
+            undeclared.len(),
+            undeclared.join("\n  ")
+        );
+
+        let outlived: Vec<String> = declared
+            .iter()
+            .filter(|(path, method, _)| {
+                !unasked
+                    .iter()
+                    .any(|(p, m)| p == path && method.eq_ignore_ascii_case(m))
+            })
+            .map(|(path, method, _)| format!("{method} {path}"))
+            .collect();
+        assert!(
+            outlived.is_empty(),
+            "these are declared as having no caller, and the pages call them now:\n  {}\n\n\
+             Delete the lines. The declaration did its job.",
+            outlived.join("\n  ")
+        );
+    }
+
+    /// The method scan, held to the same standard as the path scan beside it: it has to see the
+    /// shape the bug came in, and it must not read one request's options as another's.
+    #[test]
+    fn the_method_scan_tells_a_posting_fetch_from_a_plain_one() {
+        // SKEIN-308 itself: two bare fetches of the drafter's path.
+        let plain = "  fetch(`/api/repos/${id}/review/${n}/critique`)\n    .then(r => r.json());";
+        assert_eq!(asked_for(plain)[0].2, "GET");
+
+        let posting = "  fetch(`/api/repos/${id}/review/${n}/act`, {\n                       \x20   method: \"POST\",\n    body: JSON.stringify(x),\n  });";
+        assert_eq!(asked_for(posting)[0].2, "POST");
+        // Both spellings the pages actually use.
+        assert_eq!(
+            asked_for("  fetch(`/api/x`, {method:\"DELETE\"})")[0].2,
+            "DELETE"
+        );
+
+        // A request must not borrow the POST written under it. This is the false accusation the
+        // window exists to prevent, and it is the one that would get this gate deleted.
+        //
+        // The fixture carries a second ARGUMENT with no method in it — `{ headers: h }` — on
+        // purpose. The shape with no argument at all is answered by the early `)` check and never
+        // reaches the window, so a neighbour test written THAT way passes whether the guard is
+        // there or not; this one fails the moment it goes.
+        let neighbours = "  fetch(`/api/a`, { headers: h })\n    .then(r => r.json());\n  fetch(`/api/b`, { method: \"POST\" });";
+        let seen = asked_for(neighbours);
+        assert_eq!(seen[0].1, "/api/a");
+        assert_eq!(
+            seen[0].2, "GET",
+            "a request with no method of its own borrowed the one written below it"
+        );
+        assert_eq!(seen[1].2, "POST");
+        // And the no-argument shape still reads as a GET, which is the SKEIN-308 case itself.
+        assert_eq!(asked_for("  fetch(`/api/c`);")[0].2, "GET");
+
+        // And the router side: one entry, both verbs, read across the lines it is written on.
+        let router = format!(
+            " .{}(\n \"/api/repos/:id/review/:number/critique\",\n {}(api_critique_get).{}(api_critique_draft),\n ) ",
+            "route", "get", "post"
+        );
+        assert_eq!(
+            entries(&router),
+            vec![(
+                "/api/repos/:id/review/:number/critique",
+                vec!["get", "post"]
+            )],
+            "the router scan cannot see a method written under its path"
         );
     }
 

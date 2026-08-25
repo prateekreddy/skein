@@ -117,6 +117,7 @@ fn stage(what: &str) -> (PathBuf, PathBuf, String, Arc<AtomicUsize>) {
 /// itself, which is how a fleet gets created twice or reported missing while it runs.
 #[test]
 fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
+    let _env = env_lock();
     let _g = serialize();
     let (root, marker, real, asked) = stage("create");
 
@@ -156,6 +157,7 @@ fn creating_the_sandbox_settles_the_listing_that_said_it_was_absent() {
 /// passes either way is not a test.
 #[test]
 fn an_act_that_fails_still_settles_what_it_disturbed() {
+    let _env = env_lock();
     let _g = serialize();
     let (root, marker, real, _asked) = stage("failing");
     std::fs::write(&marker, "made").unwrap();
@@ -198,6 +200,7 @@ fn an_act_that_fails_still_settles_what_it_disturbed() {
 /// A panic settles it too. A `?` is the common path and a panic is the one a pair of calls loses.
 #[test]
 fn a_panic_inside_an_act_still_settles_what_it_disturbed() {
+    let _env = env_lock();
     let _g = serialize();
     let (root, marker, real, _asked) = stage("panicking");
     std::fs::write(&marker, "made").unwrap();
@@ -220,4 +223,22 @@ fn a_panic_inside_an_act_still_settles_what_it_disturbed() {
         "a panic left the listing remembering a sandbox that is gone: {:?}",
         after.into_iter().map(|b| b.name).collect::<Vec<_>>()
     );
+}
+
+/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
+/// single process. `$PATH`, `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and the `$SKEIN_LS_CMD` stub are process-global, so
+/// without this every test here writes into the middle of the others: one test's fake sandbox root
+/// answers another's call, and the symptom is an assertion about what the gate settled rather than
+/// an error that names the cause.
+///
+/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
+/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
+/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
+/// first panic into every other test buries the real failure.
+///
+/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

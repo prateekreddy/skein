@@ -43,6 +43,20 @@ export function grab(name) {
   throw new Error(`could not lift \`${name}\` out of index.html — did it get renamed?`);
 }
 
+// A cockpit module, as source a lifted world can evaluate.
+//
+// `grab` lifts a declaration out of the page; this lifts a whole module out of `cockpit/src`, which
+// is where the page's PURE functions live. A world whose lifted functions call one — the review
+// pane's grouping calls `moveOf`, the row calls `moveWhy` — would otherwise have to stub it, and a
+// stub of a rule is the rule written twice: exactly what putting it in `cockpit/src` was for.
+//
+// The transform is `export ` removed and nothing else, byte for byte what `cockpit/build.mjs` does
+// to produce the bundle the browser loads, so a node world and a real page run the same code.
+export function pure(name) {
+  const text = readFileSync(join(root, "cockpit", "src", `${name}.mjs`), "utf8");
+  return text.replace(/^export\s+/gm, "");
+}
+
 // The `skein-server` binary the browser suites drive — one resolver, because the build policy is
 // the part that must not drift between them.
 //

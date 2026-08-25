@@ -118,6 +118,7 @@ fn stage(what: &str, docker: &str) -> (PathBuf, PathBuf, String) {
 /// specifically to avoid this path.
 #[test]
 fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
+    let _env = env_lock();
     let _g = serialize();
     // The Docker question fails. Not "answers empty" — fails, which is what a wedged daemon does.
     // The scratch name deliberately avoids the word the fake matches on: the first version called
@@ -160,6 +161,7 @@ fn a_resize_that_cannot_ask_about_docker_refuses_rather_than_assuming() {
 /// between two resizes was gone after the second, and nothing guarded the order.
 #[test]
 fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
+    let _env = env_lock();
     let _g = serialize();
     // Docker answers "nothing at risk", so the resize gets past the refusal and on to the work.
     let (root, log, real) = stage("login", ": ");
@@ -185,4 +187,22 @@ fn the_login_is_read_out_of_the_sandbox_before_it_is_destroyed() {
         read_login < destroy,
         "the login was read after the sandbox was destroyed, which is reading an empty sandbox:\n{calls}"
     );
+}
+
+/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
+/// single process. `$PATH`, `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and the `$SKEIN_LS_CMD` stub are process-global, so
+/// without this every test here writes into the middle of the others: one test's fake sandbox root
+/// answers another's call, and the symptom is an assertion about what the resize refused rather than
+/// an error that names the cause.
+///
+/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
+/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
+/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
+/// first panic into every other test buries the real failure.
+///
+/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

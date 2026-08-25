@@ -167,6 +167,10 @@ mod tests {
     #[test]
     #[cfg(all(feature = "create", feature = "destroy"))]
     fn a_doer_without_an_approver_refuses_before_it_reaches_the_command() {
+        // $PATH decides what EVERY spawn in this process resolves to, and six sibling tests hold
+        // this lock. Without it, this test points them at a directory containing a fake `sbx` for
+        // as long as it runs — the worst blast radius of the three sites SKEIN-307 found.
+        let _env = crate::env_lock();
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("skein-warden-doer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

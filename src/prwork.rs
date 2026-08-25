@@ -110,9 +110,32 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Carries {
     /// Somebody chose this one on the row. Outranks every rule, in both directions.
+    ///
+    /// Outranks every rule about *which* workflow — never a workflow's own conditions. Where those
+    /// do not hold, this is [`Carries::Holding`] instead (SKEIN-279).
     Assigned(String),
     /// A workflow's own `matches` claimed it.
     Matched(String),
+    /// Assigned by hand, and **holding**: the workflow governs this pull request and its own
+    /// `matches` do not hold yet, so it may not act (SKEIN-279).
+    ///
+    /// A third answer rather than a flavour of [`Carries::Assigned`], because the two are read for
+    /// different things and used to be the same word. The row must still say the workflow is on it
+    /// — somebody chose it, and it has not been forgotten — while nothing may act, which is
+    /// [`Carries::name`] against [`Carries::acting`].
+    ///
+    /// **This is not a stop and not a wait.** Nothing is written down, no clock runs, and there is
+    /// nothing for anybody to clear: `unmet` is recomputed from the queue every pass, so the pull
+    /// request starts acting on the pass after the condition becomes true. It is also kept out of
+    /// a serial train's line, which is the part that matters most — a pull request that cannot act
+    /// standing at the front of a train would hold up everything behind it, which is the failure
+    /// this whole design is written against.
+    Holding {
+        name: String,
+        /// The conditions that do not hold, spelled as they are written in the file, so the
+        /// sentence on the row is checkable against it. From [`crate::workflow::unmet`].
+        unmet: Vec<String>,
+    },
     /// Excluded by hand — the row said "no workflow", and no rule may override that.
     ///
     /// A distinct answer from [`Carries::Nothing`] and the whole reason assignment is a
@@ -125,11 +148,26 @@ pub enum Carries {
 }
 
 impl Carries {
-    /// The workflow's name, where there is one.
+    /// The workflow's name, where there is one. **What governs it**, which is what a row shows —
+    /// including one that is holding, because an assignment nobody can see is one that looks lost.
     pub fn name(&self) -> Option<&str> {
         match self {
-            Carries::Assigned(name) | Carries::Matched(name) => Some(name),
+            Carries::Assigned(name) | Carries::Matched(name) | Carries::Holding { name, .. } => {
+                Some(name)
+            }
             Carries::Excluded | Carries::Nothing => None,
+        }
+    }
+
+    /// The workflow that may act on this pull request **now**, which is a different question from
+    /// [`Carries::name`] and the whole of SKEIN-279.
+    ///
+    /// Everything that acts, or that decides who acts next, reads this one: the sweep, and the
+    /// serial line it builds. Everything that draws reads [`Carries::name`].
+    pub fn acting(&self) -> Option<&str> {
+        match self {
+            Carries::Assigned(name) | Carries::Matched(name) => Some(name),
+            Carries::Holding { .. } | Carries::Excluded | Carries::Nothing => None,
         }
     }
 }
@@ -215,6 +253,19 @@ pub fn apply(
 /// `matches` claims it does — and a workflow with no `matches` claims nothing, ever
 /// ([`crate::workflow::claims`]).
 ///
+/// **An assignment says which workflow, not that its conditions are met** (SKEIN-279). So an
+/// assigned workflow whose own `matches` do not hold comes back [`Carries::Holding`]: it governs
+/// the pull request and may not act on it, and both halves are said rather than one silently
+/// winning. Until this, `matches` was evaluated on exactly one of the two roads to acting — assign
+/// the documented merge train to a draft, or to an unapproved pull request, and it would label,
+/// rebase and wait its way through the steps with every guard written in `matches` switched off.
+/// The consequence that could not be undone was fixed in SKEIN-237 by moving that one guard into
+/// the act; this is the general hole it left behind.
+///
+/// A **matched** workflow can never be holding: its `matches` were just evaluated to get here.
+/// A workflow with no `matches` states no conditions, so assigning it is unconditional — which is
+/// what "it only ever runs where somebody assigned it" already meant.
+///
 /// An assignment naming a workflow that no longer exists is [`Carries::Nothing`] rather than an
 /// error: the file it named was edited, and the honest thing is to act on nothing rather than to
 /// guess which of the remaining ones was meant. The row says so.
@@ -227,9 +278,15 @@ pub fn carries(
     match read_assigned(repo_id).get(&number.to_string()) {
         Some(name) if name.is_empty() => return Carries::Excluded,
         Some(name) => {
-            return match flows.iter().any(|f| &f.name == name) {
-                true => Carries::Assigned(name.clone()),
-                false => Carries::Nothing,
+            return match flows.iter().find(|f| &f.name == name) {
+                Some(flow) => match crate::workflow::unmet(flow, facts) {
+                    unmet if unmet.is_empty() => Carries::Assigned(name.clone()),
+                    unmet => Carries::Holding {
+                        name: name.clone(),
+                        unmet,
+                    },
+                },
+                None => Carries::Nothing,
             }
         }
         None => {}
@@ -501,6 +558,20 @@ pub struct Standing {
     pub step: usize,
     /// Why it is stopped, if it is. A stopped workflow does nothing until this is cleared.
     pub stopped: String,
+    /// Why the workflow on this pull request is not acting, though nothing is wrong (SKEIN-279):
+    /// somebody assigned it and its own `matches` do not hold yet. Empty when it is acting
+    /// normally.
+    ///
+    /// Not a stop and not a wait, and it says so in those words — there is nothing to clear and no
+    /// clock running. The conditions are spelled as the file spells them, so the sentence is
+    /// checkable against the workflow somebody is reading.
+    ///
+    /// A separate field rather than a sentence in [`Standing::next`], because `next` is a step
+    /// spelled as it is written in the file and this is the reason there is no step. An older
+    /// cockpit that does not read this still says "nothing to do right now", which is true; a
+    /// cockpit that does says which condition.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub holding: String,
 }
 
 /// Everything the cockpit needs to draw one pull request's workflow state.
@@ -511,19 +582,42 @@ pub fn standing(
     flows: &[Workflow],
 ) -> Standing {
     let carried = carries(repo_id, number, facts, flows);
+    // A holding workflow is still an ASSIGNED one — that is how it came to carry the pull request,
+    // and it is what the row's chooser has to show as chosen. What holds it back is `holding`, so
+    // the two facts are separate rather than one overwriting the other.
     let how = match &carried {
-        Carries::Assigned(_) => "assigned",
+        Carries::Assigned(_) | Carries::Holding { .. } => "assigned",
         Carries::Matched(_) => "matched",
         Carries::Excluded => "excluded",
         Carries::Nothing => "none",
     };
+    let holding = match &carried {
+        Carries::Holding { name, unmet } => format!(
+            "{name} is on this pull request and is not acting yet: its own {} {} not true — \
+             {}. Nothing is stopped and nothing is waiting on a clock; it joins in on the next \
+             pass after that changes.",
+            match unmet.len() {
+                1 => "condition",
+                _ => "conditions",
+            },
+            match unmet.len() {
+                1 => "is",
+                _ => "are",
+            },
+            unmet.join(", "),
+        ),
+        _ => String::new(),
+    };
+    // `acting`, not `name`: a holding workflow has no next step, and asking for one would spell
+    // out a step it is not going to take.
     let flow = carried
-        .name()
+        .acting()
         .and_then(|name| flows.iter().find(|f| f.name == name));
     let chosen = flow.and_then(|flow| crate::workflow::next(flow, facts));
     Standing {
         workflow: carried.name().unwrap_or_default().to_string(),
         how: how.to_string(),
+        holding,
         next: chosen
             .as_ref()
             .map(|c| crate::workflow::spell_act(&c.act))
@@ -1056,8 +1150,12 @@ pub fn sweep() -> Vec<String> {
                 continue;
             }
             let facts = facts_of(pr, &queue.viewer, &queue.trunk);
+            // `acting`, not `name` (SKEIN-279): a workflow whose own `matches` do not hold is
+            // shown on the row and takes no part in this pass — no step, no stop, no clock, and
+            // no place in a serial train's line, where standing at the front unable to act would
+            // hold up everything behind it.
             let Some(name) = carries(&repo.id, pr.number, &facts, &flows)
-                .name()
+                .acting()
                 .map(str::to_string)
             else {
                 continue;
@@ -1852,22 +1950,371 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
-    /// A stacked child somebody put the train on by hand STOPS, and no merge reaches the wire.
+    /// **A workflow that acted drops the queue the next pass would have decided from**
+    /// (SKEIN-314).
     ///
-    /// The other half of the rule above, and the one that was missing (SKEIN-237). `matches` is
-    /// read by [`crate::workflow::claims`] and by nothing else: [`carries`] returns
-    /// `Carries::Assigned` straight from the assignment file, [`sweep`] takes its `.name()`, and
+    /// [`sweep`] ends a pass that did anything with `crate::prq::invalidate`, and the reason is in
+    /// its own comment: the queue is cached for a minute, skein has just changed the thing that
+    /// queue describes, and left alone the next pass would decide from facts it made stale itself.
+    /// That is the one input a cascade needs to merge on a check that has not run.
+    ///
+    /// **It had no test that could fail, and could not have had one**: `queue_within` skipped the
+    /// cache outright in this crate's unit tests, so deleting the `invalidate` changed nothing any
+    /// test could see. [`crate::prq::CachedQueues`] switches the cache on for the length of this
+    /// test, which makes the sweep's second pass a real one.
+    ///
+    /// Two passes over a repository whose state changes in between, exactly as it would on GitHub
+    /// after the first act: pass one puts `ci-queue` on, CI then goes green, and pass two merges.
+    /// With the `invalidate` deleted, pass two reads the cached queue instead — no label, no green
+    /// — and adds the label a second time rather than merging, which is what this fails on.
+    #[test]
+    fn acting_drops_the_queue_the_next_pass_would_have_decided_from() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+              "matches":["ready","approved","base:trunk"],
+              "steps":[
+                {"when":["no-label:ci-queue"],"do":"add-label:ci-queue"},
+                {"when":["label:ci-queue","checks:pending"],"do":"wait:CI is running"},
+                {"when":["label:ci-queue","checks:passing","mergeable","current"],
+                 "do":"merge:squash+delete"},
+                {"when":[],"do":"wait:waiting for GitHub to catch up"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+
+        // The same pull request twice: before its label and CI run, and after.
+        let answer_for = |labels: &str, checks: &str| {
+            format!(
+                r#"{{"data":{{"q0":{{"nodes":[{{"number":12,"title":"t","url":"u","isDraft":false,
+                  "author":{{"login":"me"}},"headRefName":"feat-12","headRefOid":"abc",
+                  "baseRefName":"main","updatedAt":"2026-08-23T00:00:00Z",
+                  "reviewDecision":"APPROVED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+                  "labels":{{"nodes":[{labels}]}},"latestReviews":{{"nodes":[]}},
+                  "commits":{{"nodes":[{{"commit":{{
+                    "committedDate":"2026-08-23T00:00:00Z",
+                    "statusCheckRollup":{{"contexts":{{"nodes":[
+                      {{"status":"COMPLETED","conclusion":"{checks}"}}]}}}}}}}}]}}}}]}},
+                  "q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#
+            )
+        };
+        let answer = Arc::new(Mutex::new(answer_for(r#"{"name":"ready"}"#, "SUCCESS")));
+        let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (seen, queue) = (heard.clone(), answer.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                seen.lock().unwrap().push(head.clone());
+                let answer = if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/thing") && !head.contains("/pulls") {
+                    r#"{"full_name":"acme/thing","default_branch":"main"}"#.to_string()
+                } else if head.contains("/graphql") {
+                    queue.lock().unwrap().clone()
+                } else {
+                    r#"{"merged":true}"#.to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // The cache live, which is the whole point: without this the second sweep refetches
+        // whether or not anything invalidated, and the assertion below cannot fail.
+        let _cache = crate::prq::CachedQueues::live();
+
+        let first = sweep();
+        assert!(
+            first.iter().any(|d| d.contains("ci-queue")),
+            "the first pass did not act, so there is nothing for an invalidate to be about: \
+             {first:?}"
+        );
+
+        // GitHub's state moves on, exactly as it would have: the label is on, and CI went green
+        // against it. Nothing tells skein — the only thing that can is reading the queue again.
+        *answer.lock().unwrap() = answer_for(r#"{"name":"ready"},{"name":"ci-queue"}"#, "SUCCESS");
+
+        let second = sweep();
+        let calls = heard.lock().unwrap().clone();
+        assert!(
+            calls.iter().filter(|c| c.contains("/graphql")).count() >= 2,
+            "the second pass decided from the queue the first pass made stale — it never asked \
+             GitHub again: {second:?} / {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("/pulls/12/merge")),
+            "the pull request was not merged on the second pass, so the pass acted on facts from \
+             before its own act: {second:?} / {calls:?}"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+    }
+
+    /// **An assignment says WHICH workflow, not that its conditions are met** (SKEIN-279).
+    ///
+    /// The rule this pins, in one sentence: a workflow's `matches` are conditions on ACTING, read
+    /// on both roads to acting, and an assignment overrides only which workflow is responsible.
+    /// Until this, `matches` was evaluated by [`crate::workflow::claims`] and nowhere else, so a
+    /// hand assignment switched off every guard written there — the documented merge train,
+    /// assigned to a pull request nobody had approved, would label it, rebase it and merge it.
+    ///
+    /// Both candidate answers are asserted here, because the value of this test is that it fails
+    /// under either of the other two:
+    ///
+    /// * **"this one, guards and all"** — the behaviour that was there. It fails on `#11`, which
+    ///   would have had `ci-queue` put on it and started CI on an unapproved change.
+    /// * **"the conditions hold, and holding is a stop or a wait"** — the objection that left this
+    ///   item open, since "put this on the train, it will go when it is approved" is an ordinary
+    ///   thing to want. It fails on the three assertions that nothing was written down, and on the
+    ///   second sweep, where approval alone is enough to make it act: no stop to clear, no
+    ///   re-assignment, and no clock that could have run out in between.
+    ///
+    /// And the assertion that is neither: `#11` is the LOWER number, so under the serial train's
+    /// oldest-first rule it would be the front. A pull request that cannot act must not be able to
+    /// stand at the front of a train — that would park everything behind it on a condition its own
+    /// workflow stated — so `#12` merges in the same pass that `#11` is held.
+    #[test]
+    fn an_assigned_workflow_holds_for_its_own_conditions_without_blocking_the_train() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+
+        // The train from docs/pr-workflow.md, "The train, written down".
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+              "matches":["ready","approved","base:trunk"],
+              "steps":[
+                {"when":["changes-requested"],"do":"flag:changes were requested"},
+                {"when":["not-mergeable"],"do":"flag:conflicts with the base"},
+                {"when":["behind"],"do":"update-branch:rebase"},
+                {"when":["checks:failing"],"do":"flag:CI failed"},
+                {"when":["no-label:ci-queue"],"do":"add-label:ci-queue"},
+                {"when":["label:ci-queue","checks:pending"],"do":"wait:CI is running"},
+                {"when":["label:ci-queue","checks:passing","mergeable","current"],
+                 "do":"merge:squash+delete"},
+                {"when":[],"do":"wait:waiting for GitHub to catch up"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+
+        // #11 is `ready`, trunk-based, green — and NOT approved. #12 is all four, and the train's
+        // own rule claims it. The review decision on #11 is what the second sweep changes.
+        let pr = |number: u64, decision: &str, labels: &str| {
+            format!(
+                r#"{{"number":{number},"title":"t","url":"u","isDraft":false,
+                  "author":{{"login":"me"}},"headRefName":"feat-{number}","headRefOid":"abc{number}",
+                  "baseRefName":"main","updatedAt":"2026-08-23T00:00:00Z",
+                  "reviewDecision":"{decision}","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+                  "labels":{{"nodes":[{labels}]}},"latestReviews":{{"nodes":[]}},
+                  "commits":{{"nodes":[{{"commit":{{
+                    "committedDate":"2026-08-23T00:00:00Z",
+                    "statusCheckRollup":{{"contexts":{{"nodes":[
+                      {{"status":"COMPLETED","conclusion":"SUCCESS"}}]}}}}}}}}]}}}}"#
+            )
+        };
+        let queue_answer = |eleven: &str| {
+            format!(
+                r#"{{"data":{{"q0":{{"nodes":[{},{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
+                pr(11, eleven, r#"{"name":"ready"}"#),
+                pr(12, "APPROVED", r#"{"name":"ready"},{"name":"ci-queue"}"#),
+            )
+        };
+        let answer = Arc::new(Mutex::new(queue_answer("REVIEW_REQUIRED")));
+        let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (seen, queue) = (heard.clone(), answer.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                seen.lock().unwrap().push(head.clone());
+                let answer = if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/thing") && !head.contains("/pulls") {
+                    r#"{"full_name":"acme/thing","default_branch":"main"}"#.to_string()
+                } else if head.contains("/graphql") {
+                    queue.lock().unwrap().clone()
+                } else {
+                    r#"{"merged":true}"#.to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        assign("demo", 11, "merge-train").unwrap();
+        let did = sweep();
+
+        // **Nothing was done to #11**, on the wire, which is the only place it would show.
+        let calls = heard.lock().unwrap().clone();
+        let touched_11 = |c: &String| c.contains("/11/") || c.contains("/pulls/11");
+        assert!(
+            !calls.iter().any(touched_11),
+            "the train acted on a pull request nobody has approved: {did:?} / {calls:?}"
+        );
+        // And nothing was written down about it either: no stop to clear, no timeline entry, and
+        // therefore no clock that could later turn this into one.
+        assert_eq!(stopped("demo", 11), None, "holding became a stop");
+        assert!(
+            journal("demo", 11).is_empty(),
+            "holding was recorded as an event: {:?}",
+            journal("demo", 11)
+        );
+
+        // **The train moved anyway.** #11 is the lower number and would have been the front.
+        assert!(
+            calls.iter().any(|c| c.contains("/pulls/12/merge")),
+            "a held pull request blocked the train behind it: {did:?} / {calls:?}"
+        );
+
+        // **The row says both halves**: the train is on #11 — it must still show as chosen in the
+        // pane's chooser — and it is not acting, naming the condition off the file.
+        let flows = crate::workflow::load().unwrap();
+        let held = crate::prq::queue(&crate::repos::load_repos()[0], false)
+            .unwrap()
+            .prs
+            .into_iter()
+            .find(|p| p.number == 11)
+            .expect("#11 is in the queue");
+        let facts = facts_of(&held, "me", "main");
+        assert_eq!(
+            carries("demo", 11, &facts, &flows),
+            Carries::Holding {
+                name: "merge-train".into(),
+                unmet: vec!["approved".into()]
+            },
+            "the condition it is holding for is not the one the file states"
+        );
+        let seen = standing("demo", 11, &facts, &flows);
+        assert_eq!(
+            (
+                seen.how.as_str(),
+                seen.workflow.as_str(),
+                seen.next.as_str()
+            ),
+            ("assigned", "merge-train", ""),
+            "the dry run lost the assignment, or promised a step: {seen:?}"
+        );
+        assert!(
+            seen.holding.contains("approved"),
+            "the row does not say which condition it is not moving on: {seen:?}"
+        );
+        assert_eq!(
+            seen.stopped, "",
+            "holding was reported to the pane as a stop, which is something to clear: {seen:?}"
+        );
+
+        // **And approval alone starts it.** Nothing is cleared, re-assigned or waited out: the
+        // next pass reads the same assignment against new facts.
+        *answer.lock().unwrap() = queue_answer("APPROVED");
+        crate::prq::invalidate("demo");
+        heard.lock().unwrap().clear();
+        sweep();
+        let calls = heard.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("POST") && c.contains("/issues/11/labels")),
+            "an approved pull request did not rejoin the train it was assigned to: {calls:?}"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+    }
+
+    /// A stacked child somebody put the train on by hand is never merged into its parent, and no
+    /// merge reaches the wire.
+    ///
+    /// The other half of the rule above, and the one that was missing (SKEIN-237). `matches` used
+    /// to be read by [`crate::workflow::claims`] and by nothing else: [`carries`] returned
+    /// `Carries::Assigned` straight from the assignment file, [`sweep`] took its name, and
     /// [`crate::workflow::next`] evaluates only `steps` — so on a documented merge train, whose
     /// `base:trunk` lives in `matches`, one hand assignment merged a child into its PARENT's
     /// branch and deleted the child's branch. Putting a workflow on a row by hand is an ordinary
     /// cockpit act; on an eighteen-deep stack it takes the rest of the stack with it, and there is
     /// no undo for a landed merge and a deleted branch.
     ///
+    /// **What refuses it moved earlier, and the test says which** (SKEIN-279). SKEIN-237 could
+    /// only refuse this at the act, because the train had already claimed the pull request and
+    /// walked its steps: the merge became a `flag`, and a stop somebody had to clear. Now the
+    /// train's own `base:trunk` holds on both roads, so the pull request is never carried for
+    /// acting at all — no step, no stop, nothing written down, and it rejoins by itself when its
+    /// parent merges and GitHub retargets it. The act-level guard has NOT gone anywhere and is
+    /// still what catches a workflow whose `matches` never mentioned the base: it is pinned by
+    /// `workflow::tests::a_merge_is_refused_on_a_base_that_is_not_known_to_be_the_trunk`, on
+    /// [`crate::workflow::next`] directly.
+    ///
     /// Driven through [`sweep`] against a GitHub that records every request, because the assertion
     /// that matters is about the wire: a doer tested through its return value would pass while
     /// merging. The workflow is the train exactly as `docs/pr-workflow.md` writes it down.
     #[test]
-    fn a_hand_assigned_stacked_child_stops_instead_of_merging_into_its_parent() {
+    fn a_hand_assigned_stacked_child_is_never_merged_into_its_parent() {
         let _g = crate::testutil::env_lock();
         let _h = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
@@ -1962,28 +2409,24 @@ mod tests {
             !calls.iter().any(|c| c.starts_with("DELETE")),
             "a branch was deleted on a pull request that was never merged: {calls:?}"
         );
-        // And it stopped rather than going quiet: a serial train passes a stop over and keeps
-        // moving, and the reason is what somebody reads in the banner.
-        let why = stopped("demo", 12).unwrap_or_else(|| {
-            panic!("a stacked child was left silently blocking the front of the train: {did:?}")
-        });
-        assert!(
-            why.contains("not based on the trunk"),
-            "the stop does not say what is wrong: {why}"
-        );
-        // The timeline says which workflow and which step decided it — step 7 is the merge.
-        let entries = journal("demo", 12);
+        // And it was refused BEFORE the train took it up, so there is nothing to clear: no stop
+        // written down, and no journal entry, because nothing happened to record. A stop the
+        // owner has to clear on a pull request that will retarget itself is work manufactured out
+        // of a condition the workflow already stated.
         assert_eq!(
-            entries
-                .iter()
-                .map(|e| (e.kind.as_str(), e.flow.as_str(), e.step))
-                .collect::<Vec<_>>(),
-            vec![("stopped", "merge-train", 7)],
-            "the refusal must name the line that would have merged: {entries:?}"
+            stopped("demo", 12),
+            None,
+            "a stop was written for a pull request the train never took up: {did:?}"
         );
-        // And the dry run says the same thing. It is the same [`crate::workflow::next`], so a
-        // person reading the workflows pane before they switch this on is shown the refusal rather
-        // than the merge it used to promise.
+        let entries = journal("demo", 12);
+        assert!(
+            entries.is_empty(),
+            "nothing acted, so nothing may be in the timeline: {entries:?}"
+        );
+        // The dry run is where this has to be visible, and it says both halves: the train is on
+        // this pull request (somebody chose it, and the chooser must show it as chosen) and it is
+        // not acting, naming the condition off the file. This is what the owner reads with the
+        // switch off, so silence here is the whole failure SKEIN-279 is about.
         let flows = crate::workflow::load().unwrap();
         let facts = facts_of(
             &crate::prq::queue(&crate::repos::load_repos()[0], false)
@@ -1993,10 +2436,18 @@ mod tests {
             "main",
         );
         let seen = standing("demo", 12, &facts, &flows);
-        assert_eq!((seen.how.as_str(), seen.step), ("assigned", 7));
+        assert_eq!(
+            (seen.how.as_str(), seen.workflow.as_str(), seen.step),
+            ("assigned", "merge-train", 0),
+            "the row must still say the train is on it, with no step it is about to take: {seen:?}"
+        );
+        assert_eq!(
+            seen.next, "",
+            "the dry run promised a step on a pull request nothing will act on: {seen:?}"
+        );
         assert!(
-            seen.next.starts_with("flag:"),
-            "the dry run promised something the tick will not do: {seen:?}"
+            seen.holding.contains("base:trunk"),
+            "the dry run says nothing about why the train is not moving on it: {seen:?}"
         );
 
         for key in [

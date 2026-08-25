@@ -894,7 +894,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
 /// steady-state spend that got the owner rate-limited, back when each refresh was five separate
 /// GraphQL searches rather than [`search_prs_all`]'s one.
 pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
-    if !cfg!(test) {
+    if queues_are_cached() {
         if let Some(young) = unexpired_within(&repo.id, max_age) {
             return Ok(young);
         }
@@ -1157,7 +1157,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         fresh: true,
         whole: answered,
     };
-    if !cfg!(test) {
+    if queues_are_cached() {
         QUEUE_CACHE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1168,6 +1168,87 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         remember(&q);
     }
     Ok(q)
+}
+
+/// Does [`queue_within`] use the caches it is written around?
+///
+/// Always, except in this crate's own unit tests, where it is off unless a test has asked for it
+/// with [`CachedQueues`]. Note the narrowness: `cfg(test)` is set only when the library is
+/// compiled as its own test binary, so every integration test in `tests/` already runs against
+/// the real thing.
+///
+/// **Why it is off by default** — the cache is a process-global `static` and unit tests share one
+/// process, so a queue built by one test would be served to another under the same repo id, and
+/// a test that never mentions caching would fail because of one that does.
+///
+/// **Why it can be switched on** (SKEIN-314). Off unconditionally, no test could put a queue that
+/// is OLD in front of a caller, so three stated defences had nothing that could fail on them: the
+/// `invalidate` after a workflow acts (`crate::prwork::sweep`), the 60s-vs-600s split between the
+/// pane and the badge poll, and anything else that turns on a queue being stale rather than
+/// absent. Each was pinned by reading the source instead — which catches a call being deleted and
+/// nothing about whether it works.
+fn queues_are_cached() -> bool {
+    #[cfg(not(test))]
+    {
+        true
+    }
+    #[cfg(test)]
+    {
+        CACHE_UNDER_TEST.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Whether this crate's unit tests have asked for the queue cache. See [`CachedQueues`].
+#[cfg(test)]
+static CACHE_UNDER_TEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test-only: [`queue_within`] caches exactly as it does in production, for the life of this
+/// guard, and a queue can be planted in the cache already old (SKEIN-314).
+///
+/// **A guard rather than a pair of functions**, because the thing being switched on is
+/// process-global: it has to go off again on the way out, including out of a panicking test, or
+/// every test that runs afterwards in this process inherits a cache it never asked for. `Drop`
+/// empties [`QUEUE_CACHE`] as well as clearing the flag, so nothing this test planted can be
+/// served to the next one.
+///
+/// **Take [`crate::testutil::env_lock`] first.** It is this crate's serialization for
+/// process-global state, which is what this is, and every test that seeds a queue is setting
+/// `$SKEIN_HOME` anyway.
+///
+/// Seeding is a method rather than a free function so it cannot be called without holding the
+/// guard — planting an entry while the cache is off would be a fixture nothing reads, which is
+/// the failure this whole seam exists to stop being possible.
+#[cfg(test)]
+pub(crate) struct CachedQueues(());
+
+#[cfg(test)]
+impl CachedQueues {
+    /// Switch the cache on until this value is dropped.
+    pub(crate) fn live() -> Self {
+        CACHE_UNDER_TEST.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(())
+    }
+
+    /// Put `q` in the cache stamped `age` ago — the one thing a test cannot otherwise do, since
+    /// an `Instant` cannot be set and a real test cannot wait ten minutes.
+    pub(crate) fn stamped(&self, repo_id: &str, age: Duration, q: &Queue) {
+        let at = Instant::now()
+            .checked_sub(age)
+            .expect("this process has not been up long enough to stamp a queue that far back");
+        QUEUE_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert(repo_id.to_string(), (at, q.clone()));
+    }
+}
+
+#[cfg(test)]
+impl Drop for CachedQueues {
+    fn drop(&mut self) {
+        CACHE_UNDER_TEST.store(false, std::sync::atomic::Ordering::SeqCst);
+        *QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 // ───────────────────────────── what to show before the answer ─────────────────────────────
@@ -1190,10 +1271,11 @@ fn remember(q: &Queue) {
 
 /// Test-only: put a queue where [`remembered`] reads it, for tests elsewhere in the crate.
 ///
-/// [`queue_within`] deliberately neither caches nor remembers under `cfg!(test)`, so a test's world
-/// has no remembered queue in it unless it says so — and "no remembered queue" is a state a real
-/// post is almost never in, because the pane must have rendered this repo for a draft to exist at
-/// all. A write path's test that wants the state it will actually run in seeds it here.
+/// [`queue_within`] neither caches nor remembers in this crate's unit tests unless one asks with
+/// [`CachedQueues`], so a test's world has no remembered queue in it unless it says so — and "no
+/// remembered queue" is a state a real post is almost never in, because the pane must have
+/// rendered this repo for a draft to exist at all. A write path's test that wants the state it
+/// will actually run in seeds it here; a test that wants the whole cache, live, takes the guard.
 #[cfg(test)]
 pub(crate) fn remember_for_test(q: &Queue) {
     remember(q);
@@ -1227,9 +1309,10 @@ pub fn unexpired(repo_id: &str) -> Option<Queue> {
 
 /// The TTL rule itself: the in-process copy, if it is younger than `max_age`.
 ///
-/// Its own function rather than three lines inside [`queue_within`], because that path bypasses
-/// the cache under `cfg!(test)` — this is the piece a test can hold, by seeding [`QUEUE_CACHE`]
-/// with a back-stamped entry and asking.
+/// Its own function rather than three lines inside [`queue_within`], because until SKEIN-314 that
+/// path bypassed the cache in unit tests altogether and this was the only piece a test could hold.
+/// It is still the smallest statement of the rule, and [`CachedQueues`] is how a test now asks the
+/// same question of `queue_within` itself.
 fn unexpired_within(repo_id: &str, max_age: Duration) -> Option<Queue> {
     let cache = QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let (at, q) = cache.as_ref()?.get(repo_id)?;
@@ -1291,13 +1374,26 @@ pub fn remembered_head(repo_id: &str, number: u64) -> Option<String> {
 const REVIEW_THREADS_FETCHED: usize = 10;
 
 /// How many PR-level comments one pull request contributes. **These carry bodies**, so this is the
-/// expensive cap and it is deliberately the smaller one.
+/// expensive cap and it is deliberately the smallest one.
 ///
-/// The last ten, not the first ten: a conversation is read from its end. The item this came from
+/// The LAST five, not the first five: a conversation is read from its end. The item this came from
 /// names the case exactly — a pull request with four hundred comments must not be the thing that
 /// makes the queue slow — and without a cap that PR would ship its whole history inside a request
-/// that already carries ninety-nine others.
-const PR_COMMENTS_FETCHED: usize = 10;
+/// that already carries ninety-nine others. [`Pr::comments_total`] carries GitHub's own count
+/// beside the five, so a conversation that was cut says how much of it is missing.
+///
+/// **Five, not ten (SKEIN-316).** This is the first lever that item names, and it was pulled on a
+/// measurement rather than on taste:
+/// `the_conversation_is_measured_against_the_answer_it_grew_from` prints the worst case the caps
+/// allow — [`SEARCH_PAGE`] pull requests saturating this and [`REVIEW_THREADS_FETCHED`] — and ten
+/// put it at **583,887 bytes for ONE alias**, roughly 2.9 MB for a five-alias batch, on the same
+/// request `acme/thing` answers with a 504 (SKEIN-278). Five puts it at **450,827**, and
+/// that test now holds a ceiling rather than only printing the number. It is this cap and not
+/// [`REVIEW_THREADS_FETCHED`] because a comment node carries a body and a thread node deliberately
+/// does not (SKEIN-301) — at the 120-character body that measurement uses they are already 264
+/// bytes against 226, and a real comment body is several times that, so the gap this closes is
+/// wider in the fleet than in the fixture.
+const PR_COMMENTS_FETCHED: usize = 5;
 
 /// How many outstanding review requests are listed. People and teams together; a pull request
 /// waiting on more than this many reviewers is not a row anybody reads a list of names off.
@@ -2627,61 +2723,6 @@ fn short_sha(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-/// The RIGHT-side commentable lines of a unified diff: every `+` and context line, with the NEW
-/// file's line number and the line's content (marker stripped). This is exactly the set of
-/// coordinates GitHub accepts for a `side: "RIGHT"` review comment.
-///
-/// The counters come from each `@@ -a,b +c,d @@` header's `+c`; `-` lines do not advance the new
-/// counter, and a `\ No newline at end of file` marker advances nothing. File identity comes from
-/// the `+++ b/...` header. A hunk header that does not parse (the assembled diff's
-/// `@@ no patch available @@` placeholder) suspends counting until the next real one, so a file
-/// GitHub served only as numbers contributes no false anchors.
-fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
-    let mut out = Vec::new();
-    let mut path: Option<String> = None;
-    let mut new_line: u64 = 0;
-    let mut in_hunk = false;
-    for line in diff.lines() {
-        if line.starts_with("diff --git ") {
-            path = None;
-            in_hunk = false;
-        } else if !in_hunk && line.starts_with("+++ ") {
-            let name = line["+++ ".len()..].trim();
-            path =
-                (name != "/dev/null").then(|| name.strip_prefix("b/").unwrap_or(name).to_string());
-        } else if !in_hunk && line.starts_with("--- ") {
-            // The old-file header; only the +++ side names what RIGHT comments attach to.
-        } else if line.starts_with("@@") {
-            // `@@ -a,b +c,d @@` — only `+c` matters here.
-            in_hunk = false;
-            if let Some(plus) = line.split_whitespace().find(|w| w.starts_with('+')) {
-                let start = plus[1..].split(',').next().unwrap_or("");
-                if let Ok(n) = start.parse::<u64>() {
-                    new_line = n;
-                    in_hunk = true;
-                }
-            }
-        } else if in_hunk {
-            if let Some(rest) = line.strip_prefix('+') {
-                if let Some(p) = &path {
-                    out.push((p.clone(), new_line, rest.to_string()));
-                }
-                new_line += 1;
-            } else if line.starts_with('\\') || line.starts_with('-') {
-                // `\ No newline…` marks the previous line; `-` lines live only in the old file.
-            } else {
-                // Context: a leading space, or the entirely empty line git emits for blank context.
-                let rest = line.strip_prefix(' ').unwrap_or(line);
-                if let Some(p) = &path {
-                    out.push((p.clone(), new_line, rest.to_string()));
-                }
-                new_line += 1;
-            }
-        }
-    }
-    out
-}
-
 /// Re-anchor drafted comments against a NEWER diff, by line text. Returns
 /// `(anchored, displaced)`: the anchored carry updated line numbers valid in the new diff, the
 /// displaced could not be placed and belong in the review body instead.
@@ -2706,7 +2747,11 @@ pub fn re_anchor(
     comments: &[ReviewComment],
     new_diff: &str,
 ) -> (Vec<ReviewComment>, Vec<ReviewComment>) {
-    let lines = right_side_lines(new_diff);
+    // ONE diff grammar, and it lives where the vetting happens (SKEIN-233). This was a
+    // second body with the same name: identical code, and `review::commentable` had a
+    // THIRD reading of the same bytes that lacked the `\ No newline at end of file` case
+    // and silently discarded the rest of its hunk. `prq -> review` is already declared.
+    let lines = crate::review::right_side_lines(new_diff);
     let mut anchored = Vec::new();
     let mut displaced = Vec::new();
     for c in comments {
@@ -3120,6 +3165,84 @@ pub fn merge(slug: &str, number: u64) -> Result<String, String> {
         .to_string())
 }
 
+/// Mark a review thread resolved on GitHub (SKEIN-305).
+///
+/// `thread_id` is [`ReviewThread::id`] — GitHub's node id, which is exactly the argument
+/// `resolveReviewThread` takes, so this needs no lookup and no slug. That is why the whole
+/// conversation carries thread ids: the panel draws a thread from its author, time and permalink,
+/// and the id is the one field on it that exists only so this call can be made.
+///
+/// **Here rather than in the caller**, because this is the only module that may reach GitHub:
+/// [`crate::github::graphql`] is `pub(crate)`, so `src/bin/skein-server.rs` is a different crate
+/// and cannot call it, and `review` reaching `github` is an edge `docs/modules.toml` does not
+/// declare — `tools/module-check.py` fails on it. `prq -> github` is declared, so this is where it
+/// goes.
+///
+/// **No queue read.** A thread id and nothing else, so a resolve costs one request and cannot
+/// inherit the ways a refresh fails (the SKEIN-272 lesson, in the form it takes here). Invalidating
+/// the cached queue afterwards is the caller's, on the same rule as every other act that touched
+/// GitHub.
+pub fn resolve_review_thread(thread_id: &str) -> Result<(), String> {
+    set_thread_resolved(thread_id, true)
+}
+
+/// The inverse, so the panel's eight-second undo (SKEIN-162) is a real retraction rather than a
+/// row that redraws itself while GitHub still says resolved.
+pub fn unresolve_review_thread(thread_id: &str) -> Result<(), String> {
+    set_thread_resolved(thread_id, false)
+}
+
+/// The one mutation both directions send, with only its name and the state it asserts differing.
+///
+/// **[`crate::github::graphql`], never `graphql_partial`.** The sibling asks a dead connection
+/// again, and its own doc says why that must not carry a mutation: an ambiguous failure may be one
+/// that already ran. It is also the half that fails the whole request on any `errors` entry, which
+/// is what this needs — an `Ok(())` on a GraphQL error would let the undo window close over a
+/// resolve that never happened.
+///
+/// GitHub's answer is read back rather than discarded, on the rule this file uses everywhere: what
+/// GitHub SAID is used, and what it did not say is not invented. `isResolved` coming back against
+/// what was asked is a write that did not take, and it is reported as one; `isResolved` absent is
+/// not a contradiction, so it is accepted.
+fn set_thread_resolved(thread_id: &str, resolved: bool) -> Result<(), String> {
+    if thread_id.trim().is_empty() {
+        return Err("no review thread was named, so there is nothing to resolve".into());
+    }
+    let field = match resolved {
+        true => "resolveReviewThread",
+        false => "unresolveReviewThread",
+    };
+    let query = format!(
+        "mutation($id: ID!) {{\n\
+        \x20 {field}(input: {{threadId: $id}}) {{ thread {{ id isResolved }} }}\n\
+        }}"
+    );
+    let out = crate::github::graphql(
+        &query,
+        serde_json::json!({ "id": thread_id }),
+        &host_token()?,
+    )?;
+    let said = out
+        .get(field)
+        .and_then(|v| v.get("thread"))
+        .and_then(|t| t.get("isResolved"))
+        .and_then(serde_json::Value::as_bool);
+    match said {
+        Some(is) if is != resolved => Err(format!(
+            "GitHub accepted the {} and reports the thread as {}",
+            match resolved {
+                true => "resolve",
+                false => "unresolve",
+            },
+            match is {
+                true => "still resolved",
+                false => "still open",
+            }
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// A `Deserialize` twin of [`Lane`], so a route can accept a lane name as input.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -3498,12 +3621,128 @@ mod tests {
         forget_trunks();
     }
 
+    /// **A queue inside the budget is served from memory; one outside it is fetched again**
+    /// (SKEIN-314).
+    ///
+    /// The rule asserted where every caller meets it — [`queue_within`] — rather than on the
+    /// helper underneath. That distinction is the whole item: the cache was skipped outright in
+    /// this crate's unit tests, so nothing could put a queue that is OLD in front of a caller, and
+    /// the 60s-vs-600s split between the pane and the badge poll had no test that could fail on
+    /// it. [`CachedQueues`] is the seam; this is the first thing it makes sayable.
+    ///
+    /// Measured on the wire and not on the answer, because "did it refetch" is a request to
+    /// GitHub. The planted queue carries a pull request the fake never serves, so the two cases
+    /// are also told apart by what comes back: the seeded row on a hit, the fake's on a miss.
+    #[test]
+    fn a_queue_inside_the_budget_is_served_and_one_outside_it_is_refetched() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, asked) = routing_github();
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "source": "https://github.com/acme/new-name.git",
+            "work": "",
+            "store": "",
+            "review_queue": true,
+        }))
+        .unwrap();
+        crate::repos::save_repos(std::slice::from_ref(&repo)).unwrap();
+
+        let cache = CachedQueues::live();
+        // Through serde, so fields this test has no opinion about keep their real defaults.
+        let planted: Queue = serde_json::from_value(serde_json::json!({
+            "repo_id": "demo",
+            "slug": "acme/new-name",
+            "viewer": "me",
+            "ai": false,
+            "prs": [{
+                "number": 4242, "title": "planted", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "2026-08-01T00:00:00Z", "committed_at": "",
+                "checks": "none", "my_review": "none", "review_is_current": false,
+                "reasons": ["reviewer"], "lane": "needs-you", "box_name": "b"
+            }],
+            "blind_spots": [],
+        }))
+        .unwrap();
+        let graphqls = || {
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.starts_with("/graphql"))
+                .count()
+        };
+
+        // Ninety seconds old: inside the badge's ten minutes, outside the pane's sixty seconds.
+        cache.stamped("demo", Duration::from_secs(90), &planted);
+        let badge = queue_within(&repo, Duration::from_secs(600)).expect("the badge's read");
+        assert_eq!(
+            graphqls(),
+            0,
+            "a ninety-second-old queue cost a GitHub round trip on the ten-minute budget — that \
+             spend is per repo, per open tab, every three minutes: {:?}",
+            asked.lock().unwrap()
+        );
+        assert_eq!(
+            badge.prs.first().map(|p| p.number),
+            Some(4242),
+            "the badge was served something other than the queue that was in the cache"
+        );
+
+        // The same entry, the same moment, read on the pane's budget: too old, so it is refetched.
+        let pane = queue_within(&repo, Duration::from_secs(60)).expect("the pane's read");
+        assert_eq!(
+            graphqls(),
+            1,
+            "the pane's sixty seconds served a ninety-second-old answer as fresh: {:?}",
+            asked.lock().unwrap()
+        );
+        assert!(
+            pane.prs.iter().all(|p| p.number != 4242),
+            "the refetched queue still carries the planted row, so nothing was actually refetched"
+        );
+
+        // And the refetch replaced the entry, so the badge's next read is inside the budget again
+        // — the write half of the cache, which was skipped in tests along with the read half.
+        let after = queue_within(&repo, Duration::from_secs(600)).expect("the badge again");
+        assert_eq!(
+            graphqls(),
+            1,
+            "a queue built one line ago was not put in the cache: {:?}",
+            asked.lock().unwrap()
+        );
+        assert!(after.prs.iter().all(|p| p.number != 4242));
+
+        // Dropping the guard puts the process back as it was for every test that runs after this
+        // one: the cache off, and nothing this test planted left in it.
+        drop(cache);
+        assert!(
+            unexpired_within("demo", Duration::from_secs(600)).is_none(),
+            "the guard left this test's queue in a process-global cache"
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+    }
+
     /// The TTL rule the badge rides on: a remembered in-process queue is served only while it is
     /// younger than the caller's age budget.
     ///
-    /// Asserted on `unexpired_within` directly, because `queue_within` bypasses the cache under
-    /// `cfg!(test)` — seeding [`QUEUE_CACHE`] with a back-stamped entry is the only way the rule
-    /// is reachable from a test at all.
+    /// Asserted on `unexpired_within` directly: the rule itself, in isolation, with no GitHub and
+    /// no repo. `a_queue_inside_the_budget_is_served_and_one_outside_it_is_refetched` asks the
+    /// same question of [`queue_within`], which is the function every caller actually reaches.
     #[test]
     fn an_in_process_queue_is_served_only_within_the_callers_age_budget() {
         // The cache is a process-wide static; the env lock is this file's serialization for those.
@@ -3553,12 +3792,12 @@ mod tests {
 
     /// The badge reads through the ten-minute budget, not the pane's sixty seconds.
     ///
-    /// Asserted against the source, the way `nothing_here_shells_out_to_gh` is, because the
-    /// runtime path is unreachable from a test: `queue_within` bypasses the cache under
-    /// `cfg!(test)`, so a test that called `counts()` would pass identically on either budget.
-    /// What this pins is the call itself — pointing `counts` back at `queue(&repo, false)` is
-    /// the regression that rebuilt every repo's queue through a 60s cache every three minutes
-    /// per open tab, and it is exactly what this fails on.
+    /// Asserted against the source, the way `nothing_here_shells_out_to_gh` is. What this pins is
+    /// the call itself — pointing `counts` back at `queue(&repo, false)` is the regression that
+    /// rebuilt every repo's queue through a 60s cache every three minutes per open tab, and it is
+    /// exactly what this fails on. That the two budgets then behave differently is no longer taken
+    /// on trust either: since SKEIN-314 it is measured against `queue_within` in
+    /// `a_queue_inside_the_budget_is_served_and_one_outside_it_is_refetched`.
     #[test]
     fn the_badge_reads_through_a_ten_minute_budget() {
         let source = std::fs::read_to_string(file!()).expect("this file");
@@ -4076,6 +4315,12 @@ mod tests {
     /// The ceiling is what the test enforces. It is deliberately loose — the point is not the exact
     /// byte count, which moves with every field anybody adds, but that this change stays in the
     /// same order of magnitude as the answer it grew from. The measured numbers go in the item.
+    ///
+    /// **The worst case has a ceiling too, since SKEIN-316.** Both numbers were printed and only
+    /// the profile one was checked, so the number the 504 is actually about — every pull request
+    /// saturating both caps, a whole page of them — could be tripled by a cap nobody re-measured
+    /// and the test would still pass. It is the per-ALIAS figure that carries the ceiling because
+    /// that is what a cap multiplies; a refresh sends five of these in one request.
     #[test]
     fn the_conversation_is_measured_against_the_answer_it_grew_from() {
         let thread = |n: usize| {
@@ -4148,6 +4393,27 @@ mod tests {
             "the conversation more than quadrupled the answer ({was} -> {now} bytes for 54 pull \
              requests) — PR_FRAGMENT travels for up to {SEARCH_PAGE} of them per membership rule, \
              and this is the request that already 504s (SKEIN-278)"
+        );
+
+        // **The worst case the caps allow, held under half a megabyte per alias** (SKEIN-316). A
+        // refresh sends one of these per membership rule in ONE request, so this figure is a fifth
+        // of what GitHub is asked to compute — and `acme/thing` already answers that with a
+        // 504. The ceiling is a round number rather than the measurement plus a margin, so that
+        // reading it says what is being defended instead of what today happens to cost; the
+        // headroom under it is stated in the message, so a failure says how far past it went and
+        // which lever SKEIN-316 names first.
+        const WORST_CASE_CEILING: usize = 500_000;
+        assert!(
+            saturated.len() < WORST_CASE_CEILING,
+            "the worst case the caps allow is {} bytes for ONE alias ({} for a five-alias \
+             refresh), past the {WORST_CASE_CEILING}-byte ceiling — this is the request \
+             acme/thing answers with a 504 (SKEIN-278). The levers, in SKEIN-316's order: \
+             PR_COMMENTS_FETCHED (now {PR_COMMENTS_FETCHED}, the only cap whose nodes carry \
+             bodies), then REVIEW_THREADS_FETCHED (now {REVIEW_THREADS_FETCHED}). Do NOT raise \
+             SEARCH_PAGE (now {SEARCH_PAGE}) — its own doc argues a bigger page trades a rare \
+             truncation for a likelier outage",
+            saturated.len(),
+            saturated.len() * 5,
         );
     }
 
@@ -7219,11 +7485,206 @@ mod tests {
             .split("review::prune(")
             .next()
             .expect("the source before the call");
+        // The PROPERTY, not one spelling of it: somewhere before the call, the queues that reach
+        // it are filtered on `whole`. Pinned this way round because the exact expression has
+        // already moved once — it was `slug.filter(|_| queue.whole)` inline, and is now a filter
+        // in the helper that builds the list — and a test that fails on a refactor which KEEPS
+        // the guard teaches whoever meets it to delete the test.
         assert!(
-            guarded.contains("slug.filter(|_| queue.whole)"),
+            guarded
+                .lines()
+                .any(|line| line.contains("filter") && line.contains("whole")),
             "the queue's list is pruned against without asking whether it saw everything — a \
              search cut off at its page makes every pull request past the hundredth absent for a \
              reason that has nothing to do with it"
+        );
+    }
+
+    // ───────────────── resolving a review thread from the panel (SKEIN-305) ─────────────────
+
+    /// A GitHub that answers each connection from a script and records what it was handed.
+    ///
+    /// `Some(body)` is a 200 carrying that JSON; `None` is the failure this must be tested against
+    /// — headers written, then the connection dropped, which is the shape SKEIN-271 met live and
+    /// the one where "it ran" and "it did not run" look identical from here. Every request's body
+    /// is recorded, so a test reads the mutation that actually went out rather than the one the
+    /// source appears to build.
+    fn scripted_github(
+        script: Vec<Option<&'static str>>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            let mut turn = 0usize;
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut body).ok();
+                }
+                recorder.lock().unwrap().push(format!(
+                    "{} {}",
+                    request.split_whitespace().nth(1).unwrap_or(""),
+                    String::from_utf8_lossy(&body)
+                ));
+                let answer = script.get(turn).copied().flatten();
+                turn += 1;
+                match answer {
+                    Some(json) => {
+                        let _ = stream.write_all(
+                            format!(
+                                "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                                json.len()
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                    // Headers, then nothing — the stream dies where the answer should have been.
+                    None => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 X\r\nContent-Length: 128\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                }
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    /// The one GraphQL request each direction sends, read off the wire (SKEIN-305).
+    ///
+    /// Both halves, because a resolve that sends `unresolveReviewThread` and an unresolve that
+    /// sends `resolveReviewThread` are the same one-word mistake, and the pane's undo is the place
+    /// it would be met. The thread id travels as a **variable** rather than interpolated into the
+    /// query, so this also pins that: a node id spliced into the mutation text is an injection and
+    /// a syntax error waiting on the first id with a quote in it.
+    #[test]
+    fn resolving_and_unresolving_send_the_mutation_github_names() {
+        let (api, seen) = scripted_github(vec![
+            Some(
+                r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true}}}}"#,
+            ),
+            Some(
+                r#"{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":false}}}}"#,
+            ),
+        ]);
+        let _wired = wired(&api);
+        resolve_review_thread("PRRT_1").expect("GitHub said the thread is resolved");
+        unresolve_review_thread("PRRT_1").expect("GitHub said the thread is open again");
+
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(
+            sent.len(),
+            2,
+            "one request each, and no lookup beside it: {sent:?}"
+        );
+        for (i, (field, other)) in [
+            ("resolveReviewThread", "unresolveReviewThread"),
+            ("unresolveReviewThread", "resolveReviewThread"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let (path, body) = sent[i].split_once(' ').expect("path and body");
+            assert_eq!(
+                path, "/graphql",
+                "the mutation did not go to GraphQL: {}",
+                sent[i]
+            );
+            let body: serde_json::Value = serde_json::from_str(body).expect("a JSON request");
+            let query = body["query"].as_str().unwrap_or_default();
+            assert!(
+                query.contains(&format!(" {field}(input: {{threadId: $id}})")),
+                "the {field} mutation is not what went out: {query}"
+            );
+            // The leading space is load-bearing: `resolveReviewThread` is a substring of
+            // `unresolveReviewThread`, so a bare `contains` cannot tell the two apart in the
+            // direction that matters — which is exactly the mistake being tested for.
+            assert!(
+                !query.contains(&format!(" {other}(")),
+                "the two directions send the same mutation: {query}"
+            );
+            assert_eq!(
+                body["variables"]["id"], "PRRT_1",
+                "the thread id must travel as a variable, not spliced into the query: {body}"
+            );
+        }
+    }
+
+    /// **A refusal is an error, not a closed undo window** (SKEIN-305).
+    ///
+    /// Two ways GitHub says no, and both used to be the same `Ok(())` if the answer were dropped
+    /// on the floor: a GraphQL `errors` entry, and a 200 whose thread comes back in the state it
+    /// started in. The pane draws a receipt and starts an eight-second countdown on `ok`, so a
+    /// swallowed failure is a thread the owner believes they resolved and a window that closes
+    /// over it.
+    #[test]
+    fn a_resolve_github_did_not_perform_is_reported_rather_than_swallowed() {
+        let (api, _seen) = scripted_github(vec![
+            Some(r#"{"errors":[{"message":"Could not resolve to a node with the global id"}]}"#),
+            Some(
+                r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":false}}}}"#,
+            ),
+        ]);
+        let _wired = wired(&api);
+        let why =
+            resolve_review_thread("PRRT_1").expect_err("a GraphQL error is not a resolved thread");
+        assert!(
+            why.contains("global id"),
+            "GitHub's own reason did not reach the caller: {why}"
+        );
+        let why = resolve_review_thread("PRRT_1")
+            .expect_err("a thread GitHub reports as still open was not resolved");
+        assert!(
+            why.contains("still open"),
+            "a write that did not take was reported as one that did: {why}"
+        );
+        // And nothing is sent at all when there is no thread to name — a request GitHub would
+        // answer with a schema complaint that reads as a skein bug.
+        assert!(resolve_review_thread("  ").is_err());
+    }
+
+    /// **A mutation whose connection dies is never sent twice** (SKEIN-271, SKEIN-305).
+    ///
+    /// This is the routing test: [`crate::github::graphql_partial`] asks a dead connection again,
+    /// [`crate::github::graphql`] does not, and a resolve sent twice is a write the owner did not
+    /// ask for — the second one lands on a thread somebody may have reopened in between. Counted
+    /// on the wire rather than read out of the source, so it holds however the call is spelled.
+    #[test]
+    fn a_resolve_whose_connection_dies_is_never_sent_twice() {
+        let (api, seen) = scripted_github(vec![
+            None,
+            Some(
+                r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_1","isResolved":true}}}}"#,
+            ),
+        ]);
+        let _wired = wired(&api);
+        let why = resolve_review_thread("PRRT_1")
+            .expect_err("a dead connection on a mutation is an error, not a retry");
+        assert!(!why.is_empty());
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "the resolve reached GitHub twice — the retry belongs to reads only, and this is a \
+             write: {:?}",
+            seen.lock().unwrap()
         );
     }
 }

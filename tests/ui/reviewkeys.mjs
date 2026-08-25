@@ -19,7 +19,7 @@
 //     order.
 //
 //   node tests/ui/reviewkeys.mjs
-import { grab, harness } from "./lift.mjs";
+import { grab, harness, pure } from "./lift.mjs";
 import { shortcutFor, ACTIONS } from "../../cockpit/src/keys.mjs";
 
 const t = harness();
@@ -142,6 +142,9 @@ function world(opts = {}) {
   const localStorage = { store: {}, getItem(k) { return this.store[k] ?? null; }, setItem(k, v) { this.store[k] = v; }, removeItem(k) { delete this.store[k]; } };
 
   const body = `
+    // Whose move a pull request is, from cockpit/src/move.mjs — the one place the rule lives
+    // (SKEIN-302), so a world that stubbed it would be testing a second copy of it.
+    ${pure("move")}
     const repos = ${JSON.stringify((opts.repos || ["alpha", "beta", "gamma"]).map(id => ({ id })))};
     let view = { box: null, mode: "review", kind: "agent" };
     const applyView = () => {};
@@ -218,6 +221,14 @@ function world(opts = {}) {
     ${grab("revNotReadyOpen")}
     ${grab("toggleNotReady")}
     ${grab("revNotReadyWhy")}
+    // The two groups below your move both fold now (SKEIN-302), so the pane needs both switches
+    // and the sentence each heading states its composition with.
+    ${grab("revTheirsOpen")}
+    ${grab("toggleTheirs")}
+    ${grab("REV_FOLDS")}
+    ${grab("revFolds")}
+    ${grab("revFoldOpen")}
+    ${grab("revTheirsWhy")}
     ${grab("revNavSettle")}
     ${grab("revRenderHeld")}
     ${grab("revRenderFlush")}
@@ -277,6 +288,11 @@ function world(opts = {}) {
     ${grab("revReceiptHtml")}
     ${grab("revMarkDone")}
     ${grab("revRepaintRow")}
+    // The pending paint routes a THREAD key to its own paint (SKEIN-305), so it needs the marker
+    // that tells the two kinds of key apart. (No backticks: this whole world is a template literal.)
+    ${grab("REV_THREAD_MARK")}
+    ${grab("revThreadAt")}
+    ${grab("revThreadPaint")}
     ${grab("revPendingPaint")}
     ${grab("revBarHtml")}
     ${grab("revMovedNotice")}

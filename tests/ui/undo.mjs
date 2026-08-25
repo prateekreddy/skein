@@ -18,7 +18,7 @@
 // Timers are a driven clock, not sleeps: the suite advances time and watches what fires.
 //
 //   node tests/ui/undo.mjs
-import { grab, harness } from "./lift.mjs";
+import { grab, harness, pure } from "./lift.mjs";
 
 const t = harness();
 
@@ -62,8 +62,16 @@ function world(opts = {}) {
   const bar = {};
   Object.defineProperty(bar, "outerHTML", { set(v) { barHtml = v; } });
   const spans = opts.spans || [];
+  // One open review thread's line, captured the same way (SKEIN-305). It is queried by
+  // `data-thread` and never by `.revrow` — a pull request inside a stack is drawn as a `.step`, so
+  // a selector reaching for the row around it finds nothing and the press dies silently.
+  const thread = { html: "" };
+  Object.defineProperty(thread, "outerHTML", { set(v) { thread.html = v; }, get() { return thread.html; } });
+  let threadDrawn = true;   // is that line on screen? (a closed row is the case where it is not)
   const revpane = {
-    querySelector: sel => sel === ".readbar" ? bar : sel.startsWith(".revrow") ? row : null,
+    querySelector: sel => sel === ".readbar" ? bar
+      : sel.startsWith("[data-thread=") ? (threadDrawn ? thread : null)
+      : sel.startsWith(".revrow") ? row : null,
     querySelectorAll: sel => sel === "[data-undo-left]" ? spans : [],
   };
   const store = new Map();
@@ -73,6 +81,9 @@ function world(opts = {}) {
     removeItem: k => store.delete(k),
   };
   const src = `
+    // Whose move a pull request is, from cockpit/src/move.mjs — the one place the rule lives
+    // (SKEIN-302), so a world that stubbed it would be testing a second copy of it.
+    ${pure("move")}
     let revComposing = null;
     // SKEIN-159's keyboard state, referenced by revRow (sel/flash/held) and revHold (last act).
     let revSel = null, revFlash = "", revLastActKey = "";
@@ -151,8 +162,28 @@ function world(opts = {}) {
     ${grab("revReadAgain")}
     ${grab("revRow")}
     ${grab("archivePr")}
+    // SKEIN-305: resolve is the one write this panel grants, and it rides the same hold, undo and
+    // eight seconds as every other act — under its OWN key, because a hold replaces wholesale and
+    // the row's key would make two presses cancel each other. (No backticks in this block: the
+    // whole world is one template literal and one would end it mid-world.)
+    ${grab("revAgo")}
+    ${grab("REV_THREAD_MARK")}
+    ${grab("revThreadKey")}
+    ${grab("revThreadAt")}
+    ${grab("revThreadHtml")}
+    ${grab("revResolveThread")}
+    ${grab("revThreadPaint")}
+    ${grab("revThreadDone")}
     return {
       act: (r, n, k) => revAct(r, n, k),
+      resolve: (r, n, id) => revResolveThread(r, n, id),
+      threadKey: (r, n, id) => r + "#" + n + "#thread:" + id,
+      threadHtml: (n, id) => {
+        const pr = revQueue.prs.find(p => p.number === n);
+        return revThreadHtml(pr, (pr.review_threads || []).find(t => t.id === id));
+      },
+      threadResolved: (n, id) =>
+        (revQueue.prs.find(p => p.number === n).review_threads || []).find(t => t.id === id).resolved,
       archive: (r, n, on) => archivePr(r, n, on),
       undo: k => revUndo(k),
       retry: k => revRetry(k),
@@ -184,6 +215,7 @@ function world(opts = {}) {
     "fetch", "document", "localStorage", "revpane", "setTimeout", "clearTimeout", "encodeURIComponent", src,
   )(fetch, { getElementById: () => null }, localStorage, revpane, clk.setT, clk.clearT, encodeURIComponent);
   return { ...made, posts, advance: ms => clk.advance(ms), row: () => row.html, barHtml: () => barHtml,
+           thread: () => thread.html, closeRow: () => { threadDrawn = false; },
            refuse: why => { answer = { ok: false, error: why }; }, accept: () => { answer = { ok: true, text: "approved" }; } };
 }
 
@@ -475,6 +507,100 @@ const DRAFT = { number: 7, head_sha: SHA, truncated: false, overall: "the lock i
     [w.posts.length, w.pending("acme#7")], [0, undefined]);
   t.check("and says why, where the press was",
     w.toasts.some(s => /nothing kept/.test(s)), true);
+}
+
+// ---- SKEIN-305: resolve is the one write, on its own key, with a real undo ----
+//
+// The route (`POST …/review/:number/thread`) sends `unresolveReviewThread` for `resolved: false`, so
+// firing and retracting would both be genuine. It is still HELD, like every other act here: inside
+// the window nothing has left the machine, which is strictly better than two mutations.
+const THREADED = (over = {}) => ({
+  ...PR, head_sha: SHA, reasons: ["author"], review_threads_total: 2,
+  review_threads: [
+    { id: "PRRT_open", resolved: false, outdated: false, author: "dana",
+      started_at: "2026-08-20T00:00:00Z", url: "https://github.com/acme/skein/pull/7#discussion_r1" },
+    { id: "PRRT_two", resolved: false, outdated: false, author: "sam",
+      started_at: "2026-08-20T01:00:00Z", url: "https://github.com/acme/skein/pull/7#discussion_r2" },
+  ],
+  ...over,
+});
+{
+  const w = world({ prs: [THREADED()] });
+  const key = w.threadKey("acme", 7, "PRRT_open");
+  w.resolve("acme", 7, "PRRT_open");
+  t.check("nothing has left the machine inside the window", w.posts.length, 0);
+  t.check("and the receipt is on the thread's own line, where the press was",
+    [w.thread().includes("thread resolved"), w.thread().includes("undo (u)")], [true, true]);
+  // THE KEY. `revPending` is keyed by rk(pr) and `revHold` replaces wholesale, so a thread press
+  // filed under the row's key would mean the second resolve silently dropping the first — and a
+  // resolve and an approve cancelling each other.
+  w.resolve("acme", 7, "PRRT_two");
+  t.check("a second thread's press does not clobber the first",
+    [!!w.pending(key), !!w.pending(w.threadKey("acme", 7, "PRRT_two"))], [true, true]);
+
+  w.advance(8000);
+  await settle();
+  const post = w.posts.find(p => /\/thread$/.test(p.url));
+  t.check("the press reaches the route the server registered",
+    [post.url, post.body], ["/api/repos/acme/review/7/thread", { thread_id: "PRRT_open", resolved: true }]);
+  t.check("the thread is marked resolved on the object the pane draws from",
+    w.threadResolved(7, "PRRT_open"), true);
+  // The row repaints, not the pane: the unresolved count, the "N threads unresolved" on the
+  // collapsed line and whether the row is your move at all are answers that just changed.
+  t.check("and the row is repainted in place", w.row().includes('data-rk="acme#7"'), true);
+  t.check("resolving decides no verdict on the pull request",
+    [w.prs()[0].my_review, w.prs()[0].review_is_current], ["none", false]);
+}
+{
+  // The other half of the same key rule: a resolve and a VERDICT on one pull request are two acts,
+  // and under the row's key each would have cancelled the other.
+  const w = world({ prs: [THREADED()] });
+  const key = w.threadKey("acme", 7, "PRRT_open");
+  w.resolve("acme", 7, "PRRT_open");
+  w.act("acme", 7, "approve");
+  t.check("a verdict on the same pull request does not cancel a held resolve",
+    [!!w.pending(key), !!w.pending("acme#7")], [true, true]);
+  w.advance(8000);
+  await settle();
+  t.check("and both land, each on its own route",
+    w.posts.map(p => p.url).sort(),
+    ["/api/repos/acme/review/7/act", "/api/repos/acme/review/7/thread"]);
+}
+{
+  const w = world({ prs: [THREADED()] });
+  const key = w.threadKey("acme", 7, "PRRT_open");
+  w.resolve("acme", 7, "PRRT_open");
+  w.undo(key);
+  w.advance(8000);
+  await settle();
+  t.check("undo inside the window means GitHub never hears of the resolve",
+    [w.posts.length, w.pending(key)], [0, undefined]);
+  t.check("and the thread is still open", w.threadResolved(7, "PRRT_open"), false);
+  t.check("with its resolve offered again",
+    w.threadHtml(7, "PRRT_open").includes("revResolveThread"), true);
+}
+{
+  const w = world({ prs: [THREADED()] });
+  w.refuse("Could not resolve review thread: Resource not accessible by integration");
+  w.resolve("acme", 7, "PRRT_open");
+  w.advance(8000);
+  await settle();
+  t.check("a refusal STAYS on the line it was pressed on, with the way out",
+    [w.thread().includes("GitHub refused"), w.thread().includes("not accessible"),
+     w.thread().includes("try again")], [true, true, true]);
+  t.check("and the thread is not marked resolved on a request that failed",
+    w.threadResolved(7, "PRRT_open"), false);
+}
+{
+  // The window lapses with the row closed under it. Nothing on screen to repaint, and the pane must
+  // NOT be rebuilt for a receipt nobody is looking at — that is a caret out of somebody's composer.
+  const w = world({ prs: [THREADED()] });
+  w.resolve("acme", 7, "PRRT_open");
+  w.closeRow();
+  w.advance(8000);
+  await settle();
+  t.check("a resolve whose line has left the screen still posts", w.posts.length, 1);
+  t.check("and does not rebuild the pane to say so", w.renders(), 0);
 }
 
 t.done();

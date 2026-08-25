@@ -286,7 +286,11 @@ mod tests {
 
     #[test]
     fn the_grace_is_overridable_for_tests_and_sane_without_one() {
-        // Serialised by nothing: this is the only test that reads the variable, and it restores it.
+        // Serialised, and the argument for not bothering is written down in `docs/env-lock.toml`
+        // as the reason this was the weakest of three exemptions rather than a safe one: being the
+        // only READER does not make a write to a table every thread shares safe, and the restore
+        // below is one `#[should_panic]` sibling away from leaking `nonsense` into the next test.
+        let _env = crate::testutil::env_lock();
         let before = std::env::var("SKEIN_DOORSTEP_GRACE").ok();
         std::env::remove_var("SKEIN_DOORSTEP_GRACE");
         assert_eq!(grace(), Duration::from_secs(10));

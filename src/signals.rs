@@ -582,12 +582,55 @@ pub(crate) fn is_compacting_line(line: &str) -> bool {
     starts_like_status(l) && l.to_lowercase().contains("compacting")
 }
 
-/// A spinner glyph in the terminal title is how both runtimes say "busy" — Claude Code writes
+/// The braille lead glyph itself, with no claim about *when* it was drawn — Claude Code writes
 /// `⠂ Claude Code` while working and `✳ Claude Code` when idle, Codex writes `⠋ <dir>`. Braille is
-/// the animated set in both. A bonus signal only: Claude Code's glyph is braille in some frames and
-/// `_` in others while working, so nothing may depend on it alone.
-pub(crate) fn title_is_spinning(title: &str) -> bool {
+/// the animated set in both.
+///
+/// Private on purpose. The glyph alone is not a verdict and the type system should say so: every
+/// caller goes through [`title_is_spinning`], which is the glyph **and** the freshness bound.
+fn title_glyph_is_braille(title: &str) -> bool {
     matches!(title.trim().chars().next(), Some(c) if ('\u{2800}'..='\u{28FF}').contains(&c))
+}
+
+/// How recently the observer must have watched the title's TEXT change for anything in the title to
+/// count as evidence about the turn that is running now.
+///
+/// One rule, one place: [`board::load_views`](crate::board) applies it to the title's *text*
+/// (`title_activity`) and [`title_is_spinning`] applies it to the title's *glyph*. `-1` — the
+/// observer never witnessed a change — is outside the range and so refused, which is the same
+/// answer `box-pane.sh` reports it as: "unknown", not "no".
+pub(crate) fn title_is_fresh(obs: &PaneObs) -> bool {
+    (0..=TITLE_FRESH_SECS).contains(&obs.title_age)
+}
+
+/// A spinner glyph in the terminal title is how both runtimes say "busy" — **while the title is
+/// still moving**. A bonus signal only, and now a gated one: nothing may depend on it alone.
+///
+/// The gate is the same one `box-pane.sh`'s own comment already argues for ("a title inherited from
+/// a turn that ended ten minutes ago is not evidence of current work") and the same one the board
+/// already applies to the title's text. The glyph was the one path that read the title without it.
+///
+/// Measured on this fleet 2026-08-25 18:03–18:04, all six live boxes, `/boxes/*/session.sock`:
+///
+/// * The glyph does not animate. `tmux display-message -p '#{pane_title}'` on this repo's own box
+///   returned `⠐ example-box-6` on 40 consecutive samples in a tight loop, and
+///   `⠂ example-box-6` on 60 consecutive samples over 30s at 0.5s. One frame, held. So its
+///   presence is not evidence that anything is redrawing it.
+/// * The glyph reaches [`PaneObs`] verbatim — `src/probe/box-pane.sh` writes the RAW title. Run
+///   against this box's `skein-agent` it wrote `"title":"⠂ example-box-6"` at ts 1787681013.
+/// * The box's own long-running probe, one second later (ts 1787681014), wrote
+///   `"title":"_ example-box-6","title_age":13801` for the SAME pane. Two probe records of one
+///   pane, one second apart, disagreeing about the lead glyph — while the title's *text* had not
+///   changed in 3h50m.
+///
+/// So `title_age` is what says whether the title is about now, and the glyph is a coin flip taken
+/// on top of it. The cost of the gate is that a box whose title text is static (four of the eight
+/// live observations read at the same minute carry the box name and nothing else) loses the glyph
+/// signal permanently — and that is the direction to lose it in: abstaining reads as "not busy",
+/// which is today's behaviour for every box with no observer at all, whereas a stale glyph reads as
+/// Busy and outranks both `dropped_to_shell` and the error line beneath it.
+pub(crate) fn title_is_spinning(obs: &PaneObs) -> bool {
+    title_glyph_is_braille(&obs.title) && title_is_fresh(obs)
 }
 
 /// The activity text Claude Code puts in the terminal title (`✳ Run bash command true` → "Run bash
@@ -726,7 +769,7 @@ pub(crate) fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
         .iter()
         .any(|l| is_working_status_line(l) || is_waiting_on_agents_line(l) || is_compacting_line(l))
         || any("esc to interrupt")
-        || title_is_spinning(&obs.title)
+        || title_is_spinning(obs)
     {
         return Screen::Busy;
     }
@@ -785,7 +828,7 @@ pub(crate) fn classify_codex(obs: &PaneObs, lower: &[String]) -> Screen {
     if title_has_attention(&obs.title) && !composer {
         return Screen::Blocked(Blocked::Question);
     }
-    if any("esc to interrupt") || title_is_spinning(&obs.title) {
+    if any("esc to interrupt") || title_is_spinning(obs) {
         return Screen::Busy;
     }
     // Codex prints failures as a `■ ` line carrying a JSON payload. Prose `■ ` lines are notices
@@ -2222,10 +2265,10 @@ mod tests {
             title_age: -1,
             ..stale.clone()
         };
+        // `title_is_fresh`, not the bound spelled out again: this test used to carry its own copy
+        // of the rule, which is how the glyph half came to have no copy of it at all (SKEIN-321).
         let task_from_title = |runtime: &str, o: &PaneObs| {
-            runtime == "claude"
-                && (0..=TITLE_FRESH_SECS).contains(&o.title_age)
-                && title_activity(&o.title).is_some()
+            runtime == "claude" && title_is_fresh(o) && title_activity(&o.title).is_some()
         };
         let usable = |o: &PaneObs| task_from_title("claude", o);
         assert!(
@@ -2248,6 +2291,102 @@ mod tests {
             ..stale.clone()
         };
         assert!(!task_from_title("codex", &codex));
+    }
+
+    /// **A spinner glyph nobody has watched move is not evidence that anything is moving.**
+    ///
+    /// The fixture is a live capture of this repo's own box, taken 2026-08-25 18:12:24 from
+    /// `/boxes/example-box-6/session.sock` at a moment the pane was genuinely between turns:
+    /// the agent's last message on screen, a bare `❯\u{a0}` composer, no status line, no
+    /// `esc to interrupt`, no `Waiting for … background agents`. Its title at that moment was
+    /// `⠂ example-box-6` — braille, so `title_is_spinning` used to return true and
+    /// `classify_claude` used to return `Busy` from the glyph alone.
+    ///
+    /// The glyph is not animating. `tmux display-message -p '#{pane_title}'` on the same pane
+    /// returned ONE frame on 40 consecutive samples in a tight loop, and one frame again on 60
+    /// consecutive samples over 30s. And the title's TEXT is the box name, so it never changes at
+    /// all: the last `title_age` the box's own probe wrote before this capture was 13815 — three
+    /// hours and fifty minutes — and the capture is 516s after that write, so the true age here is
+    /// larger still. 13815 is used because it is a number a probe actually recorded, not one
+    /// extrapolated to the capture's second.
+    ///
+    /// Two probes over one pane, one second apart, disagreed about the lead glyph
+    /// (`src/probe/box-pane.sh` run into a scratch store wrote `"title":"⠂ example-box-6"` at
+    /// ts 1787681013; the box's long-running probe wrote `"title":"_ example-box-6"` at
+    /// ts 1787681014) — which is the whole argument in one line. The glyph is a coin flip, and
+    /// `title_age` is the field that says whether the title is about now.
+    #[test]
+    fn a_frozen_spinner_glyph_in_the_title_is_not_evidence_of_work() {
+        const FROZEN: &str = "⠂ example-box-6";
+        let idle = include_str!(
+            "../tests/fixtures/panes/claude-waiting.example-box-6.frozen-spinner-title.2026-08-25.txt"
+        );
+        assert_eq!(
+            classify_pane("claude", &captured(idle, FROZEN, 13815)),
+            Screen::Waiting,
+            "a braille frame the observer last watched change 3h50m ago is residue, not a turn"
+        );
+        // The signal is gated, not deleted: the same pane and the same glyph, at an age the observer
+        // did witness, still carries Busy on its own — nothing else in this tail says busy.
+        assert_eq!(
+            classify_pane("claude", &captured(idle, FROZEN, 3)),
+            Screen::Busy,
+            "a title that moved 3s ago is exactly what the glyph was added to report"
+        );
+
+        // The bound itself, at its edges and at "never witnessed" — which is what a freshly started
+        // observer reports, and is refused for the same reason a stale one is: it is not a claim
+        // that the title moved.
+        let at = |age: i64| {
+            title_is_spinning(&PaneObs {
+                title: FROZEN.into(),
+                title_age: age,
+                ..Default::default()
+            })
+        };
+        assert!(at(0) && at(TITLE_FRESH_SECS), "inside the bound, inclusive");
+        assert!(!at(TITLE_FRESH_SECS + 1), "one second past the bound");
+        assert!(!at(-1), "never seen changing ⇒ no claim at all");
+        assert!(
+            !title_is_spinning(&PaneObs {
+                title: "✳ example-box-6".into(),
+                title_age: 1,
+                ..Default::default()
+            }),
+            "✳ is Claude Code's idle glyph and was never a spinner, however fresh"
+        );
+
+        // Codex reads the same title through the same gate — `⠋ <dir>` is its working glyph, and its
+        // title text is the working directory, which never changes either.
+        let codex = |age: i64| {
+            classify_pane(
+                "codex",
+                &PaneObs {
+                    title: "⠧ skein".into(),
+                    title_age: age,
+                    tail: vec!["› do the thing".into()],
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(codex(2), Screen::Busy);
+        assert_eq!(
+            codex(TITLE_FRESH_SECS + 1),
+            Screen::Unknown,
+            "stale glyph ⇒ the grammar has nothing to say, which defers to the hook edges"
+        );
+
+        // The worst shape the ungated glyph could produce, and the one box-pane.sh's own header
+        // names: an agent that exited leaves a shell prompt on screen and tmux keeps whatever the
+        // TUI last painted into the title for ever. `title_is_spinning` is ranked above
+        // `dropped_to_shell`, so the box read `working` after it had died.
+        let crashed = PaneObs {
+            title: FROZEN.into(),
+            title_age: 13815,
+            tail: vec!["agent@skein-fleet:/boxes/example-box-6/tree$".into()],
+            ..Default::default()
+        };
+        assert_eq!(classify_pane("claude", &crashed), Screen::Dead);
     }
 
     #[test]

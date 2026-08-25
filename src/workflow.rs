@@ -146,6 +146,26 @@ pub struct Workflow {
     /// The owner asked for both: "every PR I author" as a rule, and assignment on a single row. A
     /// per-PR assignment always wins over a match, in both directions — including an explicit "no
     /// workflow" on a PR a rule would otherwise claim.
+    ///
+    /// **These are conditions on ACTING, not only on being claimed** (SKEIN-279). An assignment
+    /// answers *which* workflow is responsible for a pull request. It does not assert that the
+    /// workflow's own conditions hold, and it never could — the person choosing a workflow on a row
+    /// is not restating its file. So `matches` is read on both roads: [`claims`] uses it to decide
+    /// what this workflow takes on by itself, and [`unmet`] holds it back from acting wherever they
+    /// do not hold, however it came to carry the pull request.
+    ///
+    /// Written this way round because the alternative cannot be made safe. If an assignment meant
+    /// "guards and all off", then every condition anybody writes here is a guard that silently does
+    /// not apply on one of the two roads — which is how a hand-assigned stacked child was merged
+    /// into its parent's branch (SKEIN-237), and that fix had to be moved out of `matches` and into
+    /// the act to hold at all. One escape hatch remains and it is the honest one: a workflow with
+    /// no `matches` states no conditions, so it acts wherever it is assigned.
+    ///
+    /// Holding back costs nothing and demands nothing. It is not a stop and not a timed wait: the
+    /// pull request is simply not carried for the purpose of acting ([`crate::prwork::Carries`]),
+    /// so it never becomes the front of a serial train, no clock runs on it, and the moment the
+    /// condition becomes true it joins in. "Put this on the train, it will go when it is approved"
+    /// is therefore exactly what happens.
     #[serde(default)]
     pub matches: Vec<Cond>,
     /// One at a time, per **(repo, workflow)** — not per repo. The sweep orders this workflow's
@@ -761,12 +781,36 @@ pub fn instead_of_merging_off_the_trunk(act: &Act, facts: &Facts) -> Option<Act>
 ///
 /// The one condition that may be unmet and still claim is [`Cond::Approved`], and only for the one
 /// reason in [`the_reviewer_said_no_instead`].
+///
+/// **This is only half of what `matches` decides.** It answers which pull requests the workflow
+/// takes on by itself; [`unmet`] answers whether it may act on one at all, which is the half a
+/// hand-assigned pull request used to skip (SKEIN-279). Both are read off the same evaluation
+/// below, so the two answers cannot drift apart.
 pub fn claims(flow: &Workflow, facts: &Facts) -> bool {
-    !flow.matches.is_empty()
-        && flow
-            .matches
-            .iter()
-            .all(|cond| holds(cond, facts) || the_reviewer_said_no_instead(cond, facts))
+    !flow.matches.is_empty() && unmet(flow, facts).is_empty()
+}
+
+/// Which of this workflow's `matches` do NOT hold, spelled as they are written on disk.
+///
+/// **The guard half of `matches`, in a form a person can be shown.** `matches` says which pull
+/// requests this workflow is responsible for AND, on every one it governs, the conditions under
+/// which it may act — see [`Workflow::matches`]. Empty means neither: no rule to claim by, and no
+/// condition to hold back for.
+///
+/// Spelled rather than counted because the sentence built from this is read on a row, next to a
+/// workflow somebody chose by hand and is waiting on: "holding — `approved` is not true yet" is
+/// checkable against the file, where "1 condition unmet" is something to go and work out.
+///
+/// [`the_reviewer_said_no_instead`] applies here exactly as it does to a claim, and it must: a
+/// pull request whose reviewer asked for changes is one the workflow is still responsible for, and
+/// its documented first step is written for that case. Reporting `approved` as unmet there would
+/// hold the pull request one pass short of the step that exists to catch it.
+pub fn unmet(flow: &Workflow, facts: &Facts) -> Vec<String> {
+    flow.matches
+        .iter()
+        .filter(|cond| !holds(cond, facts) && !the_reviewer_said_no_instead(cond, facts))
+        .map(spell_cond)
+        .collect()
 }
 
 /// **A reviewer saying no is not a pull request leaving the workflow.** True where `matches` asks

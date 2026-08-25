@@ -62,8 +62,17 @@ function world(flowsByRepo, opts = {}) {
     ${grab("revTrainLine")}
     ${grab("revTrainRepo")}
     ${grab("revTrainHtml")}
+    // The other half of SKEIN-326: the same standing, on the pull request's own row. The panel and
+    // the row read one payload, so they belong in one world — a held pull request that the panel
+    // leaves out of the line and the row still describes as "waiting for something to change" is
+    // the two surfaces disagreeing about the same fact.
+    const revSetWorkflow = () => {};
+    ${grab("revFlowBox")}
+    ${grab("revFlowChip")}
     return {
       html: () => revTrainHtml(),
+      flowBox: (repo, number) => revFlowBox({ repo_id: repo, number }),
+      flowChip: (repo, number) => revFlowChip({ repo_id: repo, number }),
       toggle: on => revTrainToggle(on),
       go: (id, n) => revTrainGo(id, n),
       log: key => revTrainLog(key),
@@ -223,6 +232,67 @@ const queue = { prs: [
   w.log("acme#7");
   t.check("expanding without a journal says so, and does not crash",
     w.html().includes("no history recorded yet"), true);
+}
+
+// ---- a HELD pull request is not a car (SKEIN-279/326) ----
+//
+// Somebody put a workflow on it by hand and the workflow's own `matches` are not true yet. It keeps
+// `standing.workflow` on purpose — the row still has to say which workflow they chose — and is
+// deliberately excluded from ACTING, so `prwork::sweep` skips it. Drawn as a car it promises an act
+// the tick will never take; drawn as the FRONT, which is what the lowest number gets, it names the
+// wrong pull request as the one being worked on. The comment above the route's own carrying list
+// says it: "a panel that showed it in the line would promise an act the tick will never take."
+{
+  const w = world({
+    acme: {
+      enabled: true,
+      prs: {
+        // Lowest number, so under the old rule it would have been drawn first and read as the front.
+        3: { workflow: "merge-train", how: "assigned", next: "", step: 0, stopped: "",
+             holding: "merge-train is on this pull request and is not acting yet: its own condition is not true — approved. Nothing is stopped and nothing is waiting on a clock; it joins in on the next pass after that changes." },
+        7: { workflow: "merge-train", how: "matched", next: "merge:squash+delete", step: 2, stopped: "" },
+        // Carrying a workflow with nothing to do — the state the fallback sentence IS right for.
+        9: { workflow: "merge-train", how: "matched", next: "", step: 0, stopped: "", holding: "" },
+      },
+      defined: [{ name: "merge-train" }],
+    },
+  });
+  const html = w.html();
+  t.check("a held pull request is left out of the line", html.includes(">#3<"), false);
+  t.check("and the one that can act is still in it", html.includes(">#7<"), true);
+
+  // The row's own half. It used to fall through to "waiting for something to change" — true, and
+  // wrong in the way that matters: it reads as a clock running when none is, and it names nothing.
+  // The owner is reading this pane as a DRY RUN with the train switched off, so this is the surface
+  // where "put it on the train, it goes when it is approved" either says what it is waiting for or
+  // does not.
+  const held = w.flowBox("acme", 3);
+  t.check("the row says which condition is not met yet", held.includes("approved"), true);
+  t.check("and no longer implies a wait with nothing behind it",
+    held.includes("waiting for something to change"), false);
+  // Not a stop: nothing failed, and there is nothing to press.
+  t.check("it is drawn as a held workflow, not a stopped one",
+    [held.includes("revflow-holding"), held.includes("revflow-stop"), held.includes("let it run again")],
+    [true, false, false]);
+  // The chooser still shows the workflow somebody put on it — that is why `workflow` stays set.
+  t.check("the workflow somebody chose is still the chosen one",
+    /<option value="merge-train" selected>/.test(held), true);
+  t.check("the collapsed row's chip says the same thing rather than 'nothing to do right now'",
+    [w.flowChip("acme", 3).includes("not acting yet"),
+     w.flowChip("acme", 3).includes("nothing to do right now")], [true, false]);
+  // And a pull request that really has nothing to do keeps the sentence that was right for it.
+  t.check("an idle workflow still reads as idle",
+    w.flowBox("acme", 9).includes("waiting for something to change"), true);
+}
+{
+  // …and a train whose every car is held is no train at all, rather than an empty frame with a
+  // heading promising work.
+  const w = world({
+    acme: { enabled: true, prs: {
+      3: { workflow: "merge-train", how: "assigned", next: "", step: 0, stopped: "", holding: "not acting yet: approved is not true" },
+    } },
+  });
+  t.check("a train of nothing but held pull requests shows no line", w.html(), "");
 }
 
 // ---- nothing to show is no panel, not an empty frame ----

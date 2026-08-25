@@ -10,7 +10,8 @@
 //!
 //! The rule, and `docs/queue-fields.md` is where the human half lives:
 //!
-//! > Every field serialised on a queue payload type is read by `src/web/index.html`, or is named in
+//! > Every field serialised on a queue payload type is read by the page — `src/web/index.html` or
+//! > the cockpit bundle it loads — or is named in
 //! > `docs/queue-fields.md` with the reader that justifies it.
 //!
 //! **Both directions are checked**, and the second is the one that keeps the first honest: a
@@ -34,7 +35,21 @@ const PAYLOAD_FILES: [&str; 4] = [
     "src/contracts.rs",
 ];
 
-const PAGE: &str = "src/web/index.html";
+/// **The page is two files, and reading one of them was a bug in this gate** (SKEIN-328).
+///
+/// `cockpit/build.mjs` concatenates `cockpit/src/*.mjs` into `src/web/vendor/cockpit.js`, and
+/// `index.html` loads that bundle — so a field read from a cockpit module is read BY THE PAGE, and
+/// a census that greps only `index.html` reports it as unread.
+///
+/// The incentive is why this matters more than the six wrong answers it gave. As it stood, moving a
+/// rule out of the 10,000-line page into a leaf function `node --test` can drive looked to this gate
+/// exactly like deleting the field's reader — and the cheap way to a green build was to add a
+/// decorative read back into `index.html`. A gate that pays people to keep logic untestable is worse
+/// than no gate.
+///
+/// The BUNDLE rather than `cockpit/src/*.mjs` directly, because the bundle is what the page actually
+/// loads; `node cockpit/build.mjs --check` is the separate gate that keeps it from going stale.
+const PAGE: [&str; 2] = ["src/web/index.html", "src/web/vendor/cockpit.js"];
 const DECLARED: &str = "docs/queue-fields.md";
 
 fn repo() -> PathBuf {
@@ -179,7 +194,7 @@ fn declared() -> BTreeSet<String> {
 
 /// The whole census: every serialised field, and whether the page reads it.
 fn census() -> Vec<(String, bool)> {
-    let page = read(PAGE);
+    let page = PAGE.map(read).join("\n");
     let mut all = Vec::new();
     for file in PAYLOAD_FILES {
         for (ty, fields) in serialised_fields(&read(file)) {
@@ -342,7 +357,7 @@ pub struct Invented {
         ]
     );
 
-    let page = read(PAGE);
+    let page = PAGE.map(read).join("\n");
     assert!(
         !page_reads(&page, "nobody_reads_this_one"),
         "the page does not read it, so the gate would name it"
@@ -357,7 +372,7 @@ pub struct Invented {
 /// And it does not accuse a field the page does read — the failure that would get it deleted.
 #[test]
 fn the_gate_does_not_accuse_a_field_the_page_reads() {
-    let page = read(PAGE);
+    let page = PAGE.map(read).join("\n");
     for live in ["number", "title", "head_sha", "lane", "reasons", "prs"] {
         assert!(
             page_reads(&page, live),

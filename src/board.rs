@@ -21,7 +21,7 @@ use crate::sbx::{box_liveness, fleet_boxes, git_branch_for, Liveness};
 use crate::signals::{
     classify_message, classify_pane, current_status_detail, current_task, fuse_status, hook_health,
     is_generic_wait, pane_usable, read_pane_raw, screen_health, session_signal, status_edge,
-    title_activity, Pause, Screen, TITLE_FRESH_SECS,
+    title_activity, title_is_fresh, Pause, Screen,
 };
 use crate::tracking::sync_docs_available;
 use crate::util::{first_line, shorten};
@@ -212,9 +212,12 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
                 // description only under both conditions (see PaneObs::title_age). Claude only —
                 // Codex's title is the working directory (`⠧ skein`), which names no activity, so
                 // reading it as one would put the box's own folder name in the task column.
-                let fresh = (0..=TITLE_FRESH_SECS).contains(&obs.title_age);
+                //
+                // `title_is_fresh` rather than the bound spelled out here: the glyph half of the
+                // title is gated on the same predicate (`title_is_spinning`), and two spellings of
+                // one rule is how the glyph came to have no gate at all (SKEIN-321).
                 (agent == "claude"
-                    && fresh
+                    && title_is_fresh(obs)
                     && level.as_ref().map(|(s, _)| s) == Some(&Screen::Busy))
                 .then(|| title_activity(&obs.title))
                 .flatten()

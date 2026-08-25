@@ -16,9 +16,21 @@ frame (`⠐`), and the probe's own paired record for the same box in the same mi
 **whether or not the anchor was fixed** — a test that is green for a reason that has nothing to do
 with what it claims to check. Use the `title` and `title_age` the probe recorded beside the tail.
 
-(That the glyph alone can carry a verdict, with no freshness gate, is itself a defect — SKEIN-321.
-`box-pane.sh`'s own comment and `TITLE_FRESH_SECS` both already say a stale title is not evidence
-of work.)
+(That the glyph alone could carry a verdict, with no freshness gate, was itself the defect —
+SKEIN-321, now fixed: `title_is_spinning` takes the whole observation and requires
+`title_is_fresh`, the same predicate the board already applied to the title's text.
+`claude-waiting.example-box-6.frozen-spinner-title.2026-08-25.txt` is the capture that pins
+it — this box, genuinely between turns, title `⠂ example-box-6`, one frame held across 40
+consecutive `tmux display-message` samples, and a title whose text had not changed in 3h50m.)
+
+## One edit is made to a capture, and only this one
+
+`tmux capture-pane` output goes through a pipeline before it reaches a file here, and a
+`str.rstrip()` anywhere in that pipeline eats the composer's trailing non-breaking space — which
+this file says two paragraphs down is load-bearing. So the composer row is restored to
+`❯\u{a0}` when a capture arrives without it. That is not a judgement about what the screen looked
+like: every other capture from the same box carries the same two bytes (`grep -n '❯' *.txt | cat -A`),
+and `box-pane.sh` writes the row raw. Nothing else in a capture is ever retyped.
 
 ## These captures are redacted, and what that costs
 

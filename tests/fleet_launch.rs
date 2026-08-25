@@ -125,6 +125,7 @@ fn serialize() -> std::sync::MutexGuard<'static, ()> {
 /// mutable state between tests through the environment — which is exactly what makes suites flaky.
 #[test]
 fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("bwrap") || !have("tmux") || !have("git") {
         eprintln!("skipping: this machine lacks bwrap/tmux/git, so it cannot host a box");
@@ -696,6 +697,7 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
 /// of it is visible unless the entry point itself is the thing under test.
 #[test]
 fn start_box_leaves_a_box_that_is_actually_usable() {
+    let _env = env_lock();
     if !have("bwrap") || !have("tmux") || !have("git") {
         eprintln!("skipping: this machine lacks bwrap/tmux/git, so it cannot host a box");
         return;
@@ -1012,6 +1014,7 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
 /// carries is repaired by `ensure_box_session` on the path that wakes it instead.
 #[test]
 fn a_server_restart_repairs_a_fleet_that_predates_it() {
+    let _env = env_lock();
     let _guard = serialize();
     let root = scratch();
     write_fake_sbx(&root.join("bin"));
@@ -1089,4 +1092,22 @@ fn await_ls(want: Option<Liveness>) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
+/// single process. `$HOME`, `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT` and the `$SKEIN_LS_CMD` stub are process-global, so
+/// without this every test here writes into the middle of the others: one test's fake sandbox root
+/// answers another's call, and the symptom is an assertion about what the launcher did rather than
+/// an error that names the cause.
+///
+/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
+/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
+/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
+/// first panic into every other test buries the real failure.
+///
+/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

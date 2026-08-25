@@ -3,13 +3,15 @@
 > See and steer your fleet of agent boxes. A thin control surface over one shared `sbx`
 > microVM (a bwrap namespace per box) and a mounted shared store — the layer
 > Conductor-likes have but that's missing from the sbx workflow. *Compose, don't
-> reinvent* — see [`ARCHITECTURE.md`](ARCHITECTURE.md); the why is in
-> [`VISION.md`](VISION.md).
+> reinvent* — see [`docs/architecture.md`](docs/architecture.md); the why is in
+> [`VISION.md`](VISION.md). [`ARCHITECTURE.md`](ARCHITECTURE.md) is the signpost to all four
+> design documents.
 
 **Status:** v0 — a live **web cockpit** (fleet board over SSE) with an **embedded
-per-box terminal** (click a box → talk to that agent in the browser) + a CLI. The goal
-is the web UI as the *single pane of glass*; web actions (launch/diff/merge/stop/destroy) and
-a ⌘K palette are next (ARCHITECTURE.md § Roadmap).
+per-box terminal** (click a box → talk to that agent in the browser) + a CLI. The goal is the
+web UI as the *single pane of glass*. What is being built next, in order, is
+[`docs/delivery.md`](docs/delivery.md) — the sequence lives there rather than here, because a
+roadmap copied into a README is a second place to update and the copy is what goes stale.
 
 ## Getting started
 

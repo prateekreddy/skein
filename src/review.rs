@@ -2267,49 +2267,99 @@ fn store_critique(repo_id: &str, c: &Critique) -> Result<(), String> {
     )
 }
 
-/// The NEW-side lines the diff actually shows, per file, each with its CONTENT (marker stripped)
-/// — exactly the lines GitHub accepts a RIGHT-side review comment on. Context and added lines
-/// count; a deleted line exists only on the left, and a deleted file has no right side at all.
+/// **The one parser for "which lines of a unified diff does the NEW file show, and what is on
+/// them"** — `(path, new-side line number, content with the diff marker stripped)`, in the order
+/// the diff lists them.
+///
+/// Exactly the lines GitHub accepts a RIGHT-side review comment on: context and added lines count,
+/// a deleted line exists only on the left, and a deleted file has no right side at all.
+///
+/// **Why it is one function and not two** (SKEIN-233). This fact used to be parsed twice — here for
+/// vetting a drafted comment ([`commentable`], which decides `Draft::anchored` and
+/// `Draft::line_text`), and again in `prq::re_anchor` for placing that same comment against the
+/// LIVE diff after the head moved. Two parsers of one grammar drift, and these did:
+///
+///   * `\ No newline at end of file`. git emits that marker in the MIDDLE of a hunk whenever the
+///     old file lacked a trailing newline and the new one has one — routine in JSON, `.env`,
+///     generated files and fixtures. The vetting parser had no case for it, so it fell through to
+///     an `else` that cleared `in_hunk` and **discarded every remaining line of that hunk**. Every
+///     comment the model drafted below the marker was then vetted as unanchorable, and
+///     [`assemble_post`] folded it into the review body as `**path**: …` prose. The review still
+///     posted and still looked fine; it had simply stopped being a line review for that file.
+///   * `+++ path` with no `b/` prefix. The vetting parser required `b/` exactly and treated any
+///     other `+++ ` as a deleted file, so such a diff commented on nothing at all.
+///   * A hunk line carrying no marker at all. One parser read it as context, the other as the end
+///     of the hunk.
+///
+/// The grammar below is the union, taking the safer reading at each divergence — and the point is
+/// that there is now nowhere for a second reading to live. `prq::re_anchor` calls this.
 ///
 /// The content rides along because it is what a draft stores as each comment's durable anchor
 /// ([`Draft::line_text`]): the number places the comment today, the text finds it again after the
 /// branch moves.
+pub fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
+    let mut out = Vec::new();
+    let mut path: Option<String> = None;
+    let mut new_line: u64 = 0;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            path = None;
+            in_hunk = false;
+        } else if !in_hunk && line.starts_with("+++ ") {
+            // `b/` is git's convention and not part of the path; `+++ /dev/null` is a deleted file,
+            // which has no right side to comment on. The `!in_hunk` guard is what keeps an ADDED
+            // line whose own text begins `++ ` from being read as a file header.
+            let name = line["+++ ".len()..].trim();
+            path =
+                (name != "/dev/null").then(|| name.strip_prefix("b/").unwrap_or(name).to_string());
+        } else if !in_hunk && line.starts_with("--- ") {
+            // The old-file header; only the +++ side names what RIGHT comments attach to.
+        } else if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@` — only `+c` matters here. A header this cannot read leaves
+            // `in_hunk` false rather than counting from a number nobody supplied.
+            in_hunk = false;
+            if let Some(plus) = line.split_whitespace().find(|w| w.starts_with('+')) {
+                let start = plus[1..].split(',').next().unwrap_or("");
+                if let Ok(n) = start.parse::<u64>() {
+                    new_line = n;
+                    in_hunk = true;
+                }
+            }
+        } else if in_hunk {
+            if let Some(rest) = line.strip_prefix('+') {
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            } else if line.starts_with('\\') || line.starts_with('-') {
+                // `\ No newline…` is a note ABOUT the previous line, not a line of either file, so
+                // it moves no counter and ends no hunk. `-` lines live only in the old file.
+            } else {
+                // Context: a leading space, or the entirely empty line git emits for blank context.
+                let rest = line.strip_prefix(' ').unwrap_or(line);
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            }
+        }
+    }
+    out
+}
+
+/// [`right_side_lines`] indexed the way vetting asks the question: path → line → content.
+///
+/// A projection and nothing else. It holds no grammar of its own, which is the whole of SKEIN-233:
+/// the vetter and the re-anchorer now cannot disagree about what a diff says, because only one of
+/// them reads it.
 fn commentable(
     diff: &str,
 ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> {
     let mut map: std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> =
         Default::default();
-    let mut file: Option<String> = None;
-    let mut line = 0u64;
-    let mut in_hunk = false;
-    for l in diff.lines() {
-        if let Some(rest) = l.strip_prefix("+++ b/") {
-            file = Some(rest.to_string());
-            in_hunk = false;
-        } else if l.starts_with("+++ ") {
-            // `+++ /dev/null` — a deleted file.
-            file = None;
-            in_hunk = false;
-        } else if let Some(hunk) = l.strip_prefix("@@") {
-            line = hunk
-                .split('+')
-                .nth(1)
-                .and_then(|v| v.split([',', ' ']).next())
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            in_hunk = line > 0;
-        } else if in_hunk && (l.starts_with('+') || l.starts_with(' ') || l.is_empty()) {
-            // An empty line inside a hunk is a context line whose content is empty.
-            if let Some(f) = &file {
-                let content = l.get(1..).unwrap_or("").to_string();
-                map.entry(f.clone()).or_default().insert(line, content);
-            }
-            line += 1;
-        } else if in_hunk && l.starts_with('-') {
-            // Left side only; the new-file counter does not move.
-        } else {
-            in_hunk = false;
-        }
+    for (path, line, content) in right_side_lines(diff) {
+        map.entry(path).or_default().insert(line, content);
     }
     map
 }
@@ -5991,6 +6041,77 @@ diff --git a/dead.rs b/dead.rs
             !map.contains_key("dead.rs"),
             "a deleted file has no right side to comment on"
         );
+    }
+
+    /// **A `\\ No newline at end of file` marker does not end the hunk it sits in** (SKEIN-233).
+    ///
+    /// git emits that marker in the middle of a hunk whenever the old file lacked a trailing
+    /// newline and the new one has one — routine in JSON, `.env`, generated files and fixtures.
+    /// The vetting parser had no case for it and fell through to an `else` that cleared `in_hunk`,
+    /// so it saw ONE line of this diff where the re-anchorer saw four. Every drafted comment below
+    /// the marker was then vetted unanchorable and `assemble_post` folded it into the review body
+    /// as prose: the review still posted, and had quietly stopped being a line review.
+    ///
+    /// Written against both views on purpose. `right_side_lines` is now the only parser and
+    /// `commentable` is its projection, so this asserts the sequence AND the map — the two shapes
+    /// that used to be produced by two different readings of the same grammar.
+    #[test]
+    fn a_no_newline_marker_does_not_swallow_the_rest_of_its_hunk() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,2 +1,4 @@
+ fn main() {}
+-let old = 1;
+\\ No newline at end of file
++let new = 1;
++let after = 2;
++let last = 3;
+";
+        assert_eq!(
+            right_side_lines(diff),
+            vec![
+                ("src/a.rs".to_string(), 1, "fn main() {}".to_string()),
+                ("src/a.rs".to_string(), 2, "let new = 1;".to_string()),
+                ("src/a.rs".to_string(), 3, "let after = 2;".to_string()),
+                ("src/a.rs".to_string(), 4, "let last = 3;".to_string()),
+            ],
+            "the marker is a note about the previous line, not the end of the hunk"
+        );
+        let map = commentable(diff);
+        let a = map.get("src/a.rs").expect("the file is commentable at all");
+        assert_eq!(
+            a.keys().copied().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "vetting saw fewer lines than re-anchoring, so every draft below the marker posts as \
+             prose instead of on its line"
+        );
+        assert_eq!(a[&4], "let last = 3;", "the anchor text a draft stores");
+    }
+
+    /// **`+++ path` with no `b/` names the same file `+++ b/path` does** (SKEIN-233).
+    ///
+    /// The vetting parser required the `b/` exactly and treated every other `+++ ` as a deleted
+    /// file, so a diff written without git's prefix — `git diff --no-prefix`, and every unified
+    /// diff not produced by git — was commentable nowhere at all. Silent: a review with no
+    /// anchored comments looks exactly like a review the model chose not to put on lines.
+    #[test]
+    fn a_diff_header_without_the_b_prefix_still_names_a_file_to_comment_on() {
+        let diff = "\
+diff --git src/a.rs src/a.rs
+--- src/a.rs
++++ src/a.rs
+@@ -1,1 +1,2 @@
+ fn main() {}
++let added = 1;
+";
+        let map = commentable(diff);
+        let a = map
+            .get("src/a.rs")
+            .expect("a diff written without git's b/ prefix was commentable nowhere");
+        assert_eq!(a.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(a[&2], "let added = 1;");
     }
 
     /// The model's format parses into drafts, and anchoring is decided by the caller against the

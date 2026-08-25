@@ -62,6 +62,16 @@ async function createGitHub(root) {
       if (url === "/user") return send(200, { login: "me" });
       if (url === "/user/teams") return send(403, { message: "Requires read:org" });
       if (url === "/graphql") {
+        // The one mutation this page sends (SKEIN-305). Answered in GitHub's own shape — the
+        // thread's id and its new `isResolved` — because `prq::set_thread_resolved` reads the
+        // answer back and reports an `isResolved` that contradicts what was asked as a write that
+        // did not take. A stub that answered `{}` would pass either way.
+        if (/resolveReviewThread/.test(body)) {
+          const on = !/unresolveReviewThread/.test(body);
+          const id = (JSON.parse(body || "{}").variables || {}).id || "";
+          return send(200, { data: { [on ? "resolveReviewThread" : "unresolveReviewThread"]:
+            { thread: { id, isResolved: on } } } });
+        }
         // One request carries every membership search of a refresh now, aliased q0…qN (SKEIN-209),
         // and each alias answers under its own name — a fixture that still answered the single
         // `search` field left every query reading as "GitHub returned no answer for this search".
@@ -148,8 +158,45 @@ async function makeFixture() {
     // was not asked for.
     pr(5, "wip: still moving things around", "dana", { isDraft: true }),
   ]));
-  fs.writeFileSync(path.join(root, "search-author.json"),
-    JSON.stringify([pr(4, "my own change to the store layout", "me")]));
+  // The two you opened, and they are the two halves of SKEIN-303's rule.
+  //
+  // #4 is RED and nothing else: no unresolved thread, no conflict, nobody asking for changes. It
+  // must NOT be your move. The owner, verbatim: "CI pass isn't your responsibility, that is of
+  // whoever merges." It also carries the roster #6 does not — a person and a team — which is what
+  // an author chasing an approval actually wants to read (SKEIN-306).
+  //
+  // #6 is also red, and it IS your move, because a review thread is open on it. Two pull requests
+  // you opened, identical in their checks and opposite in the list, so a change that starts reading
+  // `checks` here cannot pass by accident.
+  fs.writeFileSync(path.join(root, "search-author.json"), JSON.stringify([
+    pr(4, "my own change to the store layout", "me", {
+      reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
+      reviewRequests: { totalCount: 2, nodes: [
+        { requestedReviewer: { login: "dana" } },
+        { requestedReviewer: { slug: "core", organization: { login: "acme" } } },
+      ] },
+      ...checks([{ status: "COMPLETED", conclusion: "FAILURE", name: "build (nightly)",
+                   detailsUrl: "https://ci.example/1" }]),
+    }),
+    pr(6, "the tenant seam I am waiting on", "me", {
+      mergeable: "MERGEABLE", mergeStateStatus: "CLEAN",
+      reviewThreads: { totalCount: 2, nodes: [
+        { id: "PRRT_open", isResolved: false, isOutdated: false, comments: { nodes: [
+          { author: { login: "dana" }, createdAt: "2026-08-06T09:00:00Z",
+            url: "https://github.com/acme/thing/pull/6#discussion_r1" }] } },
+        { id: "PRRT_done", isResolved: true, isOutdated: false, comments: { nodes: [
+          { author: { login: "sam" }, createdAt: "2026-08-06T10:00:00Z",
+            url: "https://github.com/acme/thing/pull/6#discussion_r2" }] } },
+      ] },
+      comments: { totalCount: 1, nodes: [
+        { author: { login: "dana" }, body: "Can we ship this before Friday?",
+          createdAt: "2026-08-06T11:00:00Z",
+          url: "https://github.com/acme/thing/pull/6#issuecomment-9" },
+      ] },
+      ...checks([{ status: "COMPLETED", conclusion: "FAILURE", name: "build (nightly)",
+                   detailsUrl: "https://ci.example/2" }]),
+    }),
+  ]));
 
   // A working clone with a CODEOWNERS, so stage 0 (ownership) runs for real rather than being
   // skipped by an absent file — the path that decides how deep a summary goes, and the same file
@@ -283,13 +330,25 @@ async function mustSee(sel, why) {
   return el;
 }
 const settle = (ms = 500) => page.waitForTimeout(ms);
-/** The visible rows of one lane, by title — the queue as a person reads it. */
-const laneTitles = async (label) => page.evaluate(l => {
-  const lane = [...document.querySelectorAll("#revpane .revlane")]
-    .find(x => x.querySelector("h4")?.textContent.trim().startsWith(l));
-  if (!lane) return null;
-  return [...lane.querySelectorAll(".revtitle")].map(e => e.textContent.trim());
-}, label);
+/** The visible rows of one group, by title — the queue as a person reads it.
+ *
+ * Keyed on `data-lane`, which is `moveOf`'s word (`yours` / `theirs` / `not-ready` / `archived`)
+ * rather than the heading's, because the heading is prose and prose is what a design changes. */
+const laneTitles = async (lane) => page.evaluate(l => {
+  const el = document.querySelector(`#revpane .revlane[data-lane="${l}"]`);
+  return el ? [...el.querySelectorAll(".revtitle")].map(e => e.textContent.trim()) : null;
+}, lane);
+/** The heading of one group, as a reader sees it. */
+const laneHead = async (lane) => page.evaluate(l =>
+  document.querySelector(`#revpane .revlane[data-lane="${l}"] h4`)?.textContent.replace(/\s+/g, " ").trim() ?? null,
+lane);
+/** Open a folded group. The two groups under "your move" are places you go looking, so they draw a
+ *  count until asked (SKEIN-302) — a test that wants their rows has to ask, exactly as a reader does. */
+const unfold = async (lane) => {
+  const h = await page.$(`#revpane .revlane[data-lane="${lane}"] h4.revfold`);
+  if (!h) throw new Error(`there is no ${lane} group on screen to open`);
+  if (!(await laneTitles(lane)).length) { await h.click(); await settle(300); }
+};
 
 // ---------- run ----------
 const fx = await makeFixture();
@@ -362,23 +421,71 @@ await check("the dock opens even though no box is running", async () => {
   if (!docked) throw new Error("body is not .docked, so the pane has nowhere to render");
 });
 
-console.log("\nlanes");
+console.log("\none list, both roles");
+// SKEIN-300/302. The top of the pane used to be `Lane::NeedsYou` — the REVIEWER's question — so a
+// pull request the owner had opened was "waiting" by definition however stuck it was, and the one
+// screen built to answer "what needs me" could not answer it about half their work. It is now ONE
+// list mixing both roles, with the two groups under it folded to a count.
 await check("an unreviewed PR is your move", async () => {
-  const titles = await laneTitles("your move");
-  if (!titles) throw new Error("there is no 'your move' lane on screen");
+  const titles = await laneTitles("yours");
+  if (!titles) throw new Error("there is no 'your move' list on screen");
   if (!titles.some(t => t.includes("null deref"))) throw new Error(`not in your-move: ${JSON.stringify(titles)}`);
 });
-await check("a PR you approved on its current head is their move, not asking again", async () => {
-  const titles = await laneTitles("their move");
-  if (!titles?.some(t => t.includes("retry flag"))) throw new Error(`not in their-move: ${JSON.stringify(titles)}`);
+await check("and so is a PR YOU opened, when a review thread is open on it", async () => {
+  const titles = await laneTitles("yours");
+  if (!titles.some(t => t.includes("tenant seam")))
+    throw new Error(`your own blocked pull request is not in the list: ${JSON.stringify(titles)}`);
 });
-await check("and so is the one you authored — your problem as an author is not review work", async () => {
-  const titles = await laneTitles("their move");
-  if (!titles?.some(t => t.includes("store layout"))) throw new Error(`not in their-move: ${JSON.stringify(titles)}`);
+await check("each row says in words why it needs you, and the two roles read differently", async () => {
+  const said = await page.$$eval("#revpane .revlane[data-lane='yours'] .revrow", els => els.map(e => ({
+    title: e.querySelector(".revtitle")?.textContent.trim() || "",
+    why: e.querySelector(".revwhy")?.textContent.trim() || "",
+  })));
+  const seam = said.find(r => r.title.includes("tenant seam"));
+  const deref = said.find(r => r.title.includes("null deref"));
+  if (seam?.why !== "1 thread unresolved")
+    throw new Error(`your own row does not say why: ${JSON.stringify(seam)}`);
+  if (deref?.why !== "review not given")
+    throw new Error(`a review request does not say why: ${JSON.stringify(deref)}`);
+  const el = await mustSee("#revpane .revlane[data-lane='yours'] .revwhy", "the why on a row");
+  const colour = await el.evaluate(e => getComputedStyle(e).color);
+  if (!colour || colour === "rgba(0, 0, 0, 0)") throw new Error("the why is in the DOM and invisible");
+});
+// THE RULE MOST LIKELY TO BE "FIXED" BY SOMEBODY WHO HAS NOT READ IT (SKEIN-303). The owner,
+// verbatim: "CI pass isn't your responsibility, that is of whoever merges — unless ci-queue tag is
+// attached and it fails then… But this ci-queue thing is very specific to this repo. So I don't
+// want to include that in generic workflow."
+//
+// #4 and #6 are both yours and both red. #6 is in the list because a thread is open on it; #4 has
+// nothing open and must not be there. If this fails and the change that broke it taught the rule
+// about `checks`, the change is wrong — the ci-queue behaviour arrives as repo configuration.
+await check("a PR you opened that is only RED is never your move", async () => {
+  const yours = await laneTitles("yours");
+  if (yours.some(t => t.includes("store layout")))
+    throw new Error(`a red pull request of yours was promoted by its checks: ${JSON.stringify(yours)}`);
+  await unfold("theirs");
+  const theirs = await laneTitles("theirs");
+  if (!theirs.some(t => t.includes("store layout")))
+    throw new Error(`it is not in waiting-on-others either — where did it go? ${JSON.stringify(theirs)}`);
+  // …and it really is red, so the check above is about the rule and not about a missing rollup.
+  const red = await page.$$eval("#revpane .revlane[data-lane='theirs'] .revrow", els => els.map(e => e.outerHTML));
+  if (!red.some(h => h.includes("store layout"))) throw new Error("the row is not drawn at all");
+});
+await check("a PR you approved on its current head is waiting on others, not asking again", async () => {
+  const titles = await laneTitles("theirs");
+  if (!titles?.some(t => t.includes("retry flag"))) throw new Error(`not in waiting-on-others: ${JSON.stringify(titles)}`);
+});
+await check("waiting on others is a fold that states what it is made of", async () => {
+  const said = await laneHead("theirs");
+  if (!/you opened/.test(said || "")) throw new Error(`the group does not say its composition: ${said}`);
+  // Closed again, so what follows sees the queue a reader opens on.
+  await page.click("#revpane .revlane[data-lane='theirs'] h4.revfold");
+  await settle(300);
+  if ((await laneTitles("theirs")).length) throw new Error("clicking the heading did not fold it back");
 });
 // The case the whole head-SHA design exists for.
 await check("commits landing after your approval bring it back to you", async () => {
-  const titles = await laneTitles("your move");
+  const titles = await laneTitles("yours");
   if (!titles.some(t => t.includes("default timeout")))
     throw new Error(`an approval that new commits invalidated did not return: ${JSON.stringify(titles)}`);
 });
@@ -442,15 +549,25 @@ console.log("\nfilter");
 await check("'mine' shows what you opened and hides what you did not", async () => {
   await page.click("#revpane .revchip:has-text('mine')");
   await settle();
+  // Both of yours are here, in the two different groups the rule puts them in — so the filter is
+  // asserted across the split rather than only where the rows happen to be drawn.
+  await unfold("theirs");
   const shown = await page.$$eval("#revpane .revtitle", els => els.map(e => e.textContent.trim()));
   if (!shown.some(t => t.includes("store layout"))) throw new Error("your own PR vanished");
+  if (!shown.some(t => t.includes("tenant seam"))) throw new Error("your own blocked PR vanished");
   if (shown.some(t => t.includes("null deref"))) throw new Error("someone else's PR survived the filter");
 });
 await check("'all' brings everything back", async () => {
   await page.click("#revpane .revchip:has-text('all')");
   await settle();
+  await unfold("theirs");
+  await unfold("not-ready");
   const shown = await page.$$eval("#revpane .revtitle", els => els.map(e => e.textContent.trim()));
-  if (shown.length < 4) throw new Error(`expected all four PRs, saw ${shown.length}`);
+  if (shown.length < 6) throw new Error(`expected all six PRs, saw ${shown.length}: ${JSON.stringify(shown)}`);
+  // Folded back, so the keyboard checks below walk the queue a reader opens on.
+  await page.click("#revpane .revlane[data-lane='theirs'] h4.revfold");
+  await page.click("#revpane .revlane[data-lane='not-ready'] h4.revfold");
+  await settle(300);
 });
 
 console.log("\nthe keyboard");
@@ -749,9 +866,15 @@ await check("a drafted review says so on the row, and opens beside the summary",
 // the run, and `the queue asks for rows, and a row asks for its own prose when it opens` needs one
 // that nobody has opened yet. Taking the row that is already full costs that check nothing.
 const noDraftRow = async () => page.evaluate(() => {
+  // DRAWN, and somebody else's. These three states are about a review skein would have drafted for
+  // you, so the row has to be one you were asked to review — and `setNoDraft` rewrites `reasons`,
+  // which on a pull request you opened would move the row into the folded group and leave the
+  // assertion reading an empty string (SKEIN-302).
+  const drawn = new Set([...document.querySelectorAll("#revpane .revrow")].map(e => e.dataset.rk));
   const p = (revQueue.prs || []).find(x => {
     const s = revSums.get(rk(x));
-    return s && s !== "…" && s.depth !== "unread" && !s.stale && !s.thin;
+    return drawn.has(rk(x)) && !(x.reasons || []).includes("author")
+      && s && s !== "…" && s.depth !== "unread" && !s.stale && !s.thin;
   });
   return p ? rk(p) : null;
 });
@@ -865,7 +988,9 @@ await check("and a row nothing has drafted yet says that instead, with the press
 
 await check("a draft is not ready, and the fold states its own composition", async () => {
   // The draft is not hidden and not your move: it is a COUNT with its reason, one click open.
-  const fold = await page.$("#revpane .revlane h4.revfold");
+  // Named by `data-lane`: two groups fold now, and a bare `.revfold` finds whichever the document
+  // reaches first — which since SKEIN-302 is waiting-on-others.
+  const fold = await page.$("#revpane .revlane[data-lane='not-ready'] h4.revfold");
   if (!fold) throw new Error("there is no not-ready fold on screen");
   const said = await fold.textContent();
   if (!/1 draft/.test(said)) throw new Error(`the fold does not state its composition: ${said.trim()}`);
@@ -901,6 +1026,155 @@ await check("a draft is not read unless you ask, and says so rather than looking
   if (!button) throw new Error("no way to ask for it by hand");
   await page.click(`#revpane .revrow:has-text("still moving things around") .revline`);
   await settle(200);
+});
+
+console.log("\nthe conversation");
+// SKEIN-304. The owner: "I also want to see comment history so that convo is seen from here
+// directly." Two kinds, treated differently ON PURPOSE — "not keyed on lines… if they are inline
+// comments then link out. If they are normal comments then just show it here and also link out."
+//
+// Both directions are asserted in the same render, because the obvious instinct is to treat them
+// alike and a test that only checked the present half would pass a change that did.
+await check("a PR-level comment's text is readable without leaving skein", async () => {
+  await page.click(`#revpane .revrow:has-text("tenant seam") .revline`);
+  await settle(600);
+  await mustSee(`#revpane .revrow:has-text("tenant seam") .revconv`, "the conversation block");
+  const said = await page.$eval(`#revpane .revrow:has-text("tenant seam") .revcomment-body`,
+    e => e.textContent.trim());
+  if (said !== "Can we ship this before Friday?")
+    throw new Error(`the comment's text is not on screen: ${JSON.stringify(said)}`);
+  const href = await page.$eval(`#revpane .revrow:has-text("tenant seam") .revcomment-head a`,
+    e => e.getAttribute("href"));
+  if (!/issuecomment-9$/.test(href || "")) throw new Error(`and it does not link out: ${href}`);
+});
+await check("an inline thread is who, when and a way to it — never its words", async () => {
+  const threads = await page.$$eval(`#revpane .revrow:has-text("tenant seam") .revthread`,
+    els => els.map(e => ({ text: e.textContent.replace(/\s+/g, " ").trim(),
+                           href: e.querySelector("a")?.getAttribute("href") || "" })));
+  if (threads.length !== 1)
+    throw new Error(`one thread is open on this pull request; ${threads.length} are drawn`);
+  const [th] = threads;
+  if (!th.text.includes("dana")) throw new Error(`the thread does not say who opened it: ${th.text}`);
+  if (!/discussion_r1$/.test(th.href)) throw new Error(`no way to the thread itself: ${th.href}`);
+  // The asymmetry, stated as a test: a thread's comment bodies are not fetched at all
+  // (`prq::ReviewThread`), so there is nothing here to draw — and this is where a payload that grew
+  // them would start showing up on screen.
+  const conv = await page.$eval(`#revpane .revrow:has-text("tenant seam") .revconv`, e => e.textContent);
+  const beforeComments = conv.split("the conversation")[0];
+  if (/Friday/.test(beforeComments))
+    throw new Error("a thread rendered a comment body — the two kinds have collapsed into one");
+  if (!/1 resolved/.test(beforeComments))
+    throw new Error(`a resolved thread must be counted rather than listed: ${beforeComments}`);
+});
+console.log("\nresolving a thread"); // SKEIN-305
+// The only write SKEIN-300 grants on this panel: resolve. Replies stay on GitHub.
+//
+// **Pressed on a STACKED row, deliberately.** `revStackSteps` draws a pull request inside a stack
+// as a `.step`, and the `.revrow` around it carries the STACK's key — so a repaint that reached for
+// `.revrow` found nothing and the press did nothing visible at all. That is SKEIN-284, reported by
+// an owner whose every open pull request is one 18-step stack: "when I click idk if it went through
+// or not". Every test passed throughout, because the suite drove loose rows.
+await check("a resolve pressed inside a stack gives its receipt on the thread's own line", async () => {
+  // The stack is put into the queue on screen rather than into the GitHub fixture, on purpose: a
+  // second stacked pair in the fixture changes which row every keyboard and expansion check above
+  // happens to land on, and this test is about a SELECTOR, which does not care where the rows came
+  // from. Same technique the cleared-queue check uses. Put back at the end.
+  await page.evaluate(() => {
+    window.__wasPrs = revQueue.prs;
+    const base = { repo_id: "acme", author: "me", draft: false, reasons: ["author"],
+                   my_review: "none", review_is_current: false, checks: "none",
+                   review_threads: [], review_threads_total: 0, comments: [], comments_total: 0,
+                   review_requests: [], mergeable: true, merge_state: "CLEAN", review_decision: "" };
+    revQueue = { ...revQueue, prs: [...revQueue.prs,
+      { ...base, number: 7, title: "the seam underneath", lane: "waiting",
+        head_ref: "seam", base_ref: "main", head_sha: "s7",
+        url: "https://github.com/acme/thing/pull/7", updated_at: "2026-08-07T00:00:00Z" },
+      { ...base, number: 8, title: "the slice on top of the seam", lane: "waiting",
+        head_ref: "slice", base_ref: "seam", head_sha: "s8",
+        url: "https://github.com/acme/thing/pull/8", updated_at: "2026-08-08T00:00:00Z",
+        review_threads_total: 1,
+        review_threads: [{ id: "PRRT_stacked", resolved: false, outdated: false, author: "dana",
+                           started_at: "2026-08-08T09:00:00Z",
+                           url: "https://github.com/acme/thing/pull/8#discussion_r9" }] },
+    ] };
+    renderReview(true);
+  });
+  await settle(400);
+  // Open the stack, then the step. Both are clicks a person makes; neither is a `.revrow`.
+  const stack = await mustSee("#revpane .revrow.stack .revline", "the stack row");
+  await stack.click();
+  await settle(400);
+  const step = await page.$(`#revpane .step:has-text("the slice on top of the seam")`);
+  if (!step) throw new Error("the stack did not expand into steps");
+  await step.click();
+  await settle(700);
+
+  // The control exists AND is drawn — the rule this whole suite was written for.
+  const btn = await mustSee(`#revpane .step + .revbody .revthread .revchip, #revpane .revthread .revchip`,
+    "the resolve control on a stacked row's thread");
+  const urls = [];
+  const listen = r => urls.push(r.url());
+  page.on("request", listen);
+  // Counted, because "it appeared" is satisfied by a whole-pane rebuild and the point is that the
+  // receipt is SURGICAL. `revThreadPaint` finds the line by `data-thread`; a selector reaching for
+  // `.revrow` finds nothing on a stacked row and falls back to repainting everything, which is the
+  // reflow §7.1 exists to end and would drop a caret out of any composer on screen.
+  await page.evaluate(() => {
+    window.__renders = 0;
+    for (const n of ["renderReview", "renderReviewNow"]) {
+      const real = window[n];
+      window[n] = (...a) => { window.__renders++; return real(...a); };
+    }
+  });
+  await btn.click();
+  await settle(300);
+  // Held, not fired: inside the window nothing has left the machine, which is what makes undo a
+  // cancellation rather than a second mutation.
+  if (urls.some(u => /\/thread$/.test(u)))
+    throw new Error("the press went to GitHub inside the undo window");
+  const said = await page.$eval("#revpane .revthread", e => e.textContent.replace(/\s+/g, " ").trim());
+  if (!/thread resolved/.test(said) || !/undo/.test(said))
+    throw new Error(`the receipt is not on the line that was pressed: ${said}`);
+  const rebuilt = await page.evaluate(() => window.__renders);
+  if (rebuilt) throw new Error(`the receipt cost ${rebuilt} whole-pane rebuilds — the line was not found`);
+
+  // The window's lapse, driven rather than waited for: this is the same call the timer makes.
+  const key = await page.evaluate(() => revLastActKey);
+  if (!/#thread:/.test(key || ""))
+    throw new Error(`the press was filed under the row's key, not the thread's: ${key}`);
+  await page.evaluate(k => revFire(k), key);
+  await settle(700);
+  page.off("request", listen);
+  if (!urls.some(u => /\/api\/repos\/acme\/review\/8\/thread$/.test(u)))
+    throw new Error(`the resolve never reached the route: ${JSON.stringify(urls.slice(-6))}`);
+  const resolved = await page.evaluate(() =>
+    ((revQueue.prs || []).find(p => p.number === 8).review_threads || [])[0].resolved);
+  if (!resolved) throw new Error("GitHub agreed and the row still shows the thread as open");
+  await page.evaluate(() => {
+    revQueue = { ...revQueue, prs: window.__wasPrs };
+    revStackOpenKey = null; revStackStep = null; revOpen = new Set();
+    renderReview(true);
+  });
+  await settle(300);
+});
+
+console.log("\nwho still owes an approval"); // SKEIN-306
+await check("the PR you opened names who is still to approve it", async () => {
+  await unfold("theirs");
+  await page.click(`#revpane .revrow:has-text("store layout") .revline`);
+  await settle(600);
+  const el = await mustSee(`#revpane .revrow:has-text("store layout") .revapprovals`, "the approvals line");
+  const said = (await el.textContent()).replace(/\s+/g, " ").trim();
+  if (!said.includes("waiting on @dana and the acme/core team"))
+    throw new Error(`it does not name who is outstanding: ${said}`);
+  // SKEIN-262's gap, where a short list does real harm: without `read:org` a team asked to review
+  // arrives from GitHub with no slug and is dropped, so a roster read as whole is how somebody
+  // concludes an approval has landed that never will.
+  if (!said.includes("incomplete") || !/read:org/.test(said))
+    throw new Error(`a roster that could not see teams must say so: ${said}`);
+  await page.click(`#revpane .revrow:has-text("store layout") .revline`);
+  await page.click("#revpane .revlane[data-lane='theirs'] h4.revfold");
+  await settle(300);
 });
 
 console.log("\nthe row"); // SKEIN-156/157/158 — one height, whose-move, never silent
@@ -1231,7 +1505,7 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
     if (t.includes("null deref") && !(await row.$(".revbody"))) { await row.click(); break; }
   }
   await settle();
-  const before = await laneTitles("your move");
+  const before = await laneTitles("yours");
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
   await settle(300);
   // The ROW's own strip, not the drafted review's beside it: an expanded row grew sections with
@@ -1239,7 +1513,7 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   const strip = await page.$eval("#revpane .revrow.open .revrowacts", e => e.textContent || "");
   if (!/set aside/.test(strip) || !/undo/.test(strip))
     throw new Error(`the control did not become the receipt: "${strip}"`);
-  const held = await laneTitles("your move");
+  const held = await laneTitles("yours");
   if (held.length !== before.length) throw new Error("the row vanished inside the undo window");
   // undo: the request never left the machine, and the strip returns.
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('undo')");
@@ -1251,7 +1525,7 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   // The OPEN row: an earlier verdict in this file left its own row marked done, and a bare
   // `.revrow.done` matches that one instantly — the wait would pass before this act had posted.
   await page.waitForSelector("#revpane .revrow.open.done", { timeout: 15000 });
-  const after = await laneTitles("your move");
+  const after = await laneTitles("yours");
   if (after.length !== before.length) throw new Error("the done row left the lane before the next load");
   // It leaves on the next natural load, by which time you are elsewhere.
   await page.click("#revpane .revhead .revchip:has-text('refresh')");
@@ -1584,8 +1858,11 @@ await check("a cleared queue reads like one and names what the rest of the fleet
     // Each moved row takes its reading with it. `rk` is repo + number, so a row that changes repo
     // becomes a row nothing has read — and the pump would then ask the server about a repo that
     // does not exist, which is a 404 in the console and a check failing three sections later.
+    // `moveOf`, not `lane`: what has to leave for this repo to be CLEAR is the your-move list, and
+    // since SKEIN-302 that list is not the `needs-you` lane — a pull request you opened with a
+    // thread open on it is in it, and leaving it behind leaves the queue non-empty.
     revQueue = { ...revQueue, prs: (revQueue.prs || []).map(p => {
-      if (p.lane !== "needs-you") return p;
+      if (moveOf(p) !== "yours") return p;
       const moved = { ...p, repo_id: "lattice" };
       revSums.set(rk(moved), revSums.get(rk(p))
         || { number: p.number, head_sha: p.head_sha, depth: "unread", unread_because: "nobody asked" });

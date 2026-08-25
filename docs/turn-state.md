@@ -248,9 +248,21 @@ Codex's own composer to get these:
 | *not* an error | a prose `■ ` line — `■ Conversation interrupted - tell the model what to do differently.` — and `⚠ Heads up, you have less than 25% of your monthly limit left.`, both of which sit beside a perfectly live composer |
 | tool result / hook | lines starting `• ` (`• bin, kit, lib.rs, probe, store, web`, `• SessionStart hook (completed)`) |
 
-So both runtimes share two robust markers — a spinner glyph in the terminal **title** and the string
+So both runtimes share two markers — a spinner glyph in the terminal **title** and the string
 **`esc to interrupt`** on screen — which is what makes a single `busy` predicate viable across
 providers, with only the dialog/idle grammars needing per-runtime tables.
+
+**Neither marker is robust, and "robust" is what this sentence used to say.** `esc to interrupt`
+appeared nowhere on screen across four minutes of continuous work in a real box (§8a, *Two defects
+a real box found*). And
+the title's glyph does not animate: sampled on this repo's own box 2026-08-25,
+`tmux display-message -p '#{pane_title}'` returned `⠐ example-box-6` on 40 consecutive samples
+in a tight loop and `⠂ example-box-6` on 60 consecutive samples over 30s — one frame, held,
+while the box worked. Two probes reading the same pane one second apart recorded different lead
+glyphs (`⠂` and `_`) with the title's *text* unchanged for 3h50m. So the glyph is a coin flip taken
+on top of a string that stopped moving, and `signals::title_is_spinning` gates it on
+`title_is_fresh` — the same 90s bound the title's text already had (SKEIN-321). What actually
+carries `busy` is the status line's *shape*, which is the same section's conclusion.
 
 Three things worth more than the table:
 
@@ -350,6 +362,14 @@ Cost, measured in-box over a 61s window spanning a live turn: **0.11% of one cor
    part of the title and changes every frame — which is what made a stale description look fresh).
    Net effect: correct but usually silent. Worth revisiting if a later Claude Code tracks the title
    per tool.
+
+   **The same bound now covers the glyph, and did not until SKEIN-321.** `title_is_spinning` read
+   the first character and nothing else, so a title that had not moved in hours still returned
+   `Busy` on its own — ranked above `dropped_to_shell` and above the error line, which is the
+   "shows working for 45 minutes after a crash" shape this whole level signal exists to end. The
+   glyph and the text are one field and are now gated by one predicate, `signals::title_is_fresh`,
+   which `board::load_views` also calls: two spellings of one rule is how the glyph came to have no
+   spelling of it at all.
 
 ### Verified against a live Codex TUI
 

@@ -521,7 +521,11 @@
              align-items:center; gap:0 10px; padding:4px 10px; min-height:28px; cursor:pointer; }
   .revline:hover { background:color-mix(in srgb,var(--elevated) 60%,transparent); }
   .revnum { font:11px var(--mono); color:var(--faint); text-align:right; }
-  .tcell { display:flex; align-items:center; gap:6px; min-width:0; }
+  /* `overflow:hidden` is load-bearing, not tidiness. The chips are `flex:none`, so on a crowded row
+     they used to spill OUT of a fixed grid track and land on top of the gist column — measured: the
+     row's read control drawn over "read before the latest commits…", which reads as a live button
+     and is a click that hits the text. A column that cannot contain its contents is not a column. */
+  .tcell { display:flex; align-items:center; gap:6px; min-width:0; overflow:hidden; }
   .revtitle { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
               font-size:13px; color:var(--text); }
   /* WHOSE MOVE — replaces the check dot in the row's highest-value position. Exactly one of the
@@ -560,6 +564,13 @@
      in 29 and is gone; the filter strip above is where that axis lives. */
   .revtag { font:10px var(--mono); border:0; border-radius:3px; padding:0 5px; flex:none;
             background:var(--elevated); color:var(--dim); }
+  /* WHY this row needs you, on rows that need you and nowhere else (SKEIN-302). Not a `.revtag`:
+     a chip is a fact ABOUT the pull request and sits at rank 4, and this is the sentence the list
+     is built on — periwinkle, which is `--accent`'s one meaning, "your move". Unfilled, so it
+     reads as words rather than as another badge, and `flex:none` so it can never be the thing that
+     wraps a row onto a second line. */
+  .revwhy { font:10.5px var(--mono); color:var(--accent-2); white-space:nowrap;
+            min-width:0; overflow:hidden; text-overflow:ellipsis; }
   .revtag.draft { background:color-mix(in srgb,var(--waiting) 16%,transparent); color:var(--waiting); }
   .revtag.moved { background:color-mix(in srgb,var(--working) 16%,transparent); color:var(--working); }
   /* A drafted review waiting to be read: muted green, because it is work already finished rather
@@ -635,6 +646,13 @@
   .revflow-head { display:flex; align-items:center; gap:8px; }
   .revflow-head span { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint); }
   .revflow-stop { color:var(--attn); display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+  /* HELD, which is neither of the two states beside it (SKEIN-279/326). Not `.revflow-stop`'s red:
+     nothing failed and there is nothing to clear. Not amber either — amber on this page is "true,
+     you should know", and it is spoken for by conditions somebody has to act on. A held workflow is
+     one doing exactly what it was configured to do, so it is promoted out of `.dim` (which read as
+     "nothing here") and no further: the sentence is the whole of the treatment. */
+  .revflow-holding { color:var(--text-2); border-left:2px solid var(--border-3);
+                     padding:1px 0 1px 9px; line-height:1.55; }
   .revflow-off { color:var(--waiting); }
   /* The merge-train panel, at the top of the workflows pane: the switch, the front, the line. */
   .revtrain { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
@@ -704,6 +722,45 @@
                   letter-spacing:.06em; font-size:10px; margin-bottom:5px; }
   .revsignals > div { margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
   .revsignals .dim { color:var(--faint); }
+  /* WHO STILL OWES AN APPROVAL (SKEIN-306). One line, in the expanded row and nowhere else: an
+     author goes looking for this, and a chip on the collapsed line would be a nag about something
+     that is deliberately not their move. */
+  .revapprovals { font:11.5px var(--mono); color:var(--text-2); margin-bottom:9px;
+                  border-left:2px solid var(--border-3); padding:2px 0 2px 9px; }
+  .revapprovals b { color:var(--faint); font-weight:600; text-transform:uppercase;
+                    letter-spacing:.06em; font-size:10px; margin-right:6px; }
+  .revapprovals .revblindwhat { color:var(--waiting); }
+  .revapprovals code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
+  /* THE CONVERSATION (SKEIN-304), and the asymmetry is visible in the CSS as well as the markup:
+     a thread is ONE LINE — who, when, the way to it — and a PR-level comment is a block with its
+     text in it. They are different objects and must not read as a list of the same thing. */
+  .revconv { margin-bottom:11px; display:flex; flex-direction:column; gap:9px; }
+  .revconv-part > b { display:block; font:600 10px var(--mono); color:var(--faint);
+                      text-transform:uppercase; letter-spacing:.06em; margin-bottom:5px; }
+  .revconv .dim { font:11px var(--mono); color:var(--faint); margin-top:3px; }
+  .revthread { display:flex; align-items:baseline; gap:8px; padding:2px 0;
+               font:11.5px var(--mono); color:var(--text-2); flex-wrap:wrap; }
+  .revthread .who { color:var(--text); }
+  .revthread a { color:var(--accent-2); }
+  /* `resolve` is the ONLY write on this panel (SKEIN-305) and it sits at the end of the line it
+     acts on, not at the end of the block: a control whose target is ambiguous is a control that
+     gets pressed on the wrong thread. Outlined and small, like `.revread` — it is the one action
+     among the line's facts, and the difference has to be legible without reading it. */
+  .revthread .revchip { margin-left:auto; height:19px; padding:0 7px; font:10px var(--mono);
+                        line-height:17px; }
+  .revthread .revreceipt { font-size:11.5px; }
+  .revcomment { margin-top:7px; border:1px solid var(--border-2); border-radius:var(--radius-sm);
+                background:var(--panel); padding:7px 10px; }
+  .revcomment-head { display:flex; align-items:baseline; gap:8px; font:11px var(--mono);
+                     color:var(--faint); margin-bottom:4px; }
+  .revcomment-head .who { color:var(--text); }
+  .revcomment-head a { color:var(--accent-2); margin-left:auto; }
+  /* `pre-wrap`, because the body is escaped text and never markdown: somebody else's writing off
+     the internet is the one thing on this page `marked.parse` must not be pointed at. Capped and
+     scrollable, so one four-hundred-line comment cannot become the whole expanded row. */
+  .revcomment-body { font-size:12.5px; line-height:1.55; color:var(--text);
+                     white-space:pre-wrap; overflow-wrap:anywhere;
+                     max-height:260px; overflow-y:auto; }
   .revowned { font:11px var(--mono); color:var(--dim); margin-bottom:9px; }
   .revowned code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
   .revbrief { font-size:13.5px; line-height:1.6; color:var(--text); }
@@ -1751,10 +1808,11 @@
 <script src="/vendor/addon-fit.js"></script>
 <script src="/vendor/marked.js"></script>
 <!-- The cockpit's pure functions: GROUPS, groupOf, NEEDS_YOU, owedIn, labelOf, matchesFilter,
-     boardRows, wantsForeign, withoutForeignTerm, fmtGB, fmtGb. Built from `cockpit/src` and tested
-     in node — see cockpit/README.md. They live there and not here because a function that cannot be
-     imported cannot be tested except by reimplementing it, and a reimplementation agrees with the
-     code right up until one of them changes. -->
+     boardRows, wantsForeign, withoutForeignTerm, fmtGB, fmtGb, and — for the review pane's top
+     level — authored, threads, authorBlock, moveOf, moveWhy, approvalsLine, andList. Built from
+     `cockpit/src` and tested in node — see cockpit/README.md. They live there and not here because
+     a function that cannot be imported cannot be tested except by reimplementing it, and a
+     reimplementation agrees with the code right up until one of them changes. -->
 <script src="/vendor/cockpit.js"></script>
 <script>
 // ---------- model ----------
@@ -3032,7 +3090,15 @@ function loadReview(force) {
     // The pane just fetched every repo for real; fold that into the badge rather than waiting up
     // to three minutes for the poller to rediscover numbers we already have.
     for (const qq of q.queues) {
-      const n = (qq.prs || []).filter(p => p.lane === "needs-you").length;
+      // **The badge counts the your-move list and nothing else** (SKEIN-300). It counts `moveOf`
+      // rather than `Lane::NeedsYou` for the same reason the pane groups on it: a pull request you
+      // opened with changes requested on it needs you, and a badge that says otherwise is the
+      // disagreement between the badge and the pane that §2.7 is about, one field along.
+      //
+      // The three-minute poll (`/api/review/counts`) still answers with the server's lane count,
+      // so the badge is only exactly this list once the pane has loaded. Closing that is SKEIN-323
+      // — a server-side change, and the honest half is done here rather than nowhere.
+      const n = (qq.prs || []).filter(p => moveOf(p) === "yours").length;
       const row = revCounts.find(c => c.repo_id === qq.repo_id);
       if (row) { row.needs_you = n; row.error = ""; } else revCounts.push({ repo_id: qq.repo_id, needs_you: n, error: "" });
     }
@@ -3052,16 +3118,44 @@ function loadReview(force) {
   });
 }
 
+// **The pane's top level is ONE "your move" list, and these keys are `moveOf`'s words rather than
+// `Pr::lane`'s** (SKEIN-300, SKEIN-302). They are different questions. The lane answers "is this
+// review work for you", per role; this list mixes the roles, because the owner's ask was "I want to
+// know what needs me very clearly" and under the lanes a pull request YOU opened was filed as
+// `waiting` by definition, however stuck it was. `cockpit/src/move.mjs` holds the rule; nothing
+// here re-decides it.
+//
+// The two groups under it are places you GO LOOKING, not lists that claim you, so both fold to a
+// count that states its own composition. Archived keeps its own place at the bottom: you put it
+// there by hand, so it is neither a claim nor a question.
 const REV_LANES = [
-  ["needs-you", "your move"],
-  ["waiting",   "their move"],
+  ["yours",     "your move"],
+  ["theirs",    "waiting on others"],
   ["not-ready", "not ready"],
   ["archived",  "archived"],
 ];
-// Not-ready starts folded to a count with its reasons. Nothing is hidden — a count is not hiding —
-// it is just not claiming to be your problem until you ask.
+// Both groups below your move start folded to a count with their reasons. Nothing is hidden — a
+// count is not hiding — they are just not claiming to be your problem until you ask.
 let revNotReadyOpen = false;
 function toggleNotReady() { revNotReadyOpen = !revNotReadyOpen; renderReviewNow(); }
+let revTheirsOpen = false;
+function toggleTheirs() { revTheirsOpen = !revTheirsOpen; renderReviewNow(); }
+const REV_FOLDS = { theirs: () => revTheirsOpen, "not-ready": () => revNotReadyOpen };
+const revFolds = lane => Object.prototype.hasOwnProperty.call(REV_FOLDS, lane);
+const revFoldOpen = lane => (revFolds(lane) ? REV_FOLDS[lane]() : true);
+// What the group is made of, said on its own heading — the same job `revNotReadyWhy` does one
+// group down, for the same reason: a number you cannot decompose is a number you have to open.
+function revTheirsWhy(rows) {
+  const n = { mine: 0, decided: 0 };
+  for (const p of rows) {
+    if (authored(p)) n.mine++;
+    else if (p.my_review && p.my_review !== "none") n.decided++;
+  }
+  const parts = [];
+  if (n.mine) parts.push(`${n.mine} you opened`);
+  if (n.decided) parts.push(`${n.decided} you signed off`);
+  return parts.join(", ");
+}
 // The lane's own composition: why these are not ready, tallied. A PR can be more than one of
 // these at once, so the tallies are independent — they name the reasons, they do not sum to the
 // count.
@@ -3087,7 +3181,7 @@ function revNotReadyWhy(rows) {
 // about whether anything needs you, so those keep the plain line.
 function revLaneEmpty(lane) {
   const narrowed = revFilter !== "all" || revSearch.trim();
-  if (lane !== "needs-you" || narrowed || (revQueue && revQueue.error)) {
+  if (lane !== "yours" || narrowed || (revQueue && revQueue.error)) {
     return `<div class="revempty">nothing here${
       revSearch.trim() ? " matching what you typed" : revFilter !== "all" ? " under this filter" : ""}.</div>`;
   }
@@ -3528,20 +3622,11 @@ function revRenderPane(force) {
     const lanes = [];
     const nav = [];
     for (const [lane, label] of REV_LANES) {
-      const loose = shown.filter(p => p.lane === lane && !inStack.has(rk(p)));
+      const loose = shown.filter(p => moveOf(p) === lane && !inStack.has(rk(p)));
       const laneStacks = stacks.filter(st => revStackLane(st) === lane);
-      // Needs-you always shows its heading, even at zero — "nothing needs you" is an answer you
+      // Your move always shows its heading, even at zero — "nothing needs you" is an answer you
       // came here for, and a missing section reads as a page that failed to load.
-      if (!loose.length && !laneStacks.length && lane !== "needs-you") continue;
-      // Not-ready is a count that states its own composition, folded until asked. The heading is
-      // the toggle both ways, so nothing about the fold is somewhere else. Its rows are navigable
-      // exactly when they are visible — a selection must never sit on a folded row.
-      if (lane === "not-ready") {
-        const entries = revNotReadyOpen ? loose.map(p => ({ key: rk(p), make: () => revRow(p) })) : [];
-        lanes.push({ lane, label, loose, entries, total: loose.length });
-        for (const en of entries) nav.push(en.key);
-        continue;
-      }
+      if (!loose.length && !laneStacks.length && lane !== "yours") continue;
       // A stack sorts by its next actionable step, not its tip — the tip is the one PR you
       // cannot review yet, and it is exactly what floats to the top of a recency sort.
       //
@@ -3557,37 +3642,49 @@ function revRenderPane(force) {
       // row above the unread, a routine verdict sinks below them, and nothing the model says can
       // take a PR out of the lane its readiness put it in — AI adds scrutiny, never removes it. A
       // wrong promotion costs a glance; a wrong demotion costs a missed regression.
+      //
+      // A stack takes the band of the step you would actually open, for the same reason it takes
+      // that step's AGE: both are questions about the next decision, not about the tip. It used to
+      // be a flat 1 — "unread" — which made the band incomparable across the two kinds of entry:
+      // a stack whose next step skein had read and flagged sank below every loose row, and one
+      // whose next step was routine floated above them. That also broke the order SKEIN-302 states,
+      // where unstacked pull requests sort by age BETWEEN the stacks.
       const entries = [
         ...loose.map(p => ({ band: revReadBand(p), at: sortAt(p), key: rk(p), make: () => revRow(p) })),
-        ...laneStacks.map(st => ({
-          band: 1,
-          at: sortAt(revStackNext(st) || st.steps[0]),
-          key: revStackKey(st),
-          make: () => revStackRow(st),
-        })),
-      ].sort((a, b) => (lane === "needs-you" && a.band !== b.band)
+        ...laneStacks.map(st => {
+          const next = revStackNext(st) || st.steps[0];
+          return { band: revReadBand(next), at: sortAt(next), key: revStackKey(st),
+                   make: () => revStackRow(st) };
+        }),
+      ].sort((a, b) => (lane === "yours" && a.band !== b.band)
         ? a.band - b.band
-        : lane === "needs-you"
+        : lane === "yours"
           ? String(a.at).localeCompare(String(b.at))
           : String(b.at).localeCompare(String(a.at)));
       // "N decisions from M pull requests": a stack is one entry point and several decisions in a
       // forced order — the heading says both, which is also how the badge (counting PRs) and the
       // pane (counting starts) stop disagreeing.
       const total = loose.length + laneStacks.reduce((n, st) => n + st.steps.length, 0);
-      lanes.push({ lane, label, loose, entries, total });
-      for (const en of entries) nav.push(en.key);
+      // A folded group is computed in full and DRAWN as nothing. Its rows are navigable exactly
+      // when they are visible, so a selection can never sit on a row nobody can see; the count on
+      // the heading is the whole group either way, because a fold that also under-counted would be
+      // hiding rather than folding.
+      const drawn = revFoldOpen(lane) ? entries : [];
+      lanes.push({ lane, label, loose, entries: drawn, count: entries.length, total });
+      for (const en of drawn) nav.push(en.key);
     }
     revNavSettle(nav);
-    for (const { lane, label, loose, entries, total } of lanes) {
-      if (lane === "not-ready") {
-        body += `<div class="revlane"><h4 class="revfold" onclick="toggleNotReady()">${esc(label)}
-            <span class="revn">${loose.length}</span>
-            <span class="dim">· ${esc(revNotReadyWhy(loose))} — ${revNotReadyOpen ? "click to fold" : "click to expand"}</span></h4>${
+    for (const { lane, label, loose, entries, count, total } of lanes) {
+      if (revFolds(lane)) {
+        const why = lane === "not-ready" ? revNotReadyWhy(loose) : revTheirsWhy(loose);
+        body += `<div class="revlane" data-lane="${esc(lane)}"><h4 class="revfold" onclick="${lane === "not-ready" ? "toggleNotReady()" : "toggleTheirs()"}">${esc(label)}
+            <span class="revn">${count}</span>
+            <span class="dim">${why ? `· ${esc(why)} ` : ""}— ${revFoldOpen(lane) ? "click to fold" : "click to expand"}</span></h4>${
           entries.map(revRowSafe).join("")
         }</div>`;
         continue;
       }
-      body += `<div class="revlane"><h4>${esc(label)} <span class="revn">${entries.length}</span>${
+      body += `<div class="revlane" data-lane="${esc(lane)}"><h4>${esc(label)} <span class="revn">${entries.length}</span>${
           entries.length !== total ? ` <span class="dim">from ${total} pull requests</span>` : ""
         }</h4>${
         entries.length ? entries.map(revRowSafe).join("")
@@ -4261,6 +4358,13 @@ function revTrainsFromStanding(prs) {
   const byFlow = new Map();
   for (const [n, st] of Object.entries(prs || {})) {
     if (!st || !st.workflow) continue;
+    // A HELD pull request keeps its `workflow` on purpose — the row must still say which workflow
+    // somebody chose — and is deliberately excluded from ACTING (`Carries::acting` against
+    // `Carries::name`), so the tick skips it. Drawn as a car it would be a promise of an act that
+    // will never be taken, and if it held the lowest number it would be drawn as the front while
+    // the tick's front was somebody else (SKEIN-279/326). This is the page's own fallback for a
+    // server that sends no `trains`; the route makes the same exclusion.
+    if (st.holding) continue;
     if (!byFlow.has(st.workflow)) byFlow.set(st.workflow, []);
     byFlow.get(st.workflow).push(Number(n));
   }
@@ -4343,7 +4447,10 @@ function revFlowChip(pr) {
   }
   // The verb only — "add-label", "merge" — because the row is scanned and the argument is detail.
   const doing = st.next ? String(st.next).split(":")[0] : "";
-  const title = st.next ? `step ${st.step}: ${st.next}` : "nothing to do right now";
+  // A held workflow has no next step and is not idle either (SKEIN-326): "nothing to do right now"
+  // on the hover of a pull request whose workflow is waiting on its own conditions is the same
+  // wrong sentence the expanded row used to print, one surface up.
+  const title = st.next ? `step ${st.step}: ${st.next}` : st.holding || "nothing to do right now";
   return `<span class="revtag flow" title="${esc(title)}">${esc(st.workflow)}${doing ? ` · ${esc(doing)}` : ""}</span>`;
 }
 
@@ -4674,7 +4781,16 @@ function revRow(pr) {
   const flags = rawFlags.slice(0, 2)
     .map(f => `<span class="revtag flag">${esc(f)}</span>`).join("")
     + (rawFlags.length > 2 ? `<span class="revtag flag" title="${esc(rawFlags.slice(2).join(", "))}">+${rawFlags.length - 2}</span>` : "");
-  const chips = `${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
+  // WHY this row needs you, in words, on the collapsed line (SKEIN-300/302). It is exempt from the
+  // minority rule the other chips obey, and deliberately: that rule is about marks which compete
+  // with the title for attention, and this is the row's reason for being in the list at all. It is
+  // what makes one mixed list readable — "2 threads unresolved" and "review not given" beside each
+  // other say which of your two roles is being asked for, which the lane split used to say by
+  // living in different sections and cannot say once they share one. Absent everywhere else, so it
+  // never appears on a row that is not yours to act on.
+  const why = moveWhy(pr);
+  const whyTag = why ? `<span class="revwhy">${esc(why)}</span>` : "";
+  const chips = `${whyTag}${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
     revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
   }${revReadyChip(pr)}${revNoDraftChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
   const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
@@ -4745,10 +4861,16 @@ const REV_MOVE_WORDS = {
   done: "you decided, and it holds",
   blocked: "waits on an unreviewed base",
 };
+//
+// It reads `moveOf` rather than the lane, so the lit mark and the list a row is IN can never
+// disagree — a row sitting under "your move" with a hollow ring is the pane contradicting itself
+// on the one field the design gave the row's highest-value pixel to.
 function revMove(pr) {
-  if (pr.lane === "archived") return "done";
+  const m = moveOf(pr);
+  if (m === "archived") return "done";
+  if (m === "yours") return "yours";
   if (pr.my_review && pr.my_review !== "none" && pr.review_is_current) return "done";
-  return pr.lane === "needs-you" ? "yours" : "theirs";
+  return "theirs";
 }
 
 // Age, then size, then who. Age is first because it is the sort key, and a sort key you cannot see
@@ -4782,15 +4904,24 @@ function revRail(pr) {
 // moment it came back, and a comment since then does not restart it. Every other lane is recency —
 // for your own pull requests, "what moved most recently" is the right question, and nothing there
 // is waiting on you at all.
+//
+// Asked of `moveOf` rather than of the lane (SKEIN-302), because the list is what the column
+// audits and the list mixes both roles now. On a pull request you opened, `revWaitedSince` falls
+// through to `updated_at` — your own PR has no request time, and the last touch is the comment or
+// the review that put it back in your hands. That fallthrough is why this stays one function:
+// `review::waited_since` mirrors it field for field to decide what skein reads ahead, and a second
+// clock invented here would be the third implementation of an order that already came apart once.
 function revSortAt(p) {
-  return p.lane === "needs-you" ? revWaitedSince(p) : (p.updated_at || "");
+  return moveOf(p) === "yours" ? revWaitedSince(p) : (p.updated_at || "");
 }
-// What the number in that cell MEANS, on the cell — the two lanes measure different things and the
+// What the number in that cell MEANS, on the cell — the groups measure different things and the
 // column cannot say which in 34 px.
 function revSortWord(p) {
-  return p.lane === "needs-you"
-    ? (revMoved(p) ? "waiting on you since the commit that came after your review" : "waiting on you this long")
-    : "last moved this long ago";
+  if (moveOf(p) !== "yours") return "last moved this long ago";
+  if (authored(p)) return "waiting on you since it was last touched";
+  return revMoved(p)
+    ? "waiting on you since the commit that came after your review"
+    : "waiting on you this long";
 }
 // `7 files ±782`, with the whole story on hover — the old `7f 782±` read as a cipher to the person
 // the column exists for. Null while the queue does not carry the numbers; the caller renders an
@@ -4851,6 +4982,8 @@ function revBody(pr) {
       <span>${mine}</span>
       <a href="${esc(pr.url || "#")}" target="_blank" rel="noopener">open on GitHub ↗</a>
     </div>
+    ${revApprovals(pr)}
+    ${revConversation(pr)}
     ${revDetail(pr)}
     ${revDraftSection(pr)}
     <div class="revacts revrowacts">${revPending.has(rk(pr))
@@ -4872,6 +5005,178 @@ function revBody(pr) {
     ${revCritiqueHtml(pr)}
     ${revComposeHtml(pr)}
   </div>`;
+}
+
+// Could this repo's queue see your TEAMS? `gh` without `read:org` cannot list them, and a team
+// asked to review then arrives from GitHub without a slug and is dropped on the floor
+// (`prq::normalise`) — so the roster below can be short without anything having failed. The queue
+// already reports the gap as a standing blind spot; this is the one question that has to ask it
+// per row, because a list of names is exactly where a silent omission does harm (SKEIN-262/306).
+function revTeamsBlind(repoId) {
+  return ((revQueue && revQueue.blind_spots) || [])
+    .some(b => (!repoId || String(b).startsWith(repoId + ":")) && /read:org/.test(b));
+}
+
+// **Which approvals are still outstanding, and from whom** (SKEIN-306). The owner: "May be I am the
+// author and I want to ensure that all approvals are done on it."
+//
+// `review_decision` answers whether the repository is satisfied; it cannot answer WHO, and who is
+// the question somebody chasing an approval actually has. Drawn only on a pull request you opened,
+// and only in the expanded row: this is information you go looking for, not something that should
+// nag — an authored PR whose approvals are outstanding is not, by itself, your move (SKEIN-303).
+function revApprovals(pr) {
+  if (!authored(pr)) return "";
+  const line = approvalsLine(pr);
+  const decision = pr.review_decision || "";
+  const said = line
+    ? line
+    : decision === "APPROVED" ? "every approval this repository asks for is in"
+    : decision === "CHANGES_REQUESTED" ? "changes were requested, and nobody is queued to look again"
+    : decision === "REVIEW_REQUIRED" ? "this repository requires a review, and nobody is queued"
+    : "GitHub is not waiting on anybody";
+  // The roster's own honesty, and it is not decoration: a short list read as a whole one is how
+  // somebody concludes an approval has landed that never will.
+  const short = revTeamsBlind(pr.repo_id)
+    ? `<span class="revblindwhat">incomplete</span> — a team asked to review would not be listed:
+       <code>gh</code> cannot see your teams. Fix: <code>gh auth refresh -s read:org</code>`
+    : "";
+  return `<div class="revapprovals"><b>approvals</b> ${esc(said)}${short ? `<div>${short}</div>` : ""}</div>`;
+}
+
+// **The conversation, two kinds, drawn deliberately differently** (SKEIN-300, SKEIN-304). The
+// owner's own words: "not keyed on lines… if they are inline comments then link out. If they are
+// normal comments then just show it here and also link out."
+//
+// The asymmetry is the design, and the obvious instinct — treat both alike — is what it exists to
+// refuse. A PR-level comment is the conversation ABOUT the pull request, and reading it here is the
+// whole point of not leaving skein. An inline review thread is a conversation about a line of code,
+// and it is worth nothing away from the line: rendered here it would be a stack of decontextualised
+// fragments competing with the diff for authority. So a thread is drawn as who opened it, when, and
+// the way to it — and **its bodies are never fetched at all** (`prq::ReviewThread`), which is what
+// keeps a hundred pull requests in one GraphQL request the owner's repo already answers with a 504.
+// Adding the bodies here would be a payload decision made at the surface; there is a test that
+// fails if the fetch grows them.
+//
+// Bodies go through `esc` and are laid out with `white-space: pre-wrap`, never `marked.parse`: the
+// brief is skein's own prose and a comment is somebody else's text off the internet, and the one
+// place on this page that renders markdown must not be pointed at it.
+// ONE open review thread: who, when, the way to it, and the only write this panel grants.
+//
+// **Its own key, and not the pull request's** (SKEIN-305). `revPending` is keyed by `rk(pr)` and
+// `revHold` replaces the held act wholesale, so a thread press filed under the row's key would mean
+// two resolves inside eight seconds silently dropping the first, and a resolve and an `approve`
+// cancelling each other. The key carries the thread id, which also means `revMarkDone` and
+// `revRepaintRow` find no pull request under it — correct rather than awkward: resolving a thread
+// decides no verdict, so nothing about the row's own review state may change. Its paint is
+// `revThreadPaint`, and the receipt is the same hold, undo and 8 seconds as every other act (§7.1).
+const revThreadKey = (pr, th) => rk(pr) + "#thread:" + th.id;
+const REV_THREAD_MARK = "#thread:";
+// The pull request and the thread a key names, off the queue on screen — so a repaint reads the
+// same objects the press did rather than closing over them.
+function revThreadAt(key) {
+  const at = String(key).lastIndexOf(REV_THREAD_MARK);
+  if (at < 0) return null;
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key.slice(0, at));
+  if (!pr) return null;
+  const th = (pr.review_threads || []).find(t => t.id === key.slice(at + REV_THREAD_MARK.length));
+  return th ? { pr, th } : null;
+}
+function revThreadHtml(pr, th) {
+  const key = revThreadKey(pr, th);
+  const held = revPending.get(key);
+  return `<div class="revthread" data-thread="${esc(key)}">
+      <span class="who">${esc(th.author || "somebody")}</span>
+      <span class="dim">${esc(th.started_at ? revAgo(th.started_at) : "")}</span>
+      ${th.outdated ? `<span class="revtag draft" title="it hangs off lines the head has replaced — still open, and still yours to answer">outdated</span>` : ""}
+      ${th.url ? `<a href="${esc(th.url)}" target="_blank" rel="noopener">read it on GitHub ↗</a>` : ""}
+      ${held ? revReceiptHtml(key, held)
+        : `<button type="button" class="revchip" onclick="revResolveThread(${
+            esc(JSON.stringify(pr.repo_id || ""))}, ${pr.number}, ${esc(JSON.stringify(th.id || ""))})"
+            title="marks it resolved on GitHub — replies still happen there">resolve</button>`}
+    </div>`;
+}
+
+// The press. Held rather than fired, like every other act that reaches GitHub: inside the window
+// nothing has left the machine, so `undo` is a cancellation rather than a second mutation. (The
+// route does support `resolved: false` — a real `unresolveReviewThread` — which is what a "reopen"
+// control would send if this panel ever grows one. It does not need it to make undo honest.)
+function revResolveThread(repo, number, id) {
+  const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === repo + "#" + number);
+  if (!pr) return;
+  const th = (pr.review_threads || []).find(t => t.id === id);
+  if (!th) return;
+  const key = revThreadKey(pr, th);
+  revHold(key, {
+    repo, number, kind: "resolve", verdict: false,
+    url: th.url || pr.url || `https://github.com/${repo}/pull/${number}`,
+    send: () => fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/thread`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ thread_id: id, resolved: true }),
+    }).then(r => r.json()).catch(e => ({ ok: false, error: String((e && e.message) || e) })),
+    state: "waiting", left: Math.round(REV_UNDO_MS / 1000), timer: null, tick: null, error: "", said: "",
+  });
+}
+
+// The receipt where the press was — one thread's line, never the row and never the pane.
+//
+// **Queried by `data-thread` and not by `.revrow`** (SKEIN-284, and the patch note that carried this
+// route over): a pull request inside a stack is drawn as a `.step`, so a selector reaching for the
+// row around it finds nothing and the press dies silently. This element is the same element in both
+// places, which is why the hook is on it. Where it is not on screen at all — the row closed under a
+// lapsing window — the pane repaints only if the pull request is visible somewhere, on the same
+// rule `revRepaintRow` states: repainting for a receipt nobody is looking at would take a caret out
+// of a composer.
+function revThreadPaint(key) {
+  if (revReading || !revpane || !revpane.querySelector) return;
+  const at = revThreadAt(key);
+  const el = revpane.querySelector(`[data-thread="${String(key).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`);
+  if (el && at) { el.outerHTML = revThreadHtml(at.pr, at.th); return; }
+  if (at && revpane.querySelector(revRkQuery(rk(at.pr)))) renderReviewNow();
+}
+
+// It landed. The thread is marked resolved on the object the pane is drawing from — the same
+// discipline `revMarkDone` uses for a verdict, so a later full render agrees — and the ROW repaints,
+// because the count in the conversation, the "N threads unresolved" on the collapsed line and
+// whether the row is your move at all are all answers that just changed.
+function revThreadDone(key) {
+  const at = revThreadAt(key);
+  if (!at) return;
+  at.th.resolved = true;
+  revRepaintRow(rk(at.pr));
+}
+
+function revConversation(pr) {
+  const t = threads(pr);
+  const seen = pr.comments || [];
+  const total = pr.comments_total;
+  const older = total != null && total > seen.length ? total - seen.length : 0;
+  if (!t.shown && !t.unseen && !seen.length && !older) return "";
+  const when = iso => (iso ? revAgo(iso) : "");
+  const resolved = t.shown - t.open.length;
+  const threadRows = t.open.map(th => revThreadHtml(pr, th)).join("");
+  const threadsBlock = (t.shown || t.unseen)
+    ? `<div class="revconv-part"><b>unresolved review threads${
+        t.open.length ? ` · ${t.open.length}` : ""}</b>
+      ${t.open.length ? threadRows : `<div class="dim">Nothing is open on the lines of this change.</div>`}
+      ${resolved > 0 ? `<div class="dim">${resolved} resolved.</div>` : ""}
+      ${t.unseen > 0 ? `<div class="dim">${t.unseen} more thread${t.unseen === 1 ? "" : "s"} skein did not fetch — this is the ones it could see, not all of them.</div>` : ""}
+      <div class="dim">Threads are read and answered on GitHub; skein shows you that they are open.</div>
+    </div>`
+    : "";
+  const commentRows = seen.map(c => `<div class="revcomment">
+      <div class="revcomment-head"><span class="who">${esc(c.author || "somebody")}</span>
+        <span class="dim">${esc(when(c.created_at))}</span>
+        ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">on GitHub ↗</a>` : ""}</div>
+      <div class="revcomment-body">${esc(c.body || "")}</div>
+    </div>`).join("");
+  const commentsBlock = (seen.length || older)
+    ? `<div class="revconv-part"><b>the conversation${total != null ? ` · ${total}` : ""}</b>
+      ${older ? `<div class="dim">The last ${seen.length} of ${total}${
+        pr.url ? ` — <a href="${esc(pr.url)}" target="_blank" rel="noopener">the rest is on GitHub ↗</a>` : ""}.</div>` : ""}
+      ${commentRows}
+    </div>`
+    : "";
+  return `<div class="revconv">${threadsBlock}${commentsBlock}</div>`;
 }
 
 // The expanded half: the brief when there is one, and an unmissable statement when there is not.
@@ -5035,7 +5340,8 @@ function revFlowBox(pr) {
     return `<div class="revflow"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;
   }
   const defined = flows.defined || [];
-  const st = (flows.prs || {})[pr.number] || { workflow: "", how: "none", next: "", step: 0, stopped: "" };
+  const st = (flows.prs || {})[pr.number]
+    || { workflow: "", how: "none", next: "", step: 0, stopped: "", holding: "" };
   const chosen = st.how === "assigned" ? st.workflow : st.how === "excluded" ? "" : "__rules";
   const options = [
     `<option value="__rules"${chosen === "__rules" ? " selected" : ""}>let the rules decide</option>`,
@@ -5050,6 +5356,19 @@ function revFlowBox(pr) {
         <button type="button" class="revchip" onclick="revClearStop('${esc(pr.repo_id)}', ${pr.number})">let it run again</button></div>`
     : !st.workflow
       ? `<div class="dim">Nothing governs this pull request${st.how === "excluded" ? " — you left it out" : ""}.</div>`
+      // **HELD** (SKEIN-279/326): somebody put a workflow on this pull request and the workflow's
+      // own `matches` are not true yet. The row fell through to "waiting for something to change"
+      // — true, and wrong in the way that matters: it reads as a clock running when none is, and
+      // it does not say what is missing. The sentence the server builds names the unmet conditions
+      // as the FILE spells them, so it can be checked against the workflow somebody is reading.
+      //
+      // Drawn in the "not a stop" register, deliberately: no button, nothing to clear, and neither
+      // amber nor red. Nothing has failed and nothing is waiting on a clock — this is a workflow
+      // doing exactly what it was configured to do, and the owner is reading this pane as a dry run
+      // with the train switched off. "Put it on the train, it goes when it is approved" is now
+      // literally what happens, and this is the line that says so.
+      : st.holding
+        ? `<div class="revflow-holding">${esc(st.holding)}</div>`
       : st.next
         ? `<div>Next: <code>${esc(st.next)}</code> <span class="dim">(step ${st.step}${
             st.how === "matched" ? `, from ${esc(st.workflow)}'s own rule` : ""})</span></div>`
@@ -5345,6 +5664,8 @@ function revRetry(key) {
 function revReceiptHtml(key, p) {
   const did = { approve: "approved", "request-changes": "changes requested", comment: "commented",
                 archive: "set aside", merge: "merged",
+                // The one write this panel grants (SKEIN-305). Replies stay on GitHub.
+                resolve: "thread resolved",
                 // Not a verdict and not a post — a read that REPLACES the review you have vetted,
                 // so the receipt says what is about to be lost rather than what is about to be sent
                 // (SKEIN-293).
@@ -5371,6 +5692,10 @@ function revReceiptHtml(key, p) {
 /// rows in a list you are navigating destroy your place. The pr object itself is updated so any
 /// later full render agrees, and the row leaves on the next natural load.
 function revMarkDone(key, kind) {
+  // A resolve decides no verdict (SKEIN-305). Its key names a thread rather than a row, so every
+  // line below would find nothing anyway — this says so out loud, and hands the paint to the one
+  // that knows where a thread is drawn.
+  if (kind === "resolve") { revThreadDone(key); return; }
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key);
   if (pr) {
     // A read decides nothing (SKEIN-293). Without this arm a held re-read landed and marked the row
@@ -5418,6 +5743,8 @@ function revRepaintRow(key) {
 /// PR's queue row otherwise. Surgical on purpose — renderReview() would drop scroll and rebuild
 /// the subtree the eye is on, which is the reflow §7.1 exists to end.
 function revPendingPaint(key) {
+  // A thread's press has neither the row's key nor the row's paint (SKEIN-305).
+  if (String(key).includes(REV_THREAD_MARK)) { revThreadPaint(key); return; }
   if (revReading) {
     if (revReading.repo + "#" + revReading.number !== key) return; // reading something else; the receipt waits in the row
     // A verdict pressed FROM the composer closes it, and the composer is not inside the bar — so a
@@ -6539,10 +6866,12 @@ function revMisnamed(steps) {
 // A stack's own key in the queue's namespace — its head PR's rk with a marker, so the keyboard's
 // selection can name a stack row the same way it names a loose one and neither can collide.
 function revStackKey(st) { return "stack:" + st.repo_id + "#" + st.steps[0].number; }
-// The first step still awaiting you — the only place a review of this stack can start.
-function revStackNext(st) { return st.steps.find(p => p.lane === "needs-you") || null; }
-// A stack sits in the lane of its next actionable step, not of its tip.
-function revStackLane(st) { return revStackNext(st) ? "needs-you" : "waiting"; }
+// The first step still awaiting you — the only place a review of this stack can start. Asked of
+// `moveOf`, so a stack of your OWN pull requests with a thread open on one of them enters the
+// your-move list at that step rather than sitting silently below it (SKEIN-302).
+function revStackNext(st) { return st.steps.find(p => moveOf(p) === "yours") || null; }
+// A stack sits in the group of its next actionable step, not of its tip.
+function revStackLane(st) { return revStackNext(st) ? "yours" : "theirs"; }
 
 let revStackOpenKey = null;   // which stack is expanded — at most one, ever
 let revStackStep = null;      // rk of the step whose full row is open inside it
@@ -6609,7 +6938,7 @@ function revStackRow(st) {
 function revStackSteps(st) {
   const next = revStackNext(st);
   const rows = st.steps.map((p, i) => {
-    const decided = p.lane === "waiting";
+    const decided = moveOf(p) === "theirs";
     const cls = p === next ? " next" : decided ? " done" : "";
     const note = st.misnamed.get(p.number);
     // A FORK is not a break, and it is not silent either (SKEIN-288). Two pull requests on one base

@@ -134,6 +134,7 @@ fn connects(port: u16) -> bool {
 /// The move, in the order the design requires, with the payload treated as the binary it is.
 #[test]
 fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("tmux") || !have("python3") {
         eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
@@ -325,6 +326,7 @@ fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
 /// to, which is exactly the condition a live fleet does not satisfy.
 #[test]
 fn a_server_is_replaced_while_the_old_one_is_still_running() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("python3") {
         eprintln!("skipping: no python3 to stand in for a running server");
@@ -392,6 +394,7 @@ fn a_server_is_replaced_while_the_old_one_is_still_running() {
 /// cross-build story as a sentence rather than prose in a doc.
 #[test]
 fn a_server_the_sandbox_cannot_run_is_refused_with_the_cross_build_named() {
+    let _env = env_lock();
     let _guard = serialize();
     let root = scratch();
 
@@ -425,6 +428,7 @@ fn a_server_the_sandbox_cannot_run_is_refused_with_the_cross_build_named() {
 /// where that is proved against a real namespace; here the claim is only about the mount SET.
 #[test]
 fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {
+    let _env = env_lock();
     let _guard = serialize();
     let root = scratch();
     let home = root.join("skein");
@@ -560,6 +564,7 @@ fn observer(tag: &str, out: &Path) -> String {
 /// possible at all, since the binary does not arrive until somebody runs `skein fleet-serve`.
 #[test]
 fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("tmux") || !have("python3") {
         eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
@@ -607,6 +612,7 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
 /// nor the port.
 #[test]
 fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("tmux") || !have("python3") {
         eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
@@ -659,6 +665,7 @@ fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
 /// operations and not their effects — `ensure_fleet` otherwise runs apt and writes `/etc/docker`.
 #[test]
 fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
+    let _env = env_lock();
     let _guard = serialize();
     let root = scratch();
     let port = stage(&root);
@@ -706,6 +713,7 @@ fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
 /// distinguishable servers is the only way to see that the second one got the first one's.
 #[test]
 fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("tmux") || !have("python3") {
         eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
@@ -777,6 +785,7 @@ fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
 /// rather than stopping and starting one, which is what makes an upgrade windowless.
 #[test]
 fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("tmux") || !have("python3") {
         eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
@@ -835,6 +844,7 @@ fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
 /// port — and then no replacement could ever bind it. The server's death is part of the doorway's.
 #[test]
 fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("tmux") || !have("python3") {
         eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
@@ -902,6 +912,7 @@ fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
 /// exactly as the doorway does. It is the doorway's own stamp that tells them apart.
 #[test]
 fn a_squatter_on_the_cockpits_port_is_never_published_to() {
+    let _env = env_lock();
     let _guard = serialize();
     if !have("tmux") || !have("python3") {
         eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
@@ -936,4 +947,22 @@ fn a_squatter_on_the_cockpits_port_is_never_published_to() {
 
     drop(squatter);
     unstage(&root);
+}
+
+/// Cargo builds ONE binary per file in `tests/`, and runs the tests in it as parallel threads of a
+/// single process. `$SKEIN_HOME`, `$SKEIN_FLEET_ROOT`, `$SKEIN_SERVER_BINARY` and `$SKEIN_SERVER_PORT` are process-global, so
+/// without this every test here writes into the middle of the others: one test's fake sandbox root
+/// answers another's call, and the symptom is an assertion about which server is listening rather than
+/// an error that names the cause.
+///
+/// The same lock, by the same argument, as `src/testutil.rs`'s `env_lock` — a separate one because
+/// that one is `#[cfg(test)]` inside the library crate and no integration binary can reach it.
+/// Poisoning is ignored for the reason given there: the guarded data is `()`, and cascading the
+/// first panic into every other test buries the real failure.
+///
+/// `tools/env-lock-check.py` is what keeps this true as tests are added here.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

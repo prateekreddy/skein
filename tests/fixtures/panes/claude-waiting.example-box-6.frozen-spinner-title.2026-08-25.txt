@@ -1,0 +1,24 @@
+› a a read description remembers than here seeing
+
+● somebody somebody seeing fixture the time is somebody said of the why and    
+
+  every description  
+
+● time than and is remembers description why a here mattered thing description why seeing a it board a a at  
+  ⎿  the read one another the time somebody thing description capture is pane
+
+● and is seeing it at at than rather a screen here real mattered remembers the which capture at real board fixture fixture is mattered read it a one capture  
+  the a rather rather rather pane every somebody board rather a remembers real pane    
+
+                                                                                            ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── example-box-6 ──
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  CTX █████░░░░░░░ 00% 000.0k/0.0M │ 5H  █▒▒▒░░░░░░░░ 00%→00% 0h00m left │ 7D  ███▒▒▒▒▒▒▒▒▒ 00%→00% 0d0h left │ $000.00 │ Opus 5(1M)                                   /rc
+  ⏵⏵ auto mode on · 1 monitor · ← for agents
+
+  ● main
+  ◯ general-purpose     panel page                                                                                                                00m 00s · ↓ 000.0k tokens
+  ◯ general-purpose  every engine                                                                                                                 00m 00s · ↓ 000.0k tokens
+  ◯ general-purpose  board  and cleanup                                                                                                            00m 0s · ↓ 000.0k tokens
+  ◯ general-purpose         and review                                                                                                 00m 00s · ↓ 000.0k tokens · 0 queued

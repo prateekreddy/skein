@@ -26,6 +26,12 @@ jobs:
       # The Source law (§2.3): nothing reaches anything except through a declared Source. Same
       # reason and same shape — a law nothing checks is a paragraph.
       - run: python3 tools/source-check.py
+      # Process-wide env vars in tests. `cargo test` runs a file's tests on many threads, so two
+      # that set the same variable interleave and read each other's values — which fails as a
+      # random red somewhere else, and has cost real time on this project more than once. The gate
+      # finds a `set_var`/`remove_var` in a scope that does not hold `env_lock()`, resolving test
+      # helpers transitively, with the deliberate exceptions declared in `docs/env-lock.toml`.
+      - run: python3 tools/env-lock-check.py
       # The cockpit's pure functions, in node. They live in `cockpit/src` because a function that
       # cannot be imported cannot be tested except by reimplementing it — and a reimplementation
       # agrees with the code right up until one of them changes.

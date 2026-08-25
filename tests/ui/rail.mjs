@@ -17,7 +17,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { grab, harness } from "./lift.mjs";
+import { grab, harness, pure } from "./lift.mjs";
 
 const t = harness();
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -38,6 +38,9 @@ function world() {
   };
   const src = `
     ${grab("esc")}
+    // Whose move it is decides which clock the age cell is on, and that rule lives in
+    // cockpit/src/move.mjs so the list, the badge and this column cannot pick different answers.
+    ${pure("move")}
     ${grab("revAge")}
     ${grab("revSize")}
     // The age cell renders the LANE's own sort key (SKEIN-251) — a column that computed its own

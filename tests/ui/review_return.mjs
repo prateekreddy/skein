@@ -25,7 +25,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { grab, harness, page } from "./lift.mjs";
+import { grab, harness, page, pure } from "./lift.mjs";
 
 // The owner's real queue, captured 2026-08-25 — 54 open pull requests on `acme/thing`, trunk
 // `develop`. See tests/ui/fixtures/README.md for why it is kept whole.
@@ -53,6 +53,10 @@ function board() {
     let revModsOpen = false, revCounts = [];
     let revSumBusy = 0;
     const REV_SUM_PARALLEL = 3;
+    // Whose move a pull request is, from cockpit/src/move.mjs — the one place that rule lives
+    // (SKEIN-302). The pane groups on it, the badge counts it and the row's mark paints it, so a
+    // world that stubbed it would be proving a second copy of the rule rather than the rule.
+    ${pure("move")}
     ${grab("revSeen")}
     ${grab("rk")}
     ${grab("revSel")}
@@ -118,6 +122,14 @@ function board() {
     ${grab("revNotReadyOpen")}
     ${grab("toggleNotReady")}
     ${grab("revNotReadyWhy")}
+    // The two groups below your move both fold now (SKEIN-302), so the pane needs both switches
+    // and the sentence each heading states its composition with.
+    ${grab("revTheirsOpen")}
+    ${grab("toggleTheirs")}
+    ${grab("REV_FOLDS")}
+    ${grab("revFolds")}
+    ${grab("revFoldOpen")}
+    ${grab("revTheirsWhy")}
     // The two empty states the pane can be in: nothing here, and nothing anywhere (SKEIN-154).
     ${grab("revLaneEmpty")}
     // The one place that decides whether the calm headline is a claim the pane has earned.
@@ -223,6 +235,16 @@ function board() {
       tries: () => revStaleTries,
       fetchOne: (n, repo) => revFetchSummary(repo || "alpha", n, "force"),
       toggleNR: () => toggleNotReady(),
+      toggleTheirs: () => toggleTheirs(),
+      // What j/k walks, which IS the drawn list in its drawn order — a folded group contributes
+      // nothing to it, because a selection must never sit on a row nobody can see.
+      nav: () => revNav.slice(),
+      // The whose-move headings as a reader sees them, with the count each one claims. Built with
+      // RegExp rather than a literal: this whole world is a template literal, so a backslash here
+      // is eaten before the regex ever exists.
+      heads: () => [...revpane.innerHTML.matchAll(
+        new RegExp('<h4[^>]*>([^<]*)<span class="revn">([0-9]+)</span>', "g"))]
+        .map(m => [m[1].trim(), Number(m[2])]),
       stack: key => toggleRevStack(key),
       chains: () => revChains(revQueue.prs || []),
       row: key => toggleRevRow(key),
@@ -733,14 +755,17 @@ function board() {
   b.open("alpha");
   await b.drain();
 
-  t.check("whose-move lanes are on screen",
-    ["your move", "their move", "not ready"].every(l => b.pane().includes(l)), true);
-  t.check("a red PR awaiting review is drawn with your move, not folded away", b.rows(), 3);
-  t.check("the fold states its own composition",
+  t.check("one your-move list at the top, and two folded groups under it",
+    b.heads(), [["your move", 2], ["waiting on others", 1], ["not ready", 2]]);
+  t.check("a red PR awaiting review is drawn with your move, not folded away", b.rows(), 2);
+  t.check("the not-ready fold states its own composition",
     b.pane().includes("1 draft, 1 conflicted"), true);
+  t.check("and so does waiting-on-others", b.pane().includes("1 you opened"), true);
 
   b.toggleNR();
-  t.check("one click and every not-ready row is there — folded is not hidden", b.rows(), 5);
+  t.check("one click and every not-ready row is there — folded is not hidden", b.rows(), 4);
+  b.toggleTheirs();
+  t.check("and the same for the one you opened", b.rows(), 5);
 }
 
 // ---- the actual review: what the pane posts is exactly what was kept ----
@@ -1140,6 +1165,202 @@ await trunkSeam("");
   t.check("every develop-rooted stack survives the trunk pull request", chains.length >= 4, true);
 }
 
+// ---- SKEIN-302: ONE "your move" list, mixing both roles, ordered by stack then age ----
+//
+// The owner's ask, answered at the top level of the pane: "I want to know what needs me very
+// clearly." Under the lane split the top of the pane was `Lane::NeedsYou` alone — the REVIEWER's
+// question — so a pull request the owner had opened was `waiting` by definition however stuck it
+// was, and the one screen built to say what needs you could not say it about half their work.
+//
+// Driven by the owner's own 54-pull-request branch graph, because membership and ORDER are the two
+// halves of the claim and a hand-made pair proves neither: this queue is four stacks (26, 18, 3 and
+// 2 steps) and five loose rows, so 49 of the 54 would interleave under a plain per-pull-request age
+// sort. The ages below are chosen to make that interleaving visible — the newest touch in the whole
+// queue is a step buried inside a stack, and the oldest is a stack's own next step.
+{
+  const b = board();
+  const ago = h => new Date(Date.now() - h * 3600 * 1000).toISOString();
+  // Each stack's NEXT ACTIONABLE step carries the age its row is sorted at; everything else is
+  // recent enough that a naive sort would float it to the top.
+  const AGES = { 650: 100, 652: 60, 218: 40, 667: 20, 685: 5, 700: 0.01, 711: 0.02 };
+  const thread = (id, who, h) => ({ id, resolved: false, outdated: false, author: who,
+                                    started_at: ago(h), url: `https://github.com/x/y#${id}` });
+  b.trunk(THING.trunk);
+  b.lanes(THING.prs.map(p => ({
+    ...p, head_sha: "sha" + p.number, committed_at: "", settled: true, draft: false,
+    checks: "failing",           // the whole fleet is red; none of it decides anything here
+    // Every pull request NOT awaiting your review is one you opened — which is what the owner's own
+    // repository queue looks like, and what makes the CI assertion at the bottom mean something:
+    // twenty-six red pull requests of theirs, and the rule must leave every one of them alone.
+    reasons: [p.lane === "needs-you" ? "reviewer" : "author"],
+    my_review: "none", review_is_current: false,
+    updated_at: ago(AGES[p.number] != null ? AGES[p.number] : 1),
+    // #218 is the owner's OWN pull request, with two threads open on it. It is `waiting` at the
+    // server and belongs at the top of the mixed list — this is the row the lane split could not
+    // show, and it sorts by age BETWEEN the stacks rather than after them.
+    ...(p.number === 218
+      ? { reasons: ["author"], review_threads: [thread("t1", "dana", 40), thread("t2", "sam", 39)],
+          review_threads_total: 2 }
+      : {}),
+  })));
+  b.open("alpha");
+  await b.drain();
+
+  // MEMBERSHIP and ORDER in one assertion, because they are one claim. Four stack rows and the
+  // owner's own pull request, oldest first — and #218 in the middle of them, which is the whole
+  // point of mixing the roles.
+  t.check("the your-move list is four stacks and your own pull request, oldest first",
+    b.nav(),
+    ["stack:alpha#650", "stack:alpha#661", "alpha#218", "stack:alpha#659", "stack:alpha#686"]);
+  // A plain age sort over the same rows would open with #700 and #711 — two steps in the middle of
+  // two different stacks, neither of which can be reviewed yet.
+  t.check("the newest touch in the queue is a stack step, and it does not lead the list",
+    b.nav().slice(0, 1), ["stack:alpha#650"]);
+  t.check("and no step of a stack is loose in the list",
+    b.nav().some(k => ["alpha#700", "alpha#711", "alpha#652", "alpha#667", "alpha#685"].includes(k)),
+    false);
+
+  t.check("one list at the top, one folded group under it",
+    b.heads(), [["your move", 5], ["waiting on others", 4]]);
+  // The heading reconciles the two counts §5.3 says must both be true: five things you can start,
+  // out of fifty of them.
+  t.check("and it says how many pull requests those five starts are",
+    /from 50 pull requests/.test(b.pane()), true);
+  t.check("the group below states what it is made of",
+    b.pane().includes("4 you signed off") || b.pane().includes("you opened")
+      ? b.pane().includes("— click to expand") : false, true);
+
+  // The row says WHY it needs you, in words, on the collapsed line. `revRow` is stubbed in this
+  // world, so the sentence itself is asserted where the real row is drawn (rowWorld, below); what
+  // this proves is that the rule put it there rather than in the reviewer half.
+  t.check("your own pull request is in your move because of its threads, never its red checks",
+    b.chains().every(st => st.steps.every(p => p.number !== 218)), true);
+
+  // The CI rule, at the pane. Every row in this queue is `checks: "failing"` — on the owner's fleet
+  // CI runs after review, so red is the ordinary state — and not one of the twenty-six pull
+  // requests they authored is in the list because of it.
+  b.toggleTheirs();
+  t.check("twenty-six red pull requests of theirs stay out of the your-move list",
+    [b.nav().slice(0, 5), b.nav().length],
+    [["stack:alpha#650", "stack:alpha#661", "alpha#218", "stack:alpha#659", "stack:alpha#686"], 9]);
+  b.toggleTheirs();
+}
+
+// ---- SKEIN-304/306: the conversation, and who still owes an approval ----
+//
+// Two kinds of conversation, drawn deliberately differently, and the asymmetry is the whole design:
+// a PR-level comment renders its TEXT here, and an inline review thread renders who, when and the
+// way to it and never a word of what was said. The owner: "not keyed on lines… if they are inline
+// comments then link out. If they are normal comments then just show it here and also link out."
+//
+// The obvious instinct is to treat both alike, which is why this is asserted in both directions —
+// the body is present for one and absent for the other, in the same render.
+function convWorld() {
+  const body = `
+    let revQueue = { ai: true, blind_spots: [] };
+    ${pure("move")}
+    ${grab("rk")}
+    ${grab("revAgo")}
+    ${grab("revTeamsBlind")}
+    ${grab("revApprovals")}
+    // A thread's line is its own element with its own key (SKEIN-305) — the receipt and the resolve
+    // live on it, and the hold machinery it rides is proven in tests/ui/undo.mjs.
+    ${grab("revPending")}
+    ${grab("revReceiptHtml")}
+    ${grab("revThreadKey")}
+    ${grab("revThreadHtml")}
+    ${grab("revConversation")}
+    return {
+      approvals: pr => revApprovals(pr),
+      conv: pr => revConversation(pr),
+      blind: bs => { revQueue.blind_spots = bs; },
+    };
+  `;
+  return new Function("esc", body)(grabbedEsc);
+}
+// The page's real `esc`, so a comment body carrying markup is asserted against the escaping that
+// actually ships rather than against a stub that would pass either way.
+const grabbedEsc = new Function(`${grab("esc")}; return esc;`)();
+{
+  const w = convWorld();
+  const ago = h => new Date(Date.now() - h * 3600 * 1000).toISOString();
+  const base = over => ({ number: 41, repo_id: "alpha", title: "t", lane: "waiting",
+    reasons: ["author"], base_ref: "main", url: "https://github.com/a/b/pull/41",
+    my_review: "none", review_is_current: false, review_decision: "", checks: "failing",
+    review_threads: [], review_threads_total: null, comments: [], comments_total: null,
+    review_requests: [], ...over });
+
+  const both = w.conv(base({
+    review_threads: [
+      { id: "T1", resolved: false, outdated: false, author: "dana", started_at: ago(30),
+        url: "https://github.com/a/b/pull/41#discussion_r1" },
+      { id: "T2", resolved: true, outdated: false, author: "sam", started_at: ago(20), url: "u2" },
+    ],
+    review_threads_total: 2,
+    comments: [{ author: "dana", body: "Can we ship this before Friday?", created_at: ago(2),
+                 url: "https://github.com/a/b/pull/41#issuecomment-9" }],
+    comments_total: 1,
+  }));
+  t.check("a PR-level comment renders its text, here, without leaving skein",
+    both.includes("Can we ship this before Friday?"), true);
+  t.check("an inline thread renders who opened it, when, and the way to it",
+    [both.includes("dana"), both.includes("discussion_r1")], [true, true]);
+  t.check("a resolved thread is counted, not listed", both.includes("1 resolved"), true);
+  // The half that is not an omission but a decision: the bodies are never FETCHED (prq::ReviewThread
+  // — SKEIN-287 cut this payload from 155KB to 12KB), so there is nothing here to render even if
+  // somebody wanted to. If a `body` key ever appears on a thread, this is where it gets drawn by
+  // accident.
+  const withBody = w.conv(base({
+    review_threads: [{ id: "T1", resolved: false, author: "dana", started_at: ago(3),
+                       url: "u", body: "what dana actually wrote" }],
+    review_threads_total: 1,
+  }));
+  t.check("a thread's text is not drawn even when a payload turns up carrying one",
+    withBody.includes("what dana actually wrote"), false);
+
+  const truncated = w.conv(base({
+    review_threads: [{ id: "T1", resolved: true, author: "dana", started_at: ago(30), url: "u" }],
+    review_threads_total: 5,
+    comments: [{ author: "sam", body: "the last word", created_at: ago(1), url: "u" }],
+    comments_total: 40,
+  }));
+  t.check("a capped thread list says how many it could not see",
+    truncated.includes("4 more threads skein did not fetch"), true);
+  t.check("and a capped conversation says which part of it this is",
+    truncated.includes("The last 1 of 40"), true);
+
+  // A comment body is somebody else's text off the internet. It is escaped and never markdown —
+  // `marked.parse` is pointed at skein's own prose and nothing else on this page.
+  const nasty = w.conv(base({
+    comments: [{ author: "x", body: "<img src=x onerror=alert(1)>", created_at: ago(1), url: "u" }],
+    comments_total: 1,
+  }));
+  t.check("a comment body is escaped, not rendered",
+    [nasty.includes("<img"), nasty.includes("&lt;img")], [false, true]);
+
+  t.check("a pull request with no conversation at all draws nothing", w.conv(base({})), "");
+
+  // ---- who still owes an approval ----
+  t.check("an authored row names the people and teams GitHub is waiting on",
+    w.approvals(base({ review_requests: [{ name: "dana", team: false },
+                                         { name: "acme/core", team: true }] }))
+      .includes("waiting on @dana and the acme/core team"), true);
+  t.check("and says plainly when the repository is satisfied",
+    w.approvals(base({ review_decision: "APPROVED" })).includes("every approval this repository asks for is in"),
+    true);
+  t.check("a pull request somebody else opened is not asked this question",
+    w.approvals(base({ reasons: ["reviewer"], review_requests: [{ name: "dana", team: false }] })), "");
+
+  // SKEIN-262's blind spot, at the one place a short list does harm: a roster read as whole is how
+  // somebody concludes an approval has landed that never will.
+  w.blind(["alpha: team review requests are missing — `gh` cannot list your teams. Fix: gh auth refresh -s read:org"]);
+  t.check("a roster that could not see teams says so rather than reading as complete",
+    w.approvals(base({ review_requests: [{ name: "dana", team: false }] })).includes("incomplete"), true);
+  w.blind(["alpha: 12 pull requests are missing from this queue"]);
+  t.check("and an unrelated blind spot does not make it cry wolf",
+    w.approvals(base({ review_requests: [{ name: "dana", team: false }] })).includes("incomplete"), false);
+}
+
 // ---- the row is five cells at one height, and it never says nothing ----
 //
 // Three findings, one row (SKEIN-156/157/158): flex let six rows grow to 62px among 23 at 36px, so
@@ -1159,6 +1380,8 @@ function rowWorld() {
     let revSel = null, revFlash = "";        // SKEIN-159: revRow paints sel/flash/held from these
     const revPending = new Map();
     const revFlows = new Map([["alpha", { read_prs: true }]]);
+    // The move mark and the WHY on the collapsed line both read cockpit/src/move.mjs (SKEIN-302).
+    ${pure("move")}
     ${grab("rk")}
     ${grab("revDecided")}
     ${grab("revMoved")}
@@ -1763,7 +1986,14 @@ function rowWorld() {
   const order = [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1]));
   t.check("a week-old request outranks a minute-old push",
     order.slice(0, 3), [100, 200, 300]);
-  t.check("their move keeps recency, newest first", order.slice(3), [500, 400]);
+  // Waiting-on-others is a group you go looking at, so it is folded and draws no rows until asked
+  // (SKEIN-302). Its ORDER is still recency, newest first — for your own pull requests "what moved
+  // most recently" is the right question — which is what one click shows.
+  t.check("waiting on others draws nothing until you ask for it", order.slice(3), []);
+  b.toggleTheirs();
+  t.check("their move keeps recency, newest first",
+    [...b.pane().matchAll(/<row n=(\d+)>/g)].map(m => Number(m[1])).slice(3), [500, 400]);
+  b.toggleTheirs();
 
   // SKEIN-251. This fixture already had the row that proves it — #200, committed 72h ago and
   // touched 30 seconds ago — and asserted only the ORDER, so the divergence was baked in as
@@ -2054,6 +2284,11 @@ function composeWorld(store) {
     ${grab("revFire")}
     ${grab("revMarkDone")}
     ${grab("revRepaintRow")}
+    // The pending paint routes a THREAD key to its own paint (SKEIN-305), so it needs the marker
+    // that tells the two kinds of key apart. (No backticks: this whole world is a template literal.)
+    ${grab("REV_THREAD_MARK")}
+    ${grab("revThreadAt")}
+    ${grab("revThreadPaint")}
     ${grab("revPendingPaint")}
     let revReading = null;
     let revQueue = { prs: [] };

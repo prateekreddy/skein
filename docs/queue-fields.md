@@ -57,8 +57,18 @@ deleting a field changes a payload and a cache shape, and that is a decision wit
 
 Deleting those two is SKEIN-298, not this document's job.
 
-**Ahead of its reader.** The field is for the page, the page does not draw it *yet*, and the work
-that will is a live item. This is the one category with an expiry: the line names the item that
+**Ahead of its reader — and now empty, which is how it was supposed to end.** SKEIN-318 deleted all
+seven the day SKEIN-300's panel drew them; the lines named the item that removes them and it removed
+them. Kept as a category because it will be wanted again, not because anything is in it.
+
+`Pr.review_decision` and `Pr.merge_state` left the **server-consumed** list at the same time and for
+a different reason: their server readers are still real (`src/prwork.rs`'s `facts_of`), but the panel
+reads them now too, and the closing rule below does not care why a line was written — a declaration
+naming a field the page reads is an exemption that outlived its reason. Their rows stay in the prose
+table above, which the test does not parse; only the machine-readable lines went.
+
+The definition, for when the category is next used. The field is for the page, the page does not draw
+it *yet*, and the work that will is a live item. This is the one category with an expiry: the line names the item that
 deletes it, and the document's closing rule — "a declaration naming a field the page now reads is
 an exemption that outlived its reason: delete the line" — is what ends it. It is deliberately
 narrow. "The page will read it one day" with no item is the same claim as "used server-side" with
@@ -74,20 +84,11 @@ The test parses this section and nothing else, so a field is declared exactly wh
 here. Format: a list item whose first backticked span is `Type.field`.
 
 - `Pr.labels` — server-consumed by the merge train (`src/prwork.rs`, `src/workflow.rs`)
-- `Pr.review_decision` — server-consumed by the merge train (`src/prwork.rs`)
-- `Pr.merge_state` — server-consumed by the merge train (`src/prwork.rs`)
 - `Queue.viewer` — server-consumed by `src/prwork.rs`, `src/review.rs`, `src/bin/skein-server.rs`
 - `Summary.computed` — server-consumed by `src/review.rs`
 - `Signal.symbol` — server-consumed by `src/shape.rs`
 - `Pr.settled` — DEAD, delete pending (SKEIN-234, SKEIN-298)
 - `Pr.box_name` — DEAD, delete pending (SKEIN-298)
-- `Pr.review_threads` — AHEAD OF ITS READER: fetched by SKEIN-301, drawn by SKEIN-300's panel (delete this line with SKEIN-318)
-- `Pr.review_threads_total` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
-- `Pr.comments_total` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
-- `Pr.review_requests` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
-- `ReviewThread.outdated` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
-- `ReviewThread.started_at` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
-- `PrComment.created_at` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
 
 ## What to do when this test fails
 
