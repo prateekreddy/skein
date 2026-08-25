@@ -1331,6 +1331,17 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    "Append-only" is unenforceable on a path a uid-1000 box can reach — there is no `chattr +a`
    without `CAP_LINUX_IMMUTABLE`.
 
+   **So the warden's home splits, and the two halves want opposite things** (SKEIN-218). R5 puts the
+   secret under the cover, which means following the volume root; delivery §3 4c mounts that volume
+   *into* the fleet, where skein runs. The record therefore lives beside the volume rather than on
+   it: `warden/src/lib.rs` `audit_home()` derives `$SKEIN_WARDEN_AUDIT | ~/.skein-warden` — a
+   sibling of the volume, so it stays outside wherever the volume is pointed — and a log or an
+   outcome left under the volume by an earlier warden is **moved out** at start
+   (`warden/src/audit.rs` `adopt_left_behind`). The outcomes travel with the log rather than the
+   secret, and not only for tidiness: an outcome the audited thing can write is an answer the warden
+   would then serve as its own. `$SKEIN_WARDEN_HOME` still keeps both halves in one directory, since
+   that override is a test or a development run saying where everything goes.
+
    **The sink existed and nothing reported into it**, which is the same as not having one with the
    reassurance of the code being present. skein now reports the acts it takes *without* asking the
    warden to take them — **a box destroyed, a push credential granted or withdrawn, a box handed to

@@ -38,6 +38,77 @@ pub struct Entry {
     pub reported_by: String,
 }
 
+/// Move a record left under the volume to the host-side home the warden keeps now (SKEIN-218).
+///
+/// The audit log and the outcomes lived under [`crate::home()`] — which follows the volume root,
+/// for the secret's sake — until delivery 4c made that volume something skein reads and writes
+/// from inside the fleet. Two things are wrong with leaving them there, and only one of them is
+/// about history: an audit log the audited thing can rewrite is not a record, and an OUTCOME the
+/// audited thing can write is an *answer the warden will then serve* as its own.
+///
+/// So the move is part of the fix, not a courtesy. It runs only for a fully derived pair of homes:
+/// under either override the operator has said where these go, and moving somebody's production
+/// record into a scratch directory is how a test deletes real history.
+///
+/// `rename` first, then a copy-and-remove for the `EXDEV` case — a volume on another disk is the
+/// common reason for a non-default `$SKEIN_HOME`, and the point is that nothing stays behind.
+pub fn adopt_left_behind(volume_home: &Path, record: &Path) {
+    for key in ["SKEIN_WARDEN_HOME", "SKEIN_WARDEN_AUDIT"] {
+        if std::env::var_os(key).is_some_and(|s| !s.is_empty()) {
+            return;
+        }
+    }
+    if volume_home == record {
+        return;
+    }
+    if std::fs::create_dir_all(record).is_err() {
+        return; // The log reports its own failure to open, loudly, at the first append.
+    }
+    move_file(&volume_home.join("audit.jsonl"), &record.join("audit.jsonl"));
+    move_outcomes(&volume_home.join("outcomes"), &record.join("outcomes"));
+}
+
+/// One file, if it is there and nothing is at the destination.
+fn move_file(old: &Path, new: &Path) {
+    if !old.exists() || new.exists() {
+        return;
+    }
+    let moved = std::fs::rename(old, new).or_else(|_| {
+        std::fs::copy(old, new)
+            .and_then(|_| std::fs::remove_file(old))
+            .map(|_| ())
+    });
+    match moved {
+        Ok(()) => eprintln!(
+            "skein-warden: moved {} to {} — the record lives beside the volume now, not on it              (§5: skein cannot audit itself)",
+            old.display(),
+            new.display()
+        ),
+        Err(e) => eprintln!(
+            "skein-warden: could not move {} to {} ({e}) — it is on the volume, which skein can              write, so delete it once you have kept what you want from it",
+            old.display(),
+            new.display()
+        ),
+    }
+}
+
+/// The outcomes directory: flat, `<id>.json` per answer, so a file-by-file fallback is the whole
+/// of it. Merged into whatever is already at the destination rather than refused, because an id
+/// that exists at both ends is the same operation and the destination's copy is the newer one.
+fn move_outcomes(old: &Path, new: &Path) {
+    let Ok(entries) = std::fs::read_dir(old) else {
+        return;
+    };
+    if std::fs::create_dir_all(new).is_err() {
+        return;
+    }
+    for entry in entries.flatten() {
+        move_file(&entry.path(), &new.join(entry.file_name()));
+    }
+    // Only when it is empty — a directory that still holds something is one this did not finish.
+    let _ = std::fs::remove_dir(old);
+}
+
 /// The host-side log.
 pub struct Log {
     path: PathBuf,
@@ -152,5 +223,60 @@ mod tests {
         // Both are in the log. Neither is deleted to make room for the other — an audit log that
         // resolved a disagreement would be hiding the one thing worth reading.
         assert_eq!(entries.len(), 2);
+    }
+
+    /// A record left on the volume is moved off it, outcomes included (SKEIN-218).
+    #[test]
+    fn a_record_left_on_the_volume_does_not_stay_there() {
+        let _g = crate::env_lock();
+        let keep: Vec<_> = ["SKEIN_WARDEN_HOME", "SKEIN_WARDEN_AUDIT"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        for (k, _) in &keep {
+            std::env::remove_var(k);
+        }
+
+        let volume = scratch("volume-warden");
+        let record = scratch("host-record");
+        std::fs::create_dir_all(&volume).unwrap();
+        std::fs::write(volume.join("audit.jsonl"), "{\"what\":\"approved\"}\n").unwrap();
+        std::fs::create_dir_all(volume.join("outcomes")).unwrap();
+        std::fs::write(volume.join("outcomes/op-1.json"), "{}").unwrap();
+
+        adopt_left_behind(&volume, &record);
+
+        assert!(
+            !volume.join("audit.jsonl").exists(),
+            "the log is still on the volume, where the audited thing can rewrite it"
+        );
+        assert!(
+            !volume.join("outcomes/op-1.json").exists(),
+            "an outcome is still on the volume, where skein could write one the warden then serves"
+        );
+        assert_eq!(
+            std::fs::read_to_string(record.join("audit.jsonl")).unwrap(),
+            "{\"what\":\"approved\"}\n",
+            "the history did not travel"
+        );
+        assert!(record.join("outcomes/op-1.json").exists());
+
+        // An overridden home is the operator saying where these live; nothing is moved out of it.
+        let over = scratch("overridden");
+        std::fs::create_dir_all(&over).unwrap();
+        std::fs::write(over.join("audit.jsonl"), "kept\n").unwrap();
+        std::env::set_var("SKEIN_WARDEN_HOME", over.display().to_string());
+        adopt_left_behind(&over, &record);
+        assert!(
+            over.join("audit.jsonl").exists(),
+            "a test's or a developer's own directory was emptied into the host record"
+        );
+
+        for (k, v) in keep {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
     }
 }

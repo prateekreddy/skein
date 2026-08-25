@@ -859,11 +859,18 @@ fn a_box_sees_its_own_repo_and_no_one_elses() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// The two directories the older cover already owns are never re-covered here.
+/// The two directories the older cover already owns are never re-covered AFTER their binds — and
+/// an ancestor of them is covered BEFORE (SKEIN-219).
 ///
 /// A tmpfs lands in the argument list in order, so one written over `$fleet_root` or over the box
-/// state parent AFTER their binds throws those binds away — and the box comes up with no root of
-/// its own and no state, which is worse than the exposure the loop exists to close.
+/// state parent after their binds throws those binds away — and the box comes up with no root of
+/// its own and no state, which is worse than the exposure the loop exists to close. That is why an
+/// ancestor mount used to be skipped altogether; skipping is not covering, and the volume a fleet
+/// serves from is exactly such an ancestor, so every box could read `credentials/` off it. Order is
+/// what makes both true at once: the ancestor first, the entitlements bound back through it (bwrap
+/// resolves a bind source against the original filesystem). What a box can actually reach after
+/// that is asserted against a real namespace in `tests/isolation_bwrap.rs`; this one is about the
+/// argument list.
 #[test]
 fn covering_the_mounts_does_not_uncover_the_box() {
     let dir = std::env::temp_dir().join(format!("skein-iso-order-{}", std::process::id()));
@@ -901,9 +908,18 @@ fn covering_the_mounts_does_not_uncover_the_box() {
         !tmpfs_after_bind(&states, &states.join("web-main")),
         "the state parent was re-covered after the box got its state back: {binds}"
     );
+    let lines: Vec<&str> = binds.lines().collect();
+    let ancestor_at = lines
+        .windows(2)
+        .position(|w| w[0] == "--tmpfs" && w[1] == dir.to_string_lossy())
+        .expect("the mount containing both was not covered at all, so a box can read it");
+    let first_bind = lines
+        .iter()
+        .position(|l| *l == fleet.join("web-main").to_string_lossy())
+        .expect("the box never got its own root back");
     assert!(
-        !has_pair(&binds, "--tmpfs", dir.to_string_lossy().as_ref()),
-        "an ancestor of both was covered, which erases both binds: {binds}"
+        ancestor_at < first_bind,
+        "the ancestor was covered after the binds it contains, which throws them away: {binds}"
     );
 
     let _ = fs::remove_dir_all(&dir);

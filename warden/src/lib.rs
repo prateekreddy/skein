@@ -60,6 +60,38 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Where the warden's RECORD lives — the audit log and the outcomes beside it — which is
+/// deliberately **not** where its secret lives.
+///
+/// `$SKEIN_WARDEN_AUDIT` if set and non-empty, else `$SKEIN_WARDEN_HOME` when the operator has
+/// overridden the whole home (tests and development keep one scratch directory rather than two),
+/// else `~/.skein-warden` on the host — beside the volume, never inside it.
+///
+/// **Why the home splits at all.** [`home()`] follows the volume root so the secret stays under
+/// the cover derived over that root (§9.5 R5). Delivery step 4c mounts that volume INTO the fleet
+/// sandbox, where skein runs — so a home that is right for the secret is exactly wrong for the log:
+/// §5 argues skein cannot audit itself, and architecture.md's queue table says it in one line — "a
+/// record of an approval must not live where the thing being audited can reach it". The two halves
+/// want opposite things from the same directory, so they no longer share one.
+///
+/// `~/.skein-warden` rather than `~/.skein/warden-log`: the volume is what gets mounted, and a
+/// sibling of it is outside by construction wherever the volume is pointed. A path *inside*
+/// `~/.skein` would be back on the volume the day somebody repointed it.
+///
+/// The outcomes go with the log rather than with the secret because they are the same kind of
+/// thing — what happened, written by the approving side — and because nothing of skein's reads
+/// them off disk: it asks the warden over the socket (`src/warden_client.rs`).
+pub fn audit_home() -> std::path::PathBuf {
+    if let Some(explicit) = std::env::var_os("SKEIN_WARDEN_AUDIT").filter(|s| !s.is_empty()) {
+        return std::path::PathBuf::from(explicit);
+    }
+    if let Some(overridden) = std::env::var_os("SKEIN_WARDEN_HOME").filter(|s| !s.is_empty()) {
+        return std::path::PathBuf::from(overridden);
+    }
+    std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
+        .join(".skein-warden")
+}
+
 #[cfg(test)]
 mod tests {
     /// The home follows the volume, and the override steps outside it.
@@ -103,6 +135,57 @@ mod tests {
             super::home(),
             std::path::PathBuf::from("/somewhere/deliberate"),
             "the explicit override is the operator leaving the covered world, and it wins"
+        );
+
+        for (k, v) in keep {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// The record does NOT follow the volume, because at 4c the volume is inside the fleet
+    /// (SKEIN-218).
+    #[test]
+    fn the_audit_home_is_never_inside_the_volume() {
+        let _g = super::env_lock();
+        let keep: Vec<_> = ["SKEIN_WARDEN_HOME", "SKEIN_WARDEN_AUDIT", "SKEIN_HOME", "HOME"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+
+        std::env::set_var("HOME", "/host/home");
+        for k in ["SKEIN_WARDEN_HOME", "SKEIN_WARDEN_AUDIT", "SKEIN_HOME"] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(
+            super::audit_home(),
+            std::path::PathBuf::from("/host/home/.skein-warden"),
+            "the record must sit beside the volume, not in it"
+        );
+
+        // The case the split exists for: a repointed volume moves the secret and must not move the
+        // log with it — wherever the volume is pointed, that is a place skein can write.
+        std::env::set_var("SKEIN_HOME", "/mnt/backup/.skein-backup");
+        assert_eq!(super::home(), std::path::PathBuf::from("/mnt/backup/.skein-backup/warden"));
+        assert_eq!(
+            super::audit_home(),
+            std::path::PathBuf::from("/host/home/.skein-warden"),
+            "the volume moved and took the record with it — the audited thing can reach it there"
+        );
+
+        // One scratch directory for a test or a development run, both halves in it.
+        std::env::set_var("SKEIN_WARDEN_HOME", "/somewhere/deliberate");
+        assert_eq!(
+            super::audit_home(),
+            std::path::PathBuf::from("/somewhere/deliberate")
+        );
+        // …and the narrower variable wins over it, for an operator who wants only the record moved.
+        std::env::set_var("SKEIN_WARDEN_AUDIT", "/var/log/skein-warden");
+        assert_eq!(
+            super::audit_home(),
+            std::path::PathBuf::from("/var/log/skein-warden")
         );
 
         for (k, v) in keep {

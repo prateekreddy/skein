@@ -33,6 +33,13 @@ fn main() {
     // A secret from before the home followed the volume is moved in, not re-minted — the pairing
     // survives the path change, and nothing secret-shaped stays at the uncovered old default.
     skein_warden::secret::adopt_left_behind(&home);
+    // The RECORD goes the other way (SKEIN-218). The home above follows the volume for the
+    // secret's sake, and delivery 4c mounts that volume into the fleet — so the log and the
+    // outcomes, which must sit where the audited thing cannot reach them, live beside it instead.
+    // `audit_home()` derives that, and anything left under the volume by an earlier warden is
+    // moved out rather than read in place.
+    let record = skein_warden::audit_home();
+    skein_warden::audit::adopt_left_behind(&home, &record);
 
     let listener = match bind(port) {
         Ok(listener) => listener,
@@ -52,8 +59,8 @@ fn main() {
     };
 
     let warden = Arc::new(Warden {
-        store: Store::new(home.join("outcomes"), RETENTION),
-        log: Log::new(home.join("audit.jsonl")),
+        store: Store::new(record.join("outcomes"), RETENTION),
+        log: Log::new(record.join("audit.jsonl")),
         approver,
         doorway: skein_warden::flooding::Doorway::new(),
         secret: skein_warden::secret::Secret::kept_in(&home),
@@ -71,6 +78,25 @@ fn main() {
                 .join(", "),
         }
     );
+
+    // **And the pairing said at the moment somebody moves the VOLUME.**
+    //
+    // The home above is derived from `$SKEIN_HOME`, and the two processes read their own
+    // environments: `SKEIN_HOME=/mnt/backup skein …` with a warden started without it leaves skein
+    // reading a secret at one path and the warden minting one at another. The failure is loud —
+    // every request refused, which is what a mismatched secret is supposed to look like — but the
+    // cause is not, and "the warden refuses everything" reads as a broken warden rather than as two
+    // processes disagreeing about where the volume is. Whatever repoints one must repoint both.
+    //
+    // The record does NOT move with it, by design: see `audit_home()`.
+    if let Some(volume) = std::env::var_os("SKEIN_HOME").filter(|s| !s.is_empty()) {
+        eprintln!(
+            "skein-warden: volume {} (from $SKEIN_HOME) — skein must be pointed at the same one, \
+             or every request is refused for a mismatched secret; the record is at {}",
+            std::path::Path::new(&volume).display(),
+            record.display()
+        );
+    }
 
     // **The pairing, said at the moment somebody changes the port.**
     //

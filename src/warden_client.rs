@@ -273,6 +273,13 @@ pub struct Warden {
 /// "empty is unset" — and `warden/src/lib.rs`'s `home()` spells the identical chain on the other
 /// end, with the roundtrip test to fail if they drift.
 ///
+/// **And it does not ask `deployment` anything**, which is why it has no `CONSULTED_BY` entry
+/// (`src/deployment.rs`). In the fleet the volume is mounted at its host path, so the same chain
+/// resolves to the same file from both sides of the move; nothing about reading the secret differs
+/// by where skein is standing. The warden's own home is the half that changes at 4c — its record
+/// moves off the volume (`warden/src/lib.rs` `audit_home()`, SKEIN-218) — and that is the warden's
+/// decision on the host, never this reader's.
+///
 /// **skein only reads.** One minter — the warden, which owns the directory — because two would each
 /// write a different value and the mismatch would look exactly like an intruder, which is the
 /// loudest possible failure for the most boring possible cause. The old fixed default is kept only
