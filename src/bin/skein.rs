@@ -114,6 +114,7 @@ fn main() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
+        "fleet-serve" => cmd_fleet_serve(rest.iter().any(|a| a == "--uncovered-volume")),
         "version" | "--version" | "-v" => {
             // Package version from the manifest (a hardcoded copy here had already drifted once),
             // revision from the build stamp — the package version alone is 0.1.0 forever and
@@ -154,6 +155,8 @@ skein login <runtime> authenticate once in the shared sandbox; every box inherit
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
                       (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
+skein fleet-serve     run the web cockpit INSIDE the fleet sandbox (delivery 4c); a plain\n  \
+                      `skein-server` on the host is unchanged and stays the default\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
 skein doctor          check registry, tools, and the shared sandbox if one is on\n  \
@@ -1149,6 +1152,48 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
         }),
         Err(e) => Err(format!("running {program}: {e}")),
     }
+}
+
+/// `skein fleet-serve [--uncovered-volume]` — the move (delivery §3 4c): run skein-server inside
+/// the fleet sandbox, with the host path one variable away.
+///
+/// The sequence is `fleet::ensure_fleet_server`'s, in the order the design requires: the volume
+/// visible in the sandbox, the binary installed over stdin, the cockpit's socket opened by the
+/// doorway *before* the server starts behind it (src/server-doorway.py), and the port published
+/// last, once something holds it. The host-driven `skein-server` is untouched by all of this — it
+/// sets no `SKEIN_IN_FLEET` and behaves exactly as it always has, which is the fallback §4c
+/// demands.
+///
+/// `--uncovered-volume` is R9's shape applied here: mounting the volume into the sandbox is what
+/// the server needs, and until the launcher's mount cover learns to cover the volume root, it is
+/// also readable from every box. `fleet::fleet_serve_mounts` states the grant; this flag is the
+/// only way to take it.
+fn cmd_fleet_serve(accept_uncovered: bool) -> Result<(), String> {
+    let sandbox = skein::place::fleet_sandbox();
+    if sandbox.is_empty() {
+        return Err(
+            "no fleet sandbox is configured (fleet_sandbox in config.json) — the cockpit needs a \
+             fleet to move into"
+                .into(),
+        );
+    }
+    let mounts = skein::fleet::fleet_serve_mounts(accept_uncovered)?;
+    skein::fleet::ensure_fleet(&sandbox, &mounts)?;
+    let port = skein::fleet::ensure_fleet_server(&sandbox)?;
+    // The same token file: the volume is mounted at its host path, so the server inside reads the
+    // secret this process can read, and the URL printed here is a URL that works.
+    match skein::apiauth::token() {
+        Ok(t) => println!("skein-server is running inside {sandbox} → http://127.0.0.1:{port}/?t={t}"),
+        Err(e) => println!(
+            "skein-server is running inside {sandbox} → http://127.0.0.1:{port}/ (no API token \
+             could be read: {e})"
+        ),
+    }
+    println!(
+        "{DIM}the host path is unchanged: run `skein-server` on this machine to serve \
+         host-driven, exactly as before{RESET}"
+    );
+    Ok(())
 }
 
 /// `skein resize <memory> [cpus]` — rebuild the shared sandbox at a new size.

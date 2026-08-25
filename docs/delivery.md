@@ -209,11 +209,12 @@ in its own item because there is nothing to hang it on until there is a fleet st
 **4c — the move**, with host-driven mode still working one environment variable away. **Started**,
 and written down: SKEIN-101 with eight children, one per row of §2's table plus the mechanics.
 
-The variable exists (`SKEIN_IN_FLEET`, `src/deployment.rs`) and so far decides **nothing** — it is
-reported by `skein doctor` and read nowhere else. That is deliberate and it is checked: the module
-carries a list of every unit allowed to branch on the deployment, and a test fails the build when a
-unit starts branching without being added to it. The move lands one change at a time, and "what does
-this flag change so far" has to stay answerable for that to mean anything.
+The variable exists (`SKEIN_IN_FLEET`, `src/deployment.rs`), and what it decides is **enumerated**:
+the module carries `CONSULTED_BY` — eight units at this writing — and a test fails the build when a
+unit starts branching on the deployment without being added to it, or stays listed after it stops.
+It began as "reported by `skein doctor` and read nowhere else", deliberately, so the seam existed
+before anything leant on it. The move lands one change at a time, and "what does this flag change
+so far" has to stay answerable for that to mean anything.
 
 Declared rather than detected, because every detector anybody would write — is `/run/sandbox` there,
 is `sbx` on `$PATH` — is a guess about somebody else's machine, and the two wrong answers are not
@@ -221,7 +222,7 @@ symmetric. A fleet process that thinks it is on the host runs `sbx`, fails, and 
 process that thinks it is in the fleet stops reaching a fleet only it can reach, and the symptom is a
 fleet that appears to have no boxes.
 
-**Three of §2's six rows are now answered, and one of them was not a row at all.** The file picker
+**Five of §2's six rows now have their answer, and one of them was not a row at all.** The file picker
 went from both boards rather than being made deployment-dependent (SKEIN-106) — the answer had
 already shipped at `/v2`, and a button that is there and does nothing is how somebody concludes skein
 is broken. The credential turned out to be two-thirds already built (SKEIN-107): a GitHub App and
@@ -265,6 +266,43 @@ unplaced box already does. And **the cockpit's terminal stopped naming `sbx`**: 
 `CommandBuilder::new("sbx")`, which cannot be told the deployment changed the program, so
 `interactive_argv` now returns the whole argv including argv[0]. `bin/skein-server` came off the
 `sbx` row of `docs/sources.toml` as a result.
+
+**The two rows nobody had to build turned out to be already answered, one with a stated residue.**
+API authentication survived the shared netns before the move reached it: the API takes a token
+(`src/apiauth.rs` — measured from a box first, `curl` to the cockpit answered 200 with no
+credential), connecting is rate-limited pre-auth (`src/knock.rs`), and the socket handover below is
+what answers the one attack the token cannot (§9.4's squat). And the review queue's credential path
+mostly rides the volume already: `prq::host_credential` resolves `$GH_TOKEN`, then the read token
+and any write PAT — both `gitgate` files under the volume, which travels — and only its *last
+resort* is host-only (`gh`'s keyring). A host whose sole credential was that keyring loses the queue
+in-fleet, and `host_token`'s refusal already names the three ways to hand it one.
+
+**The mechanics landed (SKEIN-109), and each piece was found rather than invented.** The binary is
+carried, not embedded — a binary cannot `include_str!` itself — as the sibling of the running
+executable or whatever `$SKEIN_SERVER_BINARY` names, refused without an ELF header so a mac host's
+own build fails as a sentence naming the musl cross-target instead of as a start bug later. The
+install is the launcher's own stdin trick, and the trick already carries megabytes: a body up to 1
+GiB rides the agent's chunked `/write`, and past it (or with no agent) `sbx exec -i` streams from a
+thread with no ceiling — verified byte-for-byte at 1 MiB against the fake sbx, no new chunking. The
+socket is opened by a **doorway** (`src/server-doorway.py`), not by the server: it binds the
+cockpit's port, then fork-and-execs `skein-server` behind descriptor 3 in systemd's spelling, which
+`src/doorway.rs` (SKEIN-77) already validates from the inheriting side — so a server crash restarts
+the server under a door that never closed, and `SKEIN_LISTEN_INHERITED_ONLY=1` turns a start that
+lost its descriptor into a refusal rather than a re-run of the race. The port is published **last**,
+once something holds it, reusing mappings before making them for the reason the agent's port does.
+`skein fleet-serve` is the sequence end to end; a `skein-server` run on the host sets none of this
+and is unchanged. What the doorway does *not* yet survive is its own restart — that instant re-bind
+is SKEIN-105's remainder, along with opening at fleet create rather than at serve.
+
+**And the move's one create-time difference is a grant the cover cannot yet close, so it is taken
+explicitly or not at all.** The server needs the volume mounted; 4a's inversion covers "every host
+path the sandbox mounts" — but `box-session.sh` deliberately skips covering any mount that is an
+*ancestor* of its own covers (a tmpfs over `~/.skein` would land after the `~/.skein/boxes` binds
+and throw them away), and the volume root is exactly that ancestor. Mount it today and every box
+reads `credentials/`, `api-token`, `github-pats/` and `tokens/` — step 1's exposure, back.
+`fleet_serve_mounts` refuses with that derivation unless `--uncovered-volume` says it was read
+(R9's shape). **The launcher learning to cover the volume root ahead of its owned binds is what
+remains between here and 4c being safe by default**, and it is launcher work, not mover work.
  This is where
 the six items in §2 get answered, with a fallback available while answering them.
 

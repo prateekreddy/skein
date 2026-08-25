@@ -1023,7 +1023,6 @@ mod tests {
     /// The cockpit editor sends a whole file through [`save`], which re-serializes from what was
     /// PARSED — so a field the round trip dropped would be a train that quietly went parallel the
     /// first time somebody edited an unrelated workflow.
-    #[test]
     /// The editor payload is the file's own shape — the regression this guards: the server once
     /// rebuilt it by hand and the copy dropped `serial`, so the cockpit under-reported a running
     /// train and a save from that editor would have stripped the field from the file.
@@ -1048,6 +1047,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn serial_survives_the_round_trip_and_the_save() {
         let file = br#"{"workflow":[
           {"name":"merge-train","serial":true,"matches":["mine"],"steps":[{"when":[],"do":"merge:squash+delete"}]},

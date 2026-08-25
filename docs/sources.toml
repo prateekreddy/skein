@@ -32,7 +32,13 @@ spelled_in = []
 # end of a connection. It opens nothing, connects nowhere, and the only thing it can do with the
 # descriptor is refuse it. Listed because the checker matches the spelling, and a spelling exempted
 # by hand is how the next real reach gets exempted with it.
-spelled_in = ["doorway", "gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
+#
+# `fleet` spells `TcpStream::connect_timeout` in exactly one place (`cockpit_settled`): after the
+# move's publish it connects to the host side of the cockpit's mapping to learn whether anything
+# holds it, speaks no bytes, and drops the connection. Loopback only, and the answer decides only
+# whether to burn a second candidate port — sbx has no unpublish, so a mapping published on a wrong
+# guess is permanent, which is what makes asking first worth a Source row.
+spelled_in = ["doorway", "fleet", "gitgate", "github", "place", "repos", "warden/serve", "warden_client"]
 
 [sbx]
 # The warden's two are the point of the whole component: `warden/doer` is where `sbx create` and

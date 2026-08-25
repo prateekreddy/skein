@@ -142,7 +142,7 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
     // accumulate them forever, and each dead one is exactly the phantom that #297 describes. Reuse
     // is the only way not to leak.
     let mut tried: Vec<String> = Vec::new();
-    for port in existing_agent_ports(sandbox) {
+    for port in existing_forwards(sandbox, AGENT_SANDBOX_PORT) {
         if settled_answer(port) {
             record_agent_port(port);
             return Ok(port);
@@ -164,7 +164,7 @@ pub fn ensure_fleet_agent_port(sandbox: &str) -> Result<u16, String> {
     };
 
     for port in candidates {
-        match publish_agent_port(sandbox, port) {
+        match publish_forward(sandbox, port, AGENT_SANDBOX_PORT) {
             Ok(()) => {
                 if settled_answer(port) {
                     record_agent_port(port);
@@ -206,13 +206,13 @@ fn settled_answer(port: u16) -> bool {
     false
 }
 
-/// Host ports sbx already forwards to [`AGENT_SANDBOX_PORT`] in this sandbox.
+/// Host ports sbx already forwards to `sandbox_port` in this sandbox.
 ///
 /// Parsed from the table `sbx ports <sandbox>` prints — `HOST IP / HOST PORT / SANDBOX PORT /
 /// PROTOCOL` — because the alternative is publishing a new mapping on every server restart and
 /// never being able to remove any of them. Deduplicated: the same host port is listed once per
 /// address family (`127.0.0.1` and `::1`), and they are one mapping.
-fn existing_agent_ports(sandbox: &str) -> Vec<u16> {
+fn existing_forwards(sandbox: &str, sandbox_port: u16) -> Vec<u16> {
     let Ok((out, _, 0)) = run_capture_for("sbx", &["ports", sandbox], Duration::from_secs(20))
     else {
         return Vec::new();
@@ -222,8 +222,8 @@ fn existing_agent_ports(sandbox: &str) -> Vec<u16> {
         .filter_map(|line| {
             let mut cols = line.split_whitespace();
             let host_port: u16 = cols.nth(1)?.parse().ok()?;
-            let sandbox_port: u16 = cols.next()?.parse().ok()?;
-            (sandbox_port == AGENT_SANDBOX_PORT).then_some(host_port)
+            let mapped: u16 = cols.next()?.parse().ok()?;
+            (mapped == sandbox_port).then_some(host_port)
         })
         .collect();
     found.sort_unstable();
@@ -236,8 +236,8 @@ fn existing_agent_ports(sandbox: &str) -> Vec<u16> {
 /// Its own function so the wire format is in one readable place: `HOST:SANDBOX/PROTOCOL`, which is
 /// sbx's spelling and not a guess — an unpublish verb does not exist, which is why healing moves to
 /// a new port rather than tidying up the old one.
-fn publish_agent_port(sandbox: &str, host_port: u16) -> Result<(), String> {
-    let mapping = format!("{host_port}:{AGENT_SANDBOX_PORT}/tcp");
+fn publish_forward(sandbox: &str, host_port: u16, sandbox_port: u16) -> Result<(), String> {
+    let mapping = format!("{host_port}:{sandbox_port}/tcp");
     let (out, err, code) = run_capture_for(
         "sbx",
         &["ports", sandbox, "--publish", &mapping],
@@ -459,6 +459,299 @@ pub fn start_fleet_agent(sandbox: &str) -> Result<(), String> {
         .exec(&script, Duration::from_secs(30))
         .map(|_| ())
         .map_err(|e| format!("starting the fleet agent in {sandbox}: {e}"))
+}
+
+// --- The move (delivery §3 4c): skein-server runs inside the fleet it operates -------------------
+//
+// Everything below is HOST-driven code — the mover, not the moved. The server it starts is the one
+// process that runs in-fleet, and the only thing that tells it so is `SKEIN_IN_FLEET=1` in its
+// environment, set by `server-doorway.py` and by nothing else (src/deployment.rs). A `skein-server`
+// run by hand on the host sets nothing and is the deployment skein has always had — the host path
+// is one *unset* variable away, which is the direction §4c requires.
+
+/// The socket-holder installed beside the server. `src/server-doorway.py` says why the socket is
+/// opened by a process that is not the server: the port must never be free (§9.4), including across
+/// server crashes and upgrades, and a supervisor that re-ran a self-binding server would reopen
+/// the squat window on every restart.
+const SERVER_DOORWAY_PY: &str = include_str!("server-doorway.py");
+
+/// The tmux session the doorway (and through it the server) runs in. Its own socket file rather
+/// than the sandbox's default server, so `fleet-serve` in a test — where the "sandbox" is the
+/// machine itself — cannot collide with a real session, and so the pane is findable by path.
+const SERVER_SESSION: &str = "skein-server";
+
+/// Where the server binary is installed inside the fleet sandbox. Beside the launcher for the same
+/// reason everything else is: the fleet root belongs to skein and outlives every box.
+pub fn server_path() -> String {
+    format!("{}/.skein/skein-server", fleet_root())
+}
+
+/// Where the socket-holder is installed.
+pub fn server_doorway_path() -> String {
+    format!("{}/.skein/server-doorway.py", fleet_root())
+}
+
+/// The tmux socket the server session lives on.
+pub fn server_tmux_sock() -> String {
+    format!("{}/.skein/server.tmux", fleet_root())
+}
+
+/// The port the cockpit listens on **inside** the sandbox. 7878 because that is the number every
+/// browser bookmark and README already carries; `$SKEIN_SERVER_PORT` overrides it in the same
+/// spirit as `$SKEIN_FLEET_ROOT` — without the seam this path could only be exercised against a
+/// real sandbox, and binding the real 7878 in a test collides with a real cockpit.
+pub fn server_sandbox_port() -> u16 {
+    std::env::var("SKEIN_SERVER_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7878)
+}
+
+/// The `skein-server` binary this host would install into the fleet, checked to be one the fleet
+/// can run.
+///
+/// The launcher and the agent are *text*, embedded with `include_str!` and installed over stdin —
+/// a binary cannot embed itself, so the server is carried as a file instead: the sibling of the
+/// running executable (`cargo build` puts `skein` and `skein-server` in one directory), or
+/// whatever `$SKEIN_SERVER_BINARY` names.
+///
+/// The ELF check is the cross-build story stated as a refusal rather than prose. The fleet sandbox
+/// is a Linux VM whichever host made it, and this box builds Linux binaries — but a mac host's own
+/// build is Mach-O, which would install cleanly and then fail at start, reading as a start bug.
+/// Four bytes read here turn that into a sentence naming the fix.
+pub fn server_binary() -> Result<std::path::PathBuf, String> {
+    let named = std::env::var("SKEIN_SERVER_BINARY")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let path = match named {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_exe()
+            .map_err(|e| format!("cannot locate this executable: {e}"))?
+            .with_file_name("skein-server"),
+    };
+    let mut magic = [0u8; 4];
+    std::fs::File::open(&path)
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic))
+        .map_err(|e| {
+            format!(
+                "no skein-server binary at {} ({e}) — build it beside this skein \
+                 (`cargo build --release --bin skein-server`) or point $SKEIN_SERVER_BINARY at one",
+                path.display()
+            )
+        })?;
+    if magic != [0x7f, b'E', b'L', b'F'] {
+        return Err(format!(
+            "{} is not a Linux executable (no ELF header), and the fleet sandbox is Linux. On a \
+             mac host, cross-build it — `cargo build --release --bin skein-server --target \
+             aarch64-unknown-linux-musl` (or x86_64-unknown-linux-musl on Intel) — and point \
+             $SKEIN_SERVER_BINARY at the result",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// Install the server and its doorway into the sandbox, over stdin — the same trick as the
+/// launcher and the agent, and the payload size is already solved where the trick lives: a body up
+/// to `AGENT_WRITE_CAP` (1 GiB, `place.rs`) goes through the agent's chunked `/write`, and
+/// anything else — including a fleet with no agent — takes `sbx exec -i`, whose stdin is written
+/// on its own thread and has no ceiling at all. No new chunking, and no `-t` anywhere near it,
+/// which is what would corrupt binary bytes.
+pub fn install_server(sandbox: &str) -> Result<(), String> {
+    let binary = server_binary()?;
+    let bytes = std::fs::read(&binary)
+        .map_err(|e| format!("reading {}: {e}", binary.display()))?;
+    let place = own_sandbox(sandbox);
+    let path = server_path();
+    let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
+    place
+        .write(
+            &format!(
+                "mkdir -p {} && cat > {} && chmod 755 {}",
+                sh_quote(dir),
+                sh_quote(&path),
+                sh_quote(&path)
+            ),
+            &bytes,
+            // A binary is tens of megabytes where the scripts are kilobytes; the budget follows.
+            Duration::from_secs(300),
+        )
+        .map_err(|e| format!("installing skein-server in {sandbox}: {e}"))?;
+    let doorway = server_doorway_path();
+    place
+        .write(
+            &format!(
+                "cat > {} && chmod 755 {}",
+                sh_quote(&doorway),
+                sh_quote(&doorway)
+            ),
+            SERVER_DOORWAY_PY.as_bytes(),
+            Duration::from_secs(30),
+        )
+        .map_err(|e| format!("installing the server doorway in {sandbox}: {e}"))
+}
+
+/// Start the doorway, which opens the socket and only then runs the server behind it.
+///
+/// The ordering the item exists for is not enforced here — it is *structural*: there is no
+/// spelling of this start that runs skein-server before the socket is open, because the only thing
+/// started is the doorway, and the doorway binds before it forks. `SKEIN_HOME` rides in the inner
+/// command because the volume is mounted into the sandbox at its host path and the sandbox's own
+/// environment has never heard of it.
+pub fn start_server(sandbox: &str) -> Result<(), String> {
+    let sock = server_tmux_sock();
+    let inner = format!(
+        "while true; do SKEIN_HOME={home} python3 {doorway} {port} {server}; sleep 2; done",
+        home = sh_quote(&skein_home().to_string_lossy()),
+        doorway = sh_quote(&server_doorway_path()),
+        port = server_sandbox_port(),
+        server = sh_quote(&server_path()),
+    );
+    let script = format!(
+        "tmux -S {sock} has-session -t {session} 2>/dev/null && exit 0; \
+         tmux -S {sock} new-session -d -s {session} {inner}",
+        sock = sh_quote(&sock),
+        session = sh_quote(SERVER_SESSION),
+        inner = sh_quote(&inner),
+    );
+    own_sandbox(sandbox)
+        .exec(&script, Duration::from_secs(30))
+        .map(|_| ())
+        .map_err(|e| format!("starting skein-server in {sandbox}: {e}"))
+}
+
+/// Stop the doorway and the server it holds. Ending the session ends the supervisor loop, the
+/// doorway and — same process group — the server it forked; the `pkill`s are for anything that
+/// somehow outlived its session, and are allowed to find nothing.
+pub fn stop_server(sandbox: &str) {
+    let script = format!(
+        "tmux -S {sock} kill-session -t {session} 2>/dev/null; \
+         pkill -f {doorway} 2>/dev/null; pkill -f {server} 2>/dev/null; true",
+        sock = sh_quote(&server_tmux_sock()),
+        session = sh_quote(SERVER_SESSION),
+        doorway = sh_quote(&agent_pkill_pattern(&server_doorway_path())),
+        server = sh_quote(&format!("^{}( |$)", server_path().replace('.', "\\."))),
+    );
+    let _ = own_sandbox(sandbox).exec_sbx(&script, Duration::from_secs(30));
+}
+
+/// The whole move, in the order the item names: the volume checked visible, the binary installed
+/// over stdin, the socket opened first and the server started behind it, then the port published.
+/// Returns the host port the cockpit answers on.
+///
+/// `stop_server` before `start_server` because this is an explicit `skein fleet-serve`, not a tick:
+/// the person running it means "this build", and a start that found a session and left it would
+/// keep an old binary serving forever, which is the bug `retire_stale_agent` exists for one door
+/// over. The cost is stated where it is paid: across a doorway restart the socket closes and
+/// reopens, so the §9.4 window exists for that instant — holding it open across *upgrades* too is
+/// SKEIN-105's remainder.
+pub fn ensure_fleet_server(sandbox: &str) -> Result<u16, String> {
+    let home = skein_home().to_string_lossy().into_owned();
+    own_sandbox(sandbox)
+        .exec(&format!("test -d {}", sh_quote(&home)), Duration::from_secs(30))
+        .map_err(|_| {
+            format!(
+                "the volume ({home}) is not visible inside {sandbox}, so a server started there \
+                 would find no config, no repos and no credentials. This fleet was created without \
+                 the volume mounted — destroy it (through the warden) and run `skein fleet-serve` \
+                 again, which creates it with the volume aboard"
+            )
+        })?;
+    install_server(sandbox)?;
+    stop_server(sandbox);
+    start_server(sandbox)?;
+    ensure_server_port(sandbox)
+}
+
+/// Publish the cockpit's port to the host, reusing before creating — same discipline as
+/// [`ensure_fleet_agent_port`] and for the same reason: sbx has no unpublish, so every mapping
+/// this makes is permanent.
+///
+/// Judged by a TCP connect rather than an HTTP exchange, deliberately: the doorway holds the
+/// listening socket whether or not the server behind it is up yet, and the kernel completes the
+/// handshake from the backlog — so "connects" is exactly the property the move promises, that the
+/// door is open before and independent of the server serving.
+pub fn ensure_server_port(sandbox: &str) -> Result<u16, String> {
+    let sandbox_port = server_sandbox_port();
+    let mut tried: Vec<String> = Vec::new();
+    for port in existing_forwards(sandbox, sandbox_port) {
+        if cockpit_settled(port) {
+            return Ok(port);
+        }
+        tried.push(format!("{port}: an existing mapping, still silent"));
+    }
+    // The sandbox's own number first — it is where every bookmark already points — then one fresh
+    // port. Two attempts, not more: each failure leaves a mapping nothing can remove.
+    let candidates: Vec<u16> = std::iter::once(Some(sandbox_port))
+        .chain(std::iter::once_with(free_host_port))
+        .flatten()
+        .collect();
+    for port in candidates {
+        match publish_forward(sandbox, port, sandbox_port) {
+            Ok(()) => {
+                if cockpit_settled(port) {
+                    return Ok(port);
+                }
+                tried.push(format!("{port}: published but nothing answered through it"));
+            }
+            Err(why) => tried.push(format!("{port}: {why}")),
+        }
+    }
+    Err(format!(
+        "could not publish the cockpit's port ({}). The server is running inside {sandbox}; only \
+         the way to reach it from this machine is missing",
+        tried.join("; ")
+    ))
+}
+
+/// Does anything accept on the host side of `port`? Retried briefly, because a publish returns
+/// before its forwarder necessarily does (see [`settled_answer`], which this mirrors).
+fn cockpit_settled(port: u16) -> bool {
+    let attempts = if cfg!(test) { 1 } else { 6 };
+    for attempt in 0..attempts {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok() {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    false
+}
+
+/// The mount set for a fleet whose sandbox will host the server: [`fleet_mounts`] plus the volume
+/// root itself, which the server needs and nothing else has ever been allowed near.
+///
+/// Refused without `accept_uncovered`, and the refusal is the security derivation, not a
+/// formality. The 4a cover is an inversion over `$SKEIN_FLEET_MOUNTS` — but `box-session.sh`
+/// deliberately skips covering any mount that is an *ancestor* of its own covers (a tmpfs over
+/// `~/.skein` lands after the `~/.skein/boxes` binds in bwrap's argument list and throws them
+/// away), and the volume root is an ancestor of the box-state parent. So until the launcher
+/// learns to cover the volume root ahead of its owned binds, a volume-mounted fleet hands every
+/// box `credentials/`, `api-token`, `github-pats/` and `tokens/` — the exact exposure delivery
+/// §3 step 1 closed. R9's precedent applies: the grant is stated in the caller's face and taken
+/// knowingly, never defaulted.
+pub fn fleet_serve_mounts(accept_uncovered: bool) -> Result<Vec<String>, String> {
+    let home = skein_home().to_string_lossy().into_owned();
+    if !accept_uncovered {
+        return Err(format!(
+            "mounting the volume ({home}) into the fleet sandbox is what lets skein-server run \
+             there — and today it also lets every BOX read it: the launcher's mount cover skips \
+             ancestors of its own binds (src/box-session.sh), and the volume root is one, so \
+             `credentials/`, `api-token`, `github-pats/` and `tokens/` would be readable from \
+             every box. Run `skein fleet-serve --uncovered-volume` to accept that, or wait for \
+             the launcher to learn the volume cover (delivery §3 4c)"
+        ));
+    }
+    let mut mounts = vec![home.clone()];
+    for mount in fleet_mounts() {
+        if under(&mount, &home) || mounts.iter().any(|m| under(&mount, m)) {
+            continue; // already visible through the volume root
+        }
+        mounts.push(mount);
+    }
+    Ok(mounts)
 }
 
 /// Where the provisioning script is installed inside the fleet sandbox.
