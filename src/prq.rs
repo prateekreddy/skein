@@ -409,10 +409,24 @@ pub fn forget_renames() {
 /// [`Queue::trunk`].
 ///
 /// Remembered per process for [`renamed_to`]'s reason: this is a REST round trip whose answer
-/// changes about never, asked from a poll. A lookup that fails is remembered as `""` — unknown —
-/// rather than retried on every refresh; the cost of being wrong is an empty trunk until a
-/// restart, and [`Queue::trunk`]'s contract is that `""` means "not known", so nothing downstream
-/// mistakes the failure for an answer.
+/// changes about never, asked from a poll. [`Queue::trunk`]'s contract is that `""` means "not
+/// known", so nothing downstream mistakes a failure for an answer.
+///
+/// **Only an answer is remembered.** A failed lookup is not cached, and the next refresh asks
+/// again. That is the difference between a rate limit costing skein a minute and costing it the
+/// rest of the process: the ordering inside [`queue_within`] is `viewer()` [REST],
+/// `search_prs_all` [GraphQL], then this — so a GraphQL-only limit engages
+/// `crate::github`'s process-wide hold and this REST call is refused by it, having asked GitHub
+/// nothing. Cached, that refusal became `""` for ever; `base_is_trunk` was then false on every
+/// pull request in the repo, the merge train's `base:trunk` claimed nothing, and the train stopped
+/// dead with no banner, no blind spot and no log line until somebody restarted the server
+/// (SKEIN-238). Nothing anybody could clear, because nothing said it was there.
+///
+/// Not caching the failure costs one REST call per refresh on a repo whose lookup is failing — and
+/// during the hold that is the condition that causes this, the call is refused before it is spent
+/// (`crate::github::call` checks the hold first), so the retry is free in exactly the case that
+/// produces it. The queue itself is cached for a minute, so this is bounded by the refresh rate
+/// rather than by anything a poll does.
 fn trunk_of(slug: &str) -> String {
     let mut seen = TRUNKS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(known) = seen.get(slug) {
@@ -427,7 +441,12 @@ fn trunk_of(slug: &str) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    seen.insert(slug.to_string(), trunk.clone());
+    // The one line SKEIN-238 turned on: an answer is remembered, a failure is not. `TRUNKS`
+    // therefore only ever holds trunks skein has actually been told, and the early return above
+    // can never hand back a remembered failure.
+    if !trunk.is_empty() {
+        seen.insert(slug.to_string(), trunk.clone());
+    }
     trunk
 }
 

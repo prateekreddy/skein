@@ -1750,6 +1750,162 @@ mod tests {
         crate::prq::forget_trunks();
     }
 
+    /// One rate-limited refresh must not disable the merge train until somebody restarts skein.
+    ///
+    /// The shape (SKEIN-238), and it is the same shape twice over. `prq::queue_within` asks in the
+    /// order `viewer()` [REST], `search_prs_all` [GraphQL], `trunk_of` [REST] — so a GraphQL-only
+    /// limit passes the first, engages `crate::github`'s process-wide hold on the second, and the
+    /// third is refused by that hold having asked GitHub nothing. `trunk_of` swallowed that
+    /// refusal into `""` and REMEMBERED it, for the life of the process. Everything downstream
+    /// then did exactly what it should with an unknown trunk: `base_is_trunk` none, `base:trunk`
+    /// unsatisfied, `claims` false, `Carries::Nothing`, `sweep` moves on. A dead train, with no
+    /// banner, no blind spot and no log line — nothing anybody could clear, because nothing said
+    /// it was there.
+    ///
+    /// So what this asserts is RECOVERY, not correctness: skein is allowed to know nothing while
+    /// GitHub is refusing it, and is not allowed to still know nothing one refresh after GitHub
+    /// comes back. The fix is that only an ANSWER is remembered (`prq::trunk_of`); a failure is
+    /// asked again, and during the hold that retry is refused before it is spent.
+    #[test]
+    fn a_rate_limited_refresh_does_not_disable_the_train_until_a_restart() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+        crate::prq::forget_renames();
+
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+              "matches":["ready","approved","base:trunk"],
+              "steps":[{"when":["no-label:ci-queue"],"do":"add-label:ci-queue"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+
+        // A GitHub whose GRAPHQL quota alone is spent — REST is fine, which is the live shape:
+        // skein's search is where nearly all of its quota goes. `/rate_limit` stays free and
+        // answers, because that is where the hold learns how long to last.
+        let spent = Arc::new(Mutex::new(true));
+        let out = spent.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let answer = if head.starts_with("GET /rate_limit") {
+                    format!(
+                        r#"{{"resources":{{"core":{{"remaining":4000,"reset":{}}},
+                          "search":{{"remaining":30,"reset":{}}},
+                          "graphql":{{"remaining":0,"reset":{}}}}}}}"#,
+                        now + 600,
+                        now + 600,
+                        now + 600
+                    )
+                } else if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/thing HTTP") {
+                    r#"{"full_name":"acme/thing","default_branch":"main"}"#.to_string()
+                } else if head.contains("/graphql") && *out.lock().unwrap() {
+                    r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}"#
+                        .to_string()
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"q0":{"nodes":[{"number":5,"title":"t","url":"u",
+                      "isDraft":false,"author":{"login":"me"},"headRefName":"feat-5",
+                      "headRefOid":"abc","baseRefName":"main",
+                      "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
+                      "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+                      "labels":{"nodes":[]},"latestReviews":{"nodes":[]},
+                      "commits":{"nodes":[{"commit":{
+                        "committedDate":"2026-08-23T00:00:00Z",
+                        "statusCheckRollup":{"contexts":{"nodes":[
+                          {"status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}]},
+                      "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
+                        .to_string()
+                } else {
+                    "[]".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // The refresh that lands inside the outage. Knowing nothing here is correct.
+        let repo = crate::repos::load_repos().remove(0);
+        let during = crate::prq::queue(&repo, true).expect("a blind queue still answers");
+        assert_eq!(
+            during.trunk, "",
+            "skein claimed to know the trunk during an outage that refused the lookup"
+        );
+
+        // GitHub comes back: the quota returns and the hold is released.
+        *spent.lock().unwrap() = false;
+        let _cleared = crate::github::HoldClear::new();
+
+        let after = crate::prq::queue(&repo, true).expect("a healthy GitHub answers");
+        assert_eq!(
+            after.prs.len(),
+            1,
+            "the recovered queue lost its pull request"
+        );
+        assert_eq!(
+            after.trunk, "main",
+            "one rate-limited refresh disabled the merge train until a restart: the failed trunk \
+             lookup was remembered as an answer, so `base:trunk` can never hold again"
+        );
+
+        // And the train claims it again — the thing the memoised failure had silently switched
+        // off. Asserted through `claims`, which is the gate the whole chain narrows to.
+        let flows = crate::workflow::load().unwrap();
+        let facts = facts_of(&after.prs[0], &after.viewer, &after.trunk);
+        assert!(
+            crate::workflow::claims(&flows[0], &facts),
+            "the merge train still claims nothing after GitHub came back: {facts:?}"
+        );
+        // …and the tick acts on it, which is what "the train is running" means to a person.
+        let did = sweep();
+        assert!(
+            did.iter().any(|line| line.contains("ci-queue")),
+            "the train claimed #5 and still did nothing: {did:?}"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+        crate::prq::forget_renames();
+    }
+
     /// A serial workflow acts on the front of the train, and only the front.
     ///
     /// Oldest first — lowest number, the sort key the owner chose — and a stopped front is
