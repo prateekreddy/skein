@@ -3,6 +3,12 @@
 Companion to `docs/architecture.md`, which is the destination. This is how to get there without
 destroying a working tool on the way.
 
+**`docs/live-check.md` is the other companion**: what no test on a developer's machine can answer,
+because it needs a real sandbox — the door, the cover over the mounted volume, the disk figures, the
+warden's record, and the dry run to read before the merge train is switched on. Everything landed
+here is proven against the fake-sbx harness and against real `bwrap` where the question was a mount;
+that page is the residue, written as commands with what a failure would mean.
+
 ## 1. The measurement that should govern the plan
 
 **376 commits since 2026-06-28. 164 are `fix:`, 131 are `feat:`.** Fifty-six percent of the
