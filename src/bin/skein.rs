@@ -1176,9 +1176,14 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
 /// The sequence is `fleet::ensure_fleet_server`'s, in the order the design requires: the volume
 /// visible in the sandbox, the binary installed over stdin, the cockpit's socket opened by the
 /// doorway *before* the server starts behind it (src/server-doorway.py), and the port published
-/// last, once something holds it. The host-driven `skein-server` is untouched by all of this — it
-/// sets no `SKEIN_IN_FLEET` and behaves exactly as it always has, which is the fallback §4c
-/// demands.
+/// last, once **the doorway** holds it — not merely once something answers, which a squatter does
+/// too. The host-driven `skein-server` is untouched by all of this — it sets no `SKEIN_IN_FLEET`
+/// and behaves exactly as it always has, which is the fallback §4c demands.
+///
+/// By the time this runs the door is usually already open: `ensure_fleet` opens it at create,
+/// before the first box exists, which is the moment that actually closes §9.4's squat. What a
+/// serve adds is the binary behind it — installed, then *reloaded* into the running doorway, so
+/// the listening socket is carried across the upgrade rather than closed and re-bound.
 ///
 /// There used to be a `--uncovered-volume` flag here, because mounting the volume into the sandbox
 /// also made it readable from every box. The launcher covers the volume root ahead of its own binds
@@ -1199,7 +1204,9 @@ fn cmd_fleet_serve() -> Result<(), String> {
     // The same token file: the volume is mounted at its host path, so the server inside reads the
     // secret this process can read, and the URL printed here is a URL that works.
     match skein::apiauth::token() {
-        Ok(t) => println!("skein-server is running inside {sandbox} → http://127.0.0.1:{port}/?t={t}"),
+        Ok(t) => {
+            println!("skein-server is running inside {sandbox} → http://127.0.0.1:{port}/?t={t}")
+        }
         Err(e) => println!(
             "skein-server is running inside {sandbox} → http://127.0.0.1:{port}/ (no API token \
              could be read: {e})"

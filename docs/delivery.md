@@ -194,7 +194,9 @@ item.
 
 **So 4c is gated on nothing.** R6 and R8 both landed; R3 was decided against and R5 before them.
 What remains before the move is the move — and the one thing it must carry that is not a
-requirement of its own is SKEIN-77, the listening socket opened before any box exists.
+requirement of its own is SKEIN-77, the listening socket opened before any box exists (**done**,
+with SKEIN-105 supplying the end that opens it at create and holds it across the doorway's own
+restarts).
 
 ~~**So 4c is gated on two: R6 and R8.**~~ It was five when this table was written, then two, and is
 now **none** — R3 was decided against (the port stays, §9.5 R3), R5 landed, R7 turned out to be
@@ -204,7 +206,8 @@ and R8 are done.
 One thing 4c must carry that is not a requirement of its own: **the cockpit's listening socket is
 opened before any box exists and inherited across restarts.** Keeping the TCP port left port
 squatting open (§9.4), and a port that is never free is what closes it. It belongs here rather than
-in its own item because there is nothing to hang it on until there is a fleet start.
+in its own item because there is nothing to hang it on until there is a fleet start. **Done**
+(SKEIN-77, SKEIN-105): §9.4's squatting bullet reads closed rather than half.
 
 **4c — the move**, with host-driven mode still working one environment variable away. **Started**,
 and written down: SKEIN-101 with eight children, one per row of §2's table plus the mechanics.
@@ -291,8 +294,29 @@ the server under a door that never closed, and `SKEIN_LISTEN_INHERITED_ONLY=1` t
 lost its descriptor into a refusal rather than a re-run of the race. The port is published **last**,
 once something holds it, reusing mappings before making them for the reason the agent's port does.
 `skein fleet-serve` is the sequence end to end; a `skein-server` run on the host sets none of this
-and is unchanged. What the doorway does *not* yet survive is its own restart — that instant re-bind
-is SKEIN-105's remainder, along with opening at fleet create rather than at serve.
+and is unchanged.
+
+**The door opens at fleet *create*, not at serve** (SKEIN-105), which is the moment that actually
+closes the race: `ensure_fleet` opens it before it installs the launcher — the thing without which
+no box in that sandbox can exist — so there is never an interval in which a box and a free cockpit
+port coexist. The doorway holds the port with *nothing* behind it until a binary arrives, which is
+what makes that ordering possible at all. It is reported rather than fatal there, and the reason is
+read off `box-session.sh` rather than chosen: a box without python3 still starts (it loses shared
+logins), so refusing every launch on a fleet whose image has no python would be a larger outage than
+an exposure that needs a published mapping before it is reachable at all.
+
+The other half of SKEIN-105 was the doorway surviving **its own** restart, and it took four things,
+each of which was a way the port became free again. A re-serve **reloads** rather than stops and
+starts: `SIGUSR1` makes the doorway `exec` itself across the same descriptor, so upgrading a live
+fleet never closes the listener — proved by reading `/proc/<pid>/fd/3` before and after, same pid
+and same socket inode, in `tests/fleet_move.rs`. A killed doorway takes its server with it
+(`PR_SET_PDEATHSIG`), because the server inherited the listener and an orphan holding it is a wedge
+rather than a window: nothing can re-bind. The supervisor's delay became **conditional**, so a
+doorway that had been working is replaced in the time python takes to start — measured at ~20ms
+against the 2s it slept before — while one that cannot start at all still backs off. And the host
+mapping is published only when the **doorway** holds the port, read off the pid it stamps: a
+squatter accepts a TCP connect exactly as the doorway does, and sbx has no unpublish, so a
+connect-only judgement is how the browser and its token get handed to a box permanently.
 
 **And the move's one create-time difference — mounting the volume — is covered, not granted.**
 The server needs the volume mounted; 4a's inversion covers "every host path the sandbox mounts",

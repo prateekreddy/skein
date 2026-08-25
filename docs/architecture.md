@@ -941,19 +941,38 @@ which needs a requirement rather than an inference:
   never free — opened once before any box exists and inherited across restarts, rather than re-bound
   by whoever gets there first.
 
-  **Half of that exists** (`src/doorway.rs`). skein-server takes a listening socket it was handed
+  **Closed, in-fleet** (SKEIN-77 and SKEIN-105). skein-server takes a listening socket it was handed
   over the `LISTEN_FDS`/`LISTEN_PID` convention and serves on it, and refuses a descriptor that
   cannot be a door — not a socket, or the wrong end of a connection — rather than entering an accept
-  loop that fails forever and cannot tell that from `EMFILE`. `SKEIN_LISTEN_INHERITED_ONLY=1` makes
-  a *missing* descriptor a startup failure instead of a bind, because the two deployments want
-  opposite answers there and the difference has to be said: host-driven, nobody upstream can open a
-  socket and binding is the only way to start; in-fleet, a missing one means the start sequence did
-  not do its job, and binding anyway runs this race from the one process that was meant to close it.
+  loop that fails forever and cannot tell that from `EMFILE` (`src/doorway.rs`).
+  `SKEIN_LISTEN_INHERITED_ONLY=1` makes a *missing* descriptor a startup failure instead of a bind,
+  because the two deployments want opposite answers there and the difference has to be said:
+  host-driven, nobody upstream can open a socket and binding is the only way to start; in-fleet, a
+  missing one means the start sequence did not do its job, and binding anyway runs this race from
+  the one process that was meant to close it.
 
-  **The other half is 4c**: something has to open that socket before the first box exists, and there
-  is no in-fleet start to do it yet. Until then this bullet reads *takeable but taken from a
-  narrower window* rather than closed — skein still binds on the host-driven path, which is where it
-  runs today.
+  The other end is `src/server-doorway.py`, and **where it runs is the whole point**: `ensure_fleet`
+  opens it at fleet *create*, before the launcher every box needs is installed, so there is no
+  interval in which a box and a free cockpit port coexist. It then holds the listener for as long as
+  it lives — with no server behind it until one is installed — and hands the same descriptor to
+  every skein-server it starts.
+
+  Four things keep the port from ever being free again, and each was a way it became free:
+
+  * a **server** restart is a fork behind a socket the doorway never let go of;
+  * a **doorway** restart is an `exec` (`SIGUSR1`) that carries descriptor 3 across, so
+    `skein fleet-serve` upgrades a live fleet with the listener never closed — it used to stop and
+    start, which is this race run by the process that exists to close it;
+  * a doorway that is **killed** takes its server with it (`PR_SET_PDEATHSIG`) — otherwise the
+    orphan holds the inherited listener and nothing can ever re-bind — and its supervisor re-runs it
+    at once rather than after a fixed delay, measured at ~20ms against the 2s that was there;
+  * and the host mapping is **published only to the doorway**, judged by the pid it stamps rather
+    than by a TCP connect, because a squatter accepts too and sbx has no unpublish.
+
+  What is left is stated rather than claimed away: a *first* start into a sandbox that already has
+  something on the port refuses and names the squat instead of publishing to it, which is a fleet
+  that will not serve rather than a fleet served by a box. Host-driven skein still binds on the
+  host, where there is no shared namespace and no mapping to inherit.
 - **pre-auth connection exhaustion.** ~~The gate runs after accept, and §10.1's cap is post-auth~~ —
   **closed at the accept loop, where it is the only place it could be closed**: `src/knock.rs`, the
   doorstep, is what a connection is between `accept` and saying who it is. A limit that *refused*

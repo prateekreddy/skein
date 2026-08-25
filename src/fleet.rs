@@ -491,6 +491,16 @@ pub fn server_doorway_path() -> String {
     format!("{}/.skein/server-doorway.py", fleet_root())
 }
 
+/// Where the doorway records that it holds the cockpit's port.
+///
+/// The distinction this file exists to make is between *something answers on the port* and *the
+/// doorway answers on the port* — a squatter satisfies the first, and publishing the cockpit's
+/// mapping to one is exactly how the browser hands it the fleet token (§9.4). A TCP connect cannot
+/// tell them apart; a pid that is alive and is this doorway can.
+pub fn server_door_stamp_path() -> String {
+    format!("{}/.skein/server.door", fleet_root())
+}
+
 /// The tmux socket the server session lives on.
 pub fn server_tmux_sock() -> String {
     format!("{}/.skein/server.tmux", fleet_root())
@@ -572,8 +582,7 @@ pub fn server_binary() -> Result<std::path::PathBuf, String> {
 /// it (delivery §5): the executable bit must never be set on a file that is still arriving.
 pub fn install_server(sandbox: &str) -> Result<(), String> {
     let binary = server_binary()?;
-    let bytes = std::fs::read(&binary)
-        .map_err(|e| format!("reading {}: {e}", binary.display()))?;
+    let bytes = std::fs::read(&binary).map_err(|e| format!("reading {}: {e}", binary.display()))?;
     let place = own_sandbox(sandbox);
     let path = server_path();
     let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
@@ -590,21 +599,115 @@ pub fn install_server(sandbox: &str) -> Result<(), String> {
             Duration::from_secs(300),
         )
         .map_err(|e| format!("installing skein-server in {sandbox}: {e}"))?;
+    install_doorway(sandbox)
+}
+
+/// Install the socket-holder alone, with no binary to put behind it.
+///
+/// Separate from [`install_server`] because the two arrive at different moments and that is the
+/// whole point of the door: it is opened at fleet **create**, when the only thing that exists is a
+/// sandbox, and the binary turns up later at `skein fleet-serve`. A create that had to wait for a
+/// binary would leave the port free for exactly the interval in which the first box is launched.
+fn install_doorway(sandbox: &str) -> Result<(), String> {
     let doorway = server_doorway_path();
-    place
+    let dir = doorway.rsplit_once('/').map(|(d, _)| d).unwrap_or("/boxes");
+    own_sandbox(sandbox)
         .write(
             // Renamed into place for the half-written half of the reason above: ETXTBSY does
             // not apply to a `#!` script (the kernel opens the interpreter, not this file), but the
             // supervisor's two-second retry can still catch one mid-write.
             &format!(
-                "cat > {new} && chmod 755 {new} && mv {new} {doorway}",
+                "mkdir -p {dir} && cat > {new} && chmod 755 {new} && mv {new} {doorway}",
+                dir = sh_quote(dir),
                 new = sh_quote(&format!("{doorway}.new")),
                 doorway = sh_quote(&doorway),
             ),
             SERVER_DOORWAY_PY.as_bytes(),
             Duration::from_secs(30),
         )
+        .map(|_| ())
         .map_err(|e| format!("installing the server doorway in {sandbox}: {e}"))
+}
+
+/// Hold the cockpit's port in `sandbox`, whether or not there is a server to put behind it.
+///
+/// **This is the moment that closes §9.4's squat**, and it is fleet create rather than
+/// `fleet-serve`: the mapping a serve publishes outlives skein, so a box that took the port before
+/// the doorway did becomes the cockpit, and the browser hands it the fleet token on the first
+/// request. `ensure_fleet` runs this before it installs the launcher — that is, before the sandbox
+/// has ever been able to start a box — so there is no interval in which a box and a free port
+/// coexist.
+///
+/// The already-open case costs one `exec` and nothing else: a doorway that holds the port is left
+/// alone rather than reinstalled, because the launch path is not where an upgrade belongs (that is
+/// [`ensure_fleet_server`], which reloads it deliberately).
+pub fn ensure_fleet_door(sandbox: &str) -> Result<(), String> {
+    if door_holds_port(sandbox, server_sandbox_port()) {
+        return Ok(());
+    }
+    install_doorway(sandbox)?;
+    start_server(sandbox)
+}
+
+/// Is the process holding the cockpit's port **the doorway**, rather than merely something?
+///
+/// A TCP connect cannot answer this and the difference is the whole attack: a squatter accepts
+/// too, so a connect-only judgement publishes the host's mapping — and with it the browser and its
+/// token — to whatever got there first. The stamp is read the way `places/` anchors are read: a
+/// pid is a number that gets reused, so it counts only when the process is alive **and** is this
+/// doorway, which `/proc/<pid>/cmdline` says exactly. A stamp left by a doorway that was killed
+/// names a dead pid and reads as closed, which is the honest answer.
+fn door_holds_port(sandbox: &str, port: u16) -> bool {
+    let script = format!(
+        "read -r pid held < {stamp} 2>/dev/null || exit 1; \
+         [ \"$held\" = {port} ] || exit 1; \
+         kill -0 \"$pid\" 2>/dev/null || exit 1; \
+         tr '\\0' '\\n' < /proc/\"$pid\"/cmdline | grep -qxF -- {doorway} || exit 1; \
+         echo up",
+        stamp = sh_quote(&server_door_stamp_path()),
+        doorway = sh_quote(&server_doorway_path()),
+    );
+    own_sandbox(sandbox)
+        .exec_sbx(&script, Duration::from_secs(20))
+        .map(|out| out.trim() == "up")
+        .unwrap_or(false)
+}
+
+/// Wait, briefly, for the doorway to take the port and say so.
+///
+/// A start returns before the python behind it has bound, so an immediate read of the stamp is a
+/// question asked too early — and the answer it gets ("no doorway") is the one that refuses to
+/// publish. The window is generous because what it guards is permanent: sbx has no unpublish.
+fn door_settles(sandbox: &str, port: u16) -> bool {
+    let attempts = 20;
+    for attempt in 0..attempts {
+        if door_holds_port(sandbox, port) {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+    false
+}
+
+/// Ask a running doorway to restart the server behind it, without closing the socket.
+///
+/// `SIGUSR1` and not `SIGHUP`: tmux sends `SIGHUP` to a pane's processes when its session is
+/// killed, so a doorway that reloaded on `SIGHUP` would re-exec itself out of every stop.
+///
+/// Returns whether a doorway was there to signal — false means there is nothing to reload and the
+/// caller must start one. `pkill` exits 0 only when it signalled something, which is what makes
+/// that answer readable rather than guessed at.
+pub fn reload_server(sandbox: &str) -> bool {
+    let script = format!(
+        "pkill -USR1 -f {doorway} 2>/dev/null && echo reloaded",
+        doorway = sh_quote(&agent_pkill_pattern(&server_doorway_path())),
+    );
+    own_sandbox(sandbox)
+        .exec_sbx(&script, Duration::from_secs(30))
+        .map(|out| out.trim() == "reloaded")
+        .unwrap_or(false)
 }
 
 /// Start the doorway, which opens the socket and only then runs the server behind it.
@@ -614,14 +717,24 @@ pub fn install_server(sandbox: &str) -> Result<(), String> {
 /// started is the doorway, and the doorway binds before it forks. `SKEIN_HOME` rides in the inner
 /// command because the volume is mounted into the sandbox at its host path and the sandbox's own
 /// environment has never heard of it.
+///
+/// **The supervisor's delay is conditional, and that is the point.** Every second between the
+/// doorway dying and its replacement binding is a second the cockpit's port stands empty with
+/// boxes already running — so a doorway that had been up is restarted in the time python takes to
+/// start, and only one that died in its first five seconds is slept on. Unconditional (which this
+/// was) meant a two-second window on every crash; unconditionally instant would turn a doorway
+/// that cannot start at all into a busy loop on a sandbox that is already unwell.
 pub fn start_server(sandbox: &str) -> Result<(), String> {
     let sock = server_tmux_sock();
     let inner = format!(
-        "while true; do SKEIN_HOME={home} python3 {doorway} {port} {server}; sleep 2; done",
+        "while true; do began=$(date +%s); \
+         SKEIN_HOME={home} python3 {doorway} {port} {server} {stamp}; \
+         [ $(($(date +%s) - began)) -lt 5 ] && sleep 2; done",
         home = sh_quote(&skein_home().to_string_lossy()),
         doorway = sh_quote(&server_doorway_path()),
         port = server_sandbox_port(),
         server = sh_quote(&server_path()),
+        stamp = sh_quote(&server_door_stamp_path()),
     );
     let script = format!(
         "tmux -S {sock} has-session -t {session} 2>/dev/null && exit 0; \
@@ -655,16 +768,26 @@ pub fn stop_server(sandbox: &str) {
 /// over stdin, the socket opened first and the server started behind it, then the port published.
 /// Returns the host port the cockpit answers on.
 ///
-/// `stop_server` before `start_server` because this is an explicit `skein fleet-serve`, not a tick:
-/// the person running it means "this build", and a start that found a session and left it would
-/// keep an old binary serving forever, which is the bug `retire_stale_agent` exists for one door
-/// over. The cost is stated where it is paid: across a doorway restart the socket closes and
-/// reopens, so the §9.4 window exists for that instant — holding it open across *upgrades* too is
-/// SKEIN-105's remainder.
+/// **A re-serve reloads rather than restarts**, and the difference is the socket. This is an
+/// explicit `skein fleet-serve` and not a tick, so the person running it means "this build" — a
+/// start that found a session and left it would keep an old binary serving forever, which is the
+/// bug `retire_stale_agent` exists for one door over. That used to be spelled `stop_server` then
+/// `start_server`, which closed the cockpit's port and re-bound it: the §9.4 window, opened by the
+/// process that exists to close it, on every upgrade. [`reload_server`] asks the doorway to
+/// re-exec instead, so the descriptor is carried across and the port is never free. Only a fleet
+/// with no doorway at all is started from nothing.
+///
+/// **And the publish is guarded by *who* holds the port, not by whether anything does.** A
+/// squatter accepts connections exactly as the doorway does, so publishing on a connect alone is
+/// how the host's mapping — and the token the browser sends through it — reaches a box. The mapping
+/// is permanent (sbx has no unpublish), so this refuses rather than risks it.
 pub fn ensure_fleet_server(sandbox: &str) -> Result<u16, String> {
     let home = skein_home().to_string_lossy().into_owned();
     own_sandbox(sandbox)
-        .exec(&format!("test -d {}", sh_quote(&home)), Duration::from_secs(30))
+        .exec(
+            &format!("test -d {}", sh_quote(&home)),
+            Duration::from_secs(30),
+        )
         .map_err(|_| {
             format!(
                 "the volume ({home}) is not visible inside {sandbox}, so a server started there \
@@ -674,8 +797,24 @@ pub fn ensure_fleet_server(sandbox: &str) -> Result<u16, String> {
             )
         })?;
     install_server(sandbox)?;
-    stop_server(sandbox);
-    start_server(sandbox)?;
+    // Installed first, then reloaded: the doorway re-execs the script and the binary that are on
+    // disk *now*, so the order is what makes a reload an upgrade rather than a restart of the old
+    // one. A failed install leaves the running cockpit untouched, which is why it comes first.
+    if !reload_server(sandbox) {
+        start_server(sandbox)?;
+    }
+    let port = server_sandbox_port();
+    if !door_settles(sandbox, port) {
+        return Err(format!(
+            "the cockpit's door is not held by the doorway in {sandbox}: nothing was published, \
+             since a port mapping cannot be withdrawn. Either the doorway could not start (check \
+             `tmux -S {sock} capture-pane -p -t {session}` in the sandbox, or that python3 is \
+             present), or :{port} is already taken in there — which is architecture §9.4's squat, \
+             and publishing to it would hand the browser and its token to whatever holds it",
+            sock = server_tmux_sock(),
+            session = SERVER_SESSION,
+        ));
+    }
     ensure_server_port(sandbox)
 }
 
@@ -1813,6 +1952,17 @@ pub fn heal_fleet() -> Result<(), String> {
     if !awake {
         return Ok(());
     }
+    // Before the launcher, the same ordering and for the same reason as in `ensure_fleet`: the
+    // cockpit's port must be held before anything that can make a box is in place. Here as well as
+    // there because a fleet that has been up for days is otherwise repaired only at the next box
+    // start — the argument `heal_transport` already makes for the agent, applied to the door.
+    if let Err(e) = ensure_fleet_door(&sandbox) {
+        eprintln!(
+            "skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can \
+             bind :{} before skein does, which is architecture §9.4's squat",
+            server_sandbox_port()
+        );
+    }
     install_launcher(&sandbox)?;
     // Here as well as in `ensure_fleet`, and this is the call that matters for switching it on: a
     // server restart is when the setting is read, and a fleet that has been up for days would
@@ -2160,10 +2310,15 @@ pub fn fleet_exists(sandbox: &str) -> Option<bool> {
     Some(fleet_boxes()?.iter().any(|b| b.name == sandbox))
 }
 
-/// Create the fleet sandbox if it is missing, then install the launcher into it.
+/// Create the fleet sandbox if it is missing, open the cockpit's door in it, then install the
+/// launcher.
 ///
 /// Idempotent: safe to call before every launch, which is how a sandbox the user removed by hand
 /// comes back rather than leaving every box unstartable.
+///
+/// The door is here rather than in [`ensure_fleet_server`] because this is the only function that
+/// runs before a box can exist — see [`ensure_fleet_door`], and §9.4's squat, which is a race
+/// against the *first* box and not against the server.
 pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     if !valid_name(sandbox) {
         return Err("invalid fleet sandbox name".into());
@@ -2217,6 +2372,24 @@ pub fn ensure_fleet(sandbox: &str, mounts: &[String]) -> Result<(), String> {
     }
     ensure_substrate(sandbox)?;
     ensure_fleet_root(sandbox)?;
+    // Before the launcher is installed, which is the earliest a box in this sandbox could exist —
+    // and that ordering is the item (§9.4's squat). The cockpit's port has to be held from the
+    // moment the sandbox does, not from the moment somebody runs `skein fleet-serve`: the mapping
+    // a serve publishes outlives skein, so a box that took the port first *is* the cockpit, and
+    // the browser hands it the fleet token on its first request.
+    //
+    // Reported rather than fatal, and the reason is measured rather than chosen: the doorway needs
+    // python3, and `box-session.sh` says out loud that a box without python3 still starts (it
+    // loses shared logins). Refusing every launch on a fleet whose image has no python would be a
+    // bigger outage than the exposure, which needs a *published* mapping before it is reachable at
+    // all — and `ensure_fleet_server` refuses to publish one to a port the doorway does not hold.
+    if let Err(e) = ensure_fleet_door(sandbox) {
+        eprintln!(
+            "skein: the cockpit's door is not open in {sandbox} ({e}); a box in this fleet can \
+             bind :{} before skein does, which is architecture §9.4's squat",
+            server_sandbox_port()
+        );
+    }
     // After the substrate (which may have just installed the runtimes) and before any box starts,
     // so a rebuilt sandbox has its login back before the first box seeds from it.
     sync_fleet_login(sandbox);
@@ -8203,9 +8376,10 @@ b idle 5000000 4 1048576 1048576
         );
         // And not started again in the same pass. The path itself appears in the kill (it is the
         // `pkill` pattern), so what distinguishes install-and-start from stop is the start's own
-        // `has-session` guard.
+        // `has-session` guard — named for the *agent's* session, because `heal_fleet` opens the
+        // cockpit's door on the same pass and that start guards itself the same way.
         assert!(
-            !argv.contains("has-session"),
+            !argv.contains(&format!("has-session -t '{AGENT_SESSION}'")),
             "removed and started again in the same pass:\n{argv}"
         );
 

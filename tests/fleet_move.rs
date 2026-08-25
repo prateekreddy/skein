@@ -11,10 +11,29 @@
 //! What no test here can claim, said plainly: the sandbox lifecycle itself. `sbx create` with the
 //! volume mounted, the published mapping reaching the sandbox's address, and a real skein-server
 //! answering through it need a live fleet — the runnable checklist for that lives with SKEIN-109.
+//!
+//! Four more that need a live fleet, added with SKEIN-105 (the door at create, and the doorway
+//! surviving its own restart). Each is a line to run on a real one, not a claim made here:
+//!
+//!   1. **Create, then look before serving.** Destroy the fleet through the warden, start a box,
+//!      and inside the sandbox check `ss -ltnp | grep :7878` names `python3 …/server-doorway.py` —
+//!      the door is held on a fleet nobody has run `skein fleet-serve` against yet.
+//!   2. **Upgrade with the door open.** With the cockpit serving and a browser tab on it, run
+//!      `skein fleet-serve` again; note the doorway's pid before and after
+//!      (`pgrep -f server-doorway.py`) and `readlink /proc/<pid>/fd/3` — both unchanged, and the
+//!      tab reconnects without the URL changing.
+//!   3. **The port survives a killed doorway.** `kill -9` the doorway inside the sandbox and,
+//!      from the host, connect to the published port in a loop: it should refuse for well under a
+//!      second. `PR_SET_PDEATHSIG` is a Linux syscall the sandbox image has to honour, and the
+//!      symptom if it does not is an orphaned `skein-server` still on :7878 that nothing replaces.
+//!   4. **The squat refusal on a real image.** Bind :7878 inside the sandbox from a box, then run
+//!      `skein fleet-serve` from the host: it must refuse naming §9.4 and publish nothing —
+//!      `sbx ports <fleet>` unchanged, because sbx has no unpublish.
 
 use skein::fleet::{
-    ensure_fleet_server, fleet_serve_mounts, install_server, server_binary, server_doorway_path,
-    server_path, server_tmux_sock, start_server, stop_server,
+    ensure_fleet, ensure_fleet_door, ensure_fleet_server, fleet_serve_mounts, install_server,
+    reload_server, server_binary, server_door_stamp_path, server_doorway_path, server_path,
+    server_tmux_sock, start_server, stop_server,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,6 +74,29 @@ case "$verb" in
     exec "$@" ;;
   *) echo "fake sbx: unsupported verb $verb" >&2; exit 2 ;;
 esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The same stand-in, with the guest command RECORDED AND NOT RUN.
+///
+/// For the tests whose claim is an order of operations rather than an effect: `ensure_fleet` runs
+/// apt through the substrate and writes `/etc/docker` through `install_docker_config`, and a fake
+/// that executed those would do both to the machine running the suite.
+fn write_recording_sbx(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir).unwrap();
+    let p = dir.join("sbx");
+    fs::write(
+        &p,
+        r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SBX_LOG"
+# stdin is drained rather than ignored: an install writes megabytes down this pipe and a reader
+# that exits first turns the write into EPIPE, which is a failure the caller reports as its own.
+case "$1" in exec) cat >/dev/null 2>&1 ;; esac
+exit 0
 "#,
     )
     .unwrap();
@@ -136,7 +178,11 @@ fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(server_path()).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o755, "an unexecutable server is not installed");
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "an unexecutable server is not installed"
+        );
     }
     let doorway = fs::read_to_string(server_doorway_path()).expect("the doorway is installed too");
     assert!(
@@ -170,7 +216,10 @@ fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
          something holds it is a permanent mapping to nothing (sbx has no unpublish): {seq}"
     );
     assert!(
-        seq.lines().nth(publish).unwrap().contains(&format!("{port}:{port}/tcp")),
+        seq.lines()
+            .nth(publish)
+            .unwrap()
+            .contains(&format!("{port}:{port}/tcp")),
         "the publish maps the cockpit's own number: {seq}"
     );
 
@@ -230,7 +279,10 @@ fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
         "LISTEN_PID must be the server's own pid — exec keeps it — or doorway.rs refuses the \
          descriptor as somebody else's"
     );
-    assert_eq!(v["in_fleet"], "1", "the one variable: the started server IS the in-fleet one");
+    assert_eq!(
+        v["in_fleet"], "1",
+        "the one variable: the started server IS the in-fleet one"
+    );
     assert_eq!(
         v["inherited_only"], "1",
         "a fleet server that lost its descriptor must refuse to bind, not run the race itself"
@@ -386,10 +438,448 @@ fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {
         "the volume root is the mount"
     );
     assert!(
-        mounts.iter().skip(1).all(|m| !m.starts_with(&*home.to_string_lossy())),
+        mounts
+            .iter()
+            .skip(1)
+            .all(|m| !m.starts_with(&*home.to_string_lossy())),
         "everything under the volume is already visible through it; mounting a path twice is not \
          obviously harmless: {mounts:?}"
     );
 
     let _ = fs::remove_dir_all(&root);
+}
+
+// --- SKEIN-105: the port is never free ------------------------------------------------------
+//
+// Two things the doorway did not do when it landed, and each is a way the port stands empty with
+// boxes already running. It opened at `skein fleet-serve` — so a box created before that could
+// take the port, become the cockpit, and be handed the fleet token on the browser's first request
+// (architecture §9.4). And it did not survive its own restart: an upgrade was a stop and a start,
+// which closes the socket and re-binds it, running the race from the process that exists to close
+// it.
+
+/// The doorway's pid, read the way skein reads it: off the stamp it writes once it holds the port.
+fn door_pid() -> Option<u32> {
+    let stamp = fs::read_to_string(server_door_stamp_path()).ok()?;
+    stamp.split_whitespace().next()?.parse().ok()
+}
+
+/// Which socket descriptor 3 of `pid` is. Identical before and after an upgrade means the listener
+/// was carried across rather than closed and re-opened — the one observation that distinguishes a
+/// handover from a fast re-bind, and it is available because the "sandbox" here is this machine.
+fn door_socket(pid: u32) -> String {
+    fs::read_link(format!("/proc/{pid}/fd/3"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Put a server at the installed path, the way an install leaves one.
+fn write_server(body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = PathBuf::from(server_path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, body).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Did a server tagged `tag` run behind the door? The doorway polls for a missing binary, so this
+/// waits rather than asking once.
+fn ran_says(tag: &str, out: &Path) -> bool {
+    for _ in 0..100 {
+        if fs::read_to_string(out).unwrap_or_default().contains(tag) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+fn wait_for_door(port: u16) -> bool {
+    for _ in 0..100 {
+        if connects(port) && door_pid().is_some() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Stage a fake fleet: a recording `sbx` on PATH, a scratch volume, and a free cockpit port.
+fn stage(root: &Path) -> u16 {
+    write_fake_sbx(&root.join("bin"));
+    fs::write(root.join("sbx.log"), "").unwrap();
+    std::env::set_var("SBX_LOG", root.join("sbx.log"));
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            root.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let home = root.join("skein");
+    fs::create_dir_all(&home).unwrap();
+    std::env::set_var("SKEIN_HOME", &home);
+    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+    let port = free_port();
+    std::env::set_var("SKEIN_SERVER_PORT", port.to_string());
+    port
+}
+
+fn unstage(root: &Path) {
+    stop_server(FLEET);
+    let _ = Command::new("tmux")
+        .args(["-S", &server_tmux_sock(), "kill-server"])
+        .status();
+    for var in [
+        "SKEIN_SERVER_BINARY",
+        "SKEIN_SERVER_PORT",
+        "SBX_LOG",
+        "SKEIN_LS_CMD",
+        "SKEIN_RUNTIME_PACKAGES",
+    ] {
+        std::env::remove_var(var);
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// An observer that adopts descriptor 3 the way `doorway.rs` does, records which socket it was
+/// handed, and then holds it — so what ran behind the door is readable afterwards.
+fn observer(tag: &str, out: &Path) -> String {
+    format!(
+        "#!/usr/bin/env python3\n\
+         import os, socket, time\n\
+         s = socket.socket(fileno=3)\n\
+         open({out:?}, 'a').write('{tag} %d %d\\n' % (os.getpid(), s.getsockname()[1]))\n\
+         time.sleep(300)\n",
+        out = out.to_string_lossy(),
+    )
+}
+
+/// The door is open with nothing behind it — which is what makes opening it at fleet **create**
+/// possible at all, since the binary does not arrive until somebody runs `skein fleet-serve`.
+#[test]
+fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+
+    // No `install_server`, and no binary anywhere: `server_path()` does not exist.
+    ensure_fleet_door(FLEET).expect("the door opens with no server installed");
+    assert!(
+        wait_for_door(port),
+        "the cockpit's port is free on a fleet that exists — the first box to bind :{port} \
+         becomes the cockpit (architecture §9.4)"
+    );
+    assert!(
+        !Path::new(&server_path()).exists(),
+        "the point of this test is that nothing was installed behind the door"
+    );
+    let pid = door_pid().expect("the doorway stamps the port it holds");
+    assert!(
+        door_socket(pid).starts_with("socket:"),
+        "the stamped process is not holding a socket at descriptor 3"
+    );
+
+    // And a second ensure is a no-op rather than a restart: the launch path must not close the
+    // door it is there to keep open.
+    ensure_fleet_door(FLEET).expect("a second ensure");
+    assert_eq!(
+        door_pid(),
+        Some(pid),
+        "an ensure on an open door replaced the doorway, which closes the port to re-open it"
+    );
+
+    unstage(&root);
+}
+
+/// `ensure_fleet` opens the door **before** it installs the launcher — and the launcher is what
+/// makes a box in this sandbox possible at all, so that ordering is the whole item: there is no
+/// interval in which a box and a free cockpit port coexist.
+///
+/// Driven with an `sbx` that records and does nothing, because what is under test is an order of
+/// operations and not their effects — `ensure_fleet` otherwise runs apt and writes `/etc/docker`.
+#[test]
+fn the_door_is_open_before_the_launcher_that_makes_boxes_possible() {
+    let _guard = serialize();
+    let root = scratch();
+    let port = stage(&root);
+    // Recording only: every `exec` is logged and nothing is run.
+    write_recording_sbx(&root.join("bin"));
+    // The fleet already exists, so nothing is created and the warden is never asked.
+    std::env::set_var(
+        "SKEIN_LS_CMD",
+        format!("echo '[{{\"name\":\"{FLEET}\",\"status\":\"running\"}}]'"),
+    );
+    skein::sbx::forget_fleet_boxes();
+
+    let _ = ensure_fleet(FLEET, &[]);
+
+    let seq = fs::read_to_string(root.join("sbx.log")).unwrap();
+    let door = seq
+        .lines()
+        .position(|l| l.contains("server-doorway.py"))
+        .unwrap_or_else(|| panic!("the door was never opened by ensure_fleet:\n{seq}"));
+    let launcher = seq
+        .lines()
+        // The install, not a mention: the substrate script names `box-session.sh` in a comment,
+        // and matching that would find the launcher before anything installed it.
+        .position(|l| l.contains("cat >") && l.contains("box-session.sh"))
+        .unwrap_or_else(|| panic!("the launcher was never installed:\n{seq}"));
+    assert!(
+        door < launcher,
+        "the launcher was installed before the cockpit's port was held: a box started in that \
+         window binds :{port} and becomes the cockpit (architecture §9.4)\n{seq}"
+    );
+    assert!(
+        !seq.lines().any(|l| l.starts_with("create")),
+        "a fleet that already exists was created again:\n{seq}"
+    );
+
+    unstage(&root);
+}
+
+/// A reload upgrades the server **across the same listening socket**. The doorway keeps its pid
+/// (an `exec` replaces the image, not the process) and descriptor 3 keeps its socket — which is
+/// the difference between a handover and a fast re-bind, and only the first leaves no window.
+///
+/// The observers are `#!` scripts rather than the carried ELF, so they are written straight to the
+/// installed path: what is under test is the *socket* across an upgrade, and running two
+/// distinguishable servers is the only way to see that the second one got the first one's.
+#[test]
+fn a_reload_upgrades_the_server_without_ever_closing_the_door() {
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+    let ran = root.join("ran.txt");
+
+    ensure_fleet_door(FLEET).expect("the door opens with no server behind it");
+    assert!(wait_for_door(port), "the door never opened");
+    let pid = door_pid().expect("the doorway stamps the port it holds");
+    let socket = door_socket(pid);
+
+    // The binary arrives after the door, which is the create-then-serve order in miniature.
+    write_server(&observer("first", &ran));
+    assert!(
+        ran_says("first", &ran),
+        "the first server never ran behind the door"
+    );
+
+    write_server(&observer("second", &ran));
+    assert!(
+        reload_server(FLEET),
+        "there was no doorway to reload, so a re-serve would have to start one from nothing"
+    );
+    assert!(
+        ran_says("second", &ran),
+        "the reload did not replace the server behind the door"
+    );
+
+    // A *second* reload, because the first one re-execs and could rewrite the command line skein
+    // finds this process by. `pkill -f` matches an anchored `^python[0-9.]* <doorway>`, so a
+    // re-exec spelled with the interpreter's full path would leave a doorway nothing can signal —
+    // and the symptom would be a re-serve that silently starts a second one.
+    write_server(&observer("third", &ran));
+    assert!(
+        reload_server(FLEET),
+        "the reloaded doorway is no longer findable by the pattern skein signals it with"
+    );
+    assert!(
+        ran_says("third", &ran),
+        "the second reload did not replace the server behind the door"
+    );
+
+    assert_eq!(
+        door_pid(),
+        Some(pid),
+        "the doorway was replaced rather than reloaded — a new process means a new bind, and the \
+         gap between the old close and it is architecture §9.4's window"
+    );
+    assert_eq!(
+        door_socket(pid),
+        socket,
+        "descriptor 3 is a different socket after the upgrade: the listener was closed and \
+         re-opened, which is the race the doorway exists to close"
+    );
+    // Both were handed the same port, so the second is serving through the first's socket.
+    let who = fs::read_to_string(&ran).unwrap();
+    assert!(
+        who.lines().all(|l| l.ends_with(&format!(" {port}"))),
+        "a server behind the door was handed a socket that is not the cockpit's: {who:?}"
+    );
+
+    unstage(&root);
+}
+
+/// And `skein fleet-serve` against a live fleet takes that path: it reloads the running doorway
+/// rather than stopping and starting one, which is what makes an upgrade windowless.
+#[test]
+fn a_re_serve_reloads_the_running_doorway_rather_than_restarting_it() {
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+    let carried = root.join("skein-server-build");
+    let mut payload = vec![0x7f, b'E', b'L', b'F'];
+    payload.extend((0..4096u32).map(|i| (i % 251) as u8));
+    fs::write(&carried, &payload).unwrap();
+    std::env::set_var("SKEIN_SERVER_BINARY", &carried);
+
+    // The door first, as `ensure_fleet` opens it at create.
+    ensure_fleet_door(FLEET).expect("the door opens");
+    assert!(wait_for_door(port), "the door never opened");
+    let pid = door_pid().expect("a doorway");
+    let socket = door_socket(pid);
+
+    let before = fs::read_to_string(root.join("sbx.log")).unwrap().len();
+    assert_eq!(
+        ensure_fleet_server(FLEET).expect("the serve"),
+        port,
+        "the sandbox's own number is preferred host-side"
+    );
+    let log = fs::read_to_string(root.join("sbx.log")).unwrap();
+    let serve = &log[before..];
+    assert!(
+        serve.contains("-USR1"),
+        "the serve did not reload the running doorway:\n{serve}"
+    );
+    assert!(
+        !serve.contains("new-session"),
+        "the serve started a second doorway, which can only mean the first one gave up its \
+         socket:\n{serve}"
+    );
+    assert_eq!(
+        door_pid(),
+        Some(pid),
+        "the doorway did not survive the serve"
+    );
+    assert_eq!(
+        door_socket(pid),
+        socket,
+        "the cockpit's socket was closed and re-opened by the serve"
+    );
+
+    unstage(&root);
+}
+
+/// A doorway that dies is replaced *at once*, because the gap is the port standing empty. The
+/// supervisor used to sleep two seconds unconditionally before re-running it.
+///
+/// With a server behind the door, because that is what makes the death interesting: the server
+/// inherited the listener, so a doorway killed on its own would leave an orphan still holding the
+/// port — and then no replacement could ever bind it. The server's death is part of the doorway's.
+#[test]
+fn a_doorway_that_dies_takes_the_server_with_it_and_is_replaced_at_once() {
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+    let ran = root.join("ran.txt");
+
+    ensure_fleet_door(FLEET).expect("the door opens");
+    assert!(wait_for_door(port), "the door never opened");
+    let first = door_pid().expect("a doorway");
+    write_server(&observer("first", &ran));
+    assert!(ran_says("first", &ran), "no server ran behind the door");
+    let served: u32 = fs::read_to_string(&ran)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Past the supervisor's crash-loop threshold, which is what tells "this one was working" from
+    // "this one cannot start at all" — the second still backs off, deliberately.
+    std::thread::sleep(Duration::from_secs(6));
+
+    let killed = std::time::Instant::now();
+    let _ = Command::new("kill")
+        .args(["-9", &first.to_string()])
+        .status();
+    let mut back = None;
+    let mut orphan = true;
+    while killed.elapsed() < Duration::from_secs(10) {
+        orphan = Path::new(&format!("/proc/{served}")).exists();
+        match door_pid() {
+            Some(pid) if pid != first && !orphan && connects(port) => {
+                back = Some(killed.elapsed());
+                break;
+            }
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert!(
+        !orphan,
+        "the server outlived the doorway that forked it and still holds the inherited listener — \
+         no replacement doorway can ever bind :{port} again"
+    );
+    let took =
+        back.unwrap_or_else(|| panic!("the door never came back after the doorway was killed"));
+    eprintln!("the door was re-opened after {took:?}");
+    assert!(
+        took < Duration::from_millis(1500),
+        "the cockpit's port stood empty for {took:?} after the doorway died — every millisecond \
+         of that is a box's chance to bind it (architecture §9.4)"
+    );
+
+    unstage(&root);
+}
+
+/// Something already holds the cockpit's port inside the sandbox. Nothing is published: the host
+/// mapping is permanent and cannot be withdrawn, so handing it to a squatter hands it the browser
+/// and the fleet token with it.
+///
+/// The guard cannot be a TCP connect, which is what makes this worth a test — a squatter accepts
+/// exactly as the doorway does. It is the doorway's own stamp that tells them apart.
+#[test]
+fn a_squatter_on_the_cockpits_port_is_never_published_to() {
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+    let carried = root.join("skein-server-build");
+    // ELF-shaped and nothing more: what is under test is whether the port gets published, which
+    // is decided before anything behind the door has a chance to run.
+    fs::write(&carried, [0x7f, b'E', b'L', b'F']).unwrap();
+    std::env::set_var("SKEIN_SERVER_BINARY", &carried);
+
+    // The squat: a box got there first and is answering on the cockpit's number.
+    let squatter = std::net::TcpListener::bind(("0.0.0.0", port)).expect("the squatter binds");
+    assert!(
+        connects(port),
+        "the squatter accepts, exactly as the doorway would"
+    );
+
+    let why = ensure_fleet_server(FLEET).expect_err("the cockpit was published to a squatter");
+    assert!(
+        why.contains("§9.4") && why.contains("not held by the doorway"),
+        "the refusal must name the squat: {why}"
+    );
+    let seq = fs::read_to_string(root.join("sbx.log")).unwrap();
+    assert!(
+        !seq.contains("--publish"),
+        "a permanent host mapping was made to whatever holds :{port} — sbx has no unpublish, so \
+         that mapping outlives the mistake:\n{seq}"
+    );
+
+    drop(squatter);
+    unstage(&root);
 }
