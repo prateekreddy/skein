@@ -53,9 +53,39 @@ own="${SKEIN_STATE:-}/inbox"
 seen_file="${HOME:-/tmp}/.skein-mail-seen"
 # The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
 # signal on it makes every box write one file and the board see none of them report.
-# SKEIN_BOX is exported by box-session.sh, the only thing that knows which box a process is
-# in. A legacy box has no SKEIN_BOX and is alone in its VM, where the two are the same name.
-vmid="${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}}"
+#
+# SKEIN_BOX names the box wherever it was set: the launcher exports it before it starts the box's
+# tmux server (src/box-session.sh), so the agent and every hook it forks inherit it, and every
+# placement hop into a shared box exports it too (`wrap` in src/place.rs).
+#
+# The old chain ran on from there to SANDBOX_VM_ID and then `hostname` unconditionally, and in a
+# shared sandbox BOTH of those name the sandbox — one string for every box in it. Whether that
+# fallback is sound depends on which world this box is in, and the fact that answers it here is the
+# fleet launcher: skein installs it at `fleet::box_session_path()` in the one sandbox that holds
+# boxes, and never in a per-VM sandbox, which `sbx create` builds with no fleet machinery at all.
+# box-pane.sh answers the same question from SKEIN_TMUX_SOCK and spells the argument out in full; a
+# hook is not started by the attach and never sees that variable, but the launcher is a fact about
+# the SANDBOX and so is visible to anything running inside it, whatever its lineage. So
+#   · SKEIN_BOX set          — that is the box, whatever else is in the environment;
+#   · unset, no launcher     — a legacy box, alone in its VM, where the two names are the same
+#                              string. Unchanged: this is the path that has always worked;
+#   · unset, with a launcher — a shared sandbox and no identity. Writing under SANDBOX_VM_ID here
+#                              files this box's signal under a name that is not its own, and
+#                              overwrites whichever box does own that name.
+#
+# Loudly here, and not `exit 0` as the hooks do: this is a command the agent runs and reads the
+# answer of, so silence would look like an empty inbox — the one reading a lost identity must never
+# produce. What it would cost otherwise is worse than a misfiled file: mail addressed to this box
+# would go undelivered because the address no longer matches, every outgoing message would claim to
+# come from a box that does not exist, and `seenBy` would fill with the sandbox's name.
+if [ -n "${SKEIN_BOX:-}" ]; then
+  vmid="$SKEIN_BOX"
+elif [ ! -e "${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh" ]; then
+  vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
+else
+  echo "[skein-mailbox] this box cannot establish which box it is (no SKEIN_BOX in a shared sandbox); mail is neither sent nor delivered" >&2
+  exit 0
+fi
 vmid="${vmid//\//-}"   # slash-safe identity (matches the registry/journal shard keys)
 cmd="${1:-inbox}"; shift || true
 

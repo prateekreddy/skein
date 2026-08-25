@@ -30,6 +30,29 @@ pub(crate) fn probe_is_stale(store: &Path, name: &str) -> bool {
     current.is_some() && current != booted
 }
 
+/// **Is this signal the box's own?** — the filename says so, and this is what checks it.
+///
+/// Every per-box signal lives at `<store>/<kind>/<box>.json`, and until the probes wrote the name
+/// *inside* the file the path was the only thing asserting whose signal it was. A file misfiled
+/// under another box's name is the worst possible shape for that: well-formed, fresh, and rendering
+/// as that box's own state with nothing on the row to mark it. The probes cannot write the wrong
+/// name any more ("The BOX, not the VM" in each of them); this is for the files a probe that could
+/// already left on disk, and for a store that was copied or restored.
+///
+/// A signal that names nobody passes — it came from a probe that could not say, which is
+/// `health::Level::Unknown`: not checked, not a fault. Refusing those would take the signal away
+/// from every box still running an older probe, a certain loss traded against a possible one. A
+/// *non-empty* name that disagrees with the file it came out of is the fault.
+///
+/// Deliberately not a version bump anywhere: `box` adds a key without changing what any existing
+/// key means, so an older skein ignores it (serde drops unknown fields) and a newer one checks it.
+pub(crate) fn signal_is_ours(v: &serde_json::Value, name: &str) -> bool {
+    match v.get("box").and_then(|b| b.as_str()).map(str::trim) {
+        None | Some("") => true,
+        Some(claimed) => claimed == name,
+    }
+}
+
 /// The narrative signal a box writes on each turn-end (box-session.sh): the last assistant
 /// message (Stop) or the prompt it's blocked on (Notification). The free digest source —
 /// the agent already wrote the words, so reading them costs no model tokens.
@@ -43,9 +66,17 @@ pub struct SessionSignal {
     pub last_message: String,
     #[serde(default)]
     pub prompt: String,
+    /// **Whose words these are** — the box `box-session.sh` believed it was reporting for. Empty
+    /// from a probe that predates the field. See [`signal_is_ours`].
+    #[serde(default, rename = "box")]
+    pub box_name: String,
 }
 
 /// Read `<store>/sessions/<name>.json` — the last narrative signal the box reported.
+///
+/// `None` rather than the wrong box's words when the file turns out to be another box's: this is
+/// the headline the row shows, so a misfiled one reads as this box having said something it never
+/// said, and there is nothing in the sentence itself that could give that away.
 pub fn session_signal(name: &str) -> Option<SessionSignal> {
     if !valid_name(name) {
         return None;
@@ -54,7 +85,11 @@ pub fn session_signal(name: &str) -> Option<SessionSignal> {
         .join("sessions")
         .join(format!("{name}.json"));
     let txt = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&txt).ok()
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    if !signal_is_ours(&v, name) {
+        return None;
+    }
+    serde_json::from_value(v).ok()
 }
 
 /// The box's *current task* — what it's doing right now, for the fleet's peripheral view. Prefers
@@ -67,9 +102,14 @@ pub fn current_task(name: &str) -> Option<String> {
     if let Some(p) = store_for_box(name).map(|d| d.join("tasks").join(format!("{name}.json"))) {
         if let Ok(txt) = fs::read_to_string(p) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
-                if let Some(t) = v.get("task").and_then(|t| t.as_str()).map(str::trim) {
-                    if !t.is_empty() {
-                        return first_line(t);
+                // Another box's task is not this box's live signal, so fall through to the journal
+                // rather than show it. The row would otherwise carry a plausible sentence about
+                // work this box is not doing, which is indistinguishable from a correct one.
+                if signal_is_ours(&v, name) {
+                    if let Some(t) = v.get("task").and_then(|t| t.as_str()).map(str::trim) {
+                        if !t.is_empty() {
+                            return first_line(t);
+                        }
                     }
                 }
             }
@@ -94,6 +134,12 @@ pub(crate) fn status_edge(name: &str) -> Option<(String, i64)> {
         .join("status")
         .join(format!("{name}.json"));
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    // Before the status is read at all, because attribution is prior to every other question about
+    // it: another box's "working" is not a stale claim about this box, it is not a claim about this
+    // box, and fusing it with this box's screen would produce a turn state neither of them is in.
+    if !signal_is_ours(&v, name) {
+        return None;
+    }
     let at = v
         .get("ts")
         .and_then(|t| t.as_str())
@@ -773,6 +819,12 @@ pub fn current_status_detail(name: &str) -> Option<String> {
         .join("status")
         .join(format!("{name}.json"));
     let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    // The same file `status_edge` reads, so it must refuse it for the same reason and at the same
+    // moment. A detail that survives a status that was rejected is how a row comes to say "API
+    // error: rate limit" about a box that never hit one.
+    if !signal_is_ours(&v, name) {
+        return None;
+    }
     v.get("detail")
         .and_then(|s| s.as_str())
         .map(|s| s.trim().to_string())

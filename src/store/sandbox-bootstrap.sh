@@ -48,9 +48,38 @@ fi
 
 # The BOX, not the VM. In a shared sandbox every box has the same SANDBOX_VM_ID, so keying a
 # signal on it makes every box write one file and the board see none of them report.
-# SKEIN_BOX is exported by box-session.sh, the only thing that knows which box a process is
-# in. A legacy box has no SKEIN_BOX and is alone in its VM, where the two are the same name.
-vmid="${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}}"
+#
+# SKEIN_BOX names the box wherever it was set: the launcher exports it before it starts the box's
+# tmux server (src/box-session.sh), so the agent and every hook it forks inherit it, and every
+# placement hop into a shared box exports it too (`wrap` in src/place.rs).
+#
+# The old chain ran on from there to SANDBOX_VM_ID and then `hostname` unconditionally, and in a
+# shared sandbox BOTH of those name the sandbox — one string for every box in it. Whether that
+# fallback is sound depends on which world this box is in, and the fact that answers it here is the
+# fleet launcher: skein installs it at `fleet::box_session_path()` in the one sandbox that holds
+# boxes, and never in a per-VM sandbox, which `sbx create` builds with no fleet machinery at all.
+# box-pane.sh answers the same question from SKEIN_TMUX_SOCK and spells the argument out in full; a
+# hook is not started by the attach and never sees that variable, but the launcher is a fact about
+# the SANDBOX and so is visible to anything running inside it, whatever its lineage. So
+#   · SKEIN_BOX set          — that is the box, whatever else is in the environment;
+#   · unset, no launcher     — a legacy box, alone in its VM, where the two names are the same
+#                              string. Unchanged: this is the path that has always worked;
+#   · unset, with a launcher — a shared sandbox and no identity. Writing under SANDBOX_VM_ID here
+#                              files this box's signal under a name that is not its own, and
+#                              overwrites whichever box does own that name.
+#
+# Empty rather than `exit 0`, because most of what this hook does is not keyed on identity at all —
+# the shared-home contract, the memory bridge and the gitignored-path surfacing are what make the
+# box usable, and they are the same work whoever it turns out to be. Only the parts that write
+# under a name are skipped, each at its own use below.
+if [ -n "${SKEIN_BOX:-}" ]; then
+  vmid="$SKEIN_BOX"
+elif [ ! -e "${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh" ]; then
+  vmid="${SANDBOX_VM_ID:-$(hostname 2>/dev/null || echo unknown)}"
+else
+  echo "[skein-bootstrap] no SKEIN_BOX in a shared sandbox: this box cannot say which box it is, so it registers and reports under no name" >&2
+  vmid=""
+fi
 vmid="${vmid//\//-}"
 # Where this repo's SOURCE TREE is — the checkout the gitignored files below come from. Not a
 # mirror: a mirror is a remote and carries tracked files only, so the .env and the CLAUDE.md a
@@ -78,21 +107,25 @@ fi
 
 # Echo the exact installed probe contract from SessionStart. The host compares this with the current
 # store revision and can offer a targeted agent-session restart when a long-running process is old.
+# Skipped without an identity: `probe_is_stale` reads this file BY BOX NAME, so one filed under the
+# sandbox's name answers for no box and would answer for the wrong one if a box ever bore that name.
 boot_dir="$store/skein/boot"
 boot="$boot_dir/$vmid.json"
 revision="$(sed -n '1p' "$store/skein/probe-revision" 2>/dev/null || true)"
-mkdir -p "$boot_dir" 2>/dev/null || true
-if command -v jq >/dev/null 2>&1; then
-  tmp="$(mktemp "$boot_dir/.boot.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    [ -s "$boot" ] || printf '{}\n' >"$boot"
-    jq --arg r "$revision" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
-      '. + {probe_revision:$r,ts:$t,jq:true}' "$boot" >"$tmp" 2>/dev/null \
-      && mv "$tmp" "$boot" || rm -f "$tmp" 2>/dev/null
+if [ -n "$vmid" ]; then
+  mkdir -p "$boot_dir" 2>/dev/null || true
+  if command -v jq >/dev/null 2>&1; then
+    tmp="$(mktemp "$boot_dir/.boot.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$tmp" ]; then
+      [ -s "$boot" ] || printf '{}\n' >"$boot"
+      jq --arg r "$revision" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
+        '. + {probe_revision:$r,ts:$t,jq:true}' "$boot" >"$tmp" 2>/dev/null \
+        && mv "$tmp" "$boot" || rm -f "$tmp" 2>/dev/null
+    fi
+  elif [ ! -s "$boot" ]; then
+    printf '{"ts":"%s","jq":false,"probe_revision":""}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" >"$boot" 2>/dev/null || true
   fi
-elif [ ! -s "$boot" ]; then
-  printf '{"ts":"%s","jq":false,"probe_revision":""}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" >"$boot" 2>/dev/null || true
 fi
 
 # --- surface gitignored shared paths from the repo's source tree ---------------------------------
@@ -184,17 +217,24 @@ if [ -L "$mem_link" ]; then
   [ "$(readlink "$mem_link")" = "$canonical_mem" ] || { rm -f "$mem_link"; ln -s "$canonical_mem" "$mem_link"; }
 elif [ -d "$mem_link" ]; then
   cp -a "$mem_link"/. "$canonical_mem"/ 2>/dev/null || true   # rescue any box-local notes
-  mv "$mem_link" "$mem_link.pre-skein.$vmid" 2>/dev/null || true
+  # `${vmid:-unknown}` and not a skip: this suffix only keeps two rescued directories apart, and a
+  # box that cannot name itself still has notes worth not overwriting.
+  mv "$mem_link" "$mem_link.pre-skein.${vmid:-unknown}" 2>/dev/null || true
   ln -s "$canonical_mem" "$mem_link"
 else
   ln -s "$canonical_mem" "$mem_link" 2>/dev/null || true
 fi
 
 # --- register this box (who is on what) ---------------------------------------------------------
+# Gated on the identity, and this is the entry with the longest reach of any of them: the registry
+# is keyed by box name and the host reads it every couple of seconds, so a row under the sandbox's
+# name is a box the board can be asked to show and nothing will ever clean up — `delist_box` and
+# `destroy_box` remove a box's rows BY NAME, and no box is named after the sandbox. One is already
+# on disk, in sync's registry, from before this guard existed.
 branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
 reg="$store/sandboxes.json"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
-if command -v jq >/dev/null 2>&1; then
+if [ -n "$vmid" ] && command -v jq >/dev/null 2>&1; then
   (
     flock -w 5 9 || exit 0
     [ -s "$reg" ] || echo '{}' > "$reg"
@@ -247,6 +287,12 @@ if [ -n "$wanted" ] && [ "$wanted" != "$(cat "$marker" 2>/dev/null || true)" ] \
 fi
 
 # --- surface unread mailbox hand-offs addressed to this box --------------------------------------
-[ -x "$store/skein/bin/mailbox.sh" ] && SANDBOX_VM_ID="$vmid" "$store/skein/bin/mailbox.sh" inbox 2>/dev/null || true
+# Handed over as SKEIN_BOX, not SANDBOX_VM_ID. The identity resolved above is a BOX name, and
+# putting a box name in the variable that means "the sandbox" made mailbox.sh re-derive it through
+# the same chain this file just fixed — so it inherited the fault instead of the answer. Skipped
+# outright when there is no identity: an inbox read under the wrong name delivers nothing that was
+# addressed to this box and marks other boxes' broadcasts seen by a name nobody owns.
+[ -n "$vmid" ] && [ -x "$store/skein/bin/mailbox.sh" ] \
+  && SKEIN_BOX="$vmid" "$store/skein/bin/mailbox.sh" inbox 2>/dev/null || true
 
 exit 0

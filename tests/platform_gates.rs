@@ -77,6 +77,11 @@ const GATED: &[(&str, &str)] = &[
         "shared_home_import_is_dry_run_first_explicit_and_filtered",
         "the inventory and import shells use `sort -z` and `tar --ignore-failed-read` (GNU)",
     ),
+    (
+        "no_probe_files_a_signal_under_the_sandboxs_name",
+        "runs all eleven scripts skein installs into a box, mailbox.sh and sandbox-bootstrap.sh \
+         included — `flock` and `date -u -d` are GNU, and a box is Linux by construction",
+    ),
 ];
 
 /// Every `#[cfg(target_os = "linux")] #[test]` in the library, by name.

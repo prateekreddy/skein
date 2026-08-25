@@ -1578,11 +1578,20 @@ mod tests {
 
         // A legacy box sets no SKEIN_BOX and is alone in its VM: there the VM name IS the box name,
         // and it has to keep working exactly as before.
+        //
+        // `SKEIN_FLEET_ROOT` at an empty directory is what MAKES this a legacy box rather than a
+        // wish that it is one. The probe decides from whether skein's launcher is installed in this
+        // sandbox, and this suite may itself be running inside a fleet sandbox where it IS — in
+        // which case, without this, the run below is a shared box with no identity and the script
+        // is right to write nothing. The variable is the host's own
+        // (`fleet::fleet_root`), read the same way and meaning the same thing on both sides.
+        let elsewhere = tempdir();
         let out = Command::new("bash")
             .arg(&script)
             .arg("waiting")
             .env("CLAUDE_PROJECT_DIR", &project_dir)
             .env("SANDBOX_VM_ID", "old-style-box")
+            .env("SKEIN_FLEET_ROOT", &*elsewhere)
             .env_remove("SKEIN_BOX")
             .stdin(std::process::Stdio::null())
             .output()
@@ -1734,6 +1743,368 @@ mod tests {
             "an observation that names nobody could not be checked — that is not the same as \
              being wrong"
         );
+    }
+
+    /// **No probe files a signal under the sandbox's name — every one of them, every branch.**
+    ///
+    /// `box-pane.sh` was fixed alone (the test above). The identical chain,
+    /// `${SKEIN_BOX:-${SANDBOX_VM_ID:-$(hostname)}}`, was still in ten other scripts, and the
+    /// residue proves each of them ran it: under `~/.skein/repos/*/store/.claude/` there are
+    /// `status/skein-fleet.json` and `.agents` (box-status.sh), `sessions/skein-fleet.json`
+    /// (box-session.sh), `diffs/skein-fleet.{json,patch,commits}` (box-diff.sh),
+    /// `telemetry/skein-fleet.jsonl` (box-token-usage.sh), `hook-log/skein-fleet.jsonl`,
+    /// `skein/boot/skein-fleet.json` (sandbox-bootstrap.sh) — and a `skein-fleet` row in one
+    /// registry. `skein-fleet` is `config::default_fleet_sandbox`; no box has ever been called that.
+    ///
+    /// Three worlds, because the fix is a three-way decision and two of the three are ways to be
+    /// wrong:
+    ///   1. **the box says who it is** — SKEIN_BOX wins over everything else in the environment;
+    ///   2. **a shared sandbox that cannot say** — no SKEIN_BOX, and skein's launcher installed in
+    ///      this sandbox. Nothing is written. A signal that is absent reads as a box that has not
+    ///      reported, which is true; a signal under the wrong name is well-formed, fresh, and
+    ///      renders as another box's state with nothing to mark it;
+    ///   3. **a legacy box alone in its VM** — no SKEIN_BOX and no launcher, where the sandbox's
+    ///      name IS the box's. Unchanged, because refusing here would take every unmigrated box's
+    ///      signals away to prevent a collision that cannot happen with one box per VM.
+    ///
+    /// The invariant is checked over the whole store rather than per script: after every run, no
+    /// file anywhere under it may be named after the sandbox or the host. That is what makes this a
+    /// test of the *rule* and not of eleven separate spellings of it — a new probe added tomorrow
+    /// with the old chain in it fails here the first time it writes anything.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_probe_files_a_signal_under_the_sandboxs_name() {
+        use std::io::Write as _;
+
+        let _g = env_lock();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let bin = store.join("skein").join("bin");
+        let project_dir = store.parent().unwrap().to_path_buf();
+
+        // A sandbox that holds boxes is one skein installed its launcher into
+        // (`fleet::box_session_path`), and that is the only thing a HOOK can read to tell the two
+        // worlds apart — it is not started by the attach, so `SKEIN_TMUX_SOCK`, which box-pane.sh
+        // uses for exactly this question, never reaches it. Two roots here, one of each kind.
+        let fleet_root = home.join("boxes");
+        fs::create_dir_all(fleet_root.join(".skein")).unwrap();
+        fs::write(
+            fleet_root.join(".skein").join("box-session.sh"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::fleet::box_session_path(),
+            "/boxes/.skein/box-session.sh",
+            "the scripts hard-code this path's default; if the host's moved, theirs must too"
+        );
+        let vm_root = home.join("no-fleet-here");
+        fs::create_dir_all(&vm_root).unwrap();
+
+        // What each script needs in order to have something to say. A probe that exits early
+        // because its input was missing would pass every assertion below without ever reaching the
+        // identity block, so each of these is chosen to reach a write.
+        let transcript = home.join("transcript.jsonl");
+        fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"usage":{"input_tokens":9,"output_tokens":3},"content":[{"type":"text","text":"done"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        fs::create_dir_all(project_dir.join(".skein")).unwrap();
+        fs::write(
+            project_dir.join(".skein").join("journal.md"),
+            "did x / next y\n",
+        )
+        .unwrap();
+        let transcript_arg = format!(r#"{{"transcript_path":"{}"}}"#, transcript.display());
+
+        // script, argv, stdin.
+        let probes: &[(&str, &[&str], &str)] = &[
+            ("box-status.sh", &["working"], ""),
+            (
+                "box-session.sh",
+                &["stop"],
+                r#"{"last_assistant_message":"the turn ended"}"#,
+            ),
+            ("box-diff.sh", &[], ""),
+            ("box-journal.sh", &[], ""),
+            (
+                "box-task.sh",
+                &[],
+                r#"{"tool_input":{"todos":[{"status":"in_progress","activeForm":"Reading the store"}]}}"#,
+            ),
+            (
+                "box-codex-task.sh",
+                &[],
+                r#"{"prompt":"look at the store"}"#,
+            ),
+            ("box-token-usage.sh", &[], &transcript_arg),
+            (
+                "box-codex-telemetry.sh",
+                &["tool"],
+                r#"{"tool_name":"Bash"}"#,
+            ),
+            ("box-handoff.sh", &["codex"], "{}"),
+            (
+                "mailbox.sh",
+                &["send", "--to", "somebody", "--body", "a note"],
+                "",
+            ),
+            ("sandbox-bootstrap.sh", &[], "{}"),
+        ];
+
+        // Every file under the store, with its CONTENT. Compared before and after a run, because
+        // "wrote nothing" is the assertion for the middle world and there is no other way to state
+        // it — and by content rather than by path, because two probes write the same file
+        // (`tasks/<box>.json`, from TodoWrite and from Codex's prompt) and a path-set comparison
+        // would call the second one's write "nothing happened".
+        fn files(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let mut out = std::collections::BTreeMap::new();
+            let Ok(entries) = fs::read_dir(dir) else {
+                return out;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    out.extend(files(&p));
+                } else {
+                    let bytes = fs::read(&p).unwrap_or_default();
+                    out.insert(p, bytes);
+                }
+            }
+            out
+        }
+
+        let run = |script: &str,
+                   args: &[&str],
+                   stdin: &str,
+                   skein_box: Option<&str>,
+                   vm: &str,
+                   root: &Path| {
+            let mut c = Command::new("bash");
+            c.arg(bin.join(script))
+                .args(args)
+                .env("CLAUDE_PROJECT_DIR", &project_dir)
+                .env("HOME", &*home)
+                // What every box in one sandbox agrees on, and why it is not an identity.
+                .env("SANDBOX_VM_ID", vm)
+                .env("SKEIN_FLEET_ROOT", root)
+                .env_remove("SKEIN_TMUX_SOCK")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            match skein_box {
+                Some(b) => c.env("SKEIN_BOX", b),
+                None => c.env_remove("SKEIN_BOX"),
+            };
+            let mut child = c.spawn().unwrap_or_else(|e| panic!("spawn {script}: {e}"));
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stdin.as_bytes())
+                .unwrap_or_else(|e| panic!("{script} stdin: {e}"));
+            child.wait_with_output().expect("run a probe")
+        };
+
+        // The one thing that must be true after every single run, in every world: no signal
+        // anywhere under the store carries the sandbox's name or the host's.
+        let host = String::from_utf8_lossy(
+            &Command::new("hostname")
+                .output()
+                .map(|o| o.stdout)
+                .unwrap_or_default(),
+        )
+        .trim()
+        .to_string();
+        // Seeded, not written by a probe: a pending brief under every name box-handoff.sh might
+        // pick, including the sandbox's. Exempt from the invariant below because this test put them
+        // there — and the sandbox's is asserted at the end to be still sitting there untouched,
+        // which is the only way to show the probe did not reach for it.
+        let handoffs = store.join("handoffs");
+        fs::create_dir_all(&handoffs).unwrap();
+        let seeded: Vec<std::path::PathBuf> = ["alpha", "skein-fleet", "old-style-box", &host]
+            .iter()
+            .filter(|who| !who.is_empty())
+            .map(|who| handoffs.join(format!("{who}.codex.pending.md")))
+            .collect();
+
+        let no_sandbox_named = |after: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+                                script: &str,
+                                vm: &str| {
+            for (p, bytes) in after {
+                if seeded.contains(p) {
+                    continue;
+                }
+                let rel = p.strip_prefix(&store).unwrap_or(p).to_string_lossy();
+                assert!(
+                    !rel.contains(vm),
+                    "{script} filed a signal under the sandbox's name: {rel}"
+                );
+                assert!(
+                    host.is_empty() || !rel.contains(&host),
+                    "{script} filed a signal under the hostname, which in a shared sandbox is \
+                         the same trap: {rel}"
+                );
+                // The registry is the one signal whose KEY is the box name and whose filename
+                // is not, so a path-shaped invariant walks straight past it — and it is the
+                // misfiling with the longest reach: the host reads `sandboxes.json` every
+                // couple of seconds, a row there is a box the board can be asked to show, and
+                // nothing ever removes it, because `delist_box` and `destroy_box` drop a box's
+                // rows BY NAME and no box is named after the sandbox. One such row is on disk
+                // in sync's registry, left by the version of these scripts this replaces.
+                if rel.ends_with("sandboxes.json") {
+                    let reg: serde_json::Value =
+                        serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
+                    if let Some(o) = reg.as_object() {
+                        assert!(
+                            !o.contains_key(vm),
+                            "{script} registered the SANDBOX as if it were a box: {rel} has a \
+                                 `{vm}` row"
+                        );
+                    }
+                }
+            }
+        };
+
+        for (script, args, stdin) in probes {
+            // A fresh pending brief per pass, since box-handoff.sh consumes the one it finds.
+            for p in &seeded {
+                fs::write(p, "brief\n").unwrap();
+            }
+            // 1. The box says who it is. It writes, and under its own name.
+            let before = files(&store);
+            let out = run(
+                script,
+                args,
+                stdin,
+                Some("alpha"),
+                "skein-fleet",
+                &fleet_root,
+            );
+            assert!(out.status.success(), "{script}: {out:?}");
+            let after = files(&store);
+            assert!(
+                after != before,
+                "{script} wrote nothing at all, so this test is not exercising it"
+            );
+            no_sandbox_named(&after, script, "skein-fleet");
+
+            // 2. A shared sandbox with no SKEIN_BOX: the old chain wrote `skein-fleet.*` here, on
+            //    top of whatever already owned that name. Nothing at all is written now.
+            let before = files(&store);
+            let out = run(script, args, stdin, None, "skein-fleet", &fleet_root);
+            assert!(out.status.success(), "{script}: {out:?}");
+            let after = files(&store);
+            no_sandbox_named(&after, script, "skein-fleet");
+            if *script != "sandbox-bootstrap.sh" {
+                // sandbox-bootstrap.sh is the exception and says so in its own comment: most of
+                // what it does — the shared-home contract, the memory bridge — is not keyed on
+                // identity and is the same work whoever this turns out to be, so it skips only the
+                // parts that write under a name. Every other probe writes under a name or not at
+                // all, and so has nothing left to do.
+                assert_eq!(
+                    after, before,
+                    "{script} wrote something while it could not say which box it was"
+                );
+            }
+
+            // 3. A legacy box: no SKEIN_BOX, no launcher in this sandbox, so the sandbox's name IS
+            //    the box's. Unchanged — this is the path that has always worked.
+            let before = files(&store);
+            let out = run(script, args, stdin, None, "old-style-box", &vm_root);
+            assert!(out.status.success(), "{script}: {out:?}");
+            let after = files(&store);
+            assert!(
+                after != before,
+                "{script} stopped reporting for a legacy box, which is a certain loss traded \
+                 against a collision that cannot happen with one box per VM"
+            );
+            no_sandbox_named(&after, script, "skein-fleet");
+        }
+
+        // The sandbox's brief was there the whole time and nothing ever took it. A consumed one
+        // would mean a box read handoff context addressed to a name that is not its own — the same
+        // fault as a misfiled write, in the one probe whose signal travels the other way.
+        assert!(
+            handoffs.join("skein-fleet.codex.pending.md").exists(),
+            "box-handoff.sh consumed the brief filed under the SANDBOX's name"
+        );
+
+        // `sandbox-bootstrap.sh` is the one script that resolves an identity and then hands it to
+        // ANOTHER, and the delivery it drives has to keep working now that mailbox.sh refuses a
+        // turn it cannot attribute. What this pins is the delivery, not the spelling of the
+        // handover: `SKEIN_BOX=` and `SANDBOX_VM_ID=` on that line behave identically in every
+        // reachable world, since a child inherits whichever variable the parent resolved FROM —
+        // measured, by making the swap and watching the whole suite stay green. The line reads
+        // `SKEIN_BOX` because that is what the value is, and because a box name in the variable
+        // that means "the sandbox" is how this class of bug is spelled.
+        let mail = store.join("mailbox");
+        fs::create_dir_all(&mail).unwrap();
+        fs::write(
+            mail.join("handover-check.json"),
+            r#"{"from":"beta","to":"alpha","kind":"note","branch":"main","body":"addressed to alpha","ts":"1","seenBy":[],"relayedTo":[],"originProject":""}"#,
+        )
+        .unwrap();
+        let out = run(
+            "sandbox-bootstrap.sh",
+            &[],
+            "{}",
+            Some("alpha"),
+            "skein-fleet",
+            &fleet_root,
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("addressed to alpha"),
+            "sandbox-bootstrap.sh did not deliver mail addressed to the box it had just \
+             identified. A box whose inbox stops being surfaced comes up looking perfectly \
+             healthy and simply never sees its mail. stdout: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+
+        // The signals whose reader can CHECK the filename rather than believe it say so inside the
+        // file. Not every probe can: a `.patch`, a `.commits` list and a journal `.md` are opaque
+        // bytes with nowhere to put a name, and for those the refusal above is the whole fix.
+        let claims = |kind: &str, name: &str| -> String {
+            let p = store.join(kind).join(format!("{name}.json"));
+            let v: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())),
+            )
+            .unwrap();
+            v.get("box")
+                .and_then(|b| b.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        for kind in ["status", "sessions", "tasks"] {
+            assert_eq!(
+                claims(kind, "alpha"),
+                "alpha",
+                "{kind}/alpha.json does not say whose it is, so the filename is a claim nothing \
+                 can check"
+            );
+        }
+
+        // The reader's half, on the file the probe actually wrote. Read under any other name it is
+        // refused rather than believed.
+        let status: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(store.join("status").join("alpha.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(crate::signals::signal_is_ours(&status, "alpha"));
+        assert!(!crate::signals::signal_is_ours(&status, "beta"));
+        // And one from a probe that predates the field is still read, because every box in the
+        // fleet is running one until it is reattached.
+        assert!(crate::signals::signal_is_ours(
+            &serde_json::json!({"status": "working"}),
+            "anybody"
+        ));
     }
 
     /// Linux only: drives `box-token-usage.sh` as a script, in the userland it is installed into.
