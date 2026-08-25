@@ -15,11 +15,14 @@ export const page = readFileSync(join(root, "src", "web", "index.html"), "utf8")
 // Brace-matched rather than regex-to-end-of-line, because these span lines; a wrong slice throws
 // here rather than silently testing a truncated function.
 export function grab(name) {
-  for (const start of [`function ${name}(`, `const ${name} =`, `let ${name} =`]) {
+  // `async function` is listed before `function` on purpose: `indexOf("\nfunction attachFiles(")`
+  // simply misses an async declaration, and the miss reads as "did it get renamed?" — which is a
+  // confusing thing to be told about a function that is right there.
+  for (const start of [`async function ${name}(`, `function ${name}(`, `const ${name} =`, `let ${name} =`]) {
     const at = page.indexOf(`\n${start}`);
     if (at < 0) continue;
     const from = at + 1;
-    const isFn = start.startsWith("function");
+    const isFn = start.endsWith("(");
     let depth = 0, opened = false;
     for (let i = from; i < page.length; i++) {
       const c = page[i];
