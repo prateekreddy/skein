@@ -76,6 +76,8 @@ function world(opts = {}) {
     ${grab("revFire")}
     ${grab("revReceiptHtml")}
     ${grab("revMarkDone")}
+    // revRepaintRow asks this for its data-rk selector (SKEIN-284).
+    ${grab("revRkQuery")}
     ${grab("revRepaintRow")}
     ${grab("revPendingPaint")}
     ${grab("revMovedNotice")}

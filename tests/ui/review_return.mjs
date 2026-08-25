@@ -22,7 +22,15 @@
 // fetch that answers the way the server does, including its 404.
 //
 //   node tests/ui/review_return.mjs
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { grab, harness, page } from "./lift.mjs";
+
+// The owner's real queue, captured 2026-08-25 — 54 open pull requests on `acme/thing`, trunk
+// `develop`. See tests/ui/fixtures/README.md for why it is kept whole.
+const THING = JSON.parse(readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "fixtures", "thing-queue.json"), "utf8"));
 
 const t = harness();
 
@@ -38,6 +46,10 @@ function board() {
     let revFilter = "all", revLoading = false, revStaleTimer = null;
     let revRepoFilter = "";
     let revCrits = new Map();
+    // Read-ahead ON for both fixture repos: it is the pump's SCOPE (review::unasked_scope,
+    // SKEIN-242), so an empty map here would make every assertion about what the pane reads on its
+    // own vacuous.
+    const revFlows = new Map([["alpha", { read_prs: true }], ["beta", { read_prs: true }]]);
     let revModsOpen = false, revCounts = [];
     let revSumBusy = 0;
     const REV_SUM_PARALLEL = 3;
@@ -65,14 +77,19 @@ function board() {
     ${grab("revKeyShow")}
     ${grab("revMergeQueues")}
     ${grab("revScopeRepo")}
+    ${grab("revTrunkOf")}
     ${grab("revChains")}
     ${grab("revStackName")}
+    ${grab("REV_UNROOTED_WHY")}
+    ${grab("revStepNo")}
     ${grab("revMisnamed")}
     ${grab("revStackNext")}
     ${grab("revStackLane")}
     ${grab("revStackOpenKey")}
     ${grab("revStackStep")}
     ${grab("toggleRevStack")}
+    // Opening a row or a step fetches the prose the row shape left behind (SKEIN-287).
+    ${grab("revLoadReading")}
     ${grab("toggleStackStep")}
     ${grab("revRail")}
     ${grab("revSize")}
@@ -84,6 +101,7 @@ function board() {
     ${grab("revDraftedReview")}
     // The chip itself, not a proxy for it: SKEIN-243 was a queue where six reviews had been drafted
     // and paid for and not one row said so, so the assertion has to be the mark on the row.
+    ${grab("revDraftAtHead")}
     ${grab("revReadyChip")}
     ${grab("toggleRevRow")}
     ${grab("revStaleTries")}
@@ -99,6 +117,8 @@ function board() {
     ${grab("revUnasked")}
     ${grab("revClearHtml")}
     ${grab("loadKnownSummaries")}
+    ${grab("revReadsAhead")}
+    ${grab("revSkeinsToRead")}
     ${grab("revPumpSummaries")}
     ${grab("revFetchSummary")}
     ${grab("revMatchesFilter")}
@@ -180,6 +200,7 @@ function board() {
       fetchOne: (n, repo) => revFetchSummary(repo || "alpha", n, "force"),
       toggleNR: () => toggleNotReady(),
       stack: key => toggleRevStack(key),
+      chains: () => revChains(revQueue.prs || []),
       row: key => toggleRevRow(key),
       openRow: () => [...revOpen],
       search: q => revSearchSet(q),
@@ -208,6 +229,9 @@ function board() {
     repo_id: id,
     ai: true,
     fresh,
+    // The branch everything here is ultimately for. `revChains` severs the stack at it BY NAME
+    // (SKEIN-288), so a fixture without it exercises the no-trunk fallback instead of the rule.
+    trunk,
     prs: laneRows || [1, 2, 3, 4, 5, 6].map(n => ({
       number: n,
       lane: "needs-you",
@@ -224,6 +248,7 @@ function board() {
     blind_spots: blindSpots,
   });
   const lanes = rows => { laneRows = rows; };
+  let trunk = "";            // what the queue reports as this repo's trunk
   let served = ["alpha"];    // which repos the merged answer carries
   // Answers on demand rather than immediately, so a test can look at the pane between a request and
   // its answer — which is where both defects lived.
@@ -288,7 +313,9 @@ function board() {
     // The bulk read: what skein already holds. This fixture holds nothing — every scenario here is
     // about what the pane ASKS for, so an empty answer keeps the pump as the only source and the
     // assertions about it meaningful.
-    if (/review\/summaries$/.test(url)) {
+    // `?rows=1` since SKEIN-287 — the row shape. Matched with the query, or the stub answers a
+    // call the page does not make and the pump becomes the only source.
+    if (/review\/summaries(\?|$)/.test(url)) {
       return new Promise(resolve => pending.push(() => resolve({
         ok: true,
         // This route is read with `r.json()`, like the workflow one — the queue and the per-PR
@@ -313,6 +340,10 @@ function board() {
           // (SKEIN-236); a fixture answering a bare summary would be testing a server that is gone.
           ...(drafted.includes(n)
             ? { has_critique: true,
+                // `Known::drafted` — the row's own vocabulary for "there is a review, at this head,
+                // with this many comments". It survives `Known::thin`, and `revReadyChip` reads it
+                // rather than the critique object (SKEIN-287).
+                drafted: { head_sha: head, comments: 0 },
                 critique: { number: n, head_sha: head, overall: "one thing", comments: [] } }
             : {}),
         })) });
@@ -350,6 +381,7 @@ function board() {
     ...made,
     settle,
     lanes,
+    trunk: t => { trunk = t; },
     pane: () => revpane.innerHTML,
     // Everything, until it stops asking.
     drain: async () => { for (let i = 0; i < 20 && pending.length; i++) await settle(); },
@@ -498,7 +530,7 @@ function board() {
   b.fetchOne(3);
   await b.drain();
   t.check("a read you ask for says so on the wire",
-    b.reads().some(u => /\/3\/summary\?force=1$/.test(u)), true);
+    b.reads().some(u => /\/3\/summary\?redraft=1$/.test(u)), true);
 }
 
 // ---- a reading survives the commits that land after it ----
@@ -944,8 +976,9 @@ function critWorld() {
 // survived through the single child slot, and the other dissolved into loose rows. A branch with
 // several open pull requests based on it is a trunk; chains only link through branches with exactly
 // one successor.
-{
+const trunkSeam = async trunk => {
   const b = board();
+  if (trunk) b.trunk(trunk);
   const at = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
   const pr = (n, author, head, base) => ({
     number: n, head_ref: head, base_ref: base, title: "pr " + n,
@@ -978,6 +1011,73 @@ function critWorld() {
     b.pane().includes("625") && !b.pane().includes("#625"), true);
   // 9 PRs: six fold into the two stack rows; 625, 667 and 651 stay loose.
   t.check("ordinary develop-based rows stay ordinary", b.rows(), 3);
+};
+// Named, which is the rule (SKEIN-288): the queue reports the trunk and `revChains` severs at it.
+await trunkSeam("develop");
+// And unnamed, which is the fallback. A queue that could not report its trunk falls back to the
+// old proxy — a base with several open children is assumed to be one — because without the name
+// skein genuinely cannot tell a trunk from a fork, and dissolving every stack is the worse of the
+// two failures. It shatters forks, which is the bug above; it keeps the stacks standing.
+await trunkSeam("");
+
+// ---- SKEIN-288: a fork is not a break, and a step number means depth ----
+//
+// Reported by the owner: "PR ordering in stack is broken. For example, PR 586 is 4th on the list
+// while it shows up as 1st", then "stacking seems incorrect altogether now".
+//
+// Driven by their ACTUAL queue rather than a hand-made pair, because the bug needed two things at
+// once that no hand-made case had together: a trunk pull request (#625, `develop → master`) and a
+// real fork (`fix/readiness-abstention-kinds` carries both #586 and #671). The old rule used "this
+// base has several children" as a proxy for "this base is the trunk", which cannot tell those two
+// apart — so it cut the 21-step stack in half at the fork and renumbered the far half from 1.
+{
+  const b = board();
+  b.trunk(THING.trunk);
+  b.lanes(THING.prs.map(p => ({
+    ...p, head_sha: "sha" + p.number, committed_at: "", updated_at: "", settled: true,
+    draft: false, reasons: ["reviewer"], checks: "none",
+  })));
+  b.open("alpha");
+  await b.drain();
+
+  const chains = b.chains();
+  const of = n => chains.find(st => st.steps.some(p => p.number === n));
+  const big = of(586);
+  t.check("the fork no longer cuts the stack: 650, 670, 671 and 586 are one stack",
+    [!!big, big && big.steps.some(p => p.number === 650), big && big.steps.some(p => p.number === 670),
+     big && big.steps.some(p => p.number === 671)],
+    [true, true, true, true]);
+  // The rows the same rule stranded.
+  t.check("and the rows it stranded are in it too",
+    [671, 672, 711].every(n => big && big.steps.some(p => p.number === n)), true);
+
+  // The number the owner caught. 650 is the deepest step skein can see, 670 sits on it, and the
+  // stack branches there — so 586 is the third step down its own path, and never the first.
+  t.check("586 is not step 1", big && big.depth.get("alpha#586"), 3);
+  t.check("and 650 is the bottom of what is visible", big && big.depth.get("alpha#650"), 1);
+  t.check("671 and 586 are siblings, at the same depth",
+    big && big.depth.get("alpha#671"), big && big.depth.get("alpha#586"));
+
+  // 650's own base — `example-topic-17-file-hash` — is in nobody's queue, so the real stack is deeper
+  // than this. A "1" would be the same kind of lie the fork was.
+  t.check("the stack does not claim to start at the trunk", big && big.rooted, false);
+
+  // Opened, so the steps are drawn: the numbers and the branch mark live on them.
+  b.stack("stack:alpha#650");
+  t.check("its numbers say at least", b.pane().includes("step 1+"), true);
+  t.check("and the pane says why", b.pane().includes("not in your queue"), true);
+  // A fork says so where it happens, rather than silently becoming a straight line.
+  t.check("the branch point is marked", b.pane().includes("branches from step"), true);
+
+  // The 18-step stack IS rooted on develop — 686's base is the trunk — so its numbers are exact.
+  const rooted = of(686);
+  t.check("a stack that does start at the trunk is numbered exactly",
+    [!!rooted, rooted && rooted.rooted], [true, true]);
+
+  // And the bug the old rule was written for stays fixed.
+  t.check("the trunk pull request is not swallowed into a stack",
+    chains.every(st => st.steps.every(p => p.number !== 625)), true);
+  t.check("every develop-rooted stack survives the trunk pull request", chains.length >= 4, true);
 }
 
 // ---- the row is five cells at one height, and it never says nothing ----
@@ -991,12 +1091,14 @@ function rowWorld() {
   const body = `
     let revOpen = new Set(), revSums = new Map(), revRepoFilter = "";
     let revCommonChips = new Set();
-    // The pump reads the your-move lane on its own, so the row's read control asks whether it is
-    // running before offering to do by hand what is already coming (SKEIN-228).
+    // The pump reads what skein is allowed to read on its own, so the row's read control asks
+    // whether it is running before offering to do by hand what is already coming (SKEIN-228).
+    // "Allowed" is two questions now (SKEIN-242/277): read-ahead on for the repo, and the pull
+    // request inside worth_reading's scope — hence read_prs below, and reasons on the rows.
     let revQueue = { ai: true };
     let revSel = null, revFlash = "";        // SKEIN-159: revRow paints sel/flash/held from these
     const revPending = new Map();
-    const revFlows = new Map();
+    const revFlows = new Map([["alpha", { read_prs: true }]]);
     ${grab("rk")}
     ${grab("revDecided")}
     ${grab("revMoved")}
@@ -1009,6 +1111,7 @@ function rowWorld() {
     ${grab("revGist")}
     ${grab("revCrits")}
     ${grab("revDraftedReview")}
+    ${grab("revDraftAtHead")}
     ${grab("revReadyChip")}
     // The read-only section now offers a verdict of its own — approve with this review (SKEIN-273)
     // — and stands down for one already held on the pull request, so it reaches the verdict hold,
@@ -1021,7 +1124,9 @@ function rowWorld() {
     ${grab("revReviewToPost")}
     ${grab("revApproveWithReviewHtml")}
     ${grab("revDraftSection")}
-    // The row's own read control (SKEIN-228).
+    // The row's own read control (SKEIN-228), and the two questions it asks about the pump's scope.
+    ${grab("revReadsAhead")}
+    ${grab("revSkeinsToRead")}
     ${grab("revReadAgain")}
     ${grab("revRow")}
     const revBody = () => "";
@@ -1082,7 +1187,9 @@ function rowWorld() {
   const moved = w.row(pr({ head_sha: "h1" }));
   t.check("a reading of an earlier commit offers the re-read on the line",
     moved.includes(">re-read</button>"), true);
-  t.check("which asks the way a person asks", moved.includes(`revFetchSummary('alpha', 41, 'force')`), true);
+  // The ONE control since SKEIN-293 — it reads again and drafts a new review from that reading,
+  // warning first only where the reader has vetted the draft it would replace.
+  t.check("which asks the way a person asks", moved.includes(`revReadAgainPress('alpha', 41)`), true);
   t.check("and pressing it does not open the row underneath",
     moved.includes("event.stopPropagation()"), true);
   t.check("saying what it costs, which is nothing",
@@ -1103,6 +1210,10 @@ function rowWorld() {
   t.check("a row the pump is about to read wears nothing", w.row(pr()).includes("revread"), false);
   t.check("but a draft, which nothing will read for you, does",
     w.row(pr({ draft: true })).includes(">read it</button>"), true);
+  // And so does a row in a repo skein reads nothing in on its own (SKEIN-242): "gamma" has no
+  // read-ahead consent, so no pump is coming and the control is the only way this one gets read.
+  t.check("and so does a row in a repo with read-ahead switched off",
+    w.row(pr({ repo_id: "gamma" })).includes(">read it</button>"), true);
 }
 
 // ---- a drafted review says so on the row, and shows itself when the row opens (SKEIN-216) ----
@@ -1117,8 +1228,10 @@ function rowWorld() {
   const pr = (over) => ({ number: 41, repo_id: "alpha", title: "fix the thing", author: "dana",
     lane: "needs-you", head_sha: "head1", updated_at: new Date().toISOString(),
     my_review: "none", review_is_current: true, draft: false, reasons: ["reviewer"], ...over });
+  // `Known` as the server serialises it: the summary flattened, `has_critique` and `drafted` — the
+  // row's vocabulary, which survives `Known::thin` — and the critique itself, which does not.
   const drafted = (over) => ({ depth: "line", line: "moves the audit write behind the lock", flags: [],
-    head_sha: "head1", has_critique: true,
+    head_sha: "head1", has_critique: true, drafted: { head_sha: "head1", comments: 2 },
     critique: { number: 41, head_sha: "head1", overall: "the lock is taken twice on the error path",
       truncated: false, comments: [
         { path: "src/audit.rs", line: 40, anchored: true, text: "this returns before the unlock" },
@@ -1139,7 +1252,8 @@ function rowWorld() {
   t.check("the chip goes when the head moves past the draft",
     w.row(pr({ head_sha: "head2" })).includes("review ready"), false);
   // "nothing to flag" is a review somebody paid for — and the one that saves the most reading.
-  w.sums.set("alpha#41", drafted({ critique: { number: 41, head_sha: "head1", overall: "nothing to flag", comments: [] } }));
+  w.sums.set("alpha#41", drafted({ drafted: { head_sha: "head1", comments: 0 },
+    critique: { number: 41, head_sha: "head1", overall: "nothing to flag", comments: [] } }));
   const quiet = w.row(pr());
   t.check("a review that found nothing still says it is there", quiet.includes("review ready"), true);
   t.check("with no count, because there is nothing to count", quiet.includes("review ready ·"), false);

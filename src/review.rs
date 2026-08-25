@@ -239,6 +239,88 @@ pub struct Known {
     /// The cheap flag beside the payload: is a drafted review here? `critique.comments.len()` is
     /// the count when it is.
     pub has_critique: bool,
+    /// The drafted review reduced to the two facts a collapsed ROW draws — which commit it read,
+    /// and how many comments it holds. Present exactly when [`Known::critique`] would be, and
+    /// derived from it in [`Known::new`], so it can neither disagree with the review nor outlive
+    /// it.
+    ///
+    /// It exists because [`Known::thin`] takes the review's PROSE out of the queue payload and the
+    /// chip on the line still has to be drawable: `revReadyChip` needs the count, and
+    /// `revDraftedReview` (`src/web/index.html:4313-4318`) checks the drafted commit against the
+    /// row's head before it will say a review is ready — the guard that stops a draft of a
+    /// superseded commit being announced as a review of this one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drafted: Option<Drafted>,
+}
+
+/// What a queue row says about a drafted review it is not carrying: the commit, and the count.
+///
+/// Deliberately NOT a smaller `Critique`. A second serialisation of one record is how the drafted
+/// review and the summary came apart (SKEIN-243); this is two scalars ABOUT a record, computed
+/// once in [`Known::new`], and it cannot be mistaken for the review itself.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Drafted {
+    /// The commit the review was drafted against.
+    pub head_sha: String,
+    /// How many comments it holds. Zero is a real answer — "nothing to flag" is a review somebody
+    /// paid for — so the chip is earned by the review existing, not by this being non-zero.
+    pub comments: usize,
+}
+
+impl Known {
+    /// The one place a reading and the review beside it are assembled.
+    ///
+    /// Every derived field — `has_critique`, `drafted` — is computed here and nowhere else, so
+    /// there is exactly one rule for what they mean. Three call sites used to spell
+    /// `has_critique: critique.is_some()` for themselves.
+    fn new(summary: Summary, stale: bool, critique: Option<Critique>) -> Known {
+        Known {
+            summary,
+            stale,
+            has_critique: critique.is_some(),
+            drafted: critique.as_ref().map(|c| Drafted {
+                head_sha: c.head_sha.clone(),
+                comments: c.comments.len(),
+            }),
+            critique,
+        }
+    }
+
+    /// The same reading with the PROSE taken out — what a queue ROW draws, and nothing else.
+    ///
+    /// Measured on the owner's fleet (2026-08-25): `GET /review/summaries` answered 153,381 bytes
+    /// for thirty-nine stored readings, every one carrying its full brief, its signals and the
+    /// whole drafted review — none of which a collapsed row draws. Reproduced locally at 155,167
+    /// bytes against 12,055 for the same thirty-nine
+    /// (`tests/server.rs::the_review_queue_payload_can_be_asked_for_rows_instead_of_prose`).
+    ///
+    /// The same measurement took 10.42 s, and that part is NOT this: locally the full payload is
+    /// serialised in about four milliseconds, and with the queue's micro-cache cold both shapes
+    /// wait the same for `prq::queue` to hear back from GitHub. The wait is SKEIN-291. What this
+    /// buys is the bytes, and the time the connection carrying them is occupied.
+    ///
+    /// **It is the same struct and the same `Serialize`, with named fields emptied.** Not a second
+    /// row type: two hand-maintained serialisations of one record is exactly what dropped the
+    /// drafted review out of step with its summary (SKEIN-243), and a `Row` struct beside `Known`
+    /// would be that mistake with a new name. Anything added to [`Summary`] therefore appears in
+    /// both shapes until somebody decides otherwise — and
+    /// `the_row_shape_carries_only_what_a_row_draws` fails the day it does, which is where that
+    /// decision gets made.
+    ///
+    /// What goes, and where the page reads it (all of it behind the fold, in `revDetail` and
+    /// `revDraftSection`): `detail` (`src/web/index.html:4625`), `signals` (`:4621`), `yours` and
+    /// `others` (`:4614-4616`), `ownership_unknown` (`:4611`), and the whole `critique`
+    /// (`:4643-4660`). What stays is the line, the flags, the depth and its reason, the head, and
+    /// `drafted` — the row's own vocabulary.
+    pub fn thin(mut self) -> Known {
+        self.summary.detail = String::new();
+        self.summary.signals = Vec::new();
+        self.summary.yours = Vec::new();
+        self.summary.others = 0;
+        self.summary.ownership_unknown = String::new();
+        self.critique = None;
+        self
+    }
 }
 
 /// One reading, and the review drafted at the same head — the shape [`known`] answers in bulk,
@@ -255,12 +337,7 @@ pub struct Known {
 /// there is no older vintage to disclose. `known` keeps its own arm for the cached-and-moved case.
 pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
     let critique = critiqued(repo_id, summary.number).filter(|c| c.head_sha == head_sha);
-    Known {
-        summary,
-        stale: false,
-        has_critique: critique.is_some(),
-        critique,
-    }
+    Known::new(summary, false, critique)
 }
 
 /// Every reading skein already holds for these pull requests, off disk, costing nothing.
@@ -285,32 +362,47 @@ pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap
         // The drafted review at THIS head, whichever vintage the summary turns out to be — off
         // disk, costing nothing, same rule as the summaries themselves.
         let critique = critiqued(repo_id, *number).filter(|c| &c.head_sha == head_sha);
-        let has_critique = critique.is_some();
         if let Some(summary) = cached(repo_id, *number, head_sha) {
-            out.insert(
-                *number,
-                Known {
-                    summary,
-                    stale: false,
-                    critique,
-                    has_critique,
-                },
-            );
+            out.insert(*number, Known::new(summary, false, critique));
             continue;
         }
         if let Some(summary) = newest_for(repo_id, *number) {
-            out.insert(
-                *number,
-                Known {
-                    summary,
-                    stale: true,
-                    critique,
-                    has_critique,
-                },
-            );
+            out.insert(*number, Known::new(summary, true, critique));
         }
     }
     out
+}
+
+/// What skein already holds for ONE pull request, off disk, costing nothing — the prose behind a
+/// thinned row, fetched when the row is opened.
+///
+/// **Why this is not `GET /review/:n/summary` as it stands.** That route computes: it goes through
+/// [`visit`], which serves a reading cached at THIS head first (`src/review.rs:1570-1573`) and
+/// otherwise falls through the scope and budget doors to a model call. So it answers an expanded
+/// row correctly in the common case and wrongly in the one the queue deliberately keeps: a reading
+/// of an EARLIER commit. [`known`] hands that reading over marked `stale`
+/// (`src/review.rs:364-366`), and `visit` cannot — its cache lookup is keyed on the current head,
+/// so it misses, and expanding the row would either spend a model call nobody asked for or come
+/// back `unread`. [`known_at`] could not patch that either: it hard-codes `stale: false` and
+/// filters the draft to the head it was given.
+///
+/// So this is [`known`] for one pull request, delegating rather than repeating it, and a miss is
+/// an honest unread answer rather than a 404 — a row that opens onto a transport error is how a
+/// reading that exists comes to look like a pull request nobody read.
+pub fn held(repo_id: &str, number: u64, head_sha: &str) -> Known {
+    known(repo_id, &[(number, head_sha.to_string())])
+        .remove(&number)
+        .unwrap_or_else(|| {
+            Known::new(
+                Summary::unread(
+                    number,
+                    head_sha,
+                    "skein holds no reading of this pull request yet.",
+                ),
+                false,
+                None,
+            )
+        })
 }
 
 /// The most recent reading of any commit of this pull request.
@@ -1179,27 +1271,43 @@ pub fn read_waiting() -> Vec<String> {
                     read.push(format!("{}: read #{}", repo.id, pr.number));
                 }
             }
-            // The reader's second half — the DRAFT-ONLY door, for a row whose summary is already
-            // on disk at this head (the visit above covers the rest, and `worth_critiquing`
-            // re-checked here sees anything it just drafted or noted). Same doorway reading uses
-            // — [`worth_a_visit`] at the top of the loop — and no settle hour: the daily budget
-            // is the money guard now (owner decision, 2026-08-24), and re-anchoring made a moving
-            // head postable.
+            // The reader's second half — the door for a row whose summary is already on disk at
+            // this head while its review is not (the visit above covers the rest, and
+            // `worth_critiquing` re-checked here sees anything it just drafted or noted). Same
+            // doorway reading uses — [`worth_a_visit`] at the top of the loop — and no settle
+            // hour: the daily budget is the money guard now (owner decision, 2026-08-24), and
+            // re-anchoring made a moving head postable.
+            //
+            // It re-runs the ONE reading rather than drafting beside the old summary (SKEIN-263).
+            // It used to call a standalone drafter, which cost the same single unit and left the
+            // row carrying a summary from one reading and a review from another, with the diff
+            // downloaded twice and nothing making the two agree about what they saw. Forced,
+            // because the summary on disk is exactly what must not be handed back here; the
+            // replacement is written by the same call that wrote the review.
+            //
+            // Two ways a row arrives here, both real: a summary cached before the merged call
+            // existed, and one summarised while the review was not yours to give — mentioned only
+            // — that has since become yours.
             let draft_it = worth_critiquing(&repo.id, pr, &queue.viewer);
             if draft_it {
                 if read.len() >= READ_PER_PASS {
                     return read;
                 }
-                match draft_critique(&repo, &queue.slug, pr, Trigger::Unasked) {
-                    Ok(_) => {}
-                    // Non-fatal by construction: the summary above already stands, the row simply
-                    // opens without a draft and the button still drafts on request. Noted only
-                    // when a model call was SPENT — the same boundary the summary path draws with
-                    // `computed`, or a bad network minute pins "no draft" to this head for ever.
-                    Err(fail) if fail.spent => {
-                        note_critique_tried(&repo.id, pr.number, &pr.head_sha, &fail.why)
-                    }
-                    Err(_) => {}
+                // Every failure mode is written down inside the visit — `summarise_and_draft`
+                // notes the draft as tried on a spent call, `note_tried` below covers a summary
+                // that could not be made — so a row that cannot be drafted is not re-bought every
+                // ten minutes. Nothing to match on here: what happened is on disk.
+                let again = visit(
+                    &repo,
+                    &queue.slug,
+                    pr,
+                    &identities,
+                    true,
+                    Trigger::Unasked,
+                    Review::IfYours,
+                );
+                if matches!(again.depth, Depth::Unread) && again.computed {
+                    note_tried(&repo.id, pr.number, &pr.head_sha, &again.unread_because);
                 }
             }
             // Reported off what is now on disk, whichever door drafted it.
@@ -1308,6 +1416,33 @@ fn worth_critiquing(repo_id: &str, pr: &Pr, viewer: &str) -> bool {
         && !critique_tried(repo_id).contains_key(&format!("{}-{}", pr.number, pr.head_sha))
 }
 
+/// **The scope**: is this a pull request skein may read on its own at all?
+///
+/// Split out of [`worth_reading`] so the two questions it used to answer together can be asked
+/// apart. This one is about the pull request and nothing else — who asked, and which lane — and
+/// its answer does not change when skein reads or fails to read something. [`worth_reading`] adds
+/// the thrift on top: do not buy a reading you already have, do not re-buy one that just failed.
+///
+/// [`unasked_scope`] needs exactly this half. Asking it the whole question refused the forced
+/// re-read [`read_waiting`]'s draft door makes — the summary being on disk is the REASON that door
+/// opens, so `cached(..).is_none()` there is a no rather than a yes.
+///
+/// Two ways in, and being **mentioned** is neither: somebody talking about you is not a request to
+/// read. A team request IS a review request; the queue's own filter says so, and dropping those
+/// would silently exclude exactly the pull requests the team query was added to find.
+fn in_reading_scope(pr: &Pr) -> bool {
+    let asked = pr.reasons.iter().any(|r| {
+        matches!(
+            r,
+            crate::prq::Reason::Reviewer
+                | crate::prq::Reason::Reviewed
+                | crate::prq::Reason::Team(_)
+        )
+    });
+    // The lane, and the draft rule, in one place for every caller.
+    (asked || yours(pr)) && worth_a_visit(pr)
+}
+
 /// Is this a pull request skein should read for you, unasked?
 ///
 /// Two ways in, and the lane each arrives in is [`worth_a_visit`]'s question, not this one's:
@@ -1321,20 +1456,7 @@ fn worth_critiquing(repo_id: &str, pr: &Pr, viewer: &str) -> bool {
 ///
 /// Being **mentioned** is still not a way in: somebody talking about you is not a request to read.
 fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
-    // Somebody asked you to review it — personally or through a team you are in. A team request IS
-    // a review request; the queue's own filter says so, and dropping those here would silently
-    // exclude exactly the pull requests the team query was added to find.
-    let asked = pr.reasons.iter().any(|r| {
-        matches!(
-            r,
-            crate::prq::Reason::Reviewer
-                | crate::prq::Reason::Reviewed
-                | crate::prq::Reason::Team(_)
-        )
-    });
-    (asked || yours(pr))
-        // The lane, and the draft rule, in one place for every caller.
-        && worth_a_visit(pr)
+    in_reading_scope(pr)
         // NO settle gate, any more. It required an hour of quiet before reading — the owner's
         // decision (2026-08-24) removed it: the daily spend ceiling (`Config::review_reads_per_day`,
         // enforced in `summarise` and the critique drafter) is now THE money guard, and re-anchoring
@@ -1348,6 +1470,61 @@ fn worth_reading(repo_id: &str, pr: &Pr) -> bool {
         && !read_tried(repo_id).contains_key(&format!("{}-{}", pr.number, pr.head_sha))
 }
 
+/// May skein read this pull request **on its own**? The scope guard, enforced at the model call —
+/// the same place, and for the same reason, as [`over_budget`].
+///
+/// The whole rule, in one sentence: **if you pressed it, it is free and unconditional; if skein
+/// decided to read it, that happens only in a repo you switched read-ahead on for, only within
+/// [`worth_reading`]'s scope, and it is counted against the day.** There is no third case — the
+/// pane's own pump and the ten-minute pass are both "skein decided", and both arrive here as
+/// [`Trigger::Unasked`].
+///
+/// It used to live in [`read_waiting`] alone (SKEIN-242), which made it a rule the *background*
+/// obeyed rather than a rule about the repo: `GET /review/:n/summary` with no `asked` marker read
+/// anything the caller named — a repo with read-ahead switched off, a pull request whose only
+/// reason is that somebody mentioned you — and charged the day's ledger for it. The budget check
+/// was moved server-side because "a budget the client holds is a budget any client action can
+/// refill" (`src/review.rs:462-478`); the same argument is what puts the SCOPE here, because a
+/// scope the client holds is a scope any client can widen.
+///
+/// [`read_waiting`] still asks [`worth_reading`] itself, before spending a GitHub call on a row
+/// this would refuse. That is a shortcut, not a second rule: this is the doorway.
+fn unasked_scope(repo: &Repo, pr: &Pr, trigger: Trigger) -> Option<String> {
+    // A person pressing a button is not skein's initiative, so no scope applies — the same
+    // boundary `over_budget` draws, and the owner's own rule for it: "Limit is only for automatic
+    // stuff, manually I can invoke as many as I want."
+    if trigger == Trigger::Asked {
+        return None;
+    }
+    if !repo.read_prs {
+        return Some(
+            "skein does not read this repo on its own — press \"read it\" to read this one now, \
+             or turn on \"read ahead\" for the repo to have skein read what is waiting on you and \
+             what you opened."
+                .into(),
+        );
+    }
+    // The SCOPE half of `worth_reading` and not its thrift half: "skein already has this reading"
+    // is a reason not to buy another, not a reason this pull request is out of bounds — and the
+    // forced re-read behind `read_waiting`'s draft door exists precisely because the summary is
+    // already on disk.
+    if !in_reading_scope(pr) {
+        return Some(
+            "this is not one skein reads on its own — that is the pull requests somebody asked \
+             you to review, and the ones you opened. Press \"read it\" to read this one now."
+                .into(),
+        );
+    }
+    None
+}
+
+/// Read this pull request, and draft the review too **where skein would have drafted it anyway**.
+///
+/// The conservative half of the pair. [`Review::IfYours`] means the review is drafted only when
+/// [`worth_critiquing`] says yes, and its first no is "one is already drafted at this head" — so a
+/// re-read through here KEEPS a review the reader may have vetted, kept comments from and dropped
+/// comments from. That is the whole reason this is the default and
+/// [`re_read_replacing_the_review`] is not.
 pub fn summarise(
     repo: &Repo,
     slug: &str,
@@ -1356,9 +1533,86 @@ pub fn summarise(
     force: bool,
     trigger: Trigger,
 ) -> Summary {
+    visit(repo, slug, pr, identities, force, trigger, Review::IfYours)
+}
+
+/// Read this pull request again and draft a NEW review, **replacing whatever is drafted at this
+/// head**.
+///
+/// The other half of the pair, and it differs from [`summarise`] in exactly one argument. That is
+/// the finding SKEIN-293 is about: since the drafter was merged (SKEIN-263) "re-read" and "review
+/// the code" both come here, force a reading, download the diff once and spend one model call —
+/// and on a row that already has a draft, one keeps it and the other throws it away. Nothing in
+/// either name said so. The pair is named for the difference now, so the call site has to choose
+/// it deliberately.
+///
+/// **Never reached except by a person who has been told what it costs them.** The pane asks first
+/// where there are kept/dropped decisions to lose (the owner's decision, 2026-08-25: one control,
+/// warning through the pane's own receipt rather than a native dialog). Nothing in the background
+/// comes here — [`read_waiting`] and the pane's pump both go through [`summarise`].
+///
+/// `force` and [`Trigger::Asked`] are not choices the caller gets, because neither is meaningful
+/// here. A cached reading returns from [`visit`] before anything is drafted, so a redraft that
+/// honoured the cache would be a press that did nothing; and the day's ceiling is on skein's own
+/// initiative, which this is by definition not.
+pub fn re_read_replacing_the_review(
+    repo: &Repo,
+    slug: &str,
+    pr: &Pr,
+    identities: &[String],
+) -> Summary {
+    visit(
+        repo,
+        slug,
+        pr,
+        identities,
+        true,
+        Trigger::Asked,
+        Review::Always,
+    )
+}
+
+/// Whether this visit must come back with a drafted review as well as a summary.
+///
+/// The distinction exists because a review can be **asked for directly** — the panel's "draft
+/// again" — on a pull request [`worth_critiquing`] would say no to: one already drafted at this
+/// head (that is what "again" means), or one where the review was never yours to give. Asking is
+/// its own authority, exactly as [`Trigger::Asked`] is for the budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Review {
+    /// Draft one if the review is yours to give and has not been drafted at this head. The
+    /// background pass and the read button.
+    IfYours,
+    /// Draft one, whatever [`worth_critiquing`] thinks. Somebody pressed for a review.
+    Always,
+}
+
+/// **One reading, whichever half you asked for.** The summary and the review are different tasks
+/// needing different mindsets, but they are never separate surfaces and they are always wanted
+/// together — so they are never two analyses (the owner's framing, 2026-08-25, SKEIN-263).
+///
+/// Every path that spends a model call on a pull request comes through here, and the ones that
+/// want a review come through with [`Review::Always`]. There is no second drafter: there used to
+/// be — `draft_critique`, its own prompt, its own diff download — reached by the panel's "draft
+/// again" and by the pass's draft-only door, and it is what let the summary and the review of one
+/// commit come from two different readings that never had to agree about what they saw.
+fn visit(
+    repo: &Repo,
+    slug: &str,
+    pr: &Pr,
+    identities: &[String],
+    force: bool,
+    trigger: Trigger,
+    review: Review,
+) -> Summary {
     // Somebody pressed "read it". Whatever the model refused with last time, they are entitled to
     // find out whether it still refuses — a standing refusal must never make a button do nothing.
-    if force {
+    //
+    // A PERSON pressed, though: the background pass forces a re-read of its own accord now (the
+    // draft-only door, `read_waiting`), and an unattended pass has no standing to clear a refusal
+    // nobody has seen. That rule was already written down beside the old standalone drafter; this
+    // is where it belongs, because this is the only door left.
+    if force && trigger == Trigger::Asked {
         crate::ai::forget_refusal();
     }
     if !force {
@@ -1381,6 +1635,13 @@ pub fn summarise(
             "",
             "GitHub did not report a head commit for this PR.",
         );
+    }
+    // MAY skein read this at all, unasked, before asking whether it can AFFORD to. Scope first:
+    // a repo the owner excluded must not be told what the fleet's budget is doing, and a row out
+    // of scope is refused on a spent day and on a fresh one alike. `computed` stays false and the
+    // ledger is untouched — nothing was read, so nothing is charged. See [`unasked_scope`].
+    if let Some(because) = unasked_scope(repo, pr, trigger) {
+        return Summary::unread(pr.number, &pr.head_sha, &because);
     }
     // Enforced where the money is spent, and only there. Everything above cost nothing — a cache
     // hit was already served, a switched-off repo asked for nothing — and everything below leads
@@ -1436,9 +1697,16 @@ pub fn summarise(
     // owner's "both, in waiting, on the same call"). Split, the two halves would cost two model
     // calls and two budget units for the one row: the reader's summary here, and the second door
     // in `read_waiting` drafting the review afterwards.
-    let draft_due = identities
-        .first()
-        .is_some_and(|viewer| worth_a_visit(pr) && worth_critiquing(&repo.id, pr, viewer));
+    let draft_due = match review {
+        // Somebody pressed for a review. `worth_critiquing` is not consulted at all: it answers
+        // "would skein draft this unasked", and both of its nos — already drafted at this head,
+        // never yours to give — are things a person is entitled to overrule. This is the same
+        // boundary `Trigger::Asked` draws for the money.
+        Review::Always => true,
+        Review::IfYours => identities
+            .first()
+            .is_some_and(|viewer| worth_a_visit(pr) && worth_critiquing(&repo.id, pr, viewer)),
+    };
     if draft_due {
         // Counted the moment the model is about to be asked — a call that then fails still spent.
         note_spent_if_unasked(trigger, &repo.id, &day);
@@ -1635,7 +1903,7 @@ fn summarise_and_draft(
         // is, and the draft-once-per-head discipline is the money guard worth keeping.
         Some(drafted) => {
             if let Err(fail) = vet_and_store_critique(repo, pr, drafted, &diff, cut) {
-                note_critique_tried(&repo.id, pr.number, &pr.head_sha, &fail.why);
+                note_critique_tried(&repo.id, pr.number, &pr.head_sha, &fail);
             }
         }
         // The summary parsed and the review did not: the call was spent, so the absence is noted
@@ -1936,41 +2204,6 @@ fn review_model(fallback: Option<&'static str>) -> Option<String> {
         .or_else(|| fallback.map(str::to_string))
 }
 
-fn critique_prompt(pr: &Pr, diff: &str, cut: bool) -> String {
-    format!(
-        r#"Review this pull request as a careful senior engineer. A human reviewer will go through every comment you produce, keep or drop each one, and post the kept ones under their own name — so every comment must earn its place.
-
-Comment ONLY on actual problems and improvements that matter: bugs, correctness risks, races, security holes, data loss, error paths that can actually fail and are not handled, misleading names or comments that will cause a wrong call later, real performance traps. Do not manufacture findings to seem thorough; do not comment on style, formatting, or preferences; no praise, no hedged maybes, no restating what the diff does. If the change is fine, say so and stop — an empty review is a valid review.
-
-Title: {title}
-Author: {author}
-Branch: {head} into {base}
-{cut_note}
-Format, EXACTLY:
-First line:  OVERALL: <one sentence on the change as a whole, or "nothing to flag">
-Then one block per comment, each ended by a line containing only three dashes:
-FILE: <the path exactly as it appears in the diff>
-LINE: <the line number IN THE NEW FILE this is about — count from the +start in the nearest @@ header. 0 if it is about the change as a whole>
-COMMENT: <the comment. Say what is wrong and what to do instead. May span lines.>
----
-
-The diff:
-{diff}"#,
-        title = pr.title,
-        author = pr.author,
-        head = pr.head_ref,
-        base = pr.base_ref,
-        cut_note = if cut {
-            "NOTE: the diff below was cut at a byte cap — you are seeing part of the change. \
-             The cut names the files that are missing; do not guess about them, and say your \
-             review does not cover them.\n"
-        } else {
-            ""
-        },
-        diff = diff,
-    )
-}
-
 /// Parse the model's review. `None` when the answer did not follow the format at all — that is an
 /// answer to show as a failure, not to guess comments out of.
 fn parse_critique(text: &str) -> Option<Critique> {
@@ -2211,24 +2444,49 @@ pub fn post_critique(
     Ok(said)
 }
 
-/// Draft an actual review of the PR: read the diff, produce comments, anchor each against the
-/// hunks, store the draft. Returns it for the pane to lay out for vetting. Costs a model call —
-/// run because a person asked, or by the background reader for a PR whose review is yours to give
-/// (see [`worth_critiquing`]).
-pub fn critique(repo: &Repo, slug: &str, pr: &Pr) -> Result<Critique, String> {
+/// Draft an actual review of the PR, because somebody pressed for one.
+///
+/// **It is a [`visit`], not a second analysis** (SKEIN-263). This used to be its own drafter with
+/// its own prompt and its own diff download, which meant the summary on the row and the review
+/// under it could describe two different readings of the same commit — the divergence merging
+/// them was meant to end. Now one forced visit produces both, over one download, on one model
+/// call, and stores both; this function hands back the half the caller asked for.
+///
+/// `force`, so the reading on disk is not what comes back: "draft again" means read it again.
+/// [`Review::Always`], so [`worth_critiquing`]'s two nos — already drafted at this head, never
+/// yours to give — do not stand against a person asking. [`Trigger::Asked`], so the day's ceiling
+/// neither refuses nor counts it: the limit is on skein's initiative only (see [`Trigger`]).
+///
+/// `identities` is the viewer, for the summary half's ownership attribution — the same slice
+/// [`summarise`] takes, from the same queue the caller already read.
+pub fn critique(
+    repo: &Repo,
+    slug: &str,
+    pr: &Pr,
+    identities: &[String],
+) -> Result<Critique, String> {
     if !summaries_enabled() {
         return Err(
             "reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes."
                 .into(),
         );
     }
-    // A person pressed the button; a standing refusal must never make it do nothing. The
-    // background reader deliberately does not come through here — an unattended pass has no
-    // standing to clear a refusal a person has not seen.
-    crate::ai::forget_refusal();
-    // A person pressed the button: `Asked`, so the day's ceiling neither refuses nor counts
-    // this — the limit is on skein's initiative only (see [`Trigger`]).
-    draft_critique(repo, slug, pr, Trigger::Asked).map_err(|fail| fail.why)
+    // The same visit the read route makes with `redraft=1`, spelled once. Two callers wanting
+    // one reading is what this function used to be the second copy of.
+    let summary = re_read_replacing_the_review(repo, slug, pr, identities);
+    if let Some(drafted) = critiqued(&repo.id, pr.number).filter(|c| c.head_sha == pr.head_sha) {
+        return Ok(drafted);
+    }
+    // No draft on disk for this head, so say which half failed rather than a single shrug. A
+    // summary that came back unread carries its own reason; a summary that parsed while the review
+    // did not leaves the reason in the tried-note `summarise_and_draft` writes.
+    Err(if matches!(summary.depth, Depth::Unread) {
+        summary.unread_because
+    } else {
+        critique_tried(&repo.id)
+            .remove(&format!("{}-{}", pr.number, pr.head_sha))
+            .unwrap_or_else(|| "skein read it but drafted no review of it — try again.".into())
+    })
 }
 
 /// What the reading view shows: the change itself, at a display budget, cut honestly.
@@ -2261,86 +2519,27 @@ pub fn reading(slug: &str, pr: &Pr) -> Result<Reading, String> {
     })
 }
 
-/// A draft that did not happen, and whether it cost a model call. `spent` is the same boundary
-/// [`Summary::computed`] draws: everything from the model call onward counts (a `claude` that is
-/// not logged in fails instantly and free, and an unnoted failure is retried every pass, for
-/// ever), while a diff that would not download costs one HTTP call to retry and must not be
-/// pinned to the head sha as permanent.
-struct CritiqueFail {
-    why: String,
-    spent: bool,
-}
-
-/// Draft standalone — the button, and the pass's draft-only door (a summary already cached at
-/// this head). Downloads the diff itself, once; a draft made inside a summary's visit goes
-/// through [`draft_critique_from`] with the visit's own download instead.
-fn draft_critique(
-    repo: &Repo,
-    slug: &str,
-    pr: &Pr,
-    trigger: Trigger,
-) -> Result<Critique, CritiqueFail> {
-    let free = |why: String| CritiqueFail { why, spent: false };
-    // Checked before the download too — `draft_critique_from` re-checks at the call, but refusing
-    // after fetching would spend HTTP on an answer already known. `Asked` passes both checks by
-    // definition: the ceiling is on skein's initiative, not on the person.
-    if let Some(because) = over_budget(trigger, &utc_day()) {
-        return Err(free(because));
-    }
-    let raw = crate::prq::pr_diff_text(slug, pr.number).map_err(free)?;
-    draft_critique_from(repo, pr, &raw, trigger)
-}
-
-/// The drafting itself, from a diff ALREADY DOWNLOADED — the shared half of the one-download
-/// rule: whoever holds the raw diff (the summary's visit, or the wrapper above) hands it in, and
-/// no second fetch ever happens for the same head.
-fn draft_critique_from(
-    repo: &Repo,
-    pr: &Pr,
-    full: &str,
-    trigger: Trigger,
-) -> Result<Critique, CritiqueFail> {
-    let free = |why: String| CritiqueFail { why, spent: false };
-    let spent = |why: String| CritiqueFail { why, spent: true };
-    // The same day, the same counter, the same sentence as the summaries — ONE budget, because the
-    // money is one budget. `free`, so a budget refusal is never written down as tried: tomorrow's
-    // pass, and tomorrow's button, start fresh.
-    let day = utc_day();
-    if let Some(because) = over_budget(trigger, &day) {
-        return Err(free(because));
-    }
-    let (diff, cut) = truncate_diff(full, CRITIQUE_BYTES);
-    if diff.trim().is_empty() {
-        return Err(free("GitHub returned an empty diff for this PR.".into()));
-    }
-    // One unit of the day's budget — if this is skein's own initiative — counted at the call,
-    // exactly as `summarise` counts its visit.
-    note_spent_if_unasked(trigger, &repo.id, &day);
-    let raw = crate::ai::claude_oneshot_telling(
-        &critique_prompt(pr, &diff, cut),
-        review_model(Some("claude-sonnet-5")).as_deref(),
-        Duration::from_secs(300),
-    )
-    .map_err(|unread| spent(unread.say()))?;
-    let drafted = parse_critique(&raw).ok_or_else(|| {
-        spent(
-            "the model's review did not follow the format, so no comments are being offered from it — try again."
-                .into(),
-        )
-    })?;
-    vet_and_store_critique(repo, pr, drafted, &diff, cut)
-}
-
-/// The vetting, shared by the standalone drafter and the merged visit: anchor every comment
-/// against the diff the model actually read, keep the proof, pin the draft to this pull request
-/// and head, and write it down.
+/// **There is no standalone drafter any more** (SKEIN-263). `draft_critique` and
+/// `draft_critique_from` lived here: their own prompt, their own diff download, reached by the
+/// panel's "draft again" and by `read_waiting`'s draft-only door. Both callers go through
+/// [`visit`] now, so a summary and the review beside it always come from the same reading of the
+/// same diff. Nothing needs a review WITHOUT a summary, which was the only thing that would have
+/// kept a second path alive.
+///
+/// `CritiqueFail` went with them: it carried a `spent` flag so the standalone drafter could tell a
+/// failure that cost a model call from one that did not, and decide whether to write a tried-note.
+/// The one caller left is inside [`summarise_and_draft`], which is past the call by definition —
+/// the model has already answered — so every failure here is spent and the note is unconditional.
+///
+/// The vetting itself: anchor every comment against the diff the model actually read, keep the
+/// proof, pin the draft to this pull request and head, and write it down.
 fn vet_and_store_critique(
     repo: &Repo,
     pr: &Pr,
     mut drafted: Critique,
     diff: &str,
     cut: bool,
-) -> Result<Critique, CritiqueFail> {
+) -> Result<Critique, String> {
     let lines = commentable(diff);
     for d in &mut drafted.comments {
         // The vetting keeps only lines the diff proves — and takes the proof with it: the line's
@@ -2358,7 +2557,7 @@ fn vet_and_store_critique(
     drafted.truncated = cut;
     // Spent: the model already answered, and losing the write is worth noting rather than
     // re-buying the answer next pass.
-    store_critique(&repo.id, &drafted).map_err(|why| CritiqueFail { why, spent: true })?;
+    store_critique(&repo.id, &drafted)?;
     Ok(drafted)
 }
 
@@ -2815,7 +3014,15 @@ mod tests {
             format!(
                 concat!(
                     "#!/bin/sh\ncase \"$4\" in\n",
-                    "  *\"REVIEW:\"*) echo merged >> {count}; printf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change as a whole.\\n---\\n';;\n",
+                    // Both halves of the merged answer carry the ORDINAL of the model call that
+                    // produced them, so a test can prove the summary on the row and the review
+                    // under it came out of the same reading (SKEIN-263) rather than merely both
+                    // existing. `wc -l` on the count file after appending IS this call's number.
+                    "  *\"REVIEW:\"*) echo merged >> {count}; n=$(wc -l < {count} | tr -d ' '); printf 'KIND: fix\\nLINE: reading %s of this change.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag in reading %s\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change as a whole.\\n---\\n' \"$n\" \"$n\";;\n",
+                    // The standalone critique prompt, which nothing reaches any more (SKEIN-263
+                    // deleted the drafter). Kept as a TRIPWIRE: a second drafter coming back would
+                    // put a `critique` line in this count, and the assertions that read it as
+                    // `["merged", "merged"]` would say so.
                     "  *OVERALL:*) echo critique >> {count}; printf 'OVERALL: nothing to flag\\n';;\n",
                     "  *) printf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n';;\n",
                     "esac\n"
@@ -3081,24 +3288,43 @@ mod tests {
 
         // **The live shape this was reported in** (SKEIN-265, the fleet check of 2026-08-25): a
         // stack whose rows were all read by hand — `Trigger::Asked`, which never consults
-        // `worth_reading` — and one row that ended up with a summary and no review. There is no
-        // merged call to re-run for it: the summary is already on disk at this head, so the visit
-        // above is skipped entirely and the DRAFT-ONLY door is the whole fix. It has to open for a
-        // pull request you opened yourself, or that row stays draftless until its head moves.
+        // `worth_reading` — and one row that ended up with a summary and no review. The second
+        // door is the whole fix, and it has to open for a pull request you opened yourself or that
+        // row stays draftless until its head moves.
         std::fs::remove_dir_all(crate::prq::review_dir("mine").join("critiques")).unwrap();
         let _ = read_waiting();
         assert!(
             critiqued("mine", 31).is_some_and(|c| c.head_sha == "sha31"),
             "a pull request of yours that was already summarised never gets its review — the \
-             draft-only door does not open for your own rows"
+             second door does not open for your own rows"
         );
+        // And it opens onto the SAME reading (SKEIN-263). It used to open onto a standalone
+        // drafter — a second prompt over a second download, whose review had no reason to agree
+        // with the summary already sitting on the row. `merged` twice is the whole assertion: the
+        // second visit re-read the pull request and wrote both halves from that one answer.
         assert_eq!(
             std::fs::read_to_string(&asked)
                 .unwrap_or_default()
                 .lines()
                 .collect::<Vec<_>>(),
-            vec!["merged", "critique"],
-            "the redraft is one standalone call and the cached summary none"
+            vec!["merged", "merged"],
+            "the review was drafted by a second, separate analysis of the same commit"
+        );
+        // Both halves came out of that ONE call, checked by their own text — the identity
+        // SKEIN-263 asks for. The fixture's model stamps each answer with the ordinal of the call
+        // that produced it, so "reading 2" on the summary AND on the review is the proof that the
+        // row's summary is the one this review was written beside. Under the standalone drafter
+        // the summary stayed at "reading 1" while the review came from somewhere else entirely.
+        let redrafted = cached("mine", 31, "sha31").expect("the re-read stored its summary");
+        assert_eq!(
+            redrafted.line, "reading 2 of this change.",
+            "the row kept the summary from the FIRST reading while the review came from the second"
+        );
+        let review = critiqued("mine", 31).expect("the re-read stored its review");
+        assert!(
+            review.overall.contains("reading 2"),
+            "the review came from a different reading than the summary beside it: {}",
+            review.overall
         );
 
         drafting_teardown_for("mine");
@@ -3209,6 +3435,196 @@ mod tests {
         assert_eq!(
             twice, 1,
             "a review already drafted at this head was drafted again — one model call per pass, for ever"
+        );
+
+        drafting_teardown();
+    }
+
+    /// **Asking for a review again re-runs the one reading** (SKEIN-263).
+    ///
+    /// The panel's "draft again" used to call a standalone drafter: its own prompt, its own diff
+    /// download, its own budget unit. The summary already on the row stayed where it was, so the
+    /// row could show a summary from one reading of a commit and, underneath it, a review from
+    /// another — two analyses that never had to agree about what they saw, which is exactly the
+    /// divergence merging summary and review was meant to end.
+    ///
+    /// The identity is asserted by TEXT, not by both halves merely existing: the fixture's model
+    /// stamps every answer with the ordinal of the call that produced it, so "reading 2" on the
+    /// summary AND on the review is the proof they came out of the same call. `["merged",
+    /// "merged"]` is the second half of it — a `critique` line in that list would mean a standalone
+    /// drafter had come back.
+    ///
+    /// Sabotage: make `critique` pass `Review::IfYours` and "the review a person pressed for was
+    /// not re-drafted" fails — `worth_critiquing` says no to a head it has already drafted, which
+    /// is precisely what "again" overrules. Make it pass `force: false` and "asking again handed
+    /// back the reading already on disk" fails.
+    #[cfg(unix)]
+    #[test]
+    fn asking_for_a_review_again_re_reads_rather_than_drafting_beside_the_old_summary() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let asked = drafting_fixture(home);
+        let day = utc_day();
+
+        // The background pass reads #21 once: summary and review, one merged call.
+        let _ = read_waiting();
+        assert_eq!(
+            cached("crit", 21, "sha21")
+                .expect("the pass stored a summary")
+                .line,
+            "reading 1 of this change."
+        );
+        assert!(critiqued("crit", 21)
+            .expect("and a review")
+            .overall
+            .contains("reading 1"));
+        assert_eq!(reads_spent(&day), 1);
+
+        // A person presses "draft again" on that row.
+        let repo = crate::repos::load_repos()
+            .into_iter()
+            .find(|r| r.id == "crit")
+            .unwrap();
+        let pr = budget_pr(21, "sha21");
+        let again = critique(&repo, "acme/thing", &pr, &["me".into()])
+            .expect("the panel's draft-again works end to end");
+        assert!(
+            again.overall.contains("reading 2"),
+            "the review a person pressed for was not re-drafted: {}",
+            again.overall
+        );
+        assert_eq!(
+            cached("crit", 21, "sha21")
+                .expect("the re-read stored its summary")
+                .line,
+            "reading 2 of this change.",
+            "asking again handed back the reading already on disk, or wrote a review beside it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["merged", "merged"],
+            "the re-draft was a second, separate analysis of the same commit"
+        );
+        assert_eq!(
+            reads_spent(&day),
+            1,
+            "a review a person asked for was charged to the day's automatic allowance"
+        );
+        // One reading, one download — the merged call's whole point. Two readings, two.
+        let hits = std::fs::read_to_string(home.join("hits")).unwrap_or_default();
+        assert_eq!(
+            hits.lines()
+                .filter(|l| l.starts_with("GET") && l.contains("/pulls/21 "))
+                .count(),
+            2,
+            "a reading downloaded the diff more than once: {hits}"
+        );
+
+        drafting_teardown();
+    }
+
+    /// The two controls the pane offered differ in ONE respect, and this is it (SKEIN-293).
+    ///
+    /// The owner's question, live 2026-08-25: "when I click re read, does it give review as well?
+    /// If so why is there separate re read and review the code buttons?" The answer from the code
+    /// is that since the drafter was merged (SKEIN-263) both force a reading, download the diff
+    /// once and spend one model call — and on a row that ALREADY has a draft, `summarise` keeps it
+    /// and [`re_read_replacing_the_review`] throws it away. Nothing in either label said so.
+    ///
+    /// So it is asserted rather than described, on the one row where it is visible: the same pull
+    /// request, at the same head, read twice. The stub numbers each reading, so "kept" and
+    /// "replaced" are different strings rather than a judgement.
+    ///
+    /// The conservative one is the DEFAULT, and that is the load-bearing half: the drafted review
+    /// is a thing the reader edits — kept comments, dropped comments — and a re-read that silently
+    /// replaced it would destroy that vetting with no warning. The replacing read exists so the
+    /// pane can offer it AFTER saying what it costs.
+    #[cfg(unix)]
+    #[test]
+    fn re_reading_keeps_a_vetted_review_and_only_the_replacing_read_discards_it() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let asked = drafting_fixture(home);
+
+        // Reading 1: the pass reads #21 and drafts a review with it.
+        let _ = read_waiting();
+        assert!(
+            critiqued("crit", 21)
+                .expect("the pass drafted a review")
+                .overall
+                .contains("reading 1"),
+            "the fixture did not produce a review to protect"
+        );
+
+        let repo = crate::repos::load_repos()
+            .into_iter()
+            .find(|r| r.id == "crit")
+            .unwrap();
+        let pr = budget_pr(21, "sha21");
+
+        // "Re-read" — a forced reading through the DEFAULT door. The review the reader may have
+        // vetted survives untouched. That is the property worth protecting.
+        let again = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            true,
+            Trigger::Asked,
+        );
+        assert!(
+            critiqued("crit", 21)
+                .expect("the review is still there")
+                .overall
+                .contains("reading 1"),
+            "a plain re-read replaced a review the reader may have vetted, with no warning — the \
+             exact harm the conservative default exists to prevent"
+        );
+        // And it is not even the same ANALYSIS. `worth_critiquing` says no here (a draft exists at
+        // this head), so the visit falls to the cheap two-stage summary path — a different prompt,
+        // on a weaker model — rather than the merged reading. The stub answers that path with a
+        // fixed sentence and never touches the merged-call counter, which is how a test can tell
+        // the two apart at all. So on a row that already has a draft the controls do not merely
+        // differ in what they KEEP; they buy different readings, and neither label said either.
+        assert_eq!(
+            again.line, "it changes a thing.",
+            "a re-read of an already-drafted row did not take the two-stage summary path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["merged"],
+            "a re-read that kept the draft still paid for a merged reading"
+        );
+
+        // The replacing read. One merged call, and the draft is now the new one.
+        let replacing = re_read_replacing_the_review(&repo, "acme/thing", &pr, &["me".into()]);
+        assert_eq!(
+            replacing.line, "reading 2 of this change.",
+            "the replacing read did not take the merged path"
+        );
+        assert!(
+            critiqued("crit", 21)
+                .expect("and a review came with it")
+                .overall
+                .contains("reading 2"),
+            "the replacing read did not replace the drafted review, so the pane's warning would \
+             be about a loss that never happens"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["merged", "merged"],
+            "the replacing read was not one merged analysis — a second drafter is back"
         );
 
         drafting_teardown();
@@ -3900,8 +4316,15 @@ mod tests {
     /// two assertions below fail — `cached(..).is_none()` after the blind visit, and the
     /// recovered visit's `yours`, which the stale cache answers with the blind emptiness.
     ///
-    /// The budget is asserted too, because not caching has a price: the second visit spends a
-    /// second unit, and that is correct — the first unit bought a degraded answer, not this one.
+    /// The visit is a PERSON pressing "read it" (`Trigger::Asked`). It used to be `Unasked`, on a
+    /// pull request whose only reason is that somebody mentioned you, in a repo with read-ahead
+    /// off — which is precisely the visit SKEIN-242 says skein must refuse, and `unasked_scope`
+    /// now does. What the test is about is blindness, not scope, so it presses the button.
+    ///
+    /// The ledger is asserted at zero for the same reason: an asked read is never counted. That
+    /// not caching has a PRICE — a second visit recomputes rather than serving the blind answer —
+    /// is what the recovered visit's own `yours` proves, and what an unasked visit costs for it is
+    /// `one_analysed_pull_request_is_one_unit_whatever_it_produced`'s assertion, not this one's.
     #[cfg(unix)]
     #[test]
     fn a_summary_computed_blind_is_served_but_never_cached() {
@@ -3966,7 +4389,7 @@ mod tests {
             &pr,
             &["me".into()],
             false,
-            Trigger::Unasked,
+            Trigger::Asked,
         );
         assert_ne!(
             blind.depth,
@@ -3984,8 +4407,8 @@ mod tests {
         );
         assert_eq!(
             reads_spent(&utc_day()),
-            1,
-            "the blind visit still spent its unit"
+            0,
+            "a read a person pressed for was counted against the day's automatic allowance"
         );
 
         // The mirror recovers: the checkout appears, CODEOWNERS and all.
@@ -4001,7 +4424,7 @@ mod tests {
             &pr,
             &["me".into()],
             false,
-            Trigger::Unasked,
+            Trigger::Asked,
         );
         assert!(
             healed.ownership_unknown.is_empty(),
@@ -4020,8 +4443,8 @@ mod tests {
         );
         assert_eq!(
             reads_spent(&utc_day()),
-            2,
-            "the recomputation is a second unit — the first bought a degraded answer"
+            0,
+            "two reads a person pressed for ate into the automatic allowance"
         );
 
         for key in [
@@ -4155,6 +4578,152 @@ mod tests {
             2,
             "the manual call ate the automatic allowance — asked work must not be counted"
         );
+
+        drafting_teardown();
+    }
+
+    /// **What skein reads on its own is skein's answer, not the caller's** (SKEIN-242).
+    ///
+    /// `read_prs` and [`worth_reading`] used to live in [`read_waiting`] alone, which made them a
+    /// rule the BACKGROUND obeyed rather than a rule about the repo. `GET /review/:n/summary`
+    /// without an `asked` marker went straight to [`summarise`], which consulted neither: the
+    /// pane's pump therefore read pull requests in repos where read-ahead was switched off, and
+    /// pull requests whose only reason is that somebody mentioned you, and CHARGED the day's
+    /// ledger for both. The budget check was moved server-side because a budget the client holds
+    /// is a budget any client action can refill; the scope is here for the same reason.
+    ///
+    /// Both refusals are asserted on the WIRE as well as in the answer — a refused visit must not
+    /// even download the diff — and both are followed by the same visit with the button pressed,
+    /// because a scope that also gated a person pressing "read it" would be the opposite bug.
+    ///
+    /// Sabotage: delete the `!repo.read_prs` arm of `unasked_scope` and
+    /// "read-ahead off: an unasked visit is refused" fails; delete the `worth_reading` arm and
+    /// "a mention is not a reason to read on skein's initiative" fails; return `None` for
+    /// `Trigger::Asked` unconditionally-in-reverse (drop the early return) and both
+    /// "…and the same visit, pressed, reads it" assertions fail.
+    #[cfg(unix)]
+    #[test]
+    fn skein_reads_on_its_own_only_where_you_switched_reading_on() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        let _asked = drafting_fixture(home);
+        let day = utc_day();
+        let load = || {
+            crate::repos::load_repos()
+                .into_iter()
+                .find(|r| r.id == "crit")
+                .expect("the fixture repo")
+        };
+        let diff_reads = |n: u64| {
+            std::fs::read_to_string(home.join("hits"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.starts_with("GET") && l.contains(&format!("/pulls/{n} ")))
+                .count()
+        };
+
+        // ---- read-ahead OFF, on a pull request squarely inside the scope ----
+        crate::repos::set_read_prs("crit", false).unwrap();
+        let pr = budget_pr(21, "sha21");
+        let s = summarise(
+            &load(),
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
+        assert_eq!(
+            s.depth,
+            Depth::Unread,
+            "read-ahead off: an unasked visit is refused"
+        );
+        assert!(
+            s.unread_because.contains("read ahead"),
+            "the refusal must name the switch that would change it: {}",
+            s.unread_because
+        );
+        assert!(
+            !s.budget_stopped,
+            "a scope refusal wore the budget marker — the pane would offer tomorrow to somebody \
+             whose repo will still be switched off tomorrow"
+        );
+        assert!(!s.computed, "saying no must not count as reading");
+        assert_eq!(reads_spent(&day), 0, "a refusal moved the ledger");
+        assert!(cached("crit", 21, "sha21").is_none());
+        assert_eq!(
+            diff_reads(21),
+            0,
+            "a refused visit still downloaded the diff"
+        );
+
+        // ...and the same visit, pressed, reads it — and is still free.
+        let s = summarise(
+            &load(),
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Asked,
+        );
+        assert_ne!(
+            s.depth,
+            Depth::Unread,
+            "read-ahead off refused a person pressing read it: {}",
+            s.unread_because
+        );
+        assert_eq!(
+            reads_spent(&day),
+            0,
+            "a read a person pressed for ate the automatic allowance"
+        );
+
+        // ---- read-ahead ON, but the only reason is that somebody mentioned you ----
+        crate::repos::set_read_prs("crit", true).unwrap();
+        let mut pr = budget_pr(22, "sha22");
+        pr.reasons = vec![crate::prq::Reason::Mentioned];
+        let s = summarise(
+            &load(),
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
+        assert_eq!(
+            s.depth,
+            Depth::Unread,
+            "a mention is not a reason to read on skein's initiative"
+        );
+        assert!(
+            s.unread_because.contains("not one skein reads on its own"),
+            "the refusal must say whose scope this is: {}",
+            s.unread_because
+        );
+        assert_eq!(reads_spent(&day), 0, "a mention was charged to the day");
+        assert_eq!(
+            diff_reads(22),
+            0,
+            "a refused visit still downloaded the diff"
+        );
+
+        // ...and the same visit, pressed, reads it.
+        let s = summarise(
+            &load(),
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Asked,
+        );
+        assert_ne!(
+            s.depth,
+            Depth::Unread,
+            "a mention could not be read even by hand: {}",
+            s.unread_because
+        );
+        assert_eq!(reads_spent(&day), 0);
 
         drafting_teardown();
     }
@@ -4546,6 +5115,228 @@ mod tests {
 
         std::env::remove_var("SKEIN_HOME");
     }
+
+    /// A reading with everything in it — brief, signals, ownership, a drafted review.
+    fn fat(number: u64, head: &str) -> Known {
+        Known::new(
+            Summary {
+                number,
+                head_sha: head.into(),
+                depth: Depth::Expanded,
+                line: "the request timeout default drops from 30s to 5s.".into(),
+                detail: "## What it does\n\nShortens how long a request waits.\n".into(),
+                flags: vec!["default".into(), "behaviour".into()],
+                yours: vec!["src/parser.rs".into()],
+                others: 3,
+                ownership_unknown: String::new(),
+                signals: vec![crate::contracts::Signal {
+                    kind: "default".into(),
+                    what: "TIMEOUT moved from 30 to 5".into(),
+                    file: "src/parser.rs".into(),
+                    symbol: "TIMEOUT".into(),
+                }],
+                unread_because: String::new(),
+                computed: false,
+                budget_stopped: false,
+            },
+            false,
+            Some(Critique {
+                number,
+                head_sha: head.into(),
+                overall: "one real problem.".into(),
+                // TWO comments, not one: the chip draws a COUNT, and a fixture with one comment
+                // cannot tell a count apart from a yes/no.
+                comments: vec![
+                    Draft {
+                        path: "src/a.rs".into(),
+                        line: 2,
+                        anchored: true,
+                        text: "on the line".into(),
+                        line_text: "    let x = 1;".into(),
+                    },
+                    Draft {
+                        path: "src/b.rs".into(),
+                        line: 40,
+                        anchored: false,
+                        text: "and this one is not anchored".into(),
+                        line_text: String::new(),
+                    },
+                ],
+                truncated: false,
+            }),
+        )
+    }
+
+    /// The queue payload carries what a ROW draws, and stops there (SKEIN-287).
+    ///
+    /// The baseline this exists to end: 153,381 bytes for thirty-nine readings, every one carrying
+    /// a brief of several thousand characters, its signals and its whole drafted review — none of
+    /// which a collapsed row draws. The prose is read one row at a time, when a row is opened.
+    ///
+    /// The key set is asserted EXACTLY, and that strictness is the point of the test rather than
+    /// an accident of writing it: `thin` empties fields by name, so a new prose field on
+    /// [`Summary`] would ride the row payload silently. This fails on the day one is added, which
+    /// is where somebody decides whether it belongs on the line or behind the fold.
+    #[test]
+    fn the_row_shape_carries_only_what_a_row_draws() {
+        let wire = serde_json::to_value(fat(1, "aaa").thin()).unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("a reading is an object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "computed",
+                "depth",
+                "detail",
+                "drafted",
+                "flags",
+                "has_critique",
+                "head_sha",
+                "line",
+                "number",
+                "others",
+                "signals",
+                "stale",
+                "unread_because",
+                "yours",
+            ],
+            "the row payload gained or lost a field: {wire}"
+        );
+
+        // The prose, gone — every one of these is drawn only behind the fold, by `revDetail` and
+        // `revDraftSection` (`src/web/index.html:4611-4660`).
+        assert_eq!(wire["detail"], "", "the brief is riding every queue row");
+        assert_eq!(
+            wire["signals"],
+            serde_json::json!([]),
+            "what the diff proved is riding every queue row"
+        );
+        assert_eq!(
+            wire["yours"],
+            serde_json::json!([]),
+            "the owned-paths list is riding every queue row"
+        );
+        assert_eq!(
+            wire["others"], 0,
+            "the not-yours count is riding every queue row"
+        );
+        assert!(
+            wire.get("critique").is_none(),
+            "the whole drafted review is riding every queue row: {wire}"
+        );
+
+        // And what the line itself is made of, kept: the gist, the tripwire chips, the depth and
+        // its reason, the head the stale rule compares — and the two facts the "review ready" chip
+        // is drawn from.
+        assert_eq!(
+            wire["line"],
+            "the request timeout default drops from 30s to 5s."
+        );
+        assert_eq!(wire["flags"], serde_json::json!(["default", "behaviour"]));
+        assert_eq!(wire["depth"], "expanded");
+        assert_eq!(wire["head_sha"], "aaa");
+        assert_eq!(wire["has_critique"], true);
+        assert_eq!(wire["drafted"]["head_sha"], "aaa");
+        assert_eq!(wire["drafted"]["comments"], 2);
+    }
+
+    /// A row and the reading behind it are ONE serialisation, so they cannot come apart.
+    ///
+    /// SKEIN-243 is why this is asserted rather than argued: the drafted review and the summary
+    /// were assembled in two places and stopped agreeing about which commit had been read. `thin`
+    /// is the same struct with named fields emptied, and this is the check that says so — every
+    /// key a row carries holds the value the full reading holds, or it is one of the named prose
+    /// fields that was emptied.
+    #[test]
+    fn a_row_never_disagrees_with_the_reading_behind_it() {
+        let full = serde_json::to_value(fat(1, "aaa")).unwrap();
+        let row = serde_json::to_value(fat(1, "aaa").thin()).unwrap();
+        let emptied = ["detail", "signals", "yours", "others"];
+        for (key, value) in row.as_object().unwrap() {
+            if emptied.contains(&key.as_str()) {
+                continue;
+            }
+            assert_eq!(
+                Some(value),
+                full.get(key),
+                "the row's `{key}` is not what the full reading says it is"
+            );
+        }
+        // The drafted review is dropped from the row, and the two facts left in its place are true
+        // of the review that was dropped — the chip's whole claim.
+        assert_eq!(
+            row["drafted"]["head_sha"], full["critique"]["head_sha"],
+            "the row names a commit the drafted review did not read"
+        );
+        assert_eq!(
+            row["drafted"]["comments"],
+            full["critique"]["comments"].as_array().unwrap().len(),
+            "the chip's count is not the number of comments the review holds"
+        );
+    }
+
+    /// Opening a row hands over the prose skein already has — including for a reading of an
+    /// EARLIER commit, which is the case the computing route cannot answer.
+    ///
+    /// `GET /review/:n/summary` goes through [`visit`], whose cache lookup is keyed on the CURRENT
+    /// head: on a pull request that has moved since it was read, that misses and falls through to
+    /// a model call. The queue deliberately keeps and marks that reading ([`known`]), so a row
+    /// showing it must be able to open it without buying a new one.
+    #[test]
+    fn a_row_opens_onto_the_prose_skein_already_holds() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let mut old = fat(4, "before").summary;
+        old.detail = "the brief written against the commit before the push.".into();
+        store("demo", &old).unwrap();
+        store_critique(
+            "demo",
+            &Critique {
+                number: 4,
+                head_sha: "before".into(),
+                overall: "read at the older commit.".into(),
+                comments: Vec::new(),
+                truncated: false,
+            },
+        )
+        .unwrap();
+
+        // The branch has moved: `after` is the head now, and nothing has been read at it.
+        let opened = held("demo", 4, "after");
+        assert!(
+            opened.stale,
+            "a reading of an earlier commit was handed over as current"
+        );
+        assert_eq!(
+            opened.summary.detail, "the brief written against the commit before the push.",
+            "expanding a row that has a reading found no prose in it"
+        );
+        assert!(
+            !opened.summary.signals.is_empty(),
+            "the signals behind the fold were not handed over"
+        );
+        assert!(
+            opened.critique.is_none() && !opened.has_critique,
+            "a review of the previous commit was offered as a review of this one"
+        );
+
+        // And a pull request skein has never read is an honest unread answer, not an error: a row
+        // that opens onto a transport failure is how a reading that exists comes to look like a
+        // pull request nobody read.
+        let never = held("demo", 9, "zzz");
+        assert_eq!(never.summary.depth, Depth::Unread);
+        assert!(!never.summary.unread_because.is_empty());
+        assert_eq!(never.summary.head_sha, "zzz");
+
+        std::env::remove_var("SKEIN_HOME");
+    }
 }
 
 #[cfg(test)]
@@ -4737,11 +5528,13 @@ COMMENT: this one points at a line the diff does not show.
         });
         std::env::set_var("SKEIN_GITHUB_API", &base);
 
-        // A model that reviews it: one comment the diff shows, one it does not.
+        // A model that reads it: the MERGED answer, because there is no standalone drafter left to
+        // answer the bare review format (SKEIN-263) — a summary and, under `REVIEW:`, one comment
+        // the diff shows and one it does not.
         let claude = home.join("claude.sh");
         std::fs::write(
             &claude,
-            "#!/bin/sh\nprintf 'OVERALL: one real problem.\\nFILE: src/a.rs\\nLINE: 2\\nCOMMENT: x is unused.\\n---\\nFILE: src/a.rs\\nLINE: 99\\nCOMMENT: nowhere.\\n---\\n'\n",
+            "#!/bin/sh\nprintf 'KIND: fix\\nLINE: it adds a binding.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: one real problem.\\nFILE: src/a.rs\\nLINE: 2\\nCOMMENT: x is unused.\\n---\\nFILE: src/a.rs\\nLINE: 99\\nCOMMENT: nowhere.\\n---\\n'\n",
         )
         .unwrap();
         std::fs::set_permissions(
@@ -4785,7 +5578,8 @@ COMMENT: this one points at a line the diff does not show.
             box_name: String::new(),
         };
 
-        let drafted = critique(&repo, "acme/thing", &pr).expect("the draft path works end to end");
+        let drafted = critique(&repo, "acme/thing", &pr, &["me".into()])
+            .expect("the draft path works end to end");
         assert_eq!(drafted.comments.len(), 2);
         assert!(
             drafted.comments[0].anchored,

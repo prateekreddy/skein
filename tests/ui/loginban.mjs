@@ -94,18 +94,40 @@ function world() {
 // macrotask turns flushes both.
 const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => setTimeout(r, 0)); };
 
-// --- an expired login is a row that names the runtime -------------------------------------------
+// --- an expired login is a row that names the runtime, and WHICH witness said so ------------------
+//
+// Two witnesses since SKEIN-290, and they can disagree. `witness: "credential"` is the credential
+// file's own expiry date — knowable with nothing running. `witness: "refusal"` is a model call that
+// came back refused, which is a fact about a MOMENT and the only one of the two that can be wrong
+// about right now. Rendered as one sentence, a person cannot tell a credential that is dead from one
+// that was dead a moment ago — and those lead to different actions.
 {
   const w = world();
-  w.state.health = { ok: true, expired_logins: [{ runtime: "claude", expired_at: "2026-08-22T10:00:00Z" }] };
+  w.state.health = { ok: true, expired_logins: [
+    { runtime: "claude", expired_at: "2026-08-22T10:00:00Z", witness: "credential" }] };
   w.loadHealth();
   await settle();
   const ban = w.reg.get("loginban");
   t.check("an expired login raises the banner row", !!ban, true);
-  t.check("the banner names the runtime and the consequence",
-    !!ban && ban.innerHTML.includes("the fleet's claude login expired — summaries, critiques and workflows are declining model calls"),
+  t.check("the credential's own expiry names the runtime, the date and the consequence",
+    !!ban && ban.innerHTML.includes("the fleet's claude login expired 2026-08-22T10:00:00Z — summaries, critiques and workflows are declining model calls"),
     true);
   t.check("the banner offers the one click", !!ban && ban.innerHTML.includes(">log in<"), true);
+}
+{
+  const w = world();
+  w.state.health = { ok: true, expired_logins: [
+    { runtime: "claude", expired_at: "2026-08-22T10:00:00Z", witness: "refusal",
+      said: "invalid API key · run `claude login`" }] };
+  w.loadHealth();
+  await settle();
+  const ban = w.reg.get("loginban");
+  t.check("a refusal says it was refused, and when",
+    !!ban && ban.innerHTML.includes("was refused at 2026-08-22T10:00:00Z"), true);
+  t.check("and carries the words the runtime used, escaped",
+    !!ban && ban.innerHTML.includes("invalid API key · run `claude login`"), true);
+  t.check("the two witnesses do not read the same",
+    !!ban && ban.innerHTML.includes("login expired 2026-08-22"), false);
 }
 
 // --- no expired logins, no banner — including after there was one -------------------------------

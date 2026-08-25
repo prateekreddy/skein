@@ -337,6 +337,44 @@ Seven things you can start. Twenty-nine pull requests. Both true, on one line, a
 badge (which counts PRs) with the queue (which counts starts) — fixing §2.7's disagreement rather
 than hiding it.
 
+### 5.4 What a stack IS, once real data got hold of it (SKEIN-288)
+
+The prototype above assumes a stack is a line. On the owner's own queue it is not, and assuming it
+was produced the report *"PR ordering in stack is broken. For example, PR 586 is 4th on the list
+while it shows up as 1st"* — then *"stacking seems incorrect altogether now"*. Three decisions came
+out of that, and each replaces a guess with something knowable.
+
+**A trunk is knowable, so it is known rather than guessed.** Detection walks `base_ref → head_ref`,
+which means a pull request whose head IS the trunk turns the trunk into a seam: #625 is
+`develop → master`, so `develop` became "a head" and every develop-rooted stack dissolved into it.
+The first fix used *"this base has more than one open child"* as a proxy for *"this base is the
+trunk"*. The proxy is the bug: **it cannot tell a trunk from a fork.** The queue already reports the
+trunk (`prq::Queue::trunk`), so `revChains` severs at it by name and a fork is left alone. Where the
+trunk could not be read the old proxy stays as the fallback — without a name skein genuinely cannot
+tell the two apart, and shattering forks is the lesser failure against dissolving every stack.
+
+**A fork is not a break.** Branching two fixes off one step of a stack is ordinary, and it happened
+twice in the live queue (`fix/readiness-abstention-kinds` carries #586 and #671;
+`fix/readiness-named-findings` carries #711 and #672). Cutting there split a 21-step change into two
+stacks and stranded three more rows loose. The stack is therefore a **tree**, and it is drawn
+depth-first: parents before children, so *"review from the bottom"* stays true reading downwards
+along any path, and the step that starts a second branch says which step it left from. A list that
+pretends to be a line is what the report was about; a list that says where it branches is a list you
+can read the tree out of.
+
+Rejected: drawing an actual tree with connectors. The stack row is already the densest thing in the
+pane, indentation fights the five-cell grid §4 fixed, and the reader's question is *"what do I review
+next"* — which depth-first order answers directly.
+
+**A step number means depth, not position.** The number that lied was a position in whatever
+fragment the page had managed to assemble. It is the step's depth in the stack now — and where the
+bottom is out of sight it says so. #650's own base is `example-topic-17-file-hash`, in nobody's queue
+(merged, closed, or past the end of a truncated search), so that stack is deeper than anything skein
+can see and every number in it carries a `+`: `step 1+` means *at least the first*. Numbers are exact
+only for a stack whose root sits on the trunk, because that is the only case where skein can see the
+bottom. **Say what is known, or do not number** — a number that claims more than it knows is the
+defect, not the rounding.
+
 ---
 
 ## 6. The keyboard
@@ -422,9 +460,13 @@ Three things hold it to that, and a change that drops any of them puts the rule 
 1. **The words that post are the ones printed above the control**, assembled by the same function
    that describes them (`revReviewToPost`), with the exact body on the control's own tooltip. A
    control that could post something other than what it shows is a verdict next to nothing again.
-2. **The approval is signed.** The post goes out under the reader's GitHub account, so the body's
-   last line names skein and the commit it read. An approval that misreports who read the change is
-   worse than no approval control at all.
+2. **The approval is the reader's, and reads as theirs.** The post goes out under their GitHub
+   account, to their colleague, and the body is the review's own words and nothing after them. It
+   used to end with a trailer naming skein and the commit it read; the owner's decision of
+   2026-08-25 removed it — *"It should be as if I am writing it."* What the READER is told did not
+   change and must not: the exact body is on the control's own tooltip, character for character, and
+   the reading is printed above it. Knowing what you are sending is a different question from what
+   the person receiving it reads, and only the first of those is skein's to answer.
 3. **Nothing else moved.** The bare queue row still offers no verdict, `a` outside the reading view
    still refuses out loud, and the reading view's `revBarHtml` is still gated on a fetched diff. The
    exception is one block, reached by a press, on a surface that had to be opened to exist.
@@ -433,6 +475,43 @@ It rides `revPending` — the same hold, receipt and `u` as every other verdict 
 the critique panel's own hold, because it *is* a verdict: it must mark the row approved in place, be
 undoable from the queue, and be replaced rather than doubled when a second verdict lands inside the
 same eight seconds.
+
+### 7.4 One control, and what it is allowed to throw away (SKEIN-293)
+
+The reader asked *"when I click re read, does it give review as well? If so why is there separate re
+read and review the code buttons?"* — and the honest answer was that on most rows the two were the
+same button twice. Since summary and review became one reading, both pressed the same visit, forced
+the same read, downloaded the diff once and spent one model call. They differed in one argument, on
+one kind of row: where a review was already drafted at this head, "re-read" kept it and "review the
+code" replaced it. Neither label said so, and the conservative one was the one whose name sounded
+like it did everything. Worse, on that row they did not even buy the same reading — "re-read" fell
+through to the cheap two-stage summary path, a different prompt on a weaker model, because
+`worth_critiquing` refuses a head it has already drafted.
+
+**There is one control.** *"Read it again"* reads the whole change and drafts a new review from that
+reading, always, and its title says so. The owner chose this over renaming two controls or
+explaining the difference on the row: two buttons was the "always triggered together" decision
+half-applied at the surface after it had been fully applied underneath.
+
+**What the one control may destroy, and when it asks.** The draft is a thing the reader edits — they
+keep comments, drop comments, rewrite the words. Replacing that silently is the harm the
+conservative default was protecting against, and the fix for *"this press may throw away your
+vetting"* is to say so, not to grow a second control whose name does not mention it. So the press
+asks first, through the pane's own receipt and undo (§7.1) and never a native dialog — §8's lesson
+about a browser told once to suppress dialogs and answering `false` for the life of the tab.
+
+**"Vetted" means decisions, not attention**, and the line matters more than it looks. Opening the
+panel is not vetting; keeping or dropping a comment is, and so is editing the text. An untouched
+draft is exactly what skein produced, so reading again reproduces the same kind of artefact and
+loses nothing of the reader's — asking them to confirm that is how a confirmation becomes noise and
+stops being read by the third row. `revVetted` is therefore `drop.size || edited`, and `edited` is
+recorded by the panel's own textareas (`revCritEdit`) rather than inferred.
+
+The intent travels from the surface to the server as `?redraft=1`, and the server's default stays
+conservative — because the server cannot make this judgement: it does not know what the reader has
+vetted.
+
+---
 
 ### Focus rules — the part that has to be written down
 
@@ -541,6 +620,44 @@ The budget now counts cache misses on the server (`d5b6a63`). The design's contr
   does not come out of the unasked allowance. Somebody who opened a PR asked for it.
 - the gist column makes the budget *auditable*: `not read` on 23 rows is the spend, visible, instead
   of 23 rows that look complete.
+
+**And who is spending it, which took two bugs to state properly.** The rule, whole:
+
+> If you pressed it, it is free and unconditional. If skein decided to read it, that happens only in
+> a repo you switched read-ahead on for, and it is counted against the day.
+
+There is no third case, and the pane is not one. The pane's own pump — the thing that fills in rows
+you have not opened — is *skein's* initiative however present you are, so it obeys exactly the scope
+the ten-minute background pass obeys and pays from the same ledger. What made this worth writing
+down is that the pane used to be a third case by accident: `read_prs` and `worth_reading` lived in
+the background reader alone, so an open pane read pull requests in repos the owner had switched
+read-ahead **off** for, and pull requests whose only reason was that somebody mentioned them, and
+charged the day for both — while the chip beside the queue said "nothing is read unless you ask"
+(SKEIN-242). The mirror image was live at the same time: the server had read and drafted the pull
+requests you *opened* since `f69c611`, on one merged model call, but the pump still asked only in
+the your-move lane, so your own stack filled in from the background tick and never from the pane in
+front of you (SKEIN-277).
+
+Both are one rule now, asked in one place. The scope is enforced at the model call
+(`review::unasked_scope`) rather than in the caller, for the reason the budget moved there first: a
+scope the client holds is a scope any client can widen. The page keeps a copy — `revReadsAhead` and
+`revSkeinsToRead`, read by `revPumpSummaries` and by `revReadAgain` — but only so it does not *ask*
+for what would be refused, and a copy that drifts can paint a refusal, never spend.
+
+**And what one reading buys, which is both halves.** The summary and the review are different tasks
+needing different mindsets, but they are never separate surfaces and they are always wanted
+together — so they are never two analyses (the owner, 2026-08-25). One model call over one
+download produces both and stores both, and that includes the panel's "draft again", which re-runs
+the reading rather than drafting beside the summary already on the row. The standalone drafter that
+used to serve that button is gone (SKEIN-263): it had its own prompt and its own download, and what
+it produced had no reason to agree with the summary sitting above it about what the commit even
+contained. The pane follows: after a draft lands, the row's reading is re-read off disk, because
+the one that is on screen is now the older answer.
+
+The consequence for §8.6's sentence: a row nobody is going to read on its own must say **which** of
+the two rules left it unread, because they have different answers — one is a switch on this repo,
+the other is what skein reads at all. "Nothing has asked for this one yet" was the whole of what it
+said, on rows that would never be read however long anyone waited.
 
 ---
 

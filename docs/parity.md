@@ -19,7 +19,7 @@ so it is checked like one. Updating it is one line, and the failure says which.
 ```sh
 grep -c '\.route('  src/bin/skein-server.rs                    # 92   (NOT '.route("' — that gives 80)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 159 unique, 162 occurrences
-grep -c 'function ' src/web/index.html                          # 405
+grep -c 'function ' src/web/index.html                          # 414
 sed -n '39,125p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
@@ -103,9 +103,20 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - The pull-request queue. **Six actions, not one**: approve, request-changes, comment, **merge**,
   **ask** (Q&A against the PR), **draft** (model-drafted comment). Merge is destructive and must not
   hide behind a verb.
+- **The summary and the review are one reading, always** — including "draft again". Both halves come
+  out of a single model call over a single diff download (`review::visit` → `summarise_and_draft`),
+  and both are stored together, so a row can never show a summary of one reading of a commit beside
+  a review from another. There is no standalone drafter: `draft_critique` and its own prompt were
+  deleted, because nothing needs a review without a summary (SKEIN-263). A press for a review
+  re-runs the reading rather than drafting beside the one on disk.
+- **One read control** (SKEIN-293). "Read it again" reads the whole change and drafts a new review
+  from that reading — always both halves, on the merged call, over one diff download, for one unit.
+  It carries the reader's intent to the server as `?redraft=1`, and where it would replace a draft
+  the reader has VETTED (a kept or dropped comment, or edited text) it says so first through the
+  pane's own receipt and undo, never a native dialog. Where there is nothing to lose it just goes.
 - **Approving with skein's own review** — from the block that shows the reading, one control posts
-  it as the approval body, carrying the kept line comments and signed with the commit skein read so
-  the colleague who receives it can tell whose words they are (`revApproveWithReview`, SKEIN-273).
+  it as the approval body, carrying the kept line comments, in the reader's own words — the body is
+  the review and nothing after it (`revApproveWithReview`, SKEIN-273/285).
   It is the one verdict outside the reading view, and it is allowed there for the reason the rest
   are not: that block *is* a reading of the commit it names. The bare row still offers none, and the
   keyboard still refuses `a` off the diff.
@@ -114,9 +125,31 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Contract signals** — a mechanical diff scanner that escalates a PR the model called boring,
   capped and deduplicated, deliberately non-redundant with the AI summary.
 - Review filter chips: all / author / reviewer / mentioned.
+- **Stacks, as trees rather than lines** (`revChains`, SKEIN-147/160/288). Detection is
+  `base_ref → head_ref` over the queue the pane already holds — no network, no model — severed at the
+  repo's own `trunk` by NAME, so a trunk pull request cannot dissolve every stack rooted on it and a
+  FORK is not mistaken for a trunk. Steps are laid out depth-first, a branch says which step it left
+  from, and a step's number is its DEPTH — carrying `+` ("at least") whenever the stack's lowest
+  steps are not in the queue, because a number that claims more than it knows is the defect.
 - **Blind-spot reporting** — the queue states what it could not see rather than under-reporting.
 - Summary caching keyed by head SHA; a parallelism throttle so summaries do not take the rate-limit
   window from working boxes; the count poll deliberately off the board tick.
+- **The queue payload is the ROW shape, and the prose arrives when a row opens** (SKEIN-287). A
+  collapsed row draws the line, the flags, the depth and whether a review is drafted; the brief, the
+  signals, the ownership and the drafted review itself come back per row, off disk, through
+  `/review/:n/summary?held=1` — a request to REMEMBER, which can never become a model call on any
+  head at any hour of the budget. Measured locally over thirty-nine readings: 155,167 B → 12,055 B
+  for the list, 3,969 B for one opened row.
+- **The scope of what skein reads on its own**, in one sentence: *if you pressed it, it is free and
+  unconditional; if skein decided to read it, that happens only in a repo you switched read-ahead on
+  for, and it is counted against the day.* Per-repo consent is off until somebody switches it on
+  (`repos::Repo::read_prs`), the scope is a review somebody asked you for or a pull request you
+  opened — a mention is neither, and a draft is never read whoever wrote it (`review::worth_reading`
+  over `review::worth_a_visit`) — and BOTH readers obey it: the ten-minute background pass and the
+  review pane's own pump. It is enforced at the model call (`review::unasked_scope`) so no client
+  can widen it, and the day's ceiling (`Config::review_reads_per_day`) counts only that side.
+  Anything a person presses — expanding a row, "read it", "re-read" — is `review::Trigger::Asked`:
+  unscoped, never refused, never counted. SKEIN-242/265/277.
 - Archive; review counts.
 - **Standing module notes**, including the freshness model: each note records the commit its module
   was at, and a stale note is never used.

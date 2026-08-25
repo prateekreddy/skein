@@ -998,3 +998,506 @@ fn the_server_says_at_boot_when_no_warden_is_answering() {
         "it did not say where it looked:\n{said}"
     );
 }
+
+/// A GitHub the size of what a queue refresh asks for: the viewer, its teams, and one GraphQL
+/// search answering `n` open pull requests.
+///
+/// Its own stub rather than `tests/review_queue.rs`'s, because that one drives the LIBRARY through
+/// process-global environment variables and this drives the real binary as a child. The seam is
+/// the same either way (`SKEIN_GITHUB_API`, `src/github.rs:92-97`), which is what makes the child
+/// reachable without a network at all.
+fn stub_github_for(prs: u64, reading: bool) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let nodes = (1..=prs)
+        .map(|n| {
+            format!(
+                r#"{{"number":{n},"title":"pull request {n}","author":{{"login":"dana"}},"url":"https://github.com/acme/thing/pull/{n}","headRefName":"feat-{n}","headRefOid":"sha{n}","baseRefName":"main","isDraft":false,"updatedAt":"2026-08-20T00:00:00Z","latestReviews":{{"nodes":[]}},"commits":{{"nodes":[{{"commit":{{"statusCheckRollup":null}}}}]}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let mut length = 0usize;
+            reader.read_line(&mut request).ok();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; length];
+            if length > 0 {
+                reader.read_exact(&mut body).ok();
+            }
+            let body = String::from_utf8_lossy(&body).into_owned();
+            let (code, payload) = if request.contains("/user/teams") {
+                (403, r#"{"message":"Requires read:org"}"#.to_string())
+            } else if request.contains("/user ") || request.contains("/user?") {
+                (200, r#"{"login":"me"}"#.to_string())
+            } else if request.contains("/graphql") {
+                // One request carries every membership search of a refresh, aliased q0…qN, and
+                // each alias answers under its own name. The review-requested one carries the
+                // queue; everything else answers empty, so a PR appears once.
+                let aliases: Vec<String> = body
+                    .match_indices("\"q")
+                    .filter_map(|(at, _)| body[at + 1..].split('"').next().map(str::to_string))
+                    .filter(|a| a.len() > 1 && a[1..].chars().all(|c| c.is_ascii_digit()))
+                    .collect();
+                let answered = aliases
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        format!(
+                            r#""{a}":{{"nodes":[{}]}}"#,
+                            if i == 0 { nodes.as_str() } else { "" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (200, format!(r#"{{"data":{{{answered}}}}}"#))
+            } else if reading && request.contains("/files") {
+                (200, r#"[{"filename":"src/parser.rs"}]"#.to_string())
+            } else if reading && request.contains("/pulls/") {
+                // The raw diff. Served only when a test is exercising a READING; the queue-shape
+                // tests want a route that cannot compute, so that "it answered from disk" and "it
+                // went and bought one" are different outcomes rather than the same one.
+                (
+                    200,
+                    "diff --git a/src/parser.rs b/src/parser.rs\n--- a/src/parser.rs\n                     +++ b/src/parser.rs\n@@ -1 +1 @@\n-const TIMEOUT: u64 = 30;\n                     +const TIMEOUT: u64 = 5;\n"
+                        .to_string(),
+                )
+            } else {
+                (404, r#"{"message":"no stub"}"#.to_string())
+            };
+            let head = format!(
+                "HTTP/1.1 {code} x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(payload.as_bytes());
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The queue's bulk payload can be asked for ROWS instead of prose (SKEIN-287).
+///
+/// Measured on the owner's fleet, 2026-08-25: `GET /api/repos/gadget-demo/review/summaries`
+/// answered 153,381 bytes in 10.42 s for thirty-nine stored readings — each carrying a brief of
+/// several thousand characters, its signals and its whole drafted review, none of which a
+/// collapsed row draws. Ten seconds of one of the browser's per-origin connections is what turns
+/// that from slow into wrong: everything the reader presses in that window queues behind it.
+///
+/// Driven through the ROUTE, not through `review::known`, because the unit test cannot see a query
+/// parameter that is read but never applied — the shape of SKEIN-273's three dead buttons, which
+/// every unit test passed. The sizes are printed with the test so the before and after are
+/// reproducible by running it.
+#[test]
+fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
+    const PRS: u64 = 39;
+    let home = token_home("rows");
+    let api = stub_github_for(PRS, false);
+
+    std::fs::write(
+        home.join("repos.json"),
+        format!(
+            r#"[{{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"{}","store":"{}","agent":"claude","read_prs":false,"plane_project":"","sync_connection":""}}]"#,
+            home.join("tree").display(),
+            home.join("store").display()
+        ),
+    )
+    .unwrap();
+
+    // Readings on disk, in the shape a real one has: a brief of a few thousand characters, the
+    // signals found in the diff, the owned paths, and a drafted review beside it.
+    let summaries = home.join("review").join("demo").join("summaries");
+    let critiques = home.join("review").join("demo").join("critiques");
+    std::fs::create_dir_all(&summaries).unwrap();
+    std::fs::create_dir_all(&critiques).unwrap();
+    let brief = "## What it does\n\nShortens how long a request waits before giving up, and \
+                 accounts for every caller that relied on the old ceiling.\n\n"
+        .repeat(24);
+    for n in 1..=PRS {
+        // Every reading is of the head the queue reports — except the LAST, whose branch has moved
+        // since it was read. That row is why `held=1` exists: the queue keeps and marks such a
+        // reading, and the computing route cannot hand it back, because its cache lookup is keyed
+        // on the head that is there now.
+        let read_at = if n == PRS {
+            "older".to_string()
+        } else {
+            format!("sha{n}")
+        };
+        std::fs::write(
+            summaries.join(format!("{n}-{read_at}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "number": n, "head_sha": read_at, "depth": "expanded",
+                "line": "the request timeout default drops from 30s to 5s.",
+                "detail": brief,
+                "flags": ["default", "behaviour"],
+                "yours": ["src/parser.rs", "src/timeout.rs"], "others": 3,
+                "signals": [{"kind": "default", "what": "TIMEOUT moved from 30 to 5",
+                             "file": "src/parser.rs", "symbol": "TIMEOUT"}],
+                "unread_because": "", "computed": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            critiques.join(format!("{n}-sha{n}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "number": n, "head_sha": format!("sha{n}"),
+                "overall": "one real problem, and a second worth a look.",
+                "comments": [{"path": "src/parser.rs", "line": 12, "anchored": true,
+                              "text": "this drops the error rather than returning it",
+                              "line_text": "    let _ = parse(input);"}],
+                "truncated": false,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &home)
+        .env("SKEIN_GITHUB_API", &api)
+        .env("GH_TOKEN", "test-token")
+        .env("SKEIN_REGISTRY", "")
+        .env("SKEIN_NO_GH_SECRET", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let body_of = |raw: &str| {
+        raw.split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_default()
+    };
+    let at = Instant::now();
+    let (code, raw) = http_get(&addr, "/api/repos/demo/review/summaries");
+    let full_took = at.elapsed();
+    assert_eq!(code, 200, "{raw}");
+    let full = body_of(&raw);
+    let at = Instant::now();
+    let (code, raw) = http_get(&addr, "/api/repos/demo/review/summaries?rows=1");
+    let rows_took = at.elapsed();
+    assert_eq!(code, 200, "{raw}");
+    let rows = body_of(&raw);
+
+    println!(
+        "SKEIN-287  {PRS} stored readings\n  full  {:>8} B  {:?}\n  rows  {:>8} B  {:?}",
+        full.len(),
+        full_took,
+        rows.len(),
+        rows_took
+    );
+
+    let full: serde_json::Value = serde_json::from_str(&full).expect("the full payload is JSON");
+    let rows: serde_json::Value = serde_json::from_str(&rows).expect("the row payload is JSON");
+    assert_eq!(
+        full.as_object().unwrap().len(),
+        PRS as usize,
+        "the fixture did not produce {PRS} readings, so nothing below is measuring what it says"
+    );
+    assert_eq!(
+        rows.as_object().unwrap().len(),
+        PRS as usize,
+        "asking for rows lost pull requests — this is a thinner payload, never a shorter list"
+    );
+
+    // The default is untouched: every caller that asks the way the pane asks today gets exactly
+    // what it got before, prose and drafted review and all.
+    assert!(
+        full["1"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("What it does"),
+        "the default payload stopped carrying the brief"
+    );
+    assert_eq!(full["1"]["critique"]["comments"][0]["line"], 12);
+    assert_eq!(full["1"]["signals"][0]["symbol"], "TIMEOUT");
+
+    // And the row payload carries the line, the flags and the drafted review's two facts — with
+    // none of the prose behind them.
+    assert_eq!(
+        rows["1"]["line"],
+        "the request timeout default drops from 30s to 5s."
+    );
+    assert_eq!(
+        rows["1"]["flags"],
+        serde_json::json!(["default", "behaviour"])
+    );
+    assert_eq!(rows["1"]["has_critique"], true);
+    assert_eq!(rows["1"]["drafted"]["head_sha"], "sha1");
+    assert_eq!(rows["1"]["drafted"]["comments"], 1);
+    assert_eq!(
+        rows["1"]["detail"].as_str().unwrap_or("").len(),
+        0,
+        "the brief is still riding every queue row — `?rows=1` was read and not applied"
+    );
+    assert!(
+        rows["1"].get("critique").is_none(),
+        "the whole drafted review is still riding every row: {}",
+        rows["1"]
+    );
+
+    let (full_len, rows_len) = (full.to_string().len(), rows.to_string().len());
+    assert!(
+        rows_len * 4 < full_len,
+        "the row payload is not materially smaller: {rows_len} B against {full_len} B"
+    );
+
+    // The prose the row stopped carrying is still reachable, one row at a time, off disk.
+    let (code, raw) = http_get(&addr, "/api/repos/demo/review/1/summary?held=1");
+    assert_eq!(code, 200, "{raw}");
+    let one: serde_json::Value = serde_json::from_str(&body_of(&raw)).unwrap();
+    assert!(
+        one["detail"].as_str().unwrap().contains("What it does"),
+        "opening a row found no brief behind it: {one}"
+    );
+    assert_eq!(one["critique"]["comments"][0]["line"], 12);
+    assert_eq!(one["signals"][0]["symbol"], "TIMEOUT");
+
+    // And the row `held=1` exists for: one whose branch has moved since it was read. The queue
+    // keeps that reading and says so (`stale`), so opening it must hand the prose over — while the
+    // COMPUTING route, whose cache lookup is keyed on the head that is there now, misses and goes
+    // off to buy a new reading. Both are asked here, because the difference between them IS the
+    // behaviour: without it, `held=1` could be dropped and every assertion above would still pass.
+    assert_eq!(
+        rows[&PRS.to_string()]["stale"],
+        true,
+        "the fixture's moved row is not being reported as read before the latest commits"
+    );
+    let (code, raw) = http_get(
+        &addr,
+        &format!("/api/repos/demo/review/{PRS}/summary?held=1"),
+    );
+    assert_eq!(code, 200, "{raw}");
+    let moved: serde_json::Value = serde_json::from_str(&body_of(&raw)).unwrap();
+    assert!(
+        moved["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("What it does"),
+        "opening a row read before the latest commits found no brief behind it: {moved}"
+    );
+    assert_eq!(
+        moved["stale"], true,
+        "a reading of an earlier commit was handed over as current"
+    );
+    let (code, raw) = http_get(
+        &addr,
+        &format!("/api/repos/demo/review/{PRS}/summary?asked=1"),
+    );
+    assert_eq!(code, 200, "{raw}");
+    let bought: serde_json::Value = serde_json::from_str(&body_of(&raw)).unwrap();
+    assert_eq!(
+        bought["depth"], "unread",
+        "the computing route answered a moved row from disk, so `held=1` is measuring nothing: \
+         {bought}"
+    );
+}
+
+/// A `claude` that answers the MERGED prompt and numbers each answer, so a review that was
+/// replaced and one that was kept are different strings rather than a judgement.
+///
+/// `$4` is the prompt (`src/ai.rs:469` passes `["-p", "--model", model, prompt]`), and the merged
+/// call is the only one carrying a literal `REVIEW:` — the same seam `src/review.rs`'s own
+/// drafting fixture uses. Everything else gets the cheap two-stage answer, which is what a re-read
+/// of an already-drafted row actually takes.
+#[cfg(unix)]
+fn stub_claude(home: &std::path::Path) -> std::path::PathBuf {
+    let count = home.join("merged-calls");
+    let bin = home.join("claude.sh");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\ncase \"$4\" in\n  *\"REVIEW:\"*)\n    echo m >> {c}\n\
+             n=$(wc -l < {c} | tr -d ' ')\n    printf 'KIND: fix\\nLINE: merged reading %s.\\n\
+             EXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: drafted in reading %s\\n' \
+             \"$n\" \"$n\" ;;\n  *)\n    printf 'KIND: fix\\nLINE: the cheap two-stage answer.\\n\
+             EXPAND: no\\nFLAGS: none\\n' ;;\nesac\nexit 0\n",
+            c = count.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &bin,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+    bin
+}
+
+/// The read route carries the caller's intent about the drafted review (SKEIN-293).
+///
+/// The owner asked why "re-read" and "review the code" both exist. Since the drafter was merged
+/// (SKEIN-263) both force a reading through `review::visit` and differ in one argument, and on a
+/// row that already has a draft that argument decides whether the reader's vetting survives. The
+/// owner's answer was one control, warned before it discards anything — so the intent has to reach
+/// the route from the surface that knows what is about to be lost, and the route's DEFAULT has to
+/// stay the conservative one so a server landing first changes nothing.
+///
+/// Driven through the route rather than through `review::summarise`, because a query parameter
+/// that is read and never applied is invisible to a unit test — SKEIN-273's three dead buttons.
+#[cfg(unix)]
+#[test]
+fn the_read_route_replaces_a_drafted_review_only_when_the_caller_asks() {
+    let home = token_home("redraft");
+    let api = stub_github_for(1, true);
+    let claude = stub_claude(&home);
+
+    std::fs::write(
+        home.join("repos.json"),
+        format!(
+            r#"[{{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"{}","store":"{}","agent":"claude","read_prs":false,"plane_project":"","sync_connection":""}}]"#,
+            home.join("tree").display(),
+            home.join("store").display()
+        ),
+    )
+    .unwrap();
+
+    // A reading already on disk for this head. It is what makes the "a redraft must not honour
+    // the cache" assertion below mean anything: without it every request computes, and a redraft
+    // that forgot to read past the cache would look identical to one that did.
+    let summaries = home.join("review").join("demo").join("summaries");
+    std::fs::create_dir_all(&summaries).unwrap();
+    std::fs::write(
+        summaries.join("1-sha1.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "number": 1, "head_sha": "sha1", "depth": "line",
+            "line": "the reading that was already on disk.",
+            "detail": "", "flags": [], "yours": [], "others": 0,
+            "signals": [], "unread_because": "", "computed": true,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // A review the reader has already vetted: kept some comments, dropped others. This is the
+    // thing the conservative default exists to protect.
+    let critiques = home.join("review").join("demo").join("critiques");
+    std::fs::create_dir_all(&critiques).unwrap();
+    std::fs::write(
+        critiques.join("1-sha1.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "number": 1, "head_sha": "sha1", "overall": "the review the reader vetted",
+            "comments": [], "truncated": false,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let addr = format!("127.0.0.1:{}", free_port());
+    let child = Command::new(env!("CARGO_BIN_EXE_skein-server"))
+        .env("SKEIN_ADDR", &addr)
+        .env("SKEIN_HOME", &home)
+        .env("SKEIN_GITHUB_API", &api)
+        .env("SKEIN_CLAUDE_BIN", &claude)
+        .env("GH_TOKEN", "test-token")
+        .env("SKEIN_REGISTRY", "")
+        .env("SKEIN_NO_GH_SECRET", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _kid = Kid(child);
+    let start = Instant::now();
+    while TcpStream::connect(&addr).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "server never bound"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let drafted = || -> String {
+        let text = std::fs::read_to_string(critiques.join("1-sha1.json")).unwrap_or_default();
+        serde_json::from_str::<serde_json::Value>(&text)
+            .map(|v| v["overall"].as_str().unwrap_or("").to_string())
+            .unwrap_or_default()
+    };
+
+    // A plain forced re-read. It reads the pull request again and leaves the vetted review alone.
+    let (code, raw) = http_get(&addr, "/api/repos/demo/review/1/summary?force=1");
+    assert_eq!(code, 200, "{raw}");
+    assert_eq!(
+        drafted(),
+        "the review the reader vetted",
+        "a re-read with no intent marker threw away a review the reader had vetted"
+    );
+
+    // The same route, with the intent the pane sends after it has warned. Now it is replaced.
+    let (code, raw) = http_get(&addr, "/api/repos/demo/review/1/summary?redraft=1");
+    assert_eq!(code, 200, "{raw}");
+    assert!(
+        drafted().contains("drafted in reading"),
+        "`redraft=1` did not replace the drafted review — the parameter is read and not applied: {}",
+        drafted()
+    );
+    // A redraft must not honour the cache. A reading is on disk for this head, and `visit` serves
+    // one before it decides anything about drafting — so a redraft that did not read past it
+    // would be a press that does nothing, which is the failure a marker is likeliest to have.
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    let answer: serde_json::Value = serde_json::from_str(&body).expect("the answer is JSON");
+    assert_ne!(
+        answer["line"], "the reading that was already on disk.",
+        "`redraft=1` was served from the cache, so nothing was ever drafted"
+    );
+
+    // And the answer carries the new review, so the pane does not learn about it a refresh later
+    // (SKEIN-236): the route answers `review::known_at`, whichever door it went through.
+    assert_eq!(answer["has_critique"], true);
+
+    // Precedence, decided rather than left to whichever line runs first: `held=1` asks the route
+    // to read NOTHING, `redraft=1` asks it to read again and replace. A reader who has just been
+    // warned and said yes must not have that press silently downgraded into a disk read, so the
+    // marker that asks for work wins. Asserted because the two arrive on the same request and the
+    // order they are consulted in is invisible from outside.
+    std::fs::write(
+        critiques.join("1-sha1.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "number": 1, "head_sha": "sha1", "overall": "vetted again",
+            "comments": [], "truncated": false,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (code, raw) = http_get(&addr, "/api/repos/demo/review/1/summary?redraft=1&held=1");
+    assert_eq!(code, 200, "{raw}");
+    assert!(
+        drafted().contains("drafted in reading"),
+        "`held=1` outranked `redraft=1`, so a press the reader was warned about did nothing: {}",
+        drafted()
+    );
+    assert!(
+        answer["critique"]["overall"]
+            .as_str()
+            .unwrap_or("")
+            .contains("drafted in reading"),
+        "the replacing read's own answer did not carry the review it had just drafted: {answer}"
+    );
+}

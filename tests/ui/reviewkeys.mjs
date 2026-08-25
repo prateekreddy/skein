@@ -171,7 +171,11 @@ function world(opts = {}) {
     let revStaleTries = 0;
     const REV_STALE_TRIES = 5;
     let revSums = new Map();
-    const revFlows = new Map();
+    // Read-ahead ON for both fixture repos, which is what a person who wants their queue read has
+    // pressed. It is the pump's SCOPE (review::unasked_scope, SKEIN-242) and therefore also what
+    // revReadAgain reads to decide whether a row is about to be read anyway: an empty map here
+    // would put a read control on every unread row in this suite.
+    const revFlows = new Map([["alpha", { read_prs: true }], ["beta", { read_prs: true }]]);
     const revCrits = new Map();
     let revComposing = null;
     const toasts = [];
@@ -215,12 +219,19 @@ function world(opts = {}) {
     ${grab("revStackLane")}
     ${grab("revStackOpenKey")}
     ${grab("revStackStep")}
+    // revChains reads the repo's trunk to know where a stack stops (SKEIN-288).
+    ${grab("revTrunkOf")}
     ${grab("revChains")}
     ${grab("revStackName")}
     ${grab("revMisnamed")}
     ${grab("toggleRevStack")}
+    // Opening a row or a step fetches the prose the row shape left behind (SKEIN-287).
+    ${grab("revLoadReading")}
     ${grab("toggleStackStep")}
     ${grab("toggleRevRow")}
+    // A step's number is its depth, and it says "at least" when the bottom is out of sight.
+    ${grab("REV_UNROOTED_WHY")}
+    ${grab("revStepNo")}
     ${grab("revStackRow")}
     ${grab("revStackSteps")}
     ${grab("revWaitedSince")}
@@ -238,8 +249,11 @@ function world(opts = {}) {
     ${grab("revGist")}
     // A row says whether a review is drafted for it (SKEIN-216).
     ${grab("revDraftedReview")}
+    ${grab("revDraftAtHead")}
     ${grab("revReadyChip")}
-    // The row's own read control (SKEIN-228).
+    // The row's own read control (SKEIN-228), and the two questions it asks about the pump's scope.
+    ${grab("revReadsAhead")}
+    ${grab("revSkeinsToRead")}
     ${grab("revReadAgain")}
     ${grab("revRow")}
     ${grab("revNotesStore")}

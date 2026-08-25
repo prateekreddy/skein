@@ -1323,17 +1323,61 @@ fn shape_response(
     }
 }
 
+/// Is a query flag on? Present, and spelled `1` or `true`.
+///
+/// One reading of the idiom rather than one per flag. There are five of them on the review routes
+/// now — `force`, `asked`, `rows`, `held`, `redraft` — and they all default the same safe way
+/// round: absent or misspelled means OFF, so a caller that fumbles a marker gets the cautious
+/// behaviour (the budgeted path, the full payload, the drafted review left where it is) rather
+/// than the permissive one. `redraft` is the sharpest case: fumbled, a reader's vetted review
+/// survives; honoured by accident, it is gone.
+fn flag(q: &HashMap<String, String>, key: &str) -> bool {
+    q.get(key).is_some_and(|v| v == "1" || v == "true")
+}
+
+/// One pull request's reading — computed if it is not held, or handed over as it stands.
+///
+/// Four markers. Three are about **who is asking and what may be spent**: `force=1` reads past the
+/// cache, `asked=1` says a person asked so the day's ceiling does not apply, and `held=1` says read
+/// nothing at all — answer with what is on disk, which is what an expanded queue row asks for once
+/// the queue payload is thin.
+///
+/// `redraft=1` is a different question — **what must come back**. It maps to
+/// `review::Review::Always`, so the review is drafted whatever `worth_critiquing` thinks, and the
+/// one already at this head is replaced. Related to `force` and not the same as it: a `force=1` on
+/// its own still KEEPS a review the reader has vetted, and that difference is the whole of
+/// SKEIN-293. The intent travels from the surface rather than being decided here because only the
+/// pane knows whether there are kept and dropped decisions about to be thrown away, and it warns
+/// before asking.
+///
+/// A redraft is always a forced read — `review::re_read_replacing_the_review` spells that itself,
+/// because a cached reading returns from `visit` before anything is drafted and a redraft that
+/// honoured the cache would be a press that does nothing. It is folded into `force` here as well,
+/// for one reason: PRECEDENCE. `held=1` asks this route to read nothing at all, and a reader who
+/// has just been warned and said yes must not have that press silently downgraded into a disk
+/// read, so the marker that asks for work wins.
+///
+/// **Absent, nothing changes.** The default is `Review::IfYours`, exactly what this route did
+/// before, so a server that lands ahead of the page is invisible.
 async fn api_review_summary(
     Path((id, number)): Path<(String, u64)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
+    // What must come back, rather than who is asking — see the note above. Read first because
+    // `force` follows from it.
+    let redraft = flag(&q, "redraft");
+    let force = redraft || flag(&q, "force");
     // The owner's boundary (see `review::Trigger`): the daily budget limits only what skein does
     // on its own initiative. A request a person made — the read button (`asked=1`) or a forced
     // re-read — is never budget-checked and never counted. Absent both markers the request is
     // treated as UNASKED, which is the safe default: a route that forgets the marker gates a
     // button instead of un-gating the pump.
-    let asked = force || q.get("asked").is_some_and(|v| v == "1" || v == "true");
+    let asked = force || flag(&q, "asked");
+    // **`held=1`: hand over what is on disk and read nothing.** The row that opened is asking for
+    // the prose the thin queue payload left behind — a request to REMEMBER, not to analyse — and
+    // it must never become a model call, on any head, at any hour of the budget. `force` wins if
+    // both are given, because a person pressing "re-read" has asked for the opposite of this.
+    let held = !force && flag(&q, "held");
     let trigger = if asked {
         skein::review::Trigger::Asked
     } else {
@@ -1349,8 +1393,15 @@ async fn api_review_summary(
             .iter()
             .find(|p| p.number == number)
             .ok_or("that PR is not in your queue")?;
+        if held {
+            return Ok(skein::review::held(&repo.id, pr.number, &pr.head_sha));
+        }
         let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        let summary = skein::review::summarise(&repo, &queue.slug, pr, &identities, force, trigger);
+        let summary = if redraft {
+            skein::review::re_read_replacing_the_review(&repo, &queue.slug, pr, &identities)
+        } else {
+            skein::review::summarise(&repo, &queue.slug, pr, &identities, force, trigger)
+        };
         // The same shape the bulk route answers, built by `review` rather than assembled here: one
         // visit produces the summary AND the review in one model call now, and a route that
         // answered only half of that made the page wait for a refresh to learn the other half.
@@ -1375,6 +1426,12 @@ async fn api_critique_get(Path((id, number)): Path<(String, u64)>) -> Response {
 
 /// Draft an actual review of the PR. A model call — only ever reached by a person pressing the
 /// button, never from a background pass.
+///
+/// It is ONE reading, not a second analysis (SKEIN-263): `review::critique` runs the same forced
+/// visit `/review/:n/summary?force=1` runs, and stores the summary and the review together — so
+/// the row and the draft under it can never describe two different readings of one commit. The
+/// viewer goes with it for the summary half's ownership attribution, off the queue this already
+/// read.
 async fn api_critique_draft(Path((id, number)): Path<(String, u64)>) -> Response {
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
@@ -1386,7 +1443,8 @@ async fn api_critique_draft(Path((id, number)): Path<(String, u64)>) -> Response
             .iter()
             .find(|p| p.number == number)
             .ok_or("that PR is not in your queue")?;
-        skein::review::critique(&repo, &queue.slug, pr)
+        let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
+        skein::review::critique(&repo, &queue.slug, pr, &identities)
     })
     .await;
     match out {
@@ -1458,7 +1516,31 @@ async fn api_set_reading(
 ///
 /// So this costs nothing and refuses nothing: no model calls, no rules about drafts or settling.
 /// What the pane then asks to have COMPUTED is a separate question, and that one keeps its limits.
-async fn api_review_summaries(Path(id): Path<String>) -> Response {
+///
+/// **`?rows=1` asks for the row shape** — the same readings with the prose taken out
+/// ([`skein::review::Known::thin`]). Measured on the owner's fleet, 2026-08-25, thirty-nine stored
+/// readings: 153,381 bytes for the full answer, of which a collapsed row draws the line, the
+/// flags and whether a review is drafted. Reproduced locally at 155,167 B against 12,055 B, and
+/// 7.4 ms of server time against 3.3 ms
+/// (`tests/server.rs::the_review_queue_payload_can_be_asked_for_rows_instead_of_prose`, which
+/// prints both). The prose comes back per row when a row is opened, from
+/// `/review/:n/summary?held=1`.
+///
+/// **The ten seconds in that measurement is not this payload**, and saying so here is the point:
+/// with the queue's micro-cache warm the full answer is written in single-digit milliseconds, and
+/// with it cold both shapes wait the same however long `prq::queue` takes to hear back from
+/// GitHub. That wait is SKEIN-291. This is the bytes, and the connection those bytes occupy.
+///
+/// A query parameter rather than a second route, for the reason the shape itself is a `thin()` and
+/// not a `Row` struct: one handler, one `known()` call, one serialisation. A second route is a
+/// second place to assemble a payload, and the last time this record had two of those the drafted
+/// review and the summary stopped agreeing (SKEIN-243). The default is unchanged and stays the
+/// full reading, so no caller is affected by this existing.
+async fn api_review_summaries(
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let rows = flag(&q, "rows");
     let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
@@ -1476,7 +1558,7 @@ async fn api_review_summaries(Path(id): Path<String>) -> Response {
         Ok(Ok(known)) => Json(
             known
                 .into_iter()
-                .map(|(number, k)| (number.to_string(), k))
+                .map(|(number, k)| (number.to_string(), if rows { k.thin() } else { k }))
                 .collect::<std::collections::BTreeMap<_, _>>(),
         )
         .into_response(),
@@ -3823,7 +3905,7 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{origin_ok, refuse_unknown_args, slow_down};
+    use super::{flag, origin_ok, refuse_unknown_args, slow_down};
     use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
     use std::time::Duration;
 
@@ -3891,6 +3973,37 @@ mod tests {
         assert!(refuse_unknown_args(&arg("--help"))
             .expect("help")
             .contains("no subcommands"));
+    }
+
+    /// A marker nobody spelled is OFF, and that direction is the whole safety of these routes.
+    ///
+    /// `force`, `asked`, `rows` and `held` all pass through one reader, and every one of them is
+    /// written so that failing to send it costs a caller the permissive behaviour, never grants
+    /// it: no `asked` means the day's budget applies, no `held` means the request may compute, no
+    /// `rows` means the full payload. A reader that treated "present" as true would turn
+    /// `?asked=0` into an un-budgeted model call.
+    #[test]
+    fn a_review_marker_nobody_spelled_is_off() {
+        let q: std::collections::HashMap<String, String> = [
+            ("on", "1"),
+            ("alsoOn", "true"),
+            ("off", "0"),
+            ("alsoOff", "false"),
+            ("empty", ""),
+            ("shouty", "TRUE"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert!(flag(&q, "on") && flag(&q, "alsoOn"));
+        assert!(!flag(&q, "off") && !flag(&q, "alsoOff"));
+        assert!(!flag(&q, "missing"), "an absent marker read as ON");
+        assert!(!flag(&q, "empty"), "`?held=` read as ON");
+        assert!(
+            !flag(&q, "shouty"),
+            "a spelling the routes do not document read as ON, so the set of ways to un-gate a \
+             model call is larger than the set anybody wrote down"
+        );
     }
 
     fn with_origin(o: Option<&str>) -> HeaderMap {

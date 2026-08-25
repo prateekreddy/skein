@@ -109,6 +109,8 @@ function world(opts = {}) {
     ${grab("revRetry")}
     ${grab("revReceiptHtml")}
     ${grab("revMarkDone")}
+    // revRepaintRow asks this for its data-rk selector (SKEIN-284).
+    ${grab("revRkQuery")}
     ${grab("revRepaintRow")}
     ${grab("revPendingPaint")}
     ${grab("revBarHtml")}
@@ -130,6 +132,7 @@ function world(opts = {}) {
     ${grab("revApproveWithReviewHtml")}
     ${grab("revDraftSection")}
     ${grab("revCritActsHtml")}
+    ${grab("revDraftAtHead")}
     ${grab("revReadyChip")}
     // The row's own read control (SKEIN-228).
     ${grab("revReadAgain")}
@@ -333,7 +336,6 @@ const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lan
 // and `a` outside the reading view still refuses out loud (reviewkeys.mjs:616).
 const FLAG_NOTHING = { number: 7, head_sha: SHA, truncated: false,
                        overall: "nothing to flag — this is pure composition wiring", comments: [] };
-const SIGNED = "— skein drafted this review from `aaaa111`; I read it and approved as written.";
 const DRAFT = { number: 7, head_sha: SHA, truncated: false, overall: "the lock is taken twice", comments: [
   { path: "src/seam.rs", line: 46, anchored: true, text: "membership() is cached per-request",
     line_text: "let tenant = req.session();" },
@@ -353,11 +355,10 @@ const DRAFT = { number: 7, head_sha: SHA, truncated: false, overall: "the lock i
   t.check("and says, beside the control, what pressing it puts on GitHub",
     offered.includes("approve posts skein's note above as the approval"), true);
   t.check("naming the commit that reading was of",
-    offered.includes("the commit <code>aaaa111</code> it read"), true);
+    offered.includes("the reading is of <code>aaaa111</code>"), true);
   t.check("with the exact body it will send on the control itself",
     offered.includes("posts exactly this as the approval:")
-      && offered.includes("nothing to flag — this is pure composition wiring")
-      && offered.includes(SIGNED), true);
+      && offered.includes("nothing to flag — this is pure composition wiring"), true);
 
   w.approveWith("acme", 7);
   await settle();
@@ -383,8 +384,12 @@ const DRAFT = { number: 7, head_sha: SHA, truncated: false, overall: "the lock i
   t.check("as an approval — the verdict the pane could not reach before", sent.kind, "approve");
   t.check("carrying skein's own sentence as the approval body",
     sent.body.startsWith("nothing to flag — this is pure composition wiring"), true);
-  t.check("over a line saying whose reading it was, so the colleague who gets it can tell",
-    sent.body.endsWith(SIGNED), true);
+  // The owner's decision, 2026-08-25 (SKEIN-285): "It should be as if I am writing it." The body
+  // used to end with a trailer naming skein and the commit it read. The approval goes out under
+  // their account, to their colleague, and it reads as theirs — so the body is the review's own
+  // words and stops there.
+  t.check("and nothing after it — the approval reads as the reader's own",
+    sent.body, "nothing to flag — this is pure composition wiring");
   t.check("against the commit skein read", sent.drafted_at, SHA);
   t.check("and the queue row is approved in place, without a reload",
     [w.prs()[0].my_review, w.prs()[0].review_is_current, w.reloads()], ["approved", true, 0]);
