@@ -494,14 +494,34 @@ fn graphql_answer(
 ) -> Result<(u16, String, serde_json::Value), String> {
     let body = serde_json::json!({ "query": query, "variables": variables });
     let url = format!("{}/graphql", api_base());
-    let (status, text) = call(
-        "POST",
-        &url,
-        token,
-        Some(&body.to_string()),
-        "application/vnd.github+json",
-        Duration::from_secs(30),
-    )?;
+    let ask = || {
+        call(
+            "POST",
+            &url,
+            token,
+            Some(&body.to_string()),
+            "application/vnd.github+json",
+            Duration::from_secs(30),
+        )
+    };
+    let (status, text) = ask()?;
+    // **An empty 200 is not an answer, and it is asked again once** (SKEIN-258).
+    //
+    // GitHub answers a request it gave up on server-side with a 200 and no bytes at all — no
+    // `errors` array, nothing to parse — and the heaviest thing skein sends is exactly the shape
+    // that provokes it: since the searches were batched, one request carries five `search`
+    // connections of up to a hundred nodes each. Reported live from a cold first load, where every
+    // repo sends one at once, and gone by the next refresh.
+    //
+    // One retry, not a loop: a second empty answer is a real condition and the caller must see it.
+    // Only for an EMPTY 200 — a body that says something, including an `errors` array or a 5xx, is
+    // an answer and is handled below rather than papered over. Nothing is spent on the retry that
+    // was not already spent: an empty answer costs the same quota point whether or not it is read.
+    let (status, text) = match status == 200 && text.trim().is_empty() {
+        true => ask()?,
+        false => (status, text),
+    };
+
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| complaint(status, &text))?;
     if let Some(errors) = value.get("errors").and_then(|e| e.as_array()) {
@@ -664,6 +684,66 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// A GitHub whose FIRST answer is an empty 200 and whose second is real — the shape a cold
+    /// first load meets, and the reason the retry exists.
+    fn empty_then_real_github(second: &'static str) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut served = 0usize;
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let body: &[u8] = match served {
+                    0 => b"",
+                    _ => second.as_bytes(),
+                };
+                served += 1;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// An empty 200 is asked again once, and a second one is reported (SKEIN-258).
+    ///
+    /// GitHub answers a request it gave up on with a 200 and no bytes — and since the searches were
+    /// batched, the heaviest request skein sends is the one that provokes it, so a cold first load
+    /// printed five identical alarms for one non-answer and was fine on the next refresh.
+    #[test]
+    fn an_empty_answer_is_asked_again_once_and_a_second_one_is_told() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear;
+        let api = empty_then_real_github(r#"{"data":{"q0":{"nodes":[]}}}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let answered = graphql("query { x }", serde_json::json!({}), "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let data =
+            answered.expect("an empty first answer was reported instead of being asked again");
+        assert!(
+            data.get("q0").is_some(),
+            "the retry did not carry the real answer back: {data}"
+        );
+
+        // Twice empty is a condition rather than a flap, and the caller must see it: a silent
+        // second retry would turn "GitHub is not answering" into a queue that is quietly short.
+        let always_empty = one_shot_github(200, Vec::new(), false);
+        std::env::set_var("SKEIN_GITHUB_API", &always_empty);
+        let refused = graphql("query { x }", serde_json::json!({}), "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let why = refused.expect_err("an answer that is never there was reported as success");
+        assert!(
+            why.contains("empty body"),
+            "the reason stopped naming what happened: {why}"
+        );
     }
 
     /// The regression that reported every big diff as "GitHub did not answer within 30s". curl's
