@@ -645,6 +645,19 @@ pub fn ensure_fleet_door(sandbox: &str) -> Result<(), String> {
     if door_holds_port(sandbox, server_sandbox_port()) {
         return Ok(());
     }
+    // A doorway that is ALIVE but unstamped — the stamp deleted by hand, or a pid in it that no
+    // longer names this doorway. `start_server` cannot repair that: it finds the tmux session
+    // already there and returns, so nothing re-stamps and every later `skein fleet-serve` refuses
+    // to publish, correctly but permanently, until somebody serves twice. A re-exec re-stamps
+    // across the same descriptor without ever closing the socket, which is exactly the repair.
+    //
+    // Only reachable when the stamp already says no, so a box start does not restart the server
+    // behind a healthy door — that guard is the early return above, not this branch. A doorway
+    // that takes the signal and then fails to stamp within the window falls through to the
+    // install-and-start below, which is where an unrecoverable one belongs.
+    if reload_server(sandbox) && door_settles(sandbox, server_sandbox_port()) {
+        return Ok(());
+    }
     install_doorway(sandbox)?;
     start_server(sandbox)
 }

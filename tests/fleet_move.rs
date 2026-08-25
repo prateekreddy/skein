@@ -597,6 +597,60 @@ fn the_door_opens_before_there_is_a_server_to_put_behind_it() {
     unstage(&root);
 }
 
+/// A doorway whose stamp went missing is repaired by the next box start, not only by a serve
+/// (SKEIN-226).
+///
+/// The stamp is how `door_holds_port` tells "the doorway holds the port" from "something does",
+/// and without it every publish refuses — correctly, since a squatter accepts a connect too. But
+/// `start_server` cannot put it back: the tmux session is already there, so it returns having done
+/// nothing. A re-exec re-stamps across the same descriptor, so the repair costs neither the socket
+/// nor the port.
+#[test]
+fn a_door_that_lost_its_stamp_is_re_stamped_without_closing() {
+    let _guard = serialize();
+    if !have("tmux") || !have("python3") {
+        eprintln!("skipping: this machine lacks tmux/python3, so it cannot hold the door");
+        return;
+    }
+    let root = scratch();
+    let port = stage(&root);
+
+    ensure_fleet_door(FLEET).expect("the door opens");
+    assert!(wait_for_door(port), "the door never opened");
+    let pid = door_pid().expect("the doorway stamps the port it holds");
+    // The socket the door is holding, by identity. A re-exec keeps the PID — that is what `exec`
+    // means — so the pid says nothing about whether the descriptor survived, and the inode says
+    // everything: same socket, never closed.
+    let socket = door_socket(pid);
+
+    // The stamp, and only the stamp, goes. The doorway is still alive and still holding :port.
+    fs::remove_file(server_door_stamp_path()).expect("the stamp was there to remove");
+    assert!(
+        connects(port),
+        "removing the stamp closed the port, which is not what this test is about"
+    );
+
+    ensure_fleet_door(FLEET).expect("a box start repairs the door");
+    assert!(
+        wait_for_door(port),
+        "the door was left unstamped, so every later publish refuses until somebody serves twice"
+    );
+    let after = door_pid().expect("the repair re-stamped");
+    assert_eq!(
+        after, pid,
+        "the repair replaced the doorway instead of re-execing it, which closes the port to \
+         re-open it — the squat window itself"
+    );
+    assert_eq!(
+        door_socket(after),
+        socket,
+        "descriptor 3 is a different socket after the repair, so the door was closed and re-bound"
+    );
+    assert!(connects(port), "the port is not answering after the repair");
+
+    unstage(&root);
+}
+
 /// `ensure_fleet` opens the door **before** it installs the launcher — and the launcher is what
 /// makes a box in this sandbox possible at all, so that ordering is the whole item: there is no
 /// interval in which a box and a free cockpit port coexist.
