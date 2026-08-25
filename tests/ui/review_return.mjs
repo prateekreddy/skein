@@ -22,7 +22,7 @@
 // fetch that answers the way the server does, including its 404.
 //
 //   node tests/ui/review_return.mjs
-import { grab, harness } from "./lift.mjs";
+import { grab, harness, page } from "./lift.mjs";
 
 const t = harness();
 
@@ -82,6 +82,9 @@ function board() {
     // Expanding a row asks for a stored draft only when the bulk payload did not already carry one
     // (SKEIN-216), so opening a row runs this.
     ${grab("revDraftedReview")}
+    // The chip itself, not a proxy for it: SKEIN-243 was a queue where six reviews had been drafted
+    // and paid for and not one row said so, so the assertion has to be the mark on the row.
+    ${grab("revReadyChip")}
     ${grab("toggleRevRow")}
     ${grab("revStaleTries")}
     ${grab("REV_STALE_TRIES")}
@@ -92,6 +95,8 @@ function board() {
     ${grab("revNotReadyWhy")}
     // The two empty states the pane can be in: nothing here, and nothing anywhere (SKEIN-154).
     ${grab("revLaneEmpty")}
+    // The one place that decides whether the calm headline is a claim the pane has earned.
+    ${grab("revUnasked")}
     ${grab("revClearHtml")}
     ${grab("loadKnownSummaries")}
     ${grab("revPumpSummaries")}
@@ -102,6 +107,15 @@ function board() {
     ${grab("revSnooze")}
     ${grab("revSnoozeRed")}
     ${grab("renderReview")}
+    // SKEIN-268: the paint is guarded, each row is guarded, and a fault is said out loud.
+    ${grab("lastPageError")}
+    ${grab("reportPageError")}
+    ${grab("revRowBrokenHtml")}
+    ${grab("revRowSafe")}
+    ${grab("revRenderFailed")}
+    ${grab("revRenderPane")}
+    // The press's own render, which is not deferred (SKEIN-264).
+    ${grab("renderReviewNow")}
     ${grab("renderReading")}
     ${grab("revMovedNotice")}
     ${grab("revWaitedSince")}
@@ -125,7 +139,15 @@ function board() {
     const revComposeHtml = () => "";
     const renderDiff = txt => '<div class="diff">' + txt.split(String.fromCharCode(10)).map(l => '<span class="ln">' + l + '</span>').join('') + '</div>';
     // Stubbed: this suite asks WHAT is on screen, not how a row is drawn.
-    const revRow = pr => "<row n=" + pr.number + ">";
+    // One row can be made to throw, which is the only way to prove that a row's fault stays a row's
+    // (SKEIN-268). Real data does it through marked.parse on model prose, a malformed draft, a
+    // workflow with a shape nobody expected — all per-row, all inside this one call. No backticks
+    // in here: this whole body is a template literal and one would end it mid-world.
+    let breaks = [];
+    const revRow = pr => {
+      if (breaks.includes(pr.number)) throw new TypeError("cannot read properties of undefined (reading 'map')");
+      return "<row n=" + pr.number + ">";
+    };
     const revBody = () => "";
     const revModsCount = () => "notes";
     const revModsHtml = () => "";
@@ -145,6 +167,10 @@ function board() {
       // Clicking a box: the dock's own view change, verbatim from \`showBox\`.
       box: name => { view = { box: name, mode: "term", kind: "agent" }; },
       rows: () => (revpane.innerHTML.match(/<row /g) || []).length,
+      breakRow: ns => { breaks = ns; },
+      // NOT \`broken\` — board() already returns that name for repos whose queue failed, and the
+      // outer spread would silently shadow this one into undefined.
+      brokenRows: () => (revpane.innerHTML.match(/class="revrow broken"/g) || []).length,
       sums: () => [...revSums.values()].filter(s => s !== "…").length,
       got: (n, repo) => revSums.get((repo || "alpha") + "#" + n),
       open_rows: () => revOpen.size,
@@ -158,6 +184,8 @@ function board() {
       openRow: () => [...revOpen],
       search: q => revSearchSet(q),
       common: () => [...revCommonChips],
+      chip: (n, repo) => revReadyChip(((revQueue || {}).prs || [])
+        .find(p => p.repo_id === (repo || "alpha") && p.number === n)),
       bands: () => ((revQueue && revQueue.prs) || []).map(p => [p.number, revReadBand(p)]),
       snoozeRed: () => revSnoozeRed(),
       read: (repo, n) => openReading(repo, n),
@@ -203,7 +231,9 @@ function board() {
   let refuse = null;              // a repo whose summaries the server will not serve
   let outage = null;              // when set, the merged queue route answers with this failure
   let brokenRepos = [];           // repos whose queue the merged answer reports as failed
+  let unaskedRepos = [];          // repos the merged answer says it deliberately did not ask about
   let known = {};                 // readings already on disk, as the bulk route answers them
+  let drafted = [];               // numbers the merged model call drafted a review for, as it read
   const fetch = (url) => {
     asked.push(url);
     // The merged queue: every repo in one answer, the shape the pane opens on (SKEIN-146).
@@ -218,7 +248,9 @@ function board() {
         text: () => Promise.resolve(JSON.stringify({
           ai: true, queues: served.map(queue),
           failed: brokenRepos.map(id => ({ repo_id: id, needs_you: 0, error: "boom", skipped: "" })),
-          skipped: [],
+          // `MergedQueue::skipped` — a repo skein deliberately did not ask about, carried rather
+          // than omitted so the pane can tell it from a repo with nothing waiting (src/prq.rs).
+          skipped: unaskedRepos,
         })),
       })));
     }
@@ -273,8 +305,16 @@ function board() {
         return resolve({ ok: false, status: 404, text: () => Promise.resolve("no such repo") });
       }
       if (sum) {
+        const n = Number(sum[1]), head = id + sum[1];
         return resolve({ ok: true, text: () => Promise.resolve(JSON.stringify({
-          number: Number(sum[1]), head_sha: id + sum[1], depth: "line", line: "x", computed: true,
+          number: n, head_sha: head, depth: "line", line: "x", computed: true,
+          // `review::known_at` — the summary flattened, with the review drafted at THIS head beside
+          // it. One model call produces both, so the route that answers one answers both
+          // (SKEIN-236); a fixture answering a bare summary would be testing a server that is gone.
+          ...(drafted.includes(n)
+            ? { has_critique: true,
+                critique: { number: n, head_sha: head, overall: "one thing", comments: [] } }
+            : {}),
         })) });
       }
       resolve({ ok: true, text: () => Promise.resolve(JSON.stringify(queue(id))) });
@@ -318,6 +358,8 @@ function board() {
     // The server has not caught up yet: it hands over the copy it remembers.
     stale: on => { fresh = !on; },
     broken: ids => { brokenRepos = ids; },
+    // Repos skein never asked GitHub about — review queue switched off, or no remote.
+    unasked: rows => { unaskedRepos = rows; },
     // GitHub, or skein's own route, refusing the whole queue — not one repo of nine.
     outage: why => { outage = why; },
     // A standing gap inside a queue that did arrive — `gh` without read:org is the live one.
@@ -329,6 +371,9 @@ function board() {
     hot: ns => { hot = ns; },
     // Readings skein already holds, which the pane must show without asking for any of them.
     holds: map => { known = map; },
+    // Which pull requests the reading itself comes back with a drafted review for — the merged
+    // model call's other half, on the answer to the very request that triggered it.
+    drafts: ns => { drafted = ns; },
     // The branch moving under a reading that has already been made.
     moved: ns => { moved = ns; },
     // Summary requests only — the queue's own fetches are not what these counts are about.
@@ -614,52 +659,151 @@ function board() {
 function critWorld() {
   const sent = [];
   const toasts = [];
+  const painted = [];
+  const asked = [];               // every question put to a native dialog, if any still is
+  const due = [];                 // timers, fired by the test rather than waited for
   const body = `
     let view = { repo: "*", box: null };
+    let revQueue = { prs: [] };
     ${grab("esc")}
     ${grab("rk")}
+    ${grab("REV_UNDO_MS")}
     ${grab("revCrits")}
     ${grab("revCritKeep")}
     ${grab("revCritiquePost")}
+    ${grab("revCritiqueUndo")}
+    ${grab("revCritiqueTick")}
+    ${grab("revCritiqueFire")}
+    ${grab("revCritActsPaint")}
+    ${grab("revCritActsHtml")}
     ${grab("revCritiqueHtml")}
-    const renderReview = () => {};
+    // Which render each press asked for. The press-time one must be the FORCING one — a press that
+    // paints only once the reader lets go of a selection is a press that looks like it did nothing.
+    const renderReview = () => painted.push("deferred");
+    const renderReviewNow = () => painted.push("now");
+    // The strip, modelled as an element the surgical repaint can actually replace. Without it the
+    // paint falls through to a render and the whole point of being surgical — the answer showing up
+    // while the reader still holds a caret — is untestable outside a browser.
+    const strip = { outerHTML: "" };
+    const revpane = {
+      querySelector: q => (q.startsWith("[data-critacts=") ? strip : null),
+      querySelectorAll: () => [],
+    };
     const toast = m => toasts.push(m);
-    const confirm = () => true;
+    // A native dialog must no longer be able to swallow this press, so the world records every
+    // question put to one and answers no — the shape of a browser told to suppress them.
+    const confirm = q => { asked.push(q); return false; };
     const fetch = (url, opts) => {
       sent.push({ url, body: JSON.parse(opts.body) });
       return Promise.resolve({ json: () => Promise.resolve({ ok: true, text: "posted" }) });
     };
     return {
-      seed: (repo, n, critique) => revCrits.set(repo + "#" + n, { open: true, busy: false, posting: false, critique, drop: new Set(), posted: "" }),
+      seed: (repo, n, critique) => {
+        revQueue.prs.push({ repo_id: repo, number: n, head_sha: (critique || {}).head_sha });
+        revCrits.set(repo + "#" + n, { open: true, busy: false, posting: false, critique,
+                                       drop: new Set(), posted: "", hold: null, said: "" });
+      },
       drop: (repo, n, i) => revCritKeep(repo + "#" + n, i, false),
       post: (repo, n, sha) => revCritiquePost(repo, n, sha),
+      undo: (repo, n) => revCritiqueUndo(repo + "#" + n),
+      // What the strip says right now — the receipt IS the acknowledgement, so this is where a
+      // press either landed or did not.
+      acts: (repo, n) => revCritActsHtml({ repo_id: repo, number: n,
+        head_sha: (revCrits.get(repo + "#" + n).critique || {}).head_sha }),
+      // A post already in flight. The only state left in which there is nothing to press.
+      inflight: (repo, n) => { revCrits.get(repo + "#" + n).posting = true; },
       html: pr => revCritiqueHtml(pr),
+      // What the surgical repaint last wrote into the strip.
+      painted: () => strip.outerHTML,
     };
   `;
-  return { world: new Function("sent", "toasts", body)(sent, toasts), sent, toasts };
+  const world = new Function(
+    "sent", "toasts", "painted", "asked", "setTimeout", "clearTimeout", body,
+  )(sent, toasts, painted, asked, fn => { due.push(fn); return due.length; },
+    id => { if (id) due[id - 1] = null; });
+  // The eight seconds, driven rather than waited for: what the window IS belongs to undo.mjs, which
+  // owns it; what matters here is what happens on each side of it.
+  return {
+    world, sent, toasts, painted, asked,
+    lapse: () => due.splice(0).forEach(f => f && f()),
+    // How many timers are armed. A second press must not arm a second window — with `sent` alone
+    // that is invisible, because the first hold is simply overwritten and its timer then finds
+    // nothing to do.
+    armed: () => due.filter(Boolean).length,
+  };
+}
+
+// ---- the press is a receipt, not a modal (SKEIN-264) ----
+//
+// Posting used to be gated on a native `confirm`, and a browser where somebody once ticked "prevent
+// this page from creating additional dialogs" answers every later call with false — so the press
+// returned silently and no request was ever made. Reported by the owner as "it just doesn't work.
+// idk why". SKEIN-162's hold-and-undo cannot be suppressed by a browser setting, it appears where
+// the press was, and it is what every other verdict on this surface already does.
+{
+  const { world, sent, painted, asked, lapse } = critWorld();
+  world.seed("alpha", 20, { head_sha: "h1", overall: "note", truncated: false,
+    comments: [{ path: "a.rs", line: 2, anchored: true, text: "first" },
+               { path: "b.rs", line: 5, anchored: true, text: "second — to be dropped" }] });
+  world.drop("alpha", 20, 1);
+  painted.length = 0;
+  world.post("alpha", 20, "h1");
+
+  t.check("no native dialog stands between the press and the post", asked, []);
+  t.check("the press paints at once rather than waiting for the reader's hands", painted[0], "now");
+  const held = world.acts("alpha", 20);
+  t.check("and the button becomes the receipt, in place",
+    held.includes("✓ posting 1 comment as one review"), true);
+  t.check("with the way back", held.includes(`onclick="revCritiqueUndo('alpha#20')"`), true);
+  t.check("and how long there is to take it", /data-crit-left="alpha#20">8s</.test(held), true);
+  t.check("nothing has gone to GitHub while the window is open", sent.length, 0);
+
+  lapse();
+  t.check("when the window lapses it posts, once", sent.length, 1);
+  t.check("carrying what was kept and not what was dropped",
+    sent[0].body.comments.map(c => c.text), ["first"]);
+  t.check("the head the draft read rides along", sent[0].body.head_sha, "h1");
+  t.check("it posts to the row's own repo", sent[0].url.includes("/repos/alpha/"), true);
+  t.check("the strip says the request is out, in place", world.painted().includes("✓ posting…"), true);
+
+  // The ANSWER, which is the half a render cannot deliver: by the time it lands the reader may be
+  // mid-word in another drafted comment, so it is written into the strip alone — the same surgery
+  // `revPendingPaint` does for a row's receipt. A `renderReview()` here would be deferred and the
+  // panel would sit on "posting…" for as long as the reader kept typing.
+  const before = painted.length;
+  await new Promise(r => setTimeout(r, 0));
+  t.check("and when GitHub answers, the strip says so", world.painted().includes("✓ posted"), true);
+  t.check("without a render that could be deferred out from under it",
+    painted.slice(before), []);
 }
 
 {
-  const { world, sent } = critWorld();
-  world.seed("alpha", 7, {
-    head_sha: "h1", overall: "note", truncated: false,
-    comments: [
-      { path: "a.rs", line: 2, anchored: true, text: "first" },
-      { path: "b.rs", line: 5, anchored: true, text: "second — to be dropped" },
-      { path: "c.rs", line: 0, anchored: false, text: "third" },
-    ],
-  });
-  world.drop("alpha", 7, 1);
-  world.post("alpha", 7, "h1");
+  // Taking it back inside the window: nothing was sent, and the button is a button again.
+  const { world, sent, lapse } = critWorld();
+  world.seed("alpha", 21, { head_sha: "h1", overall: "note",
+    comments: [{ path: "a.rs", line: 2, anchored: true, text: "only" }] });
+  world.post("alpha", 21, "h1");
+  world.undo("alpha", 21);
+  t.check("undo puts the press back", world.acts("alpha", 21).includes("post 1 comment as one review"), true);
+  lapse();
   await new Promise(r => setTimeout(r, 0));
+  t.check("and the window it cancelled never fires", sent.length, 0);
+}
 
-  t.check("one review request went out", sent.length, 1);
-  const posted = sent[0].body;
-  t.check("the dropped comment is not in it", posted.comments.map(c => c.text), ["first", "third"]);
-  t.check("what was kept is sent verbatim, vetted here and nowhere else",
-    posted.comments.every(c => c.text !== "second — to be dropped"), true);
-  t.check("the head the draft read rides along", posted.head_sha, "h1");
-  t.check("it posts to the row's own repo", sent[0].url.includes("/repos/alpha/"), true);
+{
+  // Pressing twice inside the window is one review, not two. The second press has no button to land
+  // on — the receipt replaced it — but the guard holds even if something calls it directly, and
+  // what it protects is the WINDOW: without it the second press silently restarts the eight seconds
+  // and orphans the first hold's countdown.
+  const { world, sent, lapse, armed } = critWorld();
+  world.seed("alpha", 22, { head_sha: "h1", overall: "note", comments: [] });
+  world.post("alpha", 22, "h1");
+  const after = armed();
+  world.post("alpha", 22, "h1");
+  t.check("a second press inside the window arms nothing new", armed(), after);
+  lapse();
+  await new Promise(r => setTimeout(r, 0));
+  t.check("and two presses inside one window post one review", sent.length, 1);
 }
 
 {
@@ -674,13 +818,51 @@ function critWorld() {
 }
 
 {
-  // A draft of an earlier commit: the pane says so and the post button is off — the server would
-  // refuse too, but the person deserves the sentence before the press, not after.
+  // Keeping or dropping a comment is a press too, and its only acknowledgement is the render: the
+  // row greys, and the count in the post button changes. Measured in chromium: ticking a checkbox
+  // leaves `document.activeElement` on the checkbox — an INPUT — so §6 rule 2 held every one of
+  // these renders until the reader clicked somewhere else.
+  const { world, painted } = critWorld();
+  world.seed("alpha", 23, { head_sha: "h1", overall: "note",
+    comments: [{ path: "a.rs", line: 2, anchored: true, text: "one" },
+               { path: "b.rs", line: 3, anchored: true, text: "two" }] });
+  painted.length = 0;
+  world.drop("alpha", 23, 0);
+  t.check("dropping a comment paints inside the frame", painted[0], "now");
+  t.check("and the count on the press follows it",
+    world.acts("alpha", 23).includes("post 1 comment as one review"), true);
+}
+
+{
+  // A draft of an earlier commit. The pane names it — "you read an old commit" stays true and worth
+  // knowing — but it does NOT take posting away: `review::post_critique` re-anchors each kept
+  // comment by its line text (SKEIN-214/215), so refusing here would restore the treadmill by
+  // itself. The `disabled` attribute is read off the post control in particular, because the row
+  // textareas carry one too as soon as a comment is dropped.
   const { world } = critWorld();
   world.seed("alpha", 9, { head_sha: "old", overall: "x", comments: [] });
   const html = world.html({ repo_id: "alpha", number: 9, head_sha: "new" });
   t.check("a stale draft is named", html.includes("Drafted before the latest commits"), true);
-  t.check("and posting is off until it is drafted again", html.includes("disabled"), true);
+  t.check("and it says the matching comments still land, at their new place",
+    html.includes("still match will post at their new place"), true);
+  t.check("and that the displaced ones travel in the note, naming the drafted commit",
+    /the rest go into the review note, naming that commit/.test(html), true);
+  const strip = world.acts("alpha", 9);
+  t.check("posting a review drafted at a moved head is offered, not refused",
+    strip.includes("disabled"), false);
+  // The sha the server re-anchors FROM, and the reason it has to be entity-escaped: a bare
+  // `JSON.stringify` puts the attribute's own delimiter inside it, the handler ends at the sha's
+  // opening quote, and the click throws instead of posting (SKEIN-261).
+  t.check("and the sha it posts under is the one the draft read, whole, inside the handler",
+    strip.includes(`onclick="revCritiquePost('alpha', 9, &quot;old&quot;)"`), true);
+
+  // A post already in flight has no button at all now, which is the SKEIN-162 rule: a control that
+  // has been pressed is replaced by what became of the press, never left there to press again.
+  world.inflight("alpha", 9);
+  const busy = world.acts("alpha", 9);
+  t.check("a post already in flight offers nothing to press again",
+    busy.includes("revCritiquePost"), false);
+  t.check("and says what is happening instead", busy.includes("✓ posting…"), true);
 }
 
 // ---- a stack of dependent pull requests is one row, opened in review order ----
@@ -971,27 +1153,47 @@ function rowWorld() {
     w.section(pr()), "");
 }
 
-// ---- a reading the page already holds still learns about the draft beside it ----
+// ---- a review drafted by the pane's own reader wears its chip on the first read ----
 //
-// `/review/:n/summary` answers a summary and nothing else, so a row read by the pump carries no
-// critique however many were drafted in the same model call. The bulk payload is where the draft
-// arrives, and it must be allowed to land on a reading it is otherwise forbidden to replace.
+// The pump's readings and the drafted reviews are ONE model call (9cfefce). This block used to open
+// the pane twice to see the chip — a second `loadReview` the live page never issues, and the whole
+// of SKEIN-243: six reviews drafted, paid for, and not one row saying so for the rest of the
+// session. So the shape of the test is the claim. Nothing here calls `b.open` more than once.
 {
   const b = board();
+  b.drafts([1]);            // one of the six, so the chip is signal rather than the texture below
   b.open("alpha");
   await b.drain();
   t.check("the pump's own readings are on screen", b.sums(), 6);
-  t.check("carrying no draft, because that route does not answer one", !!b.got(1).has_critique, false);
+  t.check("and a reading carries the review drafted in the same call", !!b.got(1).has_critique, true);
+  t.check("so the row wears its chip from that one read, with no reload",
+    b.chip(1).includes("review ready"), true);
+  t.check("a row whose reading drafted nothing wears none", b.chip(2), "");
+  t.check("one drafted review in six is not texture", b.common().includes("ready"), false);
+}
 
-  b.holds({ "1": { number: 1, head_sha: "alpha1", depth: "line", line: "off disk", has_critique: true,
-                   critique: { number: 1, head_sha: "alpha1", overall: "one thing", comments: [] } } });
+// ---- and the bulk answer does not overwrite a reading the page holds ----
+//
+// The other half of the same handler, and the reason it is not simply "last answer wins": the disk
+// copy can be OLDER than what the page has just been told. It used to be replaced in part — the
+// reading kept, the draft grafted on from disk — which was the workaround for the gap above; with
+// the gap closed, the held reading must survive whole, draft included.
+{
+  const b = board();
+  b.drafts([1]);
   b.open("alpha");
   await b.drain();
-  t.check("one drafted review in six is not texture", b.common().includes("ready"), false);
+  // Only now: the disk copy has to arrive at a page that is already holding a reading, which is
+  // the second visit, not the first. (On the first, nothing is held and the disk copy is all there
+  // is — that is the branch below it, and it is right to take it.)
+  b.holds({ "1": { number: 1, head_sha: "alpha1", depth: "line", line: "off disk", has_critique: true,
+                   critique: { number: 1, head_sha: "alpha1", overall: "an older draft", comments: [] } } });
+  b.open("alpha");
+  await b.drain();
   t.check("the newer reading survives the bulk answer", b.got(1).line, "x");
   // `|| {}` so a draft that never landed reads as a named failure rather than as a TypeError from
   // the assertion itself — a suite that crashes says less about what broke than one that reports.
-  t.check("and the drafted review beside it lands anyway", (b.got(1).critique || {}).overall, "one thing");
+  t.check("and keeps its own draft rather than the disk's", (b.got(1).critique || {}).overall, "one thing");
 }
 
 // ---- a lane skein has worked through wears the chip on nothing ----
@@ -1067,6 +1269,81 @@ function rowWorld() {
     b3.pane().includes("Nothing is waiting on you."), true);
   t.check("and nothing is claimed about repos it has no rows for",
     b3.pane().includes("revclear-next"), false);
+}
+
+// ---- "clear" is a claim, and skein only makes it about queues it read (SKEIN-245) ----
+//
+// `prq::merged` reports a repo whose review queue is switched off in `skipped` rather than leaving
+// it out, on the rule that "never looked" and "nothing waiting" must not be the same silence. The
+// pane dropped the field, so the one screen built to keep that rule broke it: `beta is clear.` —
+// about pull requests skein never asked GitHub for.
+{
+  const b = board();
+  b.unasked([{ repo_id: "beta", needs_you: 0, error: "",
+               skipped: "review queue is switched off for this repo" }]);
+  b.open("beta");
+  await b.drain();
+  const pane = b.pane();
+  t.check("a repo skein never asked about is never called clear", pane.includes("beta is clear."), false);
+  t.check("the headline says so in the verb that is true", pane.includes("skein did not ask about beta."), true);
+  t.check("and names what was switched off",
+    pane.includes("review queue is switched off for this repo"), true);
+  t.check("with the setting that would turn it back on",
+    pane.includes(`onclick="openSettings('repos')"`), true);
+  // The picker was the first place the two became the same thing: `beta · 0`, byte for byte a repo
+  // with a clean queue.
+  t.check("and the picker stops counting it as a zero", pane.includes("beta · —"), true);
+}
+
+// A fleet where NOTHING was read. The calm screen's headline is a claim about every repo skein
+// watches, and with no queue in the answer there is nothing behind it — reachable on a fresh
+// process with a bad token, where `prq::merged` has no remembered copies to fall back on.
+{
+  const b = board();
+  b.serves([]);
+  b.broken(["alpha", "beta"]);
+  b.open("");
+  await b.drain();
+  const pane = b.pane();
+  t.check("a fleet where every queue failed is not a calm fleet",
+    pane.includes("Nothing is waiting on you."), false);
+  t.check("it says no queue was read", pane.includes("skein has not read any queue."), true);
+  t.check("counting what could not be", pane.includes("2 could not be read"), true);
+  t.check("and the move is on the screen making the claim",
+    pane.includes(`class="revclear-acts"`) && pane.includes("try again"), true);
+}
+
+// The scoped form of the same lie, which is where it read worst: an orange box saying alpha's queue
+// could not be built, and directly under it the headline "alpha is clear."
+{
+  const b = board();
+  b.serves([]);
+  b.broken(["alpha"]);
+  b.open("alpha");
+  await b.drain();
+  const pane = b.pane();
+  t.check("the repo whose queue failed is not called clear either",
+    pane.includes("alpha is clear."), false);
+  t.check("its queue is unknown, and the headline says which",
+    pane.includes("skein could not read alpha."), true);
+}
+
+// The other side of the same rule, and the reason it is not simply "any failure refuses": one queue
+// that WAS read earns the fleet's answer, and what skein did not ask about is a row on it.
+{
+  const b = board();
+  b.lanes([]);
+  b.unasked([{ repo_id: "beta", needs_you: 0, error: "",
+               skipped: "no GitHub remote, so there are no pull requests to list" }]);
+  b.open("");
+  await b.drain();
+  const pane = b.pane();
+  t.check("a queue that was read still earns the fleet's answer",
+    pane.includes("Nothing is waiting on you."), true);
+  t.check("and the repo skein did not ask about is named beside it",
+    pane.includes("beta — skein did not ask: no GitHub remote"), true);
+  t.check("with a dash where a count would be",
+    /revclear-n">—<\/span>\s*<span>beta/.test(pane), true);
 }
 
 // ---- the queue could not be built: the remembered rows stay, and there is a way out ----
@@ -1417,7 +1694,11 @@ function composeWorld(store) {
     ${grab("revNotesClear")}
     const closeReading = () => {};
     const renderReview = () => {};
+    const renderReviewNow = () => {};
     const toast = () => {};
+    // The merge verdict is the pane's other confirmation, so it goes through the same wrapper.
+    ${grab("CONFIRM_FLOOR_MS")}
+    ${grab("confirmed")}
     const confirm = () => true;
     const loadReview = () => {};
     const revPost = (repo, number, kind, text, comments) => { posts.push({ repo, number, kind, text, comments: comments || [] }); return Promise.resolve({ ok: true, text: "sent" }); };
@@ -1451,6 +1732,40 @@ function composeWorld(store) {
   const { world: third } = composeWorld(store);
   third.compose("alpha", 577, "comment");
   t.check("a posted draft does not resurface", third.text(), "");
+}
+
+// ---- one row that throws is one row, not a blank page (SKEIN-268) ----
+//
+// Reported by the owner: "any small error anywhere in the review page just blanks the entire page
+// and gives the error." The pane is built as ONE string and assigned in one shot, so a throw
+// anywhere inside it means `revpane.innerHTML = …` is never reached — and everything that touches
+// model output, a diff, a draft or a workflow is called from inside that string, per row.
+{
+  const b = board();
+  b.breakRow([3]);
+  b.open("alpha");
+  await b.drain();
+  t.check("the pane is not blank", b.pane().length > 0, true);
+  t.check("the five rows that can be drawn are drawn", b.rows(), 5);
+  t.check("and the one that cannot says so, in its place", b.brokenRows(), 1);
+  t.check("naming which pull request it was", b.pane().includes("alpha#3 — skein could not draw this row"), true);
+  t.check("and why, in the page rather than in devtools",
+    b.pane().includes("cannot read properties of undefined"), true);
+  t.check("with a way to go and look at it anyway",
+    b.pane().includes("https://github.com/alpha/pull/3"), true);
+  // The row still EXISTS. Dropping it from the keyboard's list would shorten j/k for as long as
+  // the fault lasted — a second failure hiding behind the first.
+  t.check("the broken row keeps its place in the queue", b.pane().includes(`data-rk="alpha#3"`), true);
+}
+
+{
+  // Every row throwing is still not a blank page: six rows that say so beats nothing at all.
+  const b = board();
+  b.breakRow([1, 2, 3, 4, 5, 6]);
+  b.open("alpha");
+  await b.drain();
+  t.check("a queue where every row throws still draws a queue", b.brokenRows(), 6);
+  t.check("and the pane's own controls survive it", b.pane().includes("revsearch"), true);
 }
 
 t.done();

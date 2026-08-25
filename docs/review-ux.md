@@ -613,12 +613,52 @@ when nothing has narrowed it — a search that matches nothing says nothing abou
 needs you, so that keeps the plain line. Every number comes off the merged queue already on screen,
 so the calm screen costs no request, and the set-aside count rides in the sentence.
 
+**The headline is a claim, and skein only makes it about queues it read** (SKEIN-245). `revUnasked`
+decides that, in one place, for the SCOPE the headline speaks about:
+
+* a repo whose review queue is switched off, or that has no GitHub remote, arrives in
+  `MergedQueue::skipped` — reported rather than omitted, so that "never looked" and "nothing
+  waiting" are not the same silence. It reads **`skein did not ask about acme.`**, with the reason
+  and `Settings → Repos`, never "acme is clear.";
+* a repo whose queue could not be built reads **`skein could not read acme.`** — what is in it is
+  unknown, not nothing — with `try again`;
+* with no repo chosen the claim is about the whole fleet, and **one queue that was read earns it**.
+  Only when *no* queue came back does it become `skein has not read any queue.` That asymmetry is
+  deliberate: a partial failure keeps the calm screen, because the repos that answered are a real
+  reading and the ones that did not are rows on it.
+
+The rows follow the same rule as the failed repo above them: an unasked repo is listed with a **`—`**
+where a count would be, not a `0`. The repo picker does the same, for the same reason — `acme · 0`
+was byte-for-byte a repo with a clean queue, and that is where the confusion started.
+
 ### 8.6 "skein could not read this one"
 
 `not read — <reason>` in the gist column, and — the rule that matters — **the reading view still
 opens**. The diff needs no model. An unread summary must never gate reading the code; today an
 unsummarised PR expands to a dashed box explaining the rate limit, next to an `approve` button, with
 no way to see the change at all.
+
+### 8.7 "skein could not DRAW this one" — an exception is a row's problem
+
+Reported by the owner: *"any small error anywhere in the review page just blanks the entire page and
+gives the error."* The pane is built as one string and assigned in one shot, so a throw in any of
+the thirty-odd helpers that string calls meant `revpane.innerHTML = …` was never reached — blank if
+it threw before the first paint, frozen at the last good paint if later, and the reason in a
+devtools console nobody had open. Three layers, cheapest first (SKEIN-268):
+
+1. **`revRowSafe`** wraps each row's `make()`. A row that throws becomes a row *saying so* — which
+   pull request, and why — with `open on GitHub ↗` as the way out, while the rest of the queue
+   draws. This is the layer that matters: everything touching model output, a diff, a draft or a
+   workflow is per-row, and that is where malformed data arrives. The broken row **keeps its
+   `data-rk`**, so it stays in `revNav` — dropping it would silently shorten `j`/`k` for as long as
+   the fault lasted, a second failure hiding behind the first.
+2. **`renderReview` guards the whole paint** and `revRenderFailed` keeps the last good HTML rather
+   than blanking, prepending a red strip that names the reason in the page, selectable, with `read
+   it again`. A surface that blanks has also thrown away the way out.
+3. **`window.onerror` / `unhandledrejection`** land in the cockpit's own toast, de-duplicated to
+   once a minute, so a fault arrives with a sentence attached instead of a description. It is also
+   the backstop for layer 2: a throw inside `revRenderFailed` still leaves the last good queue on
+   screen and still says something.
 
 ---
 

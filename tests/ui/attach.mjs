@@ -115,9 +115,13 @@ function pageWorld(base, sid, sessions) {
   const said = [], copied = [];
   const body = `
     let attachSeq = 0;
+    // The queue is the PAGE's, keyed by sid — a handover parked on a session object goes into the
+    // bin with it when the terminal reconnects (SKEIN-267), so the world has to hold the real one.
+    const attachWaiting = new Map();
     ${grab("concatBytes")}
+    ${grab("flushAttach")}
     ${grab("attachFiles")}
-    return { attachFiles };
+    return { attachFiles, flushAttach, attachWaiting };
   `;
   const made = new Function("toast", "ensureTerminal", "sessions", "copyText", "fetch", "TextEncoder", body)(
     m => said.push(m),
@@ -128,7 +132,8 @@ function pageWorld(base, sid, sessions) {
     (url, opt) => fetch(base + url, opt),
     TextEncoder,
   );
-  return { attachFiles: made.attachFiles, said, copied };
+  return { attachFiles: made.attachFiles, flushAttach: made.flushAttach,
+           attachWaiting: made.attachWaiting, said, copied };
 }
 
 // A terminal the way the page opens one, resolved when the PTY behind it is in raw mode.
@@ -219,6 +224,53 @@ try {
     "an attach never presses Enter on the reader's behalf",
     { submits: arrived.includes("\r"), newline: arrived.includes("\n") },
     { submits: false, newline: false },
+  );
+
+  // 5. The reported bug, as a check. A terminal whose socket has gone is not a terminal, and the one
+  //    thing the reader must not be told is that the file was attached.
+  fs.writeFileSync(rec, "");
+  const gone = openTerminal(port);
+  await gone.opened;
+  gone.ws.close();
+  await new Promise(r => setTimeout(r, 300));
+  const dead = new Map([[BOX, { ws: gone.ws, box: BOX, kind: "agent", dead: true }]]);
+  const w2 = pageWorld(base, BOX, dead);
+  await w2.attachFiles(BOX, [{ rel: "shot.png", file: new File([bytes], "shot.png", { type: "image/png" }) }], 1);
+  const stranded = w2.said[w2.said.length - 1];
+  const strandedPath = (stranded.match(/\/tmp\/skein-drop-[^\s]+/) || [""])[0];
+  if (strandedPath) dropped.add(strandedPath.split("/").slice(0, 3).join("/"));
+  t.check(
+    "a terminal that has dropped is never reported as having received the attachment",
+    { claimsAttached: /attached →/.test(stranded), saysWhereItIs: stranded.includes(strandedPath),
+      stillHeld: w2.attachWaiting.has(BOX), reachedThePty: (await settled(rec, 600)).length > 0 },
+    { claimsAttached: false, saysWhereItIs: true, stillHeld: true, reachedThePty: false },
+  );
+
+  // 6. And it is not lost: the payload waits by sid, so the socket a reconnect opens still gets it —
+  //    and "attached →" is said then, when it has become true, rather than before.
+  fs.writeFileSync(rec, "");
+  const back = openTerminal(port);
+  await back.opened;
+  dead.set(BOX, { ws: back.ws, box: BOX, kind: "agent" });
+  w2.flushAttach(BOX);
+  t.check(
+    "a reconnected terminal receives the handover the dropped one could not take",
+    { reachedThePty: await settled(rec), nowClaimsAttached: /attached →/.test(w2.said[w2.said.length - 1]) },
+    { reachedThePty: `\x1b[200~${strandedPath}\x1b[201~ `, nowClaimsAttached: true },
+  );
+  back.ws.close();
+
+  // 7. With no terminal at all there is nothing to deliver to, and the clipboard is not an answer on
+  //    a phone or a second machine. The sentence has to carry the path.
+  const w3 = pageWorld(base, BOX, new Map());
+  await w3.attachFiles(BOX, [{ rel: "shot.png", file: new File([bytes], "shot.png", { type: "image/png" }) }], 1);
+  const orphan = w3.said[w3.said.length - 1];
+  const orphanPath = (orphan.match(/\/tmp\/skein-drop-[^\s]+/) || [""])[0];
+  if (orphanPath) dropped.add(orphanPath.split("/").slice(0, 3).join("/"));
+  t.check(
+    "with no terminal open the toast still says where in the box the file is",
+    { namesThePath: !!orphanPath && orphan.includes(orphanPath), alsoCopied: w3.copied.length },
+    { namesThePath: true, alsoCopied: 1 },
   );
 
   term.ws.close();

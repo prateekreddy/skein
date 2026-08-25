@@ -51,6 +51,7 @@ function world(opts = {}) {
     const revDiffs = new Map(Object.entries(${JSON.stringify(opts.diffs || {})}));
     const revNotes = new Map();
     const renderReview = () => {};
+    const renderReviewNow = () => {};
     const closeReading = () => {};
     const loadReview = () => {};
     const revRow = () => "";
@@ -132,6 +133,7 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
     const revDiffs = new Map([["acme#7", { head_sha: "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1" }]]);
     const revNotes = new Map();
     const renderReview = () => {};
+    const renderReviewNow = () => {};
     ${grab("esc")}
     ${grab("revNotesStore")}
     ${grab("revNotesFor")}

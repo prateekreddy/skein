@@ -84,6 +84,7 @@ function world(opts = {}) {
     const revNotes = new Map();
     let renders = 0;
     const renderReview = () => { renders++; };
+    const renderReviewNow = () => { renders++; };
     let reloads = 0;
     const loadReview = () => { reloads++; };
     const revBody = () => "";

@@ -150,7 +150,11 @@ function world(opts = {}) {
     const revRenderNotes = () => {};
     const revComposeHtml = () => "";
     const revCritiqueHtml = () => "";
-    const revModsHtml = () => "";
+    // Something the pane draws OUTSIDE any row, made to throw on demand — the picker, a lane
+    // heading and this are all in the one big template, and none of them is covered by the per-row
+    // guard (SKEIN-268).
+    let headThrows = false;
+    const revModsHtml = () => { if (headThrows) throw new TypeError("boom above the rows"); return ""; };
     const revEditHtml = () => "";
     const revReadChip = () => "";
     const revModsCount = () => "";
@@ -254,6 +258,15 @@ function world(opts = {}) {
     ${grab("closeReading")}
     ${grab("openReview")}
     ${grab("renderReview")}
+    // SKEIN-268: the paint is guarded, each row is guarded, and a fault is said out loud.
+    ${grab("lastPageError")}
+    ${grab("reportPageError")}
+    ${grab("revRowBrokenHtml")}
+    ${grab("revRowSafe")}
+    ${grab("revRenderFailed")}
+    ${grab("revRenderPane")}
+    // A press's own render, which rule 2 does NOT defer (SKEIN-264).
+    ${grab("renderReviewNow")}
     ${grab("revHold")}
     ${grab("revUndo")}
     ${grab("revTick")}
@@ -289,6 +302,8 @@ function world(opts = {}) {
     return {
       press,
       render: force => renderReview(force),
+      now: () => renderReviewNow(),
+      breakHead: on => { headThrows = on; },
       open: id => openReview(id),
       setQueue: q => { revQueue = q; revHeld = "*"; },
       sums: (k, v) => revSums.set(k, v),
@@ -413,6 +428,89 @@ const rowClass = (html, k) => {
   w.selection.isCollapsed = true;
   w.flush();
   t.check("collapsing it lands the owed render", w.renders(), before + 1);
+}
+
+// ---- a throw above the rows keeps the last good queue, and says so out loud (SKEIN-268) ------
+//
+// The per-row guard covers the rows; this is everything else in the one big template — the picker,
+// the lane headings, the failure boxes. `revpane.innerHTML = …` is the LAST statement, so a throw
+// before it means the assignment never runs, and what was on screen stays on screen. That is the
+// right outcome and it used to be an accident; now it is the design, and the reason is said.
+{
+  const w = world();
+  w.setQueue(Q([PR(5), PR(7)]));
+  w.render();
+  const drawn = w.pane();
+  const before = w.renders();
+  if (!drawn.length) throw new Error("the fixture drew nothing, so this check would prove nothing");
+
+  w.breakHead(true);
+  // Caught HERE as well, so an unguarded render fails as a named check rather than as a stack trace
+  // that takes the rest of the suite with it — a suite that crashes says less about what broke than
+  // one that reports.
+  let escaped = null;
+  try { w.render(); } catch (e) { escaped = String((e && e.message) || e); }
+  t.check("a throw above the rows never escapes the render", escaped, null);
+  t.check("and does not blank the pane", w.pane(), drawn);
+  t.check("because the assignment is never reached", w.renders(), before);
+  // `w.toasts` is the world's own array, already on the returned object — a second key of the same
+  // name would have been silently shadowed by it, which is how this check first read `undefined`.
+  t.check("and the reader is told, rather than devtools",
+    (w.toasts[w.toasts.length - 1] || "").includes("boom above the rows"), true);
+  // Once, not once per render: the same fault fires on every poll, and forty toasts about one bug
+  // is how people learn to ignore toasts.
+  const said = w.toasts.length;
+  w.render();
+  w.render();
+  t.check("and told once, not once per render", w.toasts.length, said);
+
+  w.breakHead(false);
+  w.render();
+  t.check("and the next good render paints again", w.renders(), before + 1);
+}
+
+// ---- but the READER'S OWN press is never deferred (SKEIN-264) --------------------------------
+//
+// Rule 2 exists to protect a caret from a render NOBODY ASKED FOR — a summary landing, the 4s
+// re-poll. Applied to the reader's own press it does the opposite of its job: reported live as
+// "posting comments button doesn't work, they aren't responsive even if something is happening in
+// the background". The critique panel is a stack of textareas, so a reader who had selected a
+// phrase in a drafted comment and pressed post got no "posting…", no disabled chip, nothing —
+// while the request was genuinely in flight.
+{
+  const w = world();
+  w.setQueue(Q([PR(5), PR(7)]));
+  w.render();
+  w.compose();
+  w.composer.value = "hmm."; w.composer.selectionStart = 4; w.composer.focus();
+  const before = w.renders();
+  w.render();
+  t.check("a render nobody asked for still waits for the caret", w.renders(), before);
+  w.now();
+  t.check("the reader's own press paints inside the frame instead", w.renders(), before + 1);
+  t.check("and leaves nothing owed behind it", w.queued(), false);
+
+  // Through a real handler, which is where the report came from — the press is a press whether the
+  // page routes it through `renderReviewNow` directly or through a handler that calls it.
+  w.composer.focus();
+  const at = w.renders();
+  w.row("alpha#5");
+  t.check("opening a row paints it, caret in the composer or not", w.renders() > at, true);
+}
+
+// The same for a text SELECTION, which is the shape the owner actually hit: a phrase selected
+// inside a drafted comment, then a press.
+{
+  const w = world();
+  w.setQueue(Q([PR(5)]));
+  w.render();
+  w.selection.isCollapsed = false;
+  w.selection.anchorNode = w.composer;
+  const before = w.renders();
+  w.render();
+  t.check("a selection over the pane still defers a background render", w.renders(), before);
+  w.now();
+  t.check("and does not defer the press", w.renders(), before + 1);
 }
 
 // ---- expansion is exclusive: at most one row or stack open ------------------------------------

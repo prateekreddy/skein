@@ -75,8 +75,9 @@ function board({ computed = () => true, prs = 29, answer } = {}) {
       resolve({ ok: true, text: () => Promise.resolve(JSON.stringify(s)) });
     }, 0));
   };
-  const made = new Function("fetch", "encodeURIComponent", "esc", "console", "renderReview", body)(
-    fetch, encodeURIComponent, String, console, () => {});
+  const made = new Function(
+    "fetch", "encodeURIComponent", "esc", "console", "renderReview", "renderReviewNow", body,
+  )(fetch, encodeURIComponent, String, console, () => {}, () => {});
   made.hold();
   return { ...made, asked, peak: () => peak };
 }

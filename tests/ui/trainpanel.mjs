@@ -42,6 +42,9 @@ function world(flowsByRepo, opts = {}) {
     const revClearStop = () => {};
     const toast = said => counts.toasts.push(said);
     const renderReview = () => { counts.painted++; };
+    // A press paints now rather than waiting for the reader's hands (SKEIN-264); this panel counts
+    // paints, and both kinds are one.
+    const renderReviewNow = () => { counts.painted++; };
     const loadWorkflows = () => { counts.reloads++; };
     ${grab("esc")}
     ${grab("revAge")}

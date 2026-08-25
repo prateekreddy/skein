@@ -20,7 +20,7 @@
 //      fails must be reported, never allowed to unmake the repository.
 //
 //   node tests/ui/gitgate.mjs
-import { grab, harness } from "./lift.mjs";
+import { grab, harness, page } from "./lift.mjs";
 
 const source = [
   // `gitqShown` is lifted with the function that owns it. It is module state — what each pending
@@ -40,7 +40,10 @@ const scope = new Function(`
   let hours = { value: "24" };
   let panelOpen = false;
   let fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {}, scrollIntoView: () => {} } };
-  let form = { plane: { value: "" }, conn: { value: "" }, review: { value: "true" }, token: { value: "" } };
+  // review "false" mirrors what the dialog opens with — a new repo starts with its queue OFF
+  // (SKEIN-270). A fixture that opened it ON would be testing a form nobody sees. No backticks in
+  // here: this whole body is a template literal, and one would end it mid-fixture.
+  let form = { plane: { value: "" }, conn: { value: "" }, review: { value: "false" }, token: { value: "" } };
   let state = { className: "", innerHTML: "" };
   let scoped = { checked: true };
   let payload = { requests: [], grants: [], app_ready: true, app_problem: "" };
@@ -110,7 +113,7 @@ const scope = new Function(`
       gitqAnnounced.clear(); gitqPrimed = false; gitqShown.clear();
       keep = { checked: false }; hours = { value: "24" }; alertsOn = true;
       fields = { repo: { value: "" }, token: { value: "", placeholder: "", focus: () => {}, scrollIntoView: () => {} } };
-      form = { plane: { value: "" }, conn: { value: "" }, review: { value: "true" }, token: { value: "" } };
+      form = { plane: { value: "" }, conn: { value: "" }, review: { value: "false" }, token: { value: "" } };
       state = { className: "", innerHTML: "" };
       scoped = { checked: true };
       gitqCreds = [];
@@ -394,11 +397,31 @@ check("and a deliberate off for the review queue", settings.body.review_queue, f
 const cred = T.sent().find(s => s.url.includes("git-credentials"));
 check("the token is stored against the repo it names", cred.body.repos, ["acme/thing"]);
 
-// On is the default, so sending it would write a field the user never touched.
+// Turning it ON is sent too. It used to send only a deliberate off and ride on the server's
+// default — and that default has since MOVED (`repos::add` registers a new repo with the queue off,
+// while serde's default for an absent field stays true so an upgrade cannot switch off a queue
+// somebody has been using). A body that omits the field cannot say which of those two it meant, so
+// the form states its value either way (SKEIN-270).
 T.reset();
 T.form().review.value = "true";
 await T.arApplySettings({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
-check("an untouched form sends nothing at all", T.sent().length, 0);
+const on = T.sent().find(x => x.url.includes("/settings"));
+check("turning the queue on is sent as a real value, not left to a default", !!on, true);
+check("and the value is the one that was chosen", on && on.body.review_queue, true);
+
+// The dialog itself. The default is a choice about SPENDING — every watched repo costs a GitHub
+// request per refresh, and eight of them exhausted the owner's rate limit and emptied the one queue
+// they were actually reading — so the control opens off and says what turning it on costs.
+const control = page.slice(page.indexOf('<select id="ar-review"'));
+const chooser = control.slice(0, control.indexOf("</select>"));
+check("the new-repo control offers off first", chooser.indexOf('value="false"') < chooser.indexOf('value="true"'), true);
+check("and opens on it", /<option value="false" selected>/.test(chooser), true);
+check("re-opening the dialog does not quietly turn it back on",
+  page.includes('document.getElementById("ar-review").value = "false";'), true);
+// In the option's own words, not a sentence under the control: the dialog is already as tall as
+// the viewport, and a line added below it pushed the Add button off screen — onboarding.mjs caught
+// exactly that, as a click that could never land.
+check("and the ON choice says what it spends", /a GitHub request per refresh, per repo/.test(chooser), true);
 
 // The clone is the expensive, irreversible part and it already succeeded. A tracker field that
 // failed to save is a ten-second fix on the card; throwing the repo away over one is not.
@@ -417,7 +440,12 @@ T.form().token.value = "github_pat_x";
 problems = await T.arApplySettings({ id: "scratch", source: "/Users/me/code/scratch", slug: "" });
 check("a token for a repo with no remote is refused, not silently dropped", problems.length, 1);
 check("saying why", problems[0].includes("no GitHub remote"), true);
-check("and nothing is sent", T.sent().length, 0);
+// It used to be "nothing is sent at all". The settings call is unconditional now — the review
+// queue states its value either way (SKEIN-270) — so what this check is actually about, and always
+// was, is that the CREDENTIAL does not go out.
+check("and no credential is stored for a repo that cannot have one",
+  T.sent().some(x => x.url.includes("git-credentials")), false);
+check("nothing else goes out either", T.sent().map(x => x.url.includes("/settings")), [true]);
 
 // The same form against a repo adopted in place: the host answered with a slug, so the token belongs
 // to that repository. Refusing it here was the dialog's half of the same bug.

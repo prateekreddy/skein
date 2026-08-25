@@ -1343,6 +1343,150 @@ await check("a queue that could not be built keeps its rows, dimmed, and offers 
   await settle(600);
 });
 
+console.log("\nposting a drafted review");
+// SKEIN-264, reported live: "posting comments button doesn't work, they aren't responsive even if
+// something is happening in the background." Every candidate for that is invisible to a test that
+// only asserts the request went out, so these press the real control in a real page.
+//
+// Reaching the panel: the fixture's model answers the merged prompt with a `REVIEW:` section, so
+// skein holds a draft for the rows it has read; where it does not, the panel's own button asks for
+// one and the same stub answers.
+let critKey = null;
+await check("a drafted review opens in the row it belongs to", async () => {
+  await page.evaluate(() => { openReview(""); });
+  await page.waitForFunction(() => revQueue && (revQueue.prs || []).some(p => p.lane === "needs-you"),
+    null, { timeout: 20000 });
+  critKey = await page.evaluate(() => {
+    const pr = (revQueue.prs || []).find(p => p.lane === "needs-you");
+    const key = pr.repo_id + "#" + pr.number;
+    // Opened, not TOGGLED: the expanding checks above may have left this very row open, and a
+    // toggle would close it — which is a whole check failing on the order of the file.
+    if (!revOpen.has(key)) toggleRevRow(key);
+    revCritiqueOpen(pr.repo_id, pr.number);
+    return key;
+  });
+  await page.waitForSelector("#revpane .revcrit", { timeout: 20000 });
+  const ask = await page.$("#revpane .revcrit .revchip:has-text('review the code')");
+  if (ask) await ask.click();
+  await page.waitForSelector("#revpane .revcrit textarea", { timeout: 60000 });
+  await mustSee("#revpane .revcrit .revchip:has-text('post')", "the post control");
+});
+// The gate SKEIN-244 removed, checked where a person meets it: the server re-anchors by line text
+// now, so a moved head must offer the post and say what will happen to it.
+await check("a draft of an earlier commit is still postable, and says what will happen", async () => {
+  await page.evaluate(k => {
+    revCrits.get(k).critique.head_sha = "a-commit-that-has-been-pushed-past";
+    renderReview();
+  }, critKey);
+  await settle(200);
+  const said = (await page.textContent("#revpane .revcrit .revstale")).replace(/\s+/g, " ");
+  if (!/still match will post at their new place/.test(said))
+    throw new Error(`the pane does not say what a moved head does to the comments: ${said}`);
+  const off = await page.$eval("#revpane .revcrit .revchip:has-text('post')", e => e.disabled);
+  if (off) throw new Error("the post is still disabled at a moved head — the treadmill SKEIN-215 removed");
+  await page.evaluate(k => { revCrits.get(k).critique.head_sha =
+    (revQueue.prs.find(p => k === p.repo_id + "#" + p.number) || {}).head_sha; renderReview(); }, critKey);
+  await settle(200);
+});
+// The modal is gone. A browser where somebody once ticked "prevent this page from creating
+// additional dialogs" answers every later confirm with a synchronous false, which is what made this
+// press evaporate — so the check is that stubbing exactly that can no longer stop the post.
+await check("a browser that refuses every dialog can no longer swallow the press", async () => {
+  await page.evaluate(() => { window.confirm = () => { window.__asked = true; return false; }; });
+  await page.click("#revpane .revcritacts .revchip:has-text('post')");
+  await settle(200);
+  if (await page.evaluate(() => window.__asked))
+    throw new Error("the press still asks a native dialog, which a browser setting can answer for it");
+  const said = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
+  if (!/posting 1 comment as one review/.test(said) && !/posting \d+ comments as one review/.test(said))
+    throw new Error(`the press left no receipt where the button was: ${said.slice(0, 200)}`);
+  if (!/undo/.test(said)) throw new Error(`a receipt with no way back inside its window: ${said}`);
+  // Taken back, so the checks below start from a press of their own.
+  await page.click("#revpane .revcritacts .revchip:has-text('undo')");
+  await settle(200);
+  await mustSee("#revpane .revcritacts .revchip:has-text('post')", "the post control, back");
+});
+// The acknowledgement itself. A live text selection over the pane holds renderReview by §6 focus
+// rule 2 — measured in chromium: after a real click on a button `document.activeElement` is the
+// BUTTON and a caret is gone, but a SELECTION survives the press and defers the render. That is the
+// reader who highlighted a phrase in a drafted comment and then pressed post, and saw nothing.
+await check("the receipt appears even with text selected in the panel, and the review posts", async () => {
+  const held = await page.evaluate(() => {
+    const label = document.querySelector("#revpane .revcrit .revcl");
+    const r = document.createRange();
+    r.selectNodeContents(label);
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    // The page's own rule, asked here so this cannot pass on a selection that never took.
+    return revRenderHeld();
+  });
+  if (!held) throw new Error("the selection did not hold the render — this check would prove nothing");
+  await page.click("#revpane .revcritacts .revchip:has-text('post')");
+  const at = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
+  if (!/posting/.test(at))
+    throw new Error(`the press left nothing on screen while it was held: ${at.slice(0, 200)}`);
+  // And it lands, with no reload — the window lapses, the request goes out, the strip says so.
+  await page.waitForFunction(
+    () => /✓ posted|GitHub refused/.test(document.querySelector("#revpane .revcritacts")?.textContent || ""),
+    null, { timeout: 20000 });
+  const done = (await page.textContent("#revpane .revcritacts")).replace(/\s+/g, " ");
+  if (/GitHub refused/.test(done)) throw new Error(`the post was refused: ${done}`);
+  if (!/✓ posted/.test(done)) throw new Error(`the row never reached a posted state: ${done}`);
+});
+
+console.log("\none row failing");
+// SKEIN-268, reported by the owner: "any small error anywhere in the review page just blanks the
+// entire page and gives the error." The pane is one string assigned in one shot, so a throw in any
+// of the helpers that string calls meant the assignment never ran. Injected here into the REAL
+// `revRow`, in the real page, because the claim is about what a person is left looking at.
+await check("a row that throws leaves the rest of the queue drawn and clickable", async () => {
+  await page.evaluate(() => { openReview(""); closeReading?.(); });
+  await page.waitForFunction(() => revQueue && (revQueue.prs || []).length >= 2, null, { timeout: 20000 });
+  const target = await page.evaluate(() => {
+    const pr = (revQueue.prs || [])[0];
+    const key = pr.repo_id + "#" + pr.number;
+    const real = window.revRow;
+    window.__realRevRow = real;
+    window.revRow = p => {
+      if (p.repo_id + "#" + p.number === key) throw new TypeError("cannot read properties of undefined (reading 'map')");
+      return real(p);
+    };
+    renderReview(true);
+    return key;
+  });
+  const rows = await page.$$eval("#revpane .revrow", els => els.length);
+  if (rows < 2) throw new Error(`the pane kept ${rows} rows — one throw took the queue with it`);
+  const broken = await mustSee("#revpane .revrow.broken", "the row that could not be drawn");
+  const said = (await broken.textContent()).replace(/\s+/g, " ");
+  if (!said.includes(target)) throw new Error(`the broken row does not say which PR it is: ${said}`);
+  if (!/cannot read properties of undefined/.test(said))
+    throw new Error(`the reason is not in the page: ${said}`);
+  // Still a queue you can work: a healthy row expands on click, and the keyboard still walks the
+  // full list — a row dropped from `revNav` would shorten j/k for as long as the fault lasted.
+  const healthy = await page.evaluate(k =>
+    (revNav || []).find(x => x !== k && !revOpen.has(x)), target);
+  if (!healthy) throw new Error("no healthy, closed row survived to click");
+  await page.click(`#revpane .revrow[data-rk="${healthy}"] .revline`);
+  await settle(400);
+  const open = await page.evaluate(() => [...revOpen]);
+  if (!open.includes(healthy)) throw new Error(`clicking a healthy row did nothing: open=${open}`);
+  const inNav = await page.evaluate(k => (revNav || []).includes(k), target);
+  if (!inNav) throw new Error("the broken row left the keyboard's list, silently shortening j/k");
+  // And the fault reached the person, rather than devtools.
+  const toast = (await page.textContent("#toast").catch(() => "")) || "";
+  if (!/something went wrong in the page/.test(toast))
+    throw new Error(`nothing said a row had failed: ${JSON.stringify(toast)}`);
+});
+// The fault clears the way a real one does — the data stops being malformed — and the row comes
+// back rather than staying broken until a reload.
+await check("and the next render puts the row back", async () => {
+  await page.evaluate(() => { window.revRow = window.__realRevRow; renderReview(true); });
+  await settle(300);
+  if (await page.$("#revpane .revrow.broken")) throw new Error("the row stayed broken after the fault cleared");
+  const rows = await page.$$eval("#revpane .revrow", els => els.length);
+  if (rows < 2) throw new Error(`the queue did not come back: ${rows} rows`);
+});
+
 console.log("\nquiet");
 await check("no page errors and no 5xx along the way", () => {
   if (noise.length) throw new Error(noise.join(" | "));
