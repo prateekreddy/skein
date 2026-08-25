@@ -57,6 +57,17 @@ deleting a field changes a payload and a cache shape, and that is a decision wit
 
 Deleting those two is SKEIN-298, not this document's job.
 
+**Ahead of its reader.** The field is for the page, the page does not draw it *yet*, and the work
+that will is a live item. This is the one category with an expiry: the line names the item that
+deletes it, and the document's closing rule — "a declaration naming a field the page now reads is
+an exemption that outlived its reason: delete the line" — is what ends it. It is deliberately
+narrow. "The page will read it one day" with no item is the same claim as "used server-side" with
+no site.
+
+| field | drawn by |
+|---|---|
+| `Pr.review_threads`, `Pr.review_threads_total`, `Pr.comments_total`, `Pr.review_requests`, `ReviewThread.outdated`, `ReviewThread.started_at`, `PrComment.created_at` | SKEIN-300's PR panel — fetched by SKEIN-301, exemption removed by SKEIN-318 |
+
 ## Declarations, machine-readable
 
 The test parses this section and nothing else, so a field is declared exactly when it has a line
@@ -70,6 +81,13 @@ here. Format: a list item whose first backticked span is `Type.field`.
 - `Signal.symbol` — server-consumed by `src/shape.rs`
 - `Pr.settled` — DEAD, delete pending (SKEIN-234, SKEIN-298)
 - `Pr.box_name` — DEAD, delete pending (SKEIN-298)
+- `Pr.review_threads` — AHEAD OF ITS READER: fetched by SKEIN-301, drawn by SKEIN-300's panel (delete this line with SKEIN-318)
+- `Pr.review_threads_total` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
+- `Pr.comments_total` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
+- `Pr.review_requests` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
+- `ReviewThread.outdated` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
+- `ReviewThread.started_at` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
+- `PrComment.created_at` — AHEAD OF ITS READER (SKEIN-301 / SKEIN-300, delete with SKEIN-318)
 
 ## What to do when this test fails
 

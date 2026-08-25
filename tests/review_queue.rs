@@ -222,6 +222,10 @@ fn setup(login: &str, teams: bool) -> (Env, PathBuf) {
     // than `gh`'s, so the test has to supply it the way a fleet would.
     std::env::set_var("GH_TOKEN", "test-token");
     skein::prq::forget_host_token();
+    // The batch-width memo is per process and keyed by slug, like the rename and trunk memos
+    // beside it — and every test here refreshes `acme/thing`. Without this, the test that proves
+    // a too-heavy batch is split leaves every later test asking one search at a time.
+    skein::prq::forget_batch_widths();
     (
         Env {
             _lock: lock,
@@ -414,7 +418,10 @@ fn archiving_moves_a_pr_out_of_needs_you_and_back() {
 /// (`archiving_moves_a_pr_out_of_needs_you_and_back` above): that one holds until a human says so.
 #[test]
 fn a_snoozed_pr_leaves_needs_you_and_returns_when_its_head_moves() {
-    let (_env, dir) = setup("me", false);
+    // `true`, and it is load-bearing: a token that cannot list teams cannot ask
+    // `team-review-requested:`, so the refresh may not read a pull request's absence as
+    // proof it is closed (SKEIN-262). The prune this test is about needs every rule asked.
+    let (_env, dir) = setup("me", true);
     // pr_json(1, …) reports head sha1 — the sha the reviewer's row was showing.
     put_search(
         &dir,
@@ -466,7 +473,10 @@ fn a_snoozed_pr_leaves_needs_you_and_returns_when_its_head_moves() {
 /// hide a still-open PR, so it only ever removes numbers absent from the fetched open set.
 #[test]
 fn the_archive_is_pruned_to_prs_that_are_still_open() {
-    let (_env, dir) = setup("me", false);
+    // `true`, and it is load-bearing: a token that cannot list teams cannot ask
+    // `team-review-requested:`, so the refresh may not read a pull request's absence as
+    // proof it is closed (SKEIN-262). The prune this test is about needs every rule asked.
+    let (_env, dir) = setup("me", true);
     put_search(
         &dir,
         "review-requested:me",
@@ -564,7 +574,10 @@ fn a_refresh_that_saw_nothing_keeps_every_set_aside_and_snoozed_pr() {
 /// present throughout — `answered` is about the searches skein ran, not about a clean queue.
 #[test]
 fn a_queue_that_really_is_empty_still_prunes() {
-    let (_env, dir) = setup("me", false);
+    // `true`, and it is load-bearing: a token that cannot list teams cannot ask
+    // `team-review-requested:`, so the refresh may not read a pull request's absence as
+    // proof it is closed (SKEIN-262). The prune this test is about needs every rule asked.
+    let (_env, dir) = setup("me", true);
     put_search(&dir, "review-requested:me", "[]");
     skein::prq::set_archived("acme", 500, true).unwrap();
     skein::prq::set_snoozed("acme", 501, Some("deadbeef")).unwrap();

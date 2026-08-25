@@ -16,6 +16,11 @@
 // PTY actually received. The PTY is a `cat` in raw mode, so what lands in that file is exactly what
 // a provider's TUI would have been handed.
 //
+// It also drives the second defect the same reproduction found (SKEIN-269): an upload that has not
+// progressed used to look exactly like one that is working — one "uploading…" toast and then
+// nothing, for as long as it took — and neither end of the wire was measured, so which end held it
+// could only be guessed at. Both are checked here against a box that really does stop reading.
+//
 //   node tests/ui/attach.mjs
 //
 // Needs node and nothing else — no chromium — so it runs in a box, where the attach path is used.
@@ -30,6 +35,9 @@ import { grab, harness, serverBinary } from "./lift.mjs";
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const BOX = "attach-box";
 const t = harness();
+// What the server is told to treat as "nothing has moved" — `SKEIN_UPLOAD_STALL_MS`, whose default
+// is a minute. See `upload_stall` (src/bin/skein-server.rs).
+const STALL_MS = 5000;
 
 const freePort = () => new Promise(res => {
   const s = createServer();
@@ -57,10 +65,17 @@ function fixture() {
   // `exec` runs the LAST argument, whatever the prefix: skein addresses a box through its placement,
   // so the real argv is `sbx exec -i <sandbox> nsenter … -- bash -lc <script>` and the script already
   // carries its own `cd`/`export HOME` from `Place::wrap`.
+  // `exec sleep` for the stall case, never a bash that waits on one: the point of the scenario is a
+  // box that has taken the bytes and will not confirm, and skein kills the process it spawned — a
+  // wrapper shell would die and leave the sleeper behind, which is a different (and worse) thing to
+  // be testing. The path carries the marker because the script is the last argument (SKEIN-269).
   fs.writeFileSync(sbx, `#!/usr/bin/env bash
 case "$1" in
   ls)   echo '[{"name":"${BOX}","status":"running","agent":"claude","workspace":"${ws}"}]'; exit 0 ;;
-  exec) exec bash -c "\${@: -1}" ;;
+  exec) case "\${@: -1}" in
+          *skein-stall*) exec sleep 60 ;;
+          *) exec bash -c "\${@: -1}" ;;
+        esac ;;
 esac
 exit 0
 `);
@@ -95,6 +110,10 @@ async function startServer(fx, port, rec) {
       // echoes it back; then everything typed at the terminal is appended to a file we can read.
       // READY is how the test knows `stty` has already run, rather than racing it.
       SKEIN_ATTACH_CMD: `stty raw -echo; printf READY; cat >> ${rec}`,
+      // The deadline under test, shortened so driving it costs five seconds instead of a minute.
+      // Longer than `ATTACH_SLOW_MS`, deliberately: the page's "still uploading…" has to fire while
+      // the request is genuinely outstanding, which is the only condition it exists for.
+      SKEIN_UPLOAD_STALL_MS: String(STALL_MS),
       PATH: `${fx.bin}:${process.env.PATH}`,
     },
   });
@@ -120,8 +139,11 @@ function pageWorld(base, sid, sessions) {
     const attachWaiting = new Map();
     ${grab("concatBytes")}
     ${grab("flushAttach")}
+    ${grab("ATTACH_SLOW_MS")}
+    ${grab("uploadOne")}
+    ${grab("attachDelayWord")}
     ${grab("attachFiles")}
-    return { attachFiles, flushAttach, attachWaiting };
+    return { attachFiles, flushAttach, attachWaiting, attachDelayWord, ATTACH_SLOW_MS };
   `;
   const made = new Function("toast", "ensureTerminal", "sessions", "copyText", "fetch", "TextEncoder", body)(
     m => said.push(m),
@@ -133,7 +155,8 @@ function pageWorld(base, sid, sessions) {
     TextEncoder,
   );
   return { attachFiles: made.attachFiles, flushAttach: made.flushAttach,
-           attachWaiting: made.attachWaiting, said, copied };
+           attachWaiting: made.attachWaiting, attachDelayWord: made.attachDelayWord,
+           slowMs: made.ATTACH_SLOW_MS, said, copied };
 }
 
 // A terminal the way the page opens one, resolved when the PTY behind it is in raw mode.
@@ -271,6 +294,70 @@ try {
     "with no terminal open the toast still says where in the box the file is",
     { namesThePath: !!orphanPath && orphan.includes(orphanPath), alsoCopied: w3.copied.length },
     { namesThePath: true, alsoCopied: 1 },
+  );
+
+  // ---- SKEIN-269: a slow upload says so, and the two clocks say which end was slow -------------
+
+  // 8. The server answers with its own clock beside the path. Without it the browser can measure
+  //    only click-to-answer, which counts time the request spent queued in the browser BEFORE it was
+  //    sent — so a browser-side delay and a box-side one produce the identical number, and the
+  //    original report could do nothing with five drop directories but list two suspects.
+  const w4 = pageWorld(base, BOX, new Map());
+  const timed = await (async () => {
+    const r = await fetch(`${base}/api/boxes/${BOX}/upload`, {
+      method: "POST", headers: { "Content-Type": "image/png", "X-Skein-Drop": "timed-1",
+                                 "X-Skein-Name": "clocked.png" }, body: bytes });
+    return r.json();
+  })();
+  if (timed.path) dropped.add(timed.path.split("/").slice(0, 3).join("/"));
+  t.check(
+    "an upload answers with the server's own clock, phase by phase",
+    { ok: timed.ok, phases: timed.ms ? Object.keys(timed.ms).sort().join(",") : "none",
+      totalIsANumber: typeof (timed.ms || {}).total === "number",
+      totalCoversItsPhases: !!timed.ms && timed.ms.total >= timed.ms.chose + timed.ms.body + timed.ms.verdict },
+    { ok: true, phases: "body,chose,total,verdict", totalIsANumber: true, totalCoversItsPhases: true },
+  );
+
+  // 9. And the comparison the pair exists for, checked on the owner's own numbers: 07:21:08.870Z
+  //    clicked, 07:29:39.957 written — 511s of waiting. Which end held it is a different answer
+  //    depending only on what the server says it spent, and that is the whole discriminator.
+  t.check(
+    "the two clocks name which end of the wire held the upload",
+    { browserQueue: w4.attachDelayWord(511087, 1600),
+      theBox: w4.attachDelayWord(511087, 509000),
+      olderSkeinWithNoClock: w4.attachDelayWord(511087, -1),
+      quickEnoughToSayNothing: w4.attachDelayWord(120, 90) },
+    { browserQueue: " — 511.1s, of which the box took 1.6s: the rest went before the request left this browser",
+      theBox: " — 511.1s, and 509.0s of it was the box",
+      olderSkeinWithNoClock: " — 511.1s, and this skein does not say where it went",
+      quickEnoughToSayNothing: "" },
+  );
+
+  // 10. The host half of the done-when: a box that takes the bytes and never confirms is refused
+  //     with a word, inside the stall budget. This path — `sbx exec -i`, the fallback when there is
+  //     no in-box agent — had NO deadline at all, so the request sat for as long as the process
+  //     lived and the reader saw "uploading…" for all of it.
+  const w5 = pageWorld(base, BOX, new Map());
+  const began = Date.now();
+  await w5.attachFiles(BOX, [{ rel: "skein-stall.png", file: new File([bytes], "skein-stall.png", { type: "image/png" }) }], 1);
+  const stalledFor = Date.now() - began;
+  const refusal = w5.said.find(m => m.startsWith("attach failed:")) || "";
+  t.check(
+    "a box that stops confirming is refused within the stall budget, not waited out",
+    { gaveUpWithin: stalledFor < STALL_MS * 3, saysNothingMoved: /did not finish within/.test(refusal),
+      namesTheBudget: refusal.includes(`${STALL_MS / 1000}s`), stillClaimedSuccess: /attached →/.test(w5.said.join(" ")) },
+    { gaveUpWithin: true, saysNothingMoved: true, namesTheBudget: true, stillClaimedSuccess: false },
+  );
+
+  // 11. And while it was outstanding the page said so, repeatedly, instead of leaving one
+  //     "uploading…" on screen. This is the sentence whose absence turned one attach into five: a
+  //     reader with nothing moving in front of them presses the thing again.
+  t.check(
+    "an upload that has not answered says it is still going, and that clicking again will not help",
+    { saidStillGoing: w5.said.some(m => m.startsWith("still uploading skein-stall.png")),
+      namesTheBox: w5.said.some(m => m.includes(`no answer from ${BOX} yet`)),
+      talksTheReaderDown: w5.said.some(m => m.includes("attaching it again will not make this one faster")) },
+    { saidStillGoing: true, namesTheBox: true, talksTheReaderDown: true },
   );
 
   term.ws.close();

@@ -249,16 +249,21 @@ fn box_write_script(dir: &str, path: &str) -> String {
 ///
 /// Nothing has been sent when this returns `None`, which is what makes that fallback safe. Once it
 /// returns a handle the write has begun — see [`crate::place::AgentWrite`].
+///
+/// `timeout` bounds the `cat` inside the box; `stall` bounds the host's wait on a socket that is
+/// carrying nothing. Two numbers because a legitimate hour-long upload and a box that has stopped
+/// reading are indistinguishable under one (SKEIN-269).
 pub fn begin_box_write(
     name: &str,
     dir: &str,
     path: &str,
     timeout: Duration,
+    stall: Duration,
 ) -> Option<crate::place::AgentWrite> {
     if !valid_name(name) {
         return None;
     }
-    place_of(name)?.begin_write(&box_write_script(dir, path), timeout)
+    place_of(name)?.begin_write(&box_write_script(dir, path), timeout, stall)
 }
 
 /// The argv that runs a one-off shell command in box `name`, wherever it lives. `None` for a name

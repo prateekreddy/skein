@@ -40,6 +40,12 @@ function world() {
     ${grab("esc")}
     ${grab("revAge")}
     ${grab("revSize")}
+    // The age cell renders the LANE's own sort key (SKEIN-251) — a column that computed its own
+    // number audited nothing — so the rail needs the order, and the word that says what it means.
+    ${grab("revMoved")}
+    ${grab("revWaitedSince")}
+    ${grab("revSortAt")}
+    ${grab("revSortWord")}
     ${grab("revRail")}
     ${grab("tickAges")}
     return { rail: pr => revRail(pr), tick: () => tickAges(), size: pr => revSize(pr) };
@@ -60,8 +66,11 @@ function world() {
 }
 
 const DAY = 86400000;
+// `lane` because the age cell renders the lane's own sort key now (SKEIN-251): their move is
+// recency, and that is what every row here is about.
 const pr = over => ({
-  number: 7, author: "prateek", updated_at: new Date(Date.now() - 2 * DAY).toISOString(),
+  number: 7, author: "prateek", lane: "waiting",
+  updated_at: new Date(Date.now() - 2 * DAY).toISOString(),
   changed_files: 7, additions: 340, deletions: 38, ...over,
 });
 
@@ -84,6 +93,35 @@ const pr = over => ({
   w.els.push({ className: "age", dataset: {}, textContent: "3s ago" });
   w.tick();
   t.check("a fleet age with no data still reads as unknown", w.els.at(-1).textContent, "?");
+}
+
+// ---- the age cell is the key its lane is sorted by ----
+//
+// SKEIN-251. The cell rendered `updated_at` while the your-move lane sorted on `revWaitedSince`, so
+// a pull request you approved, force-pushed eight days ago and commented on thirty seconds ago sat
+// near the top of oldest-first reading `1m`, above rows reading `4d`. The one column the design put
+// on the row so the order could be AUDITED was the one that made it unauditable, and the amber
+// three-day mark was being applied to the wrong number too.
+{
+  const w = world();
+  const moved = { lane: "needs-you", my_review: "approved", review_is_current: false,
+                  committed_at: new Date(Date.now() - 8 * DAY).toISOString(),
+                  updated_at: new Date(Date.now() - 30 * 1000).toISOString() };
+  w.mount(w.rail(pr(moved)));
+  t.check("your move counts from the commit that came after your review", w.els[0].textContent, "8d");
+  t.check("and it is amber, which against the latest touch it could never have been",
+    w.els[0].className.split(/\s+/).includes("old"), true);
+  t.check("the cell says which of the two clocks it is on",
+    w.els[0].attrs.includes("waiting on you since the commit that came after your review"), true);
+
+  // Their move measures something else, and the cell must render THAT — its lane sorts on
+  // updated_at, so rendering waited-since there would be the same fault mirrored.
+  const theirs = world();
+  theirs.mount(theirs.rail(pr({ ...moved, lane: "waiting" })));
+  // `1m` is the floor: the cell is 34px and the question is "can I do this now", so revAge rounds
+  // anything under a minute up to one rather than growing a seconds unit.
+  t.check("their move is recency, which is what their move is sorted by", theirs.els[0].textContent, "1m");
+  t.check("and says so", theirs.els[0].attrs.includes("last moved this long ago"), true);
 }
 
 // ---- the size cell speaks the reader's language ----

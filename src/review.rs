@@ -210,6 +210,15 @@ pub fn previous(repo_id: &str, number: u64, not_sha: &str) -> Option<Summary> {
     let text = fs::read_to_string(best?.1).ok()?;
     serde_json::from_str::<Summary>(&text)
         .ok()
+        .map(|mut s| {
+            // `cached`'s rule, and the third and last place that reads a `Summary` off disk
+            // (SKEIN-292). What was written was computed WHEN it was written; a free answer
+            // counted as a paid one is what let a page reload spend the whole day's allowance on
+            // cache hits, and the invariant has to hold at every reader or the next caller
+            // inherits the bug rather than the rule.
+            s.computed = false;
+            s
+        })
         .filter(|s| s.depth != Depth::Unread)
 }
 
@@ -251,6 +260,21 @@ pub struct Known {
     /// superseded commit being announced as a review of this one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drafted: Option<Drafted>,
+    /// Why there is NO drafted review, when a reading of this head exists and a review does not
+    /// (SKEIN-275).
+    ///
+    /// The reason already existed and could not be reached: [`note_critique_tried`] writes it to
+    /// `critique-tried.json` keyed `number-sha`, and [`worth_critiquing`] was the only reader —
+    /// the loop it gates. So a row could sit draftless for the life of a head with the reason on
+    /// disk and nothing able to say it, which is indistinguishable from a draft nobody ever asked
+    /// for.
+    ///
+    /// Empty (and omitted from the JSON) in the two cases where it would be a claim rather than a
+    /// record: a review IS drafted at this head, and nothing was ever attempted at it. "Never
+    /// attempted" and "attempted and refused" are different answers and the page says which
+    /// (`revNoDraftWhy`, `src/web/index.html`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub critique_because: String,
 }
 
 /// What a queue row says about a drafted review it is not carrying: the commit, and the count.
@@ -273,7 +297,27 @@ impl Known {
     /// Every derived field — `has_critique`, `drafted` — is computed here and nowhere else, so
     /// there is exactly one rule for what they mean. Three call sites used to spell
     /// `has_critique: critique.is_some()` for themselves.
-    fn new(summary: Summary, stale: bool, critique: Option<Critique>) -> Known {
+    /// `tried` is the repo's critique-tried notes, read ONCE by the caller: [`known`] walks every
+    /// pull request in the queue, and a file read per row would put the whole queue's worth of
+    /// them on the payload path. `head_sha` is the ROW's head, not the summary's — for a stale
+    /// reading the two differ, and the question being answered is about the commit in front of the
+    /// reader.
+    fn new(
+        summary: Summary,
+        stale: bool,
+        critique: Option<Critique>,
+        tried: &std::collections::BTreeMap<String, String>,
+        head_sha: &str,
+    ) -> Known {
+        // Only where there is no review to show: the note is what happened on the way to a draft,
+        // and a draft that landed is the answer to the same question.
+        let critique_because = match &critique {
+            Some(_) => String::new(),
+            None => tried
+                .get(&format!("{}-{head_sha}", summary.number))
+                .cloned()
+                .unwrap_or_default(),
+        };
         Known {
             summary,
             stale,
@@ -283,6 +327,7 @@ impl Known {
                 comments: c.comments.len(),
             }),
             critique,
+            critique_because,
         }
     }
 
@@ -337,7 +382,7 @@ impl Known {
 /// there is no older vintage to disclose. `known` keeps its own arm for the cached-and-moved case.
 pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
     let critique = critiqued(repo_id, summary.number).filter(|c| c.head_sha == head_sha);
-    Known::new(summary, false, critique)
+    Known::new(summary, false, critique, &critique_tried(repo_id), head_sha)
 }
 
 /// Every reading skein already holds for these pull requests, off disk, costing nothing.
@@ -358,16 +403,24 @@ pub fn known_at(repo_id: &str, summary: Summary, head_sha: &str) -> Known {
 /// vanished from the pane the moment somebody pushed, and came back only if asked for again.
 pub fn known(repo_id: &str, prs: &[(u64, String)]) -> std::collections::BTreeMap<u64, Known> {
     let mut out = std::collections::BTreeMap::new();
+    // Once for the whole queue, not once per row.
+    let tried = critique_tried(repo_id);
     for (number, head_sha) in prs {
         // The drafted review at THIS head, whichever vintage the summary turns out to be — off
         // disk, costing nothing, same rule as the summaries themselves.
         let critique = critiqued(repo_id, *number).filter(|c| &c.head_sha == head_sha);
         if let Some(summary) = cached(repo_id, *number, head_sha) {
-            out.insert(*number, Known::new(summary, false, critique));
+            out.insert(
+                *number,
+                Known::new(summary, false, critique, &tried, head_sha),
+            );
             continue;
         }
         if let Some(summary) = newest_for(repo_id, *number) {
-            out.insert(*number, Known::new(summary, true, critique));
+            out.insert(
+                *number,
+                Known::new(summary, true, critique, &tried, head_sha),
+            );
         }
     }
     out
@@ -393,6 +446,9 @@ pub fn held(repo_id: &str, number: u64, head_sha: &str) -> Known {
     known(repo_id, &[(number, head_sha.to_string())])
         .remove(&number)
         .unwrap_or_else(|| {
+            // Nothing on disk at all, so there is no note to read either: the tried-notes are
+            // written on the way to a DRAFT, and this arm is the case where no reading exists to
+            // have drafted beside.
             Known::new(
                 Summary::unread(
                     number,
@@ -401,6 +457,8 @@ pub fn held(repo_id: &str, number: u64, head_sha: &str) -> Known {
                 ),
                 false,
                 None,
+                &std::collections::BTreeMap::new(),
+                head_sha,
             )
         })
 }
@@ -1177,6 +1235,10 @@ pub fn read_waiting() -> Vec<String> {
         return Vec::new();
     }
     let mut read = Vec::new();
+    // Every switched-on repo's queue, read BEFORE anything is spent. The ordering below is
+    // fleet-wide and cannot be applied to a repo whose queue has not been fetched yet, so the
+    // gathering and the spending are two passes rather than one (SKEIN-276).
+    let mut queues = Vec::new();
     for repo in crate::repos::load_repos() {
         if !repo.read_prs {
             continue;
@@ -1187,135 +1249,142 @@ pub fn read_waiting() -> Vec<String> {
         if !queue.ai {
             continue;
         }
+        queues.push((repo, queue));
+    }
+    // The budget is spent from the TOP of the pane, lane by lane, in the pane's own order —
+    // not in the queue's transport order (`prq::newest_first`, number descending). Two lanes
+    // are read now (see [`worth_a_visit`]) and each keeps ITS own sort, mirrored field for
+    // field from `src/web/index.html`:
+    //
+    //   * **your move** first, oldest-waiting first ([`waited_since`], from `revWaitedSince`
+    //     and the needs-you lane sort). Somebody else is blocked on these, so they take the
+    //     day's money before anything of yours does — widening the scope must not push a
+    //     colleague's review request behind a stack you opened this morning.
+    //   * **their move** second, most-recently-updated first — `index.html`'s own rule for
+    //     that lane, and its reason: "for your own PRs, what moved most recently is the right
+    //     question".
+    //
+    // What the reader spends the day's money on must be the rows the person will read first,
+    // or the ceiling starves exactly the pull requests at the top of the pane.
+    //
+    // **Across every repo at once, not repo by repo** (SKEIN-276). The sort used to sit inside
+    // the `for repo in load_repos()` loop, so the order it produced was only the order *within*
+    // one repo and the outer order was the order of `repos.json`. Every pass restarts at the
+    // first repo in that file, so a repo with more unread rows than the day's ceiling meant the
+    // repos below it were never reached at all that day — including a colleague's review
+    // request, which is the exact row this ordering exists to protect. One list, one sort.
+    let mut waiting: Vec<(&Repo, &crate::prq::Queue, &Pr)> = queues
+        .iter()
+        .flat_map(|(repo, queue)| queue.prs.iter().map(move |pr| (repo, queue, pr)))
+        .collect();
+    waiting.sort_by(|(_, _, a), (_, _, b)| {
+        let rank = |pr: &Pr| u8::from(!matches!(pr.lane, crate::prq::Lane::NeedsYou));
+        rank(a).cmp(&rank(b)).then_with(|| {
+            if matches!(a.lane, crate::prq::Lane::NeedsYou) {
+                waited_since(a).cmp(waited_since(b))
+            } else {
+                b.updated_at.cmp(&a.updated_at)
+            }
+        })
+    });
+    for (repo, queue, pr) in waiting {
         let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
-        // The budget is spent from the TOP of the pane, lane by lane, in the pane's own order —
-        // not in the queue's transport order (`prq::newest_first`, number descending). Two lanes
-        // are read now (see [`worth_a_visit`]) and each keeps ITS own sort, mirrored field for
-        // field from `src/web/index.html`:
-        //
-        //   * **your move** first, oldest-waiting first ([`waited_since`], from `revWaitedSince`
-        //     and the needs-you lane sort). Somebody else is blocked on these, so they take the
-        //     day's money before anything of yours does — widening the scope must not push a
-        //     colleague's review request behind a stack you opened this morning.
-        //   * **their move** second, most-recently-updated first — `index.html`'s own rule for
-        //     that lane, and its reason: "for your own PRs, what moved most recently is the right
-        //     question".
-        //
-        // What the reader spends the day's money on must be the rows the person will read first,
-        // or the ceiling starves exactly the pull requests at the top of the pane.
-        let mut waiting: Vec<&Pr> = queue.prs.iter().collect();
-        waiting.sort_by(|a, b| {
-            let rank = |pr: &Pr| u8::from(!matches!(pr.lane, crate::prq::Lane::NeedsYou));
-            rank(a).cmp(&rank(b)).then_with(|| {
-                if matches!(a.lane, crate::prq::Lane::NeedsYou) {
-                    waited_since(a).cmp(waited_since(b))
-                } else {
-                    b.updated_at.cmp(&a.updated_at)
+        // The one doorway both halves share. Checked first so rows in lanes nobody reads cost
+        // no disk scans at all.
+        if !worth_a_visit(pr) {
+            continue;
+        }
+        let read_it = worth_reading(&repo.id, pr);
+        let had_draft = critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha);
+        if read_it {
+            if read.len() >= READ_PER_PASS {
+                return read;
+            }
+            // Never `force`: a reading already on disk for this head is the answer, and asking
+            // again would spend a model call to be told what skein already knows. Where the
+            // review is yours to give, `summarise` drafts it INSIDE this same visit, off the
+            // one diff download — see `draft_alongside`.
+            let summary = summarise(repo, &queue.slug, pr, &identities, false, Trigger::Unasked);
+            // A reading that could not be made is written down as tried, or the next pass picks
+            // it straight back up — see `tried_path`. The row still says "not summarised", and
+            // the button still reads it on request.
+            //
+            // Only when a model call was SPENT, though (`computed`) — that is the cost the note
+            // exists to stop repeating. A failure before the model — the diff would not
+            // download, GitHub was slow — costs one HTTP call to retry, and writing it down
+            // here pinned a bad network minute to the head sha as a permanent error row. Left
+            // unnoted, the next pass simply tries again. A PR that could not even be
+            // summarised earns no draft either: the same diff feeds both.
+            if matches!(summary.depth, Depth::Unread) {
+                if summary.computed {
+                    note_tried(&repo.id, pr.number, &pr.head_sha, &summary.unread_because);
                 }
-            })
-        });
-        for pr in waiting {
-            // The one doorway both halves share. Checked first so rows in lanes nobody reads cost
-            // no disk scans at all.
-            if !worth_a_visit(pr) {
                 continue;
             }
-            let read_it = worth_reading(&repo.id, pr);
-            let had_draft =
-                critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha);
-            if read_it {
-                if read.len() >= READ_PER_PASS {
-                    return read;
-                }
-                // Never `force`: a reading already on disk for this head is the answer, and asking
-                // again would spend a model call to be told what skein already knows. Where the
-                // review is yours to give, `summarise` drafts it INSIDE this same visit, off the
-                // one diff download — see `draft_alongside`.
-                let summary =
-                    summarise(&repo, &queue.slug, pr, &identities, false, Trigger::Unasked);
-                // A reading that could not be made is written down as tried, or the next pass picks
-                // it straight back up — see `tried_path`. The row still says "not summarised", and
-                // the button still reads it on request.
-                //
-                // Only when a model call was SPENT, though (`computed`) — that is the cost the note
-                // exists to stop repeating. A failure before the model — the diff would not
-                // download, GitHub was slow — costs one HTTP call to retry, and writing it down
-                // here pinned a bad network minute to the head sha as a permanent error row. Left
-                // unnoted, the next pass simply tries again. A PR that could not even be
-                // summarised earns no draft either: the same diff feeds both.
-                if matches!(summary.depth, Depth::Unread) {
-                    if summary.computed {
-                        note_tried(&repo.id, pr.number, &pr.head_sha, &summary.unread_because);
-                    }
-                    continue;
-                }
-                // Read, but BLIND: ownership could not be consulted, so `summarise` served this
-                // one without caching it (SKEIN-117 — a stored blind summary would freeze
-                // "yours: none" for the life of the head). Left unnoted, this pass would re-buy
-                // the same degraded answer every ten minutes for ever; noted, only the pass
-                // stands down. The tried-notes gate nothing but this loop — the pane's read
-                // button and per-row requests go nowhere near them — so a recovered mirror is
-                // consulted the next time anyone asks, and a new commit is a new key that reads
-                // afresh either way.
-                if summary.computed && !summary.ownership_unknown.is_empty() {
-                    note_tried(
-                        &repo.id,
-                        pr.number,
-                        &pr.head_sha,
-                        &format!("read blind — {}", summary.ownership_unknown),
-                    );
-                }
-                // Only what actually cost something is reported. A cache hit is not news, and a
-                // line per cache hit would bury the ones that are.
-                if summary.computed {
-                    read.push(format!("{}: read #{}", repo.id, pr.number));
-                }
-            }
-            // The reader's second half — the door for a row whose summary is already on disk at
-            // this head while its review is not (the visit above covers the rest, and
-            // `worth_critiquing` re-checked here sees anything it just drafted or noted). Same
-            // doorway reading uses — [`worth_a_visit`] at the top of the loop — and no settle
-            // hour: the daily budget is the money guard now (owner decision, 2026-08-24), and
-            // re-anchoring made a moving head postable.
-            //
-            // It re-runs the ONE reading rather than drafting beside the old summary (SKEIN-263).
-            // It used to call a standalone drafter, which cost the same single unit and left the
-            // row carrying a summary from one reading and a review from another, with the diff
-            // downloaded twice and nothing making the two agree about what they saw. Forced,
-            // because the summary on disk is exactly what must not be handed back here; the
-            // replacement is written by the same call that wrote the review.
-            //
-            // Two ways a row arrives here, both real: a summary cached before the merged call
-            // existed, and one summarised while the review was not yours to give — mentioned only
-            // — that has since become yours.
-            let draft_it = worth_critiquing(&repo.id, pr, &queue.viewer);
-            if draft_it {
-                if read.len() >= READ_PER_PASS {
-                    return read;
-                }
-                // Every failure mode is written down inside the visit — `summarise_and_draft`
-                // notes the draft as tried on a spent call, `note_tried` below covers a summary
-                // that could not be made — so a row that cannot be drafted is not re-bought every
-                // ten minutes. Nothing to match on here: what happened is on disk.
-                let again = visit(
-                    &repo,
-                    &queue.slug,
-                    pr,
-                    &identities,
-                    true,
-                    Trigger::Unasked,
-                    Review::IfYours,
+            // Read, but BLIND: ownership could not be consulted, so `summarise` served this
+            // one without caching it (SKEIN-117 — a stored blind summary would freeze
+            // "yours: none" for the life of the head). Left unnoted, this pass would re-buy
+            // the same degraded answer every ten minutes for ever; noted, only the pass
+            // stands down. The tried-notes gate nothing but this loop — the pane's read
+            // button and per-row requests go nowhere near them — so a recovered mirror is
+            // consulted the next time anyone asks, and a new commit is a new key that reads
+            // afresh either way.
+            if summary.computed && !summary.ownership_unknown.is_empty() {
+                note_tried(
+                    &repo.id,
+                    pr.number,
+                    &pr.head_sha,
+                    &format!("read blind — {}", summary.ownership_unknown),
                 );
-                if matches!(again.depth, Depth::Unread) && again.computed {
-                    note_tried(&repo.id, pr.number, &pr.head_sha, &again.unread_because);
-                }
             }
-            // Reported off what is now on disk, whichever door drafted it.
-            if !had_draft
-                && critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha)
-            {
-                read.push(format!("{}: drafted a review for #{}", repo.id, pr.number));
+            // Only what actually cost something is reported. A cache hit is not news, and a
+            // line per cache hit would bury the ones that are.
+            if summary.computed {
+                read.push(format!("{}: read #{}", repo.id, pr.number));
             }
+        }
+        // The reader's second half — the door for a row whose summary is already on disk at
+        // this head while its review is not (the visit above covers the rest, and
+        // `worth_critiquing` re-checked here sees anything it just drafted or noted). Same
+        // doorway reading uses — [`worth_a_visit`] at the top of the loop — and no settle
+        // hour: the daily budget is the money guard now (owner decision, 2026-08-24), and
+        // re-anchoring made a moving head postable.
+        //
+        // It re-runs the ONE reading rather than drafting beside the old summary (SKEIN-263).
+        // It used to call a standalone drafter, which cost the same single unit and left the
+        // row carrying a summary from one reading and a review from another, with the diff
+        // downloaded twice and nothing making the two agree about what they saw. Forced,
+        // because the summary on disk is exactly what must not be handed back here; the
+        // replacement is written by the same call that wrote the review.
+        //
+        // Two ways a row arrives here, both real: a summary cached before the merged call
+        // existed, and one summarised while the review was not yours to give — mentioned only
+        // — that has since become yours.
+        let draft_it = worth_critiquing(&repo.id, pr, &queue.viewer);
+        if draft_it {
+            if read.len() >= READ_PER_PASS {
+                return read;
+            }
+            // Every failure mode is written down inside the visit — `summarise_and_draft`
+            // notes the draft as tried on a spent call, `note_tried` below covers a summary
+            // that could not be made — so a row that cannot be drafted is not re-bought every
+            // ten minutes. Nothing to match on here: what happened is on disk.
+            let again = visit(
+                repo,
+                &queue.slug,
+                pr,
+                &identities,
+                true,
+                Trigger::Unasked,
+                Review::IfYours,
+            );
+            if matches!(again.depth, Depth::Unread) && again.computed {
+                note_tried(&repo.id, pr.number, &pr.head_sha, &again.unread_because);
+            }
+        }
+        // Reported off what is now on disk, whichever door drafted it.
+        if !had_draft && critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha) {
+            read.push(format!("{}: drafted a review for #{}", repo.id, pr.number));
         }
     }
     read
@@ -1605,6 +1674,39 @@ fn visit(
     trigger: Trigger,
     review: Review,
 ) -> Summary {
+    let said = spend_a_visit(repo, slug, pr, identities, force, trigger, review);
+    // **A reading skein bought and could not make is written down HERE**, not only in
+    // [`read_waiting`] (SKEIN-253).
+    //
+    // The tried-note is what stops a failure being re-bought, and it used to be written by the
+    // background pass alone — so the pane's own pump, which is `Trigger::Unasked` and IS charged,
+    // spent a budget unit per row per reload against a `claude` that fails instantly and for free.
+    // Thirty rows and three reloads is the day's ceiling gone on zero summaries, and then every row
+    // reads "today's automatic reading budget is spent (100/100)".
+    //
+    // Two conditions, and they are the same ones the pass already used. **`computed`**: only a
+    // spent model call is worth not repeating — a diff that would not download costs one HTTP call
+    // to retry, and noting it pins a bad network minute to the head sha as a permanent error row.
+    // **`Unasked`**: a person pressing "read it" is saying they think it will work now, and what
+    // they are told must never become a standing state. A new commit is a new key either way.
+    if trigger == Trigger::Unasked && said.computed && matches!(said.depth, Depth::Unread) {
+        note_tried(&repo.id, pr.number, &pr.head_sha, &said.unread_because);
+    }
+    said
+}
+
+/// The visit itself. Split from [`visit`] so that every way it can come back Unread passes the one
+/// place that writes the tried-note, rather than each of the dozen returns below remembering to.
+#[allow(clippy::too_many_arguments)]
+fn spend_a_visit(
+    repo: &Repo,
+    slug: &str,
+    pr: &Pr,
+    identities: &[String],
+    force: bool,
+    trigger: Trigger,
+    review: Review,
+) -> Summary {
     // Somebody pressed "read it". Whatever the model refused with last time, they are entitled to
     // find out whether it still refuses — a standing refusal must never make a button do nothing.
     //
@@ -1642,6 +1744,27 @@ fn visit(
     // ledger is untouched — nothing was read, so nothing is charged. See [`unasked_scope`].
     if let Some(because) = unasked_scope(repo, pr, trigger) {
         return Summary::unread(pr.number, &pr.head_sha, &because);
+    }
+    // **Tried at this commit already, and it cost a model call.** Free, and BEFORE the budget
+    // check, because the honest answer to "why is this row not summarised" is what the model said —
+    // reporting the day's ceiling instead would hide the thing that is actually broken behind a
+    // number the person cannot act on.
+    //
+    // Read on `Unasked` only. That is the boundary this note has always had and the reason it is
+    // safe to widen it from the pass to every unattended path: "read it" goes nowhere near it, so
+    // a standing failure can never make a button do nothing (`ai::forget_refusal`'s rule). And
+    // `computed` stays false, so saying this costs the day nothing.
+    if trigger == Trigger::Unasked {
+        if let Some(why) = read_tried(&repo.id).get(&format!("{}-{}", pr.number, pr.head_sha)) {
+            return Summary::unread(
+                pr.number,
+                &pr.head_sha,
+                &format!(
+                    "{why} — skein already spent a reading on this commit and will not buy \
+                     another by itself. Press \"read it\" to try again."
+                ),
+            );
+        }
     }
     // Enforced where the money is spent, and only there. Everything above cost nothing — a cache
     // hit was already served, a switched-off repo asked for nothing — and everything below leads
@@ -2647,32 +2770,9 @@ mod tests {
         std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
 
         let pr = |number: u64, reason: crate::prq::Reason, lane: crate::prq::Lane| crate::prq::Pr {
-            number,
-            title: "t".into(),
-            author: "someone".into(),
-            url: String::new(),
-            head_ref: "feat".into(),
-            head_sha: format!("sha{number}"),
-            base_ref: "main".into(),
-            draft: false,
-            updated_at: String::new(),
-            committed_at: String::new(),
-            settled: true,
-            labels: Vec::new(),
-            review_decision: String::new(),
-            mergeable: None,
-            merge_state: String::new(),
-            additions: None,
-            deletions: None,
-            changed_files: None,
-            checks: "none".into(),
-            failing_checks: Vec::new(),
-            my_review: "none".into(),
-            review_is_current: false,
-            snoozed: false,
             reasons: vec![reason],
             lane,
-            box_name: String::new(),
+            ..crate::prq::blank_pr(number, &format!("sha{number}"))
         };
         use crate::prq::{Lane, Reason};
 
@@ -3330,6 +3430,149 @@ mod tests {
         drafting_teardown_for("mine");
     }
 
+    /// Two repos, a budget that reaches neither the end of the first — and the row somebody else
+    /// is blocked on lives in the SECOND (SKEIN-276).
+    ///
+    /// The lane ordering landed with SKEIN-265 and landed *inside* the `for repo in load_repos()`
+    /// loop, which made it an ordering within one repository and left the outer order as the order
+    /// of `repos.json`. Every pass restarts at the top of that file, so a repo whose unread rows
+    /// outlast one pass — a stack you rebased this morning does it easily — means the repos below
+    /// it are never reached at all. The row that never gets read is a colleague's review request,
+    /// which is the exact row the ordering exists to put first.
+    ///
+    /// So: `busy` is registered first and holds four pull requests you opened; `quiet` is
+    /// registered second and holds one waiting on your review. `READ_PER_PASS` is 3 lines and an
+    /// authored visit reports two, so the pass stops inside `busy` — and the assertion is that
+    /// `quiet`'s #51 was read anyway, and read FIRST.
+    #[cfg(unix)]
+    #[test]
+    fn a_review_request_in_the_last_repo_is_read_before_a_stack_you_opened_in_the_first() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        two_repo_fixture(home);
+
+        let read = read_waiting();
+        assert!(
+            read.iter().any(|l| l == "quiet: read #51"),
+            "the review request in the last repo of the registry was never reached — the busy \
+             repo above it spent the whole pass: {read:?}"
+        );
+        assert_eq!(
+            read.first().map(String::as_str),
+            Some("quiet: read #51"),
+            "the pass spent its first unit on a repo's registry position rather than on the row \
+             somebody is blocked on: {read:?}"
+        );
+        // And the ordering did not simply invert into "last repo first": the same pass goes on to
+        // spend what is left on `busy`, which is where the rest of the budget belongs.
+        assert!(
+            read.iter().any(|l| l.starts_with("busy: read #")),
+            "nothing in the busy repo was read at all — the fleet-wide order dropped a repo \
+             instead of ranking it: {read:?}"
+        );
+
+        drafting_teardown_for("busy");
+        crate::prq::invalidate("quiet");
+    }
+
+    /// A GitHub serving two repositories from one stub, keyed on the `repo:` term the batched
+    /// search carries (`prq::one_request` builds `repo:{slug} is:pr is:open {search}`):
+    /// `acme/busy` answers the `author:` alias with four pull requests you opened, `acme/quiet`
+    /// answers the `review-requested:` alias with one waiting on you. Registered in that order,
+    /// because the bug being asserted against is registry order.
+    #[cfg(unix)]
+    fn two_repo_fixture(home: &std::path::Path) {
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let claude = home.join("claude-both.sh");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf 'KIND: fix\\nLINE: a reading.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\nFILE: src/a.rs\\nLINE: 0\\nCOMMENT: about the change.\\n---\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let mut stream = stream;
+                let (head, body) = read_request(&stream);
+                let committed =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let node = |number: u64, author: &str, updated: &str| {
+                    format!(
+                        r#"{{"number":{number},"title":"t","url":"u",
+                           "isDraft":false,"author":{{"login":"{author}"}},"headRefName":"feat",
+                           "headRefOid":"sha{number}","baseRefName":"main",
+                           "updatedAt":"{updated}","reviewDecision":"REVIEW_REQUIRED",
+                           "latestReviews":{{"nodes":[]}},
+                           "commits":{{"nodes":[{{"commit":{{"committedDate":"{committed}"}}}}]}}}}"#
+                    )
+                };
+                let answer = if head.contains("/user/teams") {
+                    "[]".to_string()
+                } else if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if body.contains("repo:acme/busy") {
+                    format!(
+                        r#"{{"data":{{"q0":{{"nodes":[]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[{},{},{},{}]}},"q3":{{"nodes":[]}}}}}}"#,
+                        node(41, "me", "2024-01-04T00:00:00Z"),
+                        node(42, "me", "2024-01-03T00:00:00Z"),
+                        node(43, "me", "2024-01-02T00:00:00Z"),
+                        node(44, "me", "2024-01-01T00:00:00Z"),
+                    )
+                } else if body.contains("repo:acme/quiet") {
+                    format!(
+                        r#"{{"data":{{"q0":{{"nodes":[{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
+                        node(51, "someone", "2024-01-05T00:00:00Z"),
+                    )
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // A real checkout behind both, for the same reason every other reader test has one: a repo
+        // whose mirror cannot be read is summarised BLIND and blind summaries are never cached
+        // (SKEIN-117), which would turn this ordering assertion into a caching one.
+        let checkout = home.join("checkout");
+        checkout_fixture(&checkout);
+        let repo = |id: &str, slug: &str| {
+            serde_json::from_value::<Repo>(serde_json::json!({
+                "id": id,
+                "source": format!("https://github.com/{slug}.git"),
+                "source_tree": checkout.to_string_lossy(),
+                "store": "",
+                "read_prs": true,
+            }))
+            .unwrap()
+        };
+        crate::repos::save_repos(&[repo("busy", "acme/busy"), repo("quiet", "acme/quiet")])
+            .unwrap();
+        crate::prq::invalidate("busy");
+        crate::prq::invalidate("quiet");
+    }
+
     /// Being mentioned is somebody talking ABOUT you. It gets no unrequested review draft — each
     /// draft is a paid model call, and the scope is the budget (same rule as `worth_reading`).
     ///
@@ -3351,32 +3594,10 @@ mod tests {
         );
 
         let pr = |author: &str, reasons: Vec<crate::prq::Reason>| crate::prq::Pr {
-            number: 90,
-            title: "t".into(),
             author: author.into(),
-            url: String::new(),
-            head_ref: "feat".into(),
-            head_sha: "sha90".into(),
-            base_ref: "main".into(),
-            draft: false,
-            updated_at: String::new(),
-            committed_at: String::new(),
-            settled: true,
-            labels: Vec::new(),
-            review_decision: String::new(),
-            mergeable: None,
-            merge_state: String::new(),
-            additions: None,
-            deletions: None,
-            changed_files: None,
-            checks: "none".into(),
-            failing_checks: Vec::new(),
-            my_review: "none".into(),
-            review_is_current: false,
-            snoozed: false,
             reasons,
             lane: crate::prq::Lane::NeedsYou,
-            box_name: String::new(),
+            ..crate::prq::blank_pr(90, "sha90")
         };
         use crate::prq::Reason;
         // Yours to give: asked personally, asked through a team, already in the conversation as a
@@ -4308,6 +4529,282 @@ mod tests {
         }
     }
 
+    /// **Nothing read off disk says it cost a model call** (SKEIN-292).
+    ///
+    /// [`cached`] has forced `computed = false` since the day a page reload spent the whole
+    /// allowance on cache hits, with the reason written beside it. The rule is not about that one
+    /// function though: it is about every way a stored reading comes back, and there were three
+    /// readers and only two of them obeyed it. [`previous`] deserialised straight from the file, so
+    /// a reading handed to the next prompt claimed to have cost something.
+    ///
+    /// Harmless the day it was found — nothing downstream read the flag — which is exactly the
+    /// argument for pinning it now, because the day something does read it the failure is a budget
+    /// that spends itself on remembering.
+    ///
+    /// The last assertion is the one that stops a FOURTH reader inheriting the bug instead of the
+    /// rule: it counts the deserialisations in this file and insists each is followed by the line
+    /// that forces the flag down.
+    #[test]
+    fn a_reading_off_disk_never_says_it_cost_a_model_call() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        // Stored as it is stored for real: computed, because when it was written it was.
+        store(
+            "vintage",
+            &Summary {
+                number: 3,
+                head_sha: "old".into(),
+                depth: Depth::Line,
+                line: "it changes a thing".into(),
+                detail: String::new(),
+                flags: Vec::new(),
+                signals: Vec::new(),
+                yours: Vec::new(),
+                others: 0,
+                ownership_unknown: String::new(),
+                unread_because: String::new(),
+                computed: true,
+                budget_stopped: false,
+            },
+        )
+        .unwrap();
+
+        // The head has moved. The bulk payload still hands the reading over, marked stale — and
+        // that is the path the item is about.
+        let bulk = known("vintage", &[(3, "new".to_string())]);
+        let row = bulk
+            .get(&3)
+            .expect("the earlier reading is still handed over");
+        assert!(
+            row.stale,
+            "the reading is of an earlier commit and must say so"
+        );
+        assert!(
+            !row.summary.computed,
+            "a reading served from disk reported that it cost a model call — the exact bug \
+             `cached`'s comment exists to prevent, one function along"
+        );
+        // The single-PR route goes the same way, and so does the reading at its own head.
+        assert!(!held("vintage", 3, "new").summary.computed);
+        assert!(
+            !cached("vintage", 3, "old")
+                .expect("stored at its own head")
+                .computed
+        );
+        // And the lookup that fills the prompt's "what skein already said" slot.
+        assert!(
+            !previous("vintage", 3, "new")
+                .expect("the earlier reading is what the next prompt is built on")
+                .computed,
+            "the reading handed to the next prompt claimed to have cost something"
+        );
+
+        // Every reader of a stored `Summary`, pinned. Asserted against the source because the
+        // thing that goes wrong is a NEW one being written without the line — which no runtime
+        // test of the three that exist could ever notice.
+        let src = std::fs::read_to_string("src/review.rs").expect("this file");
+        // Assembled at runtime so the needle never appears in this file as a literal — a source
+        // check that matches its own search term counts itself, and then the number it reports is
+        // about the test rather than about the code.
+        let needle = format!("{}from_str::<Summary>", "serde_json::");
+        let readers: Vec<String> = src
+            .split(&needle)
+            .skip(1)
+            .map(|after| after.chars().take(600).collect())
+            .collect();
+        assert_eq!(
+            readers.len(),
+            3,
+            "a reading is deserialised somewhere new; every one of them must force `computed` down"
+        );
+        for (i, reader) in readers.iter().enumerate() {
+            assert!(
+                reader.contains("computed = false"),
+                "reader {i} hands back a stored summary still claiming it cost a model call: \
+                 {reader}"
+            );
+        }
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A model that fails every time is bought once per commit, not once per row per reload**
+    /// (SKEIN-253).
+    ///
+    /// The tried-note is what stops a failure being re-bought, and it used to gate the background
+    /// pass alone. The pane's own pump sends no `asked` marker, so its requests are
+    /// `Trigger::Unasked` and ARE charged — and a `claude` that is not logged in fails instantly
+    /// and for free, so thirty rows over three reloads spent the day's ceiling on zero summaries,
+    /// after which every row read "today's automatic reading budget is spent".
+    ///
+    /// Three asks, and each one is a different rule:
+    ///
+    ///   * the first spends a unit and asks the model, which is right — nothing knew yet;
+    ///   * the second spends NOTHING, asks nothing, and comes back carrying what the model said;
+    ///   * the third is a person pressing "read it", which goes nowhere near the note. A standing
+    ///     failure must never make a button do nothing (`ai::forget_refusal`'s rule), and an asked
+    ///     read is un-budgeted besides.
+    #[cfg(unix)]
+    #[test]
+    fn a_model_that_always_fails_is_not_re_bought_on_every_reload() {
+        let _g = crate::testutil::env_lock();
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        // A GitHub that serves a diff, so the visit reaches the model rather than stopping at the
+        // download — the failure this is about is the model's, and a transport failure is
+        // deliberately NOT noted (`computed` is the boundary).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let mut stream = stream;
+                let _ = read_request(&stream);
+                let body = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-fn a() {}\n+fn a() { b() }\n";
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // A model that runs, answers, and answers nothing the parser knows — the shape of a
+        // `claude` that is not logged in: instant, free, and a failure every single time. Counted,
+        // because "it returned nothing" looks identical whether or not it was asked.
+        let asked = home.join("asked");
+        let claude = home.join("claude-broken.sh");
+        std::fs::write(
+            &claude,
+            format!(
+                "#!/bin/sh\necho x >> {}\nprintf 'no format here'\n",
+                asked.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "burn", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "", "read_prs": true,
+        }))
+        .unwrap();
+        let pr = budget_pr(4, "abc");
+        let calls = || {
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+
+        let first = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
+        assert!(
+            matches!(first.depth, Depth::Unread) && first.computed,
+            "{first:?}"
+        );
+        assert_eq!(
+            calls(),
+            1,
+            "the first ask must reach the model — nothing knew anything yet"
+        );
+        assert_eq!(
+            reads_spent(&utc_day()),
+            1,
+            "a spent model call must be counted, however fast it failed"
+        );
+
+        // The reload. Same row, same head, and this is the one that used to cost a unit per row.
+        let again = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
+        assert_eq!(
+            calls(),
+            1,
+            "the model was asked again about a commit it had already refused — one budget unit per \
+             row per reload, until the day's ceiling is gone and no row has a summary"
+        );
+        assert_eq!(
+            reads_spent(&utc_day()),
+            1,
+            "the reload charged the day for a reading nobody bought"
+        );
+        assert!(
+            !again.computed,
+            "a refusal served from a note must not be reported as a reading that cost something"
+        );
+        assert!(
+            again.unread_because.contains("could not make sense")
+                && again.unread_because.contains("read it"),
+            "the row must carry what the MODEL said, and how to try again — not a budget number \
+             that hides it: {}",
+            again.unread_because
+        );
+        assert!(
+            !again.budget_stopped,
+            "a standing failure was reported as the day's budget running out"
+        );
+
+        // And a person pressing the button goes nowhere near any of it.
+        let pressed = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Asked,
+        );
+        assert_eq!(
+            calls(),
+            2,
+            "\"read it\" did nothing — a standing failure must never make a button dead"
+        );
+        assert!(matches!(pressed.depth, Depth::Unread));
+        assert_eq!(
+            reads_spent(&utc_day()),
+            1,
+            "an asked read was charged to the automatic allowance"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+    }
+
     /// The durable half of SKEIN-117: a summary computed while the repo could not be read is
     /// SERVED — the person still gets their summary now — but never cached, so a mirror that
     /// recovers is consulted on the next computation. Under the old unconditional cache write,
@@ -4907,32 +5404,9 @@ mod tests {
     /// A Pr literal for budget tests — the queue's own fields, one place.
     fn budget_pr(number: u64, head: &str) -> crate::prq::Pr {
         crate::prq::Pr {
-            number,
-            title: "t".into(),
-            author: "someone".into(),
-            url: String::new(),
-            head_ref: "feat".into(),
-            head_sha: head.into(),
-            base_ref: "main".into(),
-            draft: false,
-            updated_at: String::new(),
-            committed_at: String::new(),
-            settled: true,
-            labels: Vec::new(),
-            review_decision: String::new(),
-            mergeable: None,
-            merge_state: String::new(),
-            additions: None,
-            deletions: None,
-            changed_files: None,
-            checks: "none".into(),
-            failing_checks: Vec::new(),
-            my_review: "none".into(),
-            review_is_current: false,
-            snoozed: false,
             reasons: vec![crate::prq::Reason::Reviewer],
             lane: crate::prq::Lane::NeedsYou,
-            box_name: String::new(),
+            ..crate::prq::blank_pr(number, head)
         }
     }
 
@@ -5116,6 +5590,91 @@ mod tests {
         std::env::remove_var("SKEIN_HOME");
     }
 
+    /// **A row can tell "skein tried and was refused" from "nothing bought one yet"** (SKEIN-275).
+    ///
+    /// The reason has been on disk the whole time and could not be reached: `note_critique_tried`
+    /// writes `critique-tried.json` keyed `number-sha`, and `worth_critiquing` — the loop it gates
+    /// — was its only reader. No route served it, so `known` could not carry it, and a row sat
+    /// draftless for the life of a head looking exactly like a row nobody had asked about.
+    ///
+    /// Three states, and the test insists on all three, because the two silent ones are what make
+    /// the loud one mean anything:
+    ///
+    ///   * attempted at THIS head and refused → the note's own words ride the row;
+    ///   * attempted at an EARLIER head → nothing, because the note is keyed to the commit and a
+    ///     refusal about a commit that has been replaced says nothing about this one;
+    ///   * a review IS drafted → nothing, because the draft is the answer to the same question.
+    #[test]
+    fn a_row_says_why_no_review_was_drafted_when_one_was_tried_and_refused() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let reading = |number: u64, head: &str| Summary {
+            number,
+            head_sha: head.into(),
+            depth: Depth::Line,
+            line: "it changes a thing".into(),
+            detail: String::new(),
+            flags: Vec::new(),
+            signals: Vec::new(),
+            yours: Vec::new(),
+            others: 0,
+            ownership_unknown: String::new(),
+            unread_because: String::new(),
+            computed: true,
+            budget_stopped: false,
+        };
+        store("why", &reading(5, "aaa")).unwrap();
+        store("why", &reading(6, "bbb")).unwrap();
+        note_critique_tried("why", 5, "aaa", "the model would not answer");
+        // Keyed to a commit that has been replaced: it must not speak about `bbb`.
+        note_critique_tried("why", 6, "OLD", "a refusal about a different commit");
+
+        let rows = known("why", &[(5, "aaa".to_string()), (6, "bbb".to_string())]);
+        assert_eq!(
+            rows[&5].critique_because, "the model would not answer",
+            "the reason was on disk and the row could not say it — which reads as a review nobody \
+             ever asked for"
+        );
+        assert_eq!(
+            rows[&6].critique_because, "",
+            "a refusal recorded against a commit that has been replaced was reported as if it \
+             were about this one"
+        );
+
+        // It reaches the page under that name, and only when there is something to say.
+        let wire = serde_json::to_value(&rows[&5]).unwrap();
+        assert_eq!(wire["critique_because"], "the model would not answer");
+        assert!(
+            serde_json::to_value(&rows[&6])
+                .unwrap()
+                .get("critique_because")
+                .is_none(),
+            "an empty reason must stay off the wire rather than render as a blank chip"
+        );
+
+        // And a row that HAS a review says nothing: the draft is the answer to the same question.
+        store_critique(
+            "why",
+            &Critique {
+                number: 5,
+                head_sha: "aaa".into(),
+                overall: "one real problem".into(),
+                comments: Vec::new(),
+                truncated: false,
+            },
+        )
+        .unwrap();
+        let rows = known("why", &[(5, "aaa".to_string())]);
+        assert!(
+            rows[&5].has_critique && rows[&5].critique_because.is_empty(),
+            "a row with a drafted review still explains why it has none"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
     /// A reading with everything in it — brief, signals, ownership, a drafted review.
     fn fat(number: u64, head: &str) -> Known {
         Known::new(
@@ -5164,6 +5723,11 @@ mod tests {
                 ],
                 truncated: false,
             }),
+            // A critique IS present, so `critique_because` is empty whatever is in here — which is
+            // what keeps the exact key list in `the_row_shape_carries_only_what_a_row_draws`
+            // unchanged.
+            &std::collections::BTreeMap::new(),
+            head,
         )
     }
 
@@ -5550,32 +6114,9 @@ COMMENT: this one points at a line the diff does not show.
         }))
         .unwrap();
         let pr = crate::prq::Pr {
-            number: 11,
-            title: "t".into(),
-            author: "someone".into(),
-            url: String::new(),
-            head_ref: "feat".into(),
-            head_sha: "sha11".into(),
-            base_ref: "main".into(),
-            updated_at: String::new(),
-            committed_at: String::new(),
-            settled: true,
-            draft: false,
-            labels: Vec::new(),
-            review_decision: String::new(),
-            mergeable: None,
-            merge_state: String::new(),
-            additions: None,
-            deletions: None,
-            changed_files: None,
-            checks: "none".into(),
-            failing_checks: Vec::new(),
-            my_review: "none".into(),
-            review_is_current: false,
-            snoozed: false,
             reasons: Vec::new(),
             lane: crate::prq::Lane::NeedsYou,
-            box_name: String::new(),
+            ..crate::prq::blank_pr(11, "sha11")
         };
 
         let drafted = critique(&repo, "acme/thing", &pr, &["me".into()])

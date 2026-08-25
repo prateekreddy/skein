@@ -981,6 +981,20 @@ pub fn health_report() -> HealthReport {
         .filter(|view| view.hook_health == "stale")
         .map(|view| view.name.clone())
         .collect::<Vec<_>>();
+    // Boxes holding a hook signal that says it is a different box's. See
+    // [`crate::signals::hook_health`]: the file is in the store, well-formed and fresh, and it is
+    // refused — so the box reports nothing while looking exactly like one that has nothing to say.
+    //
+    // Here rather than only on the row, and NOT folded into `dark_boxes`, because the two answers
+    // send a person somewhere different: `dark_boxes` carries "`skein restart <box>`", and
+    // restarting a box does not remove a file that is already on disk under the wrong name. This
+    // one is a store to clean. Folding them would have given every misfiled box the recipe that
+    // cannot fix it, which is worse than the silence it replaces.
+    let misfiled_boxes = views
+        .iter()
+        .filter(|view| view.hook_health == "misfiled")
+        .map(|view| view.name.clone())
+        .collect::<Vec<_>>();
     // Boxes still living in the namespace an older `box-session.sh` built for them. See
     // [`crate::board::BoxView::cover`]: everything skein does about isolation it does at box start,
     // so a cover that lands in a new release reaches new boxes and no running one.
@@ -1050,6 +1064,23 @@ pub fn health_report() -> HealthReport {
              were installed",
             dark_boxes.first().map(String::as_str).unwrap_or("<box>")
         );
+    }
+    if !misfiled_boxes.is_empty() {
+        probes.level = Level::Unsatisfied;
+        probes.detail.push_str(&format!(
+            "; hook signals filed under the wrong box's name, so they are refused: {}",
+            misfiled_boxes.join(", ")
+        ));
+        // Only when nothing else has already claimed the fix line: a dark box's restart is the
+        // more urgent of the two, and a check may carry exactly one recipe.
+        if probes.fix.is_empty() || dark_boxes.is_empty() {
+            probes.fix = format!(
+                "remove the misfiled signal — `ls ~/.skein/repos/*/store/.claude/{{status,sessions,\
+                 tasks}}/{}.json` and delete the one whose `box` field names a different box — then \
+                 reattach the box, since the attach is what exports SKEIN_BOX to its probes",
+                misfiled_boxes.first().map(String::as_str).unwrap_or("<box>")
+            );
+        }
     }
     // Deliberately NOT reported here: a box on hook-only turn state (see `screen_health`) is not
     // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment

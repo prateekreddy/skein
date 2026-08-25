@@ -148,12 +148,19 @@ pub struct Workflow {
     /// workflow" on a PR a rule would otherwise claim.
     #[serde(default)]
     pub matches: Vec<Cond>,
-    /// One at a time, per repo. The sweep orders this workflow's carrying pull requests
-    /// oldest-first (lowest number) and lets only the first one without a stop act each pass;
+    /// One at a time, per **(repo, workflow)** — not per repo. The sweep orders this workflow's
+    /// carrying pull requests oldest-first (lowest number) and lets only the first one without a
+    /// stop act each pass;
     /// everyone behind the front simply waits, and a stopped front is passed over — that is the
     /// "skip failures and move ahead" the owner asked for. A parallel train re-runs CI on every
     /// sibling after every merge, which is the tax serial exists to avoid
     /// (`docs/pr-workflow.md`, "The merge train").
+    ///
+    /// Two serial workflows carrying pull requests in one repo therefore have two fronts, and two
+    /// pull requests act in a single pass — `sweep`'s `fronts` map is keyed on the flow name. One
+    /// train is the configuration this was designed for and cannot tell the difference; a second
+    /// one hands back exactly the re-run tax serial was chosen to avoid.
+    /// `tests/merge_train_shape.rs` pins both the behaviour and the wording.
     #[serde(default)]
     pub serial: bool,
     pub steps: Vec<Step>,
@@ -221,7 +228,7 @@ pub const CONDITIONS: [(&str, &str); 14] = [
 ];
 
 /// Every action that can be written. See [`CONDITIONS`] for why this is a table.
-pub const ACTIONS: [(&str, &str); 9] = [
+pub const ACTIONS: [(&str, &str); 10] = [
     (
         "add-label:<name>",
         "put a label on it — usually what starts CI",
@@ -237,6 +244,10 @@ pub const ACTIONS: [(&str, &str); 9] = [
     ("merge:merge", "merge with a merge commit"),
     ("merge:merge+delete", "merge, then delete the branch"),
     ("flag:<why>", "say this on the row, and stop"),
+    (
+        "wait:<why>",
+        "say this and do nothing this pass — the train's own way of standing still",
+    ),
 ];
 
 /// One word of the vocabulary, taken apart for a picker.
@@ -747,8 +758,59 @@ pub fn instead_of_merging_off_the_trunk(act: &Act, facts: &Facts) -> Option<Act>
 /// Empty `matches` means never — a workflow with no rule runs only where somebody assigned it by
 /// hand. That is the safe direction: the cost of a rule that never fires is that you assign it
 /// yourself; the cost of one that fires on everything is a merge you did not ask for.
+///
+/// The one condition that may be unmet and still claim is [`Cond::Approved`], and only for the one
+/// reason in [`the_reviewer_said_no_instead`].
 pub fn claims(flow: &Workflow, facts: &Facts) -> bool {
-    !flow.matches.is_empty() && flow.matches.iter().all(|cond| holds(cond, facts))
+    !flow.matches.is_empty()
+        && flow
+            .matches
+            .iter()
+            .all(|cond| holds(cond, facts) || the_reviewer_said_no_instead(cond, facts))
+}
+
+/// **A reviewer saying no is not a pull request leaving the workflow.** True where `matches` asks
+/// for an approval and what came back was a refusal.
+///
+/// `approved` and `changes-requested` are two readings of ONE GitHub field. `facts_of` builds both
+/// from `pr.review_decision` (`crate::prwork::facts_of`) — `== "APPROVED"` and
+/// `== "CHANGES_REQUESTED"` — so they can never hold together, and a workflow whose `matches`
+/// requires the first releases the pull request at the exact moment the second becomes true.
+///
+/// That made a step nobody could reach. The owner's own documented merge train
+/// (`docs/pr-workflow.md`, "The train, written down") is `matches: ["ready", "approved",
+/// "base:trunk"]` with `{"when": ["changes-requested"], "do": "flag:changes were requested —
+/// resolve them to rejoin the train"}` as its FIRST step — written for precisely this, and dead by
+/// construction: the pull request stopped carrying the workflow one pass before the step could
+/// fire. What the owner saw was a pull request disappearing off the train with no stop, no banner,
+/// no journal line and nothing on the row (SKEIN-247), on the one event where somebody had said in
+/// as many words that it needed a person.
+///
+/// **Why this is a rule about `matches` and not a word in the file.** The vocabulary has no `or`,
+/// so "approved, or a reviewer said no" cannot be written down; and the two obvious ways round it
+/// are both worse than the bug. Dropping `approved` from `matches` puts every unreviewed pull
+/// request in the repository on the train, where the documented steps rebase its branch and start
+/// CI on it. Adding a step for it changes nothing, because steps are only ever evaluated for a
+/// pull request the workflow already claims. So the fix belongs where the claim is decided, as a
+/// statement about what `matches` MEANS: it says which pull requests a workflow is responsible
+/// for, and asking somebody for an approval does not stop being your question when the answer is
+/// no.
+///
+/// **It claims nothing extra.** Only a pull request whose `review_decision` is
+/// `CHANGES_REQUESTED`, and only against a `matches` that already asked about approval — every
+/// other unmet condition still releases it, and a workflow that never mentions `approved` is
+/// untouched. In particular an unreviewed pull request (GitHub's `REVIEW_REQUIRED`, or no review
+/// at all) is neither approved nor changes-requested, so it stays off the train: that one is the
+/// ordinary state of every open pull request, and pulling it in would rebase branches and start CI
+/// on work nobody has looked at.
+///
+/// **And it does not strand it.** Everything downstream is unchanged: the workflow's own steps
+/// decide what happens, a `flag:` writes the stop and reaches the banner like any other, and a
+/// serial train passes a stopped pull request over and keeps moving. A workflow with no
+/// `changes-requested` step falls to its catch-all `wait:`, which is bounded by
+/// [`crate::prwork::a_wait_that_will_not_end_on_its_own`] — so the silence has nowhere left to hide.
+fn the_reviewer_said_no_instead(cond: &Cond, facts: &Facts) -> bool {
+    matches!(cond, Cond::Approved) && facts.changes_requested
 }
 
 #[cfg(test)]
@@ -952,6 +1014,198 @@ mod tests {
         assert!(
             !claims(unruled, &mine),
             "a workflow with no rule claimed a pull request anyway"
+        );
+    }
+
+    /// The merge train, READ OUT of `docs/pr-workflow.md` ("The train, written down").
+    ///
+    /// Read rather than copied, and it is the same discipline as
+    /// `prq::the_only_other_reader_of_this_list_stands_down_when_it_is_partial` reading the server
+    /// source: a fixture copied from a document proves the fixture. Both tests below make claims
+    /// about the train somebody will actually run, so both have to be looking at it — and one
+    /// source means the two can never disagree about what the train is.
+    fn documented_train() -> Workflow {
+        let doc = std::fs::read_to_string("docs/pr-workflow.md").expect("the workflow document");
+        let written = doc
+            .split_once("### The train, written down")
+            .expect("the document no longer writes the train down")
+            .1
+            .split_once("```json")
+            .expect("the train is no longer a json block")
+            .1
+            .split_once("```")
+            .expect("the json block never ends")
+            .0;
+        from_bytes(written.as_bytes())
+            .unwrap_or_else(|e| panic!("the train in docs/pr-workflow.md does not parse: {e}"))
+            .remove(0)
+    }
+
+    /// A reviewer saying no does not take the pull request off the train (SKEIN-247).
+    ///
+    /// The train's FIRST step is `changes-requested → flag`, and until this rule existed no pull
+    /// request could ever reach it: `matches` asks for `approved`, `approved` and
+    /// `changes-requested` are two readings of one GitHub field, so the pull request stopped
+    /// carrying the workflow one pass before the step written for it could fire. It left the train
+    /// with no stop, no banner and nothing on the row — on the one event where a human had said in
+    /// as many words that it needed a person.
+    ///
+    /// The third assertion is the one that keeps this from being a licence. An unreviewed pull
+    /// request is neither approved nor changes-requested, and it must stay OFF: on the documented
+    /// steps, claiming it rebases its branch and starts CI on work nobody has looked at.
+    #[test]
+    fn a_reviewer_saying_no_does_not_take_a_pull_request_off_the_train() {
+        let train = &documented_train();
+        // `base_is_trunk: Some(true)` and not a draft — the other two things `matches` asks for,
+        // so the only thing moving between these three facts is the review decision.
+        let on_the_trunk = Facts {
+            base_is_trunk: Some(true),
+            checks: "passing".into(),
+            ..Default::default()
+        };
+
+        let approved = Facts {
+            approved: true,
+            ..on_the_trunk.clone()
+        };
+        assert!(
+            claims(train, &approved),
+            "the train must claim what it is for"
+        );
+
+        // What `facts_of` builds from `review_decision == "CHANGES_REQUESTED"`: NOT approved, and
+        // changes requested. The two can never hold together — that is the whole defect.
+        let said_no = Facts {
+            approved: false,
+            changes_requested: true,
+            ..on_the_trunk.clone()
+        };
+        assert!(
+            claims(train, &said_no),
+            "a pull request whose reviewer requested changes left the train silently — its own \
+             `flag:changes were requested` step can never fire, so nothing writes a stop and \
+             nothing reaches the banner"
+        );
+        assert_eq!(
+            next(train, &said_no),
+            Some(Chosen {
+                step: 0,
+                act: Act::Flag("changes were requested — resolve them to rejoin the train".into()),
+            }),
+            "it is carried but the step written for it is not what fires"
+        );
+
+        // Nobody has reviewed it yet — GitHub's `REVIEW_REQUIRED`, or no review at all.
+        let unreviewed = Facts {
+            approved: false,
+            changes_requested: false,
+            ..on_the_trunk
+        };
+        assert!(
+            !claims(train, &unreviewed),
+            "an unreviewed pull request was pulled onto the train, where the documented steps \
+             rebase its branch and start CI on work nobody has looked at"
+        );
+
+        // And the rule is about a `matches` that ASKED about approval. A workflow that never
+        // mentions it is untouched in both directions.
+        let mine = &from_bytes(
+            br#"{"workflow":[{"name":"ship-mine","matches":["mine"],"steps":[{"when":[],"do":"merge:squash"}]}]}"#,
+        )
+        .unwrap()[0];
+        assert!(
+            !claims(mine, &said_no),
+            "a rule about whose PR it is started reading review decisions"
+        );
+    }
+
+    /// Every step of the documented merge train is reachable by SOME pull request the train claims
+    /// for itself.
+    ///
+    /// The general form of SKEIN-247, and the test that would have caught it. A step is written
+    /// down to be run; one that no pull request can ever reach is a promise the file makes and the
+    /// engine cannot keep, and it is invisible — the step reads correctly, parses correctly, and
+    /// simply never happens. `matches` and `steps` are checked against each other nowhere else:
+    /// `claims` reads the first and `next` reads the second, and until this test nothing compared
+    /// them.
+    ///
+    /// The train comes from [`documented_train`], so this is a claim about the train the document
+    /// actually tells somebody to run.
+    ///
+    /// The search is exhaustive over every fact any condition in the vocabulary can read — a few
+    /// thousand combinations, which is nothing, and the alternative is choosing the states by hand
+    /// and choosing exactly the ones that pass.
+    #[test]
+    fn every_step_of_the_documented_train_is_reachable() {
+        let train = &documented_train();
+
+        // Every label the file has an opinion about, so the search covers carrying it and not.
+        let mut labels: Vec<String> = Vec::new();
+        for cond in train
+            .matches
+            .iter()
+            .chain(train.steps.iter().flat_map(|s| &s.when))
+        {
+            if let Cond::Label(name) | Cond::NoLabel(name) = cond {
+                if !labels.contains(name) {
+                    labels.push(name.clone());
+                }
+            }
+        }
+
+        let mut reached = vec![false; train.steps.len()];
+        // GitHub's four answers for `reviewDecision`, as `prwork::facts_of` reads them: one field,
+        // so `approved` and `changes_requested` can never both be true.
+        for (approved, changes_requested) in [(true, false), (false, true), (false, false)] {
+            for draft in [true, false] {
+                for mine in [true, false] {
+                    for base_is_trunk in [Some(true), Some(false), None] {
+                        for mergeable in [Some(true), Some(false), None] {
+                            for behind in [Some(true), Some(false), None] {
+                                for checks in ["passing", "failing", "pending", "none"] {
+                                    for on in 0..(1u32 << labels.len()) {
+                                        let facts = Facts {
+                                            approved,
+                                            changes_requested,
+                                            draft,
+                                            mine,
+                                            base_is_trunk,
+                                            mergeable,
+                                            behind,
+                                            checks: checks.into(),
+                                            labels: labels
+                                                .iter()
+                                                .enumerate()
+                                                .filter(|(i, _)| on & (1 << i) != 0)
+                                                .map(|(_, name)| name.clone())
+                                                .collect(),
+                                        };
+                                        if !claims(train, &facts) {
+                                            continue;
+                                        }
+                                        if let Some(chosen) = next(train, &facts) {
+                                            reached[chosen.step] = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let unreachable: Vec<String> = reached
+            .iter()
+            .enumerate()
+            .filter(|(_, hit)| !**hit)
+            .map(|(i, _)| format!("step {} ({})", i + 1, spell_act(&train.steps[i].act)))
+            .collect();
+        assert!(
+            unreachable.is_empty(),
+            "the documented train has steps no pull request it claims can ever reach, so they \
+             read correctly, parse correctly and never happen: {}",
+            unreachable.join(", ")
         );
     }
 
@@ -1282,6 +1536,73 @@ mod tests {
     /// true if something checks it: a picker offering something the parser refuses is a workflow
     /// somebody builds in the UI and cannot save, and it is found by a person, in the one moment
     /// they were trusting the tool.
+    /// Every action the parser takes is one a picker offers — the direction the table→parser test
+    /// below cannot see.
+    ///
+    /// [`Act::Wait`] lived in [`Act::parse`] and [`spell_act`] and NOT in [`ACTIONS`], so the two
+    /// steps the documented merge train stands still on could not be built or restored in the
+    /// cockpit, and a typo'd `waitt:` got an "it can be:" list with the wanted word missing from it
+    /// — [`unknown`] reads the same table. A table that is authoritative in one direction only is
+    /// not a table, it is a coincidence (SKEIN-248/315).
+    ///
+    /// Written over a spelled example of each variant rather than over the variants themselves,
+    /// because an enum's cases cannot be enumerated here. **The list below is the thing to extend
+    /// when a variant is added**, and the compiler helps: `Act` is matched exhaustively in
+    /// [`spell_act`], so a new variant cannot be added without touching that function, and this
+    /// test is named in its neighbourhood.
+    ///
+    /// Two assertions per variant, and they fail for different reasons: the head must be a word
+    /// somebody can pick, and the whole spelling must parse back to what spelled it — a table row
+    /// whose spelling the parser then refuses is the same defect facing the other way.
+    #[test]
+    fn every_action_the_parser_takes_is_one_a_picker_offers() {
+        let heads: std::collections::BTreeSet<&str> = ACTIONS
+            .iter()
+            .map(|(spelling, _)| spelling.split(':').next().unwrap_or(spelling))
+            .collect();
+        for act in [
+            Act::AddLabel("x".into()),
+            Act::RemoveLabel("x".into()),
+            Act::UpdateBranch(Update::Rebase),
+            Act::UpdateBranch(Update::Merge),
+            Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: false,
+            }),
+            Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: true,
+            }),
+            Act::Merge(Merge {
+                how: MergeAs::Merge,
+                delete_branch: false,
+            }),
+            Act::Merge(Merge {
+                how: MergeAs::Merge,
+                delete_branch: true,
+            }),
+            Act::Merge(Merge {
+                how: MergeAs::Rebase,
+                delete_branch: false,
+            }),
+            Act::Flag("why".into()),
+            Act::Wait("why".into()),
+        ] {
+            let spelled = spell_act(&act);
+            let head = spelled.split(':').next().unwrap_or(&spelled);
+            assert!(
+                heads.contains(head),
+                "the parser takes `{spelled}` and no picker offers it, so it can be run and not \
+                 written: ACTIONS heads are {heads:?}"
+            );
+            assert_eq!(
+                Act::parse(&spelled).ok().as_ref(),
+                Some(&act),
+                "`{spelled}` does not parse back to what spelled it"
+            );
+        }
+    }
+
     #[test]
     fn every_word_the_pickers_offer_is_one_the_parser_takes() {
         for (spelling, _) in CONDITIONS {

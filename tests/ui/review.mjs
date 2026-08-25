@@ -739,6 +739,130 @@ await check("a drafted review says so on the row, and opens beside the summary",
   await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
   await settle(200);
 });
+// SKEIN-275. The other half of the chip above: eighteen read, seventeen drafted, one with a full
+// summary and `critique: null` — and from the pane nothing at all, just a row missing a chip its
+// neighbours had. Each of the three states is put on a REAL row's reading and read back out of the
+// page, because they differ in one field of one payload and the claim is about what a person is
+// left looking at.
+// A row whose FULL reading is already in hand — the one the check above opened. Deliberately not
+// any row with a reading: opening a thinned row fetches its prose and un-thins it for the rest of
+// the run, and `the queue asks for rows, and a row asks for its own prose when it opens` needs one
+// that nobody has opened yet. Taking the row that is already full costs that check nothing.
+const noDraftRow = async () => page.evaluate(() => {
+  const p = (revQueue.prs || []).find(x => {
+    const s = revSums.get(rk(x));
+    return s && s !== "…" && s.depth !== "unread" && !s.stale && !s.thin;
+  });
+  return p ? rk(p) : null;
+});
+/**
+ * Put a state on one row's reading, keeping what was there so the rest of the suite is untouched.
+ *
+ * `revCrits` goes with it, and that is not a convenience: the editing panel opens itself on a row
+ * whose reading says no draft at this head, carrying whatever draft is on disk for that NUMBER
+ * (`toggleRevRow` → `/critique`, which is head-agnostic on purpose so a draft of an earlier commit
+ * is still postable). A row that genuinely carries `critique_because` has nothing on disk for that
+ * panel to find — the reason exists precisely because no review was stored — so leaving a real
+ * panel open over a fabricated absence would be asserting against a state the server cannot
+ * produce. `revDraftSection` yields to that panel either way, which is the behaviour the last check
+ * here pins.
+ */
+const setNoDraft = (key, patch) => page.evaluate(([k, p]) => {
+  const s = revSums.get(k);
+  const pr = (revQueue.prs || []).find(x => rk(x) === k);
+  window.__noDraftWas = window.__noDraftWas || {
+    has_critique: s.has_critique, drafted: s.drafted, critique: s.critique,
+    critique_because: s.critique_because, crits: revCrits.get(k), reasons: pr && pr.reasons,
+  };
+  s.has_critique = false;
+  delete s.drafted;
+  delete s.critique;
+  s.critique_because = p.because || "";
+  revCrits.delete(k);
+  // Always written, never only when asked: each state here is the WHOLE row, so a `reasons` left
+  // over from the state before would make the next check assert against a row it did not set up.
+  if (pr) pr.reasons = p.reasons || window.__noDraftWas.reasons;
+  renderReview(true);
+}, [key, patch]);
+const restoreNoDraft = key => page.evaluate(k => {
+  const s = revSums.get(k), was = window.__noDraftWas || {};
+  const pr = (revQueue.prs || []).find(x => rk(x) === k);
+  for (const f of ["has_critique", "drafted", "critique", "critique_because"]) {
+    if (was[f] === undefined) delete s[f]; else s[f] = was[f];
+  }
+  if (was.crits) revCrits.set(k, was.crits); else revCrits.delete(k);
+  if (pr && was.reasons) pr.reasons = was.reasons;
+  delete window.__noDraftWas;
+  renderReview(true);
+}, key);
+/** The no-review section's words, or "" — read from the row, not from the function. */
+const noDraftSaid = key => page.$eval(`#revpane .revrow[data-rk="${key}"] .revdraft.nodraft`,
+  e => e.textContent.replace(/\s+/g, " ").trim()).catch(() => "");
+
+await check("a read pull request with no drafted review says so where the review would have been", async () => {
+  const key = await noDraftRow();
+  if (!key) throw new Error("no row carries a reading of its current head — this check would prove nothing");
+  // Opened first, so the panel's own fetch has already settled before the state under test is put
+  // on the row: what is being asserted is the render, not a race with a request.
+  if (!(await page.$(`#revpane .revrow[data-rk="${key}"].open`)))
+    await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
+  await settle(500);
+  await setNoDraft(key, { because: "the merged answer carried no usable review section — press draft to try again." });
+  await settle(200);
+  // The chip obeys §4's minority rule exactly as `ready` does — both halves asserted, so a chip
+  // that stopped being drawn at all fails as loudly as one that became wallpaper.
+  const demoted = await page.evaluate(() => revCommonChips.has("nodraft"));
+  const chip = await page.$(`#revpane .revrow[data-rk="${key}"] .revtag.nodraft`);
+  if (demoted === !!chip) throw new Error(`the chip and the demotion disagree: demoted=${demoted}, chip=${!!chip}`);
+  if (chip) {
+    const title = await chip.getAttribute("title");
+    if (!/no usable review section/.test(title || ""))
+      throw new Error(`the chip does not carry the reason: ${JSON.stringify(title)}`);
+  }
+  // And the sentence itself, in the section the review would have filled.
+  const said = await noDraftSaid(key);
+  if (!said) throw new Error("an expanded row with a reading and no review says nothing about why");
+  if (!/no usable review section/.test(said))
+    throw new Error(`the reason skein wrote down never reaches the row: ${said}`);
+  if (!/read it again/.test(said)) throw new Error(`a stated absence with no move in it: ${said}`);
+});
+// §6's rule: you cannot approve from a surface that is not showing you the change. The section that
+// DOES hold a verdict holds it because skein's reading is printed above the control; an absence has
+// nothing printed above it, so it may hold only the press that reads the change.
+await check("the no-review section carries no verdict", async () => {
+  const key = await noDraftRow();
+  const acts = await page.$$eval(`#revpane .revrow[data-rk="${key}"] .revdraft.nodraft .revchip`,
+    els => els.map(e => e.textContent.trim()));
+  if (!acts.length) throw new Error("the no-review section is not on screen, so this proves nothing");
+  const verdict = acts.filter(a => /approve|request changes|merge/i.test(a));
+  if (verdict.length) throw new Error(`a verdict on a surface showing no change: ${JSON.stringify(verdict)}`);
+});
+// Never attempted, and never going to be: a mention is not a request to review, so `worth_critiquing`
+// will not draft one however long anyone waits. "Not yet" would be a lie with a waiting sound.
+await check("a review that was never skein's to give says that, not that one is coming", async () => {
+  const key = await noDraftRow();
+  await setNoDraft(key, { because: "", reasons: ["mentioned"] });
+  await settle(200);
+  const said = await noDraftSaid(key);
+  if (!/yours to give/.test(said))
+    throw new Error(`a mentioned-only row does not say why no review will ever be drafted: ${said}`);
+  if (/\byet\b/.test(said))
+    throw new Error(`a row nothing will ever draft is described as pending: ${said}`);
+});
+await check("and a row nothing has drafted yet says that instead, with the press", async () => {
+  const key = await noDraftRow();
+  await setNoDraft(key, { because: "" });
+  await settle(200);
+  const said = await noDraftSaid(key);
+  if (!/nothing has bought one at this head yet/.test(said))
+    throw new Error(`the third state is indistinguishable from the other two: ${said}`);
+  await restoreNoDraft(key);
+  await settle(200);
+  if (await page.$(`#revpane .revrow[data-rk="${key}"].open`))
+    await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
+  await settle(200);
+});
+
 await check("a draft is not ready, and the fold states its own composition", async () => {
   // The draft is not hidden and not your move: it is a COUNT with its reason, one click open.
   const fold = await page.$("#revpane .revlane h4.revfold");
@@ -1277,6 +1401,83 @@ await check("a workflow can be written in the cockpit, and it governs a pull req
   if (!options.includes("watch-ci")) {
     throw new Error(`a workflow written here cannot be chosen there: ${options.join(", ")}`);
   }
+});
+
+// SKEIN-248. `Workflow::serial` is the whole of what makes a merge train a train — one pull
+// request at a time per (repo, workflow), oldest first — and it appeared ZERO times in
+// `src/web/index.html`. It rode the editor's payload, so existing trains survived an edit by
+// accident (the object round-trips opaquely), but one could not be built here, and one that existed
+// could not be un-set. A documented feature the cockpit cannot express is one the file is the only
+// interface to.
+await check("a merge train can be built here: one at a time is a control, not just a file key", async () => {
+  const onDisk = () => JSON.parse(fs.readFileSync(path.join(fx.home, "workflows.json"), "utf8")).workflow[0];
+  if (onDisk().serial) throw new Error("the workflow written above was already serial — this proves nothing");
+  const chip = "#revpane .revflow-edit-head .revchip:has-text('one at a time')";
+  await mustSee(chip, "the one-at-a-time control");
+  await page.click(chip);
+  await settle();
+  await page.click("#revpane .revchip:has-text('save')");
+  await settle(1200);
+  if (!onDisk().serial) throw new Error(`the switch did not reach the file: ${JSON.stringify(onDisk())}`);
+
+  // The round trip, which is the half that would go wrong silently: the editor reads the file back
+  // and has to still know this workflow is a train.
+  await page.click("#revpane .revchip:has-text('workflows')");   // close
+  await settle();
+  await page.click("#revpane .revchip:has-text('workflows')");   // and open on what is on disk
+  await settle(900);
+  const said = await page.$eval(chip, e => e.textContent.replace(/\s+/g, " ").trim());
+  if (!/one at a time · on/.test(said))
+    throw new Error(`the editor reopened on a train and does not say it is one: ${said}`);
+
+  // And it can be un-set, which the file being the only interface made impossible without an editor.
+  await page.click(chip);
+  await settle();
+  await page.click("#revpane .revchip:has-text('save')");
+  await settle(1200);
+  if (onDisk().serial) throw new Error("a train cannot be switched back to running in parallel");
+});
+// The control says what it DOES, because "serial" is the file's word and the person pressing it is
+// deciding whether every sibling re-runs CI on every merge.
+await check("and it says which of the two behaviours it is choosing", async () => {
+  const title = await page.getAttribute("#revpane .revflow-edit-head .revchip:has-text('one at a time')", "title");
+  if (!/same pass/.test(title || "") || !/re-runs CI/.test(title || ""))
+    throw new Error(`the switch does not say what leaving it off means: ${title}`);
+  await page.click("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
+  await settle();
+  const on = await page.getAttribute("#revpane .revflow-edit-head .revchip:has-text('one at a time')", "title");
+  if (!/oldest-first, one per pass/.test(on || ""))
+    throw new Error(`the switch does not say what switching it on means: ${on}`);
+  await page.click("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
+  await settle();
+});
+// A workflow made HERE starts life able to become a train, rather than needing the file opened by
+// hand — `revEditAddFlow` built `{name, matches, steps}` and nothing else, so the thing you had just
+// created was the one thing you could not make serial.
+await check("a workflow created in the cockpit can be made a train, without touching the file", async () => {
+  await page.click("#revpane .revchip:has-text('+ workflow')");
+  await settle();
+  const chips = await page.$$("#revpane .revflow-edit-head .revchip:has-text('one at a time')");
+  if (chips.length < 2) throw new Error(`a new workflow has no one-at-a-time control: ${chips.length}`);
+  await chips[chips.length - 1].click();
+  await settle();
+  // A step, because a workflow with none is not one a save can be judged on.
+  const adds = await page.$$("#revpane .revflow-edit .revchip:has-text('+ step')");
+  await adds[adds.length - 1].click();
+  await settle();
+  await page.click("#revpane .revchip:has-text('save')");
+  await settle(1200);
+  const written = JSON.parse(fs.readFileSync(path.join(fx.home, "workflows.json"), "utf8")).workflow;
+  const made = written[written.length - 1];
+  if (!made || !made.serial)
+    throw new Error(`a workflow built from scratch here cannot be a train: ${JSON.stringify(made)}`);
+
+  // Put the fixture back for the checks below, which read the file this section wrote.
+  const dels = await page.$$("#revpane .revflow-edit .revchip:has-text('delete workflow')");
+  await dels[dels.length - 1].click();
+  await settle();
+  await page.click("#revpane .revchip:has-text('save')");
+  await settle(1200);
 });
 
 await check("a workflow it could not read is refused with the step that is wrong", async () => {

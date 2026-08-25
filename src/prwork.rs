@@ -187,6 +187,8 @@ fn write_assigned(
 /// - `name: Some("")` — leave this one out, and let no rule claim it.
 /// - `unassign` — forget the choice; the rules speak for it again.
 /// - neither — **change nothing**. `clear_stop` alone is not a statement about what governs it.
+///
+/// A `clear_stop` that could not be written is an `Err` and stops the call there — see [`clear`].
 pub fn apply(
     repo_id: &str,
     number: u64,
@@ -194,8 +196,11 @@ pub fn apply(
     unassign_it: bool,
     clear_stop: bool,
 ) -> Result<(), String> {
+    // Propagated, not swallowed: this is the half the person actually pressed, and a clear that
+    // did not land leaves the pull request stopped. Before the assignment, so a failure stops here
+    // rather than reporting an error over a change that did go through.
     if clear_stop {
-        clear(repo_id, number);
+        clear(repo_id, number)?;
     }
     match (name, unassign_it) {
         (Some(name), _) => assign(repo_id, number, name),
@@ -249,12 +254,44 @@ pub fn stopped(repo_id: &str, number: u64) -> Option<String> {
     read_stops(repo_id).remove(&number.to_string())
 }
 
-/// Every stopped pull request in this repo, in numeric order, in the shape the counts payload
-/// carries ([`crate::prq::StoppedPr`] — the type is the payload's, the file is this module's).
+/// Every stopped pull request in this repo somebody can still act on, in numeric order, in the
+/// shape the counts payload carries ([`crate::prq::StoppedPr`] — the type is the payload's, the
+/// file is this module's).
 ///
 /// Numeric rather than the file's own: the stops are keyed by strings, and `"10"` sorting before
 /// `"9"` is not an order anybody asked to read a banner in.
+///
+/// # A stop is only worth saying where there is a row to clear it from
+///
+/// This is what the cockpit's banner is built from, and a banner is a demand for somebody's
+/// attention. The stop FILE is a different thing: it is skein's memory of a refusal, and its whole
+/// job is to outlive the pass that wrote it. Reading the file straight out onto the banner
+/// conflated the two, and the difference showed up as the one failure a banner cannot survive
+/// (SKEIN-241): the train stops on #123, a person merges #123 on GitHub, #123 leaves the queue —
+/// and an orange row sits above the whole application naming a pull request with no row, for ever.
+/// Both "let it run again" buttons are built from the live queue (`src/web/index.html`), so there
+/// was no way to dismiss it at all. `crate::prq::queue_within` already makes the argument this
+/// rests on: *a banner that is always there stops being read.*
+///
+/// So the file keeps everything and this answers about what is in front of a person. That also
+/// closes the second half of SKEIN-241, without either surface having to know about the other:
+/// the panel's set ([`trains`]) is drawn from the queue too, so the banner can no longer name a
+/// pull request the panel has never heard of.
+///
+/// **The queue is read from what is already on this machine — never over the network.** Same rule
+/// and same two roads as [`crate::prq::remembered_head`]: this runs on the badge poll, for every
+/// repo in the fleet, and a filter that cost a GitHub round trip would be paid for by the one
+/// thing the ten-minute badge budget exists to protect (SKEIN-208).
+///
+/// **Blindness shows everything, rather than nothing.** No queue on this machine yet, or one whose
+/// searches did not see every open pull request ([`crate::prq::Queue::whole`]), and the file is
+/// answered unfiltered. A refresh that went dark has an empty `prs` list for the same reason a
+/// repo with nothing open does, and reading that as "every stop is dismissible" would silence
+/// every stop in the fleet during one rate-limit window — which is SKEIN-229's failure, arriving
+/// through a different file. Erring toward a banner that is too loud is recoverable; erring toward
+/// one that is silent is the failure this whole feature exists to prevent.
 pub fn stops(repo_id: &str) -> Vec<crate::prq::StoppedPr> {
+    let open = open_pull_requests(repo_id);
     let mut out: Vec<crate::prq::StoppedPr> = read_stops(repo_id)
         .into_iter()
         .filter_map(|(number, why)| {
@@ -263,9 +300,28 @@ pub fn stops(repo_id: &str) -> Vec<crate::prq::StoppedPr> {
                 .ok()
                 .map(|number| crate::prq::StoppedPr { number, why })
         })
+        .filter(|s| match &open {
+            Some(open) => open.contains(&s.number),
+            None => true,
+        })
         .collect();
     out.sort_by_key(|s| s.number);
     out
+}
+
+/// Which pull requests this repo has open, from what is already on this machine — and `None` when
+/// nothing here can say.
+///
+/// `None` is the answer for two different situations and deliberately the same one: no queue has
+/// been read for this repo yet, and a queue whose searches were cut off or failed. Both mean a
+/// pull request's ABSENCE from the list is evidence about the searches rather than about the pull
+/// request, which is exactly what [`crate::prq::Queue::whole`] was added to say — the archive and
+/// snooze prunes in `prq::queue_within` read it for the same reason.
+fn open_pull_requests(repo_id: &str) -> Option<Vec<u64>> {
+    let known = crate::prq::unexpired(repo_id).or_else(|| crate::prq::remembered(repo_id))?;
+    known
+        .whole
+        .then(|| known.prs.iter().map(|pr| pr.number).collect())
 }
 
 fn read_stops(repo_id: &str) -> std::collections::BTreeMap<String, String> {
@@ -299,21 +355,46 @@ pub fn stop(repo_id: &str, number: u64, why: &str) {
 }
 
 /// Let it run again. What a person does after fixing whatever the reason was.
-pub fn clear(repo_id: &str, number: u64) {
+///
+/// **The write is the act, and it is reported.** This used to discard it — `let _ = write_stops(…)`
+/// — and then journal the clear unconditionally, so a stops file that could not be written (a
+/// read-only host state directory, a full disk, mode 0400) left the stop exactly where it was, put
+/// a line in the timeline saying a person had lifted it, and answered the button "done". The
+/// person is told it worked, shown a record saying it worked, and the train never moves
+/// (SKEIN-249). Of everything skein writes, this was the only place a journal entry could describe
+/// an act that had not happened — its sibling [`stop`] already says a failed write out loud, and
+/// says it for the same reason in the opposite direction.
+///
+/// So the journal entry is written only after the file is, and the error travels back through
+/// [`apply`] to the row. The sentence names the consequence rather than the syscall, because what
+/// somebody needs to know is not that a write failed but that the pull request is still stopped.
+///
+/// **A pull request with no stop is `Ok`, not an error.** Nothing needed doing and nothing was
+/// written, which is the same rule [`crate::prq::set_archived`] keeps and for the same reason: a
+/// retried request must not report a failure for having arrived twice.
+pub fn clear(repo_id: &str, number: u64) -> Result<(), String> {
     let mut stops = read_stops(repo_id);
-    if stops.remove(&number.to_string()).is_some() {
-        let _ = write_stops(repo_id, &stops);
-        // A person clearing a stop is an event the timeline must show — without it, a journal
-        // reads "stopped … did …" with no sign of the hand that let it move again.
-        record(
-            repo_id,
-            number,
-            "",
-            0,
-            "cleared",
-            "the stop was cleared — the workflow may act again",
-        );
+    if stops.remove(&number.to_string()).is_none() {
+        return Ok(());
     }
+    write_stops(repo_id, &stops).map_err(|e| {
+        format!(
+            "#{number} is still stopped — skein could not write the stop file, so the workflow \
+             will not act on it again: {e}"
+        )
+    })?;
+    // A person clearing a stop is an event the timeline must show — without it, a journal
+    // reads "stopped … did …" with no sign of the hand that let it move again. AFTER the write,
+    // so the timeline can only ever describe something that happened.
+    record(
+        repo_id,
+        number,
+        "",
+        0,
+        "cleared",
+        "the stop was cleared — the workflow may act again",
+    );
+    Ok(())
 }
 
 /// One line of a pull request's workflow history — the durable answer to "what happened to this
@@ -454,17 +535,25 @@ pub fn standing(
 
 /// Take one step, or say why not.
 ///
-/// `head_sha` is passed to every action that changes the pull request, so GitHub refuses rather
-/// than acts if somebody pushed between skein deciding and skein acting. That is the same rule as
-/// the anchor on a box: prove the thing is what you think before touching it.
+/// `head_sha` anchors the two acts that can carry it: `update_branch` sends it as `expectedHeadOid`
+/// and `merge_pr` sends it as `sha`, so GitHub refuses rather than acts if somebody pushed between
+/// skein deciding and skein acting. That is the same rule as the anchor on a box: prove the thing
+/// is what you think before touching it.
+///
+/// `add_label` and `remove_label` carry no head, and cannot: GitHub's issue-labels API accepts no
+/// head parameter on either verb. That matters because `add-label:ci-queue` is the step that starts
+/// CI, so a push landing mid-decision starts a run against a head skein never saw. The cost is a
+/// wasted CI run and a front that goes round again — not a bad merge, because `merge_pr` re-checks
+/// with `sha` and GitHub answers 409. The anchor is on the acts where being wrong ships something.
+/// The table is in `docs/pr-workflow.md`, "Which acts carry a head anchor, and which two cannot".
 pub struct Subject<'a> {
     /// The repo as skein knows it, which is where the stop is written down.
     pub repo_id: &'a str,
     /// `owner/name` as GitHub knows it.
     pub slug: &'a str,
     pub number: u64,
-    /// The commit the decision was made about. Every action that changes the pull request carries
-    /// it, so GitHub refuses rather than acts if somebody pushed in between.
+    /// The commit the decision was made about. The two acts that can carry it do — see the note on
+    /// this struct for the two that cannot, and why it is the labels API rather than an oversight.
     pub head_sha: &'a str,
     pub head_ref: &'a str,
 }
@@ -682,9 +771,33 @@ fn delete_branch(slug: &str, head_ref: &str, token: &str) -> Result<(), String> 
 /// to be long enough that a check which is merely slow to be QUEUED is never mistaken for one that
 /// is not coming — GitHub Actions starts within seconds normally, and minutes on a busy runner
 /// pool — and short enough that a person watching a train notices the same day. A wait on
-/// something that IS running is not bounded by this at all (see [`a_wait_with_nothing_behind_it`]),
-/// so no CI run, however long, is ever cut short by it.
+/// something that IS running is bounded by [`WAITING_ON_A_CHECK_MS`] instead, which is more than
+/// seventy times as long, so no CI run is ever cut short by this one.
 pub const WAITING_ON_NOTHING_MS: i64 = 20 * 60 * 1000;
+
+/// How long the front of a serial train may wait on a check that HAS started and has not finished.
+///
+/// **Twenty-four hours, and the number is GitHub's own** rather than a guess about how slow a
+/// pipeline is allowed to be. GitHub cancels a job that has been running for six hours (the
+/// default `timeout-minutes: 360`), and cancels one that has sat unassigned to a runner for
+/// twenty-four. A check still reported as `pending` past the longer of those has outlived every
+/// bound GitHub itself applies to one, so it is not a slow run: whatever was going to report it is
+/// gone, and nothing that happens on GitHub will ever move it (SKEIN-283).
+///
+/// That this needs to exist at all is the point. `checks: pending` was treated as proof that
+/// something was in flight and therefore not bounded at all — which is true of a check that is
+/// running and false of a check that has *stopped* running without saying so, and those two look
+/// identical from here. A required context whose run was deleted, a self-hosted runner that went
+/// away mid-job, a check GitHub is waiting on that will never be posted: each parks the front of a
+/// serial train for ever, and everything behind it with it, saying "CI is running" about nothing.
+/// The twenty-minute rule below cannot reach any of them, because they all say `pending`.
+///
+/// **The cost of getting it wrong is deliberately lopsided.** Too long, and a broken pipeline
+/// parks a train until tomorrow — bad, and exactly the state this leaves it in today, for ever.
+/// Too short, and somebody presses "let it run again" and the wait restarts with a fresh clock,
+/// having lost one pass. There is no honest CI run this can cut short: at twenty-four hours GitHub
+/// has already cancelled it.
+pub const WAITING_ON_A_CHECK_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// When this pull request started waiting on THIS step, if it is still waiting on it.
 ///
@@ -714,12 +827,31 @@ fn waiting_since(entries: &[JournalEntry], flow: &str, step: usize) -> Option<i6
 /// So the only thing that can tell those two apart is how long the waiting has gone on, and this
 /// is where that is decided.
 ///
-/// **A wait on something running is not bounded.** `checks: pending` is a check that has started,
-/// and a real one can take the better part of an hour — the module note above builds the whole
-/// guarded-step design around surviving "a forty-minute CI run". Cutting one short would be a
-/// worse bug than the one this fixes. What is bounded is a wait with nothing behind it: no check
-/// running, nothing in flight skein can point at, and a sentence that promises something is going
-/// to change.
+/// **Two ceilings, because there are two waits.** A wait with nothing behind it — no check
+/// running, nothing in flight skein can point at, and a sentence promising something is going to
+/// change — runs out after [`WAITING_ON_NOTHING_MS`]. A wait on a check that HAS started runs out
+/// after [`WAITING_ON_A_CHECK_MS`], which is more than seventy times as long: the module note
+/// above builds the whole guarded-step design around surviving *"a forty-minute CI run"*, and
+/// cutting one short would be a worse bug than either of the ones this fixes.
+///
+/// It is one function and not two because it is one decision — *how long may this go on* — and the
+/// only thing the evidence changes is the number. Written as a second mechanism beside the first,
+/// the two would keep separate clocks over the same journal and disagree about when a wait began.
+///
+/// **`pending` earns patience, not immunity.** It used to end this function on the spot, on the
+/// reading that a check which has started is something skein can expect to end. That is true of a
+/// check that is running and false of one that has stopped running without saying so — a deleted
+/// run, a self-hosted runner that went away mid-job, a required context nobody will ever post —
+/// and from here the two are the same word. So `pending` was an unbounded park, which is the state
+/// this rule exists to prevent, reachable by saying the one thing that switched the rule off
+/// (SKEIN-283).
+///
+/// The clock does not restart when the evidence changes, and it does not need to: it can only ever
+/// move the ceiling under a wait already in progress. Nothing running for nineteen minutes and
+/// then a check starts, and the ceiling rises to a day — less eager, never a stop. A check pending
+/// for twenty-three hours and then it vanishes, and the ceiling drops to twenty minutes it has
+/// long since passed — a stop, on a pull request that has waited twenty-three hours with nothing
+/// running. Neither direction can stop something that was going to resolve on its own.
 ///
 /// **Only a serial train.** A stop is a demand for somebody's attention, and it is earned when the
 /// alternative is a queue that has stopped moving. A pull request on a workflow that blocks nobody
@@ -728,7 +860,7 @@ fn waiting_since(entries: &[JournalEntry], flow: &str, step: usize) -> Option<i6
 /// Recoverable, in the two ways that matter: the stop names the elapsed time and the step so the
 /// sentence is checkable, and clearing it puts the pull request back in line — where, if the wait
 /// really was on something slow, it simply waits again with a fresh clock.
-fn a_wait_with_nothing_behind_it(
+fn a_wait_that_will_not_end_on_its_own(
     repo_id: &str,
     number: u64,
     flow: &Workflow,
@@ -736,9 +868,16 @@ fn a_wait_with_nothing_behind_it(
     facts: &crate::workflow::Facts,
     why: &str,
 ) -> Option<String> {
-    if !flow.serial || facts.checks == "pending" {
+    if !flow.serial {
         return None;
     }
+    // The one thing the evidence decides. `pending` is the only answer that means a check has
+    // started; `passing`, `failing`, `none` and the empty string all mean nothing is in flight.
+    let running = facts.checks == "pending";
+    let ceiling = match running {
+        true => WAITING_ON_A_CHECK_MS,
+        false => WAITING_ON_NOTHING_MS,
+    };
     let step = chosen.step + 1;
     let now_ms = now_ms();
     let Some(since) = waiting_since(&journal(repo_id, number), &flow.name, step) else {
@@ -747,20 +886,34 @@ fn a_wait_with_nothing_behind_it(
         record(repo_id, number, &flow.name, step, "waiting", why);
         return None;
     };
-    if now_ms - since < WAITING_ON_NOTHING_MS {
+    let waited = now_ms - since;
+    if waited < ceiling {
         return None;
     }
-    let minutes = (now_ms - since) / 60_000;
-    let reason = format!(
-        "step {step} has been waiting {minutes} minutes — {why:?} — and nothing is running \
-         (checks: {}). Whatever was expected to start has not, so this wait will not end on its \
-         own; if a label is meant to start CI here, check it is the one the repository's workflow \
-         keys on. Clearing this stop puts it back in line.",
-        match facts.checks.is_empty() {
-            true => "none",
-            false => facts.checks.as_str(),
-        }
-    );
+    // The sentence says which of the two ceilings fell and what would have had to be true for it
+    // to be wrong, because that is what makes it checkable by the person it interrupts.
+    let reason = match running {
+        true => format!(
+            "step {step} has been waiting {hours} hours — {why:?} — and its checks have read \
+             `pending` that whole time. GitHub cancels a job that has run for six hours and one \
+             that has waited twenty-four for a runner, so a check still pending past both is not \
+             a slow build: whatever was going to report it is gone. Look for a cancelled or \
+             deleted run, or a required check nothing posts. Clearing this stop puts it back in \
+             line with a fresh clock.",
+            hours = waited / 3_600_000,
+        ),
+        false => format!(
+            "step {step} has been waiting {minutes} minutes — {why:?} — and nothing is running \
+             (checks: {}). Whatever was expected to start has not, so this wait will not end on \
+             its own; if a label is meant to start CI here, check it is the one the repository's \
+             workflow keys on. Clearing this stop puts it back in line.",
+            match facts.checks.is_empty() {
+                true => "none",
+                false => facts.checks.as_str(),
+            },
+            minutes = waited / 60_000,
+        ),
+    };
     stop(repo_id, number, &reason);
     record(repo_id, number, &flow.name, step, "stopped", &reason);
     crate::warden_client::reported(
@@ -955,10 +1108,12 @@ pub fn sweep() -> Vec<String> {
                 }
                 // Waiting is the ordinary state and says nothing — but the front of a serial
                 // train waiting on nothing is the line not moving, so it is timed. See
-                // [`a_wait_with_nothing_behind_it`], which is the only thing standing between a
+                // [`a_wait_that_will_not_end_on_its_own`], which is the only thing standing between a
                 // repo whose CI label starts nothing and a train parked for ever.
                 Outcome::Waited(why) => {
-                    a_wait_with_nothing_behind_it(&repo.id, pr.number, flow, &chosen, facts, &why);
+                    a_wait_that_will_not_end_on_its_own(
+                        &repo.id, pr.number, flow, &chosen, facts, &why,
+                    );
                 }
                 // A stop has already been written down and audited by `perform`; repeating it here
                 // every pass would bury the log.
@@ -1536,7 +1691,7 @@ mod tests {
         );
 
         // And a person can let it run again.
-        clear("demo", 41);
+        clear("demo", 41).expect("the stop must clear");
         assert_eq!(stopped("demo", 41), None);
 
         for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "SKEIN_PR_WORKFLOWS"] {
@@ -2127,7 +2282,7 @@ mod tests {
 
         // The same two pull requests under a NON-serial workflow: everyone due a step acts, which
         // is today's behavior and must stay — serial is a property of a workflow, not of the sweep.
-        clear("demo", 5);
+        clear("demo", 5).expect("the stop must clear");
         std::fs::write(
             home.join("workflows.json"),
             br#"{"workflow":[{"name":"train","matches":["mine"],"steps":[
@@ -2333,20 +2488,25 @@ mod tests {
         crate::prq::forget_trunks();
     }
 
-    /// A check that IS running is never cut short, however long it takes.
+    /// A check that IS running is not cut short — and a check that says it is running for ever is.
     ///
-    /// The other side of [`a_wait_with_nothing_behind_it`], and the more dangerous one: the bound
-    /// that fixes SKEIN-240 is the only thing in skein that can stop a pull request for taking too
-    /// long, and a CI run is allowed to take as long as it takes. The module note above builds the
-    /// whole guarded-step design around surviving *"a forty-minute CI run"*, so a train that
-    /// stopped one at twenty minutes would have traded a parked train for a broken one.
+    /// The other side of [`a_wait_that_will_not_end_on_its_own`], and the more dangerous one: this
+    /// bound is the only thing in skein that can stop a pull request for taking too long, and a CI
+    /// run is allowed to take as long as it takes. The module note above builds the whole
+    /// guarded-step design around surviving *"a forty-minute CI run"*, so a train that stopped one
+    /// at twenty minutes would have traded a parked train for a broken one.
     ///
-    /// `checks: pending` is the evidence that draws the line: a check that has started is
-    /// something skein can point at and expect to end. The clock is not started, so it can never
-    /// run out — asserted against a timeline that is a full day old, which is far past any bound
-    /// this file could grow.
+    /// What `checks: pending` earns is [`WAITING_ON_A_CHECK_MS`] of patience — more than seventy
+    /// times the other ceiling — and not immunity. It used to earn immunity, and the two things it
+    /// cannot tell apart are a check that is running and a check that stopped running without
+    /// saying so; the second parks the front of a serial train for ever, and everything behind it,
+    /// saying "CI is running" about a run that no longer exists (SKEIN-283).
+    ///
+    /// So the assertions come in pairs. Six hours of `pending` is a long build and is left alone.
+    /// Twenty-five hours of `pending` is past every bound GitHub applies to a check of its own,
+    /// and stops — with a sentence that says which of the two ceilings fell.
     #[test]
-    fn a_wait_on_a_check_that_is_running_is_never_bounded() {
+    fn a_running_check_earns_patience_and_not_immunity() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
@@ -2366,14 +2526,14 @@ mod tests {
             ..Default::default()
         };
 
-        // A day of waiting, written into the timeline — far past any bound this file could grow.
-        // Each pull request gets its own, because a stop written by one assertion would otherwise
-        // reset the next one's clock and it would pass without the rule ever being consulted.
-        let a_day_of_waiting = |number: u64, flow: &str| {
+        // A wait of a chosen age, written into the timeline. Each pull request gets its own,
+        // because a stop written by one assertion would otherwise reset the next one's clock and
+        // it would pass without the rule ever being consulted.
+        let waiting_for = |number: u64, flow: &str, ms: i64| {
             record("demo", number, flow, 1, "waiting", "CI is running");
             let mut all = journal("demo", number);
             let last = all.len() - 1;
-            all[last].at_ms -= 24 * 60 * 60 * 1000;
+            all[last].at_ms -= ms;
             let mut file: std::collections::BTreeMap<String, Vec<JournalEntry>> =
                 serde_json::from_str(&std::fs::read_to_string(journal_path("demo")).unwrap())
                     .unwrap();
@@ -2384,20 +2544,24 @@ mod tests {
             )
             .unwrap();
         };
-        a_day_of_waiting(7, "merge-train");
 
+        // Six hours of a build that is genuinely running. Eighteen times past the ceiling a wait
+        // with nothing behind it gets, and it must not be touched.
+        waiting_for(7, "merge-train", 6 * 60 * 60 * 1000);
         assert_eq!(
-            a_wait_with_nothing_behind_it("demo", 7, &flow, &chosen, &running, "CI is running"),
+            a_wait_that_will_not_end_on_its_own(
+                "demo",
+                7,
+                &flow,
+                &chosen,
+                &running,
+                "CI is running"
+            ),
             None,
-            "a check that is still running was stopped for taking too long — the bound must only \
-             ever fall on a wait with nothing behind it"
+            "a check that is still running was stopped six hours into a build that is allowed to \
+             take as long as it takes"
         );
-        assert_eq!(
-            stopped("demo", 7),
-            None,
-            "a running check was stopped a day into a build that is allowed to take as long as it \
-             takes"
-        );
+        assert_eq!(stopped("demo", 7), None, "and it wrote the stop down too");
 
         // And the same wait with nothing running IS bounded, from the same timeline — so what
         // separates them is the evidence and not the clock.
@@ -2406,9 +2570,60 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            a_wait_with_nothing_behind_it("demo", 7, &flow, &chosen, &nothing, "CI is running")
-                .is_some(),
+            a_wait_that_will_not_end_on_its_own(
+                "demo",
+                7,
+                &flow,
+                &chosen,
+                &nothing,
+                "CI is running"
+            )
+            .is_some(),
             "the bound never falls at all, on any wait"
+        );
+
+        // A check that has said `pending` for twenty-five hours. GitHub cancels a job at six hours
+        // of running and at twenty-four of queueing, so nothing is coming — and until SKEIN-283
+        // this parked the front of the train, and everything behind it, with no bound at all.
+        waiting_for(11, "merge-train", WAITING_ON_A_CHECK_MS + 60 * 60 * 1000);
+        let why = a_wait_that_will_not_end_on_its_own(
+            "demo",
+            11,
+            &flow,
+            &chosen,
+            &running,
+            "CI is running",
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "a front whose check has read `pending` for twenty-five hours is still holding \
+                 the line, silently, and nothing in skein can ever stop it"
+            )
+        });
+        assert!(
+            why.contains("25 hours") && why.contains("pending"),
+            "the stop does not say which ceiling fell or for how long: {why}"
+        );
+        assert_eq!(
+            stopped("demo", 11).as_deref(),
+            Some(why.as_str()),
+            "the stop was returned but never written down, so the next pass parks again"
+        );
+
+        // The line between them is the ceiling and nothing else: one hour SHORT of it, the same
+        // pending check is left alone.
+        waiting_for(12, "merge-train", WAITING_ON_A_CHECK_MS - 60 * 60 * 1000);
+        assert_eq!(
+            a_wait_that_will_not_end_on_its_own(
+                "demo",
+                12,
+                &flow,
+                &chosen,
+                &running,
+                "CI is running"
+            ),
+            None,
+            "a check pending for twenty-three hours was stopped — the ceiling is not where it says"
         );
 
         // And a workflow that is not a train is left alone even then — on its OWN expired clock,
@@ -2421,9 +2636,16 @@ mod tests {
         )
         .unwrap()
         .remove(0);
-        a_day_of_waiting(8, "loose");
+        waiting_for(8, "loose", WAITING_ON_A_CHECK_MS + 60 * 60 * 1000);
         assert_eq!(
-            a_wait_with_nothing_behind_it("demo", 8, &loose, &chosen, &nothing, "CI is running"),
+            a_wait_that_will_not_end_on_its_own(
+                "demo",
+                8,
+                &loose,
+                &chosen,
+                &nothing,
+                "CI is running"
+            ),
             None,
             "a workflow with no train behind it stopped a pull request for waiting, which costs a \
              person an interruption and nobody a queue"
@@ -2483,7 +2705,7 @@ mod tests {
         assert!(matches!(out, Outcome::Stopped(_)), "{out:?}");
 
         // And a person clearing the stop is an event too — flow-less, step-less, but on record.
-        clear("demo", 41);
+        clear("demo", 41).expect("the stop must clear");
 
         let entries = journal("demo", 41);
         let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
@@ -2646,6 +2868,355 @@ mod tests {
         assert_eq!(views[0].front, None);
         assert_eq!(views[0].line, vec![5, 7, 9]);
         assert_eq!(views[0].stopped.len(), 3);
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A remembered queue for `repo_id` listing exactly these open pull requests, put where
+    /// `prq::remembered` reads it.
+    ///
+    /// That is the state a real counts poll runs in and not a convenience: a stop can only be
+    /// written by a pass that read this repo's queue, so "a repo with stops and no remembered
+    /// queue" is the cold-start case, never the steady one. `queue_within` deliberately neither
+    /// caches nor remembers under `cfg!(test)`, so nothing is here unless a test says so.
+    fn remember_open(repo_id: &str, numbers: &[u64], whole: bool) {
+        let prs: Vec<serde_json::Value> = numbers
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "number": n,
+                    "title": format!("pull request {n}"),
+                    "author": "me",
+                    "url": format!("https://github.com/acme/thing/pull/{n}"),
+                    "head_ref": format!("feat-{n}"),
+                    "head_sha": "deadbeef",
+                    "base_ref": "main",
+                    "draft": false,
+                    "updated_at": "",
+                    "committed_at": "",
+                    "checks": "passing",
+                    "my_review": "none",
+                    "review_is_current": true,
+                    "reasons": ["author"],
+                    "lane": "needs-you",
+                    "box_name": "",
+                })
+            })
+            .collect();
+        let queue: crate::prq::Queue = serde_json::from_value(serde_json::json!({
+            "repo_id": repo_id,
+            "slug": "acme/thing",
+            "viewer": "me",
+            "ai": false,
+            "prs": prs,
+            "blind_spots": [],
+            "whole": whole,
+        }))
+        .expect("a queue in the shape prq writes one");
+        crate::prq::remember_for_test(&queue);
+    }
+
+    /// The banner names only stops a person can reach — and the panel cannot name one the banner
+    /// has never heard of (SKEIN-241).
+    ///
+    /// The reported failure, in order: the train stops on a pull request, a human merges it on
+    /// GitHub, it leaves the queue, and the orange block row above the whole application goes on
+    /// naming it. Clicking it opens a queue without it; both "let it run again" buttons are built
+    /// from the live queue, so there is no way to dismiss it at all.
+    ///
+    /// The second half of the same defect is asserted here rather than in a second test on
+    /// purpose: the two surfaces were two computations over two different sets, and what makes
+    /// that a defect is only visible by comparing them. `trains` is the panel's set and `stops` is
+    /// the banner's, and the departed pull request must be in neither.
+    #[test]
+    fn a_stop_on_a_pull_request_that_has_left_the_queue_is_not_shouted_about() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let flows = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"train","serial":true,"steps":[{"when":[],"do":"merge:squash"}]}]}"#,
+        )
+        .unwrap();
+        stop("gone", 123, "CI is red");
+        stop("gone", 124, "conflicts");
+        // #123 was merged by hand and has left the queue. #124 is still there.
+        remember_open("gone", &[124], true);
+
+        let banner = stops("gone");
+        assert_eq!(
+            banner.iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![124],
+            "the banner still names a pull request that is not in the queue, and no row in the \
+             cockpit can clear it: {banner:?}"
+        );
+        // The file keeps it. The banner is a demand for attention; the file is skein's memory of a
+        // refusal, and forgetting that is how an action that failed gets attempted again.
+        assert_eq!(
+            stopped("gone", 123).as_deref(),
+            Some("CI is red"),
+            "the stop itself was deleted — the workflow may now re-attempt what it refused"
+        );
+
+        // The panel, from the same queue. Nothing it names may be missing from the banner, which
+        // is the drift the two-computations defect was.
+        let carrying = vec![(124u64, "train".to_string())];
+        let panel = trains("gone", &carrying, &flows);
+        assert_eq!(panel.len(), 1);
+        for skipped in &panel[0].stopped {
+            assert!(
+                banner.iter().any(|s| s.number == skipped.number),
+                "the panel names #{} as stopped and the banner does not — the two surfaces are \
+                 reading different sets again",
+                skipped.number
+            );
+        }
+        assert!(
+            !panel[0].line.contains(&123) && !banner.iter().any(|s| s.number == 123),
+            "the merged pull request survives on one surface or the other"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The whole chain, on the one event the train had no way to say anything about (SKEIN-247):
+    /// a reviewer requests changes, and it becomes a stop on the row and a line on the banner.
+    ///
+    /// Four links, and every one of them was broken by the first: `facts_of` reads GitHub's
+    /// verdict, `carries` decides the pull request is still the train's, `perform` runs the step
+    /// written for it, and `stops` puts it where somebody sees it. This is asserted here rather
+    /// than only in `workflow` because the defect was that the chain never STARTED — a unit test
+    /// of `claims` alone would have passed against a train nothing ever reached.
+    ///
+    /// No network: `Act::Flag` is answered before `perform` touches the wire, which is what lets
+    /// the whole path be walked without a GitHub.
+    #[test]
+    fn a_reviewer_requesting_changes_becomes_a_stop_and_a_banner_line() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+
+        // The documented train's first two steps, and its `matches` — docs/pr-workflow.md, "The
+        // train, written down".
+        let flows = crate::workflow::from_bytes(
+            r#"{"workflow":[{"name":"merge-train","serial":true,
+                 "matches":["ready","approved","base:trunk"],
+                 "steps":[
+                   {"when":["changes-requested"],"do":"flag:changes were requested - resolve them to rejoin the train"},
+                   {"when":["label:ci-queue","checks:passing","mergeable","current"],"do":"merge:squash+delete"},
+                   {"when":[],"do":"wait:waiting for GitHub to catch up"}]}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let pr = |decision: &str| -> crate::prq::Pr {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "title": "t", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "labels": [], "review_decision": decision, "mergeable": true,
+                "merge_state": "CLEAN", "checks": "passing", "my_review": "none",
+                "review_is_current": false, "reasons": [], "lane": "needs-you",
+                "box_name": "demo-feat",
+            }))
+            .unwrap()
+        };
+
+        // Approved, and on the train. This is the state it is in the pass BEFORE the review lands.
+        let approved = facts_of(&pr("APPROVED"), "me", "main");
+        assert_eq!(
+            carries("demo", 7, &approved, &flows),
+            Carries::Matched("merge-train".into())
+        );
+
+        // The reviewer says no. One GitHub field changes, and both readings of it change with it.
+        let said_no = facts_of(&pr("CHANGES_REQUESTED"), "me", "main");
+        assert!(
+            !said_no.approved && said_no.changes_requested,
+            "the two facts are built from one `review_decision`, so they can never hold together"
+        );
+        assert_eq!(
+            carries("demo", 7, &said_no, &flows),
+            Carries::Matched("merge-train".into()),
+            "the pull request left the train the moment a reviewer said no — silently, and one \
+             pass before the step written for exactly this could fire"
+        );
+
+        let chosen = crate::workflow::next(&flows[0], &said_no).expect("a step must apply");
+        // #7, not the shared `subject()` helper's #41: everything below reads the stop and the
+        // journal by number, and a mismatch here would assert against an empty file.
+        let seven = Subject {
+            repo_id: "demo",
+            slug: "acme/thing",
+            number: 7,
+            head_sha: "abc",
+            head_ref: "feat",
+        };
+        let outcome = perform(&seven, &flows[0], &chosen, "gho_test");
+        assert_eq!(
+            outcome,
+            Outcome::Stopped("changes were requested - resolve them to rejoin the train".into()),
+            "the step that fired was not the one the reviewer's answer is about"
+        );
+
+        // On the row, in the timeline, and on the banner — the three places a person looks.
+        assert!(stopped("demo", 7).is_some(), "nothing was written down");
+        let timeline = journal("demo", 7);
+        assert_eq!(
+            timeline
+                .iter()
+                .map(|e| (e.kind.as_str(), e.step))
+                .collect::<Vec<_>>(),
+            vec![("stopped", 1)],
+            "the journal does not say which step stopped it: {timeline:?}"
+        );
+        remember_open("demo", &[7], true);
+        assert_eq!(
+            stops("demo").iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![7],
+            "the stop never reached the banner the counts poll draws"
+        );
+
+        // And the train passes it over rather than parking on it, which is the point of stopping
+        // it rather than leaving it carried and idle.
+        let line = trains(
+            "demo",
+            &[
+                (7, "merge-train".to_string()),
+                (9, "merge-train".to_string()),
+            ],
+            &flows,
+        );
+        assert_eq!(
+            line[0].front,
+            Some(9),
+            "a stopped pull request held the line"
+        );
+
+        std::env::remove_var("SKEIN_PR_WORKFLOWS");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A clear that could not be written says so, and puts nothing in the timeline (SKEIN-249).
+    ///
+    /// The reported failure: a person presses "let it run again", the stops file cannot be
+    /// written, and all three of the things they can see say it worked — the button answers
+    /// `{"ok": true}`, the journal gains a line saying the stop was cleared, and the stop is still
+    /// on disk. The train never moves, and nothing anywhere disagrees with the story.
+    ///
+    /// This is a claim about ORDER, so it is asserted on the two things order decides: what came
+    /// back, and what the timeline says. The journal is the sharper of the two — a `Result` nobody
+    /// reads is a smaller lie than a record of an act that did not happen, because the record
+    /// outlives the press and is what somebody debugging this reads a week later.
+    ///
+    /// The FILE is made read-only, not the directory, and that is the whole of the setup: the
+    /// stops file already exists by the time anybody clears anything, and `std::fs::write` opens
+    /// an existing path for truncation — which needs write permission on the file and none on the
+    /// directory. A read-only directory would not have reproduced this at all. It is also the
+    /// report's own repro (mode 0400), and it stands in for the two causes nobody can arrange in a
+    /// test: a read-only host state directory, and a full disk.
+    #[test]
+    fn a_clear_that_could_not_be_written_reports_it_and_journals_nothing() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        stop("demo", 41, "CI is red");
+        assert_eq!(stopped("demo", 41).as_deref(), Some("CI is red"));
+
+        let file = crate::prq::review_dir("demo").join("workflow-stops.json");
+        let mode = |bits: u32| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(bits)).unwrap();
+        };
+        mode(0o400);
+        let refused = clear("demo", 41);
+        mode(0o600);
+
+        let why = refused.expect_err(
+            "a clear that never reached disk answered the button `ok` — the person is told the \
+             workflow may act again, and it is still stopped",
+        );
+        assert!(
+            why.contains("#41") && why.contains("still stopped"),
+            "the refusal does not say which pull request is still stopped: {why}"
+        );
+        assert_eq!(
+            stopped("demo", 41).as_deref(),
+            Some("CI is red"),
+            "the stop is gone from disk after a write that failed"
+        );
+        assert!(
+            !journal("demo", 41).iter().any(|e| e.kind == "cleared"),
+            "the timeline says a person lifted this stop, and nobody did: {:?}",
+            journal("demo", 41)
+        );
+
+        // And the same press through the route's own entry point, which is what the cockpit calls
+        // — `apply` must not answer Ok for a clear that did not happen.
+        mode(0o400);
+        let refused = apply("demo", 41, None, false, true);
+        mode(0o600);
+        assert!(
+            refused.is_err(),
+            "apply swallowed the failure, so the row reports success"
+        );
+
+        // Cleared for real: the write lands, the timeline gains its line, and it is idempotent —
+        // a second press has nothing to do and is not a failure.
+        clear("demo", 41).expect("a writable stops file must clear");
+        assert_eq!(stopped("demo", 41), None);
+        assert_eq!(
+            journal("demo", 41)
+                .iter()
+                .filter(|e| e.kind == "cleared")
+                .count(),
+            1,
+            "the clear that DID happen is missing from the timeline, or is in it twice"
+        );
+        clear("demo", 41).expect("clearing a pull request with no stop is not a failure");
+
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A queue that could not see everything silences nothing.
+    ///
+    /// The direction this must fail in. A refresh that went dark produces the same empty `prs`
+    /// list as a repo with nothing open, and reading that as "every stop is dismissible" would
+    /// take every banner in the fleet down for one rate-limit window — SKEIN-229's failure through
+    /// a different file. Both the partial queue and the repo skein has never read must show
+    /// everything the file holds.
+    #[test]
+    fn a_queue_that_did_not_see_everything_hides_no_stop() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        stop("blind", 7, "CI is red");
+        stop("blind", 9, "conflicts");
+
+        // Never read at all — the cold start. Absence is evidence about skein, not about #7.
+        assert_eq!(
+            stops("blind").iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![7, 9],
+            "a repo with no queue on this machine had its stops hidden"
+        );
+
+        // Read, and cut off at its page: every pull request past the page is absent for a reason
+        // that has nothing to do with it.
+        remember_open("blind", &[], false);
+        assert_eq!(
+            stops("blind").iter().map(|s| s.number).collect::<Vec<_>>(),
+            vec![7, 9],
+            "a partial queue was read as proof that nothing is open"
+        );
+
+        // And the whole answer, which is allowed to be empty: it answered.
+        remember_open("blind", &[], true);
+        assert!(
+            stops("blind").is_empty(),
+            "a queue that saw everything and found nothing open still shouted about its stops"
+        );
 
         std::env::remove_var("SKEIN_HOME");
     }

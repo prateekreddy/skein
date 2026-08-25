@@ -76,11 +76,14 @@ function world(opts = {}) {
     let revComposing = null;
     // SKEIN-159's keyboard state, referenced by revRow (sel/flash/held) and revHold (last act).
     let revSel = null, revFlash = "", revLastActKey = "";
-    let revReading = ${opts.reading ? `{ repo: "acme", number: 7 }` : "null"};
+    let revReading = ${opts.reading ? `{ repo: "acme", number: 7, head_sha: ${JSON.stringify(opts.at || "")} }` : "null"};
     let revQueue = { prs: ${JSON.stringify(opts.prs || [])} };
     let revOpen = new Set(), revSums = new Map(), revCommonChips = new Set();
     const revFlows = new Map();
-    const revDiffs = new Map(Object.entries(${JSON.stringify(opts.diffs || {})}));
+    // Keyed repo#number#sha (SKEIN-254): the diff is filed under the COMMIT it is a diff of, and
+    // the reading view asks for the commit it opened, so a moved head simply misses.
+    const revDiffs = new Map(${JSON.stringify(
+      opts.at ? [["acme#7#" + opts.at, { head_sha: opts.at, diff: "+x" }]] : [])});
     const revNotes = new Map();
     let renders = 0;
     const renderReview = () => { renders++; };
@@ -93,6 +96,9 @@ function world(opts = {}) {
     const toast = said => toasts.push(said);
     ${grab("esc")}
     ${grab("rk")}
+    ${grab("revDiffKey")}
+    ${grab("revReadingKey")}
+    ${grab("revDiffRead")}
     ${grab("REV_UNDO_MS")}
     ${grab("revPending")}
     ${grab("revDecided")}
@@ -132,8 +138,15 @@ function world(opts = {}) {
     ${grab("revApproveWithReviewHtml")}
     ${grab("revDraftSection")}
     ${grab("revCritActsHtml")}
+    // SKEIN-251: the age cell renders the lane's own sort key, so the row needs the order.
+    ${grab("revWaitedSince")}
+    ${grab("revSortAt")}
+    ${grab("revSortWord")}
     ${grab("revDraftAtHead")}
     ${grab("revReadyChip")}
+    // SKEIN-275: the row also states the ABSENCE of a drafted review, so revRow needs it.
+    ${grab("revNoDraftWhy")}
+    ${grab("revNoDraftChip")}
     // The row's own read control (SKEIN-228).
     ${grab("revReadAgain")}
     ${grab("revRow")}
@@ -177,7 +190,7 @@ function world(opts = {}) {
 const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => setTimeout(r, 0)); };
 
 const SHA = "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1";
-const READING = { reading: true, diffs: { "acme#7": { head_sha: SHA, diff: "+x" } } };
+const READING = { reading: true, at: SHA };
 const PR = { number: 7, repo_id: "acme", title: "the change", author: "sam", lane: "needs-you",
              url: "https://github.com/acme/skein/pull/7", updated_at: "2026-08-20T00:00:00Z",
              my_review: "none", review_is_current: false, draft: false, reasons: ["reviewer"] };

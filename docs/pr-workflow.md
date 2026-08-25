@@ -138,9 +138,9 @@ that fails and say so. Three decisions, made by the owner:
 
 `expectedHeadOid` above is the anchor discipline — prove the thing is what you think before acting
 on it. It is worth writing down that **two of the train's four acts carry it and two do not**,
-because the code's own comment reads as though all four did — see
-`grep -n 'passed to every action' src/prwork.rs` — and that is the more dangerous direction to be
-wrong in.
+because the code's own comment used to read as though all four did, and that is the more dangerous
+direction to be wrong in. It says so now — see
+`grep -n 'anchors the two acts that can carry it' src/prwork.rs`.
 
 | act | carries the head skein decided on? | where |
 |---|---|---|

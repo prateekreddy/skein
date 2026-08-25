@@ -895,7 +895,14 @@ fn chunk_frame(chunk: &[u8]) -> Option<Vec<u8>> {
 
 impl AgentWrite {
     /// Open a write, or decline. `None` ⇒ nothing was sent and `sbx exec` is free to do it instead.
-    fn begin(place: &Place, script: &str, timeout: Duration) -> Option<Self> {
+    ///
+    /// `timeout` is the **box-side child's** budget and `stall` is the **host's patience with the
+    /// wire**; they are two different questions and passing one number for both is what SKEIN-269
+    /// found. An upload's child may legitimately run for an hour, so `timeout` is an hour — and
+    /// that hour was also what the socket deadlines got, which meant a box that accepted the
+    /// connection and then serviced nothing held this thread, and the request behind it, for the
+    /// full hour with nothing said. A wire that is moving no bytes is not a slow upload.
+    fn begin(place: &Place, script: &str, timeout: Duration, stall: Duration) -> Option<Self> {
         let (port, token) = agent_target()?;
         // A connection of its own, never the held one. A write takes as long as its body is big,
         // and the held connection is what liveness, resources and the board poll through — an
@@ -916,8 +923,11 @@ impl AgentWrite {
         if meta.len() > MAX_META {
             return None;
         }
-        stream.set_read_timeout(Some(timeout)).ok();
-        stream.set_write_timeout(Some(timeout)).ok();
+        // The wire's deadlines, not the child's. `push` blocking means the box has stopped reading;
+        // the read in `finish` happens only after the body has ended, so the verdict on it is a
+        // moment away or is never coming. Neither is a reason to wait out the child's whole budget.
+        stream.set_read_timeout(Some(stall)).ok();
+        stream.set_write_timeout(Some(stall)).ok();
         // Chunked, because the caller does not always know the length: an upload is streamed from
         // the browser through skein into the box, and buffering it on the host to count it would
         // undo the whole point of streaming.
@@ -1527,8 +1537,16 @@ impl Place {
     /// The handle is for callers that have the body arriving in pieces rather than in hand — an
     /// upload off a browser socket. Callers holding the whole thing want [`Place::write`], which is
     /// this with the pieces filled in.
-    pub fn begin_write(&self, script: &str, timeout: Duration) -> Option<AgentWrite> {
-        AgentWrite::begin(self, script, timeout)
+    ///
+    /// `timeout` is how long the script may run in the box; `stall` is how long the host will wait
+    /// on a socket carrying nothing. See [`AgentWrite::begin`] for why they are separate.
+    pub fn begin_write(
+        &self,
+        script: &str,
+        timeout: Duration,
+        stall: Duration,
+    ) -> Option<AgentWrite> {
+        AgentWrite::begin(self, script, timeout, stall)
     }
 
     /// Run `script` with `body` on its **stdin**.
@@ -1544,8 +1562,12 @@ impl Place {
     /// or three times however healthy the transport was.
     pub fn write(&self, script: &str, body: &[u8], timeout: Duration) -> Result<(), String> {
         // Over the cap it is `sbx exec -i`, which streams from a pipe and has no ceiling at all.
+        // One budget for both here, which is today's behaviour kept deliberately: the caller holds
+        // the whole body, so there is no streaming for a stall to be measured against, and the
+        // scripts that come through here install things and may legitimately be quiet while they
+        // run. The upload path is the one that streams, and it passes its own.
         if body.len() as u64 <= AGENT_WRITE_CAP {
-            if let Some(mut write) = self.begin_write(script, timeout) {
+            if let Some(mut write) = self.begin_write(script, timeout, timeout) {
                 // No `?`-then-fall-back here, deliberately: the script is already running in the
                 // box, so a failure is the box's answer and not a reason to send it twice.
                 write.push(body)?;
@@ -2120,7 +2142,7 @@ mod tests {
         // the chunk framing between them: a missing CRLF or a miscounted length shows up only here,
         // and shows up as a file that is subtly wrong rather than as an error.
         let mut streamed = fleet
-            .begin_write(&script, Duration::from_secs(30))
+            .begin_write(&script, Duration::from_secs(30), Duration::from_secs(30))
             .expect("the agent to take a streamed write");
         for piece in body.chunks(9_973) {
             streamed.push(piece).unwrap();
@@ -2137,7 +2159,7 @@ mod tests {
         // And an empty *piece* mid-stream is the same hazard from the other direction: a body
         // stream may yield one, and it must not be mistaken for the end of the body.
         let mut interrupted = fleet
-            .begin_write(&script, Duration::from_secs(30))
+            .begin_write(&script, Duration::from_secs(30), Duration::from_secs(30))
             .expect("the agent to take a streamed write");
         interrupted.push(b"before").unwrap();
         interrupted.push(b"").unwrap();
@@ -2194,8 +2216,85 @@ mod tests {
         // But not for a write, and the refusal comes with nothing on the wire, so `sbx exec` is
         // still free to do it.
         assert!(own_sandbox("fleet")
-            .begin_write("cat > /tmp/x", Duration::from_secs(10))
+            .begin_write(
+                "cat > /tmp/x",
+                Duration::from_secs(10),
+                Duration::from_secs(10)
+            )
             .is_none());
+    }
+
+    /// A box that takes the write and never confirms it is given up on at the STALL, not at the
+    /// script's own budget (SKEIN-269).
+    ///
+    /// The two were one number, and one number cannot tell "this upload is legitimately an hour
+    /// long" from "this box has stopped answering" — so the second was waited out as though it were
+    /// the first, holding the request and the blocking thread carrying it for the whole hour with
+    /// nothing said. Here the budget is an hour and the stall is well under a second, and the point
+    /// of the test is which of the two the failure arrives on.
+    ///
+    /// The fake agent answers `/health` as a current one — so the write is accepted, which is what
+    /// makes this the stall case rather than the decline case — and then reads the body and says
+    /// nothing at all, which is the shape of a box whose child has wedged.
+    #[test]
+    fn a_write_the_box_never_confirms_ends_at_the_stall_not_at_the_budget() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    // `/health` first, answered as the current protocol so the write is taken.
+                    let mut seen = [0u8; 4096];
+                    let _ = stream.read(&mut seen);
+                    let body = format!("skein-fleet-agent {AGENT_PROTOCOL} test");
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    // Then the write: read whatever arrives and answer none of it. The socket stays
+                    // open, which is precisely why a deadline is the only thing that ends this.
+                    loop {
+                        match stream.read(&mut seen) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(30));
+                });
+            }
+        });
+        fs::write(home.join("fleet-agent.token"), "s3cret").unwrap();
+        point_config_at(&home, port);
+
+        let mut write = own_sandbox("fleet")
+            .begin_write(
+                "cat > /tmp/x",
+                Duration::from_secs(3600),
+                Duration::from_millis(300),
+            )
+            .expect("the agent to accept the write");
+        write.push(b"some bytes").unwrap();
+        let began = std::time::Instant::now();
+        let said = write.finish();
+        let spent = began.elapsed();
+
+        assert!(
+            said.is_err(),
+            "a box that never confirms must be a failure, not a success: {said:?}"
+        );
+        assert!(
+            spent < Duration::from_secs(10),
+            "the wait must end at the stall (300ms), not at the script's hour-long budget — \
+             it took {spent:?}"
+        );
     }
 
     // A write that fails used to report `sbx exec exited 1` and drop the reason on the floor, which

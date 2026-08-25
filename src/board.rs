@@ -14,14 +14,14 @@
 use crate::diff::{read_diffstat_file, DiffStat};
 use crate::fleet::{box_disk_limit, fleet_disk_usage};
 use crate::place::{fleet_sandbox, placed_boxes, shared_record};
-use crate::registry::{all_sandboxes, store_for_box, Sandbox};
+use crate::registry::{all_sandboxes, Sandbox};
 use crate::repos::{branch_from_box, launch_spec_agent, launch_spec_branch, repo_for_box};
 use crate::runtime::{default_agent, valid_runtime};
 use crate::sbx::{box_liveness, fleet_boxes, git_branch_for, Liveness};
 use crate::signals::{
-    classify_message, classify_pane, current_status_detail, current_task, fuse_status,
-    is_generic_wait, pane_usable, probe_is_stale, read_pane_raw, screen_health, session_signal,
-    status_edge, title_activity, Pause, Screen, TITLE_FRESH_SECS,
+    classify_message, classify_pane, current_status_detail, current_task, fuse_status, hook_health,
+    is_generic_wait, pane_usable, read_pane_raw, screen_health, session_signal, status_edge,
+    title_activity, Pause, Screen, TITLE_FRESH_SECS,
 };
 use crate::tracking::sync_docs_available;
 use crate::util::{first_line, shorten};
@@ -240,25 +240,13 @@ pub fn load_views() -> Result<Vec<BoxView>, String> {
             } else {
                 classify_message(signal_text.as_deref().unwrap_or(""), blocked)
             };
-            // Hook-health: distinguish never-wired probes from sessions still running an older
-            // box-side contract. Silence alone is normal between lifecycle events; revision drift
-            // is not, because the old session may emit a payload shape the new host misreads.
-            let hook_health = if live == Some(Liveness::Running) {
-                let store = store_for_box(&name);
-                let dark = store.as_ref().is_none_or(|st| {
-                    !st.join("hook-log").join(format!("{name}.jsonl")).exists()
-                        && !st.join("status").join(format!("{name}.json")).exists()
-                });
-                if dark {
-                    "never".to_string()
-                } else if store.as_ref().is_some_and(|st| probe_is_stale(st, &name)) {
-                    "stale".to_string()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
+            // Hook-health: never-wired probes, a signal that turned out to be another box's, and
+            // sessions still running an older box-side contract, told apart. This used to be
+            // spelled out here while the refusal it discloses lived in `signals.rs`, which is
+            // exactly the drift `pane_usable` was named to stop on the screen half: a signal could
+            // be refused there and announced as healthy here. It is `hook_health` now, beside
+            // `signal_is_ours`, so the disclosure cannot be one reason short of the refusal again.
+            let hook_health = hook_health(&name, live == Some(Liveness::Running)).to_string();
             // The other half's health: a box can be perfectly wired for hooks and still be blind to
             // its own screen (no observer, an observer that stopped, a screen we can't parse), which
             // is invisible unless we say it.
@@ -381,8 +369,16 @@ pub struct BoxView {
     /// each wants a different move from you, so the row names it instead of saying "decision".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub blocked_kind: String,
-    /// probe wiring health: "" = fine; "never" = the sandbox is Running but no probe has EVER
-    /// reported (no heartbeat, no status file) — hooks dark for this box; the cockpit badges it.
+    /// probe wiring health, and the hook half's answer to [`screen_health`](crate::signals::screen_health):
+    /// "" = fine; "never" = the sandbox is Running but no probe has EVER reported (no heartbeat, no
+    /// status file) — hooks dark for this box; "misfiled" = a signal IS there under this box's name
+    /// and says it is a different box's, so it was refused; "stale" = the session predates the
+    /// installed probe contract. See [`crate::signals::hook_health`] for what each one asks of a
+    /// person; the cockpit badges them.
+    ///
+    /// `misfiled` is a separate value rather than folded into `never` because the two are the same
+    /// row and different jobs: `never` is a box to reattach, `misfiled` is a store to clean, and
+    /// until this existed the second rendered as the first.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hook_health: String,
     /// the *other* half's health — whether this box's own screen is being read, and if not why:

@@ -95,6 +95,71 @@ pub struct FailedCheck {
 /// pipeline, and naming five says "at least these" without turning the row into a log.
 pub const FAILING_CHECKS_SHOWN: usize = 5;
 
+/// One review thread on a pull request — **without a word of what anybody said in it**.
+///
+/// The omission is the design (SKEIN-300, SKEIN-301), not a shortcut. An inline thread is drawn as
+/// who opened it, when, a link, and a resolve button; its comment bodies are never rendered, so
+/// fetching them would buy nothing and cost the most expensive thing in the queue. SKEIN-287 cut
+/// this list's payload from 155 KB to 12 KB, and [`PR_FRAGMENT`] is asked for up to
+/// [`SEARCH_PAGE`] pull requests at a time across every membership rule — so a body added here is
+/// a body multiplied by a hundred, on the one request `acme/thing` already answers with a 504
+/// (SKEIN-278). If a thread's text is ever wanted, it is one PR's own request, not this one's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewThread {
+    /// GitHub's node id for the thread. Load-bearing rather than decoration: it is the argument
+    /// `resolveReviewThread` takes, so a thread fetched without it cannot be resolved from skein.
+    pub id: String,
+    /// Has somebody marked it resolved?
+    #[serde(default)]
+    pub resolved: bool,
+    /// Does it hang off lines the head has since replaced? An outdated thread is still open, and
+    /// still yours to answer — it is a different sentence, not a resolved one.
+    #[serde(default)]
+    pub outdated: bool,
+    /// Who opened it, and when — the FIRST comment's author and `createdAt`. Empty when GitHub did
+    /// not say, which is the same rule every other field here follows: absence stays absent.
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub started_at: String,
+    /// Where the thread lives on GitHub — the first comment's permalink, which is what a
+    /// `PullRequestReviewThread` has instead of a url of its own.
+    #[serde(default)]
+    pub url: String,
+}
+
+/// One PR-level comment — the conversation, not the code review. **These carry their bodies**,
+/// because these are the ones the panel renders.
+///
+/// The asymmetry with [`ReviewThread`] above is deliberate and is the whole cost decision: bodies
+/// are fetched exactly where they are drawn and nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrComment {
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+/// Somebody GitHub is still waiting on for a review — a person, or a team.
+///
+/// [`Pr::review_decision`] answers "does this need somebody"; it cannot answer "who", and "who" is
+/// the question that was actually asked. A team is kept as a team rather than flattened into a
+/// login, because the sentence a row wants to write is different: *"waiting on @alice"* and
+/// *"waiting on acme/core"* are not interchangeable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRequest {
+    /// A user's login, or a team as `org/team`.
+    pub name: String,
+    /// Is this a team rather than a person?
+    #[serde(default)]
+    pub team: bool,
+}
+
 /// One PR in the queue.
 ///
 /// Fields are pulled defensively from `gh`'s JSON: a field this version of `gh` does not emit
@@ -201,8 +266,88 @@ pub struct Pr {
     /// push), so the page needs to know which story to tell. Defaulted for remembered queues.
     #[serde(default)]
     pub snoozed: bool,
+    /// The review threads on this pull request, newest [`REVIEW_THREADS_FETCHED`] of them, with no
+    /// comment bodies — see [`ReviewThread`] for why the bodies are not here.
+    ///
+    /// Defaulted, like every field added after the first remembered queue was written: a queue on
+    /// disk from an older skein has no such key, and without a default **the whole queue fails to
+    /// parse**, which turns a new field into an empty pane rather than a missing line.
+    #[serde(default)]
+    pub review_threads: Vec<ReviewThread>,
+    /// How many threads there are in total, where GitHub said. The cap above is a cap, and a list
+    /// that is short must be able to say so rather than read as a pull request with nothing open
+    /// on it. `None` for a queue remembered before this field existed — not `0`, which would be a
+    /// claim.
+    #[serde(default)]
+    pub review_threads_total: Option<u64>,
+    /// The pull request's own conversation, the last [`PR_COMMENTS_FETCHED`] of them, bodies
+    /// included.
+    ///
+    /// The LAST rather than the first: a conversation is read from its end, and the comment that
+    /// decides anything is the recent one. A pull request with four hundred comments is exactly
+    /// what this cap exists for — the whole thread would be fetched a hundred times over in one
+    /// batched request.
+    #[serde(default)]
+    pub comments: Vec<PrComment>,
+    /// How many comments there are in total, where GitHub said — see
+    /// [`Pr::review_threads_total`] for why it is an `Option`.
+    #[serde(default)]
+    pub comments_total: Option<u64>,
+    /// Who still owes a review — people and teams GitHub is waiting on. See [`ReviewRequest`].
+    #[serde(default)]
+    pub review_requests: Vec<ReviewRequest>,
     /// The deterministic box name for this branch — whether or not one exists yet.
     pub box_name: String,
+}
+
+/// A placeholder pull request for a test to build on, with the fields nobody can guess supplied.
+///
+/// **Why this is here rather than in each test module.** `Pr` is built by hand in four fixtures
+/// across `src/review.rs` and `src/queue.rs`, every one of them exhaustive — so adding a field to
+/// it broke three files that had no opinion about the field (SKEIN-301). The fixtures in
+/// `src/prwork.rs` never broke, because they build theirs through `serde_json::from_value` and the
+/// `#[serde(default)]`s absorb a new key; this is the same tolerance for the ones that want a
+/// struct literal.
+///
+/// Used as `Pr { lane: Lane::Waiting, ..blank_pr(7, "abc") }`, so what a test cares about stays
+/// visible on the line and everything else stops being its problem. `NeedsYou` and `Reviewer` are
+/// the values a queue fixture wants most often, and both are stated rather than defaulted where a
+/// test turns on them.
+#[cfg(test)]
+pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
+    Pr {
+        number,
+        title: "t".into(),
+        author: "someone".into(),
+        url: String::new(),
+        head_ref: "feat".into(),
+        head_sha: head_sha.into(),
+        base_ref: "main".into(),
+        draft: false,
+        updated_at: String::new(),
+        committed_at: String::new(),
+        settled: true,
+        labels: Vec::new(),
+        review_decision: String::new(),
+        mergeable: None,
+        merge_state: String::new(),
+        additions: None,
+        deletions: None,
+        changed_files: None,
+        checks: "none".into(),
+        failing_checks: Vec::new(),
+        my_review: "none".into(),
+        review_is_current: false,
+        snoozed: false,
+        review_threads: Vec::new(),
+        review_threads_total: None,
+        comments: Vec::new(),
+        comments_total: None,
+        review_requests: Vec::new(),
+        reasons: vec![Reason::Reviewer],
+        lane: Lane::NeedsYou,
+        box_name: String::new(),
+    }
 }
 
 /// A repo's queue, plus an honest account of what could not be looked at.
@@ -540,12 +685,19 @@ pub fn slug_for_write(repo: &Repo) -> Result<String, String> {
 
 // ───────────────────────────── viewer identity ─────────────────────────────
 
-/// Your GitHub login and the teams you belong to, as `gh` reports them.
+/// Your GitHub login, and the teams you belong to **when GitHub would say** — `None` when it
+/// would not.
 ///
-/// Teams are best-effort: `gh api user/teams` needs `read:org`, which a perfectly good `gh` login
-/// may lack. When it fails the caller records a blind spot instead of quietly returning a queue
-/// missing every team-requested review — the one omission that would cost you a merge.
-pub fn viewer() -> Result<(String, Vec<String>), String> {
+/// Teams are best-effort: `user/teams` needs `read:org`, which a perfectly good login may lack.
+/// The two outcomes used to be the same empty list, and they are different facts (SKEIN-262):
+/// *"you are in no teams"* means the team rules that exist have all been asked, and *"GitHub would
+/// not tell me"* means a whole class of membership was never asked about at all. Only the second
+/// makes the queue's open list incomplete, and only the second earns the `read:org` sentence — a
+/// solo account was getting a permanent instruction to fix something that was not broken.
+///
+/// This is [`what_github_said`]'s rule in the shape a `Result` inside a `Result` would give: an
+/// empty list is an ANSWER and is used as one; a refusal is not turned into one.
+pub fn viewer() -> Result<(String, Option<Vec<String>>), String> {
     let token = host_token()?;
     let user = crate::github::get_json("/user", &token).map_err(|e| {
         // Which credential this ran on, and every way to change it. The queue is about *your* pull
@@ -566,19 +718,21 @@ pub fn viewer() -> Result<(String, Vec<String>), String> {
     if login.is_empty() {
         return Err("GitHub returned no login for this token".into());
     }
-    // Best-effort: `read:org` is a scope a perfectly good token may lack, and the caller records a
-    // blind spot rather than quietly returning a queue missing every team-requested review.
+    // Best-effort, and the failure is returned AS a failure. A body that is not an array is the
+    // same non-answer as a 403: neither is GitHub telling us the list is empty.
     let teams = crate::github::get_json("/user/teams?per_page=100", &token)
         .ok()
         .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|t| {
-            let org = t.get("organization")?.get("login")?.as_str()?;
-            let slug = t.get("slug")?.as_str()?;
-            Some(format!("{org}/{slug}"))
-        })
-        .collect();
+        .map(|teams| {
+            teams
+                .iter()
+                .filter_map(|t| {
+                    let org = t.get("organization")?.get("login")?.as_str()?;
+                    let slug = t.get("slug")?.as_str()?;
+                    Some(format!("{org}/{slug}"))
+                })
+                .collect()
+        });
     Ok((login, teams))
 }
 
@@ -748,6 +902,10 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     let stored = repo_slug(repo)
         .ok_or("this repo has no GitHub remote, so it has no pull requests to review")?;
     let (login, teams) = viewer()?;
+    // `None` is "GitHub would not say", which is a different fact from "you are in no teams" — see
+    // [`viewer`]. Everything below reads the list; only the prunes read the difference.
+    let teams_unknown = teams.is_none();
+    let teams = teams.unwrap_or_default();
     let mut blind_spots = Vec::new();
     // What this repository is called NOW. A name is not an identifier: `acme/gadget-demo`
     // became `acme/thing`, and because GitHub's search matches a stale name against nothing
@@ -769,10 +927,13 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         }
         None => stored,
     };
-    if teams.is_empty() {
+    if teams_unknown {
         // Short, and it names the cure. A warning that cannot be acted on is shown on every load
         // forever, and a banner that is always there stops being read — so the fix belongs in the
         // sentence, not in documentation somewhere behind it.
+        //
+        // On `teams_unknown` rather than on an empty list: an account that is genuinely in no teams
+        // was being told, on every refresh for ever, to fix a scope that was not the problem.
         blind_spots.push(
             "team review requests are missing — `gh` cannot list your teams. Fix: gh auth refresh -s read:org"
                 .into(),
@@ -810,7 +971,15 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // A whole-request failure produces exactly the same empty list as a repo with nothing waiting,
     // so the count cannot tell them apart; the searches can, and they say so here rather than
     // leaving the prune to infer it (SKEIN-229).
-    let mut answered = true;
+    //
+    // **A rule that could not be WRITTEN counts too** (SKEIN-262). Without `read:org` the loop
+    // below adds no `team-review-requested:` search at all, so a pull request whose only claim on
+    // you is a team review request cannot appear in this list — and the four personal searches all
+    // answer, so nothing here noticed. The prunes then read that absence as "closed" and deleted
+    // the owner's set-aside and its snooze, silently, on every badge poll, permanently on a fleet
+    // whose token lacks the scope (SKEIN-239). A search that failed and a search that was never
+    // possible are different things and the same hole.
+    let mut answered = !teams_unknown;
     // A whole-request failure — the network, a 5xx, the rate-limit hold — is every search failing
     // at once, and it is said ONCE.
     //
@@ -845,6 +1014,22 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
             Vec::new()
         }
     };
+    // **A repo that is being asked in narrow batches says so** (SKEIN-278). The narrowing is
+    // adaptive and invisible from the outside: the queue looks identical whether it cost one
+    // request or four, so a repository that has quietly become expensive to refresh would never be
+    // anything the owner could read. It is not a blind spot in the completeness sense — every
+    // search still answered — which is exactly what this list is for beside `whole`.
+    //
+    // It ends itself. The memo behind it holds a width GitHub ANSWERED and expires, so the sentence
+    // is gone the refresh after the wide request works again; nothing needs clearing by hand.
+    if let Some(width) = answered_batch_width(&slug).filter(|w| *w < searches.len()) {
+        blind_spots.push(format!(
+            "{slug}'s {} membership searches are being asked {width} at a time — GitHub would not \
+             answer them in one request, so every refresh of this repo costs more than one. Skein \
+             tries the single request again within the hour.",
+            searches.len()
+        ));
+    }
     for ((search, reason), outcome) in searches.iter().zip(outcomes) {
         let found = match outcome {
             Ok(found) => found,
@@ -865,15 +1050,21 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         // rows, absent from the badge, and until this line nothing anywhere said a number had been
         // cut off. GitHub is asked how many it matched, so the sentence can carry the size of the
         // hole rather than only its existence.
+        //
+        // The count it says out loud is what actually ARRIVED, not `SEARCH_PAGE` (SKEIN-280). The
+        // sentence used to name the page size because the page was all a refresh ever read; now it
+        // follows the cursor, so a rule that is still short after five pages has read five hundred
+        // and saying "the first 100" would understate its own queue by four hundred pull requests.
+        let read = found.items.len();
         if !found.whole {
             blind_spots.push(match found.matched {
                 Some(n) => format!(
-                    "the `{search}` query matched {n} pull requests and skein read the first \
-                     {SEARCH_PAGE} — the rest are missing from this queue and from its count"
+                    "the `{search}` query matched {n} pull requests and skein read {read} of them \
+                     — the rest are missing from this queue and from its count"
                 ),
                 None => format!(
-                    "the `{search}` query filled its page of {SEARCH_PAGE}, so there are probably \
-                     more pull requests it did not reach — they are missing from this queue"
+                    "the `{search}` query filled every page skein followed ({read} pull requests) \
+                     and GitHub says there are more — they are missing from this queue"
                 ),
             });
         }
@@ -1086,19 +1277,64 @@ pub fn remembered_head(repo_id: &str, number: u64) -> Option<String> {
 /// failure is not a wrong dot but a merge of a pull request whose CI failed. `state` is GitHub's
 /// answer over ALL of them and costs nothing to ask for; `totalCount` says how much of the list
 /// this page is. Both are read by [`rollup`]; the contexts are left to NAME what failed.
-const PR_FRAGMENT: &str = r#"
-fragment PrFields on PullRequest {
+/// How many review threads one pull request contributes to the batched answer.
+///
+/// A cap on a list that has no natural end, and it is the SIZE of this request that sets it, not
+/// taste: [`PR_FRAGMENT`] is asked for up to [`SEARCH_PAGE`] pull requests per membership rule, so
+/// every thread here is multiplied by a hundred. Twenty is more open threads than a reviewable pull
+/// request has, and [`Pr::review_threads_total`] carries GitHub's own count beside them so a list
+/// that IS short says so rather than reading as "nothing open".
+///
+/// Threads are cheap only because they carry no bodies — see [`ReviewThread`]. Ten, not twenty:
+/// the measurement in
+/// `the_conversation_is_measured_against_the_answer_it_grew_from` is what set it.
+const REVIEW_THREADS_FETCHED: usize = 10;
+
+/// How many PR-level comments one pull request contributes. **These carry bodies**, so this is the
+/// expensive cap and it is deliberately the smaller one.
+///
+/// The last ten, not the first ten: a conversation is read from its end. The item this came from
+/// names the case exactly — a pull request with four hundred comments must not be the thing that
+/// makes the queue slow — and without a cap that PR would ship its whole history inside a request
+/// that already carries ninety-nine others.
+const PR_COMMENTS_FETCHED: usize = 10;
+
+/// How many outstanding review requests are listed. People and teams together; a pull request
+/// waiting on more than this many reviewers is not a row anybody reads a list of names off.
+const REVIEW_REQUESTS_FETCHED: usize = 20;
+
+/// Built from the caps above rather than spelling them twice. A number written once in the query
+/// and again in the field's doc is a number that drifts, and the thing it would drift about is how
+/// much this request costs.
+static PR_FRAGMENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        r#"
+fragment PrFields on PullRequest {{
   number title url isDraft updatedAt
   headRefName headRefOid baseRefName reviewDecision mergeable mergeStateStatus
   additions deletions changedFiles
-  labels(first: 20) { nodes { name } }
-  author { login }
-  latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
-  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { totalCount nodes {
-    ... on CheckRun { name detailsUrl status conclusion }
-    ... on StatusContext { context targetUrl state }
-  } } } } } }
-}"#;
+  labels(first: 20) {{ nodes {{ name }} }}
+  author {{ login }}
+  latestReviews(first: 30) {{ nodes {{ state author {{ login }} commit {{ oid }} }} }}
+  reviewRequests(first: {asked}) {{ totalCount nodes {{ requestedReviewer {{
+    ... on User {{ login }}
+    ... on Team {{ slug organization {{ login }} }}
+  }} }} }}
+  reviewThreads(first: {threads}) {{ totalCount nodes {{
+    id isResolved isOutdated
+    comments(first: 1) {{ nodes {{ author {{ login }} createdAt url }} }}
+  }} }}
+  comments(last: {comments}) {{ totalCount nodes {{ author {{ login }} body createdAt url }} }}
+  commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state contexts(first: 100) {{ totalCount nodes {{
+    ... on CheckRun {{ name detailsUrl status conclusion }}
+    ... on StatusContext {{ context targetUrl state }}
+  }} }} }} }} }} }}
+}}"#,
+        asked = REVIEW_REQUESTS_FETCHED,
+        threads = REVIEW_THREADS_FETCHED,
+        comments = PR_COMMENTS_FETCHED,
+    )
+});
 
 /// The refresh's one request: `q0..qN`, each an aliased `search` over its own membership rule,
 /// every alias reading the same node body through [`PR_FRAGMENT`].
@@ -1111,19 +1347,27 @@ fragment PrFields on PullRequest {
 /// this request is already the heaviest thing skein sends, and the owner's repo has answered it
 /// with a 504 (SKEIN-278). They are what turns "a hundred came back" from a guess into GitHub's
 /// own statement of how many there were, and give the blind spot a number to say out loud.
+///
+/// `endCursor` is asked for beside `hasNextPage`, and every alias takes an `after` (SKEIN-280).
+/// Knowing a search was cut off is not the same as reading the rest of it, and until this the queue
+/// did the first and never the second: it said "43 are missing" on every refresh, for ever. The
+/// `after` variables are declared `String` rather than `String!` because the FIRST page passes
+/// `null` for every one of them — `after: null` is GraphQL's "from the beginning", so the first
+/// request is byte-for-byte the request it always was apart from these declarations, and a repo
+/// whose searches all fit in one page still costs exactly one request.
 fn batched_query(count: usize) -> String {
     use std::fmt::Write as _;
     let mut vars = String::from("$n: Int!");
     let mut body = String::new();
     for i in 0..count {
-        let _ = write!(vars, ", $q{i}: String!");
+        let _ = write!(vars, ", $q{i}: String!, $a{i}: String");
         let _ = writeln!(
             body,
-            "  q{i}: search(query: $q{i}, type: ISSUE, first: $n) {{ issueCount pageInfo {{ \
-             hasNextPage }} nodes {{ ...PrFields }} }}"
+            "  q{i}: search(query: $q{i}, type: ISSUE, first: $n, after: $a{i}) {{ issueCount \
+             pageInfo {{ hasNextPage endCursor }} nodes {{ ...PrFields }} }}"
         );
     }
-    format!("query({vars}) {{\n{body}}}\n{PR_FRAGMENT}")
+    format!("query({vars}) {{\n{body}}}\n{}", *PR_FRAGMENT)
 }
 
 /// One membership search's answer: the pull requests it returned, and whether that is all of them.
@@ -1143,6 +1387,14 @@ struct Found {
     items: Vec<serde_json::Value>,
     whole: bool,
     matched: Option<u64>,
+    /// Where the next page of THIS search starts, from `pageInfo { endCursor }`.
+    ///
+    /// The only thing that can continue a search, and it is deliberately the only thing: a page is
+    /// followed when GitHub both said there is more AND handed back somewhere to carry on from.
+    /// An answer that says `hasNextPage` and gives no cursor — an older fixture, a shape GitHub
+    /// changes under us — stops the paging rather than guessing an offset, and `whole` stays false
+    /// so the blind spot still says what could not be seen.
+    cursor: Option<String>,
 }
 
 /// How many pull requests one membership search asks GitHub for. A search that comes back with
@@ -1156,17 +1408,123 @@ struct Found {
 /// the page stays where it is and the queue says what it could not see.
 const SEARCH_PAGE: usize = 100;
 
+/// How many pages of one membership rule a refresh will follow — the first plus this many more.
+///
+/// A ceiling rather than "until GitHub stops", because this runs from a poll: the badge refreshes
+/// every repo every few minutes, and a rule matching four thousand open pull requests would spend
+/// forty requests per repo per refresh to build a review queue no person is going to read to the
+/// end of. Five pages is five hundred pull requests **per rule**, which is far past any queue the
+/// owner has and still a bounded worst case.
+///
+/// Hitting it is not silence. The last page's `whole` is false, so [`queue_within`]'s blind spot
+/// says how many were matched and how many were read — the SKEIN-231 sentence, with the hole now
+/// as small as this ceiling can make it.
+const SEARCH_PAGES: usize = 5;
+
 /// Every membership search of one refresh, in ONE GraphQL request — five requests per repo per
-/// refresh was where nearly all of skein's quota went (SKEIN-209).
+/// refresh was where nearly all of skein's quota went (SKEIN-209) — followed to the END of any
+/// rule GitHub says has more (SKEIN-280).
 ///
 /// The outer `Result` is the request: an `Err` means nothing was asked or nothing answered, and
 /// the caller must report **every** search as missing. The inner ones are per search, in the order
 /// given: GraphQL delivers a failed alias as `data.qN: null` plus an `errors` entry whose `path`
 /// names the alias, and that mapping is what keeps each failure its own blind spot — four good
 /// answers are still four good answers, exactly as they were when each search was its own request.
+///
+/// **Paging is the second half of SKEIN-231, not a second mechanism.** That one taught the queue to
+/// say "143 matched, I read 100"; it said it again on every refresh, for ever, because nothing ever
+/// asked for the other 43. Here the cut-off rules — and ONLY those — are asked again with their own
+/// `endCursor`, so a repo whose searches all fit in one page still costs exactly one request, and a
+/// repo with one busy rule costs one more request rather than a bigger one. That direction matters:
+/// [`SEARCH_PAGE`] argues at length that a BIGGER page is the wrong lever, because the batched
+/// request is already the heaviest thing skein sends and `acme/thing` answered it with a 504.
+/// A follow-up page carries one alias, so it is the smallest request in the refresh, not the
+/// largest.
 fn search_prs_all(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, String>>, String> {
-    match one_request(slug, searches) {
-        Ok(found) => Ok(found),
+    // The widest batch GitHub answered anywhere in THIS refresh — the first request, a half after a
+    // split, a follow-up page. Accumulated across the whole refresh rather than written per request
+    // because the halves of a split answer narrower than the batch they came from, and a memo that
+    // believed each half in turn would ratchet a repo down to one search per request (SKEIN-278).
+    let widest = std::cell::Cell::new(0usize);
+    let answered = search_pages(slug, searches, &widest);
+    learn_batch_width(slug, widest.get(), searches.len());
+    answered
+}
+
+/// The paging itself, with the refresh's widest answered batch accumulating into `widest`.
+fn search_pages(
+    slug: &str,
+    searches: &[String],
+    widest: &std::cell::Cell<usize>,
+) -> Result<Vec<Result<Found, String>>, String> {
+    let mut out = one_batch(slug, searches, &vec![None; searches.len()], widest)?;
+    for _ in 0..SEARCH_PAGES {
+        // Which rules GitHub says it has more of AND handed a cursor back for. A `hasNextPage`
+        // with no `endCursor` is not a page anyone can ask for, so it ends the paging with
+        // `whole` still false rather than being guessed at.
+        let more: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, found)| found.as_ref().is_ok_and(|f| !f.whole && f.cursor.is_some()))
+            .map(|(i, _)| i)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        let again: Vec<String> = more.iter().map(|&i| searches[i].clone()).collect();
+        let after: Vec<Option<String>> = more
+            .iter()
+            .map(|&i| out[i].as_ref().ok().and_then(|f| f.cursor.clone()))
+            .collect();
+        // A page that will not come is where this stops. Everything already read stays in the
+        // queue and every unfinished rule keeps `whole: false`, so the refresh degrades into
+        // exactly the answer it gave before paging existed rather than into an error.
+        let Ok(pages) = one_batch(slug, &again, &after, widest) else {
+            break;
+        };
+        for (&i, page) in more.iter().zip(pages) {
+            // A page that failed on its own leaves the rule where it was: partial, and saying so.
+            // Its earlier pages are real pull requests and are not thrown away over a later one.
+            let Ok(page) = page else { continue };
+            let Ok(sofar) = out[i].as_mut() else { continue };
+            sofar.items.extend(page.items);
+            sofar.whole = page.whole;
+            sofar.cursor = page.cursor;
+            // `matched` is GitHub's count of the whole rule and is the same on every page; the
+            // first page's answer is kept so a later page that omits it cannot erase the number
+            // the blind spot is built from.
+            sofar.matched = sofar.matched.or(page.matched);
+        }
+    }
+    Ok(out)
+}
+
+/// One batch of searches at one set of cursors, halved and re-asked when GitHub refuses to take
+/// it whole. The paging above calls this once per page.
+fn one_batch(
+    slug: &str,
+    searches: &[String],
+    after: &[Option<String>],
+    widest: &std::cell::Cell<usize>,
+) -> Result<Vec<Result<Found, String>>, String> {
+    // **A repo that has to be asked in halves is asked in halves, without failing first**
+    // (SKEIN-278). The split below recovers a refresh; it does not remember anything, so
+    // `acme/thing` re-learned it by 504 on every single refresh — one wasted heavy request
+    // per poll per repo, for ever, announcing itself in the fleet's log each time.
+    //
+    // What is remembered is a WIDTH GITHUB ANSWERED, never a refusal — the rule
+    // [`what_github_said`] states for the lookups above it, and the pattern SKEIN-281 names. So the
+    // memo cannot pin a repo shut over a bad minute: the worst it can say is "the last thing that
+    // worked here was three searches at a time", it expires ([`BATCH_WIDTH_LIFE`]) so the wide
+    // batch is tried again, and [`forget_batch_widths`] clears it by hand.
+    if searches.len() > 1 && answered_batch_width(slug).is_some_and(|w| searches.len() > w) {
+        return Ok(split_in_two(slug, searches, after, widest));
+    }
+    match one_request(slug, searches, after) {
+        Ok(found) => {
+            widest.set(widest.get().max(searches.len()));
+            Ok(found)
+        }
         // **Too heavy is not the same as unavailable** (SKEIN-266). Batching took five requests per
         // repo down to one — and made that one the most expensive thing skein sends: five `search`
         // connections of up to a hundred nodes each, every node carrying the whole PR fragment.
@@ -1185,18 +1543,15 @@ fn search_prs_all(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, S
         // sentence back into five. `github::edge_refused` owns that distinction, beside the words
         // it is reading.
         Err(why) if searches.len() > 1 && crate::github::edge_refused(&why) => {
-            let (left, right) = searches.split_at(searches.len() / 2);
-            let mut out = search_prs_all(slug, left)
-                .unwrap_or_else(|e| left.iter().map(|_| Err(e.clone())).collect());
-            out.extend(
-                search_prs_all(slug, right)
-                    .unwrap_or_else(|e| right.iter().map(|_| Err(e.clone())).collect()),
-            );
-            // Told once, on the answer rather than in the log: a refresh that had to split is a
-            // refresh that cost more than it should, and a fleet where that is the normal case
-            // wants to know before it meets the rate limit again.
+            let out = split_in_two(slug, searches, after, widest);
+            // Said where a refusal actually happened, and nowhere else. It used to be said on every
+            // split — which, once a repo needed splitting, was every refresh for ever: the owner
+            // read this line about `acme/thing` over and over, and it was reporting skein
+            // asking a question it already knew the answer to. A split skein chose from what it
+            // learned is not news; a refusal it had not seen coming is.
             eprintln!(
-                "skein: GitHub would not take {slug}'s {} searches in one request ({why}) — asked                  in two",
+                "skein: GitHub would not take {slug}'s {} searches in one request ({why}) — asked \
+                 in two, and the next refresh will start there",
                 searches.len()
             );
             Ok(out)
@@ -1205,9 +1560,109 @@ fn search_prs_all(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, S
     }
 }
 
+/// Ask the same searches as two narrower batches. Each half goes back through [`one_batch`], so a
+/// half GitHub also refuses splits again, and a half it answers records its width.
+fn split_in_two(
+    slug: &str,
+    searches: &[String],
+    after: &[Option<String>],
+    widest: &std::cell::Cell<usize>,
+) -> Vec<Result<Found, String>> {
+    let (left, right) = searches.split_at(searches.len() / 2);
+    let (left_after, right_after) = after.split_at(searches.len() / 2);
+    let mut out = one_batch(slug, left, left_after, widest)
+        .unwrap_or_else(|e| left.iter().map(|_| Err(e.clone())).collect());
+    out.extend(
+        one_batch(slug, right, right_after, widest)
+            .unwrap_or_else(|e| right.iter().map(|_| Err(e.clone())).collect()),
+    );
+    out
+}
+
+/// How long a batch width GitHub answered at stands in for asking again.
+///
+/// The same hour, and the same trade, as `crate::ai`'s `REFUSAL_LIFE` — stated rather than tuned.
+/// What it costs is ONE wide request per hour per repo on a fleet whose GitHub genuinely sheds
+/// them. What it buys is that nothing skein learned from a bad afternoon can outlive the afternoon:
+/// a repo narrowed to two searches at a time widens back on its own, with nobody pressing anything.
+const BATCH_WIDTH_LIFE: Duration = Duration::from_secs(60 * 60);
+
+/// The widest batch of membership searches GitHub has **answered** for a repository, and when.
+///
+/// Every number in here is an answer, never a refusal — see [`one_batch`]. It is read to decide
+/// where to START a refresh, and a stale one costs the refresh nothing worse than a split it did
+/// not need.
+static BATCH_WIDTHS: Mutex<BTreeMap<String, (usize, i64)>> = Mutex::new(BTreeMap::new());
+
+/// Forget where the refreshes start, for tests and for a person who has just fixed their GitHub.
+pub fn forget_batch_widths() {
+    if let Ok(mut seen) = BATCH_WIDTHS.lock() {
+        seen.clear();
+    }
+}
+
+/// The remembered width, **if it still describes anything**.
+fn answered_batch_width(slug: &str) -> Option<usize> {
+    let seen = BATCH_WIDTHS.lock().unwrap_or_else(|e| e.into_inner());
+    let (width, at_ms) = seen.get(slug).copied()?;
+    (now_ms().saturating_sub(at_ms) <= BATCH_WIDTH_LIFE.as_millis() as i64).then_some(width)
+}
+
+/// Write down what this refresh managed, once the refresh is over.
+///
+/// **Only a NARROWING is remembered.** `widest >= asked` means GitHub took everything it was
+/// handed, and there is nothing about this repo worth writing down — so the entry is removed
+/// rather than set to the number of searches this particular refresh happened to have. Recording
+/// that number would cap the repo at it: a fleet whose token could not list teams asks four, and
+/// the day `read:org` arrives the fifth search would be "wider than GitHub has answered" and split
+/// for no reason at all.
+///
+/// The clock is the other load-bearing part, and it moves in one direction. A refresh that got
+/// WIDER than the standing memo restarts it: GitHub took more than skein expected, which is the
+/// condition healing, and the new answer deserves its own full hour. A refresh that got narrower —
+/// or exactly as narrow as last time, which is what a repo that splits on every poll produces —
+/// updates the width and leaves the clock alone. Otherwise a repo would keep its own cap alive by
+/// confirming it every three minutes, which is the memo pattern (SKEIN-281) rebuilt out of
+/// successes: a note that outlives its cause with nothing able to end it.
+fn learn_batch_width(slug: &str, widest: usize, asked: usize) {
+    // A refresh where nothing answered learned nothing. Leaving the memo alone is what keeps a
+    // rate-limit hold or a dead network from being read as "GitHub will not take one search".
+    if widest == 0 {
+        return;
+    }
+    let mut seen = BATCH_WIDTHS.lock().unwrap_or_else(|e| e.into_inner());
+    if widest >= asked {
+        seen.remove(slug);
+        return;
+    }
+    match seen.get_mut(slug) {
+        Some((known, at_ms)) => {
+            if widest > *known {
+                *at_ms = now_ms();
+            }
+            *known = widest;
+        }
+        None => {
+            seen.insert(slug.to_string(), (widest, now_ms()));
+        }
+    }
+}
+
+/// Now, in epoch milliseconds — the one spelling this module compares memo ages against.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// One batched request, as it has always been — the recursion above is what turns a refusal of the
-/// whole batch into halves.
-fn one_request(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, String>>, String> {
+/// whole batch into halves, and `after` is what turns it into the next page.
+fn one_request(
+    slug: &str,
+    searches: &[String],
+    after: &[Option<String>],
+) -> Result<Vec<Result<Found, String>>, String> {
     let token = host_token()?;
     let mut variables = serde_json::Map::new();
     variables.insert("n".into(), serde_json::json!(SEARCH_PAGE));
@@ -1217,6 +1672,15 @@ fn one_request(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, Stri
         variables.insert(
             format!("q{i}"),
             serde_json::json!(format!("repo:{slug} is:pr is:open {search}")),
+        );
+        // `null` on the first page, which is GraphQL's "from the beginning" — so the first request
+        // of a refresh is the request it always was.
+        variables.insert(
+            format!("a{i}"),
+            match after.get(i).and_then(|c| c.clone()) {
+                Some(cursor) => serde_json::Value::String(cursor),
+                None => serde_json::Value::Null,
+            },
         );
     }
     let (data, errors) = crate::github::graphql_partial(
@@ -1243,6 +1707,11 @@ fn one_request(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, Stri
                         .and_then(|v| v.as_bool());
                     Ok(Found {
                         matched: chunk.get("issueCount").and_then(|v| v.as_u64()),
+                        cursor: chunk
+                            .get("pageInfo")
+                            .and_then(|p| p.get("endCursor"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
                         // GitHub's own word for it where there is one. The fallback counts before
                         // the filter below, because the page is what GitHub filled against
                         // `first: $n` — dropping a non-PR from it makes the answer shorter without
@@ -1362,7 +1831,98 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // The three shapes SKEIN-301 added, flattened the same way `labels` is: the connection wrapper
+    // goes, the array stays under the name the fragment asked for, and the `totalCount` beside it
+    // is lifted to a key of this module's own — absent stays absent, because a cap that cannot say
+    // how much it cut reads as a pull request with nothing on it.
+    let nodes_of = |key: &str| {
+        node.get(key)
+            .and_then(|c| c.get("nodes"))
+            .and_then(|n| n.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let total_of = |key: &str| {
+        node.get(key)
+            .and_then(|c| c.get("totalCount"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    let threads: Vec<serde_json::Value> = nodes_of("reviewThreads")
+        .iter()
+        .map(|t| {
+            // The thread's own author, timestamp and permalink are its FIRST comment's — a
+            // `PullRequestReviewThread` carries none of the three itself. Its body is not read
+            // here and is not asked for; see `ReviewThread`.
+            let first = t
+                .get("comments")
+                .and_then(|c| c.get("nodes"))
+                .and_then(|n| n.as_array())
+                .and_then(|n| n.first());
+            let from = |k: &str| {
+                first
+                    .and_then(|c| c.get(k))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+            };
+            serde_json::json!({
+                "id": t.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+                "resolved": t.get("isResolved").and_then(|v| v.as_bool()).unwrap_or(false),
+                "outdated": t.get("isOutdated").and_then(|v| v.as_bool()).unwrap_or(false),
+                "author": first
+                    .and_then(|c| c.get("author"))
+                    .and_then(|a| a.get("login"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "started_at": from("createdAt"),
+                "url": from("url"),
+            })
+        })
+        .collect();
+    let comments: Vec<serde_json::Value> = nodes_of("comments")
+        .iter()
+        .map(|c| {
+            let from = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+            serde_json::json!({
+                "author": c
+                    .get("author")
+                    .and_then(|a| a.get("login"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "body": from("body"),
+                "created_at": from("createdAt"),
+                "url": from("url"),
+            })
+        })
+        .collect();
+    let asked: Vec<serde_json::Value> = nodes_of("reviewRequests")
+        .iter()
+        .filter_map(|r| {
+            let who = r.get("requestedReviewer")?;
+            // A user has a login; a team has a slug and an organization. A reviewer that is
+            // neither — GitHub adds types to this union — is dropped rather than rendered as an
+            // empty name.
+            match who.get("login").and_then(|v| v.as_str()) {
+                Some(login) => Some(serde_json::json!({ "name": login, "team": false })),
+                None => {
+                    let slug = who.get("slug").and_then(|v| v.as_str())?;
+                    let org = who
+                        .get("organization")
+                        .and_then(|o| o.get("login"))
+                        .and_then(|v| v.as_str())?;
+                    Some(serde_json::json!({ "name": format!("{org}/{slug}"), "team": true }))
+                }
+            }
+        })
+        .collect();
+    let threads_total = total_of("reviewThreads");
+    let comments_total = total_of("comments");
     if let Some(map) = out.as_object_mut() {
+        map.insert("reviewThreads".into(), serde_json::Value::Array(threads));
+        map.insert("reviewThreadsTotal".into(), threads_total);
+        map.insert("comments".into(), serde_json::Value::Array(comments));
+        map.insert("commentsTotal".into(), comments_total);
+        map.insert("reviewRequests".into(), serde_json::Value::Array(asked));
         map.insert("labels".into(), serde_json::Value::Array(labels));
         map.insert("latestReviews".into(), reviews);
         map.insert("statusCheckRollup".into(), checks);
@@ -1491,6 +2051,27 @@ fn build_pr(
         reasons: vec![reason.clone()],
         lane,
         snoozed,
+        // Parsed off the flattened shape, and defaulting to an EMPTY list rather than failing the
+        // pull request: an answer from a GitHub that did not carry these — an older fixture, a
+        // schema that moves — costs the row its threads and nothing else. Same defensiveness the
+        // struct's own doc argues for.
+        review_threads: item
+            .get("reviewThreads")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        review_threads_total: item.get("reviewThreadsTotal").and_then(|v| v.as_u64()),
+        comments: item
+            .get("comments")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        comments_total: item.get("commentsTotal").and_then(|v| v.as_u64()),
+        review_requests: item
+            .get("reviewRequests")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -3299,6 +3880,277 @@ mod tests {
         assert_eq!(rollup(&flat), "passing");
     }
 
+    /// **The conversation shapes survive the wire, and the one that costs money is not on it**
+    /// (SKEIN-301).
+    ///
+    /// Three things a pull request carries that `review_decision` cannot say: which review threads
+    /// are open, what was said on the pull request itself, and **who** still owes an approval.
+    /// Each is asserted through the real path — GitHub's nesting, [`shape`]'s flattening,
+    /// [`build_pr`]'s parse — because every one of those three is a place a field can be fetched
+    /// and then dropped, and a dropped field looks exactly like a pull request with nothing open
+    /// on it.
+    ///
+    /// The fourth assertion is the expensive one, and it is about what is NOT here: an inline
+    /// thread's comment bodies. The panel draws a thread as who, when, a link and a resolve button
+    /// — never its text — and [`PR_FRAGMENT`] travels once per pull request for up to
+    /// [`SEARCH_PAGE`] of them per membership rule. SKEIN-287 cut this payload from 155 KB to
+    /// 12 KB; a body added here is a body multiplied by a hundred, on the request
+    /// `acme/thing` already answers with a 504 (SKEIN-278).
+    #[test]
+    fn a_pull_request_carries_its_threads_its_comments_and_who_still_owes_a_review() {
+        let node = item(
+            r#"{
+              "number": 7, "title": "t", "url": "u", "isDraft": false,
+              "updatedAt": "2026-08-18T00:00:00Z",
+              "headRefName": "feat", "headRefOid": "abc", "baseRefName": "main",
+              "author": {"login": "someone"},
+              "latestReviews": {"nodes": []},
+              "reviewRequests": {"totalCount": 2, "nodes": [
+                {"requestedReviewer": {"login": "alice"}},
+                {"requestedReviewer": {"slug": "core", "organization": {"login": "acme"}}},
+                {"requestedReviewer": {"somethingElse": true}}
+              ]},
+              "reviewThreads": {"totalCount": 9, "nodes": [
+                {"id": "PRRT_1", "isResolved": false, "isOutdated": true,
+                 "comments": {"nodes": [{"author": {"login": "bob"},
+                                         "createdAt": "2026-08-17T09:00:00Z",
+                                         "url": "https://github.com/acme/t/pull/7#discussion_r1"}]}},
+                {"id": "PRRT_2", "isResolved": true, "isOutdated": false,
+                 "comments": {"nodes": []}}
+              ]},
+              "comments": {"totalCount": 412, "nodes": [
+                {"author": {"login": "carol"}, "body": "ship it",
+                 "createdAt": "2026-08-18T10:00:00Z", "url": "https://github.com/acme/t/pull/7#issuecomment-1"}
+              ]},
+              "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": []}}}}]}
+            }"#,
+        );
+        let pr = build_pr(
+            &shape(&node),
+            7,
+            "me",
+            "repo",
+            &Reason::Reviewer,
+            &[],
+            &BTreeMap::new(),
+        );
+
+        // **Who owes an approval.** A person and a team, and the team is still a team: "waiting on
+        // @alice" and "waiting on acme/core" are not the same sentence, so the two must not be
+        // flattened into one list of names. A reviewer that is neither is dropped rather than
+        // rendered as a blank row.
+        assert_eq!(
+            pr.review_requests,
+            vec![
+                ReviewRequest {
+                    name: "alice".into(),
+                    team: false
+                },
+                ReviewRequest {
+                    name: "acme/core".into(),
+                    team: true
+                },
+            ],
+            "the outstanding reviewers did not survive the wire"
+        );
+
+        // **The threads**, with the id the resolve mutation needs, and with each thread's author,
+        // timestamp and permalink taken from its FIRST comment — a `PullRequestReviewThread` has
+        // none of the three of its own.
+        assert_eq!(pr.review_threads.len(), 2, "{:?}", pr.review_threads);
+        assert_eq!(
+            pr.review_threads[0],
+            ReviewThread {
+                id: "PRRT_1".into(),
+                resolved: false,
+                outdated: true,
+                author: "bob".into(),
+                started_at: "2026-08-17T09:00:00Z".into(),
+                url: "https://github.com/acme/t/pull/7#discussion_r1".into(),
+            },
+            "a thread reached the row without what the panel draws it from"
+        );
+        assert!(
+            pr.review_threads[0].id != pr.review_threads[1].id
+                && !pr.review_threads[1].id.is_empty(),
+            "every thread needs its own id or it cannot be resolved from skein"
+        );
+        // A thread whose first comment GitHub did not return keeps its id and loses only the
+        // sentence — absence stays absent, and the resolve button still works.
+        assert_eq!(pr.review_threads[1].author, "");
+        assert!(pr.review_threads[1].resolved);
+        assert_eq!(
+            pr.review_threads_total,
+            Some(9),
+            "the cap cut seven threads and the row cannot say so"
+        );
+
+        // **The comments**, bodies included, because these are the ones that get rendered.
+        assert_eq!(pr.comments.len(), 1);
+        assert_eq!(pr.comments[0].author, "carol");
+        assert_eq!(pr.comments[0].body, "ship it");
+        assert_eq!(pr.comments[0].created_at, "2026-08-18T10:00:00Z");
+        assert!(pr.comments[0].url.contains("issuecomment"));
+        assert_eq!(
+            pr.comments_total,
+            Some(412),
+            "a four-hundred-comment pull request must be able to say so from ten of them"
+        );
+
+        // **And the thing that must NOT be asked for.** Read off the query itself: the inline
+        // threads' selection carries no `body`, while the pull request's own comments do. Both
+        // halves, because "no body anywhere" would pass the first and break the panel.
+        let threads = PR_FRAGMENT
+            .split("reviewThreads(")
+            .nth(1)
+            .and_then(|after| after.split("comments(last:").next())
+            .expect("the fragment asks for review threads");
+        assert!(
+            !threads.contains("body"),
+            "inline review-comment bodies are being fetched — SKEIN-287 cut this payload from \
+             155 KB to 12 KB and PR_FRAGMENT is asked for up to {SEARCH_PAGE} pull requests at a \
+             time: {threads}"
+        );
+        assert!(
+            PR_FRAGMENT.contains(&format!(
+                "comments(last: {PR_COMMENTS_FETCHED}) {{ totalCount nodes {{ author {{ login }} \
+                 body createdAt url }} }}"
+            )),
+            "the pull request's own comments are rendered, so they must carry their bodies: {}",
+            *PR_FRAGMENT
+        );
+        // The caps are the query's, not a doc comment's — one number, written once.
+        assert!(
+            PR_FRAGMENT.contains(&format!("reviewThreads(first: {REVIEW_THREADS_FETCHED})"))
+                && PR_FRAGMENT
+                    .contains(&format!("reviewRequests(first: {REVIEW_REQUESTS_FETCHED})")),
+            "a cap in the doc that the query does not apply is not a cap: {}",
+            *PR_FRAGMENT
+        );
+    }
+
+    /// **A queue remembered by an older skein still parses** — the failure that turns a new field
+    /// into an empty pane (prq.rs's `settled` field says it first, and it has been true of every
+    /// field added since).
+    ///
+    /// Not a claim about `serde(default)` attributes: this is the actual JSON an older skein wrote,
+    /// parsed by today's [`Queue`]. Missing the whole conversation, it comes back as a queue with
+    /// the pull request in it and nothing said about threads or comments — which is honestly what
+    /// that skein knew. `None` totals rather than `Some(0)`, because zero would be a claim.
+    #[test]
+    fn a_remembered_queue_written_before_the_conversation_existed_still_parses() {
+        let older = r#"{
+          "repo_id": "r", "slug": "acme/thing", "viewer": "me", "ai": true,
+          "blind_spots": [], "as_of": "2026-08-01T00:00:00Z",
+          "prs": [{
+            "number": 4, "title": "t", "author": "someone", "url": "u",
+            "head_ref": "feat", "head_sha": "abc", "base_ref": "main",
+            "draft": false, "updated_at": "2026-08-01T00:00:00Z", "committed_at": "",
+            "checks": "none", "my_review": "none", "review_is_current": false,
+            "reasons": ["reviewer"], "lane": "needs-you", "box_name": "b"
+          }]
+        }"#;
+        let q: Queue = serde_json::from_str(older).expect(
+            "a queue remembered before these fields existed no longer parses — every row in it \
+             disappears, which is a blank pane rather than a missing line",
+        );
+        let pr = &q.prs[0];
+        assert!(pr.review_threads.is_empty() && pr.comments.is_empty());
+        assert!(pr.review_requests.is_empty());
+        assert_eq!(
+            (pr.review_threads_total, pr.comments_total),
+            (None, None),
+            "an older queue knew nothing about the counts, and `Some(0)` would be a claim"
+        );
+    }
+
+    /// What the conversation costs on the wire, measured rather than asserted (SKEIN-301).
+    ///
+    /// [`PR_FRAGMENT`] travels once per pull request, up to [`SEARCH_PAGE`] of them per membership
+    /// rule, in one request — the request `acme/thing` already answers with a 504
+    /// (SKEIN-278). So "does this make it worse" is a number, and the number is built here from a
+    /// stated profile rather than from a guess: **54 pull requests, each with 2 review threads,
+    /// 3 PR comments of 120 characters, and 1 outstanding reviewer.** That is the owner's own
+    /// queue size (SKEIN-301's brief) with a conversation load a busy repo would recognise.
+    ///
+    /// The ceiling is what the test enforces. It is deliberately loose — the point is not the exact
+    /// byte count, which moves with every field anybody adds, but that this change stays in the
+    /// same order of magnitude as the answer it grew from. The measured numbers go in the item.
+    #[test]
+    fn the_conversation_is_measured_against_the_answer_it_grew_from() {
+        let thread = |n: usize| {
+            format!(
+                r#"{{"id":"PRRT_kwDOAbCdEf4A{n:04}","isResolved":false,"isOutdated":false,"comments":{{"nodes":[{{"author":{{"login":"reviewer"}},"createdAt":"2026-08-18T09:00:00Z","url":"https://github.com/acme/thing/pull/{n}#discussion_r1234567890"}}]}}}}"#
+            )
+        };
+        let comment = |n: usize| {
+            format!(
+                r#"{{"author":{{"login":"someone"}},"body":"{body}","createdAt":"2026-08-18T10:00:00Z","url":"https://github.com/acme/thing/pull/{n}#issuecomment-1234567890"}}"#,
+                body = "x".repeat(120)
+            )
+        };
+        let base = |n: usize| {
+            format!(
+                r#""number":{n},"title":"a change to something","url":"https://github.com/acme/thing/pull/{n}","isDraft":false,"updatedAt":"2026-08-18T10:00:00Z","headRefName":"feat-{n}","headRefOid":"0123456789abcdef0123456789abcdef01234567","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","additions":120,"deletions":30,"changedFiles":4,"labels":{{"nodes":[{{"name":"ready"}}]}},"author":{{"login":"someone"}},"latestReviews":{{"nodes":[]}},"commits":{{"nodes":[{{"commit":{{"committedDate":"2026-08-18T09:00:00Z","statusCheckRollup":{{"state":"SUCCESS","contexts":{{"totalCount":3,"nodes":[{{"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"SUCCESS"}}]}}}}}}}}]}}"#
+            )
+        };
+        let before: String = (1..=54)
+            .map(|n| format!("{{{}}}", base(n)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let after: String = (1..=54)
+            .map(|n| {
+                format!(
+                    r#"{{{base},"reviewRequests":{{"totalCount":1,"nodes":[{{"requestedReviewer":{{"login":"alice"}}}}]}},"reviewThreads":{{"totalCount":2,"nodes":[{t1},{t2}]}},"comments":{{"totalCount":3,"nodes":[{c},{c},{c}]}}}}"#,
+                    base = base(n),
+                    t1 = thread(n),
+                    t2 = thread(n + 100),
+                    c = comment(n),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        // And the worst case the caps allow, which is the number the 504 risk is actually about:
+        // every pull request saturating both caps, in a page of `SEARCH_PAGE` rather than 54.
+        let saturated: String = (1..=SEARCH_PAGE)
+            .map(|n| {
+                let threads = (0..REVIEW_THREADS_FETCHED)
+                    .map(|i| thread(n + i * 1000))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let comments = (0..PR_COMMENTS_FETCHED)
+                    .map(|_| comment(n))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{{base},"reviewRequests":{{"totalCount":1,"nodes":[{{"requestedReviewer":{{"login":"alice"}}}}]}},"reviewThreads":{{"totalCount":{tc},"nodes":[{threads}]}},"comments":{{"totalCount":{cc},"nodes":[{comments}]}}}}"#,
+                    base = base(n),
+                    tc = REVIEW_THREADS_FETCHED,
+                    cc = PR_COMMENTS_FETCHED,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let (was, now) = (before.len(), after.len());
+        println!("SKEIN-301 payload for 54 pull requests: {was} bytes -> {now} bytes");
+        println!(
+            "SKEIN-301 worst case, {SEARCH_PAGE} pull requests at both caps: {} bytes",
+            saturated.len()
+        );
+        // Both parse, which is what makes the two numbers comparable rather than two strings.
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&format!("[{after}]")).expect("the after shape is real JSON");
+        assert_eq!(parsed.len(), 54);
+        assert!(
+            now < was * 4,
+            "the conversation more than quadrupled the answer ({was} -> {now} bytes for 54 pull \
+             requests) — PR_FRAGMENT travels for up to {SEARCH_PAGE} of them per membership rule, \
+             and this is the request that already 504s (SKEIN-278)"
+        );
+    }
+
     /// Nothing in skein runs `gh` any more.
     ///
     /// The queue was built out of the CLI, which made a third-party binary a hard requirement of a
@@ -3882,7 +4734,10 @@ mod tests {
 
     /// Env plumbing every wire test here shares. Returns the guard that must stay alive.
     fn wired(base: &str) -> impl Drop {
-        struct Undo(std::sync::MutexGuard<'static, ()>);
+        // The env lock, held for its Drop and never read — which is the whole point of it, and
+        // what the dead-code warning was about. `crate::testutil::env_lock` is the one mechanism;
+        // this only ties its lifetime to the environment it guards.
+        struct Undo(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
         impl Drop for Undo {
             fn drop(&mut self) {
                 for key in ["GH_TOKEN", "SKEIN_GITHUB_API"] {
@@ -4320,7 +5175,8 @@ mod tests {
         // queue would look thoughtfully quiet rather than broken.
         assert!(
             PR_FRAGMENT.contains("commit { committedDate"),
-            "the head commit's date is read but never requested: {PR_FRAGMENT}"
+            "the head commit's date is read but never requested: {}",
+            *PR_FRAGMENT
         );
 
         let shaped = shape(&node);
@@ -4356,12 +5212,47 @@ mod tests {
             "GitHub's merge-state verdict was parsed away — the merge train reads BEHIND to know \
              the base must be merged in first"
         );
+        // **And a node that CARRIES neither is not given a verdict** (SKEIN-257). The assertions
+        // above run on a fixture this test wrote, so on their own they say what happens when
+        // GitHub answers — and the other thing that decides `behind` is GitHub not answering at
+        // all, which is an everyday state: `mergeStateStatus` is absent for a while after every
+        // push and on a token that cannot see it. Empty and `None` are what "not known" looks
+        // like here, and both fields' own docs turn on it: a caller reading `""` as `CLEAN` or
+        // `None` as "not mergeable" advances a merge train on a guess.
+        let silent = build_pr(
+            &shape(&item(
+                r#"{"number":8,"title":"t","url":"u","isDraft":false,
+                    "headRefName":"feat","headRefOid":"abc","baseRefName":"main",
+                    "author":{"login":"someone"},"latestReviews":{"nodes":[]}}"#,
+            )),
+            8,
+            "me",
+            "acme",
+            &Reason::Author,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            silent.merge_state, "",
+            "a pull request GitHub said nothing about was given a merge-state verdict anyway"
+        );
+        assert_eq!(
+            silent.mergeable, None,
+            "silence became an answer — `UNKNOWN` read as a conflict is a rebase on a guess, and \
+             on a repo that dismisses stale approvals that rebase destroys the approval"
+        );
+        assert_eq!(
+            silent.review_decision, "",
+            "an unstated review decision must not read as a repository that requires none"
+        );
+
         // And it is actually ASKED for, same trap as `committedDate` above: everything here works
         // on a node handed to it, so without this the field could be one GitHub was never told to
         // send, and every PR would read as merge-state unknown.
         assert!(
             PR_FRAGMENT.contains("mergeStateStatus"),
-            "merge_state is read but never requested: {PR_FRAGMENT}"
+            "merge_state is read but never requested: {}",
+            *PR_FRAGMENT
         );
         let conflicting = build_pr(
             &shape(&serde_json::json!({
@@ -4692,7 +5583,8 @@ mod tests {
         );
         assert!(
             PR_FRAGMENT.contains("additions deletions changedFiles"),
-            "the fields are read but never requested: {PR_FRAGMENT}"
+            "the fields are read but never requested: {}",
+            *PR_FRAGMENT
         );
 
         let bare = item(r#"{"number":7,"headRefOid":"a","author":{"login":"someone"}}"#);
@@ -4797,11 +5689,13 @@ mod tests {
         // so without this the names would be read from a reply GitHub was never told to include.
         assert!(
             PR_FRAGMENT.contains("... on CheckRun { name detailsUrl status conclusion }"),
-            "the CheckRun name/link is read but never requested: {PR_FRAGMENT}"
+            "the CheckRun name/link is read but never requested: {}",
+            *PR_FRAGMENT
         );
         assert!(
             PR_FRAGMENT.contains("... on StatusContext { context targetUrl state }"),
-            "the StatusContext name/link is read but never requested: {PR_FRAGMENT}"
+            "the StatusContext name/link is read but never requested: {}",
+            *PR_FRAGMENT
         );
     }
 
@@ -5059,11 +5953,39 @@ mod tests {
         status: u16,
         graphql_body: String,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        batched_github_pages(teams, vec![(status, graphql_body)])
+    }
+
+    /// The same GitHub, answering a DIFFERENT status and body to each successive `/graphql` request
+    /// — the first, then the second, and the last one for every request after that.
+    ///
+    /// Paging asks the same endpoint twice in one refresh and expects two different answers
+    /// (SKEIN-280), and a stub with one canned answer cannot tell a refresh that followed a cursor
+    /// from one that re-asked the same page.
+    fn batched_github_pages(
+        teams: bool,
+        pages: Vec<(u16, String)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        batched_github_answering(teams, move |n, _| pages[n.min(pages.len() - 1)].clone())
+    }
+
+    /// The same GitHub again, answering from the REQUEST rather than from a script: `answer` is
+    /// handed the call's ordinal and its body.
+    ///
+    /// What the batch-width test needs and the sequence above cannot give it (SKEIN-278): a GitHub
+    /// that refuses the wide request **every** time and answers the narrow one every time. A
+    /// scripted stub that 504s only once cannot tell "skein remembered the width" from "GitHub
+    /// stopped refusing", which is the difference the whole item is about.
+    fn batched_github_answering(
+        teams: bool,
+        answer: impl Fn(usize, &str) -> (u16, String) + Send + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorder = seen.clone();
+        let served = std::sync::atomic::AtomicUsize::new(0);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut stream = stream;
@@ -5094,15 +6016,23 @@ mod tests {
                     .unwrap()
                     .push(format!("{method} {path} {body}"));
                 let (code, answer) = match path.as_str() {
-                    "/graphql" => (status, graphql_body.clone()),
+                    "/graphql" => {
+                        let n = served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        answer(n, &body)
+                    }
                     "/rate_limit" => (200, "{}".to_string()),
-                    p if p.starts_with("/user/teams") => (
-                        200,
-                        match teams {
-                            true => r#"[{"slug":"core","organization":{"login":"acme"}}]"#.into(),
-                            false => "[]".to_string(),
-                        },
-                    ),
+                    p if p.starts_with("/user/teams") => match teams {
+                        true => (
+                            200,
+                            r#"[{"slug":"core","organization":{"login":"acme"}}]"#.to_string(),
+                        ),
+                        // **What a token without `read:org` actually gets** — a 403, not an empty
+                        // list. It used to answer `200 []`, which since SKEIN-262 is a different
+                        // fact: an empty list is GitHub saying you are in no teams, and every test
+                        // that meant "the scope is missing" was quietly asserting against the
+                        // wrong one. `tests/review_queue.rs`'s stub has always answered 403 here.
+                        false => (403, r#"{"message":"Requires read:org"}"#.to_string()),
+                    },
                     "/user" => (200, r#"{"login":"me"}"#.to_string()),
                     p if p.starts_with("/repos/") => (
                         200,
@@ -5836,17 +6766,21 @@ mod tests {
         // see it, and "cannot see it" must not read as "it closed".
         set_archived("search-cut", 4242, true).expect("archived");
 
+        // Teams listable, so the only thing this queue cannot see is the page — a token that
+        // cannot list teams carries its own blind spot and its own `whole: false` (SKEIN-262),
+        // which would make every assertion below pass for the wrong reason.
         let answer = |more: bool| {
             format!(
                 r#"{{"data":{{"q0":{{"issueCount":143,"pageInfo":{{"hasNextPage":{more}}},"nodes":[{five}]}},
                    "q1":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}},
                    "q2":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}},
-                   "q3":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}}}}}}"#,
+                   "q3":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}},
+                   "q4":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}}}}}}"#,
                 five = search_node(5),
             )
         };
 
-        let (base, seen) = batched_github(false, 200, answer(true));
+        let (base, seen) = batched_github(true, 200, answer(true));
         std::env::set_var("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
@@ -5858,13 +6792,25 @@ mod tests {
             sent.contains("issueCount") && sent.contains("hasNextPage"),
             "the search must ask how many it matched and whether it reached the end: {sent}"
         );
+        // The count is what ARRIVED, not the page size (SKEIN-280): the refresh follows the cursor
+        // now, so "the first 100" would be a guess about a number the queue already knows. This
+        // fixture answers `hasNextPage: true` with no `endCursor` — which is also the assertion
+        // that a page nobody can ask for ends the paging instead of being guessed at, since one
+        // node came back and one node is what the sentence reports.
         assert!(
-            q.blind_spots.iter().any(|b| b.contains(
-                "the `review-requested:me` query matched 143 pull requests and skein read the \
-                 first 100"
-            )),
+            q.blind_spots.iter().any(|b| {
+                b.contains(
+                "the `review-requested:me` query matched 143 pull requests and skein read 1 of them"
+            )
+            }),
             "a truncated search must name ITS rule and the size of the hole: {:?}",
             q.blind_spots
+        );
+        assert_eq!(
+            graphql_requests(&seen).len(),
+            1,
+            "GitHub said there was more and gave nowhere to carry on from, and skein asked again \
+             anyway — a page with no cursor is a page nobody can request"
         );
         assert!(
             !q.whole,
@@ -5886,7 +6832,7 @@ mod tests {
 
         // The same shape, reaching the end. Nothing is said, `whole` holds, and the prune runs —
         // which is what stops "say it is partial" from becoming "never prune anything".
-        let (base, _seen) = batched_github(false, 200, answer(false));
+        let (base, _seen) = batched_github(true, 200, answer(false));
         std::env::set_var("SKEIN_GITHUB_API", &base);
         forget_host_token();
         forget_renames();
@@ -5903,6 +6849,345 @@ mod tests {
         );
         // Nothing here can prove what the OTHER reader of this list does with it — see
         // `the_only_other_reader_of_this_list_stands_down_when_it_is_partial`.
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+    }
+
+    /// **A set-aside pull request that only a team review request would list survives a refresh
+    /// made without `read:org`** (SKEIN-262).
+    ///
+    /// SKEIN-229 gated both prunes on `answered` — every membership search skein RAN answered in
+    /// full. A team search that was never RUN is a different hole and was still open: without
+    /// `read:org` the `for team in &teams` loop adds no search at all, the four personal rules all
+    /// answer, `answered` stays true, and the prune deletes the owner's archive entry and snooze
+    /// on the evidence of an open set that structurally could not contain the row. Silent, every
+    /// three minutes on the badge poll, and permanent on a fleet whose token lacks the scope.
+    ///
+    /// Both halves, because either alone passes for the wrong reason: with the scope missing the
+    /// decisions survive, and with the scope present the very same refresh prunes them. The second
+    /// is what makes the first mean "skein declined to prune" rather than "the fixture could not
+    /// refresh".
+    #[test]
+    fn a_set_aside_pr_no_search_could_have_listed_survives_a_refresh_without_read_org() {
+        let _g = crate::testutil::env_lock();
+        // Right after the env lock, per `github::HoldClear`'s own rule: a test elsewhere in this
+        // binary can engage the rate-limit hold, and a held hold refuses every request before it
+        // reaches the fixture — which reads here as a request that was never sent.
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        // #77's only claim on you is a team review request, so none of the four personal searches
+        // will ever return it — which is exactly what makes its absence no evidence at all.
+        set_archived("team-blind", 77, true).expect("archived");
+        set_snoozed("team-blind", 77, Some("sha77")).expect("snoozed");
+
+        let four_empty =
+            r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#;
+        let (base, _seen) = batched_github(false, 200, four_empty.to_string());
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let blind = queue(&batched_repo("acme/team-blind"), true).expect("the queue answered");
+        assert!(
+            blind
+                .blind_spots
+                .iter()
+                .any(|b| b.contains("team review requests are missing")),
+            "the fixture is not the one this test is about: {:?}",
+            blind.blind_spots
+        );
+        assert!(
+            archived("team-blind").contains(&77),
+            "a set-aside pull request was deleted because a search that could not be RUN did not \
+             list it — the same erasure SKEIN-229 fixed for a search that ran and failed"
+        );
+        assert!(
+            snoozed("team-blind").contains_key(&77),
+            "and the snooze on the same pull request went with it"
+        );
+        assert!(
+            !blind.whole,
+            "a queue that never asked about team review requests told everything downstream it \
+             had seen every open pull request"
+        );
+
+        // The same refresh, with a token that CAN list teams. Every rule that exists was asked,
+        // every one answered, nothing came back — so #77 really is closed and both files are
+        // pruned. Without this half, deleting the prune entirely would pass the test above.
+        let five_empty = r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]},"q4":{"nodes":[]}}}"#;
+        let (base, _seen) = batched_github(true, 200, five_empty.to_string());
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let seeing = queue(&batched_repo("acme/team-blind"), true).expect("the queue answered");
+        assert!(
+            seeing.whole && seeing.blind_spots.is_empty(),
+            "a refresh that asked every rule there is reported a hole: {:?}",
+            seeing.blind_spots
+        );
+        assert!(
+            archived("team-blind").is_empty() && snoozed("team-blind").is_empty(),
+            "an answered refresh stopped pruning — a queue that says it saw everything must still \
+             clear decisions about pull requests that are gone"
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+    }
+
+    /// **A repo GitHub will not answer in one request is not asked in one request twice**
+    /// (SKEIN-278).
+    ///
+    /// Reported live on `acme/thing`: the split-in-halves (SKEIN-266) recovered the refresh
+    /// exactly as designed, and then did it again ten minutes later, and again — one doomed request
+    /// per poll per repo, each carrying GitHub's own 504 latency, each announcing itself in the
+    /// fleet's log. The recovery was never the complaint; re-learning it by failing was.
+    ///
+    /// What is remembered is a width GitHub ANSWERED, never the refusal — the rule
+    /// `what_github_said` states for the lookups above it and the pattern SKEIN-281 names — so the
+    /// memo expires and [`forget_batch_widths`] clears it. Both halves are asserted here, because
+    /// either alone is a bug: the second refresh must not spend the doomed request, and the queue
+    /// must SAY that it is being asked narrowly, which the item asks for in as many words ("the
+    /// narrowing must be visible ... not a silent adaptation").
+    #[test]
+    fn a_repo_github_will_not_take_whole_is_not_asked_whole_on_the_next_refresh() {
+        let _g = crate::testutil::env_lock();
+        // Right after the env lock, per `github::HoldClear`'s own rule: a test elsewhere in this
+        // binary can engage the rate-limit hold, and a held hold refuses every request before it
+        // reaches the fixture — which reads here as a request that was never sent.
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        forget_batch_widths();
+
+        // A 504 carrying JSON: `edge_refused` reads it as "would not take it", and `edge_shrug`
+        // does not, so it costs ONE request rather than github.rs's own retry-once. Everything
+        // after it answers.
+        let empty = |aliases: usize| {
+            let body = (0..aliases)
+                .map(|i| {
+                    format!(
+                        r#""q{i}":{{"issueCount":0,"pageInfo":{{"hasNextPage":false,"endCursor":null}},"nodes":[]}}"#
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(r#"{{"data":{{{body}}}}}"#)
+        };
+        // Refused EVERY time it is asked wide, answered every time it is asked narrow — which is
+        // what a 504 caused by the repository's own size actually is. A stub that refused once
+        // could not tell "skein remembered the width" from "GitHub stopped refusing". Four aliases
+        // or more is wide here, so the five-search refresh is refused and its halves (two and
+        // three) are not; the answer carries five, so a narrower half reads the first few of it
+        // and one body serves every width.
+        let too_big = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let refusing = too_big.clone();
+        let (base, seen) = batched_github_answering(true, move |_, body| {
+            let wide = body.contains("$q3: String!");
+            match wide && refusing.load(std::sync::atomic::Ordering::SeqCst) {
+                true => (
+                    504,
+                    r#"{"message":"We couldn't respond to your request in time"}"#.to_string(),
+                ),
+                false => (200, empty(5)),
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let first = queue(&batched_repo("acme/too-big"), true).expect("the split recovered");
+        let after_one = graphql_requests(&seen).len();
+        assert_eq!(
+            after_one, 3,
+            "the first refresh should be the doomed request plus the two halves: {after_one}"
+        );
+
+        // The refresh that matters. Nothing about GitHub changed; what changed is that skein was
+        // told once and wrote down the width that WORKED.
+        let second = queue(&batched_repo("acme/too-big"), true).expect("the queue answered");
+        let after_two = graphql_requests(&seen).len() - after_one;
+        assert_eq!(
+            after_two, 2,
+            "the second refresh spent the doomed request again — the repo re-learns by failing on \
+             every single poll, which is the whole bug: {after_two} requests"
+        );
+
+        // And it is VISIBLE. A repo that has quietly become expensive to refresh looks identical
+        // from outside, so the narrowing is said on the queue itself.
+        for q in [&first, &second] {
+            assert!(
+                q.blind_spots
+                    .iter()
+                    .any(|b| b.contains("membership searches are being asked 3 at a time")),
+                "the narrowing is a silent adaptation — nothing the owner can read says this repo \
+                 costs more than one request per refresh: {:?}",
+                q.blind_spots
+            );
+        }
+        // It is not a completeness claim: every search answered, so the prunes still run.
+        assert!(
+            second.whole,
+            "asking in halves was reported as not having seen everything, which stops every prune"
+        );
+
+        // **The memo is a width GitHub answered, and it ends.** Cleared by hand here — the same
+        // door `forget_renames` and `forget_trunks` give, and the reason SKEIN-281's pattern does
+        // not apply: there is something a person can clear, and it expires on its own besides.
+        forget_batch_widths();
+        let before = graphql_requests(&seen).len();
+        let again = queue(&batched_repo("acme/too-big"), true).expect("the split recovered");
+        assert_eq!(
+            graphql_requests(&seen).len() - before,
+            3,
+            "after forgetting the width the refresh did not go back to asking wide — the memo is a \
+             narrowing nobody can undo"
+        );
+        assert!(
+            again
+                .blind_spots
+                .iter()
+                .any(|b| b.contains("being asked 3 at a time")),
+            "the refusal is still standing and the queue stopped saying so: {:?}",
+            again.blind_spots
+        );
+
+        // **And when GitHub gets better, the notice goes.** Nothing is pressed here except the
+        // memo, which is what the hourly expiry does on its own in a running fleet: one request,
+        // no sentence, and the repo is back where it started.
+        too_big.store(false, std::sync::atomic::Ordering::SeqCst);
+        forget_batch_widths();
+        let before = graphql_requests(&seen).len();
+        let healed = queue(&batched_repo("acme/too-big"), true).expect("the queue answered");
+        assert_eq!(
+            graphql_requests(&seen).len() - before,
+            1,
+            "GitHub took the wide request and the refresh split it anyway"
+        );
+        assert!(
+            !healed.blind_spots.iter().any(|b| b.contains("being asked")),
+            "the narrowing notice outlived the narrowing: {:?}",
+            healed.blind_spots
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+        forget_batch_widths();
+    }
+
+    /// **A membership rule with more pull requests than one page is read to the END** (SKEIN-280).
+    ///
+    /// SKEIN-231 taught the queue to notice a truncated search and say so. It said so on every
+    /// refresh, for ever, because nothing ever asked for the rest: a repo where more than a hundred
+    /// pull requests match one rule showed a permanently short queue with a permanent apology
+    /// beside it. Noticing is not reading.
+    ///
+    /// Four facts, and each one fails on its own:
+    ///
+    ///   * the pull request on page TWO is in the queue — the point of the whole change;
+    ///   * the cursor GitHub handed back is the `after` skein sent, so the second request is the
+    ///     next page rather than the same page again;
+    ///   * only the rule that had more is asked again — the other three are finished and must not
+    ///     cost a second request each;
+    ///   * and once the last page says `hasNextPage: false` the queue is `whole` with NO blind
+    ///     spot, because a search that was followed to the end saw everything there was. That is
+    ///     what lets the prunes in `queue_within` and `review::prune` run again.
+    #[test]
+    fn a_membership_rule_longer_than_one_page_is_followed_to_the_end() {
+        let _g = crate::testutil::env_lock();
+        // Right after the env lock, per `github::HoldClear`'s own rule: a test elsewhere in this
+        // binary can engage the rate-limit hold, and a held hold refuses every request before it
+        // reaches the fixture — which reads here as a request that was never sent.
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        // Page one: #5 and a cursor. Page two: #6 and the end. The other three rules finish on
+        // page one, which is what makes "only the unfinished rule is asked again" observable.
+        let page_one = format!(
+            r#"{{"data":{{"q0":{{"issueCount":2,"pageInfo":{{"hasNextPage":true,"endCursor":"CUR-2"}},"nodes":[{five}]}},
+               "q1":{{"issueCount":0,"pageInfo":{{"hasNextPage":false,"endCursor":null}},"nodes":[]}},
+               "q2":{{"issueCount":0,"pageInfo":{{"hasNextPage":false,"endCursor":null}},"nodes":[]}},
+               "q3":{{"issueCount":0,"pageInfo":{{"hasNextPage":false,"endCursor":null}},"nodes":[]}},
+               "q4":{{"issueCount":0,"pageInfo":{{"hasNextPage":false,"endCursor":null}},"nodes":[]}}}}}}"#,
+            five = search_node(5),
+        );
+        // The follow-up carries ONE alias, so its answer has one: `q0` is the only rule that was
+        // asked again, and the parser reads aliases positionally from what it sent.
+        let page_two = format!(
+            r#"{{"data":{{"q0":{{"issueCount":2,"pageInfo":{{"hasNextPage":false,"endCursor":"CUR-3"}},"nodes":[{six}]}}}}}}"#,
+            six = search_node(6),
+        );
+
+        let (base, seen) = batched_github_pages(true, vec![(200, page_one), (200, page_two)]);
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/two-pages"), true).expect("the queue answered");
+
+        let numbers: Vec<u64> = q.prs.iter().map(|p| p.number).collect();
+        assert!(
+            numbers.contains(&6),
+            "the pull request past the first page never reached the queue — the refresh noticed \
+             the truncation and did nothing about it: {numbers:?}"
+        );
+        assert!(
+            numbers.contains(&5),
+            "the first page was thrown away when the second arrived: {numbers:?}"
+        );
+
+        let sent = graphql_requests(&seen);
+        assert_eq!(
+            sent.len(),
+            2,
+            "one rule had a second page and the refresh cost {} requests: {sent:?}",
+            sent.len()
+        );
+        assert!(
+            sent[1].contains("CUR-2"),
+            "the second request did not carry the cursor GitHub gave, so it asked for the same \
+             page again: {}",
+            sent[1]
+        );
+        // Only the unfinished rule. The three that reached their end on page one must not be
+        // re-asked — that would make paging cost a full batch per page rather than one alias.
+        assert!(
+            sent[1].contains("review-requested:me") && !sent[1].contains("mentions:me"),
+            "a search that had already reached its end was asked again on the next page: {}",
+            sent[1]
+        );
+
+        // Followed to the end means whole, and whole means silent.
+        assert!(
+            q.whole,
+            "a queue that read every page still says it might be missing pull requests, so \
+             nothing downstream will ever prune again"
+        );
+        assert!(
+            !q.blind_spots.iter().any(|b| b.contains("query matched")),
+            "the truncation apology outlived the truncation: {:?}",
+            q.blind_spots
+        );
 
         for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
             std::env::remove_var(key);

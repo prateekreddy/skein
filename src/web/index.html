@@ -565,6 +565,13 @@
   /* A drafted review waiting to be read: muted green, because it is work already finished rather
      than work being done — the same word `--done` says everywhere else on this page. */
   .revtag.ready { background:color-mix(in srgb,var(--done) 16%,transparent); color:var(--done); }
+  /* And its opposite (SKEIN-275): read, and no review drafted. A STATED ABSENCE, so it wears the
+     gist column's own mark for one — dotted underline, no fill — rather than a colour. It is not a
+     failure and it is not a warning; amber and red are spoken for, and this is the fourth thing
+     `not read` already is one column along. */
+  .revtag.nodraft { background:none; color:var(--faint); padding:0 3px;
+                    text-decoration:underline dotted color-mix(in srgb,var(--faint) 55%,transparent);
+                    text-underline-offset:3px; }
   /* "read it" / "re-read" on the collapsed line (SKEIN-228). Outlined rather than filled, because
      it is the one ACTION among the row's facts and the difference has to be legible without
      reading it; sized to the chips so it cannot change a row's height. */
@@ -778,6 +785,11 @@
   .revdraft-overall { color:var(--text); line-height:1.55; }
   .revdraft-row { margin-top:7px; display:flex; gap:7px; flex-wrap:wrap; line-height:1.5; }
   .revdraft-row code { font:11.5px var(--mono); color:var(--text-1); flex:none; }
+  /* The same section saying there is no review (SKEIN-275). It keeps the block so the answer is
+     read where the review would have been, and loses the green edge: `--done` means "you decided
+     and it holds" everywhere on this page, and an absence has decided nothing. */
+  .revdraft.nodraft { border-left-color:var(--border-3); }
+  .revdraft.nodraft .revdraft-overall { color:var(--text-2); }
   .revfold { cursor:pointer; user-select:none; }
   .revfold:hover .dim { color:var(--text); }
   /* THE STACK — the rail is drawn, so "fifteen deep" is a length you see, not a count you read. */
@@ -2035,16 +2047,15 @@ function updateRow(el, b, showRepo) {
   age.textContent = ageNow(b.age_secs, Date.now() - (receivedAt.get(b.name) || Date.now()));
   el.querySelector(".chev").textContent = wired ? "▣" : "›";
   el.querySelector(".dstat").innerHTML = diffBadge(b.diff);
-  // hook-health: a Running box whose probes have NEVER reported has dark hooks — every other
-  // signal on this row is a lie of omission, so say so instead of impersonating a quiet box.
+  // hook-health: a Running box whose probes are not reporting normally — every other signal on this
+  // row is then a lie of omission, so say so instead of impersonating a quiet box. Drawn through
+  // `hookHalf`, so a value this page has not learned says so rather than rendering nothing.
   const hw = el.querySelector(".hookwarn");
-  const dark = b.hook_health === "never", staleProbe = b.hook_health === "stale";
-  hw.textContent = dark ? "⚠ no signals" : staleProbe ? "↻ update probes" : "";
-  hw.style.display = (dark || staleProbe) ? "" : "none";
-  hw.dataset.restart = staleProbe ? "1" : "0";
-  hw.title = dark
-    ? "this box is running but its probes have never reported — inspect environment health"
-    : staleProbe ? "this session predates the installed probe contract — click to restart its agent session" : "";
+  const hh = hookHalf(b);
+  hw.textContent = hh ? hh[0] : "";
+  hw.style.display = hh ? "" : "none";
+  hw.dataset.restart = hh && hh[2] ? "1" : "0";
+  hw.title = hh ? hh[1] : "";
   // Which isolation this box actually has. It is invisible from every other angle — an uncovered
   // box looks exactly like a covered one on this row and from inside itself — and it can only
   // change by restarting, because the cover is built at box start and the box keeps the namespace
@@ -2667,6 +2678,31 @@ const SHALF = {
 // is not a fault — showing the event at once is why edges lead — but the state has not been
 // confirmed by anything that can see the screen, and the next sample may correct it.
 const EDGE_AHEAD = ["unconfirmed", "a hook event arrived after the last screen reading, so this state is the event's and not the screen's — shown at once for latency. The next screen sample confirms or corrects it, usually within ten seconds.", "Nothing to do; it settles on its own."];
+// `hook_health`'s map — `screen_health`'s sibling in Rust (`signals::hook_health`), and now its
+// sibling here too. `HWARN[kind] = [badge, what it means and what to do, clickable-to-restart]`.
+//
+// A map with a fallback rather than a chain of `===`, and that is the SKEIN-260 fix rather than a
+// third comparison: the chain rendered nothing for any value it had not been taught, and nothing is
+// exactly how a healthy box looks. `screen_health` learned this once already (SKEIN-223, and the
+// `shUnknown` note below), and `hook_health` was the same shape one signal along, waiting to fail
+// the same way. It has now gained a value twice; the next one names itself.
+const HWARN = {
+  never:    ["⚠ no signals", "this box is running but its probes have never reported — inspect environment health", false],
+  stale:    ["↻ update probes", "this session predates the installed probe contract — click to restart its agent session", true],
+  // Not a variant of `never`: the signals ARE there, under this box's name, saying they are a
+  // different box's — so they are refused. `never` is a box to reattach; this is a store to clean,
+  // and the file on disk is somebody else's turn state. Deliberately not click-to-restart, because
+  // a restart throws away the agent's work and would not remove the file causing this.
+  misfiled: ["⚠ signals misfiled", "a hook signal stored under this box's name says it belongs to a DIFFERENT box, so it is refused rather than shown as this box's turn state. Not a missing probe: the file is in the store and is somebody else's. Remove the misfiled file under <store>/{status,sessions,tasks}/<box>.json, then reattach the box so its probes export SKEIN_BOX.", false],
+};
+// The lookup, with the same fallback discipline `screenHalf` has. `""` is the healthy answer and
+// the only one that draws nothing.
+const hookHalf = b => (!b.hook_health ? null : (HWARN[b.hook_health] || [
+  "⚠ hooks: " + b.hook_health,
+  'this cockpit has no explanation for the hook state "' + b.hook_health + '" that the server reported, so read every other signal on this row as unconfirmed.',
+  false,
+]));
+
 // A value the server sent that this page has no entry for. `screen_health` gains values in Rust and
 // this map learns them afterwards — `misfiled` shipped in 07fa02b and rendered nothing here until
 // SKEIN-223 — and "nothing" is not a neutral outcome: a missing badge is precisely how a healthy
@@ -3466,7 +3502,14 @@ function revRenderPane(force) {
         // review for every row whose review is yours to give, so on a lane it has worked through,
         // "review ready" is true of everything and stops saying which row to open. Demoted, never
         // hidden — the expanded row carries the review itself (SKEIN-216).
-        if (revDraftedReview(p)) kinds.add("ready");
+        // `revDraftAtHead`, not `revDraftedReview`: the latter needs `s.critique`, which
+        // `Known::thin` takes out of the queue payload (SKEIN-287) — so counted with it, "ready"
+        // was never counted at all and the chip could never be demoted (SKEIN-313). The chip
+        // itself has always drawn from `revDraftAtHead`; the tally has to ask the same question.
+        if (revDraftAtHead(p)) kinds.add("ready");
+        // And its opposite (SKEIN-275), for the same reason and by the same rule: on a queue
+        // nothing has drafted for, "no review" is every row and stops being a reason to open one.
+        if (revNoDraftWhy(p)) kinds.add("nodraft");
         for (const k of kinds) freq.set(k, (freq.get(k) || 0) + 1);
       }
       return new Set([...freq].filter(([, n]) => shown.length >= 3 && n > shown.length / 3).map(([k]) => k));
@@ -3505,7 +3548,11 @@ function revRenderPane(force) {
       // Your move is ordered by how long it has waited on you, OLDEST first: working from the top
       // clears what is most likely blocking a colleague. The other lanes keep recency — for your
       // own PRs, "what moved most recently" is the right question.
-      const sortAt = lane === "needs-you" ? revWaitedSince : (p => p.updated_at || "");
+      //
+      // `revSortAt` is the same function the AGE CELL renders (SKEIN-251), and that is the whole
+      // point of asking it here rather than spelling the rule out a second time: the column exists
+      // so this order can be audited, and a column computing the order for itself audits nothing.
+      const sortAt = revSortAt;
       // What skein read moves the row WITHIN its lane, never across lanes: a tripwire flag lifts a
       // row above the unread, a routine verdict sinks below them, and nothing the model says can
       // take a PR out of the lane its readiness put it in — AI adds scrutiny, never removes it. A
@@ -3817,37 +3864,85 @@ function revWorkflowPost(id, number, body) {
 // nothing else. It used to cover only the background one, so the OFF branch of the sentence below
 // was false: open the pane and every row was read anyway, and charged (SKEIN-242). It is one rule
 // now, enforced at the model call (`review::unasked_scope`), and the sentence is true again.
-function revReadChip() {
-  // Per-repo consent needs a repo: with the whole fleet on screen there is no honest single
-  // toggle, so the chip appears when the view is narrowed to one repo, and the row-level workflow
-  // box still says what governs each pull request.
-  const flows = revScopeRepo() ? revFlows.get(revScopeRepo()) : null;
-  if (!flows || flows.read_prs === undefined) return "";
-  const on = !!flows.read_prs;
-  return `<button type="button" class="revchip${on ? " on" : ""}"
-    title="${on
-      ? "skein reads this repo on its own: the pull requests somebody asked you to review, and the ones you opened. One unit of the day's budget each, and nothing else here is read."
-      : "skein reads nothing here on its own. Press read it on any row — a read you ask for is never refused and never counted against the day."}"
-    onclick="revSetReading(${!on})">read ahead${on ? " · on" : ""}</button>`;
+// The repos this view is speaking about, and which of them have answered about read-ahead.
+//
+// `read_prs` is per-repo consent and stays per-repo. What was wrong (SKEIN-282) was not the shape
+// of the consent but the shape of the CONTROL: it only existed in a view narrowed to one repo, so
+// on the merged queue — where every repo on the owner's fleet had it off — the pane showed a queue
+// nothing would ever be read in and offered nothing that would change that, unless you already
+// knew to narrow first. A control you have to know about before you can find it is a control the
+// person who needs it does not have.
+function revReadScope() {
+  const one = revScopeRepo();
+  const ids = one ? [one] : ((revQueue && revQueue.queues) || []).map(q => q.repo_id);
+  const known = ids.filter(id => (revFlows.get(id) || {}).read_prs !== undefined);
+  return { known, on: known.filter(id => revFlows.get(id).read_prs) };
 }
 
-function revSetReading(on) {
-  const id = revScopeRepo();
-  if (!id) return;
-  fetch(`/api/repos/${encodeURIComponent(id)}/reading`, {
+function revReadChip() {
+  const { known, on } = revReadScope();
+  if (!known.length) return "";
+  const all = on.length === known.length;
+  // One repo — the narrowed view, and the sentence can name it.
+  if (known.length === 1) {
+    return `<button type="button" class="revchip${all ? " on" : ""}"
+      title="${all
+        ? "skein reads this repo on its own: the pull requests somebody asked you to review, and the ones you opened. One unit of the day's budget each, and nothing else here is read."
+        : "skein reads nothing here on its own. Press read it on any row — a read you ask for is never refused and never counted against the day."}"
+      onclick="revSetReadingFor(${esc(JSON.stringify(known[0]))}, ${!all})">read ahead${all ? " · on" : ""}</button>`;
+  }
+  // The whole fleet. The COUNT is the point: "0 of 9" is the pane saying, on the screen you are
+  // already looking at, that nothing here will ever be read on its own — which is the thing the
+  // narrowed-only chip could not say. It is still per-repo consent underneath; this presses it
+  // once for each, and says how many it is about to change.
+  const off = known.length - on.length;
+  return `<button type="button" class="revchip${all ? " on" : ""}"
+    title="${all
+      ? `skein reads all ${known.length} of these repos on its own: the pull requests somebody asked you to review, and the ones you opened, one unit of the day's budget each. Press to switch every one off.`
+      : `skein reads nothing on its own in ${off} of these ${known.length} repos, so those rows stay unread however long you leave this open. Press to switch read-ahead on for all ${known.length} — the pull requests somebody asked you to review, and the ones you opened, one unit of the day's budget each. A read you ask for is never counted.`}"
+    onclick="revSetReadingAll(${!all})">read ahead · ${on.length} of ${known.length}</button>`;
+}
+
+// **One repo, and the only place this consent is posted.** Every affordance for it — the head
+// chip in either form, and the unread row's own sentence — is a caller, so there is one rule for
+// what switching it on means and one place a refusal is reported from.
+//
+// It takes the repo rather than reading the view, which is what let the control exist only where
+// the view happened to be narrowed (SKEIN-282). A row knows its own repo; the head chip knows the
+// ones it is counting.
+function revSetReadingFor(id, on) {
+  if (!id) return Promise.resolve(false);
+  return fetch(`/api/repos/${encodeURIComponent(id)}/reading`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }),
   })
     .then(r => r.json())
     .then(d => {
-      if (!d.ok) { toast(d.error || "that did not stick"); return; }
+      if (!d.ok) { toast(d.error || "that did not stick"); return false; }
       toast(on
-        ? "skein will read the pull requests waiting on you here, and the ones you opened"
-        : "skein will not read anything here unless you ask");
+        ? `skein will read the pull requests waiting on you in ${id}, and the ones you opened`
+        : `skein will not read anything in ${id} unless you ask`);
       // `loadWorkflows` carries the new answer back, and pumps: switching read-ahead ON fills the
       // repo in from the pane you are looking at, rather than at the next background tick.
       loadWorkflows();
+      return true;
     })
-    .catch(e => toast(String(e.message || e).split("\n")[0]));
+    .catch(e => { toast(String(e.message || e).split("\n")[0]); return false; });
+}
+
+// Every repo the merged queue is showing, in one press.
+//
+// Not a fleet-wide setting: it is the per-repo consent, posted once per repo, and the pane says so
+// by counting. A repo that refuses is reported by `revSetReadingFor` on its own, and the ones that
+// took still took — a partial answer is the honest one here, and the chip's own count is what says
+// where it got to.
+function revSetReadingAll(on) {
+  const { known } = revReadScope();
+  const want = known.filter(id => !!(revFlows.get(id) || {}).read_prs !== on);
+  if (!want.length) return;
+  toast(on
+    ? `switching read-ahead on for ${want.length} repo${want.length === 1 ? "" : "s"}`
+    : `switching read-ahead off for ${want.length} repo${want.length === 1 ? "" : "s"}`);
+  for (const id of want) revSetReadingFor(id, on);
 }
 
 // ---------- the workflow editor ----------
@@ -3973,6 +4068,11 @@ function revEditAddFlow() {
   revEdit.workflow.push({ name: `workflow-${revEdit.workflow.length + 1}`, matches: [], steps: [] });
   renderReview();
 }
+// One at a time — `Workflow::serial` (SKEIN-248). No initialiser beside it in `revEditAddFlow`, and
+// that is deliberate rather than an omission: `WrittenFlow::serial` is `#[serde(default)]` and is
+// always serialised, so a third statement of "a new workflow is not a train" would be a fact kept
+// in three places and testable in none. What was missing was never the field — it was this.
+function revEditSerial(w, on) { revEdit.workflow[w].serial = !!on; renderReview(); }
 function revEditDelFlow(w) { revEdit.workflow.splice(w, 1); renderReview(); }
 // Same: the input holds the name, so redrawing it would only take the caret away — see `revEditArg`.
 function revEditName(w, name) { revEdit.workflow[w].name = name; }
@@ -4023,9 +4123,20 @@ function revEditHtml() {
           <button type="button" class="revx" title="remove step" onclick="revEditDelStep(${w}, ${i})">×</button>
         </div>
       </div>`).join("");
+    // **One at a time** — `Workflow::serial`, and the whole of what makes a merge train a train
+    // (SKEIN-248). It rode the editor's payload and had no control anywhere in the page, so a train
+    // could not be built here, or un-set: existing ones survived only because the editor round-trips
+    // the object opaquely. Named for what it DOES rather than for the field, because "serial" is
+    // the file's word and "one at a time" is the reader's.
+    const serial = !!flow.serial;
     return `<div class="revflow-edit">
       <div class="revflow-edit-head">
         <input aria-label="Workflow name" value="${esc(flow.name || "")}" onchange="revEditName(${w}, this.value)">
+        <button type="button" class="revchip${serial ? " on" : ""}" onclick="revEditSerial(${w}, ${!serial})"
+          title="${serial
+            ? "a merge train: this workflow's pull requests act oldest-first, one per pass, and everyone behind the front waits. A stopped front is passed over rather than blocking the rest."
+            : "every pull request carrying this workflow acts in the same pass — which means each merge re-runs CI on all of its siblings. Switch on for a merge train: oldest first, one at a time."}"
+          >one at a time${serial ? " · on" : ""}</button>
         <span class="revspacer"></span>
         <button type="button" class="revchip" onclick="revEditDelFlow(${w})">delete workflow</button>
       </div>
@@ -4456,6 +4567,63 @@ function revReadyChip(pr) {
     n ? "" : "; it found nothing to flag"}">review ready${n ? ` · ${n}` : ""}</span>`;
 }
 
+// Why this pull request has a reading of the commit in front of you and NO drafted review beside it
+// (SKEIN-275). The shape the owner hit live: eighteen read, seventeen drafted, one with a complete
+// summary and `critique: null` — and from the pane nothing to see but a row missing a chip its
+// neighbours had. An absence with a reason on disk that nothing can reach is the same absence as
+// one with no reason at all, which is the whole defect.
+//
+// `null` when the question does not arise, and each of those is a state that already says its own
+// piece where it belongs:
+//   * nothing has been read here — the gist says `not read` and carries `unread_because`;
+//   * the reading describes an EARLIER commit — `revDetail`'s stale block is that row's story, and
+//     answering "why no review" about a commit nobody read would be answering the wrong question;
+//   * a review IS drafted at this head — `revDraftSection` prints it.
+//
+// Otherwise one of three answers, never a shrug, in the order they are knowable:
+//   1. **attempted and refused.** The background pass writes the reason to `critique-tried.json`
+//      (`review::note_critique_tried`) and `review::Known` carries it here as `critique_because`.
+//      This is the one the page cannot derive, and the one the owner needed.
+//   2. **never attempted, because the review is not skein's to give.** `review::worth_critiquing`
+//      drafts only where somebody asked YOU — reviewer, a team of yours, a review you already left
+//      — or where the pull request is your own. A mention is not a request (the same line
+//      `revSkeinsToRead` draws for reading), so a mentioned-only row is never drafted however long
+//      you wait, and saying "not yet" about it would be a lie with a waiting sound.
+//   3. **never attempted.** Nothing has bought one at this head yet, and the press is right there.
+//
+// The reasons are stated, never the containments: this returns the sentence and the caller supplies
+// the move, per law 1.
+function revNoDraftWhy(pr) {
+  const s = revSums.get(rk(pr));
+  if (!s || s === "…" || s.depth === "unread") return null;
+  // The head is CHECKED here, not trusted to the `stale` flag — the same guard, for the same
+  // reason, as `revDraftedReview` and `revDraftAtHead`. A reading of an earlier commit says its own
+  // piece in `revDetail`, and "no review of this commit" about a commit nobody has read is an
+  // answer to a question the row is not asking.
+  if (s.stale || (pr.head_sha && s.head_sha && s.head_sha !== pr.head_sha)) return null;
+  if (revDraftAtHead(pr)) return null;
+  if (s.critique_because) {
+    return { short: "no review", line: "skein read this commit and drafted no review of it", why: s.critique_because };
+  }
+  const rs = new Set((pr.reasons || []).map(r => typeof r === "string" ? r : "team"));
+  if (!(rs.has("author") || rs.has("reviewer") || rs.has("reviewed") || rs.has("team"))) {
+    return { short: "no review", line: "skein drafts a review only where the review is yours to give",
+             why: "nobody asked you to review this one, and it is not yours — so no review will be drafted for it on its own." };
+  }
+  return { short: "no review", line: "skein has drafted no review of this commit",
+           why: "nothing has bought one at this head yet — reading it again drafts one." };
+}
+
+// The absence, on the line you scan. It rides the same minority rule as every other chip
+// (`revCommonChips`, §4): on a queue nothing has drafted for, "no review" is true of everything and
+// says nothing about which row to open — so it leaves the collapsed rows and the expanded row keeps
+// the whole sentence. The reason travels on the title, because the row has one column for it.
+function revNoDraftChip(pr) {
+  const w = revNoDraftWhy(pr);
+  if (!w || revCommonChips.has("nodraft")) return "";
+  return `<span class="revtag nodraft" title="${esc(w.line)} — ${esc(w.why)}">${esc(w.short)}</span>`;
+}
+
 // Read this one, from the collapsed line (SKEIN-228).
 //
 // Re-analysis existed only behind the fold, as `re-read` among eight other chips — which the owner
@@ -4508,7 +4676,7 @@ function revRow(pr) {
     + (rawFlags.length > 2 ? `<span class="revtag flag" title="${esc(rawFlags.slice(2).join(", "))}">+${rawFlags.length - 2}</span>` : "");
   const chips = `${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
     revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
-  }${revReadyChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
+  }${revReadyChip(pr)}${revNoDraftChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr)}`;
   const line = `<div class="revline" onclick="toggleRevRow('${esc(rk(pr))}')">
       <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
       <span class="revnum" title="${esc(pr.repo_id || "")}">#${pr.number}</span>
@@ -4590,10 +4758,39 @@ function revMove(pr) {
 // The age cell is `revage`, never the fleet's `age`: `tickAges` rewrites EVERY `.age` in the
 // document from its `data-secs` once a second, and a review row carries none — so the true age
 // painted here was stomped to ageNow's "?" one tick after render, for the life of the page.
+//
+// It renders `revSortAt`, which IS what the lane sorted on (SKEIN-251). It used to render
+// `pr.updated_at` while the your-move lane sorted on `revWaitedSince`, so a pull request you
+// approved, that was force-pushed eight days ago and commented on thirty seconds ago, sat near the
+// top of oldest-first reading `1m` above rows reading `4d`. The one column this design put on the
+// row so the order could be AUDITED was the one that made it unauditable, and it took the amber
+// three-day mark with it.
 function revRail(pr) {
-  const a = revAge(pr.updated_at);
+  const a = revAge(revSortAt(pr));
   const sz = revSize(pr);
-  return `<span class="rail"><span class="revage${a.old ? " old" : ""}">${esc(a.label)}</span><span class="size"${sz ? ` title="${esc(sz.title)}"` : ""}>${sz ? esc(sz.label) : ""}</span><span class="who">${esc(pr.author || "")}</span></span>`;
+  return `<span class="rail"><span class="revage${a.old ? " old" : ""}" title="${
+    esc(revSortWord(pr))}">${esc(a.label)}</span><span class="size"${sz ? ` title="${esc(sz.title)}"` : ""}>${sz ? esc(sz.label) : ""}</span><span class="who">${esc(pr.author || "")}</span></span>`;
+}
+
+// **The one order, asked once.** The lane decides which clock a row is on, and both the sort and
+// the column it is audited by read it from here — because "how long has this waited" computed twice
+// is how the two came apart in the first place (`review::waited_since`, whose doc already says
+// "Do not invent a second order here", mirrors `revWaitedSince` field for field; the column was the
+// third implementation and the only one that disagreed).
+//
+// Your move is how long it has been waiting on YOU: a head that landed after your approval is the
+// moment it came back, and a comment since then does not restart it. Every other lane is recency —
+// for your own pull requests, "what moved most recently" is the right question, and nothing there
+// is waiting on you at all.
+function revSortAt(p) {
+  return p.lane === "needs-you" ? revWaitedSince(p) : (p.updated_at || "");
+}
+// What the number in that cell MEANS, on the cell — the two lanes measure different things and the
+// column cannot say which in 34 px.
+function revSortWord(p) {
+  return p.lane === "needs-you"
+    ? (revMoved(p) ? "waiting on you since the commit that came after your review" : "waiting on you this long")
+    : "last moved this long ago";
 }
 // `7 files ±782`, with the whole story on hover — the old `7f 782±` read as a cipher to the person
 // the column exists for. Null while the queue does not carry the numbers; the caller renders an
@@ -4695,8 +4892,14 @@ function revDetail(pr) {
         // a switch on this repo, the other is what skein reads at all on its own. "Nothing has
         // asked for this one yet" was the whole of what this said, on a row that would never be
         // read however long you waited (SKEIN-242).
+        // And the switch it names is RIGHT HERE (SKEIN-282). This sentence named a control that
+        // existed only in a view narrowed to one repo, so on the merged queue it told the reader
+        // about something they could not reach from where they were standing — law 1's failure
+        // one step removed: the move was stated but not offered.
         : !revReadsAhead(pr.repo_id)
-          ? " skein does not read this repo on its own — turn on \"read ahead\" for it, or read this one now."
+          ? ` skein does not read ${esc(pr.repo_id)} on its own — <button type="button" class="revchip" onclick="revSetReadingFor(${
+              esc(JSON.stringify(pr.repo_id))}, true)" title="the pull requests somebody asked you to review, and the ones you opened, one unit of the day's budget each — nothing else here is read">read ahead in ${
+              esc(pr.repo_id)}</button> or read this one now.`
           : !revSkeinsToRead(pr)
             ? " skein reads what somebody asked you to review and what you opened; this one is neither."
             // No settle clause any more: the hour is gone from the server, so the page must not
@@ -4779,8 +4982,22 @@ function revDetail(pr) {
 // of one review on one row is worse than either, and the editable one must win.
 function revDraftSection(pr) {
   const k = revDraftedReview(pr);
-  if (!k) return "";
   const c = revCrits.get(rk(pr));
+  if (!k) {
+    // The absence, stated where the presence would have been (SKEIN-275). Same section, same
+    // position under the brief, so "skein reviewed this" and "skein did not, and here is which of
+    // the three reasons" are read in the same place rather than one being a block and the other
+    // being nothing at all. No verdict in it, ever — §6's rule holds: this surface is not showing
+    // you the change, so the only control it may carry is the one that reads it.
+    const w = revNoDraftWhy(pr);
+    if (!w || (c && c.open)) return "";
+    return `<div class="revdraft nodraft">
+      <b>${esc(w.line)}.</b>
+      <div class="revdraft-overall">${esc(w.why)}</div>
+      <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress('${
+        esc(pr.repo_id)}', ${pr.number})">read it again, and draft one</button></div>
+    </div>`;
+  }
   if (c && c.open) return "";
   const n = (k.comments || []).length;
   const cut = k.truncated
@@ -4862,9 +5079,35 @@ let revCrits = new Map();  // rk(pr) -> { open, busy, posting, critique, drop:Se
 // returning to, so what you left (scroll, expanded row) is state to restore, not rebuild.
 let revSearch = "";            // the queue's search text — matches number, title, author, branch, repo
 let revCommonChips = new Set(); // chip kinds worn by most of the queue this render — wallpaper, not signal
-let revReading = null;         // {repo, number} while the change itself is on screen
+let revReading = null;         // {repo, number, head_sha} while the change itself is on screen
 let revReturnScroll = 0;       // the queue's scroll offset, put back on Esc
-const revDiffs = new Map();    // rk -> {head_sha, diff, cut} | {error}
+// **Keyed by the COMMIT the diff is of, not by the pull request** (SKEIN-254). Keyed by `rk` it was
+// fetched behind `if (!revDiffs.has(key))` with no invalidation anywhere — not on a queue refresh,
+// not on a head moving, not on an act — so once a tab had opened #7's code it showed that commit's
+// code until the tab was reloaded. `re-read` in the header forces the SUMMARY, never the diff. The
+// same key discipline as `review::cache_path`, and for the same reason: a new commit is a new key,
+// so a moved head simply misses instead of needing somebody to remember to clear something.
+//
+// The sha in the key comes from the ANSWER (`d.head_sha`), never from the row that asked: `/diff`
+// serves whatever is at the head now, and filing it under the sha the reader hoped for is the one
+// way this cache could lie about which commit is on screen.
+const revDiffs = new Map();    // repo#number#head_sha -> {head_sha, diff, cut} | {error}
+const revDiffBusy = new Set(); // keys with a fetch in flight — a second press must not double-ask
+const revDiffKey = (repo, number, sha) => repo + "#" + number + "#" + (sha || "");
+// The key of the diff the reading view is DRAWING — the commit the reader opened, which is not
+// whatever the queue's row has since learned the head is.
+function revReadingKey() {
+  return revReading ? revDiffKey(revReading.repo, revReading.number, revReading.head_sha) : "";
+}
+// The diff this pull request was read FROM, whichever commit that turned out to be. Insertion
+// order, so the OLDEST cached commit wins — which is what `revAct` wants when notes span two heads
+// (see there): an over-old base displaces a note into the body, an over-new one would let a wrong
+// line number stand.
+function revDiffRead(repo, number) {
+  const want = repo + "#" + number + "#";
+  for (const [k, v] of revDiffs) if (k.startsWith(want) && !v.error) return v;
+  return null;
+}
 // Line comments; they post WITH a verdict. `text` is the drafted line's own content (the durable
 // anchor the server re-anchors by when the head moves — SKEIN-214) and `sha` the head it was
 // drafted against. Notes saved before either existed still parse: missing text reads as "", which
@@ -4989,7 +5232,7 @@ function revAct(repo, number, kind) {
   // DISPLACE a note into the body (harmless), where an over-new one would claim notes were
   // drafted against code they never saw and let a wrong line number stand.
   const draftedAt = notes.length
-    ? ((notes.find(n => n.sha) || {}).sha || ((revDiffs.get(key) || {}).head_sha) || "")
+    ? ((notes.find(n => n.sha) || {}).sha || ((revDiffRead(repo, number) || {}).head_sha) || "")
     : "";
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
   const p = {
@@ -5199,21 +5442,56 @@ function revPendingPaint(key) {
 
 function openReading(repo, number) {
   revReturnScroll = (revpane && revpane.scrollTop) || 0;
-  revReading = { repo, number };
+  const at = ((revQueue && revQueue.prs) || []).find(p => p.repo_id === repo && p.number === number) || {};
+  revReading = { repo, number, head_sha: at.head_sha || "" };
   revHunkAt = -1;   // j/k and ]/[ start from the top of THIS change, not the last one's position
   revFileAt = -1;
   const key = repo + "#" + number;
-  if (!revDiffs.has(key)) {
-    fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/diff`)
-      .then(r => r.json())
-      .then(d => { revDiffs.set(key, d); if (revReading && revReading.repo === repo && revReading.number === number) renderReview(); })
-      .catch(e => { revDiffs.set(key, { error: String(e.message || e).split("\n")[0] }); renderReview(); });
-  }
+  revReadingLoad();
   // Opening the change is a revealed request, so a summary rides along — but it never GATES the
   // diff: reading code needs no model, and an unread PR opens exactly as readably as a read one.
   // Opening the change is a revealed request (docs/review-ux.md §7.3): it asks for a reading, and
   // it does not come out of the day's unasked allowance — somebody who opened a PR asked for it.
   if (!revSums.get(key)) revFetchSummary(repo, number, "asked");
+  renderReviewNow();
+}
+
+// Fetch the change the reading view is pointed at, unless it is already in hand or already coming.
+//
+// The answer files itself under ITS OWN head (`d.head_sha`) and the view moves to that key, because
+// `/diff` has no sha argument — it serves the head that is there now, and pretending otherwise is
+// how a cache starts lying about which commit is on screen. An error files under the key that was
+// asked for, so the view has something to say rather than sitting on "fetching the change…".
+function revReadingLoad() {
+  if (!revReading) return;
+  const { repo, number } = revReading;
+  const key = revReadingKey();
+  if (revDiffs.has(key) || revDiffBusy.has(key)) return;
+  revDiffBusy.add(key);
+  const here = () => revReading && revReading.repo === repo && revReading.number === number;
+  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/diff`)
+    .then(r => r.json())
+    .then(d => {
+      revDiffs.set(revDiffKey(repo, number, (d && d.head_sha) || revReading && revReading.head_sha), d);
+      if (here()) { revReading.head_sha = (d && d.head_sha) || revReading.head_sha; renderReview(); }
+    })
+    .catch(e => { revDiffs.set(key, { error: String(e.message || e).split("\n")[0] }); if (here()) renderReview(); })
+    .finally(() => revDiffBusy.delete(key));
+}
+
+// "show the new code" — the affordance SKEIN-254 was actually about. The stale marking was already
+// honest (the reader is TOLD the branch moved, and a note posts against the sha it was written on),
+// and honesty without a move is law 1's failure: the reader was told the code was old on the very
+// surface built so a thirty-a-day reviewer would not have to leave for github.com, and the only way
+// to see the new code was to leave.
+//
+// The notes are NOT thrown away: they carry their own sha, the server re-anchors them by their line
+// text against whatever is live, and a note that cannot be found is displaced into the body. So
+// loading the new code costs nothing already written.
+function revReloadReading(sha) {
+  if (!revReading) return;
+  revReading.head_sha = sha || "";
+  revReadingLoad();
   renderReviewNow();
 }
 
@@ -5246,7 +5524,10 @@ function renderReading() {
   const { repo, number } = revReading;
   const key = repo + "#" + number;
   const pr = ((revQueue && revQueue.prs) || []).find(p => p.repo_id === repo && p.number === number) || { repo_id: repo, number };
-  const d = revDiffs.get(key);
+  // The diff of the commit this view OPENED (SKEIN-254), not of whatever the row has since learned
+  // the head is: swapping the code under a reader who is part-way down it, without saying so, is
+  // the failure the moved notice exists to prevent.
+  const d = revDiffs.get(revReadingKey());
   const s = revSums.get(key);
   const a = revAge(pr.updated_at);
   const sz = revSize(pr);
@@ -5299,7 +5580,10 @@ function renderReading() {
 // While an act is held / in flight / refused, the receipt IS the bar.
 function revBarHtml(repo, number) {
   const key = repo + "#" + number;
-  const d = revDiffs.get(key);
+  // The change on SCREEN gates the verdict, so it is the reading's own key that is asked. Right
+  // after "show the new code" there is nothing on screen yet, and the bar correctly offers nothing
+  // — docs/review-ux.md §6: no verdict from a surface that is not showing you the change.
+  const d = revDiffs.get(revReadingKey());
   const notes = revNotesFor(key);
   const canJudge = d && !d.error && ((d.diff || "").trim());
   const p = revPending.get(key);
@@ -5321,11 +5605,25 @@ function revBarHtml(repo, number) {
 // thing a moved head took away, and SKEIN-214's whole point is that the post now goes anyway (the
 // server re-anchors matching lines by their text and folds the rest into the body). The stale
 // marking itself stays, because "you read an old commit" is still true and worth knowing.
+// The way out is on the notice (SKEIN-254). "The code you are reading is old" was true, said
+// plainly, and had nothing after it — on the one surface built so a thirty-a-day reviewer would not
+// have to go to github.com to see a change, the only way to see the new one was to go to
+// github.com. Law 1: never state a problem without its move.
+//
+// It costs nothing already written: a note carries the sha it was drafted on, the server re-anchors
+// it by its line text against whatever is live, and one it cannot find is displaced into the body
+// rather than mis-anchored. Only offered when the diff being shown is the one that moved — a notice
+// raised by an old NOTE alone is about the note, and reloading the code would not address it.
 function revMovedNotice(d, notes, headSha) {
   const base = ((notes || []).find(n => n.sha) || {}).sha || ((d || {}).head_sha) || "";
   if (!base || !headSha || base === headSha) return "";
+  const shown = (d || {}).head_sha || "";
+  const move = shown && shown !== headSha && revReading
+    ? ` <button type="button" class="revchip" onclick="revReloadReading(${esc(JSON.stringify(headSha))})"
+        title="fetch the change at the commit that is there now — your line comments keep the commit they were written on">show the new code</button>`
+    : "";
   return `<div class="revstale">the branch moved since you read — matching lines will carry your
-    comments at their new place; the rest post as a general note naming <code>${esc(base.slice(0, 7))}</code></div>`;
+    comments at their new place; the rest post as a general note naming <code>${esc(base.slice(0, 7))}</code>${move}</div>`;
 }
 
 // ---- line comments in the reading view: written on the line, posted with the verdict ----------
@@ -5386,7 +5684,7 @@ function openReadingComposer(ln) {
   const lineText = (ln.textContent || "").replace(/^[+\- ]/, "").replace(/^ $/, "");
   // The head this reading actually shows — revDiffs is what the pane rendered, so its sha is the
   // one the line number means. pr.head_sha may already be newer than what is on screen.
-  const draftedSha = (revDiffs.get(key) || {}).head_sha || "";
+  const draftedSha = (revDiffs.get(revReadingKey()) || {}).head_sha || "";
   const box = document.createElement("div");
   box.className = "cmt composer";
   box.innerHTML = `<textarea placeholder="Review comment on ${esc(path)}:${esc(line)} — posts with your verdict…"></textarea>
@@ -5638,8 +5936,9 @@ function revKeyReading(action) {
       return;
     }
     case "rev-approve": {
-      // The bar offers a verdict only over a readable change; the key obeys the same rule.
-      const d = revDiffs.get(key);
+      // The bar offers a verdict only over a readable change; the key obeys the same rule, and
+      // asks about the change on SCREEN (SKEIN-254) rather than any diff cached for this PR.
+      const d = revDiffs.get(revReadingKey());
       if (d && !d.error && (d.diff || "").trim()) revAct(repo, number, "approve");
       else toast("this change is not readable here, so no verdict is offered — GitHub is g h");
       return;
@@ -9813,14 +10112,18 @@ const attachWaiting = new Map();   // sid -> { bytes, text }, given to the socke
 // Hand `sid`'s waiting attachment to its socket, and only then say it was attached. The report
 // follows the delivery rather than the attempt: "attached →" claimed after a `send()` nobody read is
 // what let five uploads be reported as delivered while the agent's conversation stayed empty.
-function flushAttach(sid, lead = "") {
+// `tail` is whatever the caller has to add about the journey — the wait, when there was one worth
+// reporting (SKEIN-269). It rides the delivered sentence rather than a line of its own, because a
+// reader who waited eight minutes should be told so BY the sentence that says it finally arrived.
+// Empty from `ws.onopen`, which knows nothing about how long the upload took.
+function flushAttach(sid, lead = "", tail = "") {
   const waiting = attachWaiting.get(sid);
   if (!waiting) return false;
   const s = sessions.get(sid);
   if (!s || s.ws.readyState !== 1) return false;
   s.ws.send(waiting.bytes);
   attachWaiting.delete(sid);
-  toast(lead + "attached → " + waiting.text);
+  toast(lead + "attached → " + waiting.text + tail);
   return true;
 }
 // Append, never overwrite: two drops onto a still-connecting terminal must both survive to onopen.
@@ -9889,6 +10192,60 @@ function ensureTerminal(box) {
   return sid;
 }
 
+// How long an upload may go unanswered before the page stops showing "uploading…" and says so.
+// Well under the patience of the person watching it: the owner's five attempts (SKEIN-269) were
+// spread over seven minutes because nothing on screen ever changed after the first toast, and the
+// first thing a reader does with a surface that has stopped moving is press it again.
+const ATTACH_SLOW_MS = 4000;
+
+// One file, up the wire, with a clock on it — and a running word while it is still going.
+//
+// `fetch` has neither progress nor a deadline, so `await`ing one makes a stalled upload and a fast
+// one the same picture: one toast, then nothing, for however long it takes. That is the whole of
+// what the reader was given.
+//
+// It returns TWO numbers, and the pair is what names the cause rather than guessing at it:
+//   * `waited` — this call's own wall clock, from just before `fetch` to the parsed reply. It
+//     includes any time the request spent queued in the BROWSER, before it was ever sent.
+//   * `d.ms.total` — the server's own clock, which starts when its handler does.
+// A large `waited` with a small `total` is time spent before the request reached skein; a `total`
+// that fills the `waited` is the box holding it. SKEIN-269 could not tell those apart because
+// neither side was measured.
+async function uploadOne(box, batch, rel, file, say) {
+  const began = Date.now();
+  // Says it is STILL going, repeatedly, rather than once: a single "this is slow" ages into the
+  // same silence it was written to break.
+  const watch = setInterval(() => say(
+    `still uploading ${rel} — ${Math.round((Date.now() - began) / 1000)}s with no answer from ${box} yet; attaching it again will not make this one faster`
+  ), ATTACH_SLOW_MS);
+  try {
+    const r = await fetch(`/api/boxes/${encodeURIComponent(box)}/upload`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream",
+                 "X-Skein-Drop": batch, "X-Skein-Name": encodeURIComponent(rel) },
+      body: file });
+    const d = await r.json();
+    d.waited = Date.now() - began;
+    return d;
+  } finally { clearInterval(watch); }
+}
+
+// Where a slow attach's time actually went, as a clause to hang off the toast. Empty when it was
+// quick, because a number nobody was waiting on is noise on a line that has something to say.
+//
+// The comparison, not either number alone: the server's clock cannot see the browser's queue and
+// the browser's cannot see inside the box, so only the gap between them says which end held it.
+// `served < 0` means the server sent no clock at all — an older skein — and the honest thing then
+// is to report the wait and claim nothing about where it went.
+function attachDelayWord(waited, served) {
+  if (!(waited >= ATTACH_SLOW_MS)) return "";
+  const s = n => (n / 1000).toFixed(1) + "s";
+  if (!(served >= 0)) return ` — ${s(waited)}, and this skein does not say where it went`;
+  return served * 2 < waited
+    ? ` — ${s(waited)}, of which the box took ${s(served)}: the rest went before the request left this browser`
+    : ` — ${s(waited)}, and ${s(served)} of it was the box`;
+}
+
 // Upload every file of one drop, then paste the resulting in-box path(s) into the box's terminal.
 async function attachFiles(box, files, dropped) {
   if (!files.length) { toast("nothing to attach"); return; }
@@ -9899,22 +10256,27 @@ async function attachFiles(box, files, dropped) {
   const many = files.length > 1;
   toast(many ? `uploading ${files.length} files…` : "uploading " + files[0].rel + "…");
   const paths = [];
-  let failed = 0, dir = null;
+  let failed = 0, dir = null, waited = 0, served = 0;
   for (let i = 0; i < files.length; i++) {
     const { rel, file } = files[i];
     if (many && i && i % 10 === 0) toast(`uploading ${i}/${files.length}…`);
     try {
-      const r = await fetch(`/api/boxes/${encodeURIComponent(box)}/upload`, {
-        method: "POST",
-        headers: { "Content-Type": file.type || "application/octet-stream",
-                   "X-Skein-Drop": batch, "X-Skein-Name": encodeURIComponent(rel) },
-        body: file });
-      const d = await r.json();
+      const d = await uploadOne(box, batch, rel, file, toast);
+      // Summed over the drop, both of them: one slow file in twenty is still the drop being slow,
+      // and the pair has to stay a pair or the comparison below compares two different uploads.
+      waited += d.waited || 0;
+      served += (d.ms && d.ms.total) >= 0 ? d.ms.total : -Infinity;
       if (d.ok) { paths.push(d.path); dir = dir || d.path.split("/").slice(0, 3).join("/"); }
-      else { failed++; if (failed === 1) toast("attach failed: " + (d.error||"").split("\n")[0]); }
+      // A refusal names its own delay too. "attach failed: the box stopped taking the file" after
+      // eight minutes and the same words after eight milliseconds are different bugs.
+      else { failed++; if (failed === 1) toast("attach failed: " + (d.error||"").split("\n")[0] + attachDelayWord(d.waited || 0, (d.ms && d.ms.total) >= 0 ? d.ms.total : -1)); }
     } catch { failed++; }
   }
   if (!paths.length) { toast("attach failed"); return; }
+  // Hung off whatever the attach ends up saying, so the sentence that reports the handover is also
+  // the one that reports the wait — a reader who waited eight minutes should not have to go looking
+  // for why on a different line.
+  const slow = attachDelayWord(waited, served);
   // Collapse each attached *folder* to its directory — one path beats three hundred, and the agent can
   // list it itself. Derived from the paths the server returned (it sanitises names), not from the local
   // names, so what we hand over is exactly what exists in the box.
@@ -9935,16 +10297,16 @@ async function attachFiles(box, files, dropped) {
   // Every sentence below ends with where the file IS. When the handover does not happen, that path is
   // the whole remedy — the reader tells the agent to read it — and its absence is what turned one
   // failed attach into five attempts and a hunt through the box's /tmp.
-  if (!s) { copyText(text); toast(lead + "no terminal for " + box + " — copied; it is in the box at " + text); return; }
+  if (!s) { copyText(text); toast(lead + "no terminal for " + box + " — copied; it is in the box at " + text + slow); return; }
   // Queued by sid first and delivered second, so the payload is somewhere a reconnect can still find
   // it rather than in a local that goes out of scope with the function.
   const had = attachWaiting.get(sid);
   attachWaiting.set(sid, { bytes: had ? concatBytes(had.bytes, bytes) : bytes,
                            text: had ? had.text + " " + text : text });
-  if (flushAttach(sid, lead)) return;   // it says "attached → …" itself, once that is true
+  if (flushAttach(sid, lead, slow)) return;   // it says "attached → …" itself, once that is true
   toast(lead + (s.ws.readyState === 0
     ? "queued for " + box + "'s terminal — it is in the box at " + text
-    : box + "'s terminal is not connected — it is in the box at " + text));
+    : box + "'s terminal is not connected — it is in the box at " + text) + slow);
 }
 
 document.addEventListener("paste", e => {

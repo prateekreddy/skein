@@ -22,31 +22,38 @@ import { grab, harness } from "./lift.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-// Every value `screen_health` can return, read out of the function itself. Sliced to that function's
-// body so the rest of signals.rs cannot contribute strings it never returns.
-function healthValuesInRust() {
+// Every value one of these functions can return, read out of the function itself. Sliced to that
+// function's body so the rest of signals.rs cannot contribute strings it never returns.
+//
+// Takes the function name because `hook_health` is the same signal one column along and had the
+// same fault (SKEIN-260): a chain of `===` on the page, silent for anything it had not been taught.
+// Deriving both from Rust is the only version of this check that cannot itself go stale.
+function healthValuesInRust(fn) {
   const src = readFileSync(join(root, "src", "signals.rs"), "utf8");
-  const at = src.indexOf("pub fn screen_health(");
-  if (at < 0) throw new Error("`pub fn screen_health` is gone from src/signals.rs — renamed?");
+  const at = src.indexOf(`pub fn ${fn}(`);
+  if (at < 0) throw new Error(`\`pub fn ${fn}\` is gone from src/signals.rs — renamed?`);
   const end = src.indexOf("\n}\n", at);
   const body = src.slice(at, end);
-  const found = [...body.matchAll(/"([a-z]*)"/g)].map(m => m[1]);
+  // Value position only — after `return` or a match arm's `=>`. Every literal in the body would
+  // also catch the path segments these functions build (`store.join("status")`), which are not
+  // states anything reports and would fail this check with a badge nobody could write.
+  const found = [...body.matchAll(/(?:return|=>)\s+"([a-z]*)"/g)].map(m => m[1]);
   // `""` is the healthy answer — reading the screen fine, or the box is not running. It is the one
   // value that must NOT produce a badge, so it is dropped here rather than asserted about.
   return [...new Set(found.filter(Boolean))].sort();
 }
 
 const scope = new Function(`
-  ${["esc", "SHALF", "EDGE_AHEAD", "shUnknown", "screenHalf", "screenBadge"].map(grab).join("\n")}
-  return { SHALF, EDGE_AHEAD, screenHalf, screenBadge };
+  ${["esc", "SHALF", "EDGE_AHEAD", "shUnknown", "screenHalf", "screenBadge", "HWARN", "hookHalf"].map(grab).join("\n")}
+  return { SHALF, EDGE_AHEAD, screenHalf, screenBadge, HWARN, hookHalf };
 `);
 
 const { check, done } = harness();
-const { SHALF, EDGE_AHEAD, screenHalf, screenBadge } = scope();
+const { SHALF, EDGE_AHEAD, screenHalf, screenBadge, HWARN, hookHalf } = scope();
 
 // 1. Every state the server can report has an explanation on the page. This is the check that would
 //    have failed the day `misfiled` landed in Rust, which is the day it should have failed.
-const rust = healthValuesInRust();
+const rust = healthValuesInRust("screen_health");
 check("`misfiled` is one of the states Rust reports", rust.includes("misfiled"), true);
 check("every `screen_health` Rust returns has a SHALF entry", rust.filter(h => !SHALF[h]), []);
 
@@ -98,5 +105,37 @@ check(
   EDGE_AHEAD,
 );
 check("a shell tab has no screen to caveat", screenBadge({ screen_health: "misfiled" }, true), "");
+
+// ---- the same badge one signal along: `hook_health` (SKEIN-260) --------------------------------
+//
+// It failed the identical way and for the identical reason — three literal comparisons, and a value
+// Rust had learned that the page had not rendered NOTHING, which is how a healthy box looks. So the
+// same two checks, derived the same way, rather than a note somewhere saying to remember.
+
+// 7. Every state Rust reports has an explanation here. This is the check that fails on the day a
+//    fourth value lands in `signals::hook_health`, which is the day it should fail.
+const hookRust = healthValuesInRust("hook_health");
+check("`misfiled` is one of the hook states Rust reports", hookRust.includes("misfiled"), true);
+check(
+  "every hook state Rust can report has a badge on the page",
+  hookRust.filter(h => !HWARN[h]),
+  [],
+);
+
+// 8. And the fallback, which is what makes the check above a safety net rather than the only net: a
+//    value that gets past it still says something, and says what it does not know.
+// `|| []` deliberately: without the fallback this returns null, and reading `[0]` off it would
+// THROW — which fails the suite, but as a stack trace rather than as the sentence naming what broke.
+const oddHook = hookHalf({ hook_health: "sideways" }) || [];
+check("an unlearned hook state names itself rather than rendering nothing", oddHook[0], "⚠ hooks: sideways");
+check("and says the rest of the row is unconfirmed", /unconfirmed/.test(oddHook[1]), true);
+check("and never offers a restart it cannot justify", oddHook[2], false);
+
+// 9. `misfiled` is not a variant of `never`: one is a box to reattach, the other a store to clean.
+//    The badge has to differ in the part that decides what a person does — which is the click.
+check("a misfiled hook signal is not click-to-restart", hookHalf({ hook_health: "misfiled" })[2], false);
+check("a stale probe is", hookHalf({ hook_health: "stale" })[2], true);
+check("a box with healthy hooks says nothing", hookHalf({ hook_health: "" }), null);
+check("a box with no hook_health field says nothing", hookHalf({}), null);
 
 done();

@@ -193,6 +193,13 @@ function world(opts = {}) {
     ${grab("revReading")}
     ${grab("revReturnScroll")}
     ${grab("revDiffs")}
+    ${grab("revDiffKey")}
+    ${grab("revReadingKey")}
+    ${grab("revDiffRead")}
+    // SKEIN-254: opening a change asks for the COMMIT it opened, and can be told to load a newer one.
+    ${grab("revDiffBusy")}
+    ${grab("revReadingLoad")}
+    ${grab("revReloadReading")}
     ${grab("revNotes")}
     ${grab("revSel")}
     ${grab("revSelAt")}
@@ -249,8 +256,15 @@ function world(opts = {}) {
     ${grab("revGist")}
     // A row says whether a review is drafted for it (SKEIN-216).
     ${grab("revDraftedReview")}
+    // SKEIN-251: the age cell renders the lane's own sort key, so the row needs the order.
+    ${grab("revWaitedSince")}
+    ${grab("revSortAt")}
+    ${grab("revSortWord")}
     ${grab("revDraftAtHead")}
     ${grab("revReadyChip")}
+    // SKEIN-275: the row also states the ABSENCE of a drafted review, so revRow needs it.
+    ${grab("revNoDraftWhy")}
+    ${grab("revNoDraftChip")}
     // The row's own read control (SKEIN-228), and the two questions it asks about the pump's scope.
     ${grab("revReadsAhead")}
     ${grab("revSkeinsToRead")}
@@ -573,8 +587,11 @@ const rowClass = (html, k) => {
   w.render();
   w.press("j");
   w.press("Enter");
-  t.check("enter opens the reading view for the selected number",
-    w.reading(), { repo: "alpha", number: 5 });
+  // And at the COMMIT that row was showing (SKEIN-254): the reading view is pointed at a commit,
+  // not at a pull request, so the diff it caches can be missed by a moved head instead of outliving
+  // one for the life of the tab.
+  t.check("enter opens the reading view for the selected number, at the commit it was showing",
+    w.reading(), { repo: "alpha", number: 5, head_sha: "sha5" });
   w.press("Escape");
   t.check("esc comes back to the queue", w.reading(), null);
   t.check("with the selection intact", w.sel(), "alpha#5");

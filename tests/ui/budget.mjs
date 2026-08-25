@@ -248,4 +248,51 @@ async function drain(b) {
   t.check("the row still states its absence where you scan", b.line(1).includes("not read —"), true);
 }
 
+// ---- SKEIN-313: what the chip's demotion tally is allowed to ask -------------------------------
+//
+// `revCommonChips` counts "ready" so a chip true of most of the queue stops being drawn — it has
+// stopped saying which row to open. It counted with `revDraftedReview`, which needs `s.critique`,
+// and `Known::thin` took `critique` out of the queue payload (SKEIN-287). So on the payload
+// `/review/summaries` actually sends, "ready" was counted zero times however many rows wore it, and
+// the chip could never be demoted.
+//
+// Checked as the disagreement itself rather than by rendering a queue: the two functions answer the
+// same question off different vocabularies, and the bug is entirely that the tally asked the one
+// the wire no longer carries. A fixture that includes `critique` cannot fail this at all, so this
+// one deliberately does not have the key.
+{
+  const thinned = new Function(`
+    let revSums = new Map();
+    ${grab("rk")}
+    ${grab("revDraftedReview")}
+    ${grab("revDraftAtHead")}
+    // Exactly what a thinned row carries: has_critique + drafted, and no critique key at all.
+    const pr = { repo_id: "acme", number: 7, head_sha: "h7" };
+    revSums.set("acme#7", { has_critique: true, drafted: { head_sha: "h7", comments: 3 } });
+    return {
+      onTheWire: revDraftAtHead(pr),
+      needsTheDroppedField: revDraftedReview(pr),
+      // And the head is still checked, so a draft that moved with a kept reading of an EARLIER
+      // commit is not counted as a draft of this pull request.
+      movedHead: revDraftAtHead({ ...pr, head_sha: "h8" }),
+    };
+  `)();
+
+  t.check("a drafted review is visible in the row vocabulary the queue payload still carries",
+    thinned.onTheWire, true);
+  t.check("and invisible to the one it dropped — which is why the tally must not ask that one",
+    thinned.needsTheDroppedField, null);
+  t.check("a draft against an earlier commit is still not a draft of this one",
+    thinned.movedHead, false);
+
+  // The tally line itself, read out of the page: the check above says which function is right, and
+  // this says the demotion actually asks it. Text rather than behaviour because `revCommonChips` is
+  // computed inside `revRenderPane`, which needs a browser — and the failure being guarded is one
+  // identifier, on one line.
+  const tally = grab("revRenderPane");
+  t.check("the ready tally asks the question the wire can answer",
+    /revDraftAtHead\(p\)\) kinds\.add\("ready"\)/.test(tally), true);
+  t.check("and not the one it cannot", /revDraftedReview\(p\)\) kinds\.add/.test(tally), false);
+}
+
 t.done();

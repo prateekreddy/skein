@@ -169,6 +169,70 @@ pub(crate) fn status_edge(name: &str) -> Option<(String, i64)> {
     Some((status, at))
 }
 
+/// **Is a hook signal filed under this box's name actually another box's?** — the edge half's
+/// attribution question, asked over the three files the hooks write.
+///
+/// `status_edge`, `current_status_detail`, `session_signal` and `current_task` each refuse such a
+/// file (`signal_is_ours`), and each refuses it *silently* — the value they return for "somebody
+/// else's" is the value they return for "nothing there". This is the question those refusals were
+/// answering, asked once more so the row can say which of the two happened. `status/<box>.json`,
+/// `sessions/<box>.json` and `tasks/<box>.json` and no others: `status/<box>.pane.json` is the
+/// screen half and [`screen_health`] already discloses it, so reading it here would badge one
+/// misfiling twice under two different recipes.
+///
+/// A file that names nobody is not a misfiling — same rule as everywhere else attribution is
+/// checked, and the reason is in [`signal_is_ours`].
+fn hook_signal_misfiled(store: &Path, name: &str) -> bool {
+    ["status", "sessions", "tasks"].iter().any(|kind| {
+        fs::read_to_string(store.join(kind).join(format!("{name}.json")))
+            .ok()
+            .and_then(|txt| serde_json::from_str::<serde_json::Value>(&txt).ok())
+            .is_some_and(|v| !signal_is_ours(&v, name))
+    })
+}
+
+/// Whether the **hook** half of turn-state is contributing for this box, and if not, why —
+/// [`screen_health`]'s sibling, and it exists for the same reason.
+///
+/// * `""` — the hooks are reporting (or the box isn't running, where they cannot be).
+/// * `"never"` — nothing has ever been written: the probes are not wired. Restart the box.
+/// * `"misfiled"` — a signal under this box's name says it belongs to a different box, so it is
+///   refused. Distinct from `never` in the part that decides what a person does: `never` is a box
+///   to reattach, this is a store to clean, and the file on disk is somebody else's turn state.
+///   Asked FIRST, for the reason `screen_health` asks its own attribution first — a refused signal
+///   tells us nothing about whether this box's probes are wired, so calling it `never` or `stale`
+///   would send somebody to restart a box whose probes are fine.
+/// * `"stale"` — the session predates the installed probe contract, so it may emit a payload shape
+///   this host misreads.
+///
+/// One definition, in the same file as the predicate it applies, because the alternative is what
+/// this item found: the refusal lived in `signals.rs` and the disclosure was spelled out by hand in
+/// `board.rs`, so a signal could be dropped on one side and still announced as healthy on the other.
+pub fn hook_health(name: &str, running: bool) -> &'static str {
+    if !running {
+        return "";
+    }
+    let Some(store) = store_for_box(name) else {
+        return "never";
+    };
+    if hook_signal_misfiled(&store, name) {
+        return "misfiled";
+    }
+    // Silence alone is normal between lifecycle events; nothing ever having been written is not.
+    if !store
+        .join("hook-log")
+        .join(format!("{name}.jsonl"))
+        .exists()
+        && !store.join("status").join(format!("{name}.json")).exists()
+    {
+        return "never";
+    }
+    if probe_is_stale(&store, name) {
+        return "stale";
+    }
+    ""
+}
+
 // ---------- the level signal: what a box's screen says *right now* ----------
 // Every other signal skein has is an edge (a hook firing). Edge coverage is incomplete — no runtime
 // reports "the human answered", "the dialog was dismissed", "the turn was interrupted", "the agent
@@ -623,8 +687,25 @@ pub(crate) fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
     // whose status line was `* Fixing the style-version class… (10s · ↓ 283 tokens)`, age 0,
     // moving 1). Both windows were guesses at a distance. The line itself is what the pane means:
     // **the status line is the last non-chrome line above the composer** (see [`is_chrome`]).
-    let region: Vec<&String> = match obs.tail.iter().rposition(|l| matches!(l.trim(), "❯" | ">"))
-    {
+    //
+    // The anchor matches a composer that HOLDS TEXT, not only an empty one. `❯` and a
+    // non-breaking space is what an untouched composer trims to; the moment an operator types
+    // ahead without sending, the row becomes `❯\u{a0}keep going`, which trims to itself, the
+    // anchor finds nothing and the fallback takes over — and the fallback is the ten-line window
+    // the panels above already defeat. Captured live 2026-08-25 on this repo's own box, in
+    // `tests/fixtures/panes/claude-waiting.example-box-6.busy-queued-composer.…`: the same
+    // pane as the 2026-08-24 pair, the same agents panel, the same `✻ Waiting for 3 background
+    // agents to finish`, one character different — and the board said `waiting` at a turn that was
+    // running (`age 0, moving 1`, and its own hook edge one minute stale).
+    //
+    // Option rows are excluded: ` ❯ 1. Yes` starts with the same glyph and is a DIALOG, and
+    // anchoring the status scan above a dialog's first option would read the prose behind it. The
+    // composer *detection* below keeps the strict equality for the same reason from the other
+    // side — an option row must never count as proof the composer is on screen.
+    let region: Vec<&String> = match obs.tail.iter().rposition(|l| {
+        let t = l.trim();
+        (t.starts_with('❯') || t.starts_with('>')) && !is_option_line(l, &['❯', '>'])
+    }) {
         Some(composer) => obs.tail[..composer]
             .iter()
             .rev()
@@ -1452,6 +1533,64 @@ mod tests {
         assert!(!is_waiting_on_agents_line(
             "\"✻ Waiting for 4 background agents to finish\","
         ));
+    }
+
+    /// **Typing ahead must not make a working box look idle.**
+    ///
+    /// The pair above and this one are the same box, the same agents panel, the same status line,
+    /// and one character apart: there the composer is bare (`❯\u{a0}`), here it holds text the
+    /// operator typed without sending (`❯\u{a0}keep going`). A bare composer trims to `❯` and the
+    /// anchor found it; a held one trims to itself, the anchor found nothing, and the scan fell
+    /// back to the bottom ten non-empty lines — which the panel below the composer (the context
+    /// meter, the mode footer, `● main` and one row per agent) pushes the status line out of by
+    /// exactly one line.
+    ///
+    /// Captured live 2026-08-25 from this repo's own box, read out of the observation
+    /// `box-pane.sh` had already written (`<store>/status/example-box-6.pane.json`) rather
+    /// than re-captured, so the title travels with the tail it was sampled beside — which matters
+    /// here more than anywhere: the recorded title was `_ example-box-6`, so
+    /// `title_is_spinning` is FALSE and cannot rescue the verdict. A `tmux capture-pane` taken by
+    /// hand seconds earlier caught a braille frame, which would have made this test pass whether
+    /// or not the anchor was fixed. The pane was `age 0, moving 1` — redrawing — and the board
+    /// said `waiting`, from screen, over a hook edge that also said `waiting` from the turn
+    /// before. Both halves agreed, and both were wrong.
+    #[test]
+    fn a_busy_box_whose_composer_holds_queued_text_still_reads_busy() {
+        let real = captured(
+            include_str!(
+                "../tests/fixtures/panes/claude-waiting.example-box-6.busy-queued-composer.2026-08-25.txt"
+            ),
+            "_ example-box-6",
+            6462,
+        );
+        assert_eq!(
+            classify_pane("claude", &real),
+            Screen::Busy,
+            "an operator typing into the composer of a working box turned its status line \
+             invisible: the anchor wants a line that STARTS with the composer glyph, not one that \
+             equals it"
+        );
+        // The narrowing that keeps the anchor from being a licence. A dialog's option rows carry
+        // the same glyph, and anchoring above the first of them would scan the prose the dialog is
+        // covering; `is_option_line` is what tells them apart, and the composer *detection* below
+        // still demands the strict `❯`, so neither direction is loosened by the other.
+        assert!(is_option_line("  ❯ 1. Yes", &['❯', '>']));
+        assert!(!is_option_line("❯\u{a0}keep going", &['❯', '>']));
+        // And the bare-composer pair still classifies by the anchor, not by luck — the fixture
+        // this one was cut from.
+        for fixture in [
+            include_str!(
+                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.a.txt"
+            ),
+            include_str!(
+                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.b.txt"
+            ),
+        ] {
+            assert_eq!(
+                classify_pane("claude", &captured(fixture, "_ example-box-6", 12325)),
+                Screen::Busy
+            );
+        }
     }
 
     #[test]

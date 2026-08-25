@@ -45,10 +45,16 @@ function world(opts = {}) {
   };
   const src = `
     let revComposing = null;
-    let revReading = { repo: "acme", number: 7 };
+    // The reading carries the commit it opened (SKEIN-254): revDiffs is keyed by the COMMIT the
+    // diff is of, so a note's sha comes from the diff on screen and not from a per-PR slot that
+    // never changes.
+    let revReading = { repo: "acme", number: 7, head_sha: ${JSON.stringify(opts.at || "")} };
     let revQueue = { prs: [] };
     const revpane = null;
-    const revDiffs = new Map(Object.entries(${JSON.stringify(opts.diffs || {})}));
+    // Keyed repo#number#sha (SKEIN-254). The option "at" is the commit the reading view opened,
+    // and the diff files itself under its own head, so the two agree by construction, not by hand.
+    const revDiffs = new Map(${JSON.stringify(
+      opts.at ? [["acme#7#" + opts.at, { head_sha: opts.at, ...(opts.diff || {}) }]] : [])});
     const revNotes = new Map();
     const renderReview = () => {};
     const renderReviewNow = () => {};
@@ -59,6 +65,9 @@ function world(opts = {}) {
     const toast = said => toasts.push(said);
     ${grab("esc")}
     ${grab("rk")}
+    ${grab("revDiffKey")}
+    ${grab("revReadingKey")}
+    ${grab("revDiffRead")}
     ${grab("REV_UNDO_MS")}
     ${grab("revPending")}
     ${grab("revDecided")}
@@ -102,7 +111,7 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
 
 // --- a note born on a diff line carries the line's text and the reading's sha -------------------
 {
-  const w = world({ diffs: { "acme#7": { head_sha: "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1" } } });
+  const w = world({ at: "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1" });
   const ln = { dataset: { file: "src/lib.rs", line: "12" }, textContent: "+    let x = 1;", after() {} };
   w.compose(ln);
   t.check("composing alone saves nothing — Save does", w.notesFor("acme#7").length, 0);
@@ -131,12 +140,15 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
     },
   };
   const src = `
-    let revReading = { repo: "acme", number: 7 };
-    const revDiffs = new Map([["acme#7", { head_sha: "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1" }]]);
+    let revReading = { repo: "acme", number: 7, head_sha: "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1" };
+    const revDiffs = new Map([["acme#7#aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1",
+                              { head_sha: "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1" }]]);
     const revNotes = new Map();
     const renderReview = () => {};
     const renderReviewNow = () => {};
     ${grab("esc")}
+    ${grab("revDiffKey")}
+    ${grab("revReadingKey")}
     ${grab("revNotesStore")}
     ${grab("revNotesFor")}
     ${grab("revNotesSave")}
@@ -158,7 +170,7 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
 // --- the act POST carries comments[].text and one drafted_at ------------------------------------
 {
   const sha = "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1";
-  const w = world({ diffs: { "acme#7": { head_sha: sha } } });
+  const w = world({ at: sha });
   w.noteAdd("acme#7", "src/lib.rs", "12", "why 1?", "    let x = 1;", sha);
   w.act("acme", 7, "approve");
   await settle();
@@ -174,7 +186,7 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
 {
   const drafted = "aaaa111aaaa111aaaa111aaaa111aaaa111aaaa1";
   const live = "bbbb222bbbb222bbbb222bbbb222bbbb222bbbb2";
-  const w = world({ diffs: { "acme#7": { head_sha: drafted } } });
+  const w = world({ at: drafted });
   w.noteAdd("acme#7", "src/lib.rs", "12", "why 1?", "    let x = 1;", drafted);
   // The queue has since learned the branch moved; nothing about that may stop the post.
   w.act("acme", 7, "request-changes");
@@ -194,7 +206,7 @@ const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(r => 
   const sha = "cccc333cccc333cccc333cccc333cccc333cccc3";
   const w = world({
     stored: { "skein.revnotes.acme#7": JSON.stringify([{ path: "src/old.rs", line: 3, body: "old note" }]) },
-    diffs: { "acme#7": { head_sha: sha } },
+    at: sha,
   });
   t.check("a pre-text note parses", w.notesFor("acme#7").length, 1);
   w.act("acme", 7, "comment");

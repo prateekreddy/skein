@@ -1111,9 +1111,17 @@ async fn api_review_merged(Query(q): Query<HashMap<String, String>>) -> Response
 
 /// How many PRs need you, per repo — for the badge on the review button.
 ///
-/// Polled on a slow timer, so it deliberately does NOT force a refresh: it rides the same 60s
-/// per-repo cache as the pane. Repos with the queue switched off, and repos with no GitHub remote,
-/// are never asked.
+/// Polled on a slow timer, so it deliberately does NOT force a refresh — and how stale the badge
+/// may be is decided in [`skein::prq::counts`], not here. That is the same per-repo cache the pane
+/// reads, under a **ten-minute** budget where the pane insists on sixty seconds: a badge is a
+/// number acted on within minutes, and every refresh behind it is a GitHub round trip per repo,
+/// per open tab, every three minutes — the steady-state spend that got the owner rate-limited.
+///
+/// This comment used to say sixty seconds, on the strength of nothing but what the route did
+/// before `e6c006e` moved the budget (SKEIN-235). It is one number in two places or it drifts
+/// again, so `the_badge_route_documents_the_budget_prq_actually_uses` reads both.
+///
+/// Repos with the queue switched off, and repos with no GitHub remote, are never asked.
 async fn api_review_counts() -> Response {
     // The merge train's stops are stapled on HERE, not inside `prq::counts` — the stops file is
     // `prwork`'s, and `prq` reading it would join the module cycle (`docs/modules.toml`). This
@@ -1161,8 +1169,23 @@ async fn api_review_queue(
         if let Some(old) = skein::prq::remembered(&id) {
             // The refresh nobody is waiting for. Its result lands in the cache and on disk, so the
             // client's next ask — a few seconds later — is a cache hit rather than another wait.
+            //
+            // **Not forced** (SKEIN-235). It was `queue(&repo, true)`, which is the half of
+            // SKEIN-206 this route never got: a client retries a stale answer at 4s/8s/16s/…, and
+            // a forced refresh cannot be answered out of the cache a sibling refresh has just
+            // filled, so every retry bought another round of GraphQL searches for the same repo —
+            // "we aren't bombarding github right?". Unforced, a retry arriving after a sibling
+            // landed is served by the `unexpired` check above and never reaches this line at all.
+            //
+            // `force` still means a forced read: it is handled below, where the caller waits for
+            // it, because somebody who pressed refresh asked for the new answer rather than a fast
+            // one. What is gone is forcing on a path where nobody asked for anything.
+            //
+            // Still one refresh short of `prq::merged`, which also holds `RefreshRunning` for the
+            // repo so two cannot run at once. That guard is `prq`-private and belongs with the
+            // cache it protects; exposing it is noted for that module's owner.
             tokio::task::spawn_blocking(move || {
-                let _ = skein::prq::queue(&repo, true);
+                let _ = skein::prq::queue(&repo, false);
             });
             return Json(old).into_response();
         }
@@ -1193,6 +1216,71 @@ async fn api_review_queue(
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// The queue a route needs in order to answer **about** the queue — from what skein already knows,
+/// never from a GitHub round trip the reader waits on (SKEIN-291).
+///
+/// **The wait was never the payload.** Measured 2026-08-25 against a local server with a stubbed
+/// GitHub and thirty-nine stored readings: with the micro-cache warm the full bulk-summaries answer
+/// serialises in 7.4 ms and the thin one in 3.3 ms; with the micro-cache COLD and GitHub answering
+/// in three seconds, *both* shapes take 3.11 s, and on the owner's live fleet the same route was
+/// timed at 10.42 s. The bytes cost about four milliseconds. Everything else is
+/// `prq::queue(&repo, false)` refreshing past its sixty-second micro-cache (`src/prq.rs:725-731`),
+/// inline, before a byte is written — and the owner reads it as the cockpit hanging, because it
+/// holds one of the browser's per-origin connections for the whole of it.
+///
+/// **These routes take the refresh off the reader's path, and deliberately do not start one of
+/// their own.** Two things already refresh this cache: `GET /review` paints what is remembered and
+/// kicks the refresh behind it (`api_review_queue` above), and the badge poll re-reads every repo
+/// on a ten-minute budget (`prq::counts`, `src/prq.rs:1832`). The pane opens `/review`,
+/// `/review/summaries` and `/workflows` for the same repo in one go, so a refresh started here as
+/// well would be three GraphQL round trips per repo where one does — the duplicate-refresh spend
+/// SKEIN-206's guard exists to prevent, rebuilt outside the guard, where it cannot see it.
+///
+/// It also makes these answers *agree*. Every one of them is keyed on the head shas the queue
+/// reports, and taking them from the copy the pane is drawing is what stops a row and the reading
+/// underneath it describing two different commits.
+///
+/// A machine with nothing remembered still waits: there is no older answer to hand over, and a
+/// blank pane is not a faster one. What comes back then is a genuine read, marked fresh.
+fn queue_as_known(repo: &skein::repos::Repo) -> Result<skein::prq::Queue, String> {
+    if let Some(fresh) = skein::prq::unexpired(&repo.id) {
+        return Ok(fresh);
+    }
+    if let Some(old) = skein::prq::remembered(&repo.id) {
+        return Ok(old);
+    }
+    skein::prq::queue(repo, false)
+}
+
+/// Which queue an answer was built from, said on the answer itself.
+///
+/// skein already distinguishes a confident answer from a blind one — `Queue::fresh` and
+/// `Queue::as_of` are that distinction, and SKEIN-239 is the item that exists to name the failure
+/// of showing an old queue while claiming a current one. [`queue_as_known`] makes these routes able
+/// to answer blind, so they have to be able to say so.
+///
+/// A header rather than a field, because these routes do not return a `Queue` and one of them
+/// (`/review/summaries`) returns a bare map keyed by pull-request number, with nowhere to put a
+/// field without changing a shape every caller destructures. One fact, one spelling, on every route
+/// that can now answer from a remembered queue: `x-skein-queue: fresh | remembered`, and
+/// `x-skein-queue-as-of` carrying the same RFC 3339 stamp `Queue::as_of` does.
+fn answered_from<T: serde::Serialize>(queue: &skein::prq::Queue, body: T) -> Response {
+    (
+        [
+            (
+                "x-skein-queue",
+                match queue.fresh {
+                    true => "fresh",
+                    false => "remembered",
+                },
+            ),
+            ("x-skein-queue-as-of", queue.as_of.as_str()),
+        ],
+        Json(body),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1256,14 +1344,6 @@ async fn api_review_snooze(
     })
 }
 
-/// What one PR means, at the depth it earns. `?force=1` re-reads instead of using the cached one.
-///
-/// The PR is taken from the queue rather than from the request, so the summary is always keyed to
-/// the head commit GitHub reports right now — a client that remembered a stale SHA cannot make
-/// skein write a summary against it.
-///
-/// This never fails: a PR that could not be read comes back as an `unread` summary carrying the
-/// reason, because the only sane response to a failure here is to show you the PR anyway.
 /// What a pull request did, by module.
 ///
 /// Not a diff renderer, deliberately: §11.1 and the owner both say the value is in *which modules
@@ -1387,14 +1467,31 @@ async fn api_review_summary(
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
     let out = tokio::task::spawn_blocking(move || {
-        let queue = skein::prq::queue(&repo, false)?;
+        // Two different questions, so two different queues (SKEIN-291).
+        //
+        // `held=1` is a row opening: it reads the prose already on disk for the head the row is
+        // showing, and that head comes from the queue the pane painted — which may be the
+        // remembered one. Going to GitHub first would put a refresh in front of a 4 ms disk read
+        // (SKEIN-286), on the one path defined as "read nothing".
+        //
+        // Everything else on this route COMPUTES — a person pressed read, or re-read, or the pump
+        // asked — and a reading is worth only the commit it was taken of. Spending a model call
+        // against a head that has since moved is worse than waiting for the refresh that says so,
+        // so those arms still ask for the current queue.
+        let queue = match held {
+            true => queue_as_known(&repo)?,
+            false => skein::prq::queue(&repo, false)?,
+        };
         let pr = queue
             .prs
             .iter()
             .find(|p| p.number == number)
             .ok_or("that PR is not in your queue")?;
         if held {
-            return Ok(skein::review::held(&repo.id, pr.number, &pr.head_sha));
+            return Ok((
+                queue.clone(),
+                skein::review::held(&repo.id, pr.number, &pr.head_sha),
+            ));
         }
         let identities = std::iter::once(queue.viewer.clone()).collect::<Vec<_>>();
         let summary = if redraft {
@@ -1405,11 +1502,12 @@ async fn api_review_summary(
         // The same shape the bulk route answers, built by `review` rather than assembled here: one
         // visit produces the summary AND the review in one model call now, and a route that
         // answered only half of that made the page wait for a refresh to learn the other half.
-        Ok::<_, String>(skein::review::known_at(&repo.id, summary, &pr.head_sha))
+        let known = skein::review::known_at(&repo.id, summary, &pr.head_sha);
+        Ok::<_, String>((queue.clone(), known))
     })
     .await;
     match out {
-        Ok(Ok(summary)) => Json(summary).into_response(),
+        Ok(Ok((queue, summary))) => answered_from(&queue, summary),
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1526,10 +1624,17 @@ async fn api_set_reading(
 /// prints both). The prose comes back per row when a row is opened, from
 /// `/review/:n/summary?held=1`.
 ///
-/// **The ten seconds in that measurement is not this payload**, and saying so here is the point:
+/// **The ten seconds in that measurement was not this payload**, and saying so here is the point:
 /// with the queue's micro-cache warm the full answer is written in single-digit milliseconds, and
-/// with it cold both shapes wait the same however long `prq::queue` takes to hear back from
-/// GitHub. That wait is SKEIN-291. This is the bytes, and the connection those bytes occupy.
+/// with it cold both shapes waited the same however long `prq::queue` took to hear back from
+/// GitHub. That wait was SKEIN-291, and it is gone from this route — it goes through
+/// [`queue_as_known`], which reads what skein already holds and never blocks on a refresh. This is
+/// the bytes, and the connection those bytes occupy.
+///
+/// Which queue the answer was built from travels on the response, `x-skein-queue: fresh` or
+/// `remembered` — see [`answered_from`]. A map keyed by pull-request number has nowhere to put the
+/// `fresh`/`as_of` pair a `Queue` carries in its own payload, and an answer that cannot say it is
+/// blind is the thing SKEIN-239 exists to refuse.
 ///
 /// A query parameter rather than a second route, for the reason the shape itself is a `thin()` and
 /// not a `Row` struct: one handler, one `known()` call, one serialisation. A second route is a
@@ -1545,23 +1650,27 @@ async fn api_review_summaries(
         return (StatusCode::NOT_FOUND, "no such repo").into_response();
     };
     let out = tokio::task::spawn_blocking(move || {
-        let queue = skein::prq::queue(&repo, false)?;
+        // `queue_as_known`, not `queue(&repo, false)`: this route reads disk, and it used to do it
+        // behind a GitHub refresh that took 10.42 s on the owner's fleet (SKEIN-291). The queue is
+        // wanted here only for the list of (number, head) pairs to look up, and the pairs the pane
+        // is drawing are exactly the remembered ones.
+        let queue = queue_as_known(&repo)?;
         let want: Vec<(u64, String)> = queue
             .prs
             .iter()
             .map(|pr| (pr.number, pr.head_sha.clone()))
             .collect();
-        Ok::<_, String>(skein::review::known(&repo.id, &want))
+        Ok::<_, String>((queue, skein::review::known(&repo.id, &want)))
     })
     .await;
     match out {
-        Ok(Ok(known)) => Json(
+        Ok(Ok((queue, known))) => answered_from(
+            &queue,
             known
                 .into_iter()
                 .map(|(number, k)| (number.to_string(), if rows { k.thin() } else { k }))
                 .collect::<std::collections::BTreeMap<_, _>>(),
-        )
-        .into_response(),
+        ),
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1630,7 +1739,12 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
         // workflows all stopped working because of a typo must say so, or the automation simply
         // appears to have been forgotten.
         let flows = skein::workflow::load()?;
-        let queue = skein::prq::queue(&repo, false)?;
+        // The queue as skein already knows it (SKEIN-291). This route's own note above says it is
+        // "a separate read from the queue" and the page's call site calls it "cheap: it reads the
+        // cached queue" — but `queue(&repo, false)` refreshes the moment that cache is a minute
+        // old, and the pane fetches this per repo alongside `/review` and `/review/summaries`, so
+        // a cold minute made three routes wait on three refreshes of one queue.
+        let queue = queue_as_known(&repo)?;
         // One read for every PR's history — `journal()` per PR would re-read the same file
         // per row.
         let mut journals = skein::prwork::journals(&repo.id);
@@ -1654,19 +1768,23 @@ async fn api_workflows(Path(id): Path<String>) -> Response {
                     .unwrap_or_default();
             prs.insert(pr.number.to_string(), entry);
         }
-        Ok::<_, String>(serde_json::json!({
-            "enabled": skein::prwork::enabled(),
-            "read_prs": repo.read_prs,
-            // `editor_shape`, NOT a hand-built copy: this route had the second of the two hand
-            // serializers that silently dropped `serial` — see workflow::editor_shape.
-            "defined": flows.iter().map(skein::workflow::editor_shape).collect::<Vec<_>>(),
-            "trains": skein::prwork::trains(&repo.id, &carrying, &flows),
-            "prs": prs,
-        }))
+        let trains = skein::prwork::trains(&repo.id, &carrying, &flows);
+        Ok::<_, String>((
+            queue,
+            serde_json::json!({
+                "enabled": skein::prwork::enabled(),
+                "read_prs": repo.read_prs,
+                // `editor_shape`, NOT a hand-built copy: this route had the second of the two hand
+                // serializers that silently dropped `serial` — see workflow::editor_shape.
+                "defined": flows.iter().map(skein::workflow::editor_shape).collect::<Vec<_>>(),
+                "trains": trains,
+                "prs": prs,
+            }),
+        ))
     })
     .await;
     match out {
-        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Ok((queue, value))) => answered_from(&queue, value),
         Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -3135,14 +3253,69 @@ async fn api_destroy(Path(name): Path<String>) -> Json<serde_json::Value> {
 /// buffering — a 2 GB video costs the host no memory. `X-Skein-Name` carries the file's name
 /// (percent-encoded; may include a relative dir when a folder is dropped) and `X-Skein-Drop` groups
 /// every file of one drop into a single `/tmp/skein-drop-<batch>/` tree.
+/// It answers with its **own clock** beside the path, and that is not telemetry — it is the one
+/// thing that tells the two halves of a slow attach apart (SKEIN-269). The browser can measure only
+/// click-to-answer, which counts the time a request spent queued in the browser's own connection
+/// pool *before* it was ever sent; `ms.total` counts from this handler starting. A big wait with a
+/// small `total` happened before the request reached skein; a `total` that fills the wait is the
+/// box. Guessing between those two, from five drop directories and no numbers, is exactly what this
+/// endpoint left the reader to do.
+///
+/// The phases are named rather than summed because they fail differently: `chose` is the round trip
+/// that picks the channel, `body` is the transfer, `verdict` is waiting for the box to say the file
+/// is written.
 async fn api_upload(
     Path(name): Path<String>,
     headers: axum::http::HeaderMap,
     body: axum::body::Body,
 ) -> Json<serde_json::Value> {
-    match stream_upload(&name, &headers, body).await {
-        Ok(path) => serde_json::json!({ "ok": true, "path": path }).into(),
-        Err(e) => serde_json::json!({ "ok": false, "error": e }).into(),
+    let mut clock = UploadClock::start();
+    match stream_upload(&name, &headers, body, &mut clock).await {
+        Ok(path) => serde_json::json!({ "ok": true, "path": path, "ms": clock.ms() }).into(),
+        // The timings ride the failure too: a refusal after eight minutes and one after eight
+        // milliseconds are different bugs, and an `error` alone reports them identically.
+        Err(e) => serde_json::json!({ "ok": false, "error": e, "ms": clock.ms() }).into(),
+    }
+}
+
+/// What an upload spent, phase by phase, on the host's clock.
+///
+/// Kept by the caller and filled in as the phases end, so a failure still carries the phases that
+/// completed — a struct built at the end would have nothing to say about the upload that did not
+/// reach one.
+struct UploadClock {
+    began: std::time::Instant,
+    at: std::time::Instant,
+    chose: u128,
+    body: u128,
+    verdict: u128,
+}
+
+impl UploadClock {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            began: now,
+            at: now,
+            chose: 0,
+            body: 0,
+            verdict: 0,
+        }
+    }
+    /// End the phase that was running and start the next. Returns the millis it took.
+    fn lap(&mut self) -> u128 {
+        let now = std::time::Instant::now();
+        let ms = now.duration_since(self.at).as_millis();
+        self.at = now;
+        ms
+    }
+    fn ms(&self) -> serde_json::Value {
+        serde_json::json!({
+            "chose": self.chose,
+            "body": self.body,
+            "verdict": self.verdict,
+            "total": self.began.elapsed().as_millis(),
+        })
     }
 }
 
@@ -3155,6 +3328,42 @@ const UPLOAD_CAP: u64 = 2 * 1024 * 1024 * 1024;
 /// upload, not a stall. It exists so that a box which stops reading cannot hold the connection (and
 /// the agent's child) forever.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// How long any one step of an upload may make **no progress** before it is a stall and says so.
+///
+/// The companion to [`UPLOAD_TIMEOUT`] and not a smaller version of it: that one bounds the whole
+/// transfer, which for a 900 MB video over a slow link is legitimately most of an hour. This one
+/// bounds silence — a socket carrying nothing, a `cat` that has stopped consuming, an `sbx exec`
+/// that will not exit. The two were one number, and under one number those are the same picture:
+/// SKEIN-269's five uploads sat for minutes and the reader was told nothing, because nothing on
+/// either side of the wire distinguished "still coming" from "never coming".
+///
+/// A minute rather than seconds, because the thing on the other end is a sandbox that may be
+/// legitimately busy — `AGENT_CONNECT` (src/place.rs) is thirty seconds for that same reason, and
+/// waiting is only wrong when nothing is moving.
+///
+/// A function and not a `const` so `$SKEIN_UPLOAD_STALL_MS` can shorten it, which is what lets a
+/// test drive a real stall against a real box in under a second instead of waiting a minute for the
+/// deadline it is checking. Same shape as `knock::grace`; a value that does not parse, or is zero,
+/// is the default rather than an error, because a mistyped knob must not disable a deadline.
+/// The stall budget as the reader would say it. Seconds read better and are what the deadline is
+/// set in — but a test shortens it to milliseconds, and "nothing moved for 0s" is a sentence that
+/// says the deadline is broken rather than that it fired.
+fn stall_word() -> String {
+    let d = upload_stall();
+    match d.as_secs() {
+        0 => format!("{}ms", d.as_millis()),
+        n => format!("{n}s"),
+    }
+}
+
+fn upload_stall() -> Duration {
+    let asked = std::env::var("SKEIN_UPLOAD_STALL_MS").ok();
+    match asked.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(ms) if ms > 0 => Duration::from_millis(ms),
+        _ => Duration::from_secs(60),
+    }
+}
 
 /// Where an upload's bytes go: the in-sandbox agent when there is one, `sbx exec -i` when there is
 /// not. Both stream, so neither the host nor the box holds the whole file; the difference is only
@@ -3215,10 +3424,19 @@ impl Sink {
                     Ok(()) => Err("the write into the box ended early".into()),
                 }
             }
-            Sink::Child { stdin, .. } => stdin
-                .write_all(chunk)
-                .await
-                .map_err(|e| format!("writing file to box: {e}")),
+            // Bounded, where it used to be unbounded: `sbx exec`'s stdin is a pipe into a process
+            // that may have stopped reading, and an `await` on that with no deadline parks this
+            // request for as long as the process lives. The agent path had an hour; this one had
+            // nothing at all, which is the worse half of SKEIN-269's host side.
+            Sink::Child { stdin, .. } => {
+                match tokio::time::timeout(upload_stall(), stdin.write_all(chunk)).await {
+                    Ok(r) => r.map_err(|e| format!("writing file to box: {e}")),
+                    Err(_) => Err(format!(
+                        "the box stopped taking the file — nothing moved for {}",
+                        stall_word()
+                    )),
+                }
+            }
         }
     }
 
@@ -3232,13 +3450,22 @@ impl Sink {
             }
             Sink::Child { child, stdin } => {
                 use tokio::io::AsyncWriteExt as _;
+                // The verdict below is a moment away or is never coming: the body is already
+                // through and `cat` exits on EOF. So it waits `upload_stall`, not `UPLOAD_TIMEOUT`
+                // — an `sbx exec` that will not exit used to hold the request with no deadline at
+                // all, and the reader saw "uploading…" for as long as that lasted (SKEIN-269).
                 let mut stdin = stdin;
                 stdin.shutdown().await.ok();
                 drop(stdin); // EOF for `cat`
-                let out = child
-                    .wait_with_output()
-                    .await
-                    .map_err(|e| format!("sbx exec failed: {e}"))?;
+                let waited = tokio::time::timeout(upload_stall(), child.wait_with_output()).await;
+                let out = match waited {
+                    Ok(r) => r.map_err(|e| format!("sbx exec failed: {e}"))?,
+                    Err(_) => {
+                        let word = stall_word();
+                        let why = "the box never confirmed the file";
+                        return Err(format!("{why} — sbx exec did not finish within {word}"));
+                    }
+                };
                 if out.status.success() {
                     return Ok(());
                 }
@@ -3282,6 +3509,7 @@ async fn stream_upload(
     name: &str,
     headers: &axum::http::HeaderMap,
     body: axum::body::Body,
+    clock: &mut UploadClock,
 ) -> Result<String, String> {
     let hdr = |k: &'static str| {
         headers
@@ -3322,7 +3550,13 @@ async fn stream_upload(
         Some(n) if n <= skein::place::AGENT_WRITE_CAP => {
             let (box_name, dir, path) = (name.to_string(), dir.clone(), path.clone());
             tokio::task::spawn_blocking(move || {
-                skein::sandbox::begin_box_write(&box_name, &dir, &path, UPLOAD_TIMEOUT)
+                skein::sandbox::begin_box_write(
+                    &box_name,
+                    &dir,
+                    &path,
+                    UPLOAD_TIMEOUT,
+                    upload_stall(),
+                )
             })
             .await
             .ok()
@@ -3340,12 +3574,22 @@ async fn stream_upload(
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
+                // So that giving up on it is giving up on it. `Sink::finish` now stops waiting after
+                // `upload_stall()`, and without this the abandoned `sbx exec` would go on running —
+                // still holding the box's end of a file nobody is going to be told about, and still
+                // costing a process per attempt, which the reader's five retries would have made
+                // five (SKEIN-269).
+                .kill_on_drop(true)
                 .spawn()
                 .map_err(|e| format!("sbx exec not runnable: {e}"))?;
             let stdin = child.stdin.take().ok_or("no stdin pipe")?;
             Sink::Child { child, stdin }
         }
     };
+    // The channel is chosen; everything above is `chose`. It is its own phase because it is the one
+    // that happens before a byte of the body is read, and therefore the one a reader watching an
+    // upload bar would see as nothing happening at all.
+    clock.chose = clock.lap();
     let mut stream = body.into_data_stream();
     let mut total: u64 = 0;
     // Collect the failure instead of returning from inside the loop: the partial file has to be
@@ -3370,12 +3614,15 @@ async fn stream_upload(
             break;
         }
     }
+    clock.body = clock.lap();
     if let Some(e) = failed {
         sink.abandon().await;
         discard_partial(name, &path).await;
         return Err(e);
     }
-    sink.finish().await?;
+    let said = sink.finish().await;
+    clock.verdict = clock.lap();
+    said?;
     Ok(path)
 }
 
@@ -4049,5 +4296,521 @@ mod tests {
         assert!(origin_ok(&with_origin(Some("https://proxy.local"))));
         assert!(!origin_ok(&with_origin(Some("https://nope.local"))));
         std::env::remove_var("SKEIN_ALLOWED_ORIGINS");
+    }
+}
+
+/// The review pane's routes, driven directly.
+///
+/// Its own module because these need `$SKEIN_HOME` and a GitHub that is not there, and the asserts
+/// above are pure — mixing them would make a pure test's failure depend on an env var somebody
+/// else's test set.
+#[cfg(test)]
+mod review_routes {
+    use super::*;
+
+    /// One home per test function, named after it — `cargo` runs these as threads in one process,
+    /// so two tests sharing a directory share `repos.json` and each other's failures.
+    fn home_for(what: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!("skein-{what}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            format!(
+                r#"[{{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"{t}","store":"{s}","agent":"claude","read_prs":false,"plane_project":"","sync_connection":""}}]"#,
+                t = home.join("tree").display(),
+                s = home.join("store").display()
+            ),
+        )
+        .unwrap();
+        home
+    }
+
+    /// A queue on disk, exactly where `prq::remembered` reads it — one pull request, at `sha7`.
+    fn remember_a_queue(home: &std::path::Path) {
+        let dir = home.join("review").join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("queue.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "repo_id": "demo", "slug": "acme/thing", "viewer": "you", "ai": true,
+                "blind_spots": [], "as_of": "2026-08-25T09:00:00Z", "fresh": true,
+                "whole": true, "trunk": "main",
+                "prs": [{
+                    "number": 7, "title": "shorten the timeout", "author": "someone",
+                    "url": "https://github.com/acme/thing/pull/7",
+                    "head_ref": "timeout", "head_sha": "sha7", "base_ref": "main",
+                    "draft": false, "updated_at": "2026-08-25T08:00:00Z",
+                    "committed_at": "2026-08-25T08:00:00Z", "checks": "passing",
+                    "my_review": "", "review_is_current": false,
+                    "reasons": ["reviewer"], "lane": "needs-you", "box_name": "",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A reading already paid for, at the head the remembered queue reports.
+    fn remember_a_reading(home: &std::path::Path) {
+        let dir = home.join("review").join("demo").join("summaries");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("7-sha7.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "number": 7, "head_sha": "sha7", "depth": "expanded",
+                "line": "the request timeout default drops from 30s to 5s.",
+                "detail": "", "flags": [], "yours": [], "others": 0, "signals": [],
+                "unread_because": "", "computed": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Point skein at a GitHub that is not there. Port 1 refuses instantly, so a route that goes
+    /// looking fails in milliseconds and this test stays fast — what is asserted is WHETHER it
+    /// goes, not how long it waits when it does.
+    fn no_github(home: &std::path::Path) {
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_GITHUB_API", "http://127.0.0.1:1");
+        std::env::set_var("GH_TOKEN", "not-a-real-token");
+    }
+
+    fn forget_github(home: &std::path::Path) {
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    async fn read(response: Response) -> (StatusCode, String, String) {
+        let status = response.status();
+        let queue = response
+            .headers()
+            .get("x-skein-queue")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = axum::body::to_bytes(response.into_body(), 8 << 20)
+            .await
+            .unwrap();
+        (status, queue, String::from_utf8_lossy(&body).to_string())
+    }
+
+    /// **The review pane's answers come from what skein remembers, not from a GitHub refresh the
+    /// reader waits on** (SKEIN-291).
+    ///
+    /// The wait the owner reported as the cockpit hanging — 10.42 s on `/review/summaries` — was
+    /// never the payload: warm, the full answer serialises in ~7 ms; cold, with GitHub answering in
+    /// three seconds, every shape of it took 3.11 s. It was `prq::queue(&repo, false)` refreshing
+    /// past its sixty-second micro-cache, inline, before a byte was written.
+    ///
+    /// So: a home with a remembered queue and a reading in it, and no GitHub at all. Every route
+    /// the pane opens with must still answer, and must say the queue it answered from was a
+    /// remembered one.
+    #[tokio::test]
+    async fn the_review_pane_answers_with_no_github_to_ask() {
+        let home = home_for("291");
+        remember_a_queue(&home);
+        remember_a_reading(&home);
+        no_github(&home);
+
+        // The bulk payload — the one that was measured at 10.42 s.
+        let (status, from, body) =
+            read(api_review_summaries(Path("demo".into()), Query(HashMap::new())).await).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the bulk summaries route went to GitHub for a payload it reads off disk: {body}"
+        );
+        assert!(
+            body.contains("the request timeout default drops"),
+            "the reading skein already holds did not come back: {body}"
+        );
+        assert_eq!(
+            from, "remembered",
+            "the answer did not say which queue it was built from — a page cannot tell a \
+             confident answer from a blind one (SKEIN-239)"
+        );
+
+        // The workflows payload, fetched per repo in the same pane open.
+        let (status, from, body) = read(api_workflows(Path("demo".into())).await).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the workflows route went to GitHub for skein's own answer about the queue: {body}"
+        );
+        assert!(
+            body.contains("\"7\""),
+            "the remembered queue's pull request is missing from the workflows payload: {body}"
+        );
+        assert_eq!(from, "remembered", "the workflows answer did not say so");
+
+        // A row opening: `held=1` is defined as "hand over what is on disk and read nothing".
+        let held = HashMap::from([("held".to_string(), "1".to_string())]);
+        let (status, from, body) =
+            read(api_review_summary(Path(("demo".into(), 7)), Query(held)).await).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "opening a row put a GitHub refresh in front of a disk read: {body}"
+        );
+        assert!(
+            body.contains("the request timeout default drops"),
+            "the row opened onto no prose: {body}"
+        );
+        assert_eq!(from, "remembered", "the row's answer did not say so");
+
+        // The other half of the same route is the control: asking skein to READ this pull request
+        // is a model call, and a reading is worth only the commit it was taken of — so that arm
+        // still insists on a current queue, and with no GitHub it must fail rather than quietly
+        // analyse a head it has not checked.
+        let (status, _, _) =
+            read(api_review_summary(Path(("demo".into(), 7)), Query(HashMap::new())).await).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_GATEWAY,
+            "the computing arm answered from a remembered queue — a model call spent against a \
+             head skein has not checked"
+        );
+
+        forget_github(&home);
+    }
+
+    /// The lines of `source` around `needle` — `before` lines above it and `after` below.
+    ///
+    /// By lines rather than by byte offset: these files are full of em dashes and arrows, and a
+    /// byte window into them lands mid-character and panics on a slice boundary.
+    fn near(source: &str, needle: &str, before: usize, after: usize) -> String {
+        let at = source
+            .lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("`{needle}` is not in this file any more"));
+        source
+            .lines()
+            .skip(at.saturating_sub(before))
+            .take(before + after)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **The badge route says how stale the badge may be, and says the number `prq` uses**
+    /// (SKEIN-235).
+    ///
+    /// It said sixty seconds for as long as it took anyone to look: `e6c006e` moved the badge poll
+    /// to a ten-minute budget inside `prq::counts` and left the route's doc describing what the
+    /// route used to do. Nobody reading only one of the two files could tell — the route said 60s,
+    /// the module said 600s, and both were written as statements of fact.
+    ///
+    /// So this reads both. It is the cheapest form of "derive, do not assert": the prose is checked
+    /// against the call it describes, in the file that makes it.
+    #[test]
+    fn the_badge_route_documents_the_budget_prq_actually_uses() {
+        let prq = include_str!("../prq.rs");
+        assert!(
+            prq.contains("queue_within(&repo, Duration::from_secs(600))"),
+            "the badge poll no longer reads through a ten-minute budget, so the sentence this test              is defending has become the wrong one — fix the doc, then fix this"
+        );
+        let doc = near(
+            include_str!("skein-server.rs"),
+            "async fn api_review_counts",
+            16,
+            1,
+        );
+        assert!(
+            doc.contains("ten-minute"),
+            "the badge route stopped naming the budget it rides:\n{doc}"
+        );
+        assert!(
+            !doc.contains("60s") && !doc.contains("sixty-second"),
+            "the badge route is describing a sixty-second cache again, which is the pane's budget \
+             and not this one:\n{doc}"
+        );
+    }
+
+    /// **The refresh nobody is waiting for is not a forced one** (SKEIN-235).
+    ///
+    /// `api_review_queue` hands over the remembered queue and refreshes behind it — the same shape
+    /// `prq::merged` has, and it was missing the same lesson SKEIN-206 taught there. A client
+    /// retries a stale answer at 4s/8s/16s/…; a FORCED refresh skips the micro-cache, so a retry
+    /// arriving after a sibling refresh had already landed fetched the whole queue again instead
+    /// of being answered out of the cache that sibling had just filled. Unforced, those retries are
+    /// served by the `unexpired` check above and never reach the spawn at all.
+    ///
+    /// A source assertion because what regresses is one boolean, and it regresses by looking
+    /// obviously right: "this is the refresh, so force it".
+    #[test]
+    fn the_queue_routes_background_refresh_is_not_a_forced_one() {
+        let block = near(
+            include_str!("skein-server.rs"),
+            "The refresh nobody is waiting for.",
+            0,
+            24,
+        );
+        let forced = format!("skein::prq::{}(&repo, true)", "queue");
+        assert!(
+            !block.contains(forced.as_str()),
+            "the background refresh is forced again — every stale-answer retry buys another round \
+             of GraphQL searches for a repo nobody is waiting on:\n{block}"
+        );
+        assert!(
+            block.contains("let _ = skein::prq::queue(&repo, false);"),
+            "the background refresh is gone, or no longer spelled the way this reads it:\n{block}"
+        );
+    }
+
+    /// The routes that answer *about* the queue do not open with a refresh.
+    ///
+    /// A source assertion beside the behavioural one, for the reason `prq.rs`'s own `counts`
+    /// assertion gives: what regresses here is a *call*, one line, and it regresses by somebody
+    /// adding a route that copies the shape of the one above it.
+    #[test]
+    fn no_route_that_only_reads_the_queue_refreshes_it() {
+        let me = include_str!("skein-server.rs");
+        // Four call sites left, and each has a reason to want the current head. Three spend a
+        // model call — the computing arm of `/review/:n/summary`, `/review/:n/critique`, and the
+        // ask/draft arm of `/review/:n/act` — and a reading is worth only the commit it was taken
+        // of. The fourth is `/review/:n/diff`, which downloads the LIVE diff and stamps it with
+        // the queue's `head_sha`: served from a remembered queue it would label today's diff with
+        // yesterday's sha, and every comment drafted on it would re-anchor against a diff that had
+        // not moved.
+        //
+        // The needle is assembled rather than written out, so this assertion is not one of its
+        // own hits — a source assertion that counts a string it contains counts itself, and the
+        // number it reports drifts by one every time somebody edits the test.
+        let refresh = format!("skein::prq::{}(&repo, false)?", "queue");
+        assert_eq!(
+            me.matches(refresh.as_str()).count(),
+            4,
+            "the number of routes opening with a blocking GitHub refresh changed"
+        );
+        assert!(
+            me.contains("fn queue_as_known("),
+            "the read-only routes lost the thing that keeps GitHub off the reader's path"
+        );
+    }
+}
+
+/// Does the cockpit only ask for routes this server serves? (SKEIN-246)
+///
+/// This is the check that would have caught it, and the only one that would: `cockpit/src/change.mjs`
+/// built `/api/pr/:repo/:n/shape`, the router registers `/api/repos/:id/review/:number/shape`, and
+/// two tests asserted the wrong string — so the suite was green while clicking "change" on a pull
+/// request in `/v2` got a 404, `answer.json()` threw on the HTML body, and the catch printed the
+/// stand-in "the change could not be read".
+///
+/// It lives here because the route table lives here. A test beside the page can only assert the
+/// string the page already has; a test beside the router can compare the two.
+#[cfg(test)]
+mod cockpit_routes {
+    /// Every `/api/…` path the server registers, read from its own router entries.
+    ///
+    /// Read out of the source rather than out of a built `Router`, because axum's `Router` will not
+    /// enumerate its paths — and a list maintained by hand beside the real one is the second
+    /// opinion this whole check exists to prevent.
+    ///
+    /// A candidate carrying `{` or `$` is not a route and is dropped. This file's own tests quote
+    /// URLs, and one of them quotes the URL that 404s: without this the table below would contain
+    /// the broken path, the gate would find it served, and the check would pass by having read its
+    /// own fixture as a router entry. It did, once.
+    fn registered(server: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut rest = server;
+        while let Some(at) = rest.find("\"/api/") {
+            rest = &rest[at + 1..];
+            if let Some(end) = rest.find('"') {
+                let path = &rest[..end];
+                if !path.contains('{') && !path.contains('$') {
+                    out.push(path);
+                }
+                rest = &rest[end..];
+            }
+        }
+        out
+    }
+
+    /// Every `/api/…` path a page can BUILD, as `(1-based line, path)` with `${…}` left standing.
+    ///
+    /// Two narrowings, both to keep this from reporting prose as a request. The `/api/` must open a
+    /// string literal — a quote or a backtick immediately before it — and a line that starts a
+    /// comment is skipped, because these files discuss routes in comments as often as they call
+    /// them (`index.html` mentions `/api/repos/undefined/…` in a note about a bug that is fixed).
+    fn asked_for(page: &str) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        for (n, line) in page.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+                continue;
+            }
+            let b = line.as_bytes();
+            for i in 0..b.len() {
+                if !matches!(b[i], b'"' | b'\'' | b'`') {
+                    continue;
+                }
+                if line[i + 1..].starts_with("/api/") {
+                    out.push((n + 1, url_at(&line[i + 1..])));
+                }
+            }
+        }
+        out
+    }
+
+    /// One URL literal, from its first character to whatever ends it.
+    ///
+    /// `${…}` is copied through as a placeholder — with brace counting, or
+    /// `${encodeURIComponent(name)}` ends the path at its own closing paren and every box route in
+    /// the cockpit reads as unserved.
+    fn url_at(rest: &str) -> String {
+        let b = rest.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'$' && b.get(i + 1) == Some(&b'{') {
+                let mut depth = 0usize;
+                let mut j = i + 1;
+                while j < b.len() {
+                    match b[j] {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                out.push_str("${}");
+                i = j + 1;
+                continue;
+            }
+            // A query string, a fragment, the closing quote, or anything that cannot be in a path.
+            if !b[i].is_ascii()
+                || matches!(
+                    b[i],
+                    b'"' | b'\'' | b'`' | b'?' | b'#' | b' ' | b'\t' | b',' | b')'
+                )
+            {
+                break;
+            }
+            out.push(b[i] as char);
+            i += 1;
+        }
+        out
+    }
+
+    /// Would this route answer that ask?
+    ///
+    /// Segment by segment. A `:param` in the route matches anything; a `${…}` in the ask matches a
+    /// `:param`, and also matches a literal — `/api/boxes/${name}/${path}` is how the settings panel
+    /// posts five different box routes, and it genuinely can be any of them.
+    fn serves(route: &str, asked: &str) -> bool {
+        let r: Vec<&str> = route.split('/').skip(1).collect();
+        let a: Vec<&str> = asked.split('/').skip(1).collect();
+        if r.len() != a.len() {
+            return false;
+        }
+        r.iter()
+            .zip(a.iter())
+            .all(|(rs, as_)| match as_.find("${") {
+                Some(0) => true,
+                Some(k) => rs.starts_with(':') || *rs == &as_[..k],
+                None => rs.starts_with(':') || rs == as_,
+            })
+    }
+
+    #[test]
+    fn the_cockpit_never_asks_for_a_route_this_server_does_not_serve() {
+        let routes = registered(include_str!("skein-server.rs"));
+        assert!(
+            routes.len() > 60,
+            "the route scan found {} routes — it stopped reading the router, so what follows \
+             proves nothing",
+            routes.len()
+        );
+        // **`src/web/vendor/cockpit.js` is missing from this list, and that is SKEIN-246 itself.**
+        // The bundle builds `/api/pr/${}/${}/shape` (`cockpit.js:283`, from
+        // `cockpit/src/change.mjs:61`) and this router registers that shape at
+        // `/api/repos/:id/review/:number/shape` — so adding the bundle here today turns this gate
+        // red on a line whose fix lives in three files outside this binary. It goes in with that
+        // fix, in the same change, and this comment is the thing that must disappear when it does.
+        let pages = [
+            ("src/web/index.html", include_str!("../web/index.html")),
+            ("src/web/v2.html", include_str!("../web/v2.html")),
+        ];
+        let mut asks = 0;
+        let mut missing = Vec::new();
+        for (name, page) in pages {
+            for (line, path) in asked_for(page) {
+                asks += 1;
+                if !routes.iter().any(|r| serves(r, &path)) {
+                    missing.push(format!("{name}:{line} asks {path}"));
+                }
+            }
+        }
+        assert!(
+            asks > 80,
+            "the page scan found {asks} requests — it stopped reading the pages"
+        );
+        // The bundle is not scanned above, so say out loud what it still gets wrong. This fails
+        // the day somebody fixes `change.mjs` without putting the file back in `pages` — which is
+        // the only way the hole above outlives the bug it was left for.
+        assert!(
+            include_str!("../web/vendor/cockpit.js").contains("`/api/pr/"),
+            "the cockpit bundle no longer builds the /api/pr/… URL of SKEIN-246 — put \
+             src/web/vendor/cockpit.js back in `pages` above and delete this assertion"
+        );
+        assert!(
+            missing.is_empty(),
+            "the cockpit asks for {} path(s) no route answers, so each is a 404 the page reports \
+             as its own generic failure:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
+    /// The gate above is worth nothing if it cannot see the shape the bug came in, or cannot say
+    /// where — the same discipline `tests/page_scripts.rs` holds its two scanners to.
+    ///
+    /// Written against the real one: `/api/pr/:repo/:n/shape` against a router that registers
+    /// `/api/repos/:id/review/:number/shape`. A matcher that treated every `${…}` as a wildcard
+    /// across segment boundaries would call these equal and pass the whole suite while the tab 404s.
+    #[test]
+    fn the_route_scan_reports_the_path_that_404d_and_names_its_line() {
+        // Assembled rather than written out, and the reason is a gate: `docs/parity.md` counts
+        // this binary's routes by grepping its source for the router's own call, so a fixture
+        // that spells that token — or a comment that quotes it, as this one first did — adds to a
+        // number meant to count the router. See `tests/parity_numbers.rs` for the command.
+        let router = format!(
+            " .{}(\"/api/repos/:id/review/:number/shape\", get(api_pr_shape)) ",
+            "route"
+        );
+        let router = router.as_str();
+        let routes = registered(router);
+        assert_eq!(routes, vec!["/api/repos/:id/review/:number/shape"]);
+
+        let wrong =
+            "  return `/api/pr/${encodeURIComponent(r.repo)}/${encodeURIComponent(n)}/shape`;";
+        let found = asked_for(wrong);
+        assert_eq!(found.len(), 1, "the scanner did not see the request at all");
+        assert_eq!(found[0].1, "/api/pr/${}/${}/shape");
+        assert!(
+            !routes.iter().any(|r| serves(r, &found[0].1)),
+            "the matcher accepted the URL that 404s"
+        );
+
+        let right = "  return `/api/repos/${encodeURIComponent(r.repo)}/review/${n}/shape`;";
+        let found = asked_for(right);
+        assert!(
+            routes.iter().any(|r| serves(r, &found[0].1)),
+            "the matcher rejected the URL that works, which would make this gate the thing people \
+             delete"
+        );
+
+        // Prose is not a request: these files name routes in comments more often than they call
+        // them, and a scanner that read those would report the bugs they describe as live.
+        assert!(asked_for("  // used to send the pump to `/api/repos/undefined/x`").is_empty());
     }
 }

@@ -24,6 +24,9 @@ const OWNER: &str = "sigattrib-owner";
 const OTHER: &str = "sigattrib-other";
 /// A box whose probes predate the `box` field, which is every box until it is reattached.
 const LEGACY: &str = "sigattrib-legacy";
+/// A box that has never written a signal at all — the state a misfiled box was indistinguishable
+/// from, and the only thing that makes "it says `misfiled`" mean anything.
+const SILENT: &str = "sigattrib-silent";
 
 /// Write one signal file exactly as the probe writes it — `box` included, or omitted for a probe
 /// that predates the field.
@@ -59,7 +62,7 @@ fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
     // No `status` in the registry rows, so the ONLY turn state available is the one skein's own
     // probe wrote — which makes "the misfiling was refused" show up as a row with no state at all
     // rather than as a state that happens to match.
-    let rows: Vec<String> = [OWNER, OTHER, LEGACY]
+    let rows: Vec<String> = [OWNER, OTHER, LEGACY, SILENT]
         .iter()
         .map(|n| format!(r#""{n}":{{"branch":"main","dir":"/nowhere","lastSeen":"1"}}"#))
         .collect();
@@ -69,7 +72,7 @@ fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
     let mut config = skein::config::load_config();
     config.fleet_sandbox = FLEET.into();
     skein::config::save_config(&config).expect("turn the fleet on");
-    for name in [OWNER, OTHER, LEGACY] {
+    for name in [OWNER, OTHER, LEGACY, SILENT] {
         skein::place::record_place(
             name,
             &skein::place::PlaceRecord {
@@ -174,6 +177,50 @@ fn the_board_will_not_show_one_boxs_hook_signals_as_another_boxs_row() {
         "a status from a probe that predates the `box` field must still be read"
     );
     assert_eq!(row(LEGACY).task.as_deref(), Some(doing));
+
+    // ---- and the refusal has to be VISIBLE, which is the other half of the same fault ----
+    //
+    // Refusing is right, but every assertion above is satisfied by a row that says nothing at all —
+    // which is exactly how a box whose probes were never wired looks. Two states, one appearance,
+    // and opposite recipes: `never` is a box to reattach, a misfiled signal is a store to clean.
+    // `hook_health` is what tells them apart, the sibling of `screen_health` on the hook half.
+    //
+    // Asked directly rather than off the row, for the reason `tests/pane_attribution.rs` gives for
+    // `screen_health`: it returns "" for a box `box_liveness` cannot confirm is Running, and these
+    // are placement records with no live namespace. The store it reads is the fixture's own, so
+    // this is still the real files on disk being read back — only the liveness is supplied.
+    use skein::signals::hook_health;
+    assert_eq!(
+        hook_health(OWNER, true),
+        "",
+        "a box whose signals are its own has a healthy hook half — if this is not empty, every \
+         assertion below is about a badge that is on for everybody"
+    );
+    assert_eq!(
+        hook_health(SILENT, true),
+        "never",
+        "a box that has written no signal at all is `never`, and this is the string {OTHER} must \
+         NOT share: without it, `misfiled` is being compared against nothing"
+    );
+    assert_eq!(
+        hook_health(OTHER, true),
+        "misfiled",
+        "{OTHER}'s signals were refused as {OWNER}'s and the row said nothing about it, so it \
+         reads exactly like {SILENT} — a box that never reported. One of those wants the box \
+         reattached and the other wants the store cleaned, and the board owes the difference."
+    );
+    assert_eq!(
+        hook_health(LEGACY, true),
+        "",
+        "a signal that names NOBODY could not be checked, which is not the same as being wrong — \
+         badging every unmigrated box as misfiled would be the fleet-wide false alarm"
+    );
+    assert_eq!(
+        hook_health(OTHER, false),
+        "",
+        "a box that is not running has no hooks to be unhealthy; saying `misfiled` of a stopped \
+         box would put a badge on every row the fleet has ever held"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
