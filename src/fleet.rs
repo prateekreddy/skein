@@ -5799,8 +5799,17 @@ pub fn signed_in_runtimes() -> Vec<String> {
 }
 
 /// The runtimes whose kept credential has died, with when — see [`ExpiredLogin`].
+///
+/// **Two witnesses, and the second is the one that catches what the first cannot.** The file says
+/// when its refresh token is due to expire, and a token that was revoked — or that simply fails to
+/// refresh — passes that test while every model call comes back `Failed to authenticate: OAuth
+/// session expired and could not be refreshed`. Reported live by the owner, whose cockpit put that
+/// sentence on a pull request row and no banner anywhere, because nothing asked the model what it
+/// had just been told. `ai::auth_refusal` is that answer, and it outranks the file: the file is a
+/// claim about the future, the refusal is what happened.
 pub fn expired_logins() -> Vec<ExpiredLogin> {
-    runtime_logins()
+    let refused = crate::ai::auth_refusal();
+    let mut out: Vec<ExpiredLogin> = runtime_logins()
         .into_iter()
         .filter_map(|l| match l.state {
             LoginState::Expired { at_ms } => Some(ExpiredLogin {
@@ -5813,7 +5822,20 @@ pub fn expired_logins() -> Vec<ExpiredLogin> {
             }),
             _ => None,
         })
-        .collect()
+        .collect();
+    // Added rather than replacing: a file that says expired and a model that says refused are the
+    // same fact told twice, and the file's own death date is the better one to show when it has it.
+    if let Some(refusal) = refused {
+        if !out.iter().any(|e| e.runtime == refusal.runtime) {
+            out.push(ExpiredLogin {
+                runtime: refusal.runtime.to_string(),
+                expired_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(refusal.at_ms)
+                    .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                    .unwrap_or_else(|| format!("{}ms", refusal.at_ms)),
+            });
+        }
+    }
+    out
 }
 
 pub fn sync_fleet_login(sandbox: &str) {
@@ -6469,6 +6491,49 @@ fn anchor_matches(name: &str, record: &PlaceRecord, seen: &(String, u64)) -> Res
 
 #[cfg(test)]
 mod tests {
+
+    /// The cockpit's login banner fires on what the MODEL said, not only on what the file claims
+    /// (reported live: the row said the OAuth session had expired and no banner appeared anywhere).
+    #[test]
+    fn a_model_that_says_the_login_is_dead_is_a_dead_login() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        crate::ai::forget_refusal();
+
+        // No credential on disk at all: the file half has nothing to say, which is exactly the
+        // state that used to leave the banner silent while every reading failed.
+        assert!(
+            expired_logins().is_empty(),
+            "an absent credential is not an expired one — that is `logins: []`, a different sentence"
+        );
+
+        crate::ai::plant_refusal_saying(
+            "`claude` exited 1: Failed to authenticate: OAuth session expired and could not be refreshed",
+        );
+        let dead = expired_logins();
+        assert_eq!(
+            dead.iter().map(|e| e.runtime.as_str()).collect::<Vec<_>>(),
+            vec!["claude"],
+            "the model said the credential is dead and nothing reported it"
+        );
+        assert!(
+            !dead[0].expired_at.is_empty(),
+            "the banner shows when it was found out; an empty stamp reads as a bug in the banner"
+        );
+
+        // A refusal that says nothing about the credential must NOT be reported as a dead login:
+        // sending somebody to log in over a rate limit is a cure for a problem they do not have.
+        crate::ai::forget_refusal();
+        crate::ai::plant_refusal_saying("`claude` exited 1: rate limit reached, try again later");
+        assert!(
+            expired_logins().is_empty(),
+            "a rate limit was reported as a dead login"
+        );
+
+        crate::ai::forget_refusal();
+        std::env::remove_var("SKEIN_HOME");
+    }
     use super::*;
 
     /// Nothing skein DECIDES about a box lives where that box can write.

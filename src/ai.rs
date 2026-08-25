@@ -213,7 +213,70 @@ impl Unread {
 ///
 /// Cleared by a call that works, and by [`forget_refusal`] — which anything explicitly asked for
 /// calls first, because "read this one" is a person saying they think it will work now.
-static REFUSED: std::sync::Mutex<Option<Unread>> = std::sync::Mutex::new(None);
+static REFUSED: std::sync::Mutex<Option<Standing>> = std::sync::Mutex::new(None);
+
+/// A remembered refusal, with the two facts a surface needs beyond the sentence: WHEN it happened,
+/// and which runtime's credential was being used when it did.
+#[derive(Debug, Clone)]
+struct Standing {
+    why: Unread,
+    at_ms: i64,
+    runtime: &'static str,
+}
+
+/// What the model itself said about a credential — evidence the credential FILE does not carry.
+///
+/// `fleet::expired_logins` reads `refreshTokenExpiresAt` and believes it. A token can be revoked,
+/// or fail to refresh, long before that date: the file still reads live and every model call comes
+/// back `Failed to authenticate: OAuth session expired and could not be refreshed`. Reported live
+/// by the owner, whose cockpit showed the sentence on a pull request row and no banner anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthRefusal {
+    /// `claude` or `codex` — whichever binary was refused.
+    pub runtime: &'static str,
+    /// When skein was told, in epoch milliseconds. Not when the credential died, which nothing here
+    /// can know: the honest stamp is the moment it was found out.
+    pub at_ms: i64,
+    /// The refusal's own words, for the surface that shows them.
+    pub said: String,
+}
+
+/// The standing refusal when it is about AUTHENTICATION, and `None` for every other kind.
+///
+/// Deliberately narrow: a model that is rate limited, missing from the PATH or slow has said
+/// nothing about the credential, and reporting those as a dead login would send somebody to log in
+/// again over a problem logging in cannot fix.
+pub fn auth_refusal() -> Option<AuthRefusal> {
+    let standing = REFUSED
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())?;
+    let said = match &standing.why {
+        Unread::Refused { said, .. } => said.clone(),
+        _ => return None,
+    };
+    let lower = said.to_lowercase();
+    // Every shape seen from `claude` and `codex` for "this credential is not good any more". A
+    // substring list because the CLIs' wording is theirs to change; the cost of a miss is the
+    // banner not appearing, which is where this started.
+    let auth = [
+        "oauth session expired",
+        "could not be refreshed",
+        "failed to authenticate",
+        "please run /login",
+        "not logged in",
+        "invalid api key",
+        "unauthorized",
+        "401",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    auth.then(|| AuthRefusal {
+        runtime: standing.runtime,
+        at_ms: standing.at_ms,
+        said,
+    })
+}
 
 /// Stop declining, and try the next call for real. Called by `skein login` and by an explicit re-read.
 pub fn forget_refusal() {
@@ -229,10 +292,20 @@ pub fn forget_refusal() {
 /// refusals serializes on that lock (see `a_model_call_that_fails_says_which_failure_it_was`).
 #[cfg(test)]
 pub(crate) fn plant_refusal_for_test() {
-    remember_refusal(&Unread::Refused {
-        code: "1".into(),
-        said: "planted by a test".into(),
-    });
+    plant_refusal_saying("planted by a test");
+}
+
+/// The same, with the refusal's own words — for a test that needs an AUTH-shaped one, which is
+/// what `auth_refusal` reads and what the cockpit's login banner is driven by.
+#[cfg(test)]
+pub(crate) fn plant_refusal_saying(said: &str) {
+    remember_refusal(
+        &Unread::Refused {
+            code: "1".into(),
+            said: said.into(),
+        },
+        "claude",
+    );
 }
 
 #[cfg(test)]
@@ -246,9 +319,10 @@ fn standing_refusal() -> Option<Unread> {
         .lock()
         .map(|held| held.clone())
         .unwrap_or_else(|e| e.into_inner().clone())
+        .map(|standing| standing.why)
 }
 
-fn remember_refusal(why: &Unread) {
+fn remember_refusal(why: &Unread, bin: &str) {
     // A setup problem, not a bad moment. See the type above.
     if !matches!(
         why,
@@ -260,7 +334,19 @@ fn remember_refusal(why: &Unread) {
         return;
     }
     if let Ok(mut held) = REFUSED.lock() {
-        *held = Some(why.clone());
+        *held = Some(Standing {
+            why: why.clone(),
+            at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            // Which credential was in play. `codex` names itself in the binary; everything else
+            // skein asks is `claude`, including a `$SKEIN_CLAUDE_BIN` pointed at a stub.
+            runtime: match bin.contains("codex") {
+                true => "codex",
+                false => "claude",
+            },
+        });
     }
 }
 
@@ -290,24 +376,33 @@ pub(crate) fn tried(
     // keeps the fleet's login under `fleet-home`, reports it as `logins: ["claude"]`, and seeds
     // every box from it. It had the credential and was looking somewhere else.
     //
-    // The ambient HOME wins when it has a usable login, so a host where this already worked is not
-    // moved off it. Only when it does not does skein reach for its own.
+    // **The FLEET's login first** — the same credential every box is seeded and healed from, and the
+    // one `skein login` writes. The ambient HOME used to win whenever it carried a usable login,
+    // which meant skein could be reading pull requests on one account while every box worked on
+    // another: a logout then showed up in one place and not the other, `expired_logins` (which
+    // reads `fleet-home`) described a credential this call never touched, and the cockpit's banner
+    // watched the wrong file. The owner's own words for why this is wrong: using the boxes' login
+    // makes a logout one fact, visible everywhere, with one fix.
+    //
+    // `login_home()` answers only for a credential that can still be refreshed, so this prefers the
+    // fleet's when it works and falls back to the ambient one when it does not — it can never pick
+    // a dead credential over a live one.
     let ambient = env::var_os("HOME").map(std::path::PathBuf::from);
-    let usable = ambient
-        .as_deref()
-        .is_some_and(crate::fleet::refreshable_login_at);
-    let mut home = ambient;
     // Whether this call ends up on a login skein knows about — NOT merely whether a HOME exists.
     // The difference decides whether an inherited API key is removed below, and getting it wrong
     // means taking the only credential away from somebody who authenticates with a key.
-    let mut on_a_login = usable;
-    if !usable {
-        if let Some(own) = crate::fleet::login_home() {
+    let (home, on_a_login) = match crate::fleet::login_home() {
+        Some(own) => {
             command.env("HOME", &own);
-            home = Some(own);
-            on_a_login = true;
+            (Some(own), true)
         }
-    }
+        None => {
+            let usable = ambient
+                .as_deref()
+                .is_some_and(crate::fleet::refreshable_login_at);
+            (ambient, usable)
+        }
+    };
     // **And which temp directory it writes into**, which is the same question asked about a
     // different directory — and the next thing that stopped a live fleet dead. The CLI refuses to
     // start when the path it derives from the shared `/tmp` is owned by somebody else, and in a
@@ -346,7 +441,7 @@ pub(crate) fn tried(
     let out = match out {
         Ok(out) => out,
         Err(why) => {
-            remember_refusal(&why);
+            remember_refusal(&why, bin);
             return Err(why);
         }
     };
@@ -375,7 +470,7 @@ pub(crate) fn tried(
                 .collect::<Vec<_>>()
                 .join(" / "),
         };
-        remember_refusal(&why);
+        remember_refusal(&why, bin);
         return Err(why);
     }
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -413,7 +508,7 @@ fn from_sandbox(
                     why,
                 },
             };
-            remember_refusal(&out);
+            remember_refusal(&out, bin);
             return Err(out);
         }
     };
@@ -444,7 +539,7 @@ fn from_sandbox(
                 false => crate::util::clip(said_all.trim(), 240),
             },
         };
-        remember_refusal(&out);
+        remember_refusal(&out, bin);
         return Err(out);
     }
     // The sandbox answered, and the shell in it could not find the CLI. `claude` never ran, so
@@ -455,7 +550,7 @@ fn from_sandbox(
             bin: bin.to_string(),
             sandbox: crate::fleet::fleet_sandbox(),
         };
-        remember_refusal(&out);
+        remember_refusal(&out, bin);
         return Err(out);
     }
     if ran.code != 0 {
@@ -469,7 +564,7 @@ fn from_sandbox(
                 .collect::<Vec<_>>()
                 .join(" / "),
         };
-        remember_refusal(&why);
+        remember_refusal(&why, bin);
         return Err(why);
     }
     let said = String::from_utf8_lossy(&ran.out).trim().to_string();
@@ -990,8 +1085,12 @@ mod tests {
             "the call still read a HOME with no credential while skein was holding one"
         );
 
-        // And an ambient HOME that DOES carry a usable login keeps it — no reason to move a host
-        // that already worked.
+        // And when BOTH carry a usable login, the fleet's wins. This assertion used to say the
+        // opposite — an ambient login was left alone so a host that already worked was not moved —
+        // and the owner named the cost of that on their own fleet: skein was reading pull requests
+        // on one credential while every box worked on another, so a logout showed up in one place
+        // and not the other, and the cockpit's banner (which watches `fleet-home`) described a
+        // credential these calls never touched. One login, one logout, one fix, seen everywhere.
         let mine = bare.join(".claude");
         fs::create_dir_all(&mine).unwrap();
         fs::write(
@@ -1001,8 +1100,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             claude_oneshot("hi").as_deref(),
-            Some(bare.to_string_lossy().as_ref()),
-            "a working host was moved off the credential it was already using"
+            Some(home.join("fleet-home").to_string_lossy().as_ref()),
+            "the call read the ambient credential while skein held the one every box uses"
         );
 
         // A refresh token that has died is not a login. This is the one expiry that means anything:
@@ -1016,6 +1115,25 @@ mod tests {
             claude_oneshot("hi").as_deref(),
             Some(home.join("fleet-home").to_string_lossy().as_ref()),
             "a dead refresh token was treated as a login"
+        );
+
+        // The fallback still holds in the direction that matters: skein's own credential dead and
+        // the ambient one alive means the ambient one is used. `login_home()` answers only for a
+        // refreshable credential, so preferring the fleet's can never mean preferring a dead one.
+        fs::write(
+            mine.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#,
+        )
+        .unwrap();
+        fs::write(
+            fleet_home.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_oneshot("hi").as_deref(),
+            Some(bare.to_string_lossy().as_ref()),
+            "skein preferred its own dead credential over the live one in front of it"
         );
 
         for key in ["SKEIN_HOME", "SKEIN_AI", "SKEIN_CLAUDE_BIN", "HOME"] {
