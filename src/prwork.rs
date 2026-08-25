@@ -357,10 +357,7 @@ fn read_journal(repo_id: &str) -> std::collections::BTreeMap<String, Vec<Journal
 /// entries — a train PR sees a handful of acts on its way to merged, so 50 covers weeks of
 /// stop/clear churn without the file growing without bound.
 fn record(repo_id: &str, number: u64, flow: &str, step: usize, kind: &str, what: &str) {
-    let at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let at_ms = now_ms();
     let mut all = read_journal(repo_id);
     let entries = all.entry(number.to_string()).or_default();
     entries.push(JournalEntry {
@@ -679,6 +676,108 @@ fn delete_branch(slug: &str, head_ref: &str, token: &str) -> Result<(), String> 
     .map(|_| ())
 }
 
+/// How long the front of a serial train may wait on something skein cannot see running.
+///
+/// Twenty minutes, and the number is chosen against the two things it must not get wrong. It has
+/// to be long enough that a check which is merely slow to be QUEUED is never mistaken for one that
+/// is not coming — GitHub Actions starts within seconds normally, and minutes on a busy runner
+/// pool — and short enough that a person watching a train notices the same day. A wait on
+/// something that IS running is not bounded by this at all (see [`a_wait_with_nothing_behind_it`]),
+/// so no CI run, however long, is ever cut short by it.
+pub const WAITING_ON_NOTHING_MS: i64 = 20 * 60 * 1000;
+
+/// When this pull request started waiting on THIS step, if it is still waiting on it.
+///
+/// The NEWEST entry is the whole answer, and that is the point: anything at all having happened
+/// since — an act, a flag, a person clearing a stop, a wait on a different step — means the wait
+/// that was being timed ended, and whatever is being waited on now starts its own clock. So a
+/// train that is making progress can never accumulate patience across the steps it walked through.
+fn waiting_since(entries: &[JournalEntry], flow: &str, step: usize) -> Option<i64> {
+    entries
+        .last()
+        .filter(|e| e.kind == "waiting" && e.flow == flow && e.step == step)
+        .map(|e| e.at_ms)
+}
+
+/// The front of a serial train said `wait`. Start its clock, or stop it because the clock ran out.
+///
+/// **This is not a stale-state bug and the fix is not a re-read** (SKEIN-240). `prq::rollup`
+/// answers `"none"` when nothing has ever run against a commit, and that reading is CORRECT and
+/// CURRENT — it is the same answer whether CI is five seconds away or will never come, because
+/// nothing GitHub sends distinguishes "no check yet" from "no check, ever, on this repository".
+/// Asking again produces the same true answer for ever. The documented train has no step for
+/// `checks:none` once its label is on, so the front falls to the catch-all `wait:` and holds the
+/// line at one pass per two minutes, for ever, saying *"waiting for GitHub to catch up"* when
+/// GitHub caught up long ago. `docs/pr-workflow.md` names exactly this: *"The failure mode to
+/// avoid is not the stall. It is a **silent** stall."*
+///
+/// So the only thing that can tell those two apart is how long the waiting has gone on, and this
+/// is where that is decided.
+///
+/// **A wait on something running is not bounded.** `checks: pending` is a check that has started,
+/// and a real one can take the better part of an hour — the module note above builds the whole
+/// guarded-step design around surviving "a forty-minute CI run". Cutting one short would be a
+/// worse bug than the one this fixes. What is bounded is a wait with nothing behind it: no check
+/// running, nothing in flight skein can point at, and a sentence that promises something is going
+/// to change.
+///
+/// **Only a serial train.** A stop is a demand for somebody's attention, and it is earned when the
+/// alternative is a queue that has stopped moving. A pull request on a workflow that blocks nobody
+/// is not costing anything by waiting, and stopping it would be manufacturing work.
+///
+/// Recoverable, in the two ways that matter: the stop names the elapsed time and the step so the
+/// sentence is checkable, and clearing it puts the pull request back in line — where, if the wait
+/// really was on something slow, it simply waits again with a fresh clock.
+fn a_wait_with_nothing_behind_it(
+    repo_id: &str,
+    number: u64,
+    flow: &Workflow,
+    chosen: &Chosen,
+    facts: &crate::workflow::Facts,
+    why: &str,
+) -> Option<String> {
+    if !flow.serial || facts.checks == "pending" {
+        return None;
+    }
+    let step = chosen.step + 1;
+    let now_ms = now_ms();
+    let Some(since) = waiting_since(&journal(repo_id, number), &flow.name, step) else {
+        // The first pass on this step: put the clock down and say nothing. A wait is the ordinary
+        // state of a train and this entry is what makes it a *timed* one.
+        record(repo_id, number, &flow.name, step, "waiting", why);
+        return None;
+    };
+    if now_ms - since < WAITING_ON_NOTHING_MS {
+        return None;
+    }
+    let minutes = (now_ms - since) / 60_000;
+    let reason = format!(
+        "step {step} has been waiting {minutes} minutes — {why:?} — and nothing is running \
+         (checks: {}). Whatever was expected to start has not, so this wait will not end on its \
+         own; if a label is meant to start CI here, check it is the one the repository's workflow \
+         keys on. Clearing this stop puts it back in line.",
+        match facts.checks.is_empty() {
+            true => "none",
+            false => facts.checks.as_str(),
+        }
+    );
+    stop(repo_id, number, &reason);
+    record(repo_id, number, &flow.name, step, "stopped", &reason);
+    crate::warden_client::reported(
+        &format!("pr-workflow:{}", flow.name),
+        &format!("stopped waiting on #{number}"),
+        &reason,
+    );
+    Some(reason)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// One serial workflow's train in one repo: who is in line, who is at the front, who has been
 /// passed over — the answer to "what is it working on, and which step is everyone else waiting
 /// behind".
@@ -854,9 +953,16 @@ pub fn sweep() -> Vec<String> {
                     did.push(format!("{}: {what}", repo.id));
                     acted_in_repo = true;
                 }
-                // Waiting is the ordinary state and says nothing. A stop has already been written
-                // down and audited by `perform`; repeating it here every pass would bury the log.
-                Outcome::Waited(_) | Outcome::Stopped(_) => {}
+                // Waiting is the ordinary state and says nothing — but the front of a serial
+                // train waiting on nothing is the line not moving, so it is timed. See
+                // [`a_wait_with_nothing_behind_it`], which is the only thing standing between a
+                // repo whose CI label starts nothing and a train parked for ever.
+                Outcome::Waited(why) => {
+                    a_wait_with_nothing_behind_it(&repo.id, pr.number, flow, &chosen, facts, &why);
+                }
+                // A stop has already been written down and audited by `perform`; repeating it here
+                // every pass would bury the log.
+                Outcome::Stopped(_) => {}
             }
         }
         // The queue is cached for a minute, and skein has just changed the thing it describes. Left
@@ -2046,6 +2152,285 @@ mod tests {
             std::env::remove_var(key);
         }
         crate::prq::forget_host_token();
+    }
+
+    /// A pull request whose CI never starts stops the train's clock, not the train.
+    ///
+    /// The bug (SKEIN-240) and, more importantly, what KIND of bug it is. It looks like the
+    /// rate-limit family — a temporary condition that became permanent — and it is not one.
+    /// `prq::rollup` says `"none"` when nothing has ever run against a commit, and that answer is
+    /// correct, current and unchanging: nothing GitHub sends tells "no check yet" apart from "no
+    /// check, ever, on this repository". There is no staler cache to drop and no re-read that
+    /// helps. The documented train has no step for `checks:none` once its label is on, so the
+    /// front falls to the catch-all `wait:` and holds the line at one pass per two minutes, for
+    /// ever, over a sentence that says GitHub has not caught up when GitHub caught up long ago.
+    ///
+    /// The only thing that can tell the two apart is elapsed time, so this asserts a clock: the
+    /// first pass writes the wait down, passes inside the twenty minutes change nothing, and the
+    /// pass after it stops the pull request with a sentence naming the wait — at which point the
+    /// serial train's existing pass-over rule moves it aside and #9, which has been in line all
+    /// along, gets its turn.
+    ///
+    /// The back-dated journal entry is the clock: `record` stamps `now`, so the only way to reach
+    /// the far side of twenty minutes in a test is to write the timeline the way it would look
+    /// twenty minutes later.
+    #[test]
+    fn a_front_waiting_on_a_check_that_never_starts_stops_and_lets_the_train_past() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+
+        // The train from docs/pr-workflow.md, ending in the catch-all that has no clock of its own.
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+              "matches":["ready","approved","base:trunk"],
+              "steps":[
+                {"when":["no-label:ci-queue"],"do":"add-label:ci-queue"},
+                {"when":["label:ci-queue","checks:pending"],"do":"wait:CI is running"},
+                {"when":["label:ci-queue","checks:passing","mergeable","current"],
+                 "do":"merge:squash+delete"},
+                {"when":[],"do":"wait:waiting for GitHub to catch up"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+
+        // #5 is labelled and its label started nothing — `checks: none`, for ever. #9 is behind it
+        // in the line, unlabelled, with a step of its own it has never been given a chance to take.
+        let labelled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = labelled.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                let answer = if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/thing HTTP") {
+                    r#"{"full_name":"acme/thing","default_branch":"main"}"#.to_string()
+                } else if head.contains("/labels") {
+                    seen.lock().unwrap().push(head.clone());
+                    "[]".to_string()
+                } else if head.contains("/graphql") {
+                    // No `statusCheckRollup` contexts and none claimed on either: `checks: none`.
+                    let node = |number: u64, labels: &str| {
+                        format!(
+                            r#"{{"number":{number},"title":"t","url":"u","isDraft":false,
+                              "author":{{"login":"me"}},"headRefName":"feat-{number}",
+                              "headRefOid":"abc","baseRefName":"main",
+                              "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
+                              "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+                              "labels":{{"nodes":[{labels}]}},"latestReviews":{{"nodes":[]}},
+                              "commits":{{"nodes":[{{"commit":{{
+                                "committedDate":"2026-08-23T00:00:00Z",
+                                "statusCheckRollup":{{"contexts":{{"nodes":[]}}}}}}}}]}}}}"#
+                        )
+                    };
+                    format!(
+                        r#"{{"data":{{"q0":{{"nodes":[{},{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
+                        node(5, r#"{"name":"ci-queue"}"#),
+                        node(9, "")
+                    )
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // Pass one, and four more inside the twenty minutes. #5 is the front and waits; #9 is
+        // behind it and is passed over. This is the reported failure, and up to here it is CORRECT
+        // — a wait that has not gone on long enough to be suspicious.
+        for _ in 0..5 {
+            let _ = sweep();
+        }
+        assert!(
+            labelled.lock().unwrap().is_empty(),
+            "the train acted past a waiting front: {:?}",
+            labelled.lock().unwrap()
+        );
+        assert_eq!(stopped("demo", 5), None, "a wait was stopped far too early");
+        // …and the wait was written down once, not once per pass, with the step it is on.
+        let waits: Vec<JournalEntry> = journal("demo", 5)
+            .into_iter()
+            .filter(|e| e.kind == "waiting")
+            .collect();
+        assert_eq!(
+            waits.len(),
+            1,
+            "five passes wrote {} waiting entries: one is the clock being started, none is no \
+             clock at all, and more than one is a journal turning into a log file",
+            waits.len()
+        );
+        assert_eq!(waits[0].step, 4, "the wait must name the step it is on");
+
+        // Twenty minutes pass. Written into the timeline, because `record` stamps `now`.
+        let mut all = journal("demo", 5);
+        let last = all.len() - 1;
+        all[last].at_ms -= WAITING_ON_NOTHING_MS + 1;
+        let mut file: std::collections::BTreeMap<String, Vec<JournalEntry>> =
+            serde_json::from_str(&std::fs::read_to_string(journal_path("demo")).unwrap()).unwrap();
+        file.insert("5".into(), all);
+        std::fs::write(
+            journal_path("demo"),
+            serde_json::to_vec_pretty(&file).unwrap(),
+        )
+        .unwrap();
+
+        // The pass on the far side of the clock: #5 stops, and says what it waited for.
+        let _ = sweep();
+        let why = stopped("demo", 5).unwrap_or_else(|| {
+            panic!("a front that has waited twenty minutes on a check that never started is still holding the line, silently")
+        });
+        assert!(
+            why.contains("waiting for GitHub to catch up") && why.contains("checks: none"),
+            "the stop does not say what it waited for or why the wait cannot end: {why}"
+        );
+        assert!(
+            why.contains("minutes"),
+            "the stop does not say how long it waited, so nobody can judge it: {why}"
+        );
+
+        // And the line moves: the serial pass-over rule now finds #9 at the front, and it acts.
+        let _ = sweep();
+        let calls = labelled.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|c| c.contains("/issues/9/labels")),
+            "#5 stopped and the train still did not move on to #9: {calls:?}"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+    }
+
+    /// A check that IS running is never cut short, however long it takes.
+    ///
+    /// The other side of [`a_wait_with_nothing_behind_it`], and the more dangerous one: the bound
+    /// that fixes SKEIN-240 is the only thing in skein that can stop a pull request for taking too
+    /// long, and a CI run is allowed to take as long as it takes. The module note above builds the
+    /// whole guarded-step design around surviving *"a forty-minute CI run"*, so a train that
+    /// stopped one at twenty minutes would have traded a parked train for a broken one.
+    ///
+    /// `checks: pending` is the evidence that draws the line: a check that has started is
+    /// something skein can point at and expect to end. The clock is not started, so it can never
+    /// run out — asserted against a timeline that is a full day old, which is far past any bound
+    /// this file could grow.
+    #[test]
+    fn a_wait_on_a_check_that_is_running_is_never_bounded() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let flow = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"merge-train","serial":true,"steps":[
+              {"when":[],"do":"wait:CI is running"}]}]}"#,
+        )
+        .unwrap()
+        .remove(0);
+        let chosen = Chosen {
+            step: 0,
+            act: Act::Wait("CI is running".into()),
+        };
+        let running = crate::workflow::Facts {
+            checks: "pending".into(),
+            ..Default::default()
+        };
+
+        // A day of waiting, written into the timeline — far past any bound this file could grow.
+        // Each pull request gets its own, because a stop written by one assertion would otherwise
+        // reset the next one's clock and it would pass without the rule ever being consulted.
+        let a_day_of_waiting = |number: u64, flow: &str| {
+            record("demo", number, flow, 1, "waiting", "CI is running");
+            let mut all = journal("demo", number);
+            let last = all.len() - 1;
+            all[last].at_ms -= 24 * 60 * 60 * 1000;
+            let mut file: std::collections::BTreeMap<String, Vec<JournalEntry>> =
+                serde_json::from_str(&std::fs::read_to_string(journal_path("demo")).unwrap())
+                    .unwrap();
+            file.insert(number.to_string(), all);
+            std::fs::write(
+                journal_path("demo"),
+                serde_json::to_vec_pretty(&file).unwrap(),
+            )
+            .unwrap();
+        };
+        a_day_of_waiting(7, "merge-train");
+
+        assert_eq!(
+            a_wait_with_nothing_behind_it("demo", 7, &flow, &chosen, &running, "CI is running"),
+            None,
+            "a check that is still running was stopped for taking too long — the bound must only \
+             ever fall on a wait with nothing behind it"
+        );
+        assert_eq!(
+            stopped("demo", 7),
+            None,
+            "a running check was stopped a day into a build that is allowed to take as long as it \
+             takes"
+        );
+
+        // And the same wait with nothing running IS bounded, from the same timeline — so what
+        // separates them is the evidence and not the clock.
+        let nothing = crate::workflow::Facts {
+            checks: "none".into(),
+            ..Default::default()
+        };
+        assert!(
+            a_wait_with_nothing_behind_it("demo", 7, &flow, &chosen, &nothing, "CI is running")
+                .is_some(),
+            "the bound never falls at all, on any wait"
+        );
+
+        // And a workflow that is not a train is left alone even then — on its OWN expired clock,
+        // so the only thing that can spare it is being non-serial. A stop is a demand for
+        // somebody's attention, earned when the alternative is a queue that has stopped moving; a
+        // pull request blocking nobody is not costing anything by waiting, and stopping it would
+        // be manufacturing work.
+        let loose = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"loose","steps":[{"when":[],"do":"wait:CI is running"}]}]}"#,
+        )
+        .unwrap()
+        .remove(0);
+        a_day_of_waiting(8, "loose");
+        assert_eq!(
+            a_wait_with_nothing_behind_it("demo", 8, &loose, &chosen, &nothing, "CI is running"),
+            None,
+            "a workflow with no train behind it stopped a pull request for waiting, which costs a \
+             person an interruption and nobody a queue"
+        );
+        assert_eq!(stopped("demo", 8), None, "and it wrote the stop down too");
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The journal keeps the timeline: an act, a flag, and the hand that cleared it, in order.
