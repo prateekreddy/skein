@@ -2829,7 +2829,16 @@ function openReview(repoId) {
   //
   // A bare press of the review button keeps the filter you last chose; the picker's own "" is an
   // explicit "all repos" and does reset it.
-  revRepoFilter = repoId !== undefined ? repoId : (localStorage.getItem("skein.reviewRepo") || "");
+  //
+  // `"*"` arrives here and means EVERY repo, not a repo named `*`. It is `view.repo`'s word for
+  // "the review pane is somewhere you are" while no repo is chosen (`revRepoFilter || "*"`,
+  // below), and `restoreSessions` hands that saved view straight back on a reload. Read as a repo
+  // id it matches nothing, so the restored queue paints a header, an empty lane and no rows —
+  // measured in the browser suite, which had never reloaded with the pane open before the
+  // keyboard work made it happen. The filter's own word for every repo is `""`.
+  const asked = repoId === "*" ? "" : repoId;
+  revRepoFilter = asked !== undefined ? asked : (localStorage.getItem("skein.reviewRepo") || "");
+  if (revRepoFilter === "*") revRepoFilter = "";   // and a store poisoned before this line is fixed
   try { localStorage.setItem("skein.reviewRepo", revRepoFilter); } catch {}
   revHeld = "*";
   // Here as well as after the queue lands: the allowance governs what is read WITHOUT being asked,
@@ -3027,6 +3036,11 @@ function renderReview(force) {
   if (revReading) {
     revpane.innerHTML = renderReading();
     revRenderNotes();
+    // The hunk j/k sit on, put back on the line it names. The mark is a class, and the diff is
+    // re-rendered under it every time a summary or a note lands — the same reason the notes above
+    // are re-applied here rather than written into the HTML. The POSITION is the state (revHunkAt);
+    // the class is only how it is shown, so restoring it is arithmetic, not memory.
+    revKeyMark();
     return;
   }
   // Nine repositories were a strip with counts, until nine of them wrapped into six ragged rows
@@ -4082,7 +4096,16 @@ function revDetail(pr) {
         <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>, and the branch has moved since.
         <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, true)">read it again</button></div>`
     : "";
-  const owned = (s.yours || []).length
+  // Three ways, exactly as `review::Ownership` answers (SKEIN-117): attributed, could-not-look,
+  // or the repo has no CODEOWNERS. Silence is the right rendering for the third and the WRONG one
+  // for the second — an empty `yours` used to draw as nothing either way, so a brief written
+  // while skein could not read the repo looked like a brief about a repo nobody owns. The
+  // not-kept half is said too, because it is the reader's answer to "then why is it still
+  // offering to read this one": the server deliberately does not cache a blind reading.
+  const owned = s.ownership_unknown
+    ? `<div class="revowned">skein could not read this repo to see which of this is yours — ${
+        esc(s.ownership_unknown)}. The whole change is in scope below, and this reading is not being kept.</div>`
+    : (s.yours || []).length
     ? `<div class="revowned">yours: ${(s.yours || []).map(p => `<code>${esc(p)}</code>`).join(" ")}${
         s.others ? ` <span class="dim">· and ${s.others} path${s.others === 1 ? "" : "s"} you do not own</span>` : ""}</div>`
     : "";
@@ -4932,10 +4955,17 @@ function revKeyHunk(d) {
   revHunkAt = revHunkAt < 0
     ? (d > 0 ? 0 : hunks.length - 1)
     : Math.max(0, Math.min(revHunkAt + d, hunks.length - 1));
+  revKeyMark();
+  revKeyShow(revKeyHunks()[revHunkAt]);
+}
+/// Show where the hunk keys are, from `revHunkAt` alone — called on every keystroke AND after
+/// every reading-view render, because the diff is rebuilt under the reader whenever a summary or
+/// a note lands and a mark written once would not survive it.
+function revKeyMark() {
+  const hunks = revKeyHunks();
   for (const el of hunks) if (el.classList) el.classList.remove("at");
-  const el = hunks[revHunkAt];
-  if (el.classList) el.classList.add("at");
-  revKeyShow(el);
+  const el = revHunkAt >= 0 ? hunks[revHunkAt] : null;
+  if (el && el.classList) el.classList.add("at");
 }
 // The line `c` comments on: the first commentable line inside the focused hunk.
 function revKeyHunkLine() {
@@ -7127,6 +7157,7 @@ function renderDiagnostics() {
   const CHECKS = [
     ["registry", "registry"], ["sbx", "sbx"], ["git", "git"], ["gh", "gh"],
     ["probes", "box probes"], ["mailbox", "mailbox"], ["memory", "fleet memory"],
+    ["disk", "fleet disk"],
     ["gitgate", "github scope"], ["warden", "host warden"], ["cover", "box isolation"],
     ["ai", "ai enrichment"],
   ];
@@ -7140,7 +7171,7 @@ function renderDiagnostics() {
     // command you cannot copy is a command you retype wrongly.
     const fix = h[k].fix
       ? `<div class="dg-fix">→ <code>${esc(h[k].fix)}</code>${h[k].destructive
-          ? ` <span class="dg-danger">rebuilds the sandbox — run it yourself</span>` : ""}</div>`
+          ? ` <span class="dg-danger">destroys something — copy it and run it yourself</span>` : ""}</div>`
       : "";
     return `
     <div class="dg-row ${cls}">
@@ -8949,7 +8980,11 @@ function loadHealth() {
     // "warden" among them for the same reason again: fleet create and destroy go only through it
     // and there is no fallback, so a host without one has lost two lifecycle operations with no
     // symptom until somebody presses Launch — which on an upgrade is weeks after the cause.
-    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","gitgate","warden","cover"];
+    // "disk" among them because it is the one resource the fleet actually runs out of, and the
+    // failure lands in the middle of a build in whichever box happened to ask for the next block —
+    // usually not the box that took the space. `health.ok` counts it, so leaving it out here would
+    // put a red banner on screen with nothing in it to read.
+    const CHECKED = ["registry","sbx","git","probes","mailbox","memory","disk","gitgate","warden","cover"];
     const failed = CHECKED.filter(key => health[key]?.level === "unsatisfied");
     // Reported, never counted as a fault: these are the ones skein could not answer.
     const unsure = CHECKED.filter(key => health[key]?.level === "unknown");

@@ -55,6 +55,8 @@ function board() {
     ${grab("revRenderQueued")}
     ${grab("revNavSettle")}
     ${grab("revRenderHeld")}
+    ${grab("revKeyHunks")}
+    ${grab("revKeyMark")}
     ${grab("revRenderFlush")}
     ${grab("revStackKey")}
     ${grab("revRkQuery")}

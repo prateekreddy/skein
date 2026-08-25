@@ -267,6 +267,7 @@ function world(opts = {}) {
     ${grab("revKeyReading")}
     ${grab("revKeyHunks")}
     ${grab("revKeyHunk")}
+    ${grab("revKeyMark")}
     ${grab("revKeyHunkLine")}
     ${grab("revKeyFiles")}
     ${grab("revKeyFile")}
