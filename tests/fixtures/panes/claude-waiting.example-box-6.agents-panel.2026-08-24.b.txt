@@ -1,0 +1,24 @@
+  3. Delivery step 4 — skein-server into the fleet, host path one variable away
+  4. Unreadable-vs-empty repo (SKEIN-117) — including the durable bug where a summary computed during a mirror outage stays blind forever
+  5. (just finished and shipped: budget + merged summary/critique)
+
+  What you'll get after a rebuild once the current wave lands: your four decisions live (100/day automatic-only budget with the read-now invitation, no settle delay, one
+  model call producing summary + review together, critique visible beside the summary once the UI slice follows the keyboard agent), plus GraphQL batching,
+  approve-with-undo, the login banner, and the re-anchored reviews already pushed.
+
+  Queued next as writers free up: the critique-section UI + client budget cleanup (behind the keyboard agent), then SKEIN-165 (designed loading/empty states), SKEIN-164,
+  and the review-ready chip.
+
+✻ Waiting for 4 background agents to finish
+                                                                                            ✘ Auto-update failed · Try claude doctor or npm i -g @anthropic-ai/claude-code
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── example-box-6 ──
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  CTX █████░░░░░░░ 44% 443.4k/1.0M │ 5H  ████▒▒▒▒▒▒▒▒ 38%→168% 3h52m left │ 7D  ███████████▒ 97%→102% 7h52m left │ $380.57 │ Fable 5                                   /rc
+  ⏵⏵ auto mode on · 1 monitor · ← for agents
+
+  ● main
+  ◯ general-purpose  Keyboard-first review queue                                                                                                  19m 59s · ↓ 199.6k tokens
+  ◯ general-purpose  Screen grammar vs real fleet panes                                                                                           16m 14s · ↓ 120.3k tokens
+  ◯ general-purpose  Delivery step 4: server into the fleet                                                                                       15m 53s · ↓ 178.7k tokens
+  ◯ general-purpose  Unreadable repo told apart from empty                                                                                         9m 21s · ↓ 160.7k tokens

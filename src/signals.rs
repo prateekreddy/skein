@@ -367,6 +367,40 @@ pub(crate) fn is_working_status_line(line: &str) -> bool {
     digits > 0 && matches!(rest[digits..].chars().next(), Some('s' | 'm' | 'h'))
 }
 
+/// Claude Code's status line while the turn is parked on background agents — a busy state
+/// [`is_working_status_line`] cannot see, because the line carries no parenthesised elapsed time:
+///
+/// ```text
+/// ✻ Waiting for 4 background agents to finish
+/// ```
+///
+/// Captured live 2026-08-24 (example-box-6, mid-turn, operator statusline): the pane redrew
+/// every second — age 0-1, moving 1 across eight samples 4s apart — while the board read `waiting`.
+/// A box parked on its own agents resumes by itself; it needs nobody. Same glyph denylist as the
+/// status line, so the agents panel's own rows (`◯ general-purpose …`), a quoted copy, and prose
+/// about waiting cannot fake it.
+pub(crate) fn is_waiting_on_agents_line(line: &str) -> bool {
+    let l = line.trim();
+    starts_like_status(l) && l.contains("Waiting for") && l.contains("background agent")
+}
+
+/// The spinner-glyph opening every status line carries, and the denylist that keeps the pane's own
+/// transcript from wearing it: `●` is the agent speaking, `⎿` a tool result, `>`/`❯`/`›` the
+/// composer, a quote mark a captured copy.
+fn starts_like_status(trimmed: &str) -> bool {
+    matches!(trimmed.chars().next(), Some(c) if !c.is_alphanumeric() && !"●⎿>❯›\"'".contains(c))
+}
+
+/// Claude Code compacting *now*, told apart from the record of a compact that already finished.
+/// Skein's own PreCompact hook prints `[… box-status.sh compacting] completed successfully` into
+/// the transcript of every box in the fleet, and `⎿  Compacted (ctrl+o…)` sits above it — both
+/// carry the word, neither is the pane's state. Captured live 2026-08-24
+/// (lattice-feat-design-codex-claude): idle 8 minutes after a `/compact`, called `working` for 37.
+pub(crate) fn is_compacting_line(line: &str) -> bool {
+    let l = line.trim();
+    starts_like_status(l) && l.to_lowercase().contains("compacting")
+}
+
 /// A spinner glyph in the terminal title is how both runtimes say "busy" — Claude Code writes
 /// `⠂ Claude Code` while working and `✳ Claude Code` when idle, Codex writes `⠋ <dir>`. Braille is
 /// the animated set in both. A bonus signal only: Claude Code's glyph is braille in some frames and
@@ -460,15 +494,36 @@ pub(crate) fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
     // anything matching further up is the agent *displaying* one — a captured fixture in a diff, a
     // log being catted — not the pane's own. (Caught on live data: this file's own test fixtures were
     // on screen while being edited.)
-    let status_region = obs
-        .tail
+    // …and the bottom is the *composer*, not the last line of the pane. Rules, the context meter,
+    // the mode footer and — the case that named this — the agents panel all sit below it, and a box
+    // running four agents puts twelve lines of chrome under its own status line (captured live,
+    // 2026-08-24: the board read `waiting` for nine minutes at a pane that was mid-turn). Cutting at
+    // the composer keeps the window pointed at the status region however much chrome follows it.
+    // …and when the composer is on screen it, not the last line of the pane, is the bottom: rules,
+    // the context meter, the mode footer and — the case that named this — the agents panel all sit
+    // *below* it, and a box running four agents puts twelve lines of chrome under its own status
+    // line (captured live 2026-08-24: the board read `waiting` for nine minutes at a pane that was
+    // mid-turn). Above the composer the window is tight, because the status line is the line
+    // directly above it, give or take a right-aligned notice and the rule.
+    let region: Vec<&String> = match obs.tail.iter().rposition(|l| matches!(l.trim(), "❯" | ">")) {
+        Some(composer) => obs.tail[..composer]
+            .iter()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(4)
+            .collect(),
+        None => obs
+            .tail
+            .iter()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(10)
+            .collect(),
+    };
+    if region
         .iter()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(10);
-    if status_region.clone().any(|l| is_working_status_line(l))
+        .any(|l| is_working_status_line(l) || is_waiting_on_agents_line(l) || is_compacting_line(l))
         || any("esc to interrupt")
-        || any("compacting")
         || title_is_spinning(&obs.title)
     {
         return Screen::Busy;
@@ -1210,6 +1265,88 @@ mod tests {
         ]);
         displayed.extend(composer);
         assert_eq!(classify_pane("claude", &obs(&displayed)), Screen::Waiting);
+    }
+
+    /// A pane captured from a live fleet box, byte-for-byte as `box-pane.sh` recorded it (trailing
+    /// whitespace stripped). The metadata travels with it because the grammar reads the title too.
+    fn captured(fixture: &str, title: &str, title_age: i64) -> PaneObs {
+        PaneObs {
+            ts: 1,
+            title: title.into(),
+            title_age,
+            tail: fixture.lines().map(str::to_string).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_turn_parked_on_background_agents_reads_busy_not_waiting() {
+        // Captured live 2026-08-24 from example-box-6 (a real box, operator statusline, agents
+        // panel open): the pane redrew every second (age 0-1, moving 1 on eight samples 4s apart)
+        // with `✻ Waiting for 4 background agents to finish` as its status line — a turn in
+        // progress — while the board read `waiting` for nine minutes. Two defects at once, and a
+        // clean-room box shows neither: the agents panel below the footer (one row per agent)
+        // pushed the status line out of a bottom-anchored 10-line window, and the line itself
+        // carries no parenthesised elapsed time for `is_working_status_line` to match.
+        for fixture in [
+            include_str!(
+                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.a.txt"
+            ),
+            include_str!(
+                "../tests/fixtures/panes/claude-waiting.example-box-6.agents-panel.2026-08-24.b.txt"
+            ),
+        ] {
+            let real = captured(fixture, "_ example-box-6", 12325);
+            assert_eq!(
+                classify_pane("claude", &real),
+                Screen::Busy,
+                "a box waiting on its own background agents is mid-turn — it needs nobody"
+            );
+        }
+        assert!(is_waiting_on_agents_line(
+            "✻ Waiting for 4 background agents to finish"
+        ));
+        // The panel's own rows, and a quoted copy of the line, are not the status line.
+        assert!(!is_waiting_on_agents_line(
+            "  ◯ general-purpose  Screen grammar vs real fleet panes    4m 48s · ↓ 91.8k tokens"
+        ));
+        assert!(!is_waiting_on_agents_line(
+            "\"✻ Waiting for 4 background agents to finish\","
+        ));
+    }
+
+    #[test]
+    fn a_finished_compact_in_the_hook_log_is_not_live_compaction() {
+        // Captured live 2026-08-24 from lattice-feat-design-codex-claude: idle for 8+ minutes after
+        // a `/compact` (age 501, moving 0, completion marker `✻ Brewed for 21m 29s`, bare composer),
+        // yet the board said `working` — and kept saying it for 37 minutes — because the *hook log*
+        // of the finished compact (`PreCompact [… box-status.sh compacting] completed successfully`)
+        // sat in the tail and `any("compacting")` read it as live compaction. The word only counts
+        // in the status region; this pane's own store-installed hooks put it on screen after every
+        // compact, so this is every fleet box, not an exotic one.
+        let real = captured(
+            include_str!(
+                "../tests/fixtures/panes/claude-working.lattice.idle-after-compact.2026-08-24.txt"
+            ),
+            "_ lattice-feat-design-codex-claude",
+            11841,
+        );
+        assert_eq!(
+            classify_pane("claude", &real),
+            Screen::Waiting,
+            "a finished compact's hook log is history, not a live compaction"
+        );
+        // …while the word directly above the composer is the pane's own state. (Constructed, not a
+        // capture: no live compaction was on any fleet screen while this was written — its shape is
+        // unverified, which is why the needle stays a bare substring rather than a line shape.)
+        let compacting = &[
+            "✻ Compacting conversation…",
+            "──────────────────────────────────────────",
+            "❯\u{a0}",
+            "──────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ];
+        assert_eq!(classify_pane("claude", &obs(compacting)), Screen::Busy);
     }
 
     #[test]
