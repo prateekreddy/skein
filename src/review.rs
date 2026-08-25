@@ -85,6 +85,14 @@ pub struct Summary {
     pub yours: Vec<String>,
     /// How many changed paths you do not own, so the summary can say what it left out.
     pub others: usize,
+    /// Why ownership could **not** be consulted for this summary — the repo was unreadable when it
+    /// was computed ([`Ownership::Unreadable`], SKEIN-117). Empty when it was consulted, including
+    /// when it was consulted and genuinely absent. Non-empty means `yours`/`others` are not claims
+    /// — the pane must say "skein could not read the repo" rather than draw nothing owned — and
+    /// the summary is never written to the cache, so a recovered mirror gets consulted on the
+    /// next computation instead of being outvoted by a blind file for the life of the head.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ownership_unknown: String,
     /// Mechanical evidence from [`crate::contracts`] — what moved, found in the diff rather than
     /// reasoned about. Shown beside the brief because "the model thinks so" and "the diff says so"
     /// are different kinds of claim and you should be able to tell them apart.
@@ -129,6 +137,7 @@ impl Summary {
             budget_stopped: false,
             yours: Vec::new(),
             others: 0,
+            ownership_unknown: String::new(),
             unread_because: because.to_string(),
         }
     }
@@ -680,19 +689,62 @@ fn changed_paths(slug: &str, number: u64) -> Vec<String> {
 
 // ───────────────────────────── stage 0: ownership ─────────────────────────────
 
-/// Which changed paths are yours, and how many are not.
+/// What consulting CODEOWNERS answered — three ways, not two, and the third is the point
+/// ([`crate::health::Level`]'s register).
 ///
-/// A repo with no CODEOWNERS returns `(vec![], 0)` — deliberately indistinguishable from "no
-/// narrowing available", because that is what it is. Callers must not read an empty `yours` as
-/// "none of this is yours".
-pub fn ownership(repo: &Repo, identities: &[String], paths: &[String]) -> (Vec<String>, usize) {
-    let Some(co) =
-        crate::repos::Tree::open(repo).and_then(|tree| codeowners::load(|p| tree.read(p)))
-    else {
-        return (Vec::new(), 0);
+/// Both empty-handed answers widen a summary's scope to everything, which is the safe direction
+/// and unchanged. What they must NOT share is the sentence — "this repo has no CODEOWNERS" is the
+/// repo's own answer, "skein could not read this repo" is an admission — or the cache: a summary
+/// narrowed while the repo was unreadable froze "yours: none" for the life of its head commit,
+/// and a mirror that recovered a minute later could never correct it (SKEIN-117).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ownership {
+    /// CODEOWNERS was read: these changed paths are yours, and this many are not.
+    Owned { yours: Vec<String>, others: usize },
+    /// The repo was read and genuinely has no CODEOWNERS (or nothing in it parses to a rule).
+    /// No narrowing exists — full depth for everything, the normal case.
+    NoCodeowners,
+    /// The repo could not be read, so whether narrowing exists is unknown. Carries why, verbatim.
+    Unreadable(String),
+}
+
+impl Ownership {
+    /// The pair a [`Summary`] carries: paths that are yours, and how many are not. Empty-and-zero
+    /// for both empty-handed answers — the widening is identical; only the sentence (and the
+    /// cacheability) differs, and those read the enum itself.
+    fn split(&self) -> (Vec<String>, usize) {
+        match self {
+            Ownership::Owned { yours, others } => (yours.clone(), *others),
+            _ => (Vec::new(), 0),
+        }
+    }
+
+    /// Why ownership could not be consulted — `None` when it was, including when it was consulted
+    /// and genuinely does not exist.
+    fn unread_why(&self) -> Option<&str> {
+        match self {
+            Ownership::Unreadable(why) => Some(why),
+            _ => None,
+        }
+    }
+}
+
+/// Which changed paths are yours, and how many are not — or that no such answer exists, and
+/// which of the two reasons why. Callers must not read an empty `yours` as "none of this is
+/// yours", and must not remember anything decided on [`Ownership::Unreadable`].
+pub fn ownership(repo: &Repo, identities: &[String], paths: &[String]) -> Ownership {
+    let tree = match crate::repos::Tree::open_telling(repo) {
+        Ok(tree) => tree,
+        Err(why) => return Ownership::Unreadable(why),
+    };
+    let Some(co) = codeowners::load(|p| tree.read(p)) else {
+        return Ownership::NoCodeowners;
     };
     let (mine, theirs) = co.partition(paths, identities);
-    (mine.into_iter().map(str::to_string).collect(), theirs.len())
+    Ownership::Owned {
+        yours: mine.into_iter().map(str::to_string).collect(),
+        others: theirs.len(),
+    }
 }
 
 // ───────────────────────────── stage 1 & 2: reading ─────────────────────────────
@@ -711,15 +763,20 @@ struct Verdict {
 /// change needs a paragraph.
 const FLAGS: [&str; 5] = ["behaviour", "interface", "default", "architecture", "ux"];
 
-fn stage1_prompt(pr: &Pr, yours: &[String], others: usize, diff: &str, cut: bool) -> String {
-    let scope = if yours.is_empty() {
-        String::from("This repo has no CODEOWNERS, or none of it is attributed — treat the whole change as in scope.")
-    } else {
-        format!(
+fn stage1_prompt(pr: &Pr, owned: &Ownership, diff: &str, cut: bool) -> String {
+    // Both empty-handed answers widen scope to the whole change — the safe direction, unchanged —
+    // but the sentence says which one happened: "the repo has none" is the repo's answer, and
+    // "skein could not look" is an admission the brief must not dress up as the other (SKEIN-117).
+    let scope = match owned {
+        Ownership::Owned { yours, others } if !yours.is_empty() => format!(
             "The reviewer owns these paths: {}. {} other changed path(s) are outside their ownership — mention them only in passing.",
             yours.join(", "),
             others
-        )
+        ),
+        Ownership::Unreadable(why) => format!(
+            "Whether the reviewer owns any of this is unknown — the repo could not be read to consult CODEOWNERS ({why}). Treat the whole change as in scope."
+        ),
+        _ => String::from("This repo has no CODEOWNERS, or none of it is attributed — treat the whole change as in scope."),
     };
     format!(
         r#"You are triaging a pull request for a senior engineer who reviews to stay informed, not to catch bugs. CI and the author already cover correctness. Their words: "I want mechanism level, product level, architectural and user level details. I don't need exact functions or code level details."
@@ -1046,6 +1103,22 @@ pub fn read_waiting() -> Vec<String> {
                     }
                     continue;
                 }
+                // Read, but BLIND: ownership could not be consulted, so `summarise` served this
+                // one without caching it (SKEIN-117 — a stored blind summary would freeze
+                // "yours: none" for the life of the head). Left unnoted, this pass would re-buy
+                // the same degraded answer every ten minutes for ever; noted, only the pass
+                // stands down. The tried-notes gate nothing but this loop — the pane's read
+                // button and per-row requests go nowhere near them — so a recovered mirror is
+                // consulted the next time anyone asks, and a new commit is a new key that reads
+                // afresh either way.
+                if summary.computed && !summary.ownership_unknown.is_empty() {
+                    note_tried(
+                        &repo.id,
+                        pr.number,
+                        &pr.head_sha,
+                        &format!("read blind — {}", summary.ownership_unknown),
+                    );
+                }
                 // Only what actually cost something is reported. A cache hit is not news, and a
                 // line per cache hit would bury the ones that are.
                 if summary.computed {
@@ -1207,7 +1280,7 @@ pub fn summarise(
         return said;
     }
     let paths = changed_paths(slug, pr.number);
-    let (yours, others) = ownership(repo, identities, &paths);
+    let owned = ownership(repo, identities, &paths);
 
     // ONE download, every reader. The RAW diff is fetched once and every consumer truncates its
     // own view of it: the scanner and stage 2 at [`STAGE2_BYTES`], stage 1 at [`STAGE1_BYTES`],
@@ -1249,7 +1322,7 @@ pub fn summarise(
     if draft_due {
         // Counted the moment the model is about to be asked — a call that then fails still spent.
         note_spent_if_unasked(trigger, &repo.id, &day);
-        return summarise_and_draft(repo, pr, &yours, others, &signals, &raw);
+        return summarise_and_draft(repo, pr, &owned, &signals, &raw);
     }
 
     // One analysed pull request = one unit, counted at the call (a call that then fails still
@@ -1258,7 +1331,7 @@ pub fn summarise(
     // explaining must not cost double what a boring one did.
     note_spent_if_unasked(trigger, &repo.id, &day);
     let raw = match crate::ai::claude_oneshot_telling(
-        &stage1_prompt(pr, &yours, others, &diff, cut),
+        &stage1_prompt(pr, &owned, &diff, cut),
         review_model(None).as_deref(),
         Duration::from_secs(60),
     ) {
@@ -1293,6 +1366,7 @@ pub fn summarise(
     }
     let expand = verdict.expand || !signals.is_empty();
 
+    let (yours, others) = owned.split();
     let mut summary = Summary {
         number: pr.number,
         head_sha: pr.head_sha.clone(),
@@ -1306,6 +1380,7 @@ pub fn summarise(
         signals: signals.clone(),
         yours,
         others,
+        ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
         unread_because: String::new(),
     };
 
@@ -1334,7 +1409,19 @@ pub fn summarise(
             }
         }
     }
-    let _ = store(&repo.id, &summary);
+    // Cached ONLY when everything that would narrow it was actually consulted. A summary
+    // computed while the repo was unreadable answered "yours: none" for lack of sight, not as a
+    // fact — stored, it carried that blindness for the life of this head, and a mirror that
+    // recovered a minute later could never correct it (SKEIN-117, the durable half of the bug).
+    // So it is served — the person still gets their summary now — and NOT written down: the next
+    // computation consults whatever can be read then. That recomputation is a second unit of the
+    // day's budget, and that is correct — the first unit bought a degraded answer, not this one.
+    // It does not loop the background pass either: `read_waiting` writes a tried-note at this
+    // head for a blind reading, and the tried-notes gate only the pass — the pane's requests go
+    // nowhere near them, which is exactly the door a recovered mirror is consulted through.
+    if summary.ownership_unknown.is_empty() {
+        let _ = store(&repo.id, &summary);
+    }
     summary
 }
 
@@ -1352,8 +1439,7 @@ pub fn summarise(
 fn summarise_and_draft(
     repo: &Repo,
     pr: &Pr,
-    yours: &[String],
-    others: usize,
+    owned: &Ownership,
     signals: &[crate::contracts::Signal],
     raw_diff: &str,
 ) -> Summary {
@@ -1370,7 +1456,7 @@ fn summarise_and_draft(
         said
     };
     let answer = match crate::ai::claude_oneshot_telling(
-        &merged_prompt(pr, yours, others, signals, &diff, cut),
+        &merged_prompt(pr, owned, signals, &diff, cut),
         review_model(Some("claude-sonnet-5")).as_deref(),
         Duration::from_secs(300),
     ) {
@@ -1398,6 +1484,7 @@ fn summarise_and_draft(
             verdict.line
         ));
     }
+    let (yours, others) = owned.split();
     let summary = Summary {
         number: pr.number,
         head_sha: pr.head_sha.clone(),
@@ -1408,13 +1495,24 @@ fn summarise_and_draft(
         detail,
         flags,
         signals: signals.to_vec(),
-        yours: yours.to_vec(),
+        yours,
         others,
+        ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
         unread_because: String::new(),
     };
-    let _ = store(&repo.id, &summary);
+    // Same rule and same reason as the two-stage path (see the comment there): a summary whose
+    // ownership could not be consulted is served but never cached, so a recovered mirror is
+    // consulted on the next computation instead of being outvoted by a blind file (SKEIN-117).
+    if summary.ownership_unknown.is_empty() {
+        let _ = store(&repo.id, &summary);
+    }
     match critique {
         // Vetted against the very diff the model read, exactly as the standalone drafter vets.
+        //
+        // Stored even when the summary above was computed blind, deliberately: an unknown
+        // ownership only ever WIDENED the review's scope — the safe direction, more scrutiny
+        // rather than less — so the draft is not degraded the way the summary's ownership claim
+        // is, and the draft-once-per-head discipline is the money guard worth keeping.
         Some(drafted) => {
             if let Err(fail) = vet_and_store_critique(repo, pr, drafted, &diff, cut) {
                 note_critique_tried(&repo.id, pr.number, &pr.head_sha, &fail.why);
@@ -1801,20 +1899,24 @@ fn parse_critique(text: &str) -> Option<Critique> {
 /// for why one call.
 fn merged_prompt(
     pr: &Pr,
-    yours: &[String],
-    others: usize,
+    owned: &Ownership,
     signals: &[crate::contracts::Signal],
     diff: &str,
     cut: bool,
 ) -> String {
-    let scope = if yours.is_empty() {
-        String::from("This repo has no CODEOWNERS, or none of it is attributed — treat the whole change as in scope.")
-    } else {
-        format!(
+    // The same three-way sentence as `stage1_prompt`, in this prompt's register: both
+    // empty-handed answers keep the whole change in scope, and only the wording tells a repo
+    // with no CODEOWNERS from a repo skein could not read (SKEIN-117).
+    let scope = match owned {
+        Ownership::Owned { yours, others } if !yours.is_empty() => format!(
             "The reviewer owns these paths: {}. {} other changed path(s) are outside their ownership — go deep on theirs, stay brief elsewhere.",
             yours.join(", "),
             others
-        )
+        ),
+        Ownership::Unreadable(why) => format!(
+            "Whether the reviewer owns any of this is unknown — the repo could not be read to consult CODEOWNERS ({why}). Treat the whole change as in scope."
+        ),
+        _ => String::from("This repo has no CODEOWNERS, or none of it is attributed — treat the whole change as in scope."),
     };
     let evidence = if signals.is_empty() {
         String::new()
@@ -2302,6 +2404,7 @@ mod tests {
                 signals: Vec::new(),
                 yours: Vec::new(),
                 others: 0,
+                ownership_unknown: String::new(),
                 unread_because: String::new(),
                 computed: true,
                 budget_stopped: false,
@@ -2366,10 +2469,17 @@ mod tests {
         });
         std::env::set_var("SKEIN_GITHUB_API", &base);
 
+        // A real checkout behind the fixture repo, so its mirror is readable and summaries are
+        // not computed blind — a blind summary is deliberately never cached (SKEIN-117), and this
+        // test's dedupe steps are about the cache and the tried-notes, not about blindness. The
+        // slug still comes from `source` (`gitgate::repo_slug` reads the URL first), so the queue
+        // stub is untouched by the local tree.
+        let checkout = home.join("checkout");
+        checkout_fixture(&checkout);
         crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
             "id": "demo",
             "source": "https://github.com/acme/thing.git",
-            "source_tree": "",
+            "source_tree": checkout.to_string_lossy(),
             "store": "",
             "read_prs": false,
         }))
@@ -2604,10 +2714,16 @@ mod tests {
         });
         std::env::set_var("SKEIN_GITHUB_API", &base);
 
+        // A real checkout behind the fixture repo — same reason as `what_it_reads_unwatched`'s:
+        // the drafting tests assert what lands in the CACHE, and a repo whose mirror cannot be
+        // read has its summaries served without being cached (SKEIN-117). The slug still comes
+        // from `source`, so the GitHub stub is untouched.
+        let checkout = home.join("checkout");
+        checkout_fixture(&checkout);
         crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
             "id": "crit",
             "source": "https://github.com/acme/thing.git",
-            "source_tree": "",
+            "source_tree": checkout.to_string_lossy(),
             "store": "",
             "read_prs": true,
         }))
@@ -2856,6 +2972,7 @@ mod tests {
                     signals: Vec::new(),
                     yours: Vec::new(),
                     others: 0,
+                    ownership_unknown: String::new(),
                     unread_because: String::new(),
                     computed: true,
                     budget_stopped: false,
@@ -2924,6 +3041,7 @@ mod tests {
             signals: Vec::new(),
             yours: Vec::new(),
             others: 0,
+            ownership_unknown: String::new(),
             unread_because: String::new(),
             computed: true,
             budget_stopped: false,
@@ -3267,22 +3385,87 @@ mod tests {
         assert!(!p.to_string_lossy().contains(".."), "{}", p.display());
     }
 
+    /// Run git in `dir`, with an identity, and refuse to continue if it failed.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// A committed checkout at `dir`, with `src/a.rs` and `web/b.js` — and no CODEOWNERS unless
+    /// the test adds one and commits again.
+    fn checkout_fixture(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("web")).unwrap();
+        std::fs::write(dir.join("src").join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.join("web").join("b.js"), "// b").unwrap();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "one"]);
+    }
+
+    /// A repo registered against `checkout`, adopted in place, so its mirror reads from disk.
+    fn repo_at(id: &str, checkout: &std::path::Path) -> Repo {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "source": checkout.to_string_lossy(),
+            "source_tree": checkout.to_string_lossy(),
+            "store": "",
+        }))
+        .unwrap()
+    }
+
+    /// Ownership answers three ways, and the three are distinguishable: CODEOWNERS attributes, the
+    /// repo genuinely has none, or the repo could not be read at all. The third used to answer as
+    /// the second — `(vec![], 0)`, by its own doc "deliberately indistinguishable" — so a repo
+    /// skein could not look at read as a repo nobody owns (SKEIN-117). All three still narrow
+    /// nothing or narrow honestly; what they may no longer do is wear each other's sentence.
     #[test]
-    fn ownership_of_a_repo_without_codeowners_narrows_nothing() {
-        let repo = Repo {
-            read_prs: false,
-            id: "r".into(),
-            source: "https://github.com/a/b".into(),
-            source_tree: "/nonexistent-path-for-this-test".into(),
-            store: String::new(),
-            agent: "claude".into(),
-            plane_project: String::new(),
-            sync_connection: String::new(),
-            review_queue: true,
-            sync_gateway_url: String::new(),
-        };
-        let paths = vec!["src/a.rs".to_string()];
-        assert_eq!(ownership(&repo, &["me".into()], &paths), (vec![], 0));
+    fn ownership_tells_no_codeowners_from_a_repo_it_could_not_read() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        let paths = vec!["src/a.rs".to_string(), "web/b.js".to_string()];
+
+        // Could not read: no mirror, and none can be made from a path that does not exist.
+        let blind = repo_at("blind", &(home.as_ref() as &std::path::Path).join("nowhere"));
+        match ownership(&blind, &["me".into()], &paths) {
+            Ownership::Unreadable(why) => assert!(!why.is_empty(), "could-not-read must say why"),
+            other => panic!("an unreadable repo answered {other:?} instead of saying it could not look"),
+        }
+
+        // Genuinely none: the repo was read, and the absence is its own answer.
+        let checkout = (home.as_ref() as &std::path::Path).join("checkout");
+        checkout_fixture(&checkout);
+        let repo = repo_at("readable", &checkout);
+        assert_eq!(
+            ownership(&repo, &["me".into()], &paths),
+            Ownership::NoCodeowners,
+            "a repo with no CODEOWNERS is the normal case, not a failure to look"
+        );
+
+        // Present: the split, with the paths that are yours named and the rest counted.
+        std::fs::create_dir_all(checkout.join(".github")).unwrap();
+        std::fs::write(checkout.join(".github").join("CODEOWNERS"), "src/ @me\n").unwrap();
+        git(&checkout, &["add", "-A"]);
+        git(&checkout, &["commit", "-q", "-m", "owners"]);
+        crate::repos::fetch_mirror(&repo).unwrap();
+        assert_eq!(
+            ownership(&repo, &["me".into()], &paths),
+            Ownership::Owned {
+                yours: vec!["src/a.rs".into()],
+                others: 1
+            }
+        );
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     // ─────────────────── the day's analysis budget ───────────────────
@@ -3367,6 +3550,7 @@ mod tests {
                 signals: Vec::new(),
                 yours: Vec::new(),
                 others: 0,
+                ownership_unknown: String::new(),
                 unread_because: String::new(),
                 computed: true,
                 budget_stopped: false,
@@ -3390,6 +3574,132 @@ mod tests {
         for key in ["SKEIN_HOME", "SKEIN_REVIEW_AI", "SKEIN_CLAUDE_BIN"] {
             std::env::remove_var(key);
         }
+    }
+
+    /// The durable half of SKEIN-117: a summary computed while the repo could not be read is
+    /// SERVED — the person still gets their summary now — but never cached, so a mirror that
+    /// recovers is consulted on the next computation. Under the old unconditional cache write,
+    /// the blind answer ("yours: none", marked with nothing) froze for the life of the head:
+    /// restore `let _ = store(&repo.id, &summary);` without the `ownership_unknown` guard and
+    /// two assertions below fail — `cached(..).is_none()` after the blind visit, and the
+    /// recovered visit's `yours`, which the stale cache answers with the blind emptiness.
+    ///
+    /// The budget is asserted too, because not caching has a price: the second visit spends a
+    /// second unit, and that is correct — the first unit bought a degraded answer, not this one.
+    #[cfg(unix)]
+    #[test]
+    fn a_summary_computed_blind_is_served_but_never_cached() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_REVIEW_AI", "on");
+        let claude = home.join("claude-stage1.sh");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf 'KIND: fix\\nLINE: it changes a thing.\\nEXPAND: no\\nFLAGS: none\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &claude,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        std::env::set_var("SKEIN_CLAUDE_BIN", &claude);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        // A GitHub that answers: the diff for #5, and its changed files — one the CODEOWNERS
+        // below will attribute, one it will not.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let mut stream = stream;
+                let (head, _) = read_request(&stream);
+                let answer = if head.contains("/pulls/5/files") {
+                    r#"[{"filename":"src/a.rs"},{"filename":"web/b.js"}]"#.to_string()
+                } else if head.contains("/pulls/5 ") {
+                    "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n".to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // The repo's checkout does not exist yet: the mirror cannot be made, so skein is blind.
+        let checkout = home.join("checkout");
+        let repo = repo_at("heals", &checkout);
+        let mut pr = budget_pr(5, "sha5");
+        // Mentioned, not a reviewer: the review is not yours to give, so the visit takes the
+        // two-stage path and the stage-1 stub above answers it.
+        pr.reasons = vec![crate::prq::Reason::Mentioned];
+
+        let blind = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Unasked);
+        assert_ne!(
+            blind.depth,
+            Depth::Unread,
+            "a readable diff must still be summarised while the repo is not: {}",
+            blind.unread_because
+        );
+        assert!(
+            !blind.ownership_unknown.is_empty(),
+            "the summary must say ownership was not consulted, not draw nothing owned"
+        );
+        assert!(
+            cached("heals", 5, "sha5").is_none(),
+            "the blind summary was written down — a recovered mirror can never correct it"
+        );
+        assert_eq!(reads_spent(&utc_day()), 1, "the blind visit still spent its unit");
+
+        // The mirror recovers: the checkout appears, CODEOWNERS and all.
+        checkout_fixture(&checkout);
+        std::fs::create_dir_all(checkout.join(".github")).unwrap();
+        std::fs::write(checkout.join(".github").join("CODEOWNERS"), "src/ @me\n").unwrap();
+        git(&checkout, &["add", "-A"]);
+        git(&checkout, &["commit", "-q", "-m", "owners"]);
+
+        let healed = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Unasked);
+        assert!(
+            healed.ownership_unknown.is_empty(),
+            "the recovered mirror was not consulted: {}",
+            healed.ownership_unknown
+        );
+        assert_eq!(
+            healed.yours,
+            vec!["src/a.rs".to_string()],
+            "the recomputed summary must carry what CODEOWNERS actually attributes"
+        );
+        assert_eq!(healed.others, 1);
+        assert!(
+            cached("heals", 5, "sha5").is_some(),
+            "a summary computed with everything consulted must be cached as ever"
+        );
+        assert_eq!(
+            reads_spent(&utc_day()),
+            2,
+            "the recomputation is a second unit — the first bought a degraded answer"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_REVIEW_AI",
+            "SKEIN_CLAUDE_BIN",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
     }
 
     /// At the ceiling the model is NEVER reached for unasked work, and the row carries the
@@ -3592,9 +3902,14 @@ mod tests {
             }
         });
         std::env::set_var("SKEIN_GITHUB_API", &base);
+        // A readable checkout behind the repo, as in `drafting_fixture` and for the same reason:
+        // this test asserts WHICH rows landed in the cache, and a repo whose mirror cannot be
+        // read has its summaries served without being cached (SKEIN-117).
+        let checkout = home.join("checkout");
+        checkout_fixture(&checkout);
         crate::repos::save_repos(&[serde_json::from_value(serde_json::json!({
             "id": "ord", "source": "https://github.com/acme/thing.git",
-            "source_tree": "", "store": "", "read_prs": true,
+            "source_tree": checkout.to_string_lossy(), "store": "", "read_prs": true,
         }))
         .unwrap()])
         .unwrap();
@@ -3733,6 +4048,7 @@ mod tests {
                     signals: Vec::new(),
                     yours: Vec::new(),
                     others: 0,
+                    ownership_unknown: String::new(),
                     unread_because: String::new(),
                     computed: true,
                     budget_stopped: false,

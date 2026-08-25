@@ -554,18 +554,44 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// The repo's tree, or `None` when there is no mirror to read and one cannot be made.
+    /// The repo's tree, or `None` when it could not be read — with the reason kept only in the
+    /// server log.
+    ///
+    /// A convenience for callers whose behaviour is already absence-shaped: they do less, safely,
+    /// whichever of the two `None` means. A caller that must *tell* "this repo has nothing" from
+    /// "I could not look" reads [`Tree::open_telling`] instead — those are different sentences on
+    /// screen, and only one of them may be cached (SKEIN-117).
     pub fn open(repo: &Repo) -> Option<Tree> {
-        let mirror = ensure_mirror(repo)
+        Tree::open_telling(repo)
             .map_err(|why| eprintln!("skein: reading {}: {why}", repo.id))
-            .ok()?;
-        // A mirror of a repository with no commits at all answers nothing, and every call below
-        // would fail one at a time rather than once here.
-        let probe = Tree {
-            mirror: mirror.clone(),
-        };
-        probe.git(&["rev-parse", "--verify", "HEAD"])?;
-        Some(Tree { mirror })
+            .ok()
+    }
+
+    /// The repo's tree, or the reason it could not be read.
+    ///
+    /// [`crate::health::Level`]'s register, applied to reading a repo. `Ok` is *checked*: the
+    /// mirror answered, so an absence found through it — no CODEOWNERS, no such file, no modules
+    /// — is the repo's own answer and may be acted on and remembered. `Err` is *could not be
+    /// checked*: nothing about the repo was learned, and the honest response to "I could not
+    /// tell" is to say so and wait — render it as "skein could not read this repo", never as
+    /// "nothing there", and never store a decision made while blind. `Unknown` may never drive a
+    /// doer.
+    pub fn open_telling(repo: &Repo) -> Result<Tree, String> {
+        let mirror = ensure_mirror(repo)?;
+        // A mirror whose HEAD resolves to nothing answers nothing, and every call below would
+        // fail one at a time rather than once here. An empty repository and a mirror that did
+        // not survive its clone both land in this probe, and neither can support "the repo has
+        // no X" — so both read as could-not-read, the direction that widens attention rather
+        // than narrowing it.
+        let tree = Tree { mirror };
+        if tree.git(&["rev-parse", "--verify", "HEAD"]).is_none() {
+            return Err(format!(
+                "the mirror at {} has no readable HEAD — an empty repository, or a mirror that \
+                 did not survive its clone",
+                tree.mirror.display()
+            ));
+        }
+        Ok(tree)
     }
 
     fn git(&self, args: &[&str]) -> Option<String> {
@@ -1596,6 +1622,55 @@ mod tests {
             Tree::open(&repo).is_some_and(|t| t.read("tracked.txt").is_some()),
             "the mirror every caller got cannot answer for the tree"
         );
+
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A repo that cannot be read says why, distinguishably from a repo with nothing to say.
+    ///
+    /// `Tree::open` folds both into `None`, and every caller used to read that as "nothing there":
+    /// `review::ownership` answered "you own none of this" and `moduledocs::modules` answered
+    /// "this repo has no modules" about a repo skein could not look at (SKEIN-117). The telling
+    /// form is the seam those callers now stand on, so what it promises is pinned here: an
+    /// unreadable repo is `Err` with a reason, and a readable one whose files are then absent is
+    /// `Ok` — an absence found *through* the tree, which is the repo's own answer.
+    #[test]
+    fn a_repo_that_cannot_be_read_is_told_apart_from_one_with_nothing_to_say() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let checkout = tempdir();
+        let mut repo = Repo {
+            read_prs: false,
+            id: "proj".into(),
+            source: checkout.to_string_lossy().to_string(),
+            source_tree: checkout.join("nowhere").to_string_lossy().to_string(),
+            store: home.join("store").to_string_lossy().to_string(),
+            agent: "claude".into(),
+            plane_project: String::new(),
+            sync_connection: String::new(),
+            review_queue: true,
+            sync_gateway_url: String::new(),
+        };
+
+        // No mirror, and none can be made: could-not-read, with the reason carried out.
+        let why = match Tree::open_telling(&repo) {
+            Err(why) => why,
+            Ok(_) => panic!("a repo with nothing to mirror from was reported as readable"),
+        };
+        assert!(!why.is_empty(), "could-not-read must say why");
+        assert!(Tree::open(&repo).is_none(), "the convenience form stays absence-shaped");
+
+        // The same repo, now readable: `Ok`, and a file it does not have is an absence found
+        // through the tree — the repo's own answer, not a failure to look.
+        origin_repo(&checkout);
+        repo.source_tree = checkout.to_string_lossy().to_string();
+        let tree = Tree::open_telling(&repo).expect("a real checkout must open");
+        assert!(tree.read("tracked.txt").is_some());
+        assert!(tree.read("no-such-file").is_none());
 
         std::env::remove_var("SKEIN_NO_GH_SECRET");
         std::env::remove_var("SKEIN_HOME");

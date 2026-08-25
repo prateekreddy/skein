@@ -77,6 +77,22 @@ pub struct Status {
     pub written: String,
 }
 
+/// What the notes pane is shown: every module with its note state — or the reason the repo could
+/// not be read, which is **not** an empty module list.
+///
+/// The two used to be one payload (`[]`), and the pane drew "skein could not find modules in this
+/// repo" over a repo it never looked at (SKEIN-117). The distinction is carried in the type so no
+/// renderer can lose it: `unread_because` empty means `modules` is the repo's own answer;
+/// non-empty means nothing here was learned and the pane must say so, verbatim.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModulesPane {
+    pub modules: Vec<Status>,
+    /// Why the repo could not be read. Empty when it was — and only then may `modules` be read as
+    /// "this is what the repo has".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub unread_because: String,
+}
+
 /// Directories never worth describing: they are not this repo's work.
 const SKIP_DIRS: [&str; 12] = [
     "node_modules",
@@ -101,10 +117,23 @@ const SKIP_DIRS: [&str; 12] = [
 const MODULE_BYTES: usize = 120_000;
 
 /// The modules of a repo: CODEOWNERS directories when it has them, else top-level directories.
+///
+/// Flattens "the repo could not be read" into an empty list — safe only where absence already
+/// means do-less ([`touched`] matches nothing, [`crate::shape::of_diff`] groups nothing). Anything
+/// that *renders* the answer reads [`modules_telling`] instead: "this repo has no modules" and
+/// "skein could not look" are different sentences, and drawing the second as the first is exactly
+/// SKEIN-117.
 pub fn modules(repo: &Repo) -> Vec<Module> {
-    let Some(tree) = crate::repos::Tree::open(repo) else {
-        return Vec::new();
-    };
+    modules_telling(repo).unwrap_or_default()
+}
+
+/// The modules of a repo, or the reason the repo could not be read to list them.
+///
+/// The register is [`crate::repos::Tree::open_telling`]'s (and [`crate::health::Level`]'s behind
+/// it): `Ok` — even `Ok` of an empty list — is the repo's own answer, and `Err` means nothing was
+/// learned, so the caller must say "I could not look" rather than "nothing here".
+pub fn modules_telling(repo: &Repo) -> Result<Vec<Module>, String> {
+    let tree = crate::repos::Tree::open_telling(repo)?;
     let mut out: Vec<Module> = Vec::new();
     if let Some(co) = codeowners::load(|p| tree.read(p)) {
         for rule in &co.rules {
@@ -139,7 +168,7 @@ pub fn modules(repo: &Repo) -> Vec<Module> {
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.truncate(40);
-    out
+    Ok(out)
 }
 
 fn top_level_dirs(tree: &crate::repos::Tree) -> Vec<String> {
@@ -199,9 +228,19 @@ pub fn is_fresh(repo: &Repo, doc: &Doc) -> bool {
     !now.is_empty() && !doc.sha.is_empty() && now == doc.sha
 }
 
-/// Every module and whether skein has a current note for it.
-pub fn status(repo: &Repo) -> Vec<Status> {
-    modules(repo)
+/// Every module and whether skein has a current note for it — or that the repo could not be read,
+/// which the pane must render as its own state rather than as an empty repo.
+pub fn status(repo: &Repo) -> ModulesPane {
+    let mods = match modules_telling(repo) {
+        Ok(mods) => mods,
+        Err(why) => {
+            return ModulesPane {
+                modules: Vec::new(),
+                unread_because: why,
+            }
+        }
+    };
+    let modules = mods
         .into_iter()
         .map(|m| {
             let doc = stored(&repo.id, &m.path);
@@ -217,7 +256,11 @@ pub fn status(repo: &Repo) -> Vec<Status> {
                 written: doc.map(|d| d.written).unwrap_or_default(),
             }
         })
-        .collect()
+        .collect();
+    ModulesPane {
+        modules,
+        unread_because: String::new(),
+    }
 }
 
 // ───────────────────────────── writing one ─────────────────────────────
@@ -289,12 +332,14 @@ pub fn write(repo: &Repo, module: &str) -> Result<Doc, String> {
                 .into(),
         );
     }
-    if !modules(repo).iter().any(|m| m.path == module) {
+    // The telling form, so a repo that could not be read is refused as that — not as the module
+    // somehow not being one of the repo's, which is a claim about a repo nobody looked at.
+    let known = modules_telling(repo).map_err(|why| format!("could not read {}: {why}", repo.id))?;
+    if !known.iter().any(|m| m.path == module) {
         return Err(format!("{module:?} is not one of this repo's modules"));
     }
-    let Some(tree) = crate::repos::Tree::open(repo) else {
-        return Err(format!("{} has no mirror to read", repo.id));
-    };
+    let tree = crate::repos::Tree::open_telling(repo)
+        .map_err(|why| format!("could not read {}: {why}", repo.id))?;
     let (body, cut) = read_module(&tree, module);
     if body.trim().is_empty() {
         return Err(format!("nothing readable under {module:?}"));
@@ -562,7 +607,42 @@ mod tests {
         let f = fixture();
         let repo = &f.repo;
         let st = status(repo);
-        assert!(st.iter().all(|s| s.state == "absent"), "{st:?}");
+        assert!(st.unread_because.is_empty(), "{st:?}");
+        assert!(st.modules.iter().all(|s| s.state == "absent"), "{st:?}");
+    }
+
+    /// A repo skein could not read is told apart from a repo with nothing to say (SKEIN-117).
+    ///
+    /// `modules` returned an empty list for both, and the pane drew "no modules in this repo" over
+    /// a repo nobody looked at. The pane payload now carries which one happened: an unreadable
+    /// repo answers `unread_because` with the reason and NO module list to mistake for the repo's
+    /// own; a readable one answers its modules and no reason.
+    #[test]
+    fn a_repo_that_cannot_be_read_is_not_a_repo_with_no_modules() {
+        let f = fixture();
+        let readable = status(&f.repo);
+        assert!(readable.unread_because.is_empty());
+        assert!(!readable.modules.is_empty());
+
+        // Same home, a repo whose mirror does not exist and cannot be made.
+        let mut unreadable = f.repo.clone();
+        unreadable.id = "gone".into();
+        unreadable.source = "/nowhere/for/this/test".into();
+        unreadable.source_tree = "/nowhere/for/this/test".into();
+        let why = modules_telling(&unreadable)
+            .expect_err("listing modules of an unreadable repo must say it could not look");
+        assert!(!why.is_empty());
+        let pane = status(&unreadable);
+        assert!(
+            !pane.unread_because.is_empty(),
+            "the pane payload lost the reason: {pane:?}"
+        );
+        assert!(
+            pane.modules.is_empty(),
+            "an unreadable repo must offer no module list to mistake for its own: {pane:?}"
+        );
+        // The flattening convenience stays absence-shaped for the do-less callers.
+        assert!(modules(&unreadable).is_empty());
     }
 
     #[test]
