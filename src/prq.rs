@@ -958,6 +958,49 @@ const SEARCH_PAGE: usize = 100;
 /// names the alias, and that mapping is what keeps each failure its own blind spot — four good
 /// answers are still four good answers, exactly as they were when each search was its own request.
 fn search_prs_all(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, String>>, String> {
+    match one_request(slug, searches) {
+        Ok(found) => Ok(found),
+        // **Too heavy is not the same as unavailable** (SKEIN-266). Batching took five requests per
+        // repo down to one — and made that one the most expensive thing skein sends: five `search`
+        // connections of up to a hundred nodes each, every node carrying the whole PR fragment.
+        // GitHub sheds those at the edge, twice on the owner's fleet within an hour: once as a 200
+        // with no body, once as nginx's own `502 Bad Gateway`. `github` retries such a shrug once
+        // already; when the retry fails too, the batch itself is the thing to give up on, not the
+        // refresh.
+        //
+        // So halve it and ask again. The quota win survives where it was won — one request whenever
+        // one request works — and where it does not, skein spends two, or four, rather than showing
+        // an empty queue over a repo full of pull requests. A single search that still fails is
+        // reported as itself, which is the per-alias blind spot the batching was careful to keep.
+        // Only when GitHub refused to TAKE it. An outage, a rate-limit hold or a 500 that carries
+        // a real message is GitHub answering, and asking those again in halves would spend more
+        // requests to be told the same thing twice — and would turn SKEIN-258's one honest
+        // sentence back into five. `github::edge_refused` owns that distinction, beside the words
+        // it is reading.
+        Err(why) if searches.len() > 1 && crate::github::edge_refused(&why) => {
+            let (left, right) = searches.split_at(searches.len() / 2);
+            let mut out = search_prs_all(slug, left)
+                .unwrap_or_else(|e| left.iter().map(|_| Err(e.clone())).collect());
+            out.extend(
+                search_prs_all(slug, right)
+                    .unwrap_or_else(|e| right.iter().map(|_| Err(e.clone())).collect()),
+            );
+            // Told once, on the answer rather than in the log: a refresh that had to split is a
+            // refresh that cost more than it should, and a fleet where that is the normal case
+            // wants to know before it meets the rate limit again.
+            eprintln!(
+                "skein: GitHub would not take {slug}'s {} searches in one request ({why}) — asked                  in two",
+                searches.len()
+            );
+            Ok(out)
+        }
+        Err(why) => Err(why),
+    }
+}
+
+/// One batched request, as it has always been — the recursion above is what turns a refusal of the
+/// whole batch into halves.
+fn one_request(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, String>>, String> {
     let token = host_token()?;
     let mut variables = serde_json::Map::new();
     variables.insert("n".into(), serde_json::json!(SEARCH_PAGE));

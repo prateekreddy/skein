@@ -71,6 +71,20 @@ fn stub_github(dir: &Path, login: &str, teams_ok: bool) -> String {
                 }
             } else if path.starts_with("/user") {
                 (200, format!(r#"{{"login":"{login}"}}"#))
+            } else if path.starts_with("/graphql")
+                && root.join("too-heavy").exists()
+                && String::from_utf8_lossy(&body).contains("\"q1\"")
+            {
+                // GitHub's EDGE shedding a request its backend did not finish: nginx's own HTML,
+                // which the API never produces — reported live as `502 Bad Gateway` on the owner's
+                // five-alias refresh (SKEIN-266). Refused only while the request carries more than
+                // one search, so the split retry lands on the branch below and the test can tell
+                // "GitHub is down" from "GitHub would not take it all at once".
+                (
+                    502,
+                    "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+                        .to_string(),
+                )
             } else if path.starts_with("/graphql") && root.join("dead-request").exists() {
                 // The whole request dying, rather than one alias inside it — a 5xx, and what the
                 // network and the rate-limit hold both look like from here. Every membership
@@ -466,6 +480,42 @@ fn the_archive_is_pruned_to_prs_that_are_still_open() {
         skein::prq::archived("acme"),
         vec![1],
         "the still-open one survives, the closed one is dropped"
+    );
+}
+
+/// GitHub refusing the batch is not GitHub being unavailable (SKEIN-266).
+///
+/// Batching took five requests per repo down to one — and made that one the most expensive thing
+/// skein sends, so GitHub's edge sometimes sheds it: reported live on the owner's fleet as `502 Bad
+/// Gateway` in nginx's own HTML, an hour after the same request came back as a 200 with no body.
+/// The queue then showed nothing at all for the one repo they watch. Splitting is what turns "too
+/// heavy" back into an answer, and it costs the extra requests only when it has to.
+#[test]
+fn a_batch_github_will_not_take_is_asked_in_halves_rather_than_given_up_on() {
+    let (_env, dir) = setup("me", false);
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", pr_json(1, "open", "")),
+    );
+    put_search(&dir, "author:me", &format!("[{}]", pr_json(2, "open", "")));
+    fs::write(dir.join("too-heavy"), "").unwrap();
+
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    assert_eq!(
+        q.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+        vec![2, 1],
+        "the refresh was given up on instead of being asked in halves: {:?}",
+        q.blind_spots
+    );
+    // The standing one — this fixture's token cannot list teams — is expected and stays. What must
+    // NOT be there is a word about the refresh having failed: it did not, it was asked twice.
+    assert!(
+        !q.blind_spots.iter().any(|b| b.contains("did not answer")
+            || b.contains("membership searches are missing")
+            || b.contains("query failed")),
+        "a refresh that succeeded by splitting reported itself as missing: {:?}",
+        q.blind_spots
     );
 }
 

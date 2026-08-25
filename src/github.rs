@@ -513,11 +513,10 @@ fn graphql_answer(
     // connections of up to a hundred nodes each. Reported live from a cold first load, where every
     // repo sends one at once, and gone by the next refresh.
     //
-    // One retry, not a loop: a second empty answer is a real condition and the caller must see it.
-    // Only for an EMPTY 200 — a body that says something, including an `errors` array or a 5xx, is
-    // an answer and is handled below rather than papered over. Nothing is spent on the retry that
-    // was not already spent: an empty answer costs the same quota point whether or not it is read.
-    let (status, text) = match status == 200 && text.trim().is_empty() {
+    // One retry, not a loop: a second failure of the same shape is a real condition and the caller
+    // must see it. Nothing extra is spent — an answer nobody could read cost the same quota point
+    // whether or not it is asked for again.
+    let (status, text) = match edge_shrug(status, &text) {
         true => ask()?,
         false => (status, text),
     };
@@ -540,6 +539,49 @@ fn graphql_answer(
         }
     }
     Ok((status, text, value))
+}
+
+/// Did GitHub's EDGE shrug, rather than its API answering? (SKEIN-258, SKEIN-266)
+///
+/// The API answers JSON — including for its own failures, which arrive as a 200 carrying an
+/// `errors` array. Two shapes are not that, and both were reported live within an hour of each
+/// other on the same fleet:
+///
+/// * a **200 with no bytes at all** — the backend gave up and the edge sent the envelope anyway;
+/// * a **5xx whose body is not JSON** — `502 Bad Gateway`, nginx's own HTML, which the GitHub API
+///   never produces.
+///
+/// Both mean "ask again", and neither is an answer to parse. A 5xx that DOES carry JSON is left
+/// alone: that is the API speaking, and papering over what it said is how a real refusal turns into
+/// a silent empty queue.
+fn edge_shrug(status: u16, text: &str) -> bool {
+    let body = text.trim();
+    if status == 200 {
+        return body.is_empty();
+    }
+    (500..=504).contains(&status) && serde_json::from_str::<serde_json::Value>(body).is_err()
+}
+
+/// Was this failure GitHub refusing to TAKE the request, rather than answering it? (SKEIN-266)
+///
+/// The caller that batches — `prq::search_prs_all`, five membership searches in one request —
+/// needs this to tell "GitHub is unavailable" from "GitHub would not take it all at once", because
+/// the answers are opposite: the first must be reported once and believed, the second must be
+/// asked again in halves. Splitting an outage would turn one honest sentence back into five.
+///
+/// Recognised from the sentences [`complaint`] itself writes, and it lives beside them for that
+/// reason: one module owns both the wording and what the wording means, so the two cannot drift
+/// into a caller sniffing strings it does not own. The test below is what fails if they do.
+pub fn edge_refused(why: &str) -> bool {
+    // Rate limiting is neither: skein stops calling entirely, and splitting would only spend more
+    // of a budget that has already run out.
+    if why.contains("rate limiting skein") {
+        return false;
+    }
+    why.contains("with an empty body")
+        || ["502", "503", "504"]
+            .iter()
+            .any(|code| why.contains(&format!("GitHub answered {code}")))
 }
 
 /// GraphQL error entries' messages, joined — empty when none of them carry one.
@@ -684,6 +726,30 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// What `complaint` writes and what `edge_refused` reads are one decision, kept in one module.
+    #[test]
+    fn a_refusal_to_take_the_request_is_told_apart_from_a_refusal_to_answer_it() {
+        // The two shapes the edge produces, in the words this module gives them.
+        assert!(edge_refused(&complaint(200, "")));
+        assert!(edge_refused(&complaint(
+            502,
+            "<html><head><title>502 Bad Gateway</title></head></html>"
+        )));
+        assert!(edge_refused(&complaint(503, "<html>unavailable</html>")));
+
+        // …and everything that is GitHub actually answering. Splitting any of these would spend
+        // more requests to be told the same thing several times.
+        assert!(!edge_refused(&complaint(
+            500,
+            r#"{"message":"Server Error"}"#
+        )));
+        assert!(!edge_refused(&complaint(404, r#"{"message":"Not Found"}"#)));
+        assert!(!edge_refused(&rate_limit_sentence(
+            "API rate limit exceeded"
+        )));
+        assert!(!edge_refused("the `author:me` query failed"));
     }
 
     /// A GitHub whose FIRST answer is an empty 200 and whose second is real — the shape a cold
