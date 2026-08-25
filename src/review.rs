@@ -2169,12 +2169,18 @@ pub fn post_critique(
     overall: &str,
     kept: &[Draft],
 ) -> Result<String, String> {
-    let queue = crate::prq::queue(repo, false)?;
-    let pr = queue
-        .prs
-        .iter()
-        .find(|p| p.number == number)
-        .ok_or("that PR is not in your queue")?;
+    // **A press posts, or it fails for a reason about posting** (SKEIN-272). This used to open with
+    // `prq::queue(repo, false)?` — a full refresh past its sixty-second cache, viewer lookup and
+    // five membership searches included — for two facts a refresh is not the way to learn. The `?`
+    // on that line converted "skein could not re-read your queue" into "your review was not
+    // posted", and said so in the refresh's words: the owner pressed post and was told five
+    // membership searches were missing, about a repository they had not asked after.
+    //
+    // It also asked whether the pull request was IN the queue, and refused when it was not. Open,
+    // drafted and absent from the membership searches is exactly a PR you authored and were never
+    // asked to review, so that refusal could turn down a PR the pane had just rendered a draft for.
+    // It existed only to reach the head sha below; the two go together.
+    let slug = crate::prq::slug_for_write(repo)?;
     let (body, anchored) = assemble_post(overall, kept);
     // A moved head is no longer refused (it used to be — a dynamically moving PR made "draft it
     // again" a treadmill, SKEIN-215): each kept comment carries its line's text, so the submit
@@ -2182,13 +2188,16 @@ pub fn post_critique(
     // Lines that survive post at their new numbers; the displaced fold into the body naming the
     // drafted commit, and the record says what was actually reviewed either way.
     // The live head, read now — what `commit_id` must name, and what `head_sha` below is compared
-    // against to decide whether anything needs re-anchoring. It used to be the queue's sha, which
-    // is the one thing it must not be: a draft read from that same cached queue carries the same
-    // sha, so a branch that moved inside the cache window compared equal to itself and posted
-    // vetted comments onto dead coordinates (SKEIN-230).
-    let head = crate::prq::head_to_post_against(&queue.slug, number, &pr.head_sha);
+    // against to decide whether anything needs re-anchoring. The fallback must not be `head_sha`
+    // itself: a sha compared against itself is never "moved", nothing re-anchors, and vetted
+    // comments post at line numbers computed against a diff that no longer exists (SKEIN-230).
+    // `remembered_head` is what this machine already holds — no network call, so the fallback
+    // cannot fail the post — and `None` when it holds nothing, rather than an invented sha.
+    let seen_at = crate::prq::remembered_head(&repo.id, number);
+    let head =
+        crate::prq::head_to_post_against(&slug, number, seen_at.as_deref().unwrap_or(head_sha));
     let said = crate::prq::submit_review_with_comments(
-        &queue.slug,
+        &slug,
         number,
         &head,
         crate::prq::Verdict::Comment,
@@ -4826,6 +4835,12 @@ COMMENT: this one points at a line the diff does not show.
     /// it, so the live head read fails here, and "pinned to the live head" below is what catches a
     /// failed read being allowed to post an empty `commit_id` instead of the remembered sha. The
     /// live read succeeding is the sibling test, which stubs the two media types apart.
+    ///
+    /// The remembered queue seeded below is where that fallback now comes from. Since SKEIN-272 a
+    /// post reads no queue, so the sha it falls back to is what this machine already holds rather
+    /// than one a refresh fetched on the way past — and `queue_within` deliberately remembers
+    /// nothing under `cfg!(test)`, so a test that wants the state a real post runs in has to say
+    /// so. It is not scaffolding: a draft exists only because the pane rendered this queue.
     #[test]
     fn posting_a_moved_head_re_anchors_by_line_text_instead_of_refusing() {
         let _g = crate::testutil::env_lock();
@@ -4887,6 +4902,26 @@ COMMENT: this one points at a line the diff does not show.
             "source_tree": "", "store": "",
         }))
         .unwrap();
+        // What the pane left behind when it rendered this repo — the head skein last SAW, and the
+        // only second opinion a post has when GitHub will not say what the live head is.
+        crate::prq::remember_for_test(&crate::prq::Queue {
+            repo_id: "crit".into(),
+            slug: "acme/thing".into(),
+            trunk: "main".into(),
+            viewer: "me".into(),
+            ai: false,
+            prs: vec![serde_json::from_value(serde_json::json!({
+                "number": 11, "title": "t", "author": "someone", "url": "u",
+                "head_ref": "feat", "head_sha": "sha11", "base_ref": "main",
+                "draft": false, "updated_at": "", "committed_at": "",
+                "checks": "passing", "my_review": "none", "review_is_current": false,
+                "reasons": [], "lane": "needs-you", "box_name": "b",
+            }))
+            .unwrap()],
+            blind_spots: Vec::new(),
+            as_of: String::new(),
+            fresh: false,
+        });
         let kept = vec![
             Draft {
                 path: "src/a.rs".into(),
@@ -5144,5 +5179,146 @@ mod drafted_body_tests {
         );
         // No marker: the whole answer is the comment — the old contract, still honoured.
         assert_eq!(drafted_body("  just the comment.  "), "just the comment.");
+    }
+
+    /// **A read that fails must not fail a write** (SKEIN-272). Reported live: the owner pressed
+    /// "post comments" and got `queue_within`'s sentence — five membership searches missing, about
+    /// a repository they had not asked after — and nothing was posted. They posted it by hand.
+    ///
+    /// This GitHub refuses everything a queue refresh asks for: the viewer lookup, the membership
+    /// searches, the repo lookup. Only the write and the live-head read answer. Before SKEIN-272
+    /// the `?` on `prq::queue(repo, false)` meant nothing reached the wire at all.
+    #[test]
+    fn a_post_lands_even_when_the_queue_cannot_be_read() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
+
+        let posted = home.join("posted.json");
+        let posted_at = posted.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let (head, body) = read_request(&stream);
+                let (code, answer) = if head.starts_with("POST") && head.contains("/reviews") {
+                    std::fs::write(&posted_at, &body).unwrap();
+                    (200, "{}".to_string())
+                } else if head.starts_with("GET") && head.contains("/pulls/11 ") {
+                    (200, r#"{"head":{"sha":"sha11"}}"#.to_string())
+                } else {
+                    // Everything a refresh would ask for: dead, the way the edge was that day.
+                    (
+                        502,
+                        "<html><head><title>502 Bad Gateway</title></head></html>".to_string(),
+                    )
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "crit", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+        let kept = vec![Draft {
+            path: "src/a.rs".into(),
+            line: 2,
+            anchored: true,
+            text: "on the line".into(),
+            line_text: "    let x = 1;".into(),
+        }];
+
+        let said = post_critique(&repo, 11, "sha11", "note", &kept)
+            .expect("a queue that will not load must not swallow a vetted review");
+        assert!(said.contains("posted the review"), "{said}");
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
+        assert_eq!(sent["commit_id"], "sha11", "still pinned to the live head");
+        assert_eq!(sent["body"], "note");
+        assert_eq!(
+            sent["comments"].as_array().map(Vec::len),
+            Some(1),
+            "the vetted comment must ride along, not be dropped with the queue: {sent}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
+    }
+
+    /// And when a post DOES fail, the sentence is about posting. The one the owner was shown named
+    /// a repository, five membership searches and a refresh — none of which they had asked for, and
+    /// none of which was what went wrong from where they stood (SKEIN-272).
+    #[test]
+    fn a_post_that_fails_says_something_about_posting() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::Write as _;
+                let (head, _body) = read_request(&stream);
+                let (code, answer) = match head.starts_with("POST") && head.contains("/reviews") {
+                    true => (
+                        403,
+                        r#"{"message":"Resource not accessible by integration"}"#,
+                    ),
+                    false => (200, r#"{"head":{"sha":"sha11"}}"#),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "crit", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+        let why = post_critique(&repo, 11, "sha11", "note", &[])
+            .expect_err("GitHub refused the post, so the post failed");
+
+        assert!(
+            why.contains("Resource not accessible"),
+            "the reason is GitHub's own words about the write: {why}"
+        );
+        assert!(
+            !why.contains("membership") && !why.contains("refresh"),
+            "the reader is being told about a queue refresh they did not ask for: {why}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_renames();
     }
 }

@@ -1688,27 +1688,45 @@ async fn api_review_act(
         return Json(serde_json::json!({ "ok": false, "error": "no such repo" }));
     };
     let out = tokio::task::spawn_blocking(move || {
-        let queue = skein::prq::queue(&repo, false)?;
-        let pr = queue
-            .prs
-            .iter()
-            .find(|p| p.number == number)
-            .ok_or("that PR is not in your queue")?;
+        // The same rule as `review::post_critique` (SKEIN-272), and deliberately the same two
+        // functions: a write derives what it addresses without a queue refresh, so a GitHub READ
+        // failing can never make a verdict impossible and then report it in the refresh's words —
+        // five membership searches, about a repository nobody asked after. This route used to open
+        // with `prq::queue(&repo, false)?` for `queue.slug` and `pr.head_sha`, which put every
+        // verdict the cockpit can post behind a full refresh.
+        let slug = skein::prq::slug_for_write(&repo)?;
         let verdict = match req.kind.as_str() {
             "approve" => Some(skein::prq::Verdict::Approve),
             "request-changes" => Some(skein::prq::Verdict::RequestChanges),
             "comment" => Some(skein::prq::Verdict::Comment),
             _ => None,
         };
+        // `ask` and `draft` need the whole `Pr`, and neither writes to GitHub. They read the queue
+        // in their own arms, where a refresh that fails is honestly about what was asked for — and
+        // where "that PR is not in your queue" is a true and useful thing to say, which it was not
+        // in front of a verdict on a PR you authored and were never asked to review.
+        let queued = || -> Result<skein::prq::Pr, String> {
+            skein::prq::queue(&repo, false)?
+                .prs
+                .into_iter()
+                .find(|p| p.number == number)
+                .ok_or_else(|| "that PR is not in your queue".to_string())
+        };
         let text = match (verdict, req.kind.as_str()) {
             (Some(v), _) if !req.comments.is_empty() => {
-                // The queue is cached for up to a minute, so its sha may already be history —
-                // and `prq::head_to_post_against` is the one place that says what to do about it,
-                // shared with `review::post_critique` so the two write paths cannot answer it
-                // differently again (SKEIN-230).
-                let head = skein::prq::head_to_post_against(&queue.slug, number, &pr.head_sha);
+                // What `commit_id` must name. `head_to_post_against` reads the LIVE head and is
+                // the one place that says what to do when it cannot — shared with
+                // `review::post_critique` so the two write paths cannot answer it differently
+                // again (SKEIN-230), and its fallback is what this machine already remembers
+                // rather than the sha the draft was read at, which would compare equal to itself.
+                let seen_at = skein::prq::remembered_head(&id, number);
+                let head = skein::prq::head_to_post_against(
+                    &slug,
+                    number,
+                    seen_at.as_deref().unwrap_or(&req.drafted_at),
+                );
                 skein::prq::submit_review_with_comments(
-                    &queue.slug,
+                    &slug,
                     number,
                     &head,
                     v,
@@ -1717,7 +1735,7 @@ async fn api_review_act(
                     &req.drafted_at,
                 )?
             }
-            (Some(v), _) => skein::prq::submit_review(&queue.slug, number, v, &req.body)?,
+            (Some(v), _) => skein::prq::submit_review(&slug, number, v, &req.body)?,
             (None, _) if !req.comments.is_empty() => {
                 return Err(format!(
                     "line comments post with a verdict — approve, request-changes or comment — \
@@ -1725,9 +1743,9 @@ async fn api_review_act(
                     req.kind
                 ))
             }
-            (None, "merge") => skein::prq::merge(&queue.slug, number)?,
-            (None, "ask") => skein::review::ask(&repo, &queue.slug, pr, &req.body)?,
-            (None, "draft") => skein::review::draft_comment(&repo, &queue.slug, pr, &req.body)?,
+            (None, "merge") => skein::prq::merge(&slug, number)?,
+            (None, "ask") => skein::review::ask(&repo, &slug, &queued()?, &req.body)?,
+            (None, "draft") => skein::review::draft_comment(&repo, &slug, &queued()?, &req.body)?,
             (None, other) => return Err(format!("unknown action: {other}")),
         };
         // Anything that touched GitHub changed the lane this PR belongs in, and the queue is cached

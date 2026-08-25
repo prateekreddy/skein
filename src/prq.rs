@@ -446,6 +446,36 @@ pub fn repo_slug(repo: &Repo) -> Option<String> {
     crate::gitgate::repo_slug(repo)
 }
 
+/// The repository a WRITE should address, derived without refreshing the queue. (SKEIN-272)
+///
+/// The post path used to take its slug from `queue(repo, false)`, which is a full refresh past its
+/// sixty-second cache: the viewer lookup, the rename check, and the five membership searches in one
+/// request. So pressing "post comments" more than a minute after the last refresh inherited every
+/// way a GitHub *read* can fail, and the `?` on that line turned "skein could not re-read your
+/// queue" into "your review was not posted" — reported in the refresh's own words, which name a
+/// repository and five membership searches nobody asked about. Reported live: the owner posted by
+/// hand instead.
+///
+/// So the slug is derived from what a write actually needs. The remote is read from the checkout,
+/// which is local and cannot fail over the network. The rename is followed because a POST to a
+/// stale name is not redirected the way a GET is — but [`renamed_to`] is memoised per process and
+/// answers `None` when GitHub cannot be asked, so a read that fails costs the stored name and never
+/// the post. The only error left is the one that is genuinely about posting: there is nowhere to
+/// post to.
+pub fn slug_for_write(repo: &Repo) -> Result<String, String> {
+    let stored = repo_slug(repo)
+        .ok_or("this repo has no GitHub remote, so there is no pull request to post to")?;
+    match renamed_to(&stored) {
+        Some(now) => {
+            // Best-effort, exactly as in [`queue_within`]: a rename skein cannot write down is one
+            // it looks up again next time, which is not a reason to lose a review.
+            let _ = crate::repos::follow_rename(&repo.id, &stored, &now);
+            Ok(now)
+        }
+        None => Ok(stored),
+    }
+}
+
 // ───────────────────────────── viewer identity ─────────────────────────────
 
 /// Your GitHub login and the teams you belong to, as `gh` reports them.
@@ -732,12 +762,24 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         Ok(outcomes) => outcomes,
         Err(e) => {
             answered = false;
-            blind_spots.push(format!(
-                "GitHub did not answer for {slug}, so all {n} of this refresh's membership \
-                 searches are missing — they travel in one request, so this is one failure and \
-                 not {n}: {e}",
-                n = searches.len()
-            ));
+            let n = searches.len();
+            blind_spots.push(match crate::github::connection_died(&e) {
+                // Said as the transport failure it is (SKEIN-271). "GitHub did not answer" sends
+                // whoever reads it to look at GitHub — at a token, a rate limit, a refusal — and a
+                // connection that died is not GitHub answering anything. The two ask different
+                // things of a reader: this one says the request never completed, so ask again.
+                // Skein already has, once, by the time this line is written.
+                true => format!(
+                    "{e} — and again when skein asked a second time, so all {n} of this \
+                     refresh's membership searches for {slug} are missing; they travel in one \
+                     request, so this is one failure and not {n}"
+                ),
+                false => format!(
+                    "GitHub did not answer for {slug}, so all {n} of this refresh's membership \
+                     searches are missing — they travel in one request, so this is one failure \
+                     and not {n}: {e}"
+                ),
+            });
             Vec::new()
         }
     };
@@ -856,6 +898,17 @@ fn remember(q: &Queue) {
     }
 }
 
+/// Test-only: put a queue where [`remembered`] reads it, for tests elsewhere in the crate.
+///
+/// [`queue_within`] deliberately neither caches nor remembers under `cfg!(test)`, so a test's world
+/// has no remembered queue in it unless it says so — and "no remembered queue" is a state a real
+/// post is almost never in, because the pane must have rendered this repo for a draft to exist at
+/// all. A write path's test that wants the state it will actually run in seeds it here.
+#[cfg(test)]
+pub(crate) fn remember_for_test(q: &Queue) {
+    remember(q);
+}
+
 /// The last queue read for this repo, however old — marked as not fresh.
 ///
 /// **Whatever exists, immediately.** Opening the tab used to block on three GraphQL searches per
@@ -891,6 +944,32 @@ fn unexpired_within(repo_id: &str, max_age: Duration) -> Option<Queue> {
     let cache = QUEUE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let (at, q) = cache.as_ref()?.get(repo_id)?;
     (at.elapsed() < max_age).then(|| q.clone())
+}
+
+/// The head this repo's queue last SAW for one pull request, from what is already on this machine.
+/// (SKEIN-272)
+///
+/// **Reads nothing over the network, and never refreshes.** That is the point: it is the fallback
+/// [`head_to_post_against`] uses when GitHub will not say what the live head is, and a fallback
+/// that could itself fail over the network would put the read failure back on the write path this
+/// exists to take it off.
+///
+/// Why a write wants it at all is SKEIN-230. The comparison that decides whether anything needs
+/// re-anchoring is "the sha the draft was read at" against "the sha being posted against", and
+/// handing the drafted sha in as its own fallback makes those two equal by construction: nothing
+/// re-anchors, and vetted comments post at line numbers computed against a diff that no longer
+/// exists. A remembered sha is independent evidence — possibly stale, but never the same value by
+/// accident.
+///
+/// `None` when nothing about this pull request is remembered, which is honest: the caller then has
+/// no second opinion and must say so rather than invent one.
+pub fn remembered_head(repo_id: &str, number: u64) -> Option<String> {
+    let known = unexpired(repo_id).or_else(|| remembered(repo_id))?;
+    known
+        .prs
+        .iter()
+        .find(|p| p.number == number)
+        .map(|p| p.head_sha.clone())
 }
 
 /// Every field the queue's parser needs from one pull request — the node body every search alias
@@ -1959,12 +2038,48 @@ pub fn submit_review_with_comments(
             })
             .collect();
     }
-    crate::github::send_json(
-        "POST",
-        &format!("/repos/{slug}/pulls/{number}/reviews"),
-        &host_token()?,
-        &payload,
-    )?;
+    let token = host_token()?;
+    let path = format!("/repos/{slug}/pulls/{number}/reviews");
+    // **A dead connection here is ambiguous, and that is the whole difference from the read side**
+    // (SKEIN-271). Posting a review is not idempotent: the peer cancels the stream after the
+    // headers, so GitHub may well have created the review before the answer was lost, and asking
+    // again on that evidence posts a second review onto somebody's pull request. Nothing is ever
+    // re-sent until [`review_already_landed`] has been asked what actually happened — and when it
+    // cannot answer, skein stops and says so rather than guessing in the direction that duplicates.
+    let mut landed_first_time = true;
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match crate::github::send_json("POST", &path, &token, &payload) {
+            Ok(_) => break,
+            Err(why) if crate::github::connection_died(&why) => {
+                landed_first_time = false;
+                match review_already_landed(slug, number, head_sha, &full, &token) {
+                    // It was created before the stream died. The press succeeded; saying otherwise
+                    // would send the person to post it a second time by hand.
+                    Ok(true) => break,
+                    // GitHub has no such review, so nothing is duplicated by asking again.
+                    Ok(false) if tries < 2 => continue,
+                    Ok(false) => {
+                        return Err(format!(
+                            "the connection to GitHub died twice while posting this review, so it \
+                             was not posted — skein checked both times and nothing landed, so \
+                             nothing is duplicated and it is safe to press again ({why})"
+                        ))
+                    }
+                    Err(look) => {
+                        return Err(format!(
+                            "the connection to GitHub died while posting this review ({why}), and \
+                             skein could not then find out whether it landed ({look}) — open \
+                             {slug}#{number} and look before pressing again, because if it did \
+                             land, pressing again posts it twice"
+                        ))
+                    }
+                }
+            }
+            Err(why) => return Err(why),
+        }
+    }
     let said = match verdict {
         Verdict::Approve => "approved",
         Verdict::RequestChanges => "changes requested",
@@ -1981,7 +2096,72 @@ pub fn submit_review_with_comments(
             displaced.len()
         ));
     }
+    if !landed_first_time {
+        told.push_str(" — the connection died mid-post, and skein checked GitHub rather than posting it twice");
+    }
     Ok(told)
+}
+
+/// Is the review skein was posting when the connection died already on GitHub? (SKEIN-271)
+///
+/// The question a write has to answer before it may ask again. Three facts have to agree, and the
+/// third is the one that makes this safe in both directions:
+///
+/// * the **viewer** wrote it — this token's own login, since another reviewer's review at the same
+///   commit says nothing about ours;
+/// * the **commit** is the one this post named as `commit_id`;
+/// * the **body is byte-for-byte what was sent**. Viewer-and-commit alone is too loose: a person
+///   who approved at this head an hour ago and is now leaving comments on it would match, and
+///   declining then would silently throw away the review they had just vetted. It is also exact
+///   rather than approximate — a stream that dies mid-send truncates the JSON, which GitHub rejects
+///   as a 400 rather than storing half a review, so the body GitHub holds is either the whole of
+///   what was sent or there is no review at all.
+///
+/// **`Err` means "could not find out", never "no"** — that is why the pages are followed to the
+/// end rather than reading the first thirty. A partial listing that happens not to contain the
+/// review is indistinguishable from one that would have, and treating it as absence is precisely
+/// the double post this exists to prevent.
+fn review_already_landed(
+    slug: &str,
+    number: u64,
+    head_sha: &str,
+    body: &str,
+    token: &str,
+) -> Result<bool, String> {
+    let login = crate::github::get_json("/user", token)?
+        .get("login")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if login.is_empty() {
+        return Err("GitHub named no login for this token".into());
+    }
+    // Line endings are the one thing a round trip may normalise; everything else is compared as
+    // sent.
+    let same = |a: &str| a.replace("\r\n", "\n") == body.replace("\r\n", "\n");
+    const PER_PAGE: usize = 100;
+    // Ten pages of a hundred. A pull request with a thousand reviews on it is not a thing, and an
+    // unbounded loop on an error path is.
+    for page in 1..=10 {
+        let listed = crate::github::get_json(
+            &format!("/repos/{slug}/pulls/{number}/reviews?per_page={PER_PAGE}&page={page}"),
+            token,
+        )?;
+        let reviews = listed
+            .as_array()
+            .ok_or("GitHub's answer was not a list of reviews")?;
+        if reviews.iter().any(|r| {
+            r.pointer("/user/login").and_then(|v| v.as_str()) == Some(login.as_str())
+                && r.get("commit_id").and_then(|v| v.as_str()) == Some(head_sha)
+                && r.get("body").and_then(|v| v.as_str()).is_some_and(same)
+        }) {
+            return Ok(true);
+        }
+        if reviews.len() < PER_PAGE {
+            return Ok(false);
+        }
+    }
+    Err("this pull request has more reviews than skein will page through".into())
 }
 
 /// A pull request's diff, as a diff — the media type is the whole of what `gh pr diff` did.
@@ -3319,6 +3499,237 @@ mod tests {
         serde_json::from_str(post.splitn(3, ' ').nth(2).unwrap()).unwrap()
     }
 
+    /// The commit every SKEIN-271 test below posts against, and the review the viewer had already
+    /// left on it before any of this — the decoy that makes "a review by me at this head" the
+    /// wrong test to write.
+    const POST_HEAD: &str = "cccccccc333333333333333333333333333333333";
+    const DECOY: &str = "I approved this an hour ago";
+
+    /// A GitHub whose review POST dies MID-ANSWER, the way the owner's did (SKEIN-271).
+    ///
+    /// `creates_before_dying` is the ambiguity itself: GitHub cancels the stream after the headers,
+    /// so from skein's side "the review exists" and "the review does not exist" are the same
+    /// failure. Both halves are served from the reviews this fixture actually holds — seeded with
+    /// [`DECOY`], a review by the same viewer at the same commit — so a test reads exactly the
+    /// evidence skein reads. `lookup_dies` is the third case: the connection is gone and stays
+    /// gone, so the question cannot be answered at all.
+    ///
+    /// Returns the request record and the reviews GitHub ends up holding.
+    #[allow(clippy::type_complexity)]
+    fn dying_review_github(
+        deaths: usize,
+        creates_before_dying: bool,
+        lookup_dies: bool,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let held = std::sync::Arc::new(std::sync::Mutex::new(vec![serde_json::json!({
+            "user": { "login": "me" }, "commit_id": POST_HEAD, "body": DECOY,
+        })]));
+        let (recorder, reviews) = (seen.clone(), held.clone());
+        std::thread::spawn(move || {
+            let mut posts = 0usize;
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let mut parts = request.split_whitespace();
+                let method = parts.next().unwrap_or("").to_string();
+                let path = parts.next().unwrap_or("").to_string();
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut body).ok();
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push(format!("{method} {path} {body}"));
+                // A length promised and not delivered, then the socket goes: curl exits non-zero
+                // with no status and no body.
+                let die = |stream: &mut std::net::TcpStream| {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nhalf an ans");
+                    let _ = stream.flush();
+                };
+                let posting = method == "POST" && path.ends_with("/reviews");
+                let listing = method == "GET" && path.contains("/reviews");
+                let keep = |body: &str| {
+                    let sent: serde_json::Value = serde_json::from_str(body).unwrap();
+                    reviews.lock().unwrap().push(serde_json::json!({
+                        "user": { "login": "me" },
+                        "commit_id": sent["commit_id"],
+                        "body": sent["body"],
+                    }));
+                };
+                if posting {
+                    posts += 1;
+                    if posts <= deaths {
+                        if creates_before_dying {
+                            keep(&body);
+                        }
+                        die(&mut stream);
+                        continue;
+                    }
+                    keep(&body);
+                }
+                if listing && lookup_dies {
+                    die(&mut stream);
+                    continue;
+                }
+                let answer = match (posting, listing, path.as_str()) {
+                    (true, _, _) => "{}".to_string(),
+                    (_, true, _) => {
+                        serde_json::Value::Array(reviews.lock().unwrap().clone()).to_string()
+                    }
+                    (_, _, "/user") => r#"{"login":"me"}"#.to_string(),
+                    _ => "{}".to_string(),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen, held)
+    }
+
+    /// How many reviews actually reached GitHub, and how many times skein pressed.
+    fn posts_and_reviews(
+        seen: &std::sync::Mutex<Vec<String>>,
+        held: &std::sync::Mutex<Vec<serde_json::Value>>,
+    ) -> (usize, usize) {
+        let posts = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.starts_with("POST "))
+            .count();
+        (posts, held.lock().unwrap().len())
+    }
+
+    /// **The one SKEIN-271 exists to prevent.** The stream dies AFTER GitHub created the review, so
+    /// the failure skein sees is indistinguishable from one where nothing happened. A blind retry
+    /// — which is what the read half does, correctly, for a query — posts the owner's review onto
+    /// their pull request twice. Skein must go and look instead, find it, and stop.
+    #[test]
+    fn a_review_created_before_the_stream_died_is_found_rather_than_posted_again() {
+        let (base, seen, held) = dying_review_github(1, true, false);
+        let _env = wired(&base);
+
+        let said = submit_review_with_comments(
+            "acme/thing",
+            7,
+            POST_HEAD,
+            Verdict::Comment,
+            "looks fine",
+            &[drafted("src/lib.rs", 2, "tighten this", "fn target() {}")],
+            POST_HEAD,
+        )
+        .expect("a review that GitHub already holds is a success, not a failure to report");
+
+        let (posts, reviews) = posts_and_reviews(&seen, &held);
+        assert_eq!(
+            posts, 1,
+            "the review was posted onto the pull request twice"
+        );
+        assert_eq!(
+            reviews, 2,
+            "GitHub holds more than the decoy and the one review that was meant"
+        );
+        assert!(
+            said.contains("posted the review") && said.contains("connection died"),
+            "the answer must say it landed AND that skein had to go and check: {said}"
+        );
+    }
+
+    /// The other half of the same ambiguity: the stream died before GitHub created anything, so
+    /// there is nothing to find and the review must actually be posted. The decoy is what makes
+    /// this a real test — a review by the same viewer at the same commit is already there, and
+    /// matching on that alone would silently discard the review the person had just vetted.
+    #[test]
+    fn a_review_the_dead_stream_never_created_is_posted_on_the_second_attempt() {
+        let (base, seen, held) = dying_review_github(1, false, false);
+        let _env = wired(&base);
+
+        submit_review_with_comments(
+            "acme/thing",
+            7,
+            POST_HEAD,
+            Verdict::Comment,
+            "looks fine",
+            &[],
+            POST_HEAD,
+        )
+        .expect("nothing landed, so the review must be posted rather than declined");
+
+        let (posts, reviews) = posts_and_reviews(&seen, &held);
+        assert_eq!(posts, 2, "the retry never happened");
+        assert_eq!(reviews, 2, "the vetted review never reached GitHub");
+        assert!(
+            held.lock()
+                .unwrap()
+                .iter()
+                .any(|r| r["body"] == "looks fine"),
+            "the review that landed is not the one that was written"
+        );
+    }
+
+    /// When the ambiguity cannot be resolved, skein stops. A second press might be a duplicate and
+    /// might be the only copy, and the one thing it must not do is choose for the owner in the
+    /// direction that writes.
+    #[test]
+    fn a_post_that_cannot_be_verified_refuses_to_press_again_and_says_where_to_look() {
+        let (base, seen, held) = dying_review_github(1, true, true);
+        let _env = wired(&base);
+
+        let why = submit_review_with_comments(
+            "acme/thing",
+            7,
+            POST_HEAD,
+            Verdict::Comment,
+            "looks fine",
+            &[],
+            POST_HEAD,
+        )
+        .expect_err("an unresolvable ambiguity is not a success");
+
+        let (posts, _) = posts_and_reviews(&seen, &held);
+        assert_eq!(
+            posts, 1,
+            "skein pressed again without knowing what happened"
+        );
+        assert!(
+            why.contains("connection to GitHub died") && why.contains("acme/thing#7"),
+            "the reader is not told what happened or where to look: {why}"
+        );
+        assert!(
+            why.contains("pressing again posts it twice"),
+            "the reader is not told what the risk of pressing again is: {why}"
+        );
+    }
+
     /// SKEIN-214, the whole ask on one wire: the branch moved after drafting, and the review still
     /// lands — the comment whose line survives follows it to its NEW number, the one whose line
     /// changed folds into the body naming the commit it was read at, `commit_id` is the LIVE head,
@@ -4317,6 +4728,151 @@ mod tests {
         .unwrap()
     }
 
+    /// A GitHub that answers one canned body to every request — except on `dies_on`, where it
+    /// kills the connection mid-answer. `answer: None` kills every connection. For proving what a
+    /// code path does NOT ask for, and what it says when the one thing it does ask for dies.
+    fn recording_github(
+        answer: Option<&'static str>,
+        dies_on: Option<&'static str>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 65536];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let asked = recorder.lock().unwrap().last().cloned().unwrap_or_default();
+                let dead = dies_on.is_some_and(|p| asked.contains(p));
+                match answer.filter(|_| !dead) {
+                    None => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nhalf an ans",
+                        );
+                        let _ = stream.flush();
+                    }
+                    Some(body) => {
+                        let _ = stream.write_all(
+                            format!(
+                                "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                }
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    /// **A post must not inherit a read's failures** (SKEIN-272). The slug a write addresses used
+    /// to come out of `queue(repo, false)` — a full refresh past its sixty-second cache, viewer
+    /// lookup and five membership searches included — so a GitHub that would not answer a *read*
+    /// made a *write* impossible, and said so in the refresh's own words. Reported live: the owner
+    /// pressed "post comments" and was told five membership searches were missing.
+    ///
+    /// The remote is in the checkout. Nothing here needs GitHub to be up.
+    #[test]
+    fn the_repository_a_post_addresses_is_derived_without_a_refresh() {
+        let (base, seen) = recording_github(None, None);
+        let _env = wired(&base);
+        forget_renames();
+
+        let slug = slug_for_write(&batched_repo("acme/thing"))
+            .expect("a GitHub that will not answer must not make a post impossible");
+
+        assert_eq!(slug, "acme/thing");
+        let asked = seen.lock().unwrap().clone();
+        assert!(
+            asked.iter().all(|r| !r.contains("/graphql")),
+            "the post asked for a queue refresh: {asked:#?}"
+        );
+        assert!(
+            asked.iter().all(|r| !r.contains("/user/teams")),
+            "the post asked who the viewer's teams are: {asked:#?}"
+        );
+        forget_renames();
+    }
+
+    /// The fallback [`head_to_post_against`] uses, now that the post no longer refreshes the
+    /// queue to produce one (SKEIN-272). It is what this machine already remembers, read from
+    /// disk — and the point is what it must NOT be: the sha the draft was read at. Handing that in
+    /// as its own fallback makes "did the branch move" compare a value against itself, nothing
+    /// re-anchors, and vetted comments post at line numbers computed against a diff that no longer
+    /// exists (SKEIN-230).
+    #[test]
+    fn the_head_a_post_falls_back_to_is_the_one_this_machine_remembers() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        assert_eq!(
+            remembered_head("crit", 11),
+            None,
+            "a repo nothing is remembered about must say so rather than invent a sha"
+        );
+
+        let pr: Pr = serde_json::from_value(serde_json::json!({
+            "number": 11, "title": "t", "author": "a", "url": "u",
+            "head_ref": "f", "head_sha": "remembered111", "base_ref": "main",
+            "draft": false, "updated_at": "", "committed_at": "",
+            "checks": "passing", "my_review": "none", "review_is_current": false,
+            "reasons": [], "lane": "needs-you", "box_name": "b",
+        }))
+        .unwrap();
+        // Through the same door `review.rs`'s post tests use, so it cannot rot unnoticed.
+        remember_for_test(&Queue {
+            repo_id: "crit".into(),
+            slug: "acme/thing".into(),
+            trunk: "main".into(),
+            viewer: "me".into(),
+            ai: false,
+            prs: vec![pr],
+            blind_spots: Vec::new(),
+            as_of: String::new(),
+            fresh: false,
+        });
+
+        assert_eq!(
+            remembered_head("crit", 11).as_deref(),
+            Some("remembered111"),
+            "the post has no second opinion on where the branch was"
+        );
+        assert_eq!(
+            remembered_head("crit", 12),
+            None,
+            "a pull request nothing is remembered about must not borrow another one's sha"
+        );
+
+        // And no network was needed for any of it: SKEIN_GITHUB_API points nowhere at all.
+        std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The one GitHub fact a write does need: a renamed repository. A POST is not redirected the
+    /// way a GET is, so the canonical name is followed — memoised, and `None` when it cannot be
+    /// asked, which is what makes the test above possible.
+    #[test]
+    fn a_post_addresses_the_repository_under_the_name_it_has_now() {
+        let (base, _seen) = recording_github(Some(r#"{"full_name":"acme/renamed"}"#), None);
+        let _env = wired(&base);
+        forget_renames();
+
+        let slug = slug_for_write(&batched_repo("acme/thing")).expect("the rename resolved");
+
+        assert_eq!(
+            slug, "acme/renamed",
+            "a review would have been posted to a name the repository no longer has"
+        );
+        forget_renames();
+    }
+
     /// The recorded `/graphql` requests, whole.
     fn graphql_requests(seen: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
         seen.lock()
@@ -4513,6 +5069,68 @@ mod tests {
             std::env::remove_var(key);
         }
         forget_host_token();
+    }
+
+    /// A refresh whose CONNECTION died says so, rather than "GitHub did not answer" (SKEIN-271).
+    ///
+    /// The two ask different things of whoever reads them. "GitHub did not answer" sends them to
+    /// look at GitHub — a token, a rate limit, a refusal — and the connection dying is not GitHub
+    /// answering anything; it says the request never completed, so ask again. Skein already has,
+    /// once, by the time this line is written, and the sentence says that too.
+    #[test]
+    fn a_refresh_whose_connection_died_says_so_rather_than_blaming_github() {
+        let _g = crate::testutil::env_lock();
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let (base, seen) = recording_github(Some(r#"{"login":"me"}"#), Some("/graphql"));
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/batch-cut"), true).expect("the queue still answers");
+
+        assert!(q.prs.is_empty());
+        let said = q
+            .blind_spots
+            .iter()
+            .find(|b| b.contains("membership searches for acme/batch-cut are missing"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the refresh's total loss went unreported: {:?}",
+                    q.blind_spots
+                )
+            });
+        assert!(
+            said.contains("connection to GitHub died"),
+            "the reader is sent to look at GitHub for something GitHub never said: {said}"
+        );
+        assert!(
+            !said.contains("GitHub did not answer for"),
+            "the two diagnoses must not be the same sentence: {said}"
+        );
+        assert!(
+            said.contains("asked a second time"),
+            "a reader deciding whether to press again is not told skein already did: {said}"
+        );
+        // …and it really did ask twice, rather than only claiming to.
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("/graphql"))
+                .count()
+                >= 2,
+            "the retry the sentence promises never happened"
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
     }
 
     /// A rate-limited batch is both at once: the refresh's whole loss stated, and the hold engaged

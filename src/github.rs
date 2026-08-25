@@ -298,9 +298,9 @@ fn call(
         let _ = std::fs::remove_file(path);
     }
     if !status.success() {
-        return Err(format!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&stderr).trim()
+        return Err(transport_failure(
+            status.code(),
+            &String::from_utf8_lossy(&stderr),
         ));
     }
     let text = String::from_utf8_lossy(&stdout).into_owned();
@@ -333,14 +333,17 @@ pub(crate) fn get_json_within(
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
     let url = format!("{}{path}", api_base());
-    json(call(
-        "GET",
-        &url,
-        token,
-        None,
-        "application/vnd.github+json",
-        timeout,
-    )?)
+    // A GET is idempotent, so a connection that died is worth one more request (SKEIN-271).
+    json(ask_twice(|| {
+        call(
+            "GET",
+            &url,
+            token,
+            None,
+            "application/vnd.github+json",
+            timeout,
+        )
+    })?)
 }
 
 /// What this repository is called **now**, following a rename.
@@ -396,7 +399,8 @@ pub(crate) fn canonical_repo(slug: &str, token: &str) -> Result<String, String> 
 /// `GET`, as text — for the media types that are not JSON at all, i.e. a diff.
 pub(crate) fn get_text(path: &str, token: &str, accept: &str) -> Result<String, String> {
     let url = format!("{}{path}", api_base());
-    let (status, body) = call("GET", &url, token, None, accept, Duration::from_secs(60))?;
+    let (status, body) =
+        ask_twice(|| call("GET", &url, token, None, accept, Duration::from_secs(60)))?;
     match status {
         200..=299 => Ok(body),
         _ => Err(complaint(status, &body)),
@@ -463,12 +467,18 @@ pub(crate) fn graphql(
 /// discarded because the fifth failed — the caller maps each errored alias to its own blind spot
 /// instead. Still `Err` when there is nothing to salvage: transport failures, an unreadable body,
 /// a missing or null `data` — and a rate limit engages the hold exactly as everywhere else.
+///
+/// **A query, so a dead connection is asked again once** (SKEIN-271). The retry is here rather than
+/// in the shared [`graphql_answer`], because that one also carries [`graphql`]'s mutations —
+/// `updatePullRequestBranch` rebases a branch — and re-sending one of those on an ambiguous
+/// failure is exactly what this must not do. The one caller here is the batched membership search,
+/// which reads and nothing else.
 pub(crate) fn graphql_partial(
     query: &str,
     variables: serde_json::Value,
     token: &str,
 ) -> Result<(serde_json::Value, Vec<serde_json::Value>), String> {
-    let (status, text, value) = graphql_answer(query, variables, token)?;
+    let (status, text, value) = ask_twice(|| graphql_answer(query, variables.clone(), token))?;
     let errors = value
         .get("errors")
         .and_then(|e| e.as_array())
@@ -582,6 +592,89 @@ pub fn edge_refused(why: &str) -> bool {
         || ["502", "503", "504"]
             .iter()
             .any(|code| why.contains(&format!("GitHub answered {code}")))
+}
+
+/// The sentence for a call that never became an answer, written from curl's EXIT STATUS. (SKEIN-271)
+///
+/// Reported live while posting a drafted review:
+///
+/// ```text
+/// curl failed: curl: (92) HTTP/2 stream 1 was not closed cleanly: CANCEL (err 8)
+/// ```
+///
+/// The peer cancelled the HTTP/2 stream after the headers, so there is **no status and no body** —
+/// nothing for [`edge_shrug`] to weigh or [`edge_refused`] to read, both of which take an answer
+/// apart. Every ladder above therefore let it fall through as a hard error, one attempt, no retry.
+/// So the transport failure gets its own kind, named here and read by [`connection_died`], for the
+/// same reason `complaint` and `edge_refused` live together: one module owns both the wording and
+/// what the wording means.
+///
+/// The wording is the other half of the fix. "GitHub did not answer" is what this used to become,
+/// and it reads as *GitHub* being at fault; "the connection died" and "GitHub refused" ask
+/// different things of whoever reads them — the first says ask again, the second says something is
+/// wrong with the request. The exit code is kept in the sentence because it is the one durable
+/// handle on which failure this was (92 is a cancelled HTTP/2 stream, 18 a truncated body, 7 a
+/// connection that was never made) and curl's own words move between versions.
+fn transport_failure(code: Option<i32>, stderr: &str) -> String {
+    let said = stderr.trim();
+    // curl prints "curl: (92) …" with `-sS`; the code is already in the sentence, so quoting the
+    // prefix as well would say it twice.
+    let said = said
+        .strip_prefix("curl:")
+        .map(str::trim_start)
+        .unwrap_or(said);
+    let said = match said.split_once(')') {
+        Some((head, rest)) if head.starts_with('(') => rest.trim(),
+        _ => said,
+    };
+    let said = crate::util::clip(said, 200);
+    match (code, said.is_empty()) {
+        (Some(code), false) => {
+            format!("the connection to GitHub died before it answered (curl exit {code}: {said})")
+        }
+        (Some(code), true) => {
+            format!("the connection to GitHub died before it answered (curl exit {code})")
+        }
+        (None, false) => {
+            format!("the connection to GitHub died before it answered ({said})")
+        }
+        (None, true) => "the connection to GitHub died before it answered".to_string(),
+    }
+}
+
+/// Did the CONNECTION die, rather than GitHub answering? (SKEIN-271)
+///
+/// The one question that separates "ask again" from "this request is wrong". Read from the
+/// sentence [`transport_failure`] writes, beside it, so the two cannot drift.
+///
+/// What this deliberately does **not** cover is the deadline: "GitHub did not answer within 30s"
+/// and "GitHub was still answering after 30s" are skein's own choice to stop waiting, and asking
+/// again buys a second wait of the same length — a caller that wants those retried has to say so
+/// itself. Nor does it cover curl being missing, which no number of attempts will fix.
+///
+/// **Idempotence is the caller's to know.** A dead stream is *ambiguous* for anything that writes:
+/// the peer cancelled after the headers, so the request may well have been carried out before the
+/// answer was lost. Reads may ask again on this; writes must find out what happened first — see
+/// [`crate::prq::submit_review_with_comments`].
+pub fn connection_died(why: &str) -> bool {
+    why.contains("the connection to GitHub died")
+}
+
+/// Ask an **idempotent** call again, once, when the connection died rather than GitHub answering.
+///
+/// The same shape as the empty-200 retry in [`graphql_answer`] and for the same reason: a second
+/// failure of the same kind is a real condition the caller must see, and one retry costs one
+/// request. It lives at the read entry points rather than inside [`call`] on purpose — `call` is
+/// the wire under `POST /reviews` and `PUT /merge` too, and a retry there would re-send those
+/// blind.
+fn ask_twice<T>(mut ask: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    match ask() {
+        Err(why) if connection_died(&why) => {
+            eprintln!("skein: {why} — asking again once, because reading again costs a request");
+            ask()
+        }
+        other => other,
+    }
 }
 
 /// GraphQL error entries' messages, joined — empty when none of them carry one.
@@ -726,6 +819,97 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// A GitHub that KILLS its first `deaths` connections, the way the edge did on the owner's
+    /// fleet: the answer starts, promises a length, and the socket closes before it arrives. curl
+    /// exits non-zero with **no status and no body** — the shape every ladder in this module used
+    /// to fall straight through, because all of them take an answer apart. Counts what it was
+    /// asked, so a test can prove a second request was or was not made.
+    fn dying_github(deaths: usize, then: &'static str) -> (String, std::sync::Arc<AtomicU64>) {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked = std::sync::Arc::new(AtomicU64::new(0));
+        let counting = asked.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 65536];
+                let _ = stream.read(&mut buf);
+                let nth = counting.fetch_add(1, Ordering::SeqCst) as usize;
+                if nth < deaths {
+                    // A length promised and not delivered, then the socket goes. curl has nothing
+                    // to hand back: the status line never reached its `-w`.
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nhalf an ans");
+                    let _ = stream.flush();
+                    continue;
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    then.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(then.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), asked)
+    }
+
+    /// What [`transport_failure`] writes and what [`connection_died`] reads are one decision, kept
+    /// in one module — and the kind is read from curl's EXIT STATUS, because a cancelled stream
+    /// carries no status and no body to read it from (SKEIN-271).
+    #[test]
+    fn a_dead_connection_is_a_kind_of_its_own_and_not_an_answer() {
+        // The sentence the live failure produces, in the words this module gives it.
+        let died = transport_failure(
+            Some(92),
+            "curl: (92) HTTP/2 stream 1 was not closed cleanly: CANCEL (err 8)",
+        );
+        assert!(connection_died(&died), "the kind is unreadable: {died}");
+        assert!(
+            died.contains("connection to GitHub died") && died.contains("curl exit 92"),
+            "a reader must be told the connection died, and which failure it was: {died}"
+        );
+        assert!(
+            !died.contains("curl: (92)"),
+            "the exit code is named once, not twice: {died}"
+        );
+        // curl with nothing to say still has an exit code, and the code is the durable handle.
+        assert!(connection_died(&transport_failure(Some(7), "")));
+
+        // …and everything that IS GitHub answering, or skein's own choice, is not this. A reader
+        // told "the connection died" goes and asks again; told "GitHub refused" they go and look
+        // at the request. Confusing the two sends them to the wrong place.
+        assert!(!connection_died(&complaint(
+            502,
+            "<html>502 Bad Gateway</html>"
+        )));
+        assert!(!connection_died(&complaint(200, "")));
+        assert!(!connection_died(&complaint(
+            404,
+            r#"{"message":"Not Found"}"#
+        )));
+        assert!(!connection_died(&rate_limit_sentence(
+            "API rate limit exceeded"
+        )));
+        // Skein's own deadline: asking again buys a second wait of the same length, so it is the
+        // caller's decision and not this predicate's.
+        assert!(!connection_died("GitHub did not answer within 30s"));
+        assert!(!connection_died(
+            "GitHub was still answering after 30s — 700KB had arrived when skein stopped waiting"
+        ));
+        // No number of attempts installs curl.
+        assert!(!connection_died(
+            "curl is not installed, and skein reads GitHub with it"
+        ));
+
+        // The two kinds must not overlap. `edge_refused` means "GitHub would not take it all at
+        // once", and the batched search answers it by splitting the request in half — which is the
+        // wrong answer here: measured, the five-search batch body is 1,416 bytes, so nothing about
+        // it is too big to take, and halving would spend four requests to meet the same network.
+        assert!(!edge_refused(&died));
     }
 
     /// What `complaint` writes and what `edge_refused` reads are one decision, kept in one module.
@@ -1077,5 +1261,89 @@ mod tests {
             1,
             "engaging asks /rate_limit exactly once"
         );
+    }
+
+    /// The read half of SKEIN-271: a query whose connection dies is asked again, and the second
+    /// answer is the one the caller gets. Idempotent, so a retry costs one request and nothing
+    /// else — the same bargain the empty-200 retry above already makes.
+    #[test]
+    fn a_query_whose_connection_dies_is_asked_again_and_the_second_answer_is_kept() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let (api, asked) = dying_github(1, r#"{"data":{"q0":{"nodes":[]}}}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let answered = graphql_partial("query { x }", serde_json::json!({}), "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let (data, _) = answered.expect("a dead connection must be asked again, not reported");
+        assert!(
+            data.get("q0").is_some(),
+            "the retry did not carry the real answer back: {data}"
+        );
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the retry is one more request, not a loop"
+        );
+    }
+
+    /// Twice dead is a condition, and the caller must be told what kind. This is the sentence that
+    /// used to read "GitHub did not answer for <slug>" — true, and pointing at the wrong thing.
+    #[test]
+    fn a_connection_that_keeps_dying_is_reported_as_the_connection_and_not_as_github() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let (api, asked) = dying_github(usize::MAX, "");
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let answered = graphql_partial("query { x }", serde_json::json!({}), "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let why = answered.expect_err("a connection that never survives is an error");
+        assert!(
+            connection_died(&why) && why.contains("connection to GitHub died"),
+            "the reason stopped naming what happened: {why}"
+        );
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one retry, then the caller is told"
+        );
+    }
+
+    /// **The read's retry must not reach a write.** [`graphql`] carries `updatePullRequestBranch`,
+    /// which rebases somebody's branch, and a dead stream is ambiguous — the mutation may have run
+    /// before the answer was lost. This is why the retry lives in [`graphql_partial`] rather than
+    /// in the [`graphql_answer`] both share.
+    #[test]
+    fn a_mutation_whose_connection_dies_is_never_sent_again() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let (api, asked) = dying_github(1, r#"{"data":{"ok":true}}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let answered = graphql("mutation { rebase }", serde_json::json!({}), "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let why = answered.expect_err("a dead connection on a mutation is an error, not a retry");
+        assert!(
+            connection_died(&why),
+            "the caller cannot tell it was the connection: {why}"
+        );
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a mutation reached GitHub twice — a rebase can happen twice"
+        );
+    }
+
+    /// A GET is idempotent too, and the same retry covers it: the live 502-with-HTML that took a
+    /// queue refresh down arrived on this path as well.
+    #[test]
+    fn a_get_whose_connection_dies_is_asked_again() {
+        let _g = crate::testutil::env_lock();
+        let _hold = HoldClear::new();
+        let (api, asked) = dying_github(1, r#"{"login":"someone"}"#);
+        std::env::set_var("SKEIN_GITHUB_API", &api);
+        let got = get_json("/user", "token");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        let got = got.expect("a dead connection on a GET must be asked again");
+        assert_eq!(got.get("login").and_then(|v| v.as_str()), Some("someone"));
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }
