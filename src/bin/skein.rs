@@ -681,6 +681,22 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    // How full the fleet's filesystems are. Beside the ceilings above because it is the same
+    // question about the other resource — except that nothing enforces this one: one filesystem
+    // serves every box, so this is the only warning before a build dies half way through it.
+    {
+        let d = skein::health::disk_health();
+        let mark = match d.level {
+            skein::health::Level::Satisfied => OK,
+            skein::health::Level::Unsatisfied => BAD,
+            skein::health::Level::Unknown => WARN,
+        };
+        println!("{mark} fleet disk    {}", d.detail);
+        if !d.fix.is_empty() {
+            println!("{DIM}              → {}{RESET}", d.fix);
+        }
+    }
+
     // Which boxes are running under an older isolation. Its own line because there is no other way
     // to learn it: `box-session.sh` in the sandbox is refreshed at every start, so the copy on disk
     // describes the NEXT box and says nothing about the ones already up — and a box keeps the mount

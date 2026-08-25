@@ -113,10 +113,119 @@ impl HealthCheck {
     }
 }
 
+/// Past this share of a filesystem, skein says so. Below it, nothing is said.
+///
+/// 85 rather than 95 because the fix takes minutes and the failure takes an afternoon: a build that
+/// runs out of space fails somewhere in the middle, and the box it failed in is usually not the box
+/// that took the space. The per-box chip marks at 80% of a box's own allowance, which is a
+/// different question — that one is "who is taking it", this one is "is there any left".
+const DISK_FULL_PCT: u64 = 85;
+
+/// Is there room left on the fleet's filesystems — the one the boxes are on, and the one Docker
+/// keeps its images on?
+///
+/// Disk is the resource this fleet actually runs out of (`box-session.sh` and `BoxLoad::disk_mb`
+/// both say so, and the sandbox has hit 100% mid-build), and until SKEIN-133 nothing said a word
+/// about it unprompted: the figures existed only inside the resources overlay, which you have to
+/// already suspect something to open.
+///
+/// **Two filesystems, told apart.** sbx gives a sandbox a root sized by
+/// `DOCKER_SANDBOXES_ROOT_SIZE` and an image store sized by `DOCKER_SANDBOXES_DOCKER_SIZE`, so one
+/// being full says nothing about the other — and they are cleared by different actions, which is
+/// the whole reason for naming them separately rather than summing them. The boxes' disk is
+/// cleared by stopping or clearing a box; the image store by pruning what Docker is keeping.
+pub fn disk_health() -> HealthCheck {
+    let Some(r) = crate::fleet::fleet_resources() else {
+        return HealthCheck::unknown(
+            "no fleet sandbox is configured, so there is no filesystem to measure",
+        );
+    };
+    // The per-box figures are only READ when something is actually full: they come from their own
+    // gate and a tree walk behind it, and a satisfied check has nothing to name them for.
+    let biggest = |_: ()| {
+        let mut all: Vec<(String, u64)> = crate::fleet::fleet_disk_usage().into_iter().collect();
+        all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        all
+    };
+    disk_verdict(&r, &crate::place::fleet_sandbox(), biggest)
+}
+
+/// The verdict itself, over figures already in hand — so the thresholds can be driven in a test on
+/// a machine with no fleet, which is every machine this suite runs on.
+fn disk_verdict(
+    r: &crate::fleet::FleetResources,
+    sandbox: &str,
+    biggest: impl FnOnce(()) -> Vec<(String, u64)>,
+) -> HealthCheck {
+    if r.disk_total == 0 {
+        return HealthCheck::unknown(match r.stale {
+            true => "the sandbox is not answering, so its disk figures are the last ones that                      arrived — and they carry no total",
+            false => "the sandbox answered without disk figures, so how full it is cannot be said",
+        });
+    }
+    let gib = |mib: u64| format!("{:.1}G", mib as f64 / 1024.0);
+    let pct = |used: u64, total: u64| match total {
+        0 => 0,
+        _ => used * 100 / total,
+    };
+    let boxes_pct = pct(r.disk_used, r.disk_total);
+    // Zero total means Docker shares the boxes' filesystem — the same bytes, already counted.
+    let images_pct = pct(r.images_used, r.images_total);
+    let boxes_line = format!(
+        "the boxes' disk is {}% full ({} of {})",
+        boxes_pct,
+        gib(r.disk_used),
+        gib(r.disk_total)
+    );
+    let images_line = match r.images_total {
+        0 => "Docker shares that filesystem, so there is no separate image store".to_string(),
+        _ => format!(
+            "the image store is {}% full ({} of {})",
+            images_pct,
+            gib(r.images_used),
+            gib(r.images_total)
+        ),
+    };
+    let detail = format!("{boxes_line}; {images_line}");
+    if boxes_pct < DISK_FULL_PCT && images_pct < DISK_FULL_PCT {
+        return HealthCheck::satisfied(detail);
+    }
+    // What to clear, named per filesystem, because the two are cleared by different actions and a
+    // combined sentence leaves the reader to work out which half applies to them.
+    let mut fixes: Vec<String> = Vec::new();
+    if boxes_pct >= DISK_FULL_PCT {
+        let named = biggest(())
+            .iter()
+            .take(3)
+            .map(|(name, mb)| format!("{name} ({})", gib(*mb)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fixes.push(match named.is_empty() {
+            true => "stop a box you are not using (`skein ls` shows what is running) or clear its                      build output — one filesystem serves every box"
+                .to_string(),
+            false => format!(
+                "the largest boxes are {named} — `skein stop <box>` keeps its checkout, branch and                  conversation, or clear its build output in place"
+            ),
+        });
+    }
+    if images_pct >= DISK_FULL_PCT {
+        fixes.push(format!(
+            "the image store is Docker's: `sbx exec {sandbox} docker system prune -af` frees it"
+        ));
+    }
+    let check = HealthCheck::unsatisfied(detail, fixes.join("; "));
+    // The prune deletes images and build cache that nothing is using *now* — recoverable, but it
+    // is a delete, and §2.4 says a recipe that destroys is printed rather than driven.
+    match images_pct >= DISK_FULL_PCT {
+        true => check.destroys(),
+        false => check,
+    }
+}
+
 impl HealthReport {
     /// Every check in the report, named. One list, so a check added to the struct and forgotten
     /// here shows up as a compile error rather than as a check nothing ever looks at.
-    pub fn checks(&self) -> [(&'static str, &HealthCheck); 11] {
+    pub fn checks(&self) -> [(&'static str, &HealthCheck); 12] {
         let HealthReport {
             registry,
             sbx,
@@ -126,6 +235,7 @@ impl HealthReport {
             mailbox,
             ai,
             memory,
+            disk,
             gitgate,
             warden,
             cover,
@@ -140,6 +250,7 @@ impl HealthReport {
             ("mailbox", mailbox),
             ("ai", ai),
             ("memory", memory),
+            ("disk", disk),
             ("gitgate", gitgate),
             ("warden", warden),
             // Named for what it is about rather than for the field: this key is what `/v2` puts
@@ -176,6 +287,13 @@ pub struct HealthReport {
     /// the reserve that keeps the sandbox itself answering. Worth a line of its own because when
     /// this is wrong the symptom is not a message — it is a sandbox that stops responding.
     pub memory: HealthCheck,
+    /// How full the fleet's two filesystems are — the boxes' and Docker's image store.
+    ///
+    /// Beside memory rather than inside it because they fail differently: memory is divided by a
+    /// plan and enforced by cgroups, while one filesystem serves every box with nothing enforcing
+    /// anything. This is the resource the fleet actually runs out of, and it was the one nothing
+    /// mentioned until asked (SKEIN-133).
+    pub disk: HealthCheck,
     /// Whether a box's GitHub credential is actually scoped, and why not when it isn't.
     ///
     /// Never `ok: false` for being switched off — scoping is opt-in and "off" is a correct state.
@@ -823,6 +941,9 @@ pub fn health_report() -> HealthReport {
     // unhealthy — it degrades to exactly its pre-observer behaviour. Nagging in the environment
     // banner would be crying wolf; the caveat belongs on the row and tab it applies to.
     let cover = cover_health(&uncovered_boxes);
+    // Behind the same 30s gate the resources overlay reads, so a doctor run and an open cockpit
+    // cost one measurement between them.
+    let disk = disk_health();
     let gitgate = git_scope_health();
     // Asked through the gate rather than directly, so as many open tabs as you like cost one probe
     // per ten seconds between them, and a warden that has gone slow is asked progressively less
@@ -832,8 +953,13 @@ pub fn health_report() -> HealthReport {
     // their fleet is broken because skein could not reach it for two seconds is the false alarm the
     // third state exists to stop. The cockpit reports the unknowns beside the faults, in the mark
     // it already has for "look at this but nothing is wrong".
+    // `disk` is in this list and `memory` is not, deliberately. The memory check reports a plan
+    // and its pressure — being at the ceiling is the fleet working as configured. A filesystem past
+    // 85% is not a ceiling being used, it is a wall being approached, and the only warning anyone
+    // gets before a build dies somewhere in the middle. It can only be a fault past the threshold:
+    // an unknown disk (no sandbox, no answer) is never one.
     let ok = ![
-        &registry, &sbx, &git, &probes, &mailbox, &gitgate, &warden, &cover,
+        &registry, &sbx, &git, &probes, &mailbox, &gitgate, &warden, &cover, &disk,
     ]
     .iter()
     .any(|check| check.is_fault())
@@ -850,6 +976,7 @@ pub fn health_report() -> HealthReport {
         mailbox,
         ai,
         memory,
+        disk,
         gitgate,
         warden,
         cover,
@@ -1018,6 +1145,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A filesystem past the threshold is a fault that names what to clear — and the two
+    /// filesystems are cleared by different actions, so they are named apart (SKEIN-133).
+    #[test]
+    fn a_full_fleet_disk_says_so_and_says_what_to_clear() {
+        let full = |disk_used, images_used| crate::fleet::FleetResources {
+            disk_total: 60_000,
+            disk_used,
+            images_total: 50_000,
+            images_used,
+            ..Default::default()
+        };
+        let boxes = |_: ()| {
+            vec![
+                ("example-box-1".to_string(), 14_336_u64),
+                ("example-box-6".to_string(), 10_650),
+                ("web-main".to_string(), 512),
+            ]
+        };
+
+        // Room left: said, and nothing to do about it.
+        let easy = disk_verdict(&full(20_000, 20_000), "fleet", boxes);
+        assert_eq!(easy.level, Level::Satisfied, "{}", easy.detail);
+        assert!(easy.detail.contains("33%") && easy.detail.contains("40%"), "{}", easy.detail);
+
+        // The boxes' disk is full: the fix names the biggest, largest first, with figures — "3
+        // boxes" is not something anybody can act on at the moment they read it.
+        let tight = disk_verdict(&full(54_140, 20_000), "fleet", boxes);
+        assert_eq!(tight.level, Level::Unsatisfied, "{}", tight.detail);
+        assert!(tight.detail.contains("90%"), "the share is not stated: {}", tight.detail);
+        assert!(
+            tight.fix.contains("example-box-1 (14.0G)") && tight.fix.contains("example-box-6 (10.4G)"),
+            "the fix does not name what is taking the space: {}",
+            tight.fix
+        );
+        assert!(
+            !tight.fix.contains("prune"),
+            "the image store is not full and the fix offers to prune it anyway: {}",
+            tight.fix
+        );
+        assert!(!tight.destructive, "stopping a box destroys nothing");
+
+        // Docker's store is the other filesystem and the other action — and it deletes, so the
+        // recipe is printed rather than driven.
+        let images = disk_verdict(&full(20_000, 45_000), "fleet", boxes);
+        assert_eq!(images.level, Level::Unsatisfied, "{}", images.detail);
+        assert!(
+            images.fix.contains("sbx exec fleet docker system prune -af"),
+            "the image store's fix is not the one that clears it: {}",
+            images.fix
+        );
+        assert!(
+            !images.fix.contains("example-box-1"),
+            "the boxes' disk has room and the fix asks somebody to stop a box: {}",
+            images.fix
+        );
+        assert!(images.destructive, "a prune deletes; §2.4 says such a recipe is never driven");
+
+        // Both, and both sentences.
+        let both = disk_verdict(&full(54_140, 45_000), "fleet", boxes);
+        assert!(both.fix.contains("example-box-1") && both.fix.contains("prune"), "{}", both.fix);
+
+        // Docker sharing the boxes' filesystem: the same bytes are never counted twice, and there
+        // is no second thing to clear.
+        let shared = crate::fleet::FleetResources {
+            disk_total: 60_000,
+            disk_used: 54_140,
+            images_total: 0,
+            images_used: 0,
+            ..Default::default()
+        };
+        let one = disk_verdict(&shared, "fleet", boxes);
+        assert!(one.detail.contains("no separate image store"), "{}", one.detail);
+        assert!(!one.fix.contains("prune"), "{}", one.fix);
+
+        // Asked and not answered is not a fault — the third state exists for exactly this.
+        let blind = disk_verdict(&crate::fleet::FleetResources::default(), "fleet", boxes);
+        assert_eq!(blind.level, Level::Unknown);
+        assert!(blind.fix.is_empty(), "an unknown offers no fix: {}", blind.fix);
     }
 
     /// **No fault without a way out.** The parent property, in the only form that can be enforced.

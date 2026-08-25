@@ -315,7 +315,11 @@ depends_on = ["diff", "digest", "registry", "repos", "runtime", "signals", "util
 # edge existed, the first anybody heard of that was a 500 from pressing Launch. The edge is to the
 # CLIENT and not the warden's crate, which this one deliberately does not depend on; what health
 # reaches for is the reporting endpoint, the one that needs no compiled capability at all.
-depends_on = ["ai", "board", "deployment", "fleet", "gitgate", "github", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
+# `place` for one string: the fleet sandbox's NAME, which the full-disk fix puts inside the command
+# it tells somebody to run (`sbx exec <sandbox> docker system prune -af`). A recipe that cannot be
+# copied is half a recipe, and the alternative — health guessing the name, or printing a
+# placeholder — is worse than the edge.
+depends_on = ["ai", "board", "deployment", "fleet", "gitgate", "github", "place", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
 depends_on = ["config", "probes", "repos", "util"]

@@ -2138,6 +2138,7 @@ async fn api_health() -> Json<skein::health::HealthReport> {
                 probes: skein::health::HealthCheck::unknown("the health check itself failed"),
                 mailbox: skein::health::HealthCheck::unknown("the health check itself failed"),
                 memory: skein::health::HealthCheck::unknown("the health check itself failed"),
+                disk: skein::health::HealthCheck::unknown("the health check itself failed"),
                 gitgate: skein::health::HealthCheck::unknown("the health check itself failed"),
                 warden: skein::health::HealthCheck::unknown("the health check itself failed"),
                 cover: skein::health::HealthCheck::unknown("the health check itself failed"),
