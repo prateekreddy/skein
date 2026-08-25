@@ -79,21 +79,20 @@ function board() {
     ${grab("revAge")}
     ${grab("revStackRow")}
     ${grab("revStackSteps")}
+    // Expanding a row asks for a stored draft only when the bulk payload did not already carry one
+    // (SKEIN-216), so opening a row runs this.
+    ${grab("revDraftedReview")}
     ${grab("toggleRevRow")}
     ${grab("revStaleTries")}
     ${grab("REV_STALE_TRIES")}
-    ${grab("REV_SUM_AUTO")}
-    ${grab("revSumAuto")}
-    ${grab("revSumRepo")}
     ${grab("revHeld")}
     ${grab("REV_LANES")}
     ${grab("revNotReadyOpen")}
     ${grab("toggleNotReady")}
     ${grab("revNotReadyWhy")}
-    ${grab("REV_SETTLE_MS")}
-    ${grab("revSettled")}
-    ${grab("revSettlesIn")}
-    ${grab("revAllowanceFor")}
+    // The two empty states the pane can be in: nothing here, and nothing anywhere (SKEIN-154).
+    ${grab("revLaneEmpty")}
+    ${grab("revClearHtml")}
     ${grab("loadKnownSummaries")}
     ${grab("revPumpSummaries")}
     ${grab("revFetchSummary")}
@@ -150,10 +149,9 @@ function board() {
       got: (n, repo) => revSums.get((repo || "alpha") + "#" + n),
       open_rows: () => revOpen.size,
       openKeys: () => [...revOpen],
-      spent: () => revSumAuto,
       expand: (n, repo) => { revOpen.add((repo || "alpha") + "#" + n); },
       tries: () => revStaleTries,
-      fetchOne: (n, repo) => revFetchSummary(repo || "alpha", n, true),
+      fetchOne: (n, repo) => revFetchSummary(repo || "alpha", n, "force"),
       toggleNR: () => toggleNotReady(),
       stack: key => toggleRevStack(key),
       row: key => toggleRevRow(key),
@@ -177,6 +175,7 @@ function board() {
   let moved = [];          // numbers whose head has moved since it was read
   let fresh = true;          // whether the server has the current list yet
   let laneRows = null;       // when set, the queue serves exactly these rows
+  let blindSpots = [];       // what each served repo reports it could not see
   const queue = id => ({
     repo_id: id,
     ai: true,
@@ -192,7 +191,9 @@ function board() {
       settled: !hot.includes(n),
       reasons: ["reviewer"],
     })),
-    blind_spots: [],
+    // What this repo's queue could not SEE — a standing gap, distinct from a queue that could not
+    // be built at all (`broken` below).
+    blind_spots: blindSpots,
   });
   const lanes = rows => { laneRows = rows; };
   let served = ["alpha"];    // which repos the merged answer carries
@@ -200,12 +201,18 @@ function board() {
   // its answer — which is where both defects lived.
   let pending = [];
   let refuse = null;              // a repo whose summaries the server will not serve
+  let outage = null;              // when set, the merged queue route answers with this failure
   let brokenRepos = [];           // repos whose queue the merged answer reports as failed
   let known = {};                 // readings already on disk, as the bulk route answers them
   const fetch = (url) => {
     asked.push(url);
     // The merged queue: every repo in one answer, the shape the pane opens on (SKEIN-146).
     if (/^\/api\/review($|\?)/.test(url)) {
+      if (outage) {
+        return new Promise(resolve => pending.push(() => resolve({
+          ok: false, status: 502, text: () => Promise.resolve(outage),
+        })));
+      }
       return new Promise(resolve => pending.push(() => resolve({
         ok: true,
         text: () => Promise.resolve(JSON.stringify({
@@ -311,6 +318,10 @@ function board() {
     // The server has not caught up yet: it hands over the copy it remembers.
     stale: on => { fresh = !on; },
     broken: ids => { brokenRepos = ids; },
+    // GitHub, or skein's own route, refusing the whole queue — not one repo of nine.
+    outage: why => { outage = why; },
+    // A standing gap inside a queue that did arrive — `gh` without read:org is the live one.
+    blinds: bs => { blindSpots = bs; },
     // What the page asked to be woken for, and how long it wanted to wait.
     waits: () => waits.slice(),
     fire: () => { const due = waits.map(w => w.fn); waits.length = 0; due.forEach(f => f()); },
@@ -335,7 +346,6 @@ function board() {
   t.check("and its rows are read", b.sums(), 6);
 
   b.expand(2);
-  const spent = b.spent();
   // What the FIRST visit asked for is legitimate — those are the reads that filled the pane. The
   // question is whether coming back asks for any of it a second time, so the count is taken here.
   const before = b.reads().length;
@@ -348,7 +358,6 @@ function board() {
   t.check("the summaries that were read are still read", b.sums(), 6);
   t.check("and a row you had expanded is still expanded", b.open_rows(), 1);
   t.check("nothing is read again", b.reads().length, before);
-  t.check("so the allowance is not spent twice", b.spent(), spent);
 
   await b.drain();
   t.check("and the refetch leaves it that way", b.rows(), 6);
@@ -421,26 +430,30 @@ function board() {
   t.check("and the row is read", b.sums(), 6);
 }
 
-// ---- a pull request still being pushed to is left alone ----
+// ---- a pull request still being pushed to is read like any other ----
 //
-// Asked for: "PR should be analyzed in background once there have been no commits for atleast an
-// hour". Reading a branch somebody is mid-push on spends a model call describing a commit that is
-// about to stop being the head — and the next poll spends another.
+// It used to be left alone for an hour ("PR should be analyzed in background once there have been
+// no commits for atleast an hour"), and the owner removed that on 2026-08-24: the day's spend
+// ceiling is the money guard now (`review::over_budget`), and re-anchoring a drafted comment by its
+// line text (SKEIN-214/215) made a reading of a moving head worth keeping. The page held a SECOND
+// copy of that hour after the server dropped it — `revSettled` — which could only ever refuse rows
+// skein's own background reader was already reading.
 {
   const b = board();
   b.hot([2, 5]);           // two of the six were pushed to a moment ago
   b.open("alpha");
   await b.drain();
 
-  t.check("a branch that is still moving is not read", b.got(2), undefined);
-  t.check("nor asked for", b.reads().filter(u => /\/2\/summary/.test(u)), []);
-  t.check("and the settled ones are read", b.sums(), 4);
+  t.check("a branch that is still moving is read", b.got(2) && b.got(2).line, "x");
+  t.check("it was asked for like the rest", b.reads().filter(u => /\/2\/summary/.test(u)).length, 1);
+  t.check("and the whole lane is read, not a settled subset", b.sums(), 6);
 
-  // Asking by hand reads it at any age — the rule governs what skein does on its OWN, exactly as
-  // it does for drafts. Without this the rule is a wall rather than a default.
-  b.fetchOne(2);
+  // A read somebody asks for carries the marker that exempts it from the day's budget — the
+  // ceiling is on skein's initiative, never on the person.
+  b.fetchOne(3);
   await b.drain();
-  t.check("asking for it by hand reads it anyway", b.got(2) && b.got(2).line, "x");
+  t.check("a read you ask for says so on the wire",
+    b.reads().some(u => /\/3\/summary\?force=1$/.test(u)), true);
 }
 
 // ---- a reading survives the commits that land after it ----
@@ -539,7 +552,6 @@ function board() {
   t.check("every reading skein holds is on screen", b.sums(), 6);
   t.check("including one of an earlier commit, marked", b.got(6).stale, true);
   t.check("and nothing was asked for one at a time", b.reads(), []);
-  t.check("so no allowance was spent on what was already paid for", b.spent(), 0);
 }
 
 // ---- and what is genuinely unread still obeys every limit ----
@@ -550,11 +562,12 @@ function board() {
   b.open("alpha");
   await b.drain();
 
-  // #1 came free. #2, #3, #4 are unread and settled, so they are asked for. #5 and #6 are still
-  // being pushed to, so they are not — the limits are for new analysis, which is the whole point.
+  // #1 came free, off disk. Everything else is genuinely unread, so it is asked for — including
+  // the two being pushed to, since the settle hour is gone from both halves now. What bounds this
+  // is the server's day ledger, spent where the model call is.
   const asked = b.reads().map(u => Number(u.match(/review\/(\d+)\/summary/)[1])).sort();
-  t.check("only what is missing is asked for", asked, [2, 3, 4]);
-  t.check("and everything known or read is on screen", b.sums(), 4);
+  t.check("only what is missing is asked for", asked, [2, 3, 4, 5, 6]);
+  t.check("and everything known or read is on screen", b.sums(), 6);
 }
 
 // ---- a lane says whose move it is, not whether you have already acted ----
@@ -784,6 +797,9 @@ function rowWorld() {
   const body = `
     let revOpen = new Set(), revSums = new Map(), revRepoFilter = "";
     let revCommonChips = new Set();
+    // The pump reads the your-move lane on its own, so the row's read control asks whether it is
+    // running before offering to do by hand what is already coming (SKEIN-228).
+    let revQueue = { ai: true };
     let revSel = null, revFlash = "";        // SKEIN-159: revRow paints sel/flash/held from these
     const revPending = new Map();
     const revFlows = new Map();
@@ -797,11 +813,21 @@ function rowWorld() {
     ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revGist")}
+    ${grab("revCrits")}
+    ${grab("revDraftedReview")}
+    ${grab("revReadyChip")}
+    ${grab("revDraftSection")}
+    // The row's own read control (SKEIN-228).
+    ${grab("revReadAgain")}
     ${grab("revRow")}
     const revBody = () => "";
     const toggleRevRow = () => {};
     return { row: pr => revRow(pr), gist: s => revGist(s), move: pr => revMove(pr), sums: revSums,
-             commons: kinds => { revCommonChips = new Set(kinds); } };
+             commons: kinds => { revCommonChips = new Set(kinds); },
+             section: pr => revDraftSection(pr),
+             // The keep/drop panel open on this row, which is the one state the read-only section
+             // must keep quiet in.
+             vetting: key => revCrits.set(key, { open: true, busy: false, critique: null, drop: new Set(), posted: "" }) };
   `;
   return new Function("esc", body)(String); // the same esc stub board() uses
 }
@@ -840,6 +866,148 @@ function rowWorld() {
   t.check("archived draws done", w.move(pr({ lane: "archived" })), "done");
   t.check("a decision the branch moved from under is your move again",
     w.move(pr({ my_review: "approved", review_is_current: false })), "yours");
+
+  // SKEIN-228 — re-analysis without opening the fold, and only where it means something. The
+  // control used to live behind the fold as `re-read`, ninth of nine chips, which reads from the
+  // outside as no re-analysis at all.
+  w.sums.set("alpha#41", { depth: "line", line: "a current reading", flags: [], head_sha: "h1" });
+  t.check("a row with a current reading offers no read control",
+    w.row(pr({ head_sha: "h1" })).includes("revread"), false);
+
+  w.sums.set("alpha#41", { depth: "line", line: "read before", flags: [], head_sha: "old", stale: true });
+  const moved = w.row(pr({ head_sha: "h1" }));
+  t.check("a reading of an earlier commit offers the re-read on the line",
+    moved.includes(">re-read</button>"), true);
+  t.check("which asks the way a person asks", moved.includes(`revFetchSummary('alpha', 41, 'force')`), true);
+  t.check("and pressing it does not open the row underneath",
+    moved.includes("event.stopPropagation()"), true);
+  t.check("saying what it costs, which is nothing",
+    moved.includes("never counted against the day's budget"), true);
+
+  w.sums.set("alpha#41", { depth: "unread", budget_stopped: true, unread_because: "the budget is spent" });
+  t.check("a row the day's budget stopped offers the read it invites",
+    w.row(pr()).includes(">read it</button>"), true);
+
+  w.sums.set("alpha#41", "…");
+  t.check("a reading already in flight offers nothing to press",
+    w.row(pr()).includes("revread"), false);
+
+  // Scarcity, which is the row's whole design: the pump reads the your-move lane on its own, so an
+  // unread row there would wear a control that is gone a second later — a flicker, not an
+  // affordance. A draft is never read unasked, so it keeps one.
+  w.sums.delete("alpha#41");
+  t.check("a row the pump is about to read wears nothing", w.row(pr()).includes("revread"), false);
+  t.check("but a draft, which nothing will read for you, does",
+    w.row(pr({ draft: true })).includes(">read it</button>"), true);
+}
+
+// ---- a drafted review says so on the row, and shows itself when the row opens (SKEIN-216) ----
+//
+// The background pass drafts a review beside the summary, in the same model call. Before this, the
+// only way to find out was to open the row AND press "review the code…", so the thing skein had
+// already paid for was invisible on a queue of thirty. Both the chip and the section read the
+// critique the bulk payload already carried — `review::known` puts it there — so neither costs a
+// request.
+{
+  const w = rowWorld();
+  const pr = (over) => ({ number: 41, repo_id: "alpha", title: "fix the thing", author: "dana",
+    lane: "needs-you", head_sha: "head1", updated_at: new Date().toISOString(),
+    my_review: "none", review_is_current: true, draft: false, reasons: ["reviewer"], ...over });
+  const drafted = (over) => ({ depth: "line", line: "moves the audit write behind the lock", flags: [],
+    head_sha: "head1", has_critique: true,
+    critique: { number: 41, head_sha: "head1", overall: "the lock is taken twice on the error path",
+      truncated: false, comments: [
+        { path: "src/audit.rs", line: 40, anchored: true, text: "this returns before the unlock" },
+        { path: "src/lib.rs", line: 0, anchored: false, text: "and the caller cannot tell" },
+      ] },
+    ...over });
+
+  w.sums.set("alpha#41", { depth: "line", line: "x", flags: [], head_sha: "head1" });
+  t.check("a row with no drafted review wears no chip", w.row(pr()).includes("review ready"), false);
+
+  w.sums.set("alpha#41", drafted());
+  const ready = w.row(pr());
+  t.check("a drafted review announces itself on the collapsed row", ready.includes("review ready · 2"), true);
+  t.check("and it is drawn as a chip, in the row's chip column", ready.includes('class="revtag ready"'), true);
+
+  // The one way this chip could mislead: a review of a commit that is no longer there, announced as
+  // a review of this pull request. The draft carries its own head, so the row can tell.
+  t.check("the chip goes when the head moves past the draft",
+    w.row(pr({ head_sha: "head2" })).includes("review ready"), false);
+  // "nothing to flag" is a review somebody paid for — and the one that saves the most reading.
+  w.sums.set("alpha#41", drafted({ critique: { number: 41, head_sha: "head1", overall: "nothing to flag", comments: [] } }));
+  const quiet = w.row(pr());
+  t.check("a review that found nothing still says it is there", quiet.includes("review ready"), true);
+  t.check("with no count, because there is nothing to count", quiet.includes("review ready ·"), false);
+
+  // The section: the same draft, beside the summary, when the row is open.
+  w.sums.set("alpha#41", drafted());
+  const section = w.section(pr());
+  t.check("the expanded row carries the review as its own section",
+    section.includes('class="revdraft"'), true);
+  t.check("with the overall note", section.includes("the lock is taken twice on the error path"), true);
+  t.check("and every drafted comment, against the file it is about",
+    section.includes("src/audit.rs:40") && section.includes("this returns before the unlock")
+      && section.includes("and the caller cannot tell"), true);
+  t.check("a comment the diff could not anchor carries no line number",
+    section.includes("src/lib.rs:0"), false);
+  t.check("and the way through to keeping and posting is on it",
+    section.includes("go through 2 comments and post…"), true);
+  t.check("a draft of an earlier commit is not shown as this commit's review",
+    w.section(pr({ head_sha: "head2" })), "");
+
+  // §4's other half is a property of the QUEUE, not of the chip: skein drafts a review for every
+  // row whose review is yours to give, so on a lane it has worked through "review ready" is true of
+  // everything and stops saying which row to open. Demoted exactly like `moved`, and never hidden.
+  w.commons(["ready"]);
+  t.check("a chip most of the queue would wear leaves the line", w.row(pr()).includes("review ready"), false);
+  t.check("and the review is still there when the row opens",
+    w.section(pr()).includes('class="revdraft"'), true);
+  w.commons([]);
+
+  // Two copies of one review on one row is worse than either, and the editable one must win.
+  w.vetting("alpha#41");
+  t.check("the section keeps quiet while the keep/drop panel has the same draft open",
+    w.section(pr()), "");
+}
+
+// ---- a reading the page already holds still learns about the draft beside it ----
+//
+// `/review/:n/summary` answers a summary and nothing else, so a row read by the pump carries no
+// critique however many were drafted in the same model call. The bulk payload is where the draft
+// arrives, and it must be allowed to land on a reading it is otherwise forbidden to replace.
+{
+  const b = board();
+  b.open("alpha");
+  await b.drain();
+  t.check("the pump's own readings are on screen", b.sums(), 6);
+  t.check("carrying no draft, because that route does not answer one", !!b.got(1).has_critique, false);
+
+  b.holds({ "1": { number: 1, head_sha: "alpha1", depth: "line", line: "off disk", has_critique: true,
+                   critique: { number: 1, head_sha: "alpha1", overall: "one thing", comments: [] } } });
+  b.open("alpha");
+  await b.drain();
+  t.check("one drafted review in six is not texture", b.common().includes("ready"), false);
+  t.check("the newer reading survives the bulk answer", b.got(1).line, "x");
+  // `|| {}` so a draft that never landed reads as a named failure rather than as a TypeError from
+  // the assertion itself — a suite that crashes says less about what broke than one that reports.
+  t.check("and the drafted review beside it lands anyway", (b.got(1).critique || {}).overall, "one thing");
+}
+
+// ---- a lane skein has worked through wears the chip on nothing ----
+//
+// The queue-level half of §4, counted at render time over what is on screen: a chip true of most of
+// the queue is texture, and skein drafts a review for every row whose review is yours to give.
+{
+  const b = board();
+  const drafted = n => ({ number: n, head_sha: "alpha" + n, depth: "line", line: "read " + n,
+    has_critique: true,
+    critique: { number: n, head_sha: "alpha" + n, overall: "a note", comments: [] } });
+  b.holds(Object.fromEntries([1, 2, 3, 4, 5, 6].map(n => [String(n), drafted(n)])));
+  b.open("alpha");
+  await b.drain();
+  t.check("a review drafted on every row is texture, and the chip stands down",
+    b.common().includes("ready"), true);
 }
 
 // ---- red is a queue-level sentence, not row wallpaper ----
@@ -860,6 +1028,107 @@ function rowWorld() {
   b2.open("alpha");
   await b2.drain();
   t.check("a lone failure is not a queue-level story", b2.pane().includes("are red"), false);
+}
+
+// ---- an empty queue and a broken one both offer the next move (SKEIN-154) ----
+//
+// Both states were correct in prose and inert as affordances: "nothing here." in the corner of a
+// 1400px page while another repo held ten, and an orange box that replaced twenty-nine rows which
+// were on screen a second ago and are still on disk.
+{
+  // alpha is the repo you are looking at and the merged answer carries only beta — the shape of a
+  // fleet where the queue you opened is clear and another one is not.
+  const b = board();
+  b.serves(["beta"]);
+  b.open("alpha");
+  await b.drain();
+  const pane = b.pane();
+  t.check("a cleared queue says so as an answer, not as an absence",
+    pane.includes("alpha is clear."), true);
+  t.check("and names what the rest of the fleet holds", /revclear-n">6<\/span>\s*<span>beta/.test(pane), true);
+  t.check("with the way to it", pane.includes(`onclick="openReview('beta')"`), true);
+
+  // A repo skein could not READ is listed here too: "empty" and "not looked at" must never be the
+  // same screen.
+  const b2 = board();
+  b2.serves(["beta"]);
+  b2.broken(["gamma"]);
+  b2.open("alpha");
+  await b2.drain();
+  t.check("a repo that could not be read is named on the cleared screen",
+    b2.pane().includes("gamma — skein could not read this queue: boom"), true);
+
+  // Nothing anywhere is a different sentence from nothing here, and it is the good one.
+  const b3 = board();
+  b3.lanes([]);
+  b3.open("");
+  await b3.drain();
+  t.check("with no repo chosen, the answer is about the fleet",
+    b3.pane().includes("Nothing is waiting on you."), true);
+  t.check("and nothing is claimed about repos it has no rows for",
+    b3.pane().includes("revclear-next"), false);
+}
+
+// ---- the queue could not be built: the remembered rows stay, and there is a way out ----
+{
+  const b = board();
+  b.open("alpha");
+  await b.drain();
+  t.check("six rows, read and on screen", b.rows(), 6);
+
+  b.outage("401 Bad credentials");
+  b.open("alpha");
+  await b.drain();
+  const pane = b.pane();
+  t.check("the failure does not replace the queue that was on screen", b.rows(), 6);
+  t.check("and the rows say they are not live", pane.includes(`class="revwrap notlive"`), true);
+  t.check("the box says what GitHub said", pane.includes("401 Bad credentials"), true);
+  t.check("that these are the ones skein last read", pane.includes("skein last read"), true);
+  t.check("and offers both moves", pane.includes("try again") && pane.includes("GitHub &amp; keys"), true);
+  t.check("the settings it offers is the one holding that credential",
+    pane.includes(`onclick="openSettings('github')"`), true);
+
+  // A failure is not an answer: it must never be remembered as the queue.
+  b.outage(null);
+  b.open("alpha");
+  await b.drain();
+  t.check("and the next good answer clears it", b.pane().includes("401 Bad credentials"), false);
+}
+
+// ---- a standing blind spot and a failed queue are two different things (SKEIN-164) ----
+//
+// Both used to be the same orange box, which is how the largest, loudest object on the pane came to
+// report a condition that is true on every load until somebody runs a command. An alarm spent on a
+// constant is an alarm the eye learns to skip.
+{
+  const b = board();
+  b.blinds(["team review requests are missing — `gh` cannot list your teams. Fix: gh auth refresh -s read:org"]);
+  b.open("alpha");
+  await b.drain();
+  const pane = b.pane();
+  t.check("the standing gap is stated", pane.includes("cannot list your teams"), true);
+  t.check("with its cure in the same sentence", pane.includes("gh auth refresh -s read:org"), true);
+  t.check("in the standing treatment", pane.includes('class="revblind"'), true);
+  t.check("and not in the failure's", pane.includes('class="revfail"'), false);
+
+  // A repo whose queue could not be built at all: that IS skein failing, and it keeps the box.
+  const b2 = board();
+  b2.serves(["alpha"]);
+  b2.broken(["beta"]);
+  b2.open("");
+  await b2.drain();
+  const p2 = b2.pane();
+  t.check("a queue that could not be built keeps the alarm", p2.includes('class="revfail"'), true);
+  t.check("naming the repo and what GitHub said",
+    p2.includes("beta — boom"), true);
+  t.check("and it is no longer filed as something the queue could not see",
+    p2.includes('class="revblind"'), false);
+
+  // Filtering to a healthy repo is not a reason to stop reporting the broken one's failure… but it
+  // is not that repo's failure either, so it belongs to the repo it came from.
+  b2.open("alpha");
+  t.check("a repo's own view carries its own failures only",
+    b2.pane().includes('class="revfail"'), false);
 }
 
 // ---- many repositories are one dropdown, and SKEIN-163's numbers survive inside it ----

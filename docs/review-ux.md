@@ -584,6 +584,12 @@ empty one and skein already has it. **The prose keeps its title** but gains the 
 PM found missing. **The 55% is load-bearing**: it is how you tell at a glance that what you are
 looking at is not live, without reading anything.
 
+Built (SKEIN-154): `loadReview`'s catch keeps the copy in `revSeen` and marks it `remembered`
+rather than replacing it — and does **not** write it back, because a failure is not an answer. The
+box carries `try again` and `Settings → GitHub & keys`; the third affordance is not needed here,
+because one repo failing no longer reaches this path at all (§8.3 — it is a `.revfail` line above
+rows the other repos still fill). `.revwrap.notlive .revlane` is the 55%.
+
 ### 8.5 Empty (`v8-proto-empty.png`)
 
 Today: `NEEDS YOU 0 / nothing here.` in the top-left corner and 800 px of nothing, while the badge in
@@ -601,6 +607,11 @@ the same window reads 39.
 A cleared queue is the best moment this product has and it should feel like one — a headline in
 grotesk, a sentence of evidence, and then **the honest next thing**, which is that another repo has
 ten. The failed repo is listed here too: "empty" and "not looked at" must never be the same screen.
+
+Built (SKEIN-154): `revClearHtml`, reached from `revLaneEmpty` only for the your-move lane and only
+when nothing has narrowed it — a search that matches nothing says nothing about whether anything
+needs you, so that keeps the plain line. Every number comes off the merged queue already on screen,
+so the calm screen costs no request, and the set-aside count rides in the sentence.
 
 ### 8.6 "skein could not read this one"
 
@@ -793,10 +804,13 @@ Written in the page's existing tokens; no new variables, no new type families.
 /* A STANDING CONDITION IS NOT A FAILURE. Today both are an orange bordered box
    with a bold title, and drawing the permanent one as an alarm is what makes the
    alarm stop working. */
-.revblind   { border:1px solid var(--border-2); border-left:2px solid var(--waiting);
-              background:transparent; padding:5px 11px; margin-bottom:10px; display:flex;
-              gap:10px; align-items:baseline; font:11.5px var(--mono); color:var(--dim); }
-.revblind b { color:var(--waiting); font-weight:500; display:inline; margin:0; flex:none; }
+/* Built (SKEIN-164), and quieter than drafted here: the standing condition kept
+   the amber left rule and lost the surrounding border as well as the box — a
+   rule and a word is the whole treatment, and the word is a label rather than a
+   title. `.revfail` below is unchanged and is now the only thing wearing it. */
+.revblind   { border-left:2px solid var(--waiting); padding:2px 0 2px 9px;
+              margin-bottom:12px; font:12px var(--mono); color:var(--text-2); }
+.revblind .revblindwhat { color:var(--waiting); }
 .revfail    { border:1px solid var(--error); border-left-width:3px; border-radius:var(--radius-sm);
               background:rgba(240,136,62,.08); padding:11px 13px; margin-bottom:14px;
               font:12.5px var(--mono); color:var(--text-2); }

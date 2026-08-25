@@ -119,6 +119,12 @@ function world(opts = {}) {
     ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revGist")}
+    // A row says whether a review is drafted for it (SKEIN-216), so drawing one needs these.
+    ${grab("revCrits")}
+    ${grab("revDraftedReview")}
+    ${grab("revReadyChip")}
+    // The row's own read control (SKEIN-228).
+    ${grab("revReadAgain")}
     ${grab("revRow")}
     ${grab("archivePr")}
     return {

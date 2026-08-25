@@ -146,7 +146,6 @@ function world(opts = {}) {
     let view = { box: null, mode: "review", kind: "agent" };
     const applyView = () => {};
     const loadReview = () => { renderReview(); };   // the queue is injected, never fetched here
-    const revAllowanceFor = () => {};
     const revFetchSummary = () => {};
     const revRenderNotes = () => {};
     const revComposeHtml = () => "";
@@ -233,6 +232,11 @@ function world(opts = {}) {
     ${grab("revSize")}
     ${grab("revAge")}
     ${grab("revGist")}
+    // A row says whether a review is drafted for it (SKEIN-216).
+    ${grab("revDraftedReview")}
+    ${grab("revReadyChip")}
+    // The row's own read control (SKEIN-228).
+    ${grab("revReadAgain")}
     ${grab("revRow")}
     ${grab("revNotesStore")}
     ${grab("revNotesFor")}

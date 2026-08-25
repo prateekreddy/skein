@@ -117,6 +117,22 @@ overlay is declared as `<div id=X aria-hidden="true">`, and the stylesheet must 
 the same declarations — requiring one particular rule would encode today's grouping rather than the
 property that matters.
 
+## `screenhalf.mjs` — does the board say when half the turn signal is missing
+
+```sh
+node tests/ui/screenhalf.mjs      # no setup, no chromium, runs inside a box
+```
+
+The badge exists because a missing screen half is invisible: the row falls back to hook edges and
+looks entirely normal. It has failed at that twice in the same way. `screen_health` gained
+`misfiled` in Rust and `SHALF` in the page was never told, so a refused observation rendered
+nothing — and nothing is exactly what a healthy screen renders.
+
+So the first check reads the states out of `src/signals.rs` rather than from a list kept here, since
+a list kept here is the thing that goes stale; and the rest pin that an unrecognised value names
+itself instead of disappearing. A badge that cannot say "I do not know this state" lies by omission,
+and it lies in the direction of confidence.
+
 ## `voice.mjs` — what the mouth says, without a browser
 
 ```sh

@@ -395,6 +395,42 @@ await check("a queue that cannot see your teams says so, visibly", async () => {
   const el = await mustSee("#revpane .revblind", "the blind-spot banner");
   const t = (await el.textContent()).toLowerCase();
   if (!t.includes("team")) throw new Error(`the banner does not name what is missing: ${t}`);
+  // A warning that cannot be acted on is shown for ever, so the cure travels in the sentence.
+  if (!t.includes("gh auth refresh")) throw new Error(`it does not name the cure: ${t}`);
+});
+// SKEIN-164. The `read:org` gap is PERMANENT — true on every load until somebody runs that command
+// — and it used to be drawn in exactly the treatment "the queue could not be built" uses. A
+// constant in the alarm's clothes is what teaches the eye to skip the alarm, and the queue's
+// willingness to shout is the best thing about it.
+await check("a standing gap is amber and quiet; the alarm is kept for skein failing", async () => {
+  const paint = await page.evaluate(() => {
+    // The tokens themselves, resolved by the browser, so this compares what is drawn rather than
+    // two spellings of the same hex.
+    const tok = name => { const s = document.createElement("span"); s.style.color = `var(--${name})`;
+      document.body.append(s); const c = getComputedStyle(s).color; s.remove(); return c; };
+    const blind = getComputedStyle(document.querySelector("#revpane .revblind"));
+    // The failure treatment is probed rather than provoked: this queue is healthy, and the point is
+    // that the two are drawn differently, not that this run can produce a 401.
+    const box = document.createElement("div");
+    box.className = "revfail";
+    document.getElementById("revpane").append(box);
+    const fail = getComputedStyle(box);
+    const out = {
+      rule: blind.borderLeftColor, ruled: blind.borderLeftWidth, boxed: blind.borderTopWidth,
+      failRule: fail.borderLeftColor, failBoxed: fail.borderTopWidth,
+      waiting: tok("waiting"), error: tok("error"),
+      alarms: document.querySelectorAll("#revpane .revfail").length - 1,
+    };
+    box.remove();
+    return out;
+  });
+  if (paint.rule !== paint.waiting)
+    throw new Error(`the standing gap is not amber: ${JSON.stringify(paint)}`);
+  if (parseFloat(paint.boxed) !== 0 || parseFloat(paint.ruled) === 0)
+    throw new Error(`the standing gap still wears a box rather than a rule: ${JSON.stringify(paint)}`);
+  if (paint.failRule !== paint.error || parseFloat(paint.failBoxed) === 0)
+    throw new Error(`the failure treatment lost its orange box: ${JSON.stringify(paint)}`);
+  if (paint.alarms) throw new Error("a standing condition is drawn as a failure");
 });
 
 console.log("\nfilter");
@@ -640,6 +676,63 @@ await check("a bug fix states itself on the collapsed row", async () => {
   const gists = await page.$$eval("#revpane .gist", els => els.map(e => e.textContent.trim()));
   if (!gists.some(g => g.includes("crashing on empty input")))
     throw new Error(`no one-line summary on the row: ${JSON.stringify(gists)}`);
+});
+// SKEIN-216. Summary and review are ONE model call where the review is yours to give, and one
+// payload carries both (`review::known`) — so the queue can say a review is waiting without a
+// request of its own. Before this, the only way to find out was to open a row and press "review the
+// code…", once per row, on a queue of thirty.
+await check("a drafted review says so on the row, and opens beside the summary", async () => {
+  // The drafts were written while the summaries above were being read. The payload that carries
+  // them is fetched per queue load, so this asks for one rather than waiting for the poller.
+  await page.evaluate(() => loadReview(true));
+  await page.waitForFunction(() => (revQueue?.prs || []).some(p => revDraftedReview(p)),
+    null, { timeout: 15000 });
+  // The chip when it is signal, nothing when the queue has worked through and every row wears one —
+  // §4's minority rule, decided at render time like `moved`. Both halves are asserted, so a chip
+  // that stopped being drawn at all fails here as loudly as one that became wallpaper.
+  const demoted = await page.evaluate(() => revCommonChips.has("ready"));
+  const chips = await page.$$("#revpane .revrow .revtag.ready");
+  if (demoted === !!chips.length)
+    throw new Error(`the chip and the demotion disagree: demoted=${demoted}, ${chips.length} on screen`);
+  if (!demoted) {
+    const said = (await (await mustSee("#revpane .revrow .revtag.ready", "the drafted-review chip")).textContent()).trim();
+    if (!/^review ready/.test(said)) throw new Error(`the chip does not say what is waiting: ${said}`);
+  }
+  // It is styled as its own thing rather than inheriting the plain chip, which is the failure
+  // `overlays.mjs` exists for: markup, handlers and tests, and no CSS. Probed rather than asserted
+  // off a row, because on this queue the rule above legitimately keeps it off the rows.
+  const paint = await page.evaluate(() => {
+    const at = document.getElementById("revpane");
+    const mk = cls => { const s = document.createElement("span"); s.className = cls; s.textContent = "review ready"; at.append(s); return s; };
+    const plain = mk("revtag"), ready = mk("revtag ready");
+    const out = { plain: getComputedStyle(plain).color, ready: getComputedStyle(ready).color,
+                  box: ready.getBoundingClientRect().width };
+    plain.remove(); ready.remove();
+    return out;
+  });
+  if (!paint.box) throw new Error("the drafted-review chip has no box — a CSS rule is hiding it");
+  if (paint.plain === paint.ready)
+    throw new Error(`the drafted-review chip has no rule of its own: ${JSON.stringify(paint)}`);
+  // Scoped to the row's own key, never to a bare `.revrow`: an earlier check leaves rows in states
+  // of its own, and this one is about a particular pull request.
+  const key = await page.evaluate(() => rk((revQueue.prs || []).find(p => revDraftedReview(p))));
+  await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
+  await settle(400);
+  const section = await mustSee(`#revpane .revrow[data-rk="${key}"].open .revdraft`,
+    "the drafted review as a section of the open row");
+  const text = (await section.textContent()).trim();
+  if (!/nothing to flag/i.test(text))
+    throw new Error(`the section does not carry what the review said: ${text}`);
+  // The brief is above it: both in one go is the whole ask.
+  const order = await page.evaluate(k => {
+    const row = document.querySelector(`#revpane .revrow[data-rk="${k}"]`);
+    const brief = row.querySelector(".revbrief, .revnosum");
+    const draft = row.querySelector(".revdraft");
+    return brief && draft ? brief.compareDocumentPosition(draft) & 4 : 0;   // FOLLOWING
+  }, key);
+  if (!order) throw new Error("the review is not a section beside the summary");
+  await page.click(`#revpane .revrow[data-rk="${key}"] .revline`);
+  await settle(200);
 });
 await check("a draft is not ready, and the fold states its own composition", async () => {
   // The draft is not hidden and not your move: it is a COUNT with its reason, one click open.
@@ -929,7 +1022,9 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   const before = await laneTitles("your move");
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
   await settle(300);
-  const strip = await page.$eval("#revpane .revrow.open .revacts", e => e.textContent || "");
+  // The ROW's own strip, not the drafted review's beside it: an expanded row grew sections with
+  // their own `.revacts`, and a bare selector reads whichever the document reaches first.
+  const strip = await page.$eval("#revpane .revrow.open .revrowacts", e => e.textContent || "");
   if (!/set aside/.test(strip) || !/undo/.test(strip))
     throw new Error(`the control did not become the receipt: "${strip}"`);
   const held = await laneTitles("your move");
@@ -937,7 +1032,7 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   // undo: the request never left the machine, and the strip returns.
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('undo')");
   await settle(300);
-  const restored = await page.$eval("#revpane .revrow.open .revacts", e => e.textContent || "");
+  const restored = await page.$eval("#revpane .revrow.open .revrowacts", e => e.textContent || "");
   if (!/set aside/.test(restored) || /undo/.test(restored)) throw new Error("undo did not restore the strip");
   // Pressed for real: the window lapses, the archive posts, and the row greys IN PLACE.
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
@@ -1115,6 +1210,137 @@ await check("a workflow it could not read is refused with the step that is wrong
   if ((still.workflow || [])[0]?.name !== "watch-ci") {
     throw new Error("a refused save destroyed the file it refused to replace");
   }
+});
+
+console.log("\nedge states");   // SKEIN-154 — both were correct prose and inert as affordances
+// SKEIN-228. Re-analysis existed only behind the fold, ninth of nine chips, which from the outside
+// is the same as not existing. The row that most needs it is one read against an EARLIER commit —
+// the line already says so, and this is the answer to that sentence.
+await check("a reading of an older commit offers its re-read on the line", async () => {
+  const before = await page.$$eval("#revpane .revrow .revline",
+    els => Math.max(...els.map(e => e.getBoundingClientRect().height)));
+  const key = await page.evaluate(() => {
+    const pr = (revQueue.prs || []).find(p => {
+      const s = revSums.get(rk(p));
+      return p.lane === "needs-you" && s && s !== "…" && s.depth !== "unread";
+    });
+    const s = revSums.get(rk(pr));
+    // What the bulk payload says when the branch has moved under a reading skein already has.
+    revSums.set(rk(pr), { ...s, stale: true, head_sha: "older" });
+    renderReview();
+    return rk(pr);
+  });
+  const btn = await mustSee(`#revpane .revrow[data-rk="${key}"] .revread`, "the row's read control");
+  const after = await page.$$eval("#revpane .revrow .revline",
+    els => Math.max(...els.map(e => e.getBoundingClientRect().height)));
+  if (after > before)
+    throw new Error(`the control changed the row's height: ${before} → ${after}`);
+  if (!/never counted against the day/.test(await btn.getAttribute("title")))
+    throw new Error("the control does not say that asking costs nothing");
+
+  // Pressing it asks the server the way a person asks — and does not toggle the fold underneath,
+  // which is what a control inside a row whose whole line is a toggle would do by default.
+  const fold = () => page.$(`#revpane .revrow[data-rk="${key}"].open`).then(Boolean);
+  const wasOpen = await fold();
+  const urls = [];
+  const listen = r => urls.push(r.url());
+  page.on("request", listen);
+  await btn.click();
+  await settle(600);
+  page.off("request", listen);
+  if (!urls.some(u => /review\/\d+\/summary\?force=1$/.test(u)))
+    throw new Error(`no manual read went out: ${JSON.stringify(urls.filter(u => u.includes("summary")))}`);
+  if (await fold() !== wasOpen)
+    throw new Error("pressing the read control toggled the row it sits on");
+});
+// And where somebody who has just read the diff is most likely to want one.
+await check("the reading view carries the same control", async () => {
+  const target = await page.evaluate(() => {
+    const pr = (revQueue.prs || []).find(p => p.lane === "needs-you");
+    openReading(pr.repo_id, pr.number);
+    return pr.number;
+  });
+  await settle(600);
+  // The queue is put back whatever happens: a check that fails inside the reading view would
+  // otherwise leave every check after it looking at a diff.
+  try {
+    const btn = await mustSee("#revpane .readhead .revread", "the reading view's read control");
+    if (!/re-read|reading/.test((await btn.textContent()).trim()))
+      throw new Error(`the control does not name what it does: ${await btn.textContent()}`);
+    const urls = [];
+    const listen = r => urls.push(r.url());
+    page.on("request", listen);
+    await btn.click();
+    await settle(600);
+    page.off("request", listen);
+    if (!urls.some(u => new RegExp(`review/${target}/summary\\?force=1$`).test(u)))
+      throw new Error(`the reading view's control asked for nothing: ${JSON.stringify(urls)}`);
+  } finally {
+    await page.evaluate(() => closeReading());
+    await settle(400);
+  }
+});
+// A queue you have cleared is the best moment this product has, and it used to be "nothing here."
+// in the corner of a 1400 px page while another repo held ten. This drives the real filter and the
+// real render: the your-move rows are moved to another repo, so acme genuinely has none.
+await check("a cleared queue reads like one and names what the rest of the fleet holds", async () => {
+  // The load `openReview` starts must land BEFORE the rows are moved, or it arrives a moment later
+  // and puts the real queue back under the assertion.
+  await page.evaluate(() => openReview("acme"));
+  await page.waitForFunction(() => !revLoading && revQueue && (revQueue.prs || []).length,
+    null, { timeout: 15000 });
+  await page.evaluate(() => {
+    // Each moved row takes its reading with it. `rk` is repo + number, so a row that changes repo
+    // becomes a row nothing has read — and the pump would then ask the server about a repo that
+    // does not exist, which is a 404 in the console and a check failing three sections later.
+    revQueue = { ...revQueue, prs: (revQueue.prs || []).map(p => {
+      if (p.lane !== "needs-you") return p;
+      const moved = { ...p, repo_id: "lattice" };
+      revSums.set(rk(moved), revSums.get(rk(p))
+        || { number: p.number, head_sha: p.head_sha, depth: "unread", unread_because: "nobody asked" });
+      return moved;
+    }) };
+    renderReview();
+  });
+  await settle(300);
+  const head = await mustSee("#revpane .revclear-head", "the cleared-queue headline");
+  if (!/acme is clear/.test((await head.textContent()).trim()))
+    throw new Error(`the headline is not about the repo you are looking at: ${await head.textContent()}`);
+  const next = await mustSee("#revpane .revclear-next .revclear-row", "the honest next thing");
+  const said = (await next.textContent()).replace(/\s+/g, " ").trim();
+  if (!/lattice/.test(said) || !/^\d/.test(said))
+    throw new Error(`the other repo is not named with its count: ${said}`);
+  // A headline you cannot read is not a headline: it must outrank the sentence under it.
+  const sizes = await page.evaluate(() => [
+    parseFloat(getComputedStyle(document.querySelector("#revpane .revclear-head")).fontSize),
+    parseFloat(getComputedStyle(document.querySelector("#revpane .revclear-sub")).fontSize)]);
+  if (!(sizes[0] > sizes[1])) throw new Error(`the cleared screen has no headline: ${sizes}`);
+});
+// And the failure that used to replace the queue. Provoked in the page rather than by breaking
+// GitHub for the rest of the run: what is asserted is what the pane does with the state, and the
+// state is exactly what `loadReview`'s catch now builds.
+await check("a queue that could not be built keeps its rows, dimmed, and offers the way out", async () => {
+  await page.evaluate(() => { loadReview(true); });
+  await page.waitForFunction(() => !revLoading && revQueue && (revQueue.prs || []).length, null, { timeout: 15000 });
+  const rows = await page.evaluate(() => {
+    revQueue = { ...revQueue, error: "401 Bad credentials", remembered: true };
+    renderReview();
+    return document.querySelectorAll("#revpane .revrow").length;
+  });
+  if (!rows) throw new Error("the failure replaced the queue that was on screen");
+  const box = await mustSee("#revpane .revfail", "the failure box");
+  const said = (await box.textContent()).replace(/\s+/g, " ");
+  if (!/401 Bad credentials/.test(said)) throw new Error(`it does not say what GitHub said: ${said}`);
+  if (!/last read/.test(said)) throw new Error(`it does not say the rows are the remembered copy: ${said}`);
+  await mustSee("#revpane .revfail .revchip:has-text('try again')", "the retry");
+  await mustSee("#revpane .revfail .revchip:has-text('GitHub')", "the setting that would fix it");
+  // The 55% is load-bearing: it is how you tell what you are looking at is not live without
+  // reading anything.
+  const dim = await page.$eval("#revpane .revlane", e => parseFloat(getComputedStyle(e).opacity));
+  if (!(dim < 1)) throw new Error(`the remembered rows are drawn as though they were live: ${dim}`);
+  // Put the pane back, so this check costs the ones after it nothing.
+  await page.evaluate(() => { openReview(""); loadReview(true); });
+  await settle(600);
 });
 
 console.log("\nquiet");

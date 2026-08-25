@@ -21,17 +21,20 @@
 //! Column-0 declarations only, which is the convention both files hold to — anything indented is
 //! inside a function and shadows rather than collides. A missed collision here is a browser suite
 //! away; a false one would make this test the thing people delete.
+//!
+//! A name declared twice *within* one script is checked too, and it is the quieter of the two: the
+//! engine raises nothing, so there is no blank page to notice — just a caller wired to the wrong
+//! function. See `no_page_declares_a_name_twice_within_its_own_script`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Every top-level declaration in a script, as `name -> (kind, 1-based line)`.
+/// Every top-level declaration in a script, in source order, as `(name, kind, 1-based line)`.
 ///
-/// `kind` is kept because the JavaScript rule is asymmetric: two `var`s or two `function`s at global
-/// scope are legal and merge, while a `const`, `let` or `class` collides with *anything* of the same
-/// name. Reporting "duplicate" for the legal pair is how a checker earns a `#[ignore]`.
-fn top_level(source: &str) -> BTreeMap<String, (String, usize)> {
-    let mut found = BTreeMap::new();
+/// Kept as a list rather than a map because the two checks below want different things from it: one
+/// wants each name once, the other wants precisely the repeats.
+fn declarations(source: &str) -> Vec<(String, String, usize)> {
+    let mut found = Vec::new();
     for (i, line) in source.lines().enumerate() {
         // Column 0 only: an indented declaration is inside something.
         let rest = match line
@@ -53,13 +56,49 @@ fn top_level(source: &str) -> BTreeMap<String, (String, usize)> {
         if name.is_empty() {
             continue; // destructuring, `function (` — nothing this test can name
         }
-        found.entry(name).or_insert((kind.to_string(), i + 1));
+        found.push((name, kind.to_string(), i + 1));
     }
     found
 }
 
-/// The one inline `<script>` block — the one with no `src`.
-fn inline_script(html: &str) -> &str {
+/// Every top-level declaration in a script, as `name -> (kind, 1-based line)`.
+///
+/// `kind` is kept because the JavaScript rule is asymmetric: two `var`s or two `function`s at global
+/// scope are legal and merge, while a `const`, `let` or `class` collides with *anything* of the same
+/// name. Reporting "duplicate" for the legal pair is how a checker earns a `#[ignore]`.
+fn top_level(source: &str) -> BTreeMap<String, (String, usize)> {
+    let mut found = BTreeMap::new();
+    for (name, kind, line) in declarations(source) {
+        found.entry(name).or_insert((kind, line));
+    }
+    found
+}
+
+/// Names declared twice at column 0 in ONE script, as `(name, first, later)`.
+///
+/// Deliberately blind to `collides`: that rule answers "does the engine reject this", and within one
+/// script the answer for `function`+`function` is no — the later declaration simply wins and every
+/// earlier caller is silently rewired to it. That is not a legal pair here, it is the quietest bug
+/// this file can have, so redeclaration of ANY kind is reported.
+fn redeclared(source: &str) -> Vec<(String, (String, usize), (String, usize))> {
+    let mut first: BTreeMap<String, (String, usize)> = BTreeMap::new();
+    let mut repeats = Vec::new();
+    for (name, kind, line) in declarations(source) {
+        match first.get(&name) {
+            Some(earlier) => repeats.push((name, earlier.clone(), (kind, line))),
+            None => {
+                first.insert(name, (kind, line));
+            }
+        }
+    }
+    repeats
+}
+
+/// The one inline `<script>` block — the one with no `src` — and the file line it starts on.
+///
+/// The offset is what turns a block-relative line into something you can open. A duplicate reported
+/// as "line 4491" of a 5,000-line block is a search, not a location.
+fn inline_script(html: &str) -> (&str, usize) {
     let open = "<script>\n";
     let start = html
         .find(open)
@@ -69,7 +108,8 @@ fn inline_script(html: &str) -> &str {
         .find("\n</script>")
         .expect("the inline <script> block is closed")
         + start;
-    &html[start..end]
+    // Lines strictly before the block: the last of them is the `<script>` line itself.
+    (&html[start..end], html[..start].lines().count())
 }
 
 /// A lexical declaration collides with anything; `var`/`function` only with a lexical one.
@@ -104,7 +144,8 @@ fn no_page_declares_a_name_the_shared_bundle_already_declares() {
              this check reading the wrong block"
         );
 
-        for (name, (kind, line)) in top_level(inline_script(&html)) {
+        let (block, _) = inline_script(&html);
+        for (name, (kind, line)) in top_level(block) {
             if let Some((bundle_kind, bundle_line)) = bundle_names.get(&name) {
                 assert!(
                     !collides(kind.as_str(), bundle_kind.as_str()),
@@ -123,6 +164,75 @@ fn no_page_declares_a_name_the_shared_bundle_already_declares() {
             }
         }
     }
+}
+
+/// The other direction: one script, one name, twice.
+///
+/// The check above is about two scripts sharing a scope, where the engine at least raises a
+/// `SyntaxError` and takes the page down loudly enough to be found. This one has no such backstop.
+/// `function revDraft(pr)` was added next to the review row while `function revDraft(number)` already
+/// served the composer (SKEIN-225): two top-level function declarations, same name, and JavaScript
+/// permits it — no `SyntaxError`, no console warning. The later one wins, the composer's caller is
+/// rewired to a function expecting a different argument, and what reaches the browser is
+/// `RangeError: Maximum call stack size exceeded` in a place nothing points at. The node suites see
+/// none of it: they lift functions out of the page by name, so they only ever load one of the two.
+#[test]
+fn no_page_declares_a_name_twice_within_its_own_script() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    for page in ["src/web/index.html", "src/web/v2.html"] {
+        let html =
+            std::fs::read_to_string(root.join(page)).unwrap_or_else(|e| panic!("{page}: {e}"));
+        let (block, offset) = inline_script(&html);
+
+        for (name, (first_kind, first_line), (later_kind, later_line)) in redeclared(block) {
+            panic!(
+                "`{name}` is declared twice at the top level of {page}'s inline script:\n\
+                 \n  \
+                 {page}:{} (`{first_kind} {name}`)\n  \
+                 {page}:{} (`{later_kind} {name}`)\n\
+                 \n\
+                 Whichever runs last is the one every caller in the page gets, including the callers \
+                 written for the other one. Two `function`s raise nothing at all — no SyntaxError, \
+                 no warning — and the node suites lift functions by name, so they load one of the \
+                 two and pass.\n\
+                 \n\
+                 The fix is a name each, or one definition serving both callers. Not two that agree.",
+                offset + first_line,
+                offset + later_line,
+            );
+        }
+    }
+}
+
+/// The gate above is worth nothing if it cannot see the shape the bug came in, or cannot say where.
+///
+/// Written against the real one: two `function` declarations of the same name, which `collides`
+/// answers "legal" for and which this check must report anyway. A `redeclared` built on `collides`
+/// would have passed the whole suite while the composer called the row's function.
+#[test]
+fn the_scan_reports_a_function_redeclared_by_a_function_and_names_both_lines() {
+    let repeats =
+        redeclared("function revDraft(number) {\n}\nconst x = 1;\nfunction revDraft(pr) {\n}\n");
+    assert_eq!(repeats.len(), 1, "one name declared twice, reported once");
+    let (name, first, later) = &repeats[0];
+    assert_eq!(name, "revDraft");
+    assert_eq!(first, &("function".to_string(), 1));
+    assert_eq!(later, &("function".to_string(), 4));
+    assert!(
+        collides("function", "const"),
+        "the cross-script rule is untouched by any of this"
+    );
+
+    // A name declared once is not a repeat, however many other names surround it.
+    assert!(redeclared("function a() {}\nfunction b() {}\nconst c = 1;\n").is_empty());
+
+    // And the offset that turns a block line into a file line: the block starts after `<script>`, so
+    // a declaration on the block's first line is on the file line after it.
+    let (block, offset) = inline_script("<html>\n<script>\nfunction f() {}\n</script>\n");
+    assert_eq!(block, "function f() {}");
+    assert_eq!(offset, 2, "`<html>` and `<script>` precede the block");
+    assert_eq!(offset + 1, 3, "`function f` is file line 3");
 }
 
 /// The gate above is worth nothing if `top_level` cannot see the shape the collision came in.

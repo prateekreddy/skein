@@ -440,6 +440,10 @@ const REVIEW = {
   c: "rev-comment",
   a: "rev-approve",
   r: "rev-request",
+  // Shift-R, beside `r`, and a capital because it spends nothing and undoes nothing: it asks skein
+  // to read the selected pull request again against the commit that is there now (SKEIN-228). The
+  // day's ceiling is on skein's own initiative, never on a person, so this key is never refused.
+  R: "rev-reread",
   "]": "rev-next-file",
   "[": "rev-previous-file",
   "?": "keys",

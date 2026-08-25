@@ -82,6 +82,9 @@ test("with the review pane the surface, review keys mean review actions", () => 
     ["e", "rev-aside"], ["u", "rev-undo"], ["/", "rev-search"],
     ["g", "rev-chord"], ["G", "rev-last"],
     ["c", "rev-comment"], ["a", "rev-approve"], ["r", "rev-request"],
+    // Shift-R asks for a fresh reading and is never refused: the day's ceiling is on skein's own
+    // initiative, not on a person (SKEIN-228).
+    ["R", "rev-reread"],
     ["]", "rev-next-file"], ["[", "rev-previous-file"],
   ]);
   for (const [k, action] of named) {
