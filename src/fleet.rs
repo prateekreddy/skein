@@ -3878,10 +3878,20 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         // would fail until something reinstalled the script. An old launcher ignores an env var.
         "SKEIN_FLEET_LIMITS={fleet_q} SKEIN_FLEET_GUARANTEES={guard_q} \
          SKEIN_GIT_SCOPE={scope_q} SKEIN_BOX_REPO={repo_q} \
-         SKEIN_BOX_PRIVILEGED={priv_q} \
+         SKEIN_BOX_PRIVILEGED={priv_q} SKEIN_MODEL_SCRATCH={scratch_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
+        // Where the agent in this box keeps its model scratch, as a path relative to the box's own
+        // HOME — the launcher joins the two, because only the shell inside the namespace can name
+        // that HOME. [`MODEL_SCRATCH`] is the definition; this is the box's copy of the same rule
+        // the model call and the login terminal run on, and the value travels rather than the path
+        // being spelled out a second time in the shell script (SKEIN-289).
+        //
+        // In the environment for the same reason as everything above it: a launcher already
+        // installed in a running sandbox would read an eighth positional as part of the agent
+        // command. Unset, the launcher exports nothing and the box is exactly where it was.
+        scratch_q = sh_quote(MODEL_SCRATCH),
         // The mount set the launcher cannot learn for itself, and the two paths out of it this box
         // is entitled to. The launcher covers every mount and binds these back — an inversion, not
         // a list of things to hide, because `repo.source_tree` and an adopted `repo.store` are arbitrary
@@ -5335,6 +5345,29 @@ pub struct ExpiredLogin {
     pub runtime: String,
     /// RFC3339, UTC.
     pub expired_at: String,
+    /// Which of [`expired_logins`]'s two witnesses said so.
+    pub witness: Witness,
+    /// The refusal's own words. Empty for [`Witness::Credential`], which has none to give: a file
+    /// says when a token is due to die, not what happened when one was used.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub said: String,
+}
+
+/// Which witness reported a login dead — see [`expired_logins`] for why there are two.
+///
+/// **They are different sentences and they lead to different actions.** "The credential file says
+/// this expired on Tuesday" is a date, knowable with nothing running; "a model call was refused at
+/// 11:03 with *OAuth session expired*" is something that happened, and is the only one of the two
+/// that can be wrong about the present — which is exactly why `crate::ai`'s refusal memory now
+/// expires. A banner that renders them identically leaves a person unable to tell a credential
+/// that is dead from one that was dead a moment ago.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Witness {
+    /// The credential file's own `refreshTokenExpiresAt`, already in the past.
+    Credential,
+    /// A model call that came back refused.
+    Refusal,
 }
 
 /// Keep the fleet's login on the host, and put it back into a sandbox that has none.
@@ -5623,11 +5656,14 @@ pub fn model_call_in_sandbox(
     // shared by everything skein runs in it, and the CLI refuses to start when the path it derives
     // from /tmp belongs to somebody else. `$HOME` is expanded IN THE SANDBOX, by the shell that
     // runs this, because it is the sandbox's HOME that holds the credential and not the host's.
+    // From [`model_scratch_export`], which the login terminal and every box session now share: the
+    // rule reached the calls skein MAKES before the ones it HOSTS (SKEIN-289).
     let script = format!(
         "printf '%s\\n' {REACHED} >&2\n\
-         if [ -n \"${{HOME:-}}\" ]; then export CLAUDE_CODE_TMPDIR=\"$HOME/{MODEL_SCRATCH}\"; fi\n\
+         {scratch}\n\
          if [ -s \"$HOME/.claude/.credentials.json\" ]; then unset {overrides}; fi\n\
          {bin} -p --model {model} <<'{delim}'\n{prompt}\n{delim}\n",
+        scratch = model_scratch_export(),
         bin = sh_quote(bin),
         model = sh_quote(model),
         overrides = MODEL_AUTH_OVERRIDES.join(" "),
@@ -5756,6 +5792,30 @@ pub fn model_scratch_dir(home: &std::path::Path) -> std::path::PathBuf {
     home.join(MODEL_SCRATCH)
 }
 
+/// The same rule as shell, for the calls skein hands to a shell instead of spawning.
+///
+/// **`$HOME` is left for the shell to expand, and that is the point.** [`model_scratch_dir`] can
+/// only answer where skein already knows the HOME; a login in the sandbox, a box's agent inside its
+/// own mount namespace, and a model call made through `sbx exec` all run under a HOME this process
+/// cannot name — and it is that HOME which holds the credential, so it is that HOME the scratch
+/// must sit under. Handing them a path resolved here would name a directory the other side does not
+/// have.
+///
+/// One definition with several users, which is the whole reason this is a function rather than a
+/// line repeated per call site. [`MODEL_SCRATCH`] argues why every one of them needs it: the CLI
+/// derives `<tmp>/claude-<uid>` and refuses to start when that path belongs to somebody else, a
+/// sandbox's `/tmp` is shared by everything skein runs there, and the offending directory outlives
+/// every call. The reasoning was applied to the calls skein MAKES before it was applied to the
+/// calls skein HOSTS — the login terminal and every box session — which is SKEIN-289.
+///
+/// Guarded on HOME being set, because `$HOME/…` under an unset HOME is `/…`: a scratch directory
+/// at the filesystem root is a worse answer than letting the CLI derive its own.
+pub fn model_scratch_export() -> String {
+    format!(
+        "if [ -n \"${{HOME:-}}\" ]; then export CLAUDE_CODE_TMPDIR=\"$HOME/{MODEL_SCRATCH}\"; fi"
+    )
+}
+
 pub fn login_home() -> Option<std::path::PathBuf> {
     let home = fleet_home_dir();
     refreshable_login_at(&home).then_some(home)
@@ -5772,16 +5832,66 @@ pub fn runtime_logins() -> Vec<RuntimeLogin> {
     LOGIN_FILES
         .iter()
         .map(|rel| RuntimeLogin {
-            runtime: match rel.starts_with(".codex") {
-                true => "codex",
-                false => "claude",
-            },
+            runtime: runtime_of(rel),
             state: match std::fs::read(dir.join(rel)) {
                 Ok(bytes) => login_state(&bytes, now_ms),
                 Err(_) => LoginState::Absent,
             },
         })
         .collect()
+}
+
+/// Whose credential one of [`LOGIN_FILES`] is. One definition, because [`login_written_ms`] has to
+/// walk the same list backwards and two spellings of the same mapping is how they come apart.
+fn runtime_of(rel: &str) -> &'static str {
+    match rel.starts_with(".codex") {
+        true => "codex",
+        false => "claude",
+    }
+}
+
+/// When a credential this fleet's model calls would read was last **written**, in epoch ms.
+///
+/// **This is evidence that a refusal is out of date**, and that is the only thing it is for. A
+/// remembered refusal (`crate::ai::auth_refusal`) is a fact about the credential that was there at
+/// one moment; a credential written after that moment is a different credential, and nothing the
+/// model said about the old one applies to it. See `crate::ai`'s refusal memory for the rule and
+/// `prq::what_github_said` for where this project first wrote it down.
+///
+/// **Both HOMEs, newest wins**, because `crate::ai::tried` chooses between exactly these two: the
+/// fleet's own `fleet-home` when it holds a refreshable login, and the ambient `$HOME` when it does
+/// not. Asking only about the first would leave a person who logged in on the host's own HOME
+/// staring at a banner that will not clear — which is the shape of the fault this answers.
+///
+/// **Mtime and not `refreshTokenExpiresAt`.** The question is "has this credential been replaced
+/// since we were told it was bad", not "is the replacement any good": if it is also bad the next
+/// call is refused again and says so, which costs one call and re-plants a refusal that is true.
+/// Reading the expiry instead would trust a claim about the future to overturn a report about the
+/// past — and `box-session.sh` has the long version of why those two are not the same question.
+///
+/// `None` when there is no such file in either HOME, which is not evidence of anything.
+pub fn login_written_ms(runtime: &str) -> Option<i64> {
+    let rel = LOGIN_FILES.iter().find(|rel| runtime_of(rel) == runtime)?;
+    let homes = [
+        Some(fleet_home_dir()),
+        std::env::var_os("HOME").map(std::path::PathBuf::from),
+    ];
+    homes
+        .into_iter()
+        .flatten()
+        .filter_map(|home| written_ms(&home.join(rel)))
+        .max()
+}
+
+/// A file's mtime in epoch milliseconds, or `None` when there is no file to ask.
+fn written_ms(path: &std::path::Path) -> Option<i64> {
+    let at = std::fs::metadata(path).ok()?.modified().ok()?;
+    // A pre-1970 mtime is nonsense on a credential and still has an answer; inventing 0 for it
+    // would read as "written at the epoch", which is older than every refusal rather than newer.
+    Some(match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => since.as_millis() as i64,
+        Err(before) => -(before.duration().as_millis() as i64),
+    })
 }
 
 /// Which runtimes have a login the fleet can hand to a new box **that still works**.
@@ -5807,6 +5917,15 @@ pub fn signed_in_runtimes() -> Vec<String> {
 /// sentence on a pull request row and no banner anywhere, because nothing asked the model what it
 /// had just been told. `ai::auth_refusal` is that answer, and it outranks the file: the file is a
 /// claim about the future, the refusal is what happened.
+///
+/// **The two clear differently, which is why [`Witness`] rides along.** The file half needs nothing
+/// pressed — a login completed anywhere rewrites it and the next poll is clean. The refusal half is
+/// remembered in this process, and used to be cleared only by this process's own `skein login`, by a
+/// call that then worked, or by a restart; a login done in a box, in a second skein or in the
+/// desktop app left the banner up over a credential that was fine. `ai::refusal_still_standing` is
+/// where that was fixed — a credential written after the refusal contradicts it, and a refusal
+/// nothing can contradict expires on a clock — and the witness is how a reader can tell which of
+/// the two sentences they are looking at.
 pub fn expired_logins() -> Vec<ExpiredLogin> {
     let refused = crate::ai::auth_refusal();
     let mut out: Vec<ExpiredLogin> = runtime_logins()
@@ -5819,6 +5938,8 @@ pub fn expired_logins() -> Vec<ExpiredLogin> {
                     // A timestamp outside chrono's range is still a death date, just not a sayable
                     // one; the raw milliseconds beat inventing a calendar date.
                     .unwrap_or_else(|| format!("{at_ms}ms")),
+                witness: Witness::Credential,
+                said: String::new(),
             }),
             _ => None,
         })
@@ -5832,6 +5953,11 @@ pub fn expired_logins() -> Vec<ExpiredLogin> {
                 expired_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(refusal.at_ms)
                     .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
                     .unwrap_or_else(|| format!("{}ms", refusal.at_ms)),
+                // Which stamp this is, said out loud: `expired_at` here is when skein was TOLD, not
+                // when the credential died — nothing can know the second — and the two read
+                // identically on a banner that does not distinguish them.
+                witness: Witness::Refusal,
+                said: refusal.said,
             });
         }
     }
@@ -6267,12 +6393,23 @@ pub fn fleet_liveness() -> std::collections::HashMap<String, bool> {
 /// nothing but `backups`. Seeding a box copies FILES, so the flow that writes one is the flow that
 /// works — `/login` inside the TUI. An unknown runtime gets a plain shell rather than a command
 /// that fails in an unhelpful way.
+///
+/// **It brings its own scratch directory**, from [`model_scratch_export`], for the same reason
+/// [`MODEL_SCRATCH`] gives — and this is the entry point that reported the fault. The login runs the
+/// CLI in the fleet's shared `/tmp`, where something root-owned had already made `claude-1000`, so
+/// the flow that OAuth completed for still ended in "Refusing to use it" (SKEIN-289). Here rather
+/// than at the two call sites: `skein login` and the cockpit's login terminal both come through
+/// this function, and a fix at one of them would have left the other reporting it.
+///
+/// Prefixed on the front of every arm, including `exec bash -l` — a runtime skein does not know
+/// still gets a shell whose agent, whatever it is, is not standing in the shared `/tmp`.
 pub fn fleet_login_command(runtime: &str) -> String {
-    match runtime {
-        "codex" => "codex login".into(),
-        "claude" => "claude".into(), // then /login inside it
-        _ => "exec bash -l".into(),
-    }
+    let command = match runtime {
+        "codex" => "codex login",
+        "claude" => "claude", // then /login inside it
+        _ => "exec bash -l",
+    };
+    format!("{}\n{command}", model_scratch_export())
 }
 
 /// Log in to a runtime once, in the sandbox's own HOME, so every box inherits it.
@@ -6533,6 +6670,81 @@ mod tests {
 
         crate::ai::forget_refusal();
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// The banner goes away when the login is completed **somewhere else**, with nothing pressed.
+    ///
+    /// The owner's question, in the form it was asked: *"when login is complete from other session
+    /// or something does the bar go away?"* Partly — and which half you were looking at was not
+    /// visible from the banner. The file half clears itself on the next poll. The refusal half is
+    /// remembered in the server's own process and reached none of the ways a login can happen
+    /// elsewhere: a `/login` inside a box, a second skein, the desktop app. It stood until a call
+    /// succeeded or somebody restarted the server, so a person who logged in, looked, and concluded
+    /// it had not worked was reading a true statement about the past.
+    ///
+    /// Driven through `expired_logins`, which is what `/api/health` serializes and what the banner
+    /// renders — the surface the question was actually about.
+    #[test]
+    fn a_login_completed_anywhere_takes_the_banner_down_with_nothing_pressed() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        // The ambient HOME counts as evidence too, so it is pointed somewhere this test owns
+        // rather than at whatever the machine running the suite happens to hold.
+        std::env::set_var("HOME", home.join("ambient"));
+        crate::ai::forget_refusal();
+
+        crate::ai::plant_refusal_aged(
+            "`claude` exited 1: Failed to authenticate: OAuth session expired and could not be refreshed",
+            std::time::Duration::from_secs(600),
+        );
+        let dead = expired_logins();
+        assert_eq!(
+            dead.iter().map(|e| e.runtime.as_str()).collect::<Vec<_>>(),
+            vec!["claude"],
+            "the banner is not up, so this test would pass over the bug it is about"
+        );
+        // The two witnesses are different sentences and lead to different actions, so the banner is
+        // told which one it has — and given the words, which only this one has.
+        assert_eq!(
+            dead[0].witness,
+            Witness::Refusal,
+            "a refusal is reported as the credential file's own expiry date, which is a date \
+             nobody can check and an action that may not be needed"
+        );
+        assert!(
+            dead[0].said.contains("OAuth session expired"),
+            "the refusal reached the banner with its own words dropped: {:?}",
+            dead[0].said
+        );
+
+        // The login happens somewhere this process cannot see. Nothing here is pressed, nothing
+        // calls `forget_refusal`, nothing restarts: a credential is simply written.
+        let credential = fleet_home_dir().join(".claude/.credentials.json");
+        std::fs::create_dir_all(credential.parent().unwrap()).unwrap();
+        std::fs::write(
+            &credential,
+            br#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","refreshTokenExpiresAt":32503680000000}}"#,
+        )
+        .unwrap();
+        assert!(
+            expired_logins().is_empty(),
+            "the bar is still up after a login completed elsewhere, which reads as the login having \
+             failed: {:?}",
+            expired_logins()
+        );
+        // And the file half of the same answer is now the live one, on the same poll.
+        assert_eq!(
+            signed_in_runtimes(),
+            vec!["claude".to_string()],
+            "the credential that cleared the banner is not reported as a login"
+        );
+
+        crate::ai::forget_refusal();
+        for key in ["SKEIN_HOME", "HOME"] {
+            std::env::remove_var(key);
+        }
     }
     use super::*;
 
@@ -12962,6 +13174,102 @@ b idle 5000000 4 1048576 1048576
             in_fleet_argv.last(),
             "the two deployments log in differently, which is a second thing to keep in step"
         );
+    }
+
+    /// The login terminal brings its own scratch directory, and it is the same one the model call
+    /// brings — asserted on the environment the login's child actually receives.
+    ///
+    /// This is the entry point that reported SKEIN-289: the OAuth flow completed, and the CLI then
+    /// refused with `Temp directory /tmp/claude-1000 is owned by uid 0`. Both surfaces that log a
+    /// fleet in — `skein login` and the cockpit's login terminal — come through `login_argv`, so
+    /// this drives that argv rather than either caller.
+    ///
+    /// Run rather than matched: a substring check would pass on an export the shell never reached
+    /// (after the `exec`, inside a false branch, quoted so it is one word). The stub stands in for
+    /// `claude` and prints what it was handed.
+    #[cfg(unix)]
+    #[test]
+    fn the_login_terminal_brings_the_same_scratch_directory_the_model_call_does() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("claude");
+        std::fs::write(
+            &stub,
+            "#!/usr/bin/env bash\nprintf '%s' \"${CLAUDE_CODE_TMPDIR:-the shared /tmp}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // In-fleet, because that is the arm whose argv this machine can actually run: the host arm
+        // is the same command behind an `sbx exec` hop, which the assertion below pins separately.
+        std::env::set_var(crate::deployment::IN_FLEET, "1");
+        let (program, argv) = login_argv("skein-fleet", "claude");
+        std::env::remove_var(crate::deployment::IN_FLEET);
+
+        let home = dir.join("sandbox-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new(program)
+            .args(&argv)
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .output()
+            .expect("run the login command");
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // A login shell on some machines rewrites PATH, and then this ran nothing at all. Said out
+        // loud rather than passed over: a test that cannot run must not be silently green.
+        if said.is_empty() {
+            eprintln!(
+                "SKIPPED the_login_terminal_brings_the_same_scratch_directory_the_model_call_does: \
+                 this machine's login shell did not reach the stub on PATH, so the login \
+                 environment was NOT exercised here"
+            );
+            return;
+        }
+        assert_eq!(
+            said,
+            model_scratch_dir(&home).display().to_string(),
+            "the login started the runtime in the shared /tmp, where anything that got there first \
+             makes it refuse — the failure the owner met with a login that had otherwise worked"
+        );
+
+        // And the host arm carries the identical command, so the hop is a hop and not a second
+        // login with its own environment.
+        let (_, host_argv) = login_argv("skein-fleet", "claude");
+        assert_eq!(
+            host_argv.last(),
+            argv.last(),
+            "the login through `sbx exec` runs a different command from the in-fleet one"
+        );
+    }
+
+    /// A box's agent is handed the scratch path as a VALUE, from the one constant that defines it.
+    ///
+    /// The launcher joins it to the box's own HOME, which is the only thing that can: `$HOME` there
+    /// is the private home bwrap binds over the sandbox's, and no shell out here can name it. So
+    /// what this pins is that the path is not spelled out a second time in the shell script — the
+    /// end-to-end proof that the environment really carries it is
+    /// `tests/fleet_launch.rs::a_box_lives_and_dies_inside_the_fleet_sandbox`, under real bwrap.
+    #[test]
+    fn a_box_is_handed_the_scratch_path_rather_than_left_to_derive_one() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            script.contains(&format!("SKEIN_MODEL_SCRATCH={}", sh_quote(MODEL_SCRATCH))),
+            "a box start does not carry the scratch path, so its agent derives one from the \
+             sandbox's shared /tmp: {script}"
+        );
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// `after_login` exists so the post-login tail runs in the process whose state it fixes. Run

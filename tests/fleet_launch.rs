@@ -185,7 +185,12 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             &session_script(
                 BOX,
                 "skein-agent",
-                "echo agent-started > /tmp/agent.log; exec sleep 400",
+                // The agent records the environment it was STARTED with, which is the only place
+                // that answer exists: a later `nsenter` gets a fresh environment, so asking the
+                // running box would answer a different question. See the scratch assertion below.
+                "printf '%s\\n' \"${CLAUDE_CODE_TMPDIR:-the shared /tmp}\" > /tmp/scratch.env; \
+                 mkdir -p \"${CLAUDE_CODE_TMPDIR:-/tmp/nowhere}\"; \
+                 echo agent-started > /tmp/agent.log; exec sleep 400",
             ),
             Duration::from_secs(60),
         )
@@ -366,6 +371,48 @@ fn a_box_lives_and_dies_inside_the_fleet_sandbox() {
             .trim(),
         "agent-started",
         "the agent really ran inside the namespace"
+    );
+
+    // ...and it was started with a scratch directory of its own, rather than being left to derive
+    // one from the shared /tmp.
+    //
+    // Claude Code puts its temp directory at `${os.tmpdir()}/claude-<uid>` and REFUSES to start
+    // when that path is somebody else's. In a fleet that path is the sandbox's shared /tmp, and on
+    // the owner's fleet something running as root got there first: every model call, and a login
+    // whose OAuth had otherwise completed, came back `Temp directory /tmp/claude-1000 is owned by
+    // uid 0` (SKEIN-289).
+    //
+    // Read off the file the AGENT wrote, never asked of the running box: `boxed.exec` enters the
+    // namespace fresh through nsenter, so it would report its own environment and pass whatever
+    // the launcher did. And driven through `session_script` + the real launcher + real bwrap,
+    // because a grep for the string in `box-session.sh` proves the string is present, not that the
+    // environment a box starts with carries it.
+    let scratch = boxed
+        .exec("cat /tmp/scratch.env", Duration::from_secs(30))
+        .unwrap()
+        .trim()
+        .to_string();
+    let box_home = std::env::var("HOME").unwrap_or_default();
+    assert_eq!(
+        scratch,
+        skein::fleet::model_scratch_dir(Path::new(&box_home))
+            .display()
+            .to_string(),
+        "the box's agent starts in the shared /tmp, where anything that got there first stops the \
+         runtime from starting at all"
+    );
+    // And the path is the box's OWN, not one every box in the sandbox shares: the launcher binds
+    // the box's private home over $HOME, so the directory the agent made inside the namespace has
+    // to land under the box's root out here.
+    assert!(
+        Path::new(&format!(
+            "{}/home/{}",
+            box_root(BOX),
+            skein::fleet::MODEL_SCRATCH
+        ))
+        .is_dir(),
+        "the agent's scratch directory is not in this box's private home, so every box in the \
+         sandbox shares one — which is the thing a per-box path exists to prevent"
     );
 
     // ---- provisioning: the same script the kit runs, inside the box ----

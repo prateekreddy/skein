@@ -546,6 +546,30 @@ fn cmd_doctor() -> Result<(), String> {
     }
 
     {
+        // Has anything taken the temp directory the model CLI derives for itself?
+        //
+        // Beside the model line and after it, because it is the same failure asked one layer down:
+        // the model line says whether a call answers, this says whether the *shared* path a call
+        // would have used is somebody else's. Reported here rather than left to the CLI's own
+        // message, which is a good message that lands on whoever happened to be typing — the owner
+        // met it in the middle of a login that had otherwise worked (SKEIN-289).
+        //
+        // Here rather than in `health_report` for the same reason as the model line: it spawns.
+        let s = skein::health::model_scratch_health();
+        let mark = match s.level {
+            skein::health::Level::Satisfied => OK,
+            skein::health::Level::Unsatisfied => BAD,
+            skein::health::Level::Unknown => WARN,
+        };
+        println!("{mark} model scratch {}", s.detail);
+        // Printed and never run — the recipe is a delete in a shared /tmp skein does not own, which
+        // is the thing the CLI's guard exists to stop.
+        if !s.fix.is_empty() {
+            println!("{DIM}              → {}{RESET}", s.fix);
+        }
+    }
+
+    {
         // Which credential the host's own GitHub calls run on. It matters because only one of the
         // three can reach the system keyring, and that is the one people were being pushed onto.
         use skein::prq::GhToken;

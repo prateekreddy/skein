@@ -213,7 +213,26 @@ impl Unread {
 ///
 /// Cleared by a call that works, and by [`forget_refusal`] — which anything explicitly asked for
 /// calls first, because "read this one" is a person saying they think it will work now.
+///
+/// **And it is never read directly.** Every reader goes through [`refusal_still_standing`], which
+/// is where the rule below lives; a read of this mutex that skipped it would be the bug this
+/// module was carrying.
 static REFUSED: std::sync::Mutex<Option<Standing>> = std::sync::Mutex::new(None);
+
+/// How long a refusal nothing has contradicted is allowed to keep speaking.
+///
+/// **The backstop, for the refusals evidence cannot reach.** A credential being rewritten answers
+/// "is this still true" for an auth refusal and for nothing else: a `claude` that is not on PATH, a
+/// sandbox that is not answering, an unreachable transport — those are conditions that get fixed
+/// out there, with no file in here to notice it by. Held forever, they end the same way, which is
+/// how the owner met this: a state a person cannot clear, that outlived what produced it, and that
+/// nothing but a restart ends.
+///
+/// An hour, and the trade is stated rather than tuned. What it costs is one real call per hour per
+/// surface in a fleet that is genuinely broken — on macOS, at most one Keychain dialog an hour. What
+/// this memo exists to stop is one dialog *per pull request*, six in a second; an hour still stops
+/// that completely. What it buys is that no refusal here can outlive a restart-shaped fix.
+const REFUSAL_LIFE: Duration = Duration::from_secs(60 * 60);
 
 /// A remembered refusal, with the two facts a surface needs beyond the sentence: WHEN it happened,
 /// and which runtime's credential was being used when it did.
@@ -222,6 +241,97 @@ struct Standing {
     why: Unread,
     at_ms: i64,
     runtime: &'static str,
+}
+
+impl Standing {
+    /// Is this refusal about the CREDENTIAL — the only kind a new credential can contradict?
+    ///
+    /// The same test [`auth_refusal`] applies, and deliberately the same one: what makes a refusal
+    /// worth showing on the login banner is exactly what makes it answerable by logging in, so a
+    /// second, looser spelling here would clear refusals nothing had contradicted.
+    fn about_the_credential(&self) -> bool {
+        match &self.why {
+            Unread::Refused { said, .. } => says_the_credential_is_dead(said),
+            _ => false,
+        }
+    }
+}
+
+/// Do these words mean "this credential is not good any more"?
+///
+/// A substring list because the CLIs' wording is theirs to change; the cost of a miss is the banner
+/// not appearing, which is where this started.
+fn says_the_credential_is_dead(said: &str) -> bool {
+    let lower = said.to_lowercase();
+    // Every shape seen from `claude` and `codex`.
+    [
+        "oauth session expired",
+        "could not be refreshed",
+        "failed to authenticate",
+        "please run /login",
+        "not logged in",
+        "invalid api key",
+        "unauthorized",
+        "401",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// The remembered refusal, **if it still describes anything**.
+///
+/// **A refusal is a fact about one moment, not a standing state.** This is `prq::what_github_said`'s
+/// rule at the credential layer, and the fourth sighting of the pattern SKEIN-281 named: a
+/// per-process memo holding a failure as a fact, outliving the condition that produced it, with
+/// nothing a person can clear. There it was a rate-limited lookup cached as an answer nobody gave;
+/// here it is a dead credential remembered after somebody replaced it.
+///
+/// The owner's own question is what this answers — *"when login is complete from other session or
+/// something does the bar go away?"* It did not, and it could not: [`forget_refusal`] runs from THIS
+/// process's `skein login`, from a call that then succeeds, and from a person pressing read. A
+/// `/login` inside a box, a second skein, the desktop app — none of them reach this memory. So the
+/// bar stayed up over a credential that was fine, saying something true about the past, and a person
+/// reading it concluded their login had failed.
+///
+/// Two ways out, and it needs both:
+///
+///   * **Evidence.** A credential written after the refusal is a different credential
+///     ([`crate::fleet::login_written_ms`]), so nothing the model said about the old one applies.
+///     No press, no restart, and it works however the login happened. Only for a refusal that is
+///     ABOUT the credential — a rewritten token says nothing about a `claude` that is not on PATH.
+///   * **A clock.** For every other kind there is no file to notice a fix by, so [`REFUSAL_LIFE`]
+///     bounds it. A refusal that cannot be contradicted by evidence must expire on a clock rather
+///     than on a restart.
+///
+/// **Cleared, not merely hidden.** A stale refusal is dropped from the memo here, so the next call
+/// is made for real and re-plants one if it is still true — the same shape as `what_github_said`
+/// declining to write down what it was never told. Hiding it from the banner while the call path
+/// went on declining would have fixed the sentence and left the fleet mute.
+fn refusal_still_standing() -> Option<Standing> {
+    let mut held = match REFUSED.lock() {
+        Ok(held) => held,
+        // Poison-tolerant: the value is a remembered answer, with no invariant a panicking caller
+        // could have left half-written.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let standing = held.clone()?;
+    let contradicted = standing.about_the_credential()
+        && crate::fleet::login_written_ms(standing.runtime).is_some_and(|at| at > standing.at_ms);
+    let aged = now_ms().saturating_sub(standing.at_ms) > REFUSAL_LIFE.as_millis() as i64;
+    if contradicted || aged {
+        *held = None;
+        return None;
+    }
+    Some(standing)
+}
+
+/// Now, in epoch milliseconds. One spelling, because a refusal's age is compared against a file's
+/// mtime and the two have to be counted from the same place.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// What the model itself said about a credential — evidence the credential FILE does not carry.
@@ -246,32 +356,17 @@ pub struct AuthRefusal {
 /// Deliberately narrow: a model that is rate limited, missing from the PATH or slow has said
 /// nothing about the credential, and reporting those as a dead login would send somebody to log in
 /// again over a problem logging in cannot fix.
+///
+/// Through [`refusal_still_standing`], never the memo itself: a banner is exactly the surface this
+/// is about, and one that read the raw memory would go on showing a login as dead after somebody
+/// fixed it somewhere else.
 pub fn auth_refusal() -> Option<AuthRefusal> {
-    let standing = REFUSED
-        .lock()
-        .map(|held| held.clone())
-        .unwrap_or_else(|e| e.into_inner().clone())?;
+    let standing = refusal_still_standing()?;
     let said = match &standing.why {
         Unread::Refused { said, .. } => said.clone(),
         _ => return None,
     };
-    let lower = said.to_lowercase();
-    // Every shape seen from `claude` and `codex` for "this credential is not good any more". A
-    // substring list because the CLIs' wording is theirs to change; the cost of a miss is the
-    // banner not appearing, which is where this started.
-    let auth = [
-        "oauth session expired",
-        "could not be refreshed",
-        "failed to authenticate",
-        "please run /login",
-        "not logged in",
-        "invalid api key",
-        "unauthorized",
-        "401",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    auth.then(|| AuthRefusal {
+    says_the_credential_is_dead(&said).then(|| AuthRefusal {
         runtime: standing.runtime,
         at_ms: standing.at_ms,
         said,
@@ -308,18 +403,26 @@ pub(crate) fn plant_refusal_saying(said: &str) {
     );
 }
 
+/// The same, dated — for the two rules in [`refusal_still_standing`], both of which are about WHEN
+/// a refusal happened and neither of which a test can reach by waiting.
+#[cfg(test)]
+pub(crate) fn plant_refusal_aged(said: &str, ago: Duration) {
+    plant_refusal_saying(said);
+    if let Ok(mut held) = REFUSED.lock() {
+        if let Some(standing) = held.as_mut() {
+            standing.at_ms -= ago.as_millis() as i64;
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn refusal_standing_for_test() -> bool {
     standing_refusal().is_some()
 }
 
-/// The refusal being repeated back, if there is one.
+/// The refusal being repeated back, if there is one that still describes anything.
 fn standing_refusal() -> Option<Unread> {
-    REFUSED
-        .lock()
-        .map(|held| held.clone())
-        .unwrap_or_else(|e| e.into_inner().clone())
-        .map(|standing| standing.why)
+    refusal_still_standing().map(|standing| standing.why)
 }
 
 fn remember_refusal(why: &Unread, bin: &str) {
@@ -336,10 +439,7 @@ fn remember_refusal(why: &Unread, bin: &str) {
     if let Ok(mut held) = REFUSED.lock() {
         *held = Some(Standing {
             why: why.clone(),
-            at_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
+            at_ms: now_ms(),
             // Which credential was in play. `codex` names itself in the binary; everything else
             // skein asks is `claude`, including a `$SKEIN_CLAUDE_BIN` pointed at a stub.
             runtime: match bin.contains("codex") {
@@ -705,6 +805,91 @@ mod tests {
     use crate::testutil::*;
     #[allow(unused_imports)]
     use std::{env, fs};
+
+    /// A refusal is a fact about one moment. Two things end it, and neither is a restart.
+    ///
+    /// The owner asked: *"when login is complete from other session or something does the bar go
+    /// away?"* It did not. `forget_refusal` runs from THIS process's `skein login`, from a call that
+    /// then succeeds, and from a person pressing read — a `/login` in a box, a second skein or the
+    /// desktop app reaches none of them, so the memo outlived the credential it was about. The
+    /// fourth sighting of the pattern SKEIN-281 named, and `prq::what_github_said` is where the rule
+    /// is written: a per-process memo holds only what the world actually said, for as long as it is
+    /// still saying it.
+    ///
+    /// Driven on the memo itself and NOT only on the banner, because hiding a stale refusal from
+    /// `auth_refusal` while `tried` went on answering from it would fix the sentence and leave every
+    /// summary declining.
+    #[test]
+    fn a_refusal_ends_when_the_credential_changes_or_when_its_hour_is_up() {
+        let _g = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let dir = dir.as_ref() as &std::path::Path;
+        let home = dir.join("fleet");
+        // Both HOMEs the call chooses between, pointed somewhere this test owns: the ambient one
+        // counts too, and a developer's real credential must not decide this.
+        env::set_var("SKEIN_HOME", &home);
+        env::set_var("HOME", dir.join("ambient"));
+        let credential = home.join("fleet-home/.claude/.credentials.json");
+        fs::create_dir_all(credential.parent().unwrap()).unwrap();
+        forget_refusal();
+
+        // ---- evidence: a login completed anywhere at all ----
+        plant_refusal_aged(
+            "`claude` exited 1: Failed to authenticate: OAuth session expired and could not be \
+             refreshed",
+            Duration::from_secs(600),
+        );
+        assert!(
+            refusal_standing_for_test() && auth_refusal().is_some(),
+            "the refusal was not planted, so nothing below is testing anything"
+        );
+        // Nobody presses anything and nothing calls `forget_refusal`: a credential simply appears,
+        // which is all a login in a box or a second skein leaves behind.
+        fs::write(&credential, br#"{"claudeAiOauth":{"accessToken":"fresh"}}"#).unwrap();
+        assert!(
+            auth_refusal().is_none(),
+            "the banner still reports a login the fleet has since replaced — a true statement about \
+             the past, read by a person as their login having failed"
+        );
+        assert!(
+            !refusal_standing_for_test(),
+            "the banner cleared and the call path did not, so every summary goes on declining over \
+             a credential that is fine"
+        );
+
+        // ---- and evidence is not a licence to forget everything ----
+        // A refusal younger than the credential is still the current fact, and clearing it here
+        // would turn this memo off altogether — one Keychain dialog per pull request, which is what
+        // it exists to stop.
+        plant_refusal_saying("`claude` exited 1: Failed to authenticate: OAuth session expired");
+        assert!(
+            auth_refusal().is_some(),
+            "a refusal that happened AFTER the credential was written was thrown away, so the memo \
+             holds nothing and the fleet asks once per pull request again"
+        );
+
+        // ---- the clock, for the refusals no file can contradict ----
+        forget_refusal();
+        // Not auth-shaped, so `login_written_ms` says nothing about it however many logins happen —
+        // exactly the case that used to end only at a restart.
+        plant_refusal_aged("`claude` exited 1: rate limit reached", REFUSAL_LIFE / 2);
+        assert!(
+            refusal_standing_for_test(),
+            "a refusal from half an hour ago was already forgotten, so the memo does not hold long \
+             enough to be worth having"
+        );
+        plant_refusal_aged("`claude` exited 1: rate limit reached", REFUSAL_LIFE * 2);
+        assert!(
+            !refusal_standing_for_test(),
+            "a refusal older than its life is still speaking, so a fix made out there ends only \
+             when somebody restarts the server"
+        );
+
+        forget_refusal();
+        for key in ["SKEIN_HOME", "HOME"] {
+            env::remove_var(key);
+        }
+    }
 
     /// Each way a model call can fail says which one it was.
     ///

@@ -1605,6 +1605,30 @@ export SKEIN_BOX="$box"
 # box-to-box messages go.
 export SKEIN_STATE="$state"
 
+# Where this box's agent keeps its model scratch, instead of letting the CLI derive one from /tmp.
+#
+# Claude Code puts its temp directory at `${os.tmpdir()}/claude-<uid>` and REFUSES to start when
+# that path exists and is not owned by the calling uid — a deliberate guard against a directory
+# somebody else planted. Skein already argued this for the model calls it makes itself
+# (`fleet::MODEL_SCRATCH`); a box is the other half, and it is the half a person watches. The box's
+# `/tmp` is private (bound from `$tmp` below), so what this buys is not privacy from the other
+# boxes: it is that a box no longer depends on nothing having got to a shared path first, which is
+# the same reasoning at a different entry point rather than a second mechanism.
+#
+# The VALUE comes from skein — `fleet::MODEL_SCRATCH`, passed as `SKEIN_MODEL_SCRATCH` — so the path
+# is defined once and this script only joins it to a HOME. That join has to happen HERE: `$HOME` is
+# the box's own private home, bound over the sandbox's a few lines down, and no shell outside this
+# namespace can name it. Exported beside `SKEIN_BOX` and for the same reason — the agent, its hooks
+# and everything they fork are children of the tmux server started below.
+#
+# Absent means an older skein started this box, and then nothing is exported and the box behaves
+# exactly as it did before. An empty export would be worse than none: `CLAUDE_CODE_TMPDIR=$HOME/`
+# is a directory skein never meant to name.
+if [ -n "${SKEIN_MODEL_SCRATCH-}" ] && [ -n "${HOME:-}" ]; then
+  export CLAUDE_CODE_TMPDIR="$HOME/$SKEIN_MODEL_SCRATCH"
+fi
+unset SKEIN_MODEL_SCRATCH
+
 # --dev-bind / / keeps the sandbox's own filesystem visible (the repo, the toolchains, the store
 # mount) and then binds the box's private directories over the two paths that must not be shared.
 # No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has
