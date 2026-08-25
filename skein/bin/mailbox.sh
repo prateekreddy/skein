@@ -87,6 +87,23 @@ else
   exit 0
 fi
 vmid="${vmid//\//-}"   # slash-safe identity (matches the registry/journal shard keys)
+
+# The one registry key that is NOT a box. In a shared sandbox `SANDBOX_VM_ID` names the SANDBOX,
+# and the identity chain above says why: before SKEIN-224 the hooks fell through to it, so a
+# registry somewhere holds a key by that name which no box has ever answered to. It cannot mark
+# anything seen, so counted as a recipient it holds every broadcast in that store open for ever —
+# measured on the owner's fleet, where 7 of sync's 11 messages are broadcasts that can never
+# complete (SKEIN-259).
+#
+# Guarded by the same fact the identity chain turns on, and for the same reason: with no launcher
+# this is a legacy box alone in its VM, where that name IS this box's own and is a real recipient.
+# Empty means "exclude nothing", which is what the legacy world needs.
+if [ -e "${SKEIN_FLEET_ROOT:-/boxes}/.skein/box-session.sh" ]; then
+  notabox="${SANDBOX_VM_ID:-}"
+else
+  notabox=""
+fi
+notabox="${notabox//\//-}"
 cmd="${1:-inbox}"; shift || true
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?'; }
@@ -98,7 +115,9 @@ prune_seen() { # $1 = age in days, $2 = noisy (0/1)
   local days="${1:-30}" noisy="${2:-0}" cutoff boxes mt f
   cutoff="$(date -u -d "-$days days" +%s 2>/dev/null || echo 0)"
   [ "$cutoff" -gt 0 ] || return 0
-  boxes="$(jq -c 'keys' "$here/sandboxes.json" 2>/dev/null || echo '[]')"
+  # Every registered box EXCEPT the sandbox's own name — see `notabox` above.
+  boxes="$(jq -c --arg notabox "$notabox" '[keys[] | select($notabox == "" or . != $notabox)]' \
+    "$here/sandboxes.json" 2>/dev/null || echo '[]')"
   for f in "$box"/*.json; do
     [ -e "$f" ] || break
     mt="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"

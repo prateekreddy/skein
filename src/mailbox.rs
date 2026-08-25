@@ -672,4 +672,174 @@ mod tests {
         env::remove_var("SKEIN_HOME");
         env::remove_var("SKEIN_REGISTRY");
     }
+
+    /// **A broadcast is held open by a registry key that is not a box** (SKEIN-259).
+    ///
+    /// Before SKEIN-224 the hooks' identity chain fell through to `SANDBOX_VM_ID` in a shared
+    /// sandbox, so a store can hold a registry key named after the SANDBOX. `prune_seen` reads the
+    /// registry's keys as a broadcast's recipients, and that key answers to nothing: it can never
+    /// mark a message seen, so every broadcast in that store stays for ever. Measured on the
+    /// owner's fleet — 7 of sync's 11 messages are broadcasts from one day, none of them
+    /// completable.
+    ///
+    /// The residue is data and cannot be reached from here, so the fix is on the READ side: it
+    /// makes every store already carrying that key correct without anybody editing a file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_registry_key_named_after_the_sandbox_is_not_a_recipient() {
+        let _g = env_lock();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        crate::kit::ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+
+        // A shared sandbox: what the identity chain turns on is the launcher's presence, so the
+        // guard turns on the same fact rather than a second one.
+        let fleet_root = home.join("boxes");
+        fs::create_dir_all(fleet_root.join(".skein")).unwrap();
+        fs::write(
+            fleet_root.join(".skein").join("box-session.sh"),
+            "#!/bin/sh\n",
+        )
+        .unwrap();
+
+        // Two real boxes and the residue, exactly as it sits on disk today.
+        fs::write(
+            store.join("sandboxes.json"),
+            r#"{"boxA":{"at":"x"},"boxB":{"at":"x"},"the-shared-sandbox":{"at":"x"}}"#,
+        )
+        .unwrap();
+
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            Command::new("bash")
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .env("SKEIN_FLEET_ROOT", &fleet_root)
+                .output()
+                .expect("run mailbox.sh")
+        };
+
+        assert!(run(
+            "boxA",
+            &[
+                "send",
+                "--to",
+                "broadcast",
+                "--kind",
+                "note",
+                "--body",
+                "hello"
+            ]
+        )
+        .status
+        .success());
+        // The only recipient that is a box reads it. The sender is never its own recipient.
+        assert!(run("boxB", &["inbox"]).status.success());
+
+        // Older than the thirty-day floor, or nothing is eligible at all.
+        let msgs = store.join("mailbox");
+        let one = fs::read_dir(&msgs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "json"))
+            .expect("the broadcast is on disk");
+        assert!(Command::new("touch")
+            .arg("-d")
+            .arg("40 days ago")
+            .arg(&one)
+            .status()
+            .expect("touch")
+            .success());
+
+        assert!(run("boxB", &["prune"]).status.success());
+        assert!(
+            !one.exists(),
+            "a broadcast every BOX has seen was kept, because a registry key named after the \
+             sandbox was counted as a recipient it will never be: {}",
+            String::from_utf8_lossy(&run("boxB", &["list"]).stdout)
+        );
+    }
+
+    /// The other side of the same guard: **with no launcher this is a legacy box alone in its VM,
+    /// where `SANDBOX_VM_ID` IS its own name and a real recipient** (SKEIN-259).
+    ///
+    /// Two such boxes share one store — that is what a shared mount is for — so the registry holds
+    /// two VM names, each of them a box that answers. Excluding that name unconditionally would
+    /// empty the recipient set and keep every broadcast for ever, which is the bug the guard exists
+    /// to fix, arriving from the other direction.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_legacy_box_named_by_its_vm_is_still_a_recipient() {
+        let _g = env_lock();
+        let home = tempdir();
+        let store = home.join("store").join(".claude");
+        crate::kit::ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+
+        // No launcher under the fleet root: the legacy world, and the fact the identity chain and
+        // the guard both turn on. The directory exists and the file does not, deliberately — an
+        // absent root would prove the same thing by accident.
+        let fleet_root = home.join("boxes");
+        fs::create_dir_all(fleet_root.join(".skein")).unwrap();
+
+        fs::write(
+            store.join("sandboxes.json"),
+            r#"{"vmA":{"at":"x"},"vmB":{"at":"x"}}"#,
+        )
+        .unwrap();
+
+        // SKEIN_BOX unset: the legacy chain falls to SANDBOX_VM_ID, which is this box's own name.
+        let run = |vmid: &str, args: &[&str]| -> std::process::Output {
+            Command::new("bash")
+                .arg(&mailbox_sh)
+                .args(args)
+                .env_remove("SKEIN_BOX")
+                .env("SANDBOX_VM_ID", vmid)
+                .env("SKEIN_FLEET_ROOT", &fleet_root)
+                .output()
+                .expect("run mailbox.sh")
+        };
+
+        assert!(run(
+            "vmA",
+            &[
+                "send",
+                "--to",
+                "broadcast",
+                "--kind",
+                "note",
+                "--body",
+                "hello"
+            ]
+        )
+        .status
+        .success());
+        assert!(run("vmB", &["inbox"]).status.success());
+
+        let msgs = store.join("mailbox");
+        let one = fs::read_dir(&msgs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "json"))
+            .expect("the broadcast is on disk");
+        assert!(Command::new("touch")
+            .arg("-d")
+            .arg("40 days ago")
+            .arg(&one)
+            .status()
+            .expect("touch")
+            .success());
+
+        assert!(run("vmB", &["prune"]).status.success());
+        assert!(
+            !one.exists(),
+            "a legacy box was struck from its own broadcast's recipients, so a message everybody \
+             read is kept for ever: {}",
+            String::from_utf8_lossy(&run("vmB", &["list"]).stdout)
+        );
+    }
 }
