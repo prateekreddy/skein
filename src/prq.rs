@@ -232,6 +232,25 @@ pub struct Queue {
     /// Was this read from GitHub just now, or handed over while a fresh one is being fetched?
     #[serde(default = "yes")]
     pub fresh: bool,
+    /// Did the searches behind this queue see every pull request there was?
+    ///
+    /// The same fact [`Found::whole`] carries for one membership search, ANDed across all of them
+    /// and across the failures: `false` where a search errored, where the whole request did, or
+    /// where one filled its page and GitHub said there was another (SKEIN-231).
+    ///
+    /// It is what anyone must read before treating a pull request's **absence** from `prs` as
+    /// evidence about it. The archive and snooze prunes inside [`queue_within`] have read it since
+    /// SKEIN-229; `review::prune` runs outside this module — it is handed this list by the server —
+    /// and had no way to ask until this field existed, so it deleted nothing but paid a REST call
+    /// per summary file, for ever, for pull requests that were merely past the page.
+    ///
+    /// `blind_spots` is not a substitute: it is non-empty for things that say nothing about
+    /// completeness, `read:org` among them, so a caller reading it as this flag stands down for the
+    /// wrong reasons. Defaults to true for a queue remembered by an older skein — the same choice
+    /// [`Pr::settled`] makes, for the same reason: what skein could not know does not hold anything
+    /// back that it was not already holding back.
+    #[serde(default = "yes")]
+    pub whole: bool,
     /// The repository's default branch — the trunk a merge train advances. Filled during a
     /// refresh from `GET /repos/{slug}` (its `default_branch`), remembered per process like
     /// [`renamed_to`]'s answer beside it.
@@ -796,6 +815,25 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         };
         // A search cut off at the page is an answer about what it returned and no answer at all
         // about what it did not reach, which is the half the prune reads.
+        //
+        // And it is said out loud (SKEIN-231). Silence here is the rename bug in a quieter form —
+        // HTTP 200, a plausible list, nothing wrong to see — except that instead of an empty queue
+        // it shows a queue that looks complete. The pull requests past the page are absent from the
+        // rows, absent from the badge, and until this line nothing anywhere said a number had been
+        // cut off. GitHub is asked how many it matched, so the sentence can carry the size of the
+        // hole rather than only its existence.
+        if !found.whole {
+            blind_spots.push(match found.matched {
+                Some(n) => format!(
+                    "the `{search}` query matched {n} pull requests and skein read the first \
+                     {SEARCH_PAGE} — the rest are missing from this queue and from its count"
+                ),
+                None => format!(
+                    "the `{search}` query filled its page of {SEARCH_PAGE}, so there are probably \
+                     more pull requests it did not reach — they are missing from this queue"
+                ),
+            });
+        }
         answered &= found.whole;
         for item in found.items {
             let Some(number) = item.get("number").and_then(|v| v.as_u64()) else {
@@ -806,6 +844,23 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
                     existing.reasons.push(reason.clone());
                 }
                 continue;
+            }
+            // A rollup whose contexts were cut off AND whose verdict GitHub did not give is the one
+            // case [`rollup`] cannot answer from either source, so it says "pending" — and this is
+            // the sentence that stops that reading as "CI is still running" (SKEIN-232). Said only
+            // then: where GitHub gave its `state`, the cap costs the row a NAME and nothing else,
+            // and a blind spot for every matrix build would be noise over a verdict that is right.
+            if truncated_rollup(&item) && rollup_state_missing(&item) {
+                blind_spots.push(format!(
+                    "#{number}'s checks: GitHub listed {} contexts, skein read {}, and no rollup \
+                     verdict came with them — so its checks read `pending` rather than a colour \
+                     nothing here can stand behind",
+                    rollup_total(&item).unwrap_or_default(),
+                    item.get("statusCheckRollup")
+                        .and_then(|v| v.as_array())
+                        .map(|c| c.len())
+                        .unwrap_or_default(),
+                ));
             }
             prs.push(build_pr(
                 &item,
@@ -866,6 +921,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         blind_spots,
         as_of: chrono::Utc::now().to_rfc3339(),
         fresh: true,
+        whole: answered,
     };
     if !cfg!(test) {
         QUEUE_CACHE
@@ -979,6 +1035,14 @@ pub fn remembered_head(repo_id: &str, number: u64) -> Option<String> {
 /// left against, and its check rollup are three more REST calls **per pull request**. One search
 /// returns all of it for a hundred at once. It is also, underneath, exactly what `gh pr list
 /// --json` did — its field names *are* these — which is why [`shape`] below is almost an identity.
+///
+/// **The rollup asks for GitHub's own verdict as well as the contexts** (SKEIN-232). `contexts` is
+/// capped at a hundred and a matrix build (`os × rust-version × feature`) reaches three digits
+/// routinely, so a verdict computed only from that array reads a pull request whose 101st context
+/// is red as green — and `docs/pr-workflow.md`'s merge train reads exactly that field, so the
+/// failure is not a wrong dot but a merge of a pull request whose CI failed. `state` is GitHub's
+/// answer over ALL of them and costs nothing to ask for; `totalCount` says how much of the list
+/// this page is. Both are read by [`rollup`]; the contexts are left to NAME what failed.
 const PR_FRAGMENT: &str = r#"
 fragment PrFields on PullRequest {
   number title url isDraft updatedAt
@@ -987,7 +1051,7 @@ fragment PrFields on PullRequest {
   labels(first: 20) { nodes { name } }
   author { login }
   latestReviews(first: 30) { nodes { state author { login } commit { oid } } }
-  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { nodes {
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { totalCount nodes {
     ... on CheckRun { name detailsUrl status conclusion }
     ... on StatusContext { context targetUrl state }
   } } } } } }
@@ -998,6 +1062,12 @@ fragment PrFields on PullRequest {
 ///
 /// Built per refresh rather than kept as a constant because `count` moves with your teams — and
 /// text is all a GraphQL POST is, so there is nothing a constant would buy.
+///
+/// `issueCount` and `pageInfo` are asked for beside the nodes (SKEIN-231). Both are scalars on the
+/// connection — they add nothing to the answer's size, which matters here more than it looks:
+/// this request is already the heaviest thing skein sends, and the owner's repo has answered it
+/// with a 504 (SKEIN-278). They are what turns "a hundred came back" from a guess into GitHub's
+/// own statement of how many there were, and give the blind spot a number to say out loud.
 fn batched_query(count: usize) -> String {
     use std::fmt::Write as _;
     let mut vars = String::from("$n: Int!");
@@ -1006,7 +1076,8 @@ fn batched_query(count: usize) -> String {
         let _ = write!(vars, ", $q{i}: String!");
         let _ = writeln!(
             body,
-            "  q{i}: search(query: $q{i}, type: ISSUE, first: $n) {{ nodes {{ ...PrFields }} }}"
+            "  q{i}: search(query: $q{i}, type: ISSUE, first: $n) {{ issueCount pageInfo {{ \
+             hasNextPage }} nodes {{ ...PrFields }} }}"
         );
     }
     format!("query({vars}) {{\n{body}}}\n{PR_FRAGMENT}")
@@ -1017,15 +1088,29 @@ fn batched_query(count: usize) -> String {
 /// The two are separate facts because they decide different things. `items` is what fills the
 /// queue. `whole` is what lets the queue act on a pull request's **absence** — and the prunes in
 /// [`queue_within`] delete one of the owner's own decisions on exactly that evidence, so they may
-/// only read a search that came back short of the page. SKEIN-231 owns saying a truncated search
-/// out loud; this is the flag that stops the prune believing one in the meantime.
+/// only read a search that saw everything there was.
+///
+/// `whole` is now GitHub's answer rather than an inference: `pageInfo { hasNextPage }` says whether
+/// a page is the end of the list, where "came back short of a hundred" only ever guessed it — and
+/// guessed wrong, in the safe direction, on a search that matched exactly a hundred. It falls back
+/// to the length test when nothing said, because an answer that predates the field is still an
+/// answer. `matched` is `issueCount`: how many the search found, which is what lets the blind spot
+/// in [`queue_within`] say how many pull requests are missing rather than merely that some are.
 struct Found {
     items: Vec<serde_json::Value>,
     whole: bool,
+    matched: Option<u64>,
 }
 
 /// How many pull requests one membership search asks GitHub for. A search that comes back with
 /// exactly this many has been cut off at the page far more often than it has landed on it exactly.
+///
+/// **Not the lever for a truncated queue.** Raising it is the obvious fix for SKEIN-231 and the
+/// wrong one: the answer is already the heaviest thing skein sends — five searches × this many
+/// nodes × [`PR_FRAGMENT`] — and `acme/thing` answered that with a 504 that only
+/// [`search_prs_all`]'s split-in-halves recovered (SKEIN-278). A bigger page makes the outage more
+/// likely in order to make the truncation rarer, and an outage is the failure that hides MORE. So
+/// the page stays where it is and the queue says what it could not see.
 const SEARCH_PAGE: usize = 100;
 
 /// Every membership search of one refresh, in ONE GraphQL request — five requests per repo per
@@ -1109,11 +1194,20 @@ fn one_request(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, Stri
                     // A search that matches an issue rather than a pull request comes back as an
                     // empty object — the fragment simply does not apply — so those are dropped
                     // rather than parsed into a PR with number 0.
+                    let more = chunk
+                        .get("pageInfo")
+                        .and_then(|p| p.get("hasNextPage"))
+                        .and_then(|v| v.as_bool());
                     Ok(Found {
-                        // Counted before that filter, because the page is what GitHub filled
-                        // against `first: $n` — dropping a non-PR from it makes the answer
-                        // shorter without making it any more complete.
-                        whole: nodes.len() < SEARCH_PAGE,
+                        matched: chunk.get("issueCount").and_then(|v| v.as_u64()),
+                        // GitHub's own word for it where there is one. The fallback counts before
+                        // the filter below, because the page is what GitHub filled against
+                        // `first: $n` — dropping a non-PR from it makes the answer shorter without
+                        // making it any more complete.
+                        whole: match more {
+                            Some(more) => !more,
+                            None => nodes.len() < SEARCH_PAGE,
+                        },
                         items: nodes
                             .iter()
                             .filter(|node| node.get("number").is_some())
@@ -1165,6 +1259,11 @@ fn one_request(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, Stri
 /// pull request. Everything else is the same name and the same value, which is what made this port
 /// a translation rather than a rewrite — and what lets every test of [`build_pr`],
 /// [`my_review_state`] and [`rollup`] keep asserting on the fixtures they always had.
+///
+/// Two keys have no `gh` ancestor: `statusCheckRollupState` and `statusCheckRollupTotal`, which
+/// carry what the flattening would otherwise throw away — see [`PR_FRAGMENT`]. They are written as
+/// `null` when GitHub did not say, because a fixture from before SKEIN-232 has neither and the
+/// difference between "GitHub says this is green" and "nobody said" is the whole point of them.
 fn shape(node: &serde_json::Value) -> serde_json::Value {
     let mut out = node.clone();
     let reviews = node
@@ -1172,17 +1271,31 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         .and_then(|r| r.get("nodes"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
-    let checks = node
+    let rollup_of = node
         .get("commits")
         .and_then(|c| c.get("nodes"))
         .and_then(|n| n.as_array())
         .and_then(|n| n.first())
         .and_then(|c| c.get("commit"))
-        .and_then(|c| c.get("statusCheckRollup"))
+        .and_then(|c| c.get("statusCheckRollup"));
+    let checks = rollup_of
         .and_then(|r| r.get("contexts"))
         .and_then(|c| c.get("nodes"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    // The two facts the contexts array cannot carry, lifted out beside it under names of this
+    // module's own (SKEIN-232): GitHub's uncapped verdict, and how many contexts there were to
+    // read. Absent — from an older answer, or a GitHub that did not say — is a real state and
+    // [`rollup`] treats it as one; it must not read as `SUCCESS` or as `totalCount: 0`.
+    let rollup_state = rollup_of
+        .and_then(|r| r.get("state"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let rollup_total = rollup_of
+        .and_then(|r| r.get("contexts"))
+        .and_then(|c| c.get("totalCount"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     // The head commit's own date, lifted out before `commits` is dropped. Same node the check
     // rollup comes from, so it costs nothing to ask for and would cost a second query to add later.
     let committed = node
@@ -1210,6 +1323,8 @@ fn shape(node: &serde_json::Value) -> serde_json::Value {
         map.insert("labels".into(), serde_json::Value::Array(labels));
         map.insert("latestReviews".into(), reviews);
         map.insert("statusCheckRollup".into(), checks);
+        map.insert("statusCheckRollupState".into(), rollup_state);
+        map.insert("statusCheckRollupTotal".into(), rollup_total);
         map.insert("committedDate".into(), committed);
         map.remove("commits");
     }
@@ -1454,11 +1569,32 @@ fn verdict(c: &serde_json::Value) -> CheckVerdict {
 /// Any failure anywhere is failing; otherwise any incomplete run is pending. Failing wins over
 /// pending because a red check is information you act on now, and a queue that showed "pending"
 /// for a PR with a broken build would be hiding the useful half.
+///
+/// **Two sources, and the more cautious of them wins** (SKEIN-232). The contexts array is a page of
+/// a hundred; GitHub's own `state` is its verdict over all of them however many there are. Read
+/// from the page alone, a pull request whose 101st context is red reads "passing" — and
+/// `docs/pr-workflow.md`'s merge train acts on `checks:passing` by merging and deleting the branch,
+/// so that is not a wrong dot on a row, it is a merge performed on a guarantee that was never
+/// checked. So a red in either source is "failing", and where they disagree in the other direction
+/// — GitHub says green while a context this page holds has not finished — the answer is "pending".
+/// Both of those are the over-report direction this function already takes for a conclusion it does
+/// not recognise (see [`verdict`]): more of your attention, and never a merge on a check nobody read.
+///
+/// `state` absent is a real case, not a nuisance: an answer from before this field was asked for,
+/// and every fixture written against the old shape. Then the page is all there is — and if the page
+/// was TRUNCATED (`statusCheckRollupTotal` past its length) a walk that found nothing wrong has not
+/// earned "passing", so it says "pending" and [`queue_within`] adds the blind spot that says why.
 fn rollup(item: &serde_json::Value) -> String {
     let Some(checks) = item.get("statusCheckRollup").and_then(|v| v.as_array()) else {
         return "none".into();
     };
-    if checks.is_empty() {
+    let state = item
+        .get("statusCheckRollupState")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    // No contexts and none claimed: nothing has ever run against this commit. Unchanged, and it is
+    // why `total` may not simply default to zero — an absent `totalCount` means "not said".
+    if checks.is_empty() && rollup_total(item).unwrap_or(0) == 0 {
         return "none".into();
     }
     let mut pending = false;
@@ -1469,7 +1605,46 @@ fn rollup(item: &serde_json::Value) -> String {
             CheckVerdict::Passing => {}
         }
     }
-    if pending { "pending" } else { "passing" }.into()
+    match state {
+        // GitHub's own words for a red commit. `EXPECTED` is a context somebody promised and has
+        // not sent, which is pending by every reading.
+        Some("FAILURE" | "ERROR") => "failing".into(),
+        Some("SUCCESS") if !pending => "passing".into(),
+        // `PENDING`, `EXPECTED`, a green rollup over a context this page has not seen finish, or a
+        // word this code does not know — none of which is a check somebody may merge on.
+        Some(_) => "pending".into(),
+        None if pending || truncated_rollup(item) => "pending".into(),
+        None => "passing".into(),
+    }
+}
+
+/// Did the answer carry GitHub's own rollup verdict at all? The one state [`rollup`] cannot decide
+/// from either source, and the queue says so rather than letting its "pending" pass for CI running.
+fn rollup_state_missing(item: &serde_json::Value) -> bool {
+    !item
+        .get("statusCheckRollupState")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// How many contexts GitHub says the rollup has, where it said — see [`PR_FRAGMENT`].
+fn rollup_total(item: &serde_json::Value) -> Option<usize> {
+    item.get("statusCheckRollupTotal")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+}
+
+/// Did the check rollup have more contexts than the answer carried?
+///
+/// The comparison is against what actually arrived rather than against [`SEARCH_PAGE`]'s sibling
+/// hundred, so it stays true if the page size ever moves.
+fn truncated_rollup(item: &serde_json::Value) -> bool {
+    let read = item
+        .get("statusCheckRollup")
+        .and_then(|v| v.as_array())
+        .map(|c| c.len())
+        .unwrap_or(0);
+    rollup_total(item).is_some_and(|total| total > read)
 }
 
 /// WHICH contexts are behind a red rollup — name and detail link, first [`FAILING_CHECKS_SHOWN`]
@@ -1479,6 +1654,11 @@ fn rollup(item: &serde_json::Value) -> String {
 /// "build, build, build" answers the question worse than one that says "build". A failing context
 /// GitHub gave no name for is skipped rather than shown blank: the one-word `checks` verdict
 /// still says "failing", so nothing is hidden — there is just no name to show for it.
+///
+/// The same holds for the red that lives past the hundredth context: [`rollup`] says "failing" on
+/// GitHub's verdict, and this returns nothing to name it by, because the name is in the part of the
+/// list nobody read. An empty list under a red verdict is that, and it is the right way round — a
+/// verdict with no names sends you to GitHub; names with no verdict would have sent you nowhere.
 fn failing_contexts(item: &serde_json::Value) -> Vec<FailedCheck> {
     let Some(checks) = item.get("statusCheckRollup").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -4838,6 +5018,7 @@ mod tests {
             blind_spots: Vec::new(),
             as_of: String::new(),
             fresh: false,
+            whole: true,
         });
 
         assert_eq!(
@@ -5183,5 +5364,351 @@ mod tests {
             std::env::remove_var(key);
         }
         forget_host_token();
+    }
+
+    /// A check rollup as GitHub sends one: `state` beside a page of `contexts`.
+    ///
+    /// `state: None` is an answer from before SKEIN-232 asked for the field, which is what every
+    /// fixture written against the old shape is — those must keep reading exactly as they did.
+    fn rollup_node(state: Option<&str>, total: usize, contexts: &[&str]) -> serde_json::Value {
+        let state = match state {
+            Some(s) => format!(r#""state":"{s}","#),
+            None => String::new(),
+        };
+        item(&format!(
+            r#"{{"number":7,"title":"t","url":"u","isDraft":false,
+                "headRefName":"feat","headRefOid":"abc","baseRefName":"main",
+                "updatedAt":"2026-08-25T00:00:00Z","author":{{"login":"me"}},
+                "latestReviews":{{"nodes":[]}},
+                "commits":{{"nodes":[{{"commit":{{"committedDate":"2026-08-25T00:00:00Z",
+                  "statusCheckRollup":{{{state}"contexts":{{"totalCount":{total},"nodes":[{}]}}}}
+                }}}}]}}}}"#,
+            contexts.join(",")
+        ))
+    }
+
+    /// A hundred green contexts: the page GitHub fills, and the whole of what skein used to see.
+    fn a_full_page_of_green() -> Vec<&'static str> {
+        vec![r#"{"status":"COMPLETED","conclusion":"SUCCESS"}"#; SEARCH_PAGE]
+    }
+
+    /// **A red check past the hundredth context must not read as green** (SKEIN-232).
+    ///
+    /// The queue used to compute the verdict itself, from a `contexts(first: 100)` page, and never
+    /// asked GitHub for its own answer over all of them. A matrix build (`os × rust-version ×
+    /// feature`) reaches three digits routinely, so the 101st context being red was invisible.
+    ///
+    /// The consequence is asserted here rather than described, because it is not a wrong dot on a
+    /// row: `docs/pr-workflow.md`'s merge train fires on `checks:passing` — the same string, off the
+    /// same field ([`crate::prwork`] builds `Facts::checks` from `Pr::checks`) — and its act is
+    /// `merge:squash+delete`. A green verdict computed from a page nobody could see all of is a
+    /// merged pull request whose CI failed, with the journal recording a clean merge.
+    #[test]
+    fn a_red_check_past_the_hundredth_context_does_not_read_as_passing() {
+        let flat = shape(&rollup_node(Some("FAILURE"), 143, &a_full_page_of_green()));
+
+        assert_eq!(
+            rollup(&flat),
+            "failing",
+            "every context skein can see is green and GitHub says the commit is red — the red is \
+             in the 43 it never read, and GitHub's own verdict is the only thing that knows"
+        );
+
+        // And the act that verdict guards. The owner's train, as `docs/pr-workflow.md` writes it.
+        let train = crate::workflow::from_bytes(
+            br#"{"workflow":[{"name":"train","serial":true,"matches":["mine"],"steps":[
+                 {"when":["label:ci-queue","checks:passing","mergeable","current"],
+                  "do":"merge:squash+delete"}]}]}"#,
+        )
+        .expect("the merge train must be expressible");
+        let facts = crate::workflow::Facts {
+            approved: true,
+            labels: vec!["ci-queue".into()],
+            checks: rollup(&flat),
+            mergeable: Some(true),
+            behind: Some(false),
+            base_is_trunk: Some(true),
+            mine: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::workflow::next(&train[0], &facts),
+            None,
+            "the merge train took a step on a pull request whose CI failed — this is the merge, \
+             and the branch deletion, that the wrong verdict authorises"
+        );
+
+        // The other direction, which is what stops this fix being "say pending and never merge":
+        // a rollup GitHub calls green, whose contexts are green, still merges.
+        let green = shape(&rollup_node(Some("SUCCESS"), 143, &a_full_page_of_green()));
+        assert_eq!(rollup(&green), "passing");
+        let facts = crate::workflow::Facts {
+            checks: rollup(&green),
+            ..facts
+        };
+        assert!(
+            matches!(
+                crate::workflow::next(&train[0], &facts),
+                Some(crate::workflow::Chosen {
+                    act: crate::workflow::Act::Merge(_),
+                    ..
+                })
+            ),
+            "a genuinely green pull request must still merge, or the fix has broken the train \
+             instead of the bug"
+        );
+    }
+
+    /// The verdict is the more cautious of the two sources, and an old answer still reads as it did.
+    ///
+    /// Each line here is a case the single-source walk got wrong or must keep getting right — the
+    /// last two are the fixtures from before `state` was asked for, which have no `state` at all
+    /// and must be untouched by any of this.
+    #[test]
+    fn a_check_verdict_never_out_ranks_the_source_that_saw_more() {
+        let red = r#"{"status":"COMPLETED","conclusion":"FAILURE"}"#;
+        let running = r#"{"status":"IN_PROGRESS"}"#;
+        let green = r#"{"status":"COMPLETED","conclusion":"SUCCESS"}"#;
+        let verdict =
+            |state, total, contexts: &[&str]| rollup(&shape(&rollup_node(state, total, contexts)));
+
+        // GitHub's word for a red commit, whichever word it uses, over a page that looks fine.
+        assert_eq!(
+            verdict(Some("FAILURE"), 143, &a_full_page_of_green()),
+            "failing"
+        );
+        assert_eq!(
+            verdict(Some("ERROR"), 143, &a_full_page_of_green()),
+            "failing"
+        );
+        // Still running, over a page that has all finished.
+        assert_eq!(
+            verdict(Some("PENDING"), 143, &a_full_page_of_green()),
+            "pending"
+        );
+        assert_eq!(
+            verdict(Some("EXPECTED"), 143, &a_full_page_of_green()),
+            "pending"
+        );
+        // A word this code does not know is not a merge anybody may take.
+        assert_eq!(verdict(Some("SOMETHING_NEW"), 1, &[green]), "pending");
+        // And the page out-ranks a green verdict in the other direction: a red or an unfinished
+        // context skein can SEE is not overruled by GitHub calling the commit green.
+        assert_eq!(verdict(Some("SUCCESS"), 101, &[red]), "failing");
+        assert_eq!(verdict(Some("SUCCESS"), 101, &[running]), "pending");
+        // Nothing has run: unchanged, and it is why `totalCount` may not simply default to zero.
+        assert_eq!(verdict(Some("EXPECTED"), 0, &[]), "none");
+
+        // No `state` — every fixture written before SKEIN-232, and any answer GitHub gives without
+        // one. The page is all there is, and it is read exactly as it always was…
+        assert_eq!(verdict(None, 1, &[green]), "passing");
+        assert_eq!(verdict(None, 2, &[green, red]), "failing");
+        assert_eq!(verdict(None, 0, &[]), "none");
+        // …except that a page which was CUT OFF has not earned "passing" on its own.
+        assert_eq!(
+            verdict(None, 143, &a_full_page_of_green()),
+            "pending",
+            "a walk of 100 of 143 contexts that found nothing wrong knows nothing about the 43"
+        );
+    }
+
+    /// The queue says which pull request's checks it could not read (SKEIN-232).
+    ///
+    /// "pending" is the honest verdict for a cut-off list nobody gave a verdict for, and on its own
+    /// it is indistinguishable from CI still running — which is a sentence somebody waits on. The
+    /// blind spot is the difference, and it fires only where the truncation actually costs the
+    /// answer: with GitHub's `state` present the cap costs a NAME and nothing else, and a blind spot
+    /// per matrix build would be noise over a verdict that is right.
+    #[test]
+    fn a_check_list_the_queue_could_not_read_to_the_end_says_so() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        let node = |state: Option<&str>| {
+            serde_json::to_string(&rollup_node(state, 143, &a_full_page_of_green())).unwrap()
+        };
+        let answer = |state: Option<&str>| {
+            format!(
+                r#"{{"data":{{"q0":{{"nodes":[{}]}},"q1":{{"nodes":[]}},"q2":{{"nodes":[]}},"q3":{{"nodes":[]}}}}}}"#,
+                node(state)
+            )
+        };
+
+        let (base, seen) = batched_github(false, 200, answer(None));
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/rollup-cut"), true).expect("the queue answered");
+
+        assert!(
+            graphql_requests(&seen)[0]
+                .contains("statusCheckRollup { state contexts(first: 100) { totalCount"),
+            "the fragment must ask for GitHub's own verdict and the size of the list: {}",
+            graphql_requests(&seen)[0]
+        );
+        assert_eq!(
+            q.prs[0].checks, "pending",
+            "a cut-off list with no verdict must not read as green"
+        );
+        assert!(
+            q.blind_spots.iter().any(|b| b.contains("#7's checks")
+                && b.contains("143")
+                && b.contains("no rollup verdict")),
+            "the row says `pending` and nothing says why it is not `passing`: {:?}",
+            q.blind_spots
+        );
+
+        // The same pull request, with GitHub's verdict beside the same cut-off page: the answer is
+        // certain, so there is nothing to warn about.
+        let (base, _seen) = batched_github(false, 200, answer(Some("SUCCESS")));
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/rollup-cut"), true).expect("the queue answered");
+        assert_eq!(q.prs[0].checks, "passing");
+        assert!(
+            !q.blind_spots.iter().any(|b| b.contains("#7's checks")),
+            "a verdict GitHub stands behind needs no blind spot beside it: {:?}",
+            q.blind_spots
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+    }
+
+    /// **A membership search cut off at its page says how many it could not show** (SKEIN-231).
+    ///
+    /// The truncation was undetectable by construction: GitHub answers HTTP 200 with exactly a
+    /// hundred nodes, and the queue rendered a list that looks complete. That is the rename bug in
+    /// a quieter form — there, a stale name matched nothing and the queue was empty; here the queue
+    /// is full and merely short, which is harder to notice and just as wrong.
+    ///
+    /// Three things travel together, and the test insists on all three: the sentence with the
+    /// count in it, `whole: false` so nothing downstream reads absence as evidence, and the
+    /// archive entry for a pull request past the page surviving the refresh.
+    #[test]
+    fn a_membership_search_cut_off_at_its_page_says_how_many_it_could_not_show() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        // Set aside by hand, and past the page of whatever the searches return: the queue cannot
+        // see it, and "cannot see it" must not read as "it closed".
+        set_archived("search-cut", 4242, true).expect("archived");
+
+        let answer = |more: bool| {
+            format!(
+                r#"{{"data":{{"q0":{{"issueCount":143,"pageInfo":{{"hasNextPage":{more}}},"nodes":[{five}]}},
+                   "q1":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}},
+                   "q2":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}},
+                   "q3":{{"issueCount":0,"pageInfo":{{"hasNextPage":false}},"nodes":[]}}}}}}"#,
+                five = search_node(5),
+            )
+        };
+
+        let (base, seen) = batched_github(false, 200, answer(true));
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/search-cut"), true).expect("the queue answered");
+
+        let sent = &graphql_requests(&seen)[0];
+        assert!(
+            sent.contains("issueCount") && sent.contains("hasNextPage"),
+            "the search must ask how many it matched and whether it reached the end: {sent}"
+        );
+        assert!(
+            q.blind_spots.iter().any(|b| b.contains(
+                "the `review-requested:me` query matched 143 pull requests and skein read the \
+                 first 100"
+            )),
+            "a truncated search must name ITS rule and the size of the hole: {:?}",
+            q.blind_spots
+        );
+        assert!(
+            !q.whole,
+            "a queue missing 43 pull requests must not tell anybody it saw them all"
+        );
+        assert!(
+            archived("search-cut").contains(&4242),
+            "a set-aside pull request past the page was deleted because a truncated search did \
+             not list it — the same erasure SKEIN-229 fixed for an outage"
+        );
+        // The rules that answered in full are not tarred with it.
+        for whole in ["reviewed-by:me", "author:me", "mentions:me"] {
+            assert!(
+                !q.blind_spots.iter().any(|b| b.contains(whole)),
+                "a search that reached the end was reported as truncated: {:?}",
+                q.blind_spots
+            );
+        }
+
+        // The same shape, reaching the end. Nothing is said, `whole` holds, and the prune runs —
+        // which is what stops "say it is partial" from becoming "never prune anything".
+        let (base, _seen) = batched_github(false, 200, answer(false));
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let q = queue(&batched_repo("acme/search-cut"), true).expect("the queue answered");
+        assert!(
+            !q.blind_spots.iter().any(|b| b.contains("query matched")) && q.whole,
+            "a search that saw everything must say nothing about being cut off: {:?}",
+            q.blind_spots
+        );
+        assert!(
+            !archived("search-cut").contains(&4242),
+            "a queue that saw everything still prunes a set-aside PR that is no longer open"
+        );
+        // Nothing here can prove what the OTHER reader of this list does with it — see
+        // `the_only_other_reader_of_this_list_stands_down_when_it_is_partial`.
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+    }
+
+    /// `review::prune` reads this queue's list, and it may only do so when the list is whole.
+    ///
+    /// Asserted against the source, the way [`the_badge_reads_through_a_ten_minute_budget`] is and
+    /// for the same reason: the call lives in the server binary, behind an HTTP handler and a
+    /// detached task, so no test in this module can reach it — and the thing that goes wrong is
+    /// the guard being dropped, which a runtime test of the pruning itself would never notice.
+    ///
+    /// What it costs when it is dropped: every pull request past a truncated search's page is
+    /// absent from `open`, so its summary takes the "closed and merged is asked" road and pays a
+    /// `pr_is_open` REST call — per file, per tab open, for ever, for pull requests that are alive
+    /// and merely past the hundredth (SKEIN-231).
+    #[test]
+    fn the_only_other_reader_of_this_list_stands_down_when_it_is_partial() {
+        let server = std::fs::read_to_string("src/bin/skein-server.rs").expect("the server");
+        assert_eq!(
+            server.matches("review::prune(").count(),
+            1,
+            "there is more than one caller now, and only one of them is pinned here"
+        );
+        let guarded = server
+            .split("review::prune(")
+            .next()
+            .expect("the source before the call");
+        assert!(
+            guarded.contains("slug.filter(|_| queue.whole)"),
+            "the queue's list is pruned against without asking whether it saw everything — a \
+             search cut off at its page makes every pull request past the hundredth absent for a \
+             reason that has nothing to do with it"
+        );
     }
 }

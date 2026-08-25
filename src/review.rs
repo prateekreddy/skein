@@ -4921,6 +4921,8 @@ COMMENT: this one points at a line the diff does not show.
             blind_spots: Vec::new(),
             as_of: String::new(),
             fresh: false,
+            // Complete, so `prune` may read an absence as evidence (SKEIN-231, `Queue::whole`).
+            whole: true,
         });
         let kept = vec![
             Draft {

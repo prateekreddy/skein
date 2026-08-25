@@ -1174,7 +1174,12 @@ async fn api_review_queue(
             // whose PR is no longer in your lane, and doing that on the way to the response would
             // spend somebody's tab-open on tidying up files they cannot see. Detached: the queue is
             // already on its way out, and nothing here has an answer the caller is waiting for.
-            if let Some(slug) = slug {
+            // And only against a queue that saw everything (SKEIN-231). `prune` reads a pull
+            // request's ABSENCE from this list — a search cut off at its page makes every pull
+            // request past the hundredth absent for a reason that has nothing to do with it, and
+            // the summaries of those pay a `pr_is_open` REST call each, on every tab open, for
+            // ever. `whole` is the queue's own word for whether absence means anything here.
+            if let Some(slug) = slug.filter(|_| queue.whole) {
                 let open: Vec<(u64, String)> = queue
                     .prs
                     .iter()
