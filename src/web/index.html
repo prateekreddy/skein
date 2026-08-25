@@ -1730,6 +1730,11 @@
 <script src="/vendor/cockpit.js"></script>
 <script>
 // ---------- model ----------
+// A STRING ARGUMENT inside an `onclick="…"` is `esc(JSON.stringify(x))`, never a bare
+// JSON.stringify: its quotes are the attribute's own delimiter, so the handler ends at the opening
+// one and the remainder is parsed as further attributes — a click that throws nothing, does
+// nothing, and leaves a button that looks perfectly fine. Three shipped that way, and the owner
+// met all three: post a drafted review, set a PR aside until it moves, open a box on its branch.
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
 // coerce to integers — these land in innerHTML, so never interpolate raw box-reported values
 const diffBadge = d => d && (d.files||d.ins||d.del)
@@ -4259,10 +4264,10 @@ function revBody(pr) {
       : `<button type="button" class="revchip go" onclick="openReading('${esc(pr.repo_id)}', ${pr.number})">read the change</button>
       <button type="button" class="revchip" onclick="revCompose('${esc(pr.repo_id)}', ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
-      <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${JSON.stringify(pr.head_ref || "")})">box on this branch</button>
+      <button type="button" class="revchip" onclick="openNewBoxFor('${esc(pr.repo_id)}', ${esc(JSON.stringify(pr.head_ref || ""))})">box on this branch</button>
       ${pr.snoozed
         ? `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, '')" title="it would come back on its own at the author's next push">bring back now</button>`
-        : `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, ${JSON.stringify(pr.head_sha || "")})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
+        : `<button type="button" class="revchip" onclick="revSnooze('${esc(pr.repo_id)}', ${pr.number}, ${esc(JSON.stringify(pr.head_sha || ""))})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
       <button type="button" class="revchip" onclick="archivePr('${esc(pr.repo_id)}', ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
       <button type="button" class="revchip" onclick="revFetchSummary('${esc(pr.repo_id)}', ${pr.number}, 'force')">re-read</button>
       <button type="button" class="revchip" onclick="revCritiqueOpen('${esc(pr.repo_id)}', ${pr.number})">review the code…</button>`}
@@ -5368,7 +5373,7 @@ function revCritiqueHtml(pr) {
     <div class="revacts">
       ${c.posted
         ? `<span class="dim">${esc(c.posted)} ✓</span>`
-        : `<button type="button" class="revchip go" onclick="revCritiquePost('${esc(pr.repo_id)}', ${pr.number}, ${JSON.stringify(k.head_sha || "")})"${stale || c.posting ? " disabled" : ""}>${c.posting ? "posting…" : `post ${keptN} comment${keptN === 1 ? "" : "s"} as one review`}</button>`}
+        : `<button type="button" class="revchip go" onclick="revCritiquePost('${esc(pr.repo_id)}', ${pr.number}, ${esc(JSON.stringify(k.head_sha || ""))})"${stale || c.posting ? " disabled" : ""}>${c.posting ? "posting…" : `post ${keptN} comment${keptN === 1 ? "" : "s"} as one review`}</button>`}
       <button type="button" class="revchip" onclick="revCritiqueDraft('${esc(pr.repo_id)}', ${pr.number})">draft again</button>
       ${close}
     </div>
