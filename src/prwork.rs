@@ -51,9 +51,13 @@ use std::path::PathBuf;
 /// `trunk` is [`crate::prq::Queue::trunk`] — the repository's default branch, `""` when not
 /// known. `behind` keeps `mergeable`'s three values: `BEHIND` is yes, `""` and `UNKNOWN` are
 /// *no answer* rather than no, and everything else GitHub says (`CLEAN`, `BLOCKED`, `DIRTY`,
-/// `UNSTABLE`, …) is a head GitHub has compared with its base and not found behind. An unknown
-/// trunk makes `base_is_trunk` false — the safe direction, since the one thing it gates is a
-/// train shipping into what it believes is the trunk (`docs/pr-workflow.md`, "The merge train").
+/// `UNSTABLE`, …) is a head GitHub has compared with its base and not found behind.
+///
+/// **An unknown trunk is `None`, not `false`.** Both keep a train from shipping into what it only
+/// believes is the trunk, but they are different situations and only one of them is the pull
+/// request's fault: a base that is not the trunk is a stacked child and stops, a trunk skein
+/// cannot see is skein's own blindness and waits.
+/// [`crate::workflow::instead_of_merging_off_the_trunk`] is where that difference is spent.
 pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workflow::Facts {
     crate::workflow::Facts {
         approved: pr.review_decision == "APPROVED",
@@ -68,7 +72,10 @@ pub fn facts_of(pr: &crate::prq::Pr, viewer: &str, trunk: &str) -> crate::workfl
             "" | "UNKNOWN" => None,
             _ => Some(false),
         },
-        base_is_trunk: !trunk.is_empty() && pr.base_ref == trunk,
+        base_is_trunk: match trunk.is_empty() {
+            true => None,
+            false => Some(pr.base_ref == trunk),
+        },
     }
 }
 
@@ -963,6 +970,7 @@ mod tests {
         std::env::set_var("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
         crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
 
         // The workflow, as the owner described it.
         std::fs::write(
@@ -1001,6 +1009,13 @@ mod tests {
                 let (labelled, checks) = world.lock().unwrap().clone();
                 let answer = if head.contains("/user") {
                     r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/thing HTTP") {
+                    // What the repository's default branch is. A real GitHub answers this and a
+                    // stub that did not used to be harmless — until a merge started requiring
+                    // skein to KNOW the base it is shipping into
+                    // ([`crate::workflow::instead_of_merging_off_the_trunk`]), at which point a
+                    // fixture with no trunk is a fixture where nothing may merge.
+                    r#"{"full_name":"acme/thing","default_branch":"main"}"#.to_string()
                 } else if head.contains("/labels") {
                     // The label lands, and this repository's CI starts on it.
                     *world.lock().unwrap() = (true, "pending".into());
@@ -1096,6 +1111,7 @@ mod tests {
             std::env::remove_var(key);
         }
         crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
     }
 
     /// Which workflow governs a pull request, and who gets the last word.
@@ -1473,8 +1489,9 @@ mod tests {
     /// `behind` keeps `mergeable`'s discipline — `""` and `UNKNOWN` are *no answer*, not "current"
     /// — because the merge step leans on `current`, and unknown read as current merges code CI
     /// never tested against the trunk (docs/pr-workflow.md, "The merge train"). And an unknown
-    /// trunk claims nothing: `base_is_trunk` false is the direction that keeps a train parked
-    /// rather than shipping into a branch it only believes is the trunk.
+    /// trunk claims nothing: `base_is_trunk` is `None` — no answer rather than "no", which is the
+    /// direction that keeps a train parked rather than shipping into a branch it only believes is
+    /// the trunk, without turning skein's own blindness into a stop somebody has to clear.
     #[test]
     fn the_train_facts_come_from_merge_state_and_the_trunk() {
         let pr = |merge_state: &str, base_ref: &str| -> crate::prq::Pr {
@@ -1509,11 +1526,21 @@ mod tests {
             "UNKNOWN was flattened to an answer on the way to the workflow"
         );
 
-        assert!(facts_of(&pr("CLEAN", "main"), "me", "main").base_is_trunk);
-        assert!(!facts_of(&pr("CLEAN", "feat-parent"), "me", "main").base_is_trunk);
-        assert!(
-            !facts_of(&pr("CLEAN", "main"), "me", "").base_is_trunk,
-            "an unknown trunk claimed a base as the trunk anyway"
+        assert_eq!(
+            facts_of(&pr("CLEAN", "main"), "me", "main").base_is_trunk,
+            Some(true)
+        );
+        assert_eq!(
+            facts_of(&pr("CLEAN", "feat-parent"), "me", "main").base_is_trunk,
+            Some(false),
+            "a stacked child's base was not recognised as one that is NOT the trunk"
+        );
+        // The third value, and the one that keeps a rate limit from becoming a stop: skein has not
+        // learned this repository's default branch, which is not the same answer as "no".
+        assert_eq!(
+            facts_of(&pr("CLEAN", "main"), "me", "").base_is_trunk,
+            None,
+            "an unknown trunk was flattened to an answer on the way to the workflow"
         );
     }
 
@@ -1562,6 +1589,165 @@ mod tests {
         );
 
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// A stacked child somebody put the train on by hand STOPS, and no merge reaches the wire.
+    ///
+    /// The other half of the rule above, and the one that was missing (SKEIN-237). `matches` is
+    /// read by [`crate::workflow::claims`] and by nothing else: [`carries`] returns
+    /// `Carries::Assigned` straight from the assignment file, [`sweep`] takes its `.name()`, and
+    /// [`crate::workflow::next`] evaluates only `steps` — so on a documented merge train, whose
+    /// `base:trunk` lives in `matches`, one hand assignment merged a child into its PARENT's
+    /// branch and deleted the child's branch. Putting a workflow on a row by hand is an ordinary
+    /// cockpit act; on an eighteen-deep stack it takes the rest of the stack with it, and there is
+    /// no undo for a landed merge and a deleted branch.
+    ///
+    /// Driven through [`sweep`] against a GitHub that records every request, because the assertion
+    /// that matters is about the wire: a doer tested through its return value would pass while
+    /// merging. The workflow is the train exactly as `docs/pr-workflow.md` writes it down.
+    #[test]
+    fn a_hand_assigned_stacked_child_stops_instead_of_merging_into_its_parent() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("SKEIN_PR_WORKFLOWS", "on");
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
+
+        // The train from docs/pr-workflow.md, "The train, written down".
+        std::fs::write(
+            home.join("workflows.json"),
+            br#"{"workflow":[{"name":"merge-train","serial":true,
+              "matches":["ready","approved","base:trunk"],
+              "steps":[
+                {"when":["changes-requested"],"do":"flag:changes were requested"},
+                {"when":["not-mergeable"],"do":"flag:conflicts with the base"},
+                {"when":["behind"],"do":"update-branch:rebase"},
+                {"when":["checks:failing"],"do":"flag:CI failed"},
+                {"when":["no-label:ci-queue"],"do":"add-label:ci-queue"},
+                {"when":["label:ci-queue","checks:pending"],"do":"wait:CI is running"},
+                {"when":["label:ci-queue","checks:passing","mergeable","current"],
+                 "do":"merge:squash+delete"},
+                {"when":[],"do":"wait:waiting for GitHub to catch up"}]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("repos.json"),
+            br#"[{"id":"demo","source":"https://github.com/acme/thing.git","source_tree":"","store":""}]"#,
+        )
+        .unwrap();
+
+        // #12 is a stacked child: based on `feat-parent`, and otherwise in the exact state that
+        // makes the train's last real step fire — approved, ready, labelled, green, CLEAN.
+        let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 16384];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let said = String::from_utf8_lossy(&buf[..n]).to_string();
+                let head = said.lines().next().unwrap_or_default().to_string();
+                seen.lock().unwrap().push(head.clone());
+                let answer = if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("GET /repos/acme/thing") && !head.contains("/pulls") {
+                    r#"{"full_name":"acme/thing","default_branch":"main"}"#.to_string()
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"q0":{"nodes":[{"number":12,"title":"t","url":"u",
+                      "isDraft":false,"author":{"login":"me"},"headRefName":"feat-12",
+                      "headRefOid":"abc","baseRefName":"feat-parent",
+                      "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
+                      "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+                      "labels":{"nodes":[{"name":"ci-queue"}]},
+                      "latestReviews":{"nodes":[]},
+                      "commits":{"nodes":[{"commit":{
+                        "committedDate":"2026-08-23T00:00:00Z",
+                        "statusCheckRollup":{"contexts":{"nodes":[
+                          {"status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}]},
+                      "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
+                        .to_string()
+                } else {
+                    r#"{"merged":true}"#.to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        // The rule refuses it — that is `a_stacked_child_is_kept_out_by_its_matches` above. A
+        // person puts the train on it by hand, which is the road that skipped every guard.
+        assign("demo", 12, "merge-train").unwrap();
+        let did = sweep();
+
+        let calls = heard.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|c| c.contains("/pulls/12/merge")),
+            "the train merged a stacked child into feat-parent: {did:?} / {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("DELETE")),
+            "a branch was deleted on a pull request that was never merged: {calls:?}"
+        );
+        // And it stopped rather than going quiet: a serial train passes a stop over and keeps
+        // moving, and the reason is what somebody reads in the banner.
+        let why = stopped("demo", 12).unwrap_or_else(|| {
+            panic!("a stacked child was left silently blocking the front of the train: {did:?}")
+        });
+        assert!(
+            why.contains("not based on the trunk"),
+            "the stop does not say what is wrong: {why}"
+        );
+        // The timeline says which workflow and which step decided it — step 7 is the merge.
+        let entries = journal("demo", 12);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.kind.as_str(), e.flow.as_str(), e.step))
+                .collect::<Vec<_>>(),
+            vec![("stopped", "merge-train", 7)],
+            "the refusal must name the line that would have merged: {entries:?}"
+        );
+        // And the dry run says the same thing. It is the same [`crate::workflow::next`], so a
+        // person reading the workflows pane before they switch this on is shown the refusal rather
+        // than the merge it used to promise.
+        let flows = crate::workflow::load().unwrap();
+        let facts = facts_of(
+            &crate::prq::queue(&crate::repos::load_repos()[0], false)
+                .unwrap()
+                .prs[0],
+            "me",
+            "main",
+        );
+        let seen = standing("demo", 12, &facts, &flows);
+        assert_eq!((seen.how.as_str(), seen.step), ("assigned", 7));
+        assert!(
+            seen.next.starts_with("flag:"),
+            "the dry run promised something the tick will not do: {seen:?}"
+        );
+
+        for key in [
+            "SKEIN_HOME",
+            "SKEIN_PR_WORKFLOWS",
+            "SKEIN_GITHUB_API",
+            "GH_TOKEN",
+        ] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+        crate::prq::forget_trunks();
     }
 
     /// A serial workflow acts on the front of the train, and only the front.

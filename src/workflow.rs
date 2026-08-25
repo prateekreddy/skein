@@ -74,7 +74,9 @@ pub enum Cond {
     Current,
     /// Its base is the repository's default branch. What keeps a merge train off stacked
     /// children: a child's base is its parent's branch, and merging it would merge into the
-    /// parent, not ship it (docs/pr-workflow.md, "The merge train").
+    /// parent, not ship it (docs/pr-workflow.md, "The merge train"). **Not the only thing that
+    /// keeps them out** — writing it in `matches` is how a child stays off the train altogether,
+    /// but a merge is refused whatever the file says; see [`instead_of_merging_off_the_trunk`].
     BaseTrunk,
 }
 
@@ -615,9 +617,13 @@ pub struct Facts {
     /// `mergeStateStatus: UNKNOWN`, or a queue from before the field existed. Three-valued for
     /// the same reason as [`Facts::mergeable`] — see [`holds`].
     pub behind: Option<bool>,
-    /// The base ref is the repository's default branch. False whenever the trunk is not known:
-    /// a train that guessed here could ship a stacked child into its parent's branch.
-    pub base_is_trunk: bool,
+    /// Is the base ref the repository's default branch? `None` when skein does not know what the
+    /// trunk IS — the lookup failed, or has not happened yet. Three-valued for the same reason as
+    /// [`Facts::mergeable`] and [`Facts::behind`], and here it earns its third value twice over:
+    /// "based on a branch that is not the trunk" is a stacked child, which must never be merged,
+    /// while "skein cannot see what the trunk is" is a transient blindness that must not become a
+    /// permanent stop. [`next`] tells those two apart — see [`instead_of_merging_off_the_trunk`].
+    pub base_is_trunk: Option<bool>,
 }
 
 /// The step a workflow would take next, and where it is in the file.
@@ -659,7 +665,7 @@ pub fn holds(cond: &Cond, facts: &Facts) -> bool {
         Cond::Mine => facts.mine,
         Cond::Behind => facts.behind == Some(true),
         Cond::Current => facts.behind == Some(false),
-        Cond::BaseTrunk => facts.base_is_trunk,
+        Cond::BaseTrunk => facts.base_is_trunk == Some(true),
     }
 }
 
@@ -682,8 +688,58 @@ pub fn next(flow: &Workflow, facts: &Facts) -> Option<Chosen> {
         .find(|(_, step)| step.when.iter().all(|cond| holds(cond, facts)))
         .map(|(step, s)| Chosen {
             step,
-            act: s.act.clone(),
+            // The one thing a written-down step may not talk skein into. See below.
+            act: instead_of_merging_off_the_trunk(&s.act, facts).unwrap_or_else(|| s.act.clone()),
         })
+}
+
+/// **Skein never merges a pull request into a branch it cannot see is the trunk.** What this
+/// returns in place of that merge, or `None` when the step is one it has nothing to say about.
+///
+/// `docs/pr-workflow.md` ("Stacks need no stack model") stakes the whole stack design on one
+/// sentence — *the train only ever touches a PR whose base is the trunk* — and until SKEIN-237 the
+/// only thing holding it up was `base:trunk` in a workflow's `matches`. That guard is evaluated on
+/// exactly one of the two roads to acting: [`claims`] reads `matches`, and a workflow somebody
+/// assigned by hand never goes past it ([`crate::prwork::carries`]). One hand-assigned stacked
+/// child was therefore merged into its PARENT's branch and its branch deleted — the child's commits
+/// on the parent rather than shipped, the rest of the stack cut loose behind it, and nothing about
+/// it undoable from skein. The owner's own documented `ship-mine` (`matches: ["mine"]`) had the
+/// same hole down the *matched* road, on any stacked pull request they authored.
+///
+/// So the guard lives here, where BOTH roads pass, and it is about the action rather than about a
+/// file: a merge is the one act in the closed set that cannot be taken back, and the base is the
+/// one fact that says where its commits land.
+///
+/// The two answers are deliberately different, and that difference is the whole of what makes this
+/// recoverable:
+///
+/// * **The base is known not to be the trunk** — a stacked child. That is a standing fact about
+///   this pull request, not a hiccup, so it becomes a [`Act::Flag`]: the workflow stops on it, in
+///   writing, with the reason, and a serial train passes it over and keeps moving. It rejoins by
+///   itself when its parent merges and GitHub retargets it onto the trunk.
+/// * **The trunk is not known at all** — the lookup failed, usually a rate limit
+///   (`crate::prq::trunk_of` remembers a failure as `""`). Blindness is not a verdict. It becomes
+///   [`Act::Wait`], which writes nothing down and stops nothing: the moment skein can see the
+///   trunk again the same pull request merges, with no stop for anybody to clear.
+///
+/// There is deliberately no way to spell "merge off the trunk on purpose". `base:trunk` is the only
+/// thing the vocabulary can say about a base, so a workflow cannot express a deliberate merge into
+/// a parent branch — and if one is ever wanted, the fix is a word for it, not a hole here.
+pub fn instead_of_merging_off_the_trunk(act: &Act, facts: &Facts) -> Option<Act> {
+    match (act, facts.base_is_trunk) {
+        (Act::Merge(_), Some(false)) => Some(Act::Flag(
+            "this is not based on the trunk — merging it would land its commits on its base \
+             branch instead of shipping them, and delete the branch. It rejoins when its base \
+             becomes the repository's default branch"
+                .into(),
+        )),
+        (Act::Merge(_), None) => Some(Act::Wait(
+            "skein does not yet know this repository's default branch, and will not merge into a \
+             base it cannot check"
+                .into(),
+        )),
+        _ => None,
+    }
 }
 
 /// Does this workflow claim this pull request on its own?
@@ -782,6 +838,10 @@ mod tests {
             checks: checks.into(),
             mergeable,
             mine: true,
+            // An ordinary pull request off the trunk. Said rather than defaulted, because
+            // `Facts::default()` means "skein has not learned this repo's trunk", and a merge is
+            // refused there on purpose — see [`instead_of_merging_off_the_trunk`].
+            base_is_trunk: Some(true),
             ..Default::default()
         };
         let act = |f: &Facts| next(flow, f).map(|c| c.act);
@@ -1005,17 +1065,99 @@ mod tests {
             base_is_trunk,
             ..Default::default()
         };
-        assert!(holds(&Cond::Behind, &facts(Some(true), false)));
-        assert!(!holds(&Cond::Current, &facts(Some(true), false)));
-        assert!(holds(&Cond::Current, &facts(Some(false), false)));
-        assert!(!holds(&Cond::Behind, &facts(Some(false), false)));
+        let off = Some(false);
+        assert!(holds(&Cond::Behind, &facts(Some(true), off)));
+        assert!(!holds(&Cond::Current, &facts(Some(true), off)));
+        assert!(holds(&Cond::Current, &facts(Some(false), off)));
+        assert!(!holds(&Cond::Behind, &facts(Some(false), off)));
         assert!(
-            !holds(&Cond::Behind, &facts(None, false))
-                && !holds(&Cond::Current, &facts(None, false)),
+            !holds(&Cond::Behind, &facts(None, off)) && !holds(&Cond::Current, &facts(None, off)),
             "unknown behind-ness satisfied a condition it must satisfy neither of"
         );
-        assert!(holds(&Cond::BaseTrunk, &facts(None, true)));
-        assert!(!holds(&Cond::BaseTrunk, &facts(None, false)));
+        assert!(holds(&Cond::BaseTrunk, &facts(None, Some(true))));
+        assert!(!holds(&Cond::BaseTrunk, &facts(None, Some(false))));
+        // And a trunk skein has not learned yet satisfies it no more than a base that is not the
+        // trunk does — the third value, kept out of the condition on purpose.
+        assert!(
+            !holds(&Cond::BaseTrunk, &facts(None, None)),
+            "an unknown trunk claimed a base as the trunk anyway"
+        );
+    }
+
+    /// A merge is refused when skein cannot see it is merging into the trunk — and the two ways
+    /// it cannot see are answered differently.
+    ///
+    /// The defect this exists for (SKEIN-237) merged a hand-assigned stacked child into its
+    /// PARENT's branch and deleted the child's branch, because `base:trunk` lived only in
+    /// `matches` and an assignment never reads `matches`. The guard is on the ACTION now, so it
+    /// holds down every road to acting and whatever the file says.
+    ///
+    /// The half that matters as much as the refusal is which refusal. A base that is known not to
+    /// be the trunk is a standing fact about that pull request — it flags, so a train stops on it
+    /// loudly, says why, and moves on. A trunk skein has not learned is skein's own blindness,
+    /// usually a rate limit — it waits, writing nothing down, so the limit lifting is all it takes
+    /// for the same pull request to merge.
+    #[test]
+    fn a_merge_is_refused_on_a_base_that_is_not_known_to_be_the_trunk() {
+        let flow = &from_bytes(EXAMPLE).unwrap()[0];
+        let facts = |base_is_trunk| Facts {
+            approved: true,
+            labels: vec!["ci".into()],
+            checks: "passing".into(),
+            mergeable: Some(true),
+            mine: true,
+            base_is_trunk,
+            ..Default::default()
+        };
+
+        // Trunk-based: the merge the owner asked for, untouched.
+        let chosen = next(flow, &facts(Some(true))).expect("the merge step applies");
+        assert_eq!(
+            chosen.act,
+            Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: true
+            })
+        );
+
+        // A stacked child: the SAME step is chosen — so the row still names the line that would
+        // have acted — and what it does is stop.
+        let child = next(flow, &facts(Some(false))).expect("the merge step still applies");
+        assert_eq!(
+            child.step, chosen.step,
+            "the refusal must name the step that would have merged, not some other one"
+        );
+        match &child.act {
+            Act::Flag(why) => assert!(
+                why.contains("not based on the trunk"),
+                "a stacked child was stopped without being told why: {why}"
+            ),
+            other => panic!("a stacked child was going to be {other:?} — its commits would land on its parent's branch and its branch would be deleted"),
+        }
+
+        // Trunk unknown: a wait, not a stop. Nothing is written down, so nothing has to be
+        // cleared when skein can see again.
+        match next(flow, &facts(None)).expect("the merge step still applies").act {
+            Act::Wait(why) => assert!(
+                why.contains("default branch"),
+                "the wait did not say what skein cannot see: {why}"
+            ),
+            other => panic!("a merge went ahead, or became a stop, on a repository whose trunk skein does not know: {other:?}"),
+        }
+
+        // And the guard is about merges alone: every other action is the file's own business.
+        for act in [
+            Act::AddLabel("ci".into()),
+            Act::UpdateBranch(Update::Rebase),
+            Act::Flag("look".into()),
+            Act::Wait("hold".into()),
+        ] {
+            assert_eq!(
+                instead_of_merging_off_the_trunk(&act, &facts(Some(false))),
+                None,
+                "{act:?} was refused for a reason that only applies to merging"
+            );
+        }
     }
 
     /// `serial` survives being read, written back, and saved.
