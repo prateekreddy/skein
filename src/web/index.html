@@ -491,6 +491,20 @@
             border-bottom:1px solid var(--line); }
   .revrow:first-child { border-top:1px solid var(--line); }
   .revrow.open { background:var(--panel); }
+  /* The keyboard's selection (SKEIN-151/159): a left accent bar, not a background — the lanes and
+     the open row already speak in backgrounds, and two backgrounds compose into mud. `.step.sel`
+     is the same voice inside an open stack. */
+  .revrow.sel > .revline, .step.sel { box-shadow:inset 2px 0 0 var(--accent);
+    background:color-mix(in srgb,var(--accent) 7%,transparent); }
+  /* A selection handed off BY POSITION (its row left the list) says so once, then stops. */
+  .revrow.flash { animation:revflash .9s ease-out 1; }
+  @keyframes revflash { 0% { background:var(--accent-bg); } 100% { background:transparent; } }
+  /* An act still inside its undo window: the row greys in place, exactly as far as `done` will
+     take it if the window lapses — u brings it back whole. */
+  .revrow.held > .revline { opacity:.55; }
+  /* The hunk j/k sit on in the reading view. */
+  .diff .ln.hunk.at { outline:1px solid color-mix(in srgb,var(--accent) 60%,transparent);
+    outline-offset:-1px; }
   .revline { display:grid; grid-template-columns:14px 46px minmax(0,50fr) minmax(0,32fr) auto;
              align-items:center; gap:0 10px; padding:4px 10px; min-height:28px; cursor:pointer; }
   .revline:hover { background:color-mix(in srgb,var(--elevated) 60%,transparent); }
@@ -2961,8 +2975,52 @@ function revMatchesFilter(pr) {
   return rs.includes(revFilter);
 }
 
-function renderReview() {
+// §6 focus rule 2: renderReview may NEVER replace a subtree containing document.activeElement.
+// Measured before this existed: a half-typed comment went focused:"rev-compose",caret:4 →
+// focused:BODY,caret:0 on every summary landing, the 4s stale re-poll and every filter change.
+// The render is therefore DEFERRED while a composer or the search input is focused — or while a
+// text selection is being made over the pane (§6 rule 3's sibling: a selection is as killable as
+// a caret) — and coalesced: one render when the reader lets go, not zero and not five. Deferring
+// rather than diffing keeps renderReview's contract for its ~40 callers (call it whenever state
+// moved), and the surgical paths that must land WHILE a composer is open already exist beside it:
+// revRepaintRow and revPendingPaint touch one row, never the pane.
+// Settle the selection against the queue's NEW order, before any row paints. The selection is an
+// rk key, so surviving a re-sort, a summary landing or a filter change is the default; only when
+// the selected key has LEFT the list does position matter — the row that took its place by
+// position inherits the selection, and flashes once to say so (§6 focus rule 1). A selection on a
+// step of the open stack is on screen even though steps are not in nav, and holds as itself.
+function revNavSettle(nav) {
+  revNav = nav;
+  if (revSel) {
+    const open = revStackOpenKey && revStacks.get(revStackOpenKey);
+    const inSteps = open && open.steps.some(p => rk(p) === revSel);
+    if (!nav.includes(revSel) && !inSteps) {
+      revSel = nav.length ? nav[Math.max(0, Math.min(revSelAt, nav.length - 1))] : null;
+      if (revSel) revFlash = revSel;
+    }
+  }
+  revSelAt = Math.max(0, nav.indexOf(revSel));
+}
+
+let revRenderQueued = false;
+function revRenderHeld() {
+  if (!revpane || !revpane.contains) return false;
+  const ae = typeof document !== "undefined" && document.activeElement;
+  if (ae && revpane.contains(ae) && /^(INPUT|TEXTAREA)$/.test(ae.tagName || "")) return true;
+  const s = typeof window !== "undefined" && window.getSelection ? window.getSelection() : null;
+  if (s && !s.isCollapsed && s.anchorNode && revpane.contains(s.anchorNode)) return true;
+  return false;
+}
+function revRenderFlush() {
+  if (revRenderQueued && !revRenderHeld()) renderReview();
+}
+
+function renderReview(force) {
   if (!revpane) return;
+  // `force` belongs to the one caller that repaints the very field being typed in and restores
+  // its caret itself (revSearchSet); everything else waits for the reader's hands.
+  if (!force && revRenderHeld()) { revRenderQueued = true; return; }
+  revRenderQueued = false;
   // The reading view is a mode of this pane. It renders INSTEAD of the queue, and Esc puts the
   // queue back exactly as it was — same scroll, same expanded row — because the queue is the
   // thing a reader returns to thirty times a day.
@@ -3051,6 +3109,13 @@ function renderReview() {
     // after, and a hit inside "15 pull requests, one change" is a hit you cannot see.
     const stacks = revSearch.trim() ? [] : revChains(shown);
     const inStack = new Set(stacks.flatMap(st => st.steps.map(rk)));
+    revStacks = new Map(stacks.map(st => [revStackKey(st), st]));
+    // Two passes, and the split is the keyboard's (§6 focus rule 1): the FIRST computes what each
+    // lane will show, in its final order, so the selection can be settled against the NEW order
+    // before any row paints itself — a row renders its own `sel` class, so a selection reconciled
+    // after rendering would be a render behind. The SECOND paints.
+    const lanes = [];
+    const nav = [];
     for (const [lane, label] of REV_LANES) {
       const loose = shown.filter(p => p.lane === lane && !inStack.has(rk(p)));
       const laneStacks = stacks.filter(st => revStackLane(st) === lane);
@@ -3058,13 +3123,12 @@ function renderReview() {
       // came here for, and a missing section reads as a page that failed to load.
       if (!loose.length && !laneStacks.length && lane !== "needs-you") continue;
       // Not-ready is a count that states its own composition, folded until asked. The heading is
-      // the toggle both ways, so nothing about the fold is somewhere else.
+      // the toggle both ways, so nothing about the fold is somewhere else. Its rows are navigable
+      // exactly when they are visible — a selection must never sit on a folded row.
       if (lane === "not-ready") {
-        body += `<div class="revlane"><h4 class="revfold" onclick="toggleNotReady()">${esc(label)}
-            <span class="revn">${loose.length}</span>
-            <span class="dim">· ${esc(revNotReadyWhy(loose))} — ${revNotReadyOpen ? "click to fold" : "click to expand"}</span></h4>${
-          revNotReadyOpen ? loose.map(revRow).join("") : ""
-        }</div>`;
+        const entries = revNotReadyOpen ? loose.map(p => ({ key: rk(p), make: () => revRow(p) })) : [];
+        lanes.push({ lane, label, loose, entries, total: loose.length });
+        for (const en of entries) nav.push(en.key);
         continue;
       }
       // A stack sorts by its next actionable step, not its tip — the tip is the one PR you
@@ -3073,17 +3137,18 @@ function renderReview() {
       // Your move is ordered by how long it has waited on you, OLDEST first: working from the top
       // clears what is most likely blocking a colleague. The other lanes keep recency — for your
       // own PRs, "what moved most recently" is the right question.
-      const key = lane === "needs-you" ? revWaitedSince : (p => p.updated_at || "");
+      const sortAt = lane === "needs-you" ? revWaitedSince : (p => p.updated_at || "");
       // What skein read moves the row WITHIN its lane, never across lanes: a tripwire flag lifts a
       // row above the unread, a routine verdict sinks below them, and nothing the model says can
       // take a PR out of the lane its readiness put it in — AI adds scrutiny, never removes it. A
       // wrong promotion costs a glance; a wrong demotion costs a missed regression.
       const entries = [
-        ...loose.map(p => ({ band: revReadBand(p), at: key(p), html: revRow(p) })),
+        ...loose.map(p => ({ band: revReadBand(p), at: sortAt(p), key: rk(p), make: () => revRow(p) })),
         ...laneStacks.map(st => ({
           band: 1,
-          at: key(revStackNext(st) || st.steps[0]),
-          html: revStackRow(st),
+          at: sortAt(revStackNext(st) || st.steps[0]),
+          key: revStackKey(st),
+          make: () => revStackRow(st),
         })),
       ].sort((a, b) => (lane === "needs-you" && a.band !== b.band)
         ? a.band - b.band
@@ -3094,10 +3159,23 @@ function renderReview() {
       // forced order — the heading says both, which is also how the badge (counting PRs) and the
       // pane (counting starts) stop disagreeing.
       const total = loose.length + laneStacks.reduce((n, st) => n + st.steps.length, 0);
+      lanes.push({ lane, label, loose, entries, total });
+      for (const en of entries) nav.push(en.key);
+    }
+    revNavSettle(nav);
+    for (const { lane, label, loose, entries, total } of lanes) {
+      if (lane === "not-ready") {
+        body += `<div class="revlane"><h4 class="revfold" onclick="toggleNotReady()">${esc(label)}
+            <span class="revn">${loose.length}</span>
+            <span class="dim">· ${esc(revNotReadyWhy(loose))} — ${revNotReadyOpen ? "click to fold" : "click to expand"}</span></h4>${
+          entries.map(en => en.make()).join("")
+        }</div>`;
+        continue;
+      }
       body += `<div class="revlane"><h4>${esc(label)} <span class="revn">${entries.length}</span>${
           entries.length !== total ? ` <span class="dim">from ${total} pull requests</span>` : ""
         }</h4>${
-        entries.length ? entries.map(e => e.html).join("")
+        entries.length ? entries.map(en => en.make()).join("")
                     : `<div class="revempty">nothing here${revFilter !== "all" ? " under this filter" : ""}.</div>`
       }</div>`;
     }
@@ -3105,7 +3183,7 @@ function renderReview() {
   revpane.innerHTML = `<div class="revwrap"><div class="revhead">${picker}<div class="revchips">${chips}</div>
       <input class="revsearch" type="search" placeholder="find a pull request…" value="${esc(revSearch)}"
         oninput="revSearchSet(this.value)"
-        onkeydown="if (event.key === 'Escape' && this.value) { event.stopPropagation(); revSearchSet(''); }">
+        onkeydown="if (event.key === 'Escape') { event.stopPropagation(); if (this.value) revSearchSet(''); else this.blur(); }">
       <span class="revspacer"></span>
       ${revScopeRepo() ? `<button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>` : ""}
       <button type="button" class="revchip${revEdit ? " on" : ""}" onclick="toggleWorkflowEditor()">workflows</button>
@@ -3119,6 +3197,7 @@ function renderReview() {
         : ""}
       <button type="button" class="revchip" onclick="loadReview(true)">${revLoading ? "refreshing…" : "refresh"}</button>
     </div>${revModsHtml()}${revEditHtml()}${body}</div>`;
+  revFlash = "";   // the hand-off flash is one render's worth of saying so, not a state
 }
 
 // How old the queue on screen is, in the shortest true form. Its own function rather than a shared
@@ -3152,14 +3231,15 @@ function revScopeRepo() {
 // usually about the thing the diff landed in, which the diff cannot show. Each note records the
 // commit its module was at when it was written, so "out of date" is a fact here rather than a
 // worry — and a stale note is never used to answer anything.
-let revMods = null;        // [{path, owners, state, written}]
+let revMods = null;        // {modules:[{path, owners, state, written}], unread_because}
 let revModsOpen = false;
 let revWriting = "";       // the module being written right now
 
 function loadModules() {
   if (!revScopeRepo()) return;
   fetch(`/api/repos/${encodeURIComponent(revScopeRepo())}/modules`).then(r => r.json())
-    .then(ms => { revMods = ms || []; renderReview(); }).catch(() => {});
+    .then(ms => { revMods = ms && ms.modules ? ms : { modules: [], unread_because: (ms && ms.unread_because) || "" }; renderReview(); })
+    .catch(() => {});
 }
 function toggleMods() {
   revModsOpen = !revModsOpen;
@@ -3182,18 +3262,24 @@ function writeModule(path) {
 // to find out whether there is anything to do in it.
 function revModsCount() {
   if (!revMods) return "notes";
-  const fresh = revMods.filter(m => m.state === "fresh").length;
-  return `notes ${fresh}/${revMods.length}`;
+  // A repo skein could not read has no count to give. "0/0" would be a claim about a repo nobody
+  // looked at — the same conflation SKEIN-117 fixed on the server side.
+  if (revMods.unread_because) return "notes ?";
+  const fresh = revMods.modules.filter(m => m.state === "fresh").length;
+  return `notes ${fresh}/${revMods.modules.length}`;
 }
 function revModsHtml() {
   if (!revModsOpen) return "";
   if (!revMods) return `<div class="revmods"><div class="revempty">looking at the repo…</div></div>`;
-  if (!revMods.length) return `<div class="revmods"><div class="revempty">skein could not find modules in this repo's working clone.</div></div>`;
+  // Three states, and the pane says which: still looking, could not look, looked and found nothing.
+  // The middle one used to wear the last one's sentence.
+  if (revMods.unread_because) return `<div class="revmods"><div class="revempty">skein could not read this repo — ${esc(revMods.unread_because)}</div></div>`;
+  if (!revMods.modules.length) return `<div class="revmods"><div class="revempty">skein read this repo and found no modules in it.</div></div>`;
   return `<div class="revmods">
     <p class="revmodsnote">What each part of the repo is, written once and re-written when that part
       changes. Used to answer your questions about a PR — never to write its summary, and a note
       whose module has moved since is skipped rather than trusted.</p>
-    ${revMods.map(m => `<div class="revmod">
+    ${revMods.modules.map(m => `<div class="revmod">
       <span class="revmodstate ${esc(m.state)}" title="${m.state === "fresh" ? "current" : m.state === "stale" ? "the module has changed since this was written" : "no note yet"}"></span>
       <code>${esc(m.path)}</code>
       ${(m.owners || []).length ? `<span class="dim">${esc((m.owners || []).join(" "))}</span>` : ""}
@@ -3810,8 +3896,13 @@ function revRow(pr) {
       ${revRail(pr)}
     </div>`;
   // data-rk is the repaint hook: SKEIN-162 marks a row done in place, and a row you cannot find
-  // again is a row you can only repaint by rebuilding the pane around it.
-  return `<div class="revrow${open ? " open" : ""}${revDecided.has(rk(pr)) ? " done" : ""}" data-rk="${esc(rk(pr))}">${line}${open ? revBody(pr) : ""}</div>`;
+  // again is a row you can only repaint by rebuilding the pane around it. `sel` is the keyboard's
+  // selection (an rk, so a re-render finding it again IS the survival §6 rule 1 asks for), `flash`
+  // the one-render hand-off mark, and `held` an act still inside its undo window — the "greys in
+  // place" of §6's `e`, painted by the same one-row repaint the receipt rides.
+  return `<div class="revrow${open ? " open" : ""}${revDecided.has(rk(pr)) ? " done" : ""}${
+    revSel === rk(pr) ? " sel" : ""}${revFlash === rk(pr) ? " flash" : ""}${
+    (revPending.get(rk(pr)) || {}).state === "waiting" ? " held" : ""}" data-rk="${esc(rk(pr))}">${line}${open ? revBody(pr) : ""}</div>`;
 }
 
 // When this pull request started waiting on YOU — the sort key of the your-move lane.
@@ -3848,7 +3939,9 @@ function revMatchesSearch(p) {
 
 function revSearchSet(v) {
   revSearch = v;
-  renderReview();
+  // Forced past the focus deferral: this is the ONE caller typing into the pane whose render is
+  // the point — the queue filtering under the keystroke — and it restores the caret itself below.
+  renderReview(true);
   // innerHTML replaced the input mid-keystroke: put the caret back where the typist left it.
   const box = revpane && revpane.querySelector && revpane.querySelector(".revsearch");
   if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
@@ -4073,6 +4166,22 @@ const revDiffs = new Map();    // rk -> {head_sha, diff, cut} | {error}
 // the server displaces into the review body rather than mis-anchoring — harmless by design.
 const revNotes = new Map();    // rk -> [{path,line,body,text,sha}]
 
+// ---- the keyboard's state (SKEIN-151/159, docs/review-ux.md §6) -------------------------------
+// Selection is a PR NUMBER — an rk key, never an index (§6 focus rule 1): an index drifts off the
+// row you are looking at every time a summary lands or a lane re-sorts. `revSelAt` remembers where
+// that key sat in nav order at the last render, so a selected row that LEAVES the list can hand
+// the selection to the row that took its place by position — and `revFlash` makes that hand-off
+// visible for one render rather than silent.
+let revSel = null;             // rk of the selected row, or a stack's own key — never an index
+let revSelAt = 0;              // where the selection sat in revNav at the last render
+let revNav = [];               // every navigable key (rows and stack heads) in display order, rebuilt by renderReview
+let revStacks = new Map();     // stack key -> its stack, as of the last render — what → enters and n/N skip when finished
+let revFlash = "";             // the key whose row flashes once this render: a selection moved by position
+let revChord = "";             // "g" while a g-chord waits for its second key (the meaning lives in shortcutFor)
+let revLastActKey = "";        // the last act revHold held — what a queue-mode u takes back
+let revHunkAt = -1;            // reading view: the hunk j/k sit on (an index into the drawn hunks — positions, not identities)
+let revFileAt = -1;            // reading view: the file ]/[ sit on
+
 // What you typed survives a reload. Reported live on PR 577: notes were written, a draft came
 // back, the page was reloaded — and both were gone, because the composer was pure page state.
 // Saved per (repo, PR, kind) on every keystroke and every draft, restored on reopen, cleared only
@@ -4212,6 +4321,7 @@ function revHold(key, p) {
   const had = revPending.get(key);
   if (had) { if (had.timer) clearTimeout(had.timer); if (had.tick) clearTimeout(had.tick); }
   revPending.set(key, p);
+  revLastActKey = key;   // what a queue-mode `u` takes back — every held act passes through here
   p.timer = setTimeout(() => revFire(key), REV_UNDO_MS);
   p.tick = setTimeout(() => revTick(key), 1000);
   revPendingPaint(key);
@@ -4332,8 +4442,13 @@ function revRepaintRow(key) {
 function revPendingPaint(key) {
   if (revReading) {
     if (revReading.repo + "#" + revReading.number !== key) return; // reading something else; the receipt waits in the row
+    // A verdict pressed FROM the composer closes it, and the composer is not inside the bar — so a
+    // surgical bar swap would leave the box you just sent from sitting on screen, which reads as a
+    // press that did nothing. Nothing is being typed at that point (the state's composer is gone),
+    // so the whole view may repaint.
+    const stale = revpane && revpane.querySelector && revpane.querySelector(".revcompose") && !revComposing;
     const bar = revpane && revpane.querySelector && revpane.querySelector(".readbar");
-    if (bar) bar.outerHTML = revBarHtml(revReading.repo, revReading.number);
+    if (bar && !stale) bar.outerHTML = revBarHtml(revReading.repo, revReading.number);
     else renderReview();
     return;
   }
@@ -4350,6 +4465,8 @@ function revPendingPaint(key) {
 function openReading(repo, number) {
   revReturnScroll = (revpane && revpane.scrollTop) || 0;
   revReading = { repo, number };
+  revHunkAt = -1;   // j/k and ]/[ start from the top of THIS change, not the last one's position
+  revFileAt = -1;
   const key = repo + "#" + number;
   if (!revDiffs.has(key)) {
     fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/diff`)
@@ -4559,18 +4676,302 @@ if (typeof revpane !== "undefined" && revpane && revpane.addEventListener) {
     if (!ln || ln.nextElementSibling?.classList?.contains("composer")) return;
     openReadingComposer(ln);
   });
-  document.addEventListener("keydown", e => {
-    if (!revReading || e.target.closest("textarea, input")) return;
-    // `u` inside the undo window takes the held act back — the receipt names the key. One key
-    // beside the existing Escape, NOT a keyboard layer; the full keymap is SKEIN-159/151's.
-    if (e.key === "u") {
-      const key = revReading.repo + "#" + revReading.number;
-      const p = revPending.get(key);
-      if (p && p.state === "waiting") { e.preventDefault(); revUndo(key); }
+  // The deferred render (see revRenderHeld) lands the moment the reader lets go: focus leaving
+  // the composer or the search input, or the text selection over the pane collapsing. The
+  // microtask lets activeElement/selection settle first; revRenderFlush re-asks revRenderHeld, so
+  // nothing here decides anything.
+  revpane.addEventListener("focusout", () => setTimeout(revRenderFlush, 0));
+  document.addEventListener("selectionchange", () => setTimeout(revRenderFlush, 0));
+}
+
+// ---- the keyboard, dispatched (SKEIN-151/159, docs/review-ux.md §6) ---------------------------
+//
+// WHICH key means WHAT is shortcutFor's REVIEW table in cockpit/src/keys.mjs — one table, one
+// guard, tested in node; the `u`/`Esc` listener the reading view carried before SKEIN-159 is
+// folded in here, so this switch is the only place a review key is acted on. Two of the three
+// deliberate absences live here as refusals that speak (§6): `a` in queue mode explains itself
+// rather than acting, and `m` never arrives at all because merge is unbound in the table — one
+// letter must not land a commit on a base branch. (`o`, the third, opens the reading view HERE,
+// matching the fleet's own `o`; GitHub is the `g h` chord.)
+
+const revRkQuery = key => `[data-rk="${key.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+
+function revKeyPr(key) {
+  return ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || null;
+}
+
+// Move the keyboard's selection WITHOUT a render: the selection is two class flips, and the full
+// render path is for when the data moved, not the eye. The state moves even where the DOM stubs
+// out (the node worlds), so the next render paints the same answer.
+function revKeySelect(key) {
+  revSel = key;
+  revSelAt = Math.max(0, revNav.indexOf(key));
+  if (revpane && revpane.querySelectorAll) {
+    for (const el of revpane.querySelectorAll(".revrow.sel, .step.sel")) el.classList.remove("sel");
+    const el = revpane.querySelector(`.revrow${revRkQuery(key)}, .step${revRkQuery(key)}`);
+    if (el && el.classList) el.classList.add("sel");
+  }
+  revKeyShowSel();
+}
+
+// The selected row kept on screen with 60px of lead (§6's queue table) — enough that the NEXT row
+// is already visible when the eye gets there.
+function revKeyShowSel() {
+  if (!revpane || !revpane.querySelector || !revpane.getBoundingClientRect) return;
+  const el = revpane.querySelector(".revrow.sel, .step.sel");
+  if (!el || !el.getBoundingClientRect) return;
+  const pane = revpane.getBoundingClientRect(), row = el.getBoundingClientRect();
+  if (row.top < pane.top + 60) revpane.scrollTop += row.top - pane.top - 60;
+  else if (row.bottom > pane.bottom - 60) revpane.scrollTop += row.bottom - pane.bottom + 60;
+}
+
+// §6 focus rule 4: an OPENED thing scrolls its expansion to ~25% of the viewport. scrollIntoView
+// is not enough when the expansion is 543px tall: measured, expanding the last row put its
+// actions at top:969 in a 900px viewport with scrollTop unchanged.
+function revKeyShow(el) {
+  if (!el || !el.getBoundingClientRect || !revpane || !revpane.getBoundingClientRect) return;
+  const pane = revpane.getBoundingClientRect();
+  revpane.scrollTop += el.getBoundingClientRect().top - pane.top - pane.height * 0.25;
+}
+
+// Has this row had its decision this session? What n/N walk past: a held or landed act, a row
+// marked done in place, or a stack with no step left to review.
+function revKeyUndecided(key) {
+  const st = revStacks.get(key);
+  if (st) return !!revStackNext(st) && !st.steps.every(p => revDecided.has(rk(p)));
+  return !revDecided.has(key) && !revPending.has(key);
+}
+
+function revKey(action) {
+  if (revReading) revKeyReading(action);
+  else revKeyQueue(action);
+}
+
+function revKeyQueue(action) {
+  const openStack = revStackOpenKey ? revStacks.get(revStackOpenKey) : null;
+  const stepKeys = openStack ? openStack.steps.map(rk) : [];
+  switch (action) {
+    case "rev-next":
+    case "rev-previous": {
+      const d = action === "rev-next" ? 1 : -1;
+      // Inside an open stack, j/k walk its steps, clamped: the way out is ← or Esc, never falling
+      // off the end into an unrelated lane.
+      if (openStack && stepKeys.includes(revSel)) {
+        revKeySelect(stepKeys[Math.max(0, Math.min(stepKeys.indexOf(revSel) + d, stepKeys.length - 1))]);
+        return;
+      }
+      if (!revNav.length) return;
+      const at = revNav.indexOf(revSel);
+      const to = at < 0 ? (d > 0 ? 0 : revNav.length - 1) : Math.max(0, Math.min(at + d, revNav.length - 1));
+      revKeySelect(revNav[to]);
       return;
     }
-    if (e.key === "Escape") closeReading();
-  });
+    case "rev-first": if (revNav.length) revKeySelect(revNav[0]); return;
+    case "rev-last": if (revNav.length) revKeySelect(revNav[revNav.length - 1]); return;
+    case "rev-next-undecided":
+    case "rev-previous-undecided": {
+      if (!revNav.length) return;
+      const d = action === "rev-next-undecided" ? 1 : -1;
+      const from = revNav.indexOf(revSel);
+      for (let i = 1; i <= revNav.length; i++) {
+        const k = revNav[(((from + d * i) % revNav.length) + revNav.length) % revNav.length];
+        if (revKeyUndecided(k)) { revKeySelect(k); return; }
+      }
+      return;
+    }
+    case "rev-into": {
+      const st = revSel ? revStacks.get(revSel) : null;
+      if (!st) return;
+      if (revStackOpenKey !== revSel) toggleRevStack(revSel);
+      // Selection lands on the next actionable step — the only place this stack's review can start.
+      revKeySelect(rk(revStackNext(st) || st.steps[0]));
+      return;
+    }
+    case "rev-back": {
+      if (revStackOpenKey) {
+        const head = revStackOpenKey;
+        toggleRevStack(head);          // closes it
+        revKeySelect(head);            // selection returns to the stack's head row (§6)
+        return;
+      }
+      if (revOpen.size) { toggleRevRow([...revOpen][0]); return; }
+      // Nothing to leave: Esc clears the selection, the queue-mode echo of the fleet's deselect.
+      revSel = null;
+      if (revpane && revpane.querySelectorAll) {
+        for (const el of revpane.querySelectorAll(".revrow.sel, .step.sel")) el.classList.remove("sel");
+      }
+      return;
+    }
+    case "rev-open": {
+      const st = revSel ? revStacks.get(revSel) : null;
+      const target = st ? (revStackNext(st) || st.steps[0]) : revKeyPr(revSel);
+      if (target) openReading(target.repo_id, target.number);
+      return;
+    }
+    case "rev-aside": {
+      const pr = revKeyPr(revSel);
+      if (!pr) return;   // a stack head is set aside step by step, from where the evidence is
+      const key = rk(pr);
+      archivePr(pr.repo_id, pr.number, true);
+      // The receipt strip lives in the expanded row; on a collapsed one the row greys (`held`)
+      // and the toast names the key that takes it back — once, because the eye may be mid-list.
+      if (!revOpen.has(key)) toast(`#${pr.number} set aside — u undoes it`);
+      const at = revNav.indexOf(key);
+      if (at >= 0 && at + 1 < revNav.length) revKeySelect(revNav[at + 1]);   // selection advances
+      return;
+    }
+    case "rev-undo": {
+      const waiting = k => k && (revPending.get(k) || {}).state === "waiting";
+      const key = [revLastActKey, revSel].find(waiting) || [...revPending.keys()].find(waiting);
+      if (!key) return;
+      revUndo(key);
+      revKeySelect(key);   // selection returns to the row whose act was taken back (§6)
+      return;
+    }
+    case "rev-search": {
+      const box = revpane && revpane.querySelector && revpane.querySelector(".revsearch");
+      if (box && box.focus) box.focus();
+      return;
+    }
+    case "rev-repo-menu": {
+      const picker = revpane && revpane.querySelector && revpane.querySelector(".revrepo");
+      if (!picker) return;
+      if (picker.focus) picker.focus();
+      try { if (picker.showPicker) picker.showPicker(); } catch {}   // needs a user gesture; a keydown is one
+      return;
+    }
+    case "rev-github": {
+      const pr = revKeyPr(revSel);
+      if (pr && pr.url && typeof window !== "undefined" && window.open) window.open(pr.url, "_blank", "noopener");
+      return;
+    }
+    case "rev-approve":
+      // Deliberate refusal, out loud (§6): you cannot approve from a surface that is not showing
+      // you the change. The key EXISTS so the answer can be this sentence instead of silence.
+      toast("open it first — a approves where the diff is (↵ opens the reading view)");
+      return;
+    // Reading-view keys. In the queue they do nothing, on purpose — and because they are in the
+    // REVIEW table they are shadowed from the fleet map too, which is the half that matters.
+    case "rev-request":
+    case "rev-comment":
+    case "rev-next-file":
+    case "rev-previous-file":
+      return;
+  }
+  const nth = /^rev-repo-([1-9])$/.exec(action);
+  if (nth) {
+    // g1…g9: the nth repo in the picker's own order, which is the `repos` list's order.
+    const r = repos[+nth[1] - 1];
+    if (!r) return;
+    revSel = null;   // a repo jump starts at its first row, not wherever the old key resurfaces
+    openReview(r.id);
+    if (revNav.length) revKeySelect(revNav[0]);
+    return;
+  }
+}
+
+function revKeyReading(action) {
+  const { repo, number } = revReading;
+  const key = repo + "#" + number;
+  switch (action) {
+    case "rev-back": closeReading(); return;   // the scroll + row restore live in closeReading
+    case "rev-next": revKeyHunk(1); return;    // by HUNK, not line — a line-at-a-time diff at
+    case "rev-previous": revKeyHunk(-1); return;   // 30/day is a scroll wheel with extra steps
+    case "rev-next-file": revKeyFile(1); return;
+    case "rev-previous-file": revKeyFile(-1); return;
+    case "rev-comment": {
+      if (revHunkAt < 0) revKeyHunk(1);        // c with no hunk focused starts at the first one
+      const ln = revKeyHunkLine();
+      if (ln) openReadingComposer(ln);
+      return;
+    }
+    case "rev-approve": {
+      // The bar offers a verdict only over a readable change; the key obeys the same rule.
+      const d = revDiffs.get(key);
+      if (d && !d.error && (d.diff || "").trim()) revAct(repo, number, "approve");
+      else toast("this change is not readable here, so no verdict is offered — GitHub is g h");
+      return;
+    }
+    case "rev-request": revCompose(repo, number, "request-changes"); return;
+    case "rev-aside": archivePr(repo, number, true); return;
+    case "rev-undo": {
+      const p = revPending.get(key);
+      if (p && p.state === "waiting") revUndo(key);
+      return;
+    }
+    case "rev-into": {
+      // → : the next step of the stack this PR belongs to, recomputed the way renderReading does.
+      const chains = revChains(((revQueue && revQueue.prs) || []).filter(p => p.repo_id === repo));
+      const chain = chains.find(st => st.steps.some(x => rk(x) === key));
+      const at = chain ? chain.steps.findIndex(x => rk(x) === key) : -1;
+      const next = chain && chain.steps[at + 1];
+      if (next) { revKeySelect(rk(next)); openReading(next.repo_id, next.number); }
+      return;
+    }
+    case "rev-github": {
+      const pr = revKeyPr(key);
+      const url = (pr && pr.url) || `https://github.com/${repo}/pull/${number}`;
+      if (typeof window !== "undefined" && window.open) window.open(url, "_blank", "noopener");
+      return;
+    }
+    // rev-open, rev-search, n/N, g1…g9, first/last: queue furniture, nothing to do while the
+    // change itself is on screen — and nothing anywhere else either, because the table shadows.
+  }
+}
+
+// The reading view's hunks and files, as drawn — queried per keystroke rather than cached,
+// because the diff can re-render under the keys and an index into the CURRENT drawing survives
+// that where a held element would go stale.
+function revKeyHunks() {
+  if (!revpane || !revpane.querySelectorAll) return [];
+  return [...revpane.querySelectorAll(".ln.hunk")];
+}
+function revKeyHunk(d) {
+  const hunks = revKeyHunks();
+  if (!hunks.length) return;
+  revHunkAt = revHunkAt < 0
+    ? (d > 0 ? 0 : hunks.length - 1)
+    : Math.max(0, Math.min(revHunkAt + d, hunks.length - 1));
+  for (const el of hunks) if (el.classList) el.classList.remove("at");
+  const el = hunks[revHunkAt];
+  if (el.classList) el.classList.add("at");
+  revKeyShow(el);
+}
+// The line `c` comments on: the first commentable line inside the focused hunk.
+function revKeyHunkLine() {
+  const h = revKeyHunks()[revHunkAt];
+  if (!h) return null;
+  let el = h.nextElementSibling;
+  while (el && !(el.classList && el.classList.contains("cmtable"))) {
+    if (el.classList && el.classList.contains("hunk")) return null;   // an empty hunk stays silent
+    el = el.nextElementSibling;
+  }
+  return el || null;
+}
+function revKeyFiles() {
+  if (!revpane || !revpane.querySelectorAll) return [];
+  const seen = new Set(), out = [];
+  for (const el of revpane.querySelectorAll(".ln[data-file]")) {
+    const f = el.dataset && el.dataset.file;
+    if (f && !seen.has(f)) { seen.add(f); out.push(el); }
+  }
+  return out;
+}
+function revKeyFile(d) {
+  const files = revKeyFiles();
+  if (!files.length) return;
+  revFileAt = revFileAt < 0
+    ? (d > 0 ? 0 : files.length - 1)
+    : Math.max(0, Math.min(revFileAt + d, files.length - 1));
+  const target = files[revFileAt];
+  revKeyShow(target);
+  // Re-arm hunk navigation from the jump, so the next j lands on this file's first hunk rather
+  // than continuing from wherever j last was.
+  if (target.compareDocumentPosition) {
+    const hunks = revKeyHunks();
+    const after = hunks.findIndex(h => target.compareDocumentPosition(h) & 4 /* FOLLOWING */);
+    revHunkAt = after < 0 ? hunks.length - 1 : after - 1;
+  }
 }
 
 // --- The actual review: drafted comments you vet, then post -----------------------------------
@@ -4754,6 +5155,9 @@ function revMisnamed(steps) {
   return out;
 }
 
+// A stack's own key in the queue's namespace — its head PR's rk with a marker, so the keyboard's
+// selection can name a stack row the same way it names a loose one and neither can collide.
+function revStackKey(st) { return "stack:" + st.repo_id + "#" + st.steps[0].number; }
 // The first step still awaiting you — the only place a review of this stack can start.
 function revStackNext(st) { return st.steps.find(p => p.lane === "needs-you") || null; }
 // A stack sits in the lane of its next actionable step, not of its tip.
@@ -4769,7 +5173,12 @@ function toggleRevStack(key) {
   // the other direction.
   revOpen = new Set();
   revStackStep = null;
+  if (revStackOpenKey) { revSel = key; revSelAt = Math.max(0, revNav.indexOf(key)); }   // opening is selecting
   renderReview();
+  // §6 focus rule 4, same as a row: fifteen steps of expansion land at ~25%, not below the fold.
+  if (revStackOpenKey && revpane && revpane.querySelector) {
+    revKeyShow(revpane.querySelector(`.revrow${revRkQuery(key)}`));
+  }
 }
 function toggleStackStep(key) {
   revStackStep = revStackStep === key ? null : key;
@@ -4777,7 +5186,7 @@ function toggleStackStep(key) {
 }
 
 function revStackRow(st) {
-  const key = "stack:" + st.repo_id + "#" + st.steps[0].number;
+  const key = revStackKey(st);
   const open = revStackOpenKey === key;
   const next = revStackNext(st);
   const at = next ? st.steps.indexOf(next) + 1 : st.steps.length;
@@ -4790,7 +5199,8 @@ function revStackRow(st) {
         : `every step is decided`}</span>
       ${revRail(next || st.steps[0])}
     </div>`;
-  return `<div class="revrow stack${open ? " open" : ""}">${line}${open ? revStackSteps(st) : ""}</div>`;
+  return `<div class="revrow stack${open ? " open" : ""}${revSel === key ? " sel" : ""}${
+    revFlash === key ? " flash" : ""}" data-rk="${esc(key)}">${line}${open ? revStackSteps(st) : ""}</div>`;
 }
 
 function revStackSteps(st) {
@@ -4799,7 +5209,7 @@ function revStackSteps(st) {
     const decided = p.lane === "waiting";
     const cls = p === next ? " next" : decided ? " done" : "";
     const note = st.misnamed.get(p.number);
-    return `<div class="step${cls}" onclick="toggleStackStep('${esc(rk(p))}')">
+    return `<div class="step${cls}${revSel === rk(p) ? " sel" : ""}" data-rk="${esc(rk(p))}" onclick="toggleStackStep('${esc(rk(p))}')">
         <span class="sn">step ${i + 1}</span><span class="node"></span>
         <span class="revnum">#${p.number}</span>
         <span class="st">${esc(p.title || "")}</span>
@@ -4817,7 +5227,13 @@ function toggleRevRow(key) {
   revOpen = new Set([key]);
   revStackOpenKey = null;
   revStackStep = null;
+  // Opening IS selecting — the keyboard continues from the row the mouse chose, not from where
+  // the selection last was.
+  revSel = key;
+  revSelAt = Math.max(0, revNav.indexOf(key));
   renderReview();
+  // §6 focus rule 4: the expansion lands at ~25% of the viewport, actions visible.
+  if (revpane && revpane.querySelector) revKeyShow(revpane.querySelector(`.revrow${revRkQuery(key)}`));
   // A drafted review that survived a reload must not look gone (reported live on PR 577: the model
   // call outlived the page, the draft landed on disk, and the panel sat closed saying nothing). If
   // a stored draft exists for this row, the panel opens itself with it — a disk read, never a
@@ -6762,6 +7178,33 @@ const KEYMAP = [
     [["l"], "load by box — which one is using the CPU"],
     [["/"], "filter the board by name, branch, repo or headline"],
   ]},
+  // The review pane's map (SKEIN-151/159, docs/review-ux.md §6). The three deliberate absences
+  // are LISTED, not omitted: a key sheet that silently lacks `m` reads as a sheet that forgot it.
+  { sec:"Review — the queue", items:[
+    [["j","k"], "move the selection (inside an open stack, along its steps)"],
+    [["n","N"], "next / previous row you have not decided this session"],
+    [["→"], "enter the selected stack — ← or esc leaves it, back at its head"],
+    [["↵","o"], "open the reading view — o opens things here; GitHub is g h"],
+    [["e"], "set aside — the row greys in place, u takes it back within 8s"],
+    [["u"], "undo the held act"],
+    [["/"], "find a pull request"],
+    [["g","1"], "…g9 — the nth repo in the picker's order"],
+    [["g","r"], "the repo picker"],
+    [["g","g"], "first row · G last row"],
+    [["a"], "refused here, deliberately — you cannot approve from a surface that is not showing you the change; open the row first"],
+    [["m"], "unbound, deliberately — merging cannot be undone from this pane, so one letter must never land a commit on a base branch; the merge chip asks first"],
+  ]},
+  { sec:"Review — reading a change", items:[
+    [["j","k"], "next / previous hunk"],
+    [["]","["], "next / previous file"],
+    [["c"], "comment on the focused hunk's line — ⌘↵ saves it"],
+    [["a"], "approve, with your waiting line comments"],
+    [["r"], "request changes — the composer opens focused"],
+    [["e"], "set aside"],
+    [["→"], "the next step of this stack"],
+    [["g","h"], "open on GitHub"],
+    [["esc","←"], "back to the queue, at the row you left, selection intact"],
+  ]},
   { sec:"Tabs", items:[
     [["⌥1","…","⌥9"], "switch to the nth open tab (⌥9 is always the last)"],
     [["⌥["],           "previous tab"],
@@ -8123,8 +8566,19 @@ document.addEventListener("keydown", e => {
   // Which key means what is `shortcutFor`, one table, tested in node. This switch does the thing;
   // it does not decide it, and it no longer re-reads `e.key` — a keymap in two places is one place
   // a key can be forgotten.
-  const action = shortcutFor(e, { inTerm, inField });
+  //
+  // The review pane is its own surface (SKEIN-151): with it open, shortcutFor consults the REVIEW
+  // table and the fleet map is reached for nothing — a review key that fell through would move a
+  // selection BEHIND the pane, and ↵ would navigate out of review with a composer open. The chord
+  // is one letter of page memory (`g` was pressed); what the second key MEANS stays in the table.
+  const pending = revChord;
+  revChord = "";
+  const action = view.mode === "review"
+    ? shortcutFor(e, { inTerm, inField, pane: "review", pending })
+    : shortcutFor(e, { inTerm, inField });
   if (!action) return;
+  if (action === "rev-chord") { e.preventDefault(); revChord = "g"; return; }
+  if (action.startsWith("rev-")) { e.preventDefault(); revKey(action); return; }
   switch (action) {
     // Esc returns focus to the fleet for keyboard nav — it never closes/kills a session (that was a
     // footgun: one keypress destroyed the agent session). Close explicitly via the tab ✕.

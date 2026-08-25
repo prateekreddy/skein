@@ -62,8 +62,15 @@ async function createGitHub(root) {
       if (url === "/user") return send(200, { login: "me" });
       if (url === "/user/teams") return send(403, { message: "Requires read:org" });
       if (url === "/graphql") {
-        const q = (JSON.parse(body || "{}").variables || {}).q || "";
-        return send(200, { data: { search: { nodes: search(q) } } });
+        // One request carries every membership search of a refresh now, aliased q0…qN (SKEIN-209),
+        // and each alias answers under its own name — a fixture that still answered the single
+        // `search` field left every query reading as "GitHub returned no answer for this search".
+        const vars = JSON.parse(body || "{}").variables || {};
+        const data = {};
+        for (const [name, value] of Object.entries(vars)) {
+          if (/^q\d+$/.test(name)) data[name] = { nodes: search(String(value)) };
+        }
+        return send(200, { data });
       }
       // Acting on a PR: submitting a review, and merging. Both answer the way GitHub does — a JSON
       // object — because the client reads `message` out of it for what to show.
@@ -173,13 +180,24 @@ async function makeFixture() {
   fs.writeFileSync(sbx, `#!/bin/sh\ncase "$1" in ls) echo '[]'; exit 0 ;; esac\nexit 0\n`);
   fs.chmodSync(sbx, 0o755);
 
-  // A `claude` that answers both stages. Stage 1 is recognised by its required output format and
-  // stage 2 by everything else — the same split the real prompts make, so a change to either prompt
-  // that broke the contract would show up here.
+  // A `claude` that answers all THREE prompts skein sends, told apart the way the prompts differ:
+  // the merged one (summary AND review in one call, since 2026-08-24) asks for a `REVIEW:` section,
+  // stage 1 asks for the strict format without it, and stage 2 is the prose brief. A change to any
+  // of those contracts shows up here as a summary that stops arriving.
   const claude = path.join(bin, "claude");
   fs.writeFileSync(claude, `#!/bin/sh
 p="$4"
+brief='## What it does\\n\\nShortens how long a request waits before giving up.\\n\\n## What changes in how it works\\n\\nCallers that relied on the old 30s ceiling now fail after 5s.\\n'
 case "$p" in
+  *"REVIEW:"*)
+    case "$p" in
+      *"default timeout"*)
+        printf 'KIND: feature\\nLINE: the request timeout default drops from 30s to 5s.\\nEXPAND: yes\\nFLAGS: default, behaviour\\nDETAIL:\\n'
+        printf "$brief"
+        printf 'REVIEW:\\nOVERALL: nothing to flag\\n' ;;
+      *)
+        printf 'KIND: fix\\nLINE: stops the parser crashing on empty input.\\nEXPAND: no\\nFLAGS: none\\nDETAIL:\\nnone\\nREVIEW:\\nOVERALL: nothing to flag\\n' ;;
+    esac ;;
   *"Answer in EXACTLY this format"*)
     case "$p" in
       *"default timeout"*)
@@ -188,7 +206,7 @@ case "$p" in
         printf 'KIND: fix\\nLINE: stops the parser crashing on empty input.\\nEXPAND: no\\nFLAGS: none\\n' ;;
     esac ;;
   *)
-    printf '## What it does\\n\\nShortens how long a request waits before giving up.\\n\\n## What changes in how it works\\n\\nCallers that relied on the old 30s ceiling now fail after 5s.\\n' ;;
+    printf "$brief" ;;
 esac
 exit 0
 `);
@@ -579,7 +597,9 @@ console.log("\nacts");
 await check("asking a question keeps the answer off GitHub", async () => {
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
   await settle();
-  const label = await page.$eval("#revpane .revcl", e => e.textContent);
+  // Scoped to the composer: the drafted review that now arrives with the summary (one model call
+  // since 2026-08-24) puts its own `.revcl` on screen above this one.
+  const label = await page.$eval("#revpane .revcompose .revcl", e => e.textContent);
   if (!/stays between you and skein/i.test(label))
     throw new Error(`the composer does not promise privacy: ${label}`);
   await page.fill("#rev-compose", "why 5 seconds?");
@@ -615,6 +635,10 @@ await check("posting is a separate press from drafting", async () => {
 });
 
 console.log("\nstanding notes");
+// Back to the queue: a posted verdict leaves its receipt in the reading view and stays there
+// (SKEIN-162), and the notes chip lives in the queue's header.
+await page.keyboard.press("Escape");
+await settle();
 await check("the pane says how much of the repo it has notes on", async () => {
   const chip = await mustSee("#revpane .revchip:has-text('notes')", "the notes chip");
   if (!/notes/.test(await chip.textContent())) throw new Error("no notes chip");
@@ -638,8 +662,10 @@ await check("opening it lists the repo's modules, and admits it has none written
 // stale half, and for the wrong reason: its own comment said "the fixture's clone is not a git repo,
 // so freshness cannot be established". That made it pass on an accident. The fixture commits its
 // tree now, so freshness is a real question here and the answer to it is worth having.
+// `.modules`, because the payload distinguishes a repo with no modules from a repo skein could not
+// read (SKEIN-117) — a bare array could only say the first.
 const modulesNow = async () =>
-  (await (await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules`, { headers: authHeader() })).json());
+  (await (await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules`, { headers: authHeader() })).json()).modules;
 await check("a note written against the current commit reads fresh", async () => {
   const wrote = await fetch(`http://127.0.0.1:${port}/api/repos/acme/modules/write`, {
     method: "POST", headers: { "content-type": "application/json", ...authHeader() },
@@ -677,7 +703,9 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   const rows = await page.$$("#revpane .revrow");
   for (const row of rows) {
     const t = await row.$eval(".revtitle", e => e.textContent).catch(() => "");
-    if (t.includes("default timeout") && !(await row.$(".revbody"))) { await row.click(); break; }
+    // Not the row the verdict above went to: an act's receipt stays on the strip in place of the
+    // controls (SKEIN-162), so a row just commented on has no `set aside` to press.
+    if (t.includes("null deref") && !(await row.$(".revbody"))) { await row.click(); break; }
   }
   await settle();
   const before = await laneTitles("your move");
@@ -695,7 +723,9 @@ await check("set aside is a receipt in place — undo cancels, the lapse archive
   if (!/set aside/.test(restored) || /undo/.test(restored)) throw new Error("undo did not restore the strip");
   // Pressed for real: the window lapses, the archive posts, and the row greys IN PLACE.
   await page.click("#revpane .revrow.open .revacts .revchip:has-text('set aside')");
-  await page.waitForSelector("#revpane .revrow.done", { timeout: 15000 });
+  // The OPEN row: an earlier verdict in this file left its own row marked done, and a bare
+  // `.revrow.done` matches that one instantly — the wait would pass before this act had posted.
+  await page.waitForSelector("#revpane .revrow.open.done", { timeout: 15000 });
   const after = await laneTitles("your move");
   if (after.length !== before.length) throw new Error("the done row left the lane before the next load");
   // It leaves on the next natural load, by which time you are elsewhere.

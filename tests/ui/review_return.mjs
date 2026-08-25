@@ -43,6 +43,24 @@ function board() {
     const REV_SUM_PARALLEL = 3;
     ${grab("revSeen")}
     ${grab("rk")}
+    ${grab("revSel")}
+    ${grab("revSelAt")}
+    ${grab("revNav")}
+    ${grab("revStacks")}
+    ${grab("revFlash")}
+    ${grab("revChord")}
+    ${grab("revLastActKey")}
+    ${grab("revHunkAt")}
+    ${grab("revFileAt")}
+    ${grab("revRenderQueued")}
+    ${grab("revNavSettle")}
+    ${grab("revRenderHeld")}
+    ${grab("revRenderFlush")}
+    ${grab("revStackKey")}
+    ${grab("revRkQuery")}
+    ${grab("revKeySelect")}
+    ${grab("revKeyShowSel")}
+    ${grab("revKeyShow")}
     ${grab("revMergeQueues")}
     ${grab("revScopeRepo")}
     ${grab("revChains")}
@@ -764,6 +782,8 @@ function rowWorld() {
   const body = `
     let revOpen = new Set(), revSums = new Map(), revRepoFilter = "";
     let revCommonChips = new Set();
+    let revSel = null, revFlash = "";        // SKEIN-159: revRow paints sel/flash/held from these
+    const revPending = new Map();
     const revFlows = new Map();
     ${grab("rk")}
     ${grab("revDecided")}

@@ -74,6 +74,8 @@ function world(opts = {}) {
   };
   const src = `
     let revComposing = null;
+    // SKEIN-159's keyboard state, referenced by revRow (sel/flash/held) and revHold (last act).
+    let revSel = null, revFlash = "", revLastActKey = "";
     let revReading = ${opts.reading ? `{ repo: "acme", number: 7 }` : "null"};
     let revQueue = { prs: ${JSON.stringify(opts.prs || [])} };
     let revOpen = new Set(), revSums = new Map(), revCommonChips = new Set();
