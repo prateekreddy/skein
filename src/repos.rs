@@ -75,6 +75,12 @@ pub struct Repo {
     /// and polling it every few minutes to say so would spend `gh` calls to produce a zero.
     ///
     /// A repo with no GitHub remote is skipped whether or not this is set: it cannot have a queue.
+    ///
+    /// **A repo registered now starts OFF** (see `add`), and the serde default stays TRUE on
+    /// purpose: the two answer different questions. Absent from the file means the repo predates
+    /// the field, when every queue was on — so reading it as off would switch off a queue somebody
+    /// has been using, on upgrade, without being asked. What a new repo starts as is a choice about
+    /// spending; what an old file means is a fact about the past.
     #[serde(default = "crate::config::default_true")]
     pub review_queue: bool,
     /// Superseded by [`Repo::sync_connection`]; read once by the migration, then cleared. Kept so
@@ -850,7 +856,22 @@ pub fn add_repo(
             [only] => only.id.clone(),
             _ => String::new(),
         },
-        review_queue: true,
+        // **Off for a repo skein has just met.** Every repo with the queue on costs one batched
+        // GraphQL request per refresh, five membership searches inside it, on the badge's cadence —
+        // and a fleet of eight repos spends all of that to answer a question the owner asked about
+        // one. Measured, not supposed: the owner's fleet had eight on, exceeded GitHub's rate limit
+        // for their user, and the queue they actually watch came back empty because of it.
+        //
+        // On was the right default for the first repo anybody registers and wrong by the third, and
+        // the cost of the two mistakes is not symmetric: a queue switched off is one dropdown away
+        // and says so on the repo's own row, while a queue switched on quietly spends somebody's
+        // rate limit on pull requests that are none of their business.
+        //
+        // Note what this does NOT change: an existing `repos.json` that never wrote the field keeps
+        // reading as ON (see the field's serde default). A fleet that has been working must not
+        // have its queue turned off by an upgrade — that would be skein deciding, silently, that
+        // the thing you were watching yesterday is not worth watching today.
+        review_queue: false,
         sync_gateway_url: String::new(),
     };
     // Before registering it: a repo whose boxes cannot clone is a repo that looks added and does
@@ -1176,6 +1197,37 @@ pub fn agent_for_box(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A repo registered now does not start polling GitHub, and an older file that never wrote the
+    /// field keeps the queue it has been running with.
+    ///
+    /// The two are deliberately different answers, and conflating them is how an upgrade turns off
+    /// something somebody was watching: what a NEW repo starts as is a choice about spending, and
+    /// what an ABSENT field means is a fact about a file written when every queue was on.
+    #[test]
+    fn a_new_repo_starts_without_a_queue_and_an_old_file_keeps_its_own() {
+        let old: Repo = serde_json::from_value(serde_json::json!({
+            "id": "written-before-the-field",
+            "source": "https://github.com/acme/thing.git",
+            "source_tree": "",
+            "store": "",
+        }))
+        .unwrap();
+        assert!(
+            old.review_queue,
+            "an upgrade switched off a queue that had been running, without asking"
+        );
+
+        let explicit: Repo = serde_json::from_value(serde_json::json!({
+            "id": "said-so",
+            "source": "https://github.com/acme/thing.git",
+            "source_tree": "",
+            "store": "",
+            "review_queue": false,
+        }))
+        .unwrap();
+        assert!(!explicit.review_queue, "a deliberate off was not honoured");
+    }
     use super::*;
     use crate::testutil::{env_lock, tempdir};
 
