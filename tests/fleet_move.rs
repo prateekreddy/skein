@@ -262,6 +262,80 @@ fn the_server_moves_into_the_fleet_behind_a_door_that_was_open_first() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// A re-serve lands on a fleet whose previous server is still running — which is the ordinary
+/// case, since `ensure_fleet_server` installs *before* it stops so that a failed install leaves a
+/// working cockpit up.
+///
+/// This is a regression test for a defect the first version of this file did not catch: the install
+/// wrote `cat > <path>` straight onto the server path, and writing to an ELF a process is currently
+/// executing fails with `ETXTBSY` — so the second `skein fleet-serve` against a live fleet refused
+/// to install at all. The first test here missed it because nothing was executing the path it wrote
+/// to, which is exactly the condition a live fleet does not satisfy.
+#[test]
+fn a_server_is_replaced_while_the_old_one_is_still_running() {
+    let _guard = serialize();
+    if !have("python3") {
+        eprintln!("skipping: no python3 to stand in for a running server");
+        return;
+    }
+    let root = scratch();
+    write_fake_sbx(&root.join("bin"));
+    std::env::set_var("SBX_LOG", root.join("sbx.log"));
+    std::env::set_var(
+        "PATH",
+        format!(
+            "{}:{}",
+            root.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    std::env::set_var("SKEIN_HOME", root.join("skein"));
+    std::env::set_var("SKEIN_FLEET_ROOT", root.join("boxes"));
+
+    // A real ELF at the server's path, actually executing. A `#!` script would not reproduce this:
+    // the kernel opens the interpreter as the executable and lets go of the script itself, so only
+    // a genuine binary holds the write lock a live server holds.
+    let installed = PathBuf::from(server_path());
+    fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    fs::copy("/usr/bin/python3", &installed).expect("an ELF to stand in for the old server");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut running = Command::new(&installed)
+        .args(["-c", "import time; time.sleep(120)"])
+        .spawn()
+        .expect("the old server is running");
+
+    let replacement = root.join("skein-server-build");
+    let mut payload = vec![0x7f, b'E', b'L', b'F'];
+    payload.extend((0..4096u32).map(|i| (i % 251) as u8));
+    fs::write(&replacement, &payload).unwrap();
+    std::env::set_var("SKEIN_SERVER_BINARY", &replacement);
+
+    install_server(FLEET).expect(
+        "installing over a running server must work — it is renamed into place, not written onto",
+    );
+    assert_eq!(
+        fs::read(server_path()).unwrap(),
+        payload,
+        "the new binary is what is at the path now"
+    );
+    // And the old one is undisturbed: a rename unlinks the directory entry, so the process that
+    // was executing it keeps its inode and dies when it is told to, not when it is replaced.
+    assert!(
+        running.try_wait().unwrap().is_none(),
+        "replacing the binary must not kill the server that is still serving through it"
+    );
+
+    let _ = running.kill();
+    let _ = running.wait();
+    for var in ["SKEIN_SERVER_BINARY", "SBX_LOG"] {
+        std::env::remove_var(var);
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// The carrier refuses what the sandbox cannot run, naming the fix — this is the mac host's
 /// cross-build story as a sentence rather than prose in a doc.
 #[test]
@@ -289,25 +363,23 @@ fn a_server_the_sandbox_cannot_run_is_refused_with_the_cross_build_named() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// Mounting the volume is the move's one create-time difference, and it is a grant every box
-/// currently shares — stated and taken knowingly (R9's shape), never defaulted.
+/// Mounting the volume is the move's one create-time difference: the volume root, and then only
+/// the mounts it does not already contain.
+///
+/// It was a stated grant until SKEIN-219 — the launcher skipped covering ancestors of its own
+/// binds, so a volume-mounted fleet was readable from every box, and `--uncovered-volume` was the
+/// only way to take that. The launcher covers ancestors first now, and
+/// `tests/isolation_bwrap.rs::a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` is
+/// where that is proved against a real namespace; here the claim is only about the mount SET.
 #[test]
-fn the_volume_mount_is_a_stated_grant_and_the_mount_set_is_the_volume_plus_strays() {
+fn the_volume_mount_is_the_volume_root_plus_the_strays_outside_it() {
     let _guard = serialize();
     let root = scratch();
     let home = root.join("skein");
     fs::create_dir_all(&home).unwrap();
     std::env::set_var("SKEIN_HOME", &home);
 
-    let why = fleet_serve_mounts(false).expect_err("the exposure was granted by default");
-    for named in ["credentials/", "api-token", "--uncovered-volume", "box-session.sh"] {
-        assert!(
-            why.contains(named),
-            "the refusal must name what is granted and the way to take it ({named}): {why}"
-        );
-    }
-
-    let mounts = fleet_serve_mounts(true).expect("taken knowingly");
+    let mounts = fleet_serve_mounts().expect("the volume mount needs no grant now");
     assert_eq!(
         mounts.first().map(String::as_str),
         Some(home.to_string_lossy().as_ref()),

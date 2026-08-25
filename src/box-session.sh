@@ -1101,6 +1101,37 @@ printf "SKEIN_LIMITS %s\n" "$limits_state"
 if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
   fleet_root_dir="${SKEIN_FLEET_ROOT:-/boxes}"
   state_parent="$(dirname "$state")"
+
+  # --- first, any mount this box's own directories live INSIDE (SKEIN-219) ------------------------
+  #
+  # A mount that CONTAINS the fleet root or the state parent cannot be covered by the loop further
+  # down: bwrap applies its arguments in order, so a tmpfs over `~/.skein` written after the binds
+  # of `~/.skein/boxes/<box>` throws them away, and the box comes up with no state at all. That is
+  # why the loop skips ancestors — and skipping is not covering. The fleet skein-server runs inside
+  # is mounted at exactly such an ancestor (delivery §3 4c: the volume holding `credentials/`,
+  # `api-token` and `github-pats/`), so from every box on that fleet the fleet's own credentials
+  # were one `cat` away. Measured, not reasoned: `tests/isolation_bwrap.rs` runs bwrap and reads
+  # them back.
+  #
+  # Ordering rather than enumeration, so nothing has to be listed: cover the ancestor HERE, before
+  # the two entitlements are bound back below. bwrap resolves every `--bind` source against the
+  # original filesystem, so those binds still name the real directories through the tmpfs — the
+  # same property the covers below already rely on. Equality is left to the loop: a mount that IS
+  # the fleet root or the state parent is already covered by the two covers that follow.
+  if [ -n "${SKEIN_FLEET_MOUNTS-}" ]; then
+    while IFS= read -r fleet_mount; do
+      [ -n "$fleet_mount" ] || continue
+      [ -d "$fleet_mount" ] || continue
+      for owned in "$fleet_root_dir" "$state_parent"; do
+        case "$owned" in
+          "$fleet_mount"/*) binds+=(--tmpfs "$fleet_mount") ; break ;;
+        esac
+      done
+    done <<SKEIN_ANCESTOR_MOUNTS
+$SKEIN_FLEET_MOUNTS
+SKEIN_ANCESTOR_MOUNTS
+  fi
+
   binds+=(--tmpfs "$fleet_root_dir")
   [ -d "$fleet_root_dir/.skein" ] && binds+=(--ro-bind "$fleet_root_dir/.skein" "$fleet_root_dir/.skein")
   binds+=(--bind "$root" "$root")
@@ -1160,6 +1191,11 @@ if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ]; then
       # away. The box would come up with no root of its own and no state, which is a worse failure
       # than the exposure this loop exists to close. Ancestors and not just equality: a store or a
       # work tree at `~/.skein` would be an ancestor of `~/.skein/boxes`.
+      #
+      # Skipped HERE because it was already covered THERE: the block above tmpfs'd every ancestor
+      # before the entitlements were bound back, which is the only order in which both hold
+      # (SKEIN-219). Skipping without that block is what left a volume-mounted fleet's credentials
+      # readable from every box.
       skip=
       for owned in "$fleet_root_dir" "$state_parent"; do
         case "$owned" in

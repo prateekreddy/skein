@@ -114,7 +114,7 @@ fn main() {
             Some(name) => cmd_attach(name, &rest[1..]),
             None => Err("usage: skein attach <box>".to_string()),
         },
-        "fleet-serve" => cmd_fleet_serve(rest.iter().any(|a| a == "--uncovered-volume")),
+        "fleet-serve" => cmd_fleet_serve(),
         "version" | "--version" | "-v" => {
             // Package version from the manifest (a hardcoded copy here had already drifted once),
             // revision from the build stamp — the package version alone is 0.1.0 forever and
@@ -1154,8 +1154,8 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
     }
 }
 
-/// `skein fleet-serve [--uncovered-volume]` — the move (delivery §3 4c): run skein-server inside
-/// the fleet sandbox, with the host path one variable away.
+/// `skein fleet-serve` — the move (delivery §3 4c): run skein-server inside the fleet sandbox,
+/// with the host path one variable away.
 ///
 /// The sequence is `fleet::ensure_fleet_server`'s, in the order the design requires: the volume
 /// visible in the sandbox, the binary installed over stdin, the cockpit's socket opened by the
@@ -1164,11 +1164,11 @@ fn run_attach(argv: &[String]) -> Result<(), String> {
 /// sets no `SKEIN_IN_FLEET` and behaves exactly as it always has, which is the fallback §4c
 /// demands.
 ///
-/// `--uncovered-volume` is R9's shape applied here: mounting the volume into the sandbox is what
-/// the server needs, and until the launcher's mount cover learns to cover the volume root, it is
-/// also readable from every box. `fleet::fleet_serve_mounts` states the grant; this flag is the
-/// only way to take it.
-fn cmd_fleet_serve(accept_uncovered: bool) -> Result<(), String> {
+/// There used to be a `--uncovered-volume` flag here, because mounting the volume into the sandbox
+/// also made it readable from every box. The launcher covers the volume root ahead of its own binds
+/// now (SKEIN-219), so the flag is gone rather than defaulted — a fleet that serves is a fleet
+/// whose boxes still cannot read its credentials.
+fn cmd_fleet_serve() -> Result<(), String> {
     let sandbox = skein::place::fleet_sandbox();
     if sandbox.is_empty() {
         return Err(
@@ -1177,7 +1177,7 @@ fn cmd_fleet_serve(accept_uncovered: bool) -> Result<(), String> {
                 .into(),
         );
     }
-    let mounts = skein::fleet::fleet_serve_mounts(accept_uncovered)?;
+    let mounts = skein::fleet::fleet_serve_mounts()?;
     skein::fleet::ensure_fleet(&sandbox, &mounts)?;
     let port = skein::fleet::ensure_fleet_server(&sandbox)?;
     // The same token file: the volume is mounted at its host path, so the server inside reads the

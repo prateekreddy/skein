@@ -78,21 +78,31 @@ def uncommented(text):
 
 
 def without_tests(text):
-    """Everything outside `#[cfg(test)] mod tests { .. }`, brace-matched."""
-    m = re.search(r"^#\[cfg\(test\)\]\nmod tests \{", text, re.M)
-    if not m:
-        return text
-    depth, i = 0, m.end() - 1
-    while i < len(text):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                i += 1
-                break
-        i += 1
-    return text[: m.start()] + text[i:]
+    """Everything outside `#[cfg(test)]`, brace-matched — the module AND any single item.
+
+    It used to strip `#[cfg(test)] mod tests { .. }` and nothing else, so a test-only helper
+    written beside it — `#[cfg(test)] fn read_request(stream: &TcpStream)`, a stub server for the
+    review tests — counted as the module reaching the network in production. The law is about what
+    skein reaches when it runs; a `#[cfg(test)]` item is not that, whichever shape it takes.
+    """
+    while True:
+        m = re.search(r"^#\[cfg\(test\)\]\n", text, re.M)
+        if not m:
+            return text
+        brace = text.find("{", m.end())
+        if brace < 0:
+            return text[: m.start()] + text[m.end() :]
+        depth, i = 0, brace
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+        text = text[: m.start()] + text[i:]
 
 
 def units():

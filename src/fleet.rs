@@ -557,6 +557,19 @@ pub fn server_binary() -> Result<std::path::PathBuf, String> {
 /// anything else — including a fleet with no agent — takes `sbx exec -i`, whose stdin is written
 /// on its own thread and has no ceiling at all. No new chunking, and no `-t` anywhere near it,
 /// which is what would corrupt binary bytes.
+///
+/// **Written beside and renamed into place, never written over.** Two reasons, and the first was
+/// measured rather than reasoned about: `cat > <path>` where `<path>` is an ELF a process is
+/// currently executing fails with `ETXTBSY` ("Text file busy"), so the second `skein fleet-serve`
+/// against a live fleet would refuse to install at all — this call runs *before* `stop_server`
+/// deliberately, so that a failed install leaves a working cockpit up. A rename does not care: it
+/// unlinks the directory entry and the running process keeps its inode.
+///
+/// The second reason survives even where the first does not. The doorway re-execs the server every
+/// two seconds, so a multi-megabyte write straight onto the path gives it a window in which to exec
+/// a **half-written** binary; the rename is atomic, so what it can exec is the old file or the new
+/// one and never a fragment. `chmod` before the rename for the same reason the credential path does
+/// it (delivery §5): the executable bit must never be set on a file that is still arriving.
 pub fn install_server(sandbox: &str) -> Result<(), String> {
     let binary = server_binary()?;
     let bytes = std::fs::read(&binary)
@@ -567,10 +580,10 @@ pub fn install_server(sandbox: &str) -> Result<(), String> {
     place
         .write(
             &format!(
-                "mkdir -p {} && cat > {} && chmod 755 {}",
-                sh_quote(dir),
-                sh_quote(&path),
-                sh_quote(&path)
+                "mkdir -p {dir} && cat > {new} && chmod 755 {new} && mv {new} {path}",
+                dir = sh_quote(dir),
+                new = sh_quote(&format!("{path}.new")),
+                path = sh_quote(&path),
             ),
             &bytes,
             // A binary is tens of megabytes where the scripts are kilobytes; the budget follows.
@@ -580,10 +593,13 @@ pub fn install_server(sandbox: &str) -> Result<(), String> {
     let doorway = server_doorway_path();
     place
         .write(
+            // Renamed into place for the half-written half of the reason above: ETXTBSY does
+            // not apply to a `#!` script (the kernel opens the interpreter, not this file), but the
+            // supervisor's two-second retry can still catch one mid-write.
             &format!(
-                "cat > {} && chmod 755 {}",
-                sh_quote(&doorway),
-                sh_quote(&doorway)
+                "cat > {new} && chmod 755 {new} && mv {new} {doorway}",
+                new = sh_quote(&format!("{doorway}.new")),
+                doorway = sh_quote(&doorway),
             ),
             SERVER_DOORWAY_PY.as_bytes(),
             Duration::from_secs(30),
@@ -721,29 +737,17 @@ fn cockpit_settled(port: u16) -> bool {
 }
 
 /// The mount set for a fleet whose sandbox will host the server: [`fleet_mounts`] plus the volume
-/// root itself, which the server needs and nothing else has ever been allowed near.
+/// root itself, which the server needs and no box may read.
 ///
-/// Refused without `accept_uncovered`, and the refusal is the security derivation, not a
-/// formality. The 4a cover is an inversion over `$SKEIN_FLEET_MOUNTS` — but `box-session.sh`
-/// deliberately skips covering any mount that is an *ancestor* of its own covers (a tmpfs over
-/// `~/.skein` lands after the `~/.skein/boxes` binds in bwrap's argument list and throws them
-/// away), and the volume root is an ancestor of the box-state parent. So until the launcher
-/// learns to cover the volume root ahead of its owned binds, a volume-mounted fleet hands every
-/// box `credentials/`, `api-token`, `github-pats/` and `tokens/` — the exact exposure delivery
-/// §3 step 1 closed. R9's precedent applies: the grant is stated in the caller's face and taken
-/// knowingly, never defaulted.
-pub fn fleet_serve_mounts(accept_uncovered: bool) -> Result<Vec<String>, String> {
+/// This used to refuse unless the caller said `--uncovered-volume`, because the 4a cover skipped
+/// any mount that was an *ancestor* of its own covers — and the volume root is an ancestor of the
+/// box-state parent, so mounting it handed every box `credentials/`, `api-token`, `github-pats/`
+/// and `tokens/`. The launcher covers ancestors now, ahead of the binds that would otherwise be
+/// thrown away (SKEIN-219, `src/box-session.sh`), and `tests/isolation_bwrap.rs` proves it by
+/// running bwrap on a volume-shaped fleet and reading those paths back. So the grant is gone and
+/// the mount is ordinary: nothing here is taken knowingly any more, because nothing is given away.
+pub fn fleet_serve_mounts() -> Result<Vec<String>, String> {
     let home = skein_home().to_string_lossy().into_owned();
-    if !accept_uncovered {
-        return Err(format!(
-            "mounting the volume ({home}) into the fleet sandbox is what lets skein-server run \
-             there — and today it also lets every BOX read it: the launcher's mount cover skips \
-             ancestors of its own binds (src/box-session.sh), and the volume root is one, so \
-             `credentials/`, `api-token`, `github-pats/` and `tokens/` would be readable from \
-             every box. Run `skein fleet-serve --uncovered-volume` to accept that, or wait for \
-             the launcher to learn the volume cover (delivery §3 4c)"
-        ));
-    }
     let mut mounts = vec![home.clone()];
     for mount in fleet_mounts() {
         if under(&mount, &home) || mounts.iter().any(|m| under(&mount, m)) {

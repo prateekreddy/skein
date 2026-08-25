@@ -67,6 +67,9 @@ struct Fleet {
     repos: PathBuf,
     /// A second mount, where somebody keeps a repo skein did not choose the location of.
     elsewhere: PathBuf,
+    /// The volume the fleet's own state lives on, when this fleet is the 4c shape: a mount that
+    /// CONTAINS what a box owns, rather than sitting beside it. `None` is the 4a shape.
+    volume: Option<PathBuf>,
 }
 
 impl Drop for Fleet {
@@ -77,13 +80,29 @@ impl Drop for Fleet {
 
 impl Fleet {
     fn make(tag: &str) -> Fleet {
+        Fleet::build(tag, false)
+    }
+
+    /// The fleet skein-server runs inside (delivery §3 4c): box state lives on the VOLUME the
+    /// server is given, beside the fleet's credentials — so the path the sandbox mounts is an
+    /// ancestor of the two directories a box owns, which is the case the cover used to skip.
+    fn make_on_volume(tag: &str) -> Fleet {
+        Fleet::build(tag, true)
+    }
+
+    fn build(tag: &str, on_volume: bool) -> Fleet {
         let dir = std::env::temp_dir().join(format!("skein-bwrap-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        let volume = on_volume.then(|| dir.join("volume"));
         let f = Fleet {
             fleet_root: dir.join("boxes-vm"),
-            state_parent: dir.join("state"),
+            state_parent: match &volume {
+                Some(v) => v.join("boxes"),
+                None => dir.join("state"),
+            },
             repos: dir.join("repos"),
             elsewhere: dir.join("home-code-thing"),
+            volume,
             dir,
         };
         for p in [
@@ -129,11 +148,24 @@ impl Fleet {
         )
         .unwrap();
         fs::write(f.state_parent.join("other-main/conversation.jsonl"), "{}\n").unwrap();
+        // What the volume holds beside the boxes: everything the fleet authenticates with. These
+        // are the bytes the cover exists for — a box that can read `credentials/` is the fleet.
+        if let Some(volume) = &f.volume {
+            fs::create_dir_all(volume.join("credentials")).unwrap();
+            fs::create_dir_all(volume.join("github-pats")).unwrap();
+            fs::write(volume.join("credentials/claude.json"), "{\"token\":\"live\"}\n").unwrap();
+            fs::write(volume.join("github-pats/acme"), "ghp_live\n").unwrap();
+            fs::write(volume.join("api-token"), "t".repeat(64)).unwrap();
+        }
         f
     }
 
     fn mounts(&self) -> String {
-        format!("{}\n{}\n", self.repos.display(), self.elsewhere.display())
+        let mut out = format!("{}\n{}\n", self.repos.display(), self.elsewhere.display());
+        if let Some(volume) = &self.volume {
+            out.push_str(&format!("{}\n", volume.display()));
+        }
+        out
     }
 
     fn store(&self) -> PathBuf {
@@ -164,7 +196,7 @@ for p in "$@"; do
   fi
 done
 "#;
-        let paths = [
+        let mut paths = vec![
             self.state_parent.join("web-main/git-tokens/owner%2Frepo"),
             self.dir.join("boxhome/.claude/projects"),
             self.store(),
@@ -176,6 +208,13 @@ done
             self.state_parent.join("web-main"),
             self.state_parent.join("other-main"),
         ];
+        if let Some(volume) = &self.volume {
+            paths.extend([
+                volume.join("credentials/claude.json"),
+                volume.join("github-pats/acme"),
+                volume.join("api-token"),
+            ]);
+        }
         let quoted: Vec<String> = paths
             .iter()
             .map(|p| skein::util::sh_quote(p.to_string_lossy().as_ref()))
@@ -244,6 +283,72 @@ fn verdict<'a>(report: &'a str, path: &Path) -> &'a str {
         .and_then(|l| l.split_once(' '))
         .map(|(v, _)| v)
         .unwrap_or_else(|| panic!("the probe said nothing about {}:\n{report}", path.display()))
+}
+
+/// A fleet whose state lives on a mounted VOLUME still covers it — and still leaves the box the
+/// two directories it owns (SKEIN-219).
+///
+/// The 4a cover skipped any mount that was an ancestor of what the box owns, because a tmpfs over
+/// `~/.skein` written after the binds of `~/.skein/boxes/<box>` would throw them away. The volume
+/// skein-server-in-fleet is given is exactly that ancestor, so from every box on such a fleet
+/// `credentials/`, `api-token` and `github-pats/` were a `cat` away. Ordering, not enumeration, is
+/// the fix: the ancestor is covered BEFORE the entitlements are bound back.
+#[test]
+fn a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials() {
+    if !bwrap_works() {
+        eprintln!(
+            "SKIPPED a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials: bwrap cannot \
+             create a user namespace here, so the volume cover was NOT exercised against a real \
+             namespace on this machine"
+        );
+        return;
+    }
+    let fleet = Fleet::make_on_volume("volume");
+    let volume = fleet.volume.clone().expect("this fleet is on a volume");
+    let report = fleet.seen_by_box(false);
+
+    for secret in [
+        volume.join("credentials/claude.json"),
+        volume.join("github-pats/acme"),
+        volume.join("api-token"),
+    ] {
+        assert_eq!(
+            verdict(&report, &secret),
+            "gone",
+            "a box on a volume-mounted fleet can read {} — that credential IS the fleet:\n{report}",
+            secret.display()
+        );
+    }
+    // …and the box still has everything it is entitled to, which is the half a blunt tmpfs breaks.
+    assert_eq!(
+        verdict(&report, &fleet.store()),
+        "write",
+        "covering the volume took the box's own store with it:\n{report}"
+    );
+    assert_eq!(
+        verdict(&report, &fleet.state_parent.join("web-main")),
+        "see",
+        "covering the volume took the box's own state with it:\n{report}"
+    );
+    assert_eq!(
+        verdict(
+            &report,
+            &fleet.state_parent.join("web-main/git-tokens/owner%2Frepo")
+        ),
+        "see",
+        "covering the volume took the git token the host placed for this box:\n{report}"
+    );
+    assert_eq!(
+        verdict(&report, &fleet.fleet_root.join("web-main")),
+        "write",
+        "covering the volume took the box's own checkout with it:\n{report}"
+    );
+    // The neighbour is still gone, so this is a cover rather than an accident of layout.
+    assert_eq!(
+        verdict(&report, &fleet.state_parent.join("other-main")),
+        "gone",
+        "another box's state is reachable on a volume fleet:\n{report}"
+    );
 }
 
 /// An ordinary box reaches its own repo and its own state, and nothing else the sandbox mounts.

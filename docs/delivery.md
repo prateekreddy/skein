@@ -294,15 +294,23 @@ once something holds it, reusing mappings before making them for the reason the 
 and is unchanged. What the doorway does *not* yet survive is its own restart — that instant re-bind
 is SKEIN-105's remainder, along with opening at fleet create rather than at serve.
 
-**And the move's one create-time difference is a grant the cover cannot yet close, so it is taken
-explicitly or not at all.** The server needs the volume mounted; 4a's inversion covers "every host
-path the sandbox mounts" — but `box-session.sh` deliberately skips covering any mount that is an
-*ancestor* of its own covers (a tmpfs over `~/.skein` would land after the `~/.skein/boxes` binds
-and throw them away), and the volume root is exactly that ancestor. Mount it today and every box
-reads `credentials/`, `api-token`, `github-pats/` and `tokens/` — step 1's exposure, back.
-`fleet_serve_mounts` refuses with that derivation unless `--uncovered-volume` says it was read
-(R9's shape). **The launcher learning to cover the volume root ahead of its owned binds is what
-remains between here and 4c being safe by default**, and it is launcher work, not mover work.
+**And the move's one create-time difference — mounting the volume — is covered, not granted.**
+The server needs the volume mounted; 4a's inversion covers "every host path the sandbox mounts",
+but it used to skip any mount that was an *ancestor* of its own covers, because a tmpfs over
+`~/.skein` written after the `~/.skein/boxes/<box>` binds throws them away. The volume root is
+exactly that ancestor, so mounting it handed every box `credentials/`, `api-token`, `github-pats/`
+and `tokens/` — step 1's exposure, back — and `fleet_serve_mounts` refused unless
+`--uncovered-volume` said the derivation had been read (R9's shape).
+
+Ordering closed it (SKEIN-219). `box-session.sh` now tmpfses every ancestor mount **before** the
+fleet root and the state parent are bound back; bwrap resolves each `--bind` source against the
+original filesystem, so those binds still land through the cover. Enumeration was never needed —
+the ancestor is derived from `$SKEIN_FLEET_MOUNTS`, so a volume mounted somewhere new is covered
+the day it appears. Proved rather than argued:
+`tests/isolation_bwrap.rs::a_box_on_a_mounted_volume_cannot_read_the_fleets_credentials` builds a
+volume-shaped fleet, runs real bwrap, and reads those three paths back as `gone` while the box's
+own store, state, git token and checkout still answer. The flag is gone with the exposure; a fleet
+that serves is a fleet whose boxes still cannot read its credentials.
  This is where
 the six items in §2 get answered, with a fallback available while answering them.
 
