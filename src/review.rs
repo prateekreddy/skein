@@ -2090,11 +2090,16 @@ pub fn post_critique(
     // path re-anchors against the LIVE head's diff exactly as human line comments do (SKEIN-214).
     // Lines that survive post at their new numbers; the displaced fold into the body naming the
     // drafted commit, and the record says what was actually reviewed either way.
+    // The live head, read now — what `commit_id` must name, and what `head_sha` below is compared
+    // against to decide whether anything needs re-anchoring. It used to be the queue's sha, which
+    // is the one thing it must not be: a draft read from that same cached queue carries the same
+    // sha, so a branch that moved inside the cache window compared equal to itself and posted
+    // vetted comments onto dead coordinates (SKEIN-230).
+    let head = crate::prq::head_to_post_against(&queue.slug, number, &pr.head_sha);
     let said = crate::prq::submit_review_with_comments(
         &queue.slug,
         number,
-        // The live head — what `commit_id` must name.
-        &pr.head_sha,
+        &head,
         crate::prq::Verdict::Comment,
         &body,
         &anchored,
@@ -4545,6 +4550,12 @@ COMMENT: this one points at a line the diff does not show.
     /// again" treadmill — SKEIN-215): the wire shows the comment re-anchored by its line's text to
     /// its new number, the drafted sha named in the body, and a comment with no line text — a
     /// draft persisted before `line_text` existed — displaced into the body rather than guessed.
+    ///
+    /// It is also where `prq::head_to_post_against`'s FALLBACK is proven, which is worth knowing
+    /// before changing the stub: this GitHub answers `/pulls/11` with a diff whatever is asked of
+    /// it, so the live head read fails here, and "pinned to the live head" below is what catches a
+    /// failed read being allowed to post an empty `commit_id` instead of the remembered sha. The
+    /// live read succeeding is the sibling test, which stubs the two media types apart.
     #[test]
     fn posting_a_moved_head_re_anchors_by_line_text_instead_of_refusing() {
         let _g = crate::testutil::env_lock();
@@ -4703,6 +4714,140 @@ COMMENT: this one points at a line the diff does not show.
             said_body.contains("Reviewed at aaaaaaa — the branch has moved since")
                 && said_body.contains("src/a.rs:2 — on the line"),
             "the displaced comment folds into the body naming the drafted sha: {said_body}"
+        );
+
+        for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {
+            std::env::remove_var(key);
+        }
+        crate::prq::forget_host_token();
+    }
+
+    /// The queue's sha is not the live head, and a review must not be posted against it
+    /// (SKEIN-230).
+    ///
+    /// This is the window the bug lived in, modelled directly: GitHub's search answers the queue
+    /// with `stale111`, and `GET /pulls/11` — the live read — answers `live222`. The draft was read
+    /// from that same queue, so it carries `stale111` too. Trusting the queue makes the two agree,
+    /// `moved` reads false, nothing re-anchors, and the vetted comment posts at the line number it
+    /// had in a diff that no longer exists — with GitHub resolving it against the CURRENT diff and
+    /// the pane reporting success. Every assertion below fails in that world.
+    ///
+    /// A stub of its own because this one has to answer the SAME path two ways, on the `Accept`
+    /// header: the diff media type for `pr_diff_text`, JSON for `live_head_sha`.
+    #[test]
+    fn a_review_posts_against_the_live_head_not_the_one_the_queue_remembers() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        let home = home.as_ref() as &std::path::Path;
+        std::env::set_var("SKEIN_HOME", home);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        crate::prq::forget_host_token();
+
+        let posted = home.join("posted.json");
+        let posted_at = posted.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{BufRead as _, Read as _, Write as _};
+                // Headers and all, unlike `read_request` — the Accept header IS the dispatch here.
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut length = 0usize;
+                let mut line = String::new();
+                reader.read_line(&mut head).ok();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    head.push_str(&line);
+                    line.clear();
+                }
+                let mut raw = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut raw).ok();
+                }
+                let body = String::from_utf8_lossy(&raw).into_owned();
+
+                let answer = if head.contains("/user/teams") {
+                    "[]".to_string()
+                } else if head.contains("/user") {
+                    r#"{"login":"me"}"#.to_string()
+                } else if head.starts_with("POST") && head.contains("/reviews") {
+                    std::fs::write(&posted_at, &body).unwrap();
+                    "{}".to_string()
+                } else if head.contains("/pulls/11") && head.contains("application/vnd.github.diff")
+                {
+                    // The LIVE head's diff: an insertion above has pushed the drafted line
+                    // from 2 to 3.
+                    "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,5 @@\n fn main() {\n+    // a new line above\n+    let x = 1;\n     println!(\"hi\");\n }\n"
+                        .to_string()
+                } else if head.contains("/pulls/11") {
+                    // The live read. This is what the queue's answer below is a minute behind.
+                    r#"{"head":{"sha":"live222"}}"#.to_string()
+                } else if body.contains("review-requested") {
+                    // The queue, still holding the head from before the push.
+                    r#"{"data":{"q0":{"nodes":[{"number":11,"title":"t","url":"u",
+                       "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
+                       "headRefOid":"stale111","baseRefName":"main",
+                       "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
+                       "latestReviews":{"nodes":[]},
+                       "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]},
+                       "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
+                        .to_string()
+                } else if head.contains("/graphql") {
+                    r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "stale", "source": "https://github.com/acme/thing.git",
+            "source_tree": "", "store": "",
+        }))
+        .unwrap();
+        let kept = vec![Draft {
+            path: "src/a.rs".into(),
+            line: 2,
+            anchored: true,
+            text: "on the line".into(),
+            line_text: "    let x = 1;".into(),
+        }];
+
+        // `stale111` is what the pane had when the draft was read — the same sha the queue is
+        // still serving, which is exactly why comparing the two proves nothing.
+        post_critique(&repo, 11, "stale111", "note", &kept).expect("the review posts");
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&posted).unwrap()).unwrap();
+        assert_eq!(
+            sent["commit_id"], "live222",
+            "commit_id must name the head GitHub holds now, not the one the queue remembers"
+        );
+        let comments = sent["comments"]
+            .as_array()
+            .expect("the comment rides a line");
+        assert_eq!(
+            comments[0]["line"], 3,
+            "the branch moved, so the comment re-anchors by its line text — posting it at 2 \
+             would put vetted words on whatever now occupies line 2"
+        );
+        let said_body = sent["body"].as_str().unwrap();
+        assert!(
+            said_body.contains("(read at stale11, posted against live222)"),
+            "a moved head must say so on the record: {said_body}"
         );
 
         for key in ["SKEIN_HOME", "SKEIN_GITHUB_API", "GH_TOKEN"] {

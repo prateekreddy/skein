@@ -71,6 +71,12 @@ fn stub_github(dir: &Path, login: &str, teams_ok: bool) -> String {
                 }
             } else if path.starts_with("/user") {
                 (200, format!(r#"{{"login":"{login}"}}"#))
+            } else if path.starts_with("/graphql") && root.join("dead-request").exists() {
+                // The whole request dying, rather than one alias inside it — a 5xx, and what the
+                // network and the rate-limit hold both look like from here. Every membership
+                // search of a refresh rides this one request (SKEIN-209), so nothing comes back
+                // at all, which is the shape SKEIN-229 turns on.
+                (500, r#"{"message":"Server Error"}"#.to_string())
             } else if path.starts_with("/graphql") {
                 // The batched wire (SKEIN-209): one request, every membership search an alias
                 // `q0..qN`, one variable each. A term with a `fail-<term>` marker answers the way
@@ -146,6 +152,11 @@ fn put_search(dir: &Path, term: &str, json: &str) {
 /// Make one query fail the way GitHub does when a token lacks a scope.
 fn fail_search(dir: &Path, term: &str) {
     fs::write(dir.join(format!("fail-{}", safe_term(term))), "").unwrap();
+}
+
+/// Take GitHub down for the whole refresh, rather than for one search inside it.
+fn dead_request(dir: &Path) {
+    fs::write(dir.join("dead-request"), "").unwrap();
 }
 
 fn repo(id: &str) -> skein::repos::Repo {
@@ -455,6 +466,129 @@ fn the_archive_is_pruned_to_prs_that_are_still_open() {
         skein::prq::archived("acme"),
         vec![1],
         "the still-open one survives, the closed one is dropped"
+    );
+}
+
+/// A GitHub outage must not erase the owner's own decisions (SKEIN-229).
+///
+/// The prune above reads a pull request's ABSENCE as proof it is closed. When the whole request
+/// dies every search comes back empty, absence is total, and both files were rewritten to nothing
+/// — fleet-wide, because the badge poll runs this for every repo every three minutes, so a single
+/// rate-limit window cost every set-aside and every snooze with no record of what was there.
+#[test]
+fn a_refresh_that_saw_nothing_keeps_every_set_aside_and_snoozed_pr() {
+    let (_env, dir) = setup("me", false);
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", pr_json(1, "open", "")),
+    );
+    skein::prq::set_archived("acme", 500, true).unwrap();
+    skein::prq::set_snoozed("acme", 501, Some("deadbeef")).unwrap();
+
+    dead_request(&dir);
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    assert!(
+        q.prs.is_empty(),
+        "the outage returns no pull requests at all, got {:?}",
+        q.prs
+    );
+    assert!(
+        !q.blind_spots.is_empty(),
+        "and the queue itself is honest about having gone blind"
+    );
+    assert_eq!(
+        skein::prq::archived("acme"),
+        vec![500],
+        "a refresh that ANSWERED nothing must not read its empty list as `nothing is open`"
+    );
+    assert_eq!(
+        skein::prq::snoozed("acme"),
+        std::collections::BTreeMap::from([(501u64, "deadbeef".to_string())]),
+        "and the same for a snooze, which is the owner's decision rather than a cache"
+    );
+}
+
+/// The other half of that rule, and why it is not "skip the prune when the list came back empty":
+/// a repo with genuinely nothing open answered, so it still prunes. Note the teams blind spot is
+/// present throughout — `answered` is about the searches skein ran, not about a clean queue.
+#[test]
+fn a_queue_that_really_is_empty_still_prunes() {
+    let (_env, dir) = setup("me", false);
+    put_search(&dir, "review-requested:me", "[]");
+    skein::prq::set_archived("acme", 500, true).unwrap();
+    skein::prq::set_snoozed("acme", 501, Some("deadbeef")).unwrap();
+
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    assert!(
+        q.prs.is_empty(),
+        "nothing is open, and every search said so"
+    );
+    assert!(
+        skein::prq::archived("acme").is_empty(),
+        "an empty answer is still an answer, so the dead archive entry goes"
+    );
+    assert!(
+        skein::prq::snoozed("acme").is_empty(),
+        "and so does the spent snooze"
+    );
+}
+
+/// The partial case, which is the distinction the batching was careful to preserve: four aliases
+/// answer and one dies. The archived pull request would have come back only under the dead one, so
+/// between them the four good answers "prove" it is closed — and they prove nothing of the sort.
+#[test]
+fn an_archived_pr_that_only_the_failed_query_would_return_survives() {
+    let (_env, dir) = setup("me", false);
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", pr_json(1, "open", "")),
+    );
+    // 7 is the owner's own pull request, so `author:me` is the only search that would list it —
+    // and that is the search that goes dark.
+    fail_search(&dir, "author:me");
+    skein::prq::set_archived("acme", 7, true).unwrap();
+    skein::prq::set_snoozed("acme", 7, Some("sha7")).unwrap();
+
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    assert!(
+        q.blind_spots.iter().any(|b| b.contains("author:me")),
+        "expected the dead alias to be named, got {:?}",
+        q.blind_spots
+    );
+    assert_eq!(
+        skein::prq::archived("acme"),
+        vec![7],
+        "one dark query is enough: what it would have returned is not known to be closed"
+    );
+    assert!(
+        skein::prq::snoozed("acme").contains_key(&7),
+        "and the snooze on the same pull request survives with it"
+    );
+}
+
+/// A search asks GitHub for a hundred at a time. One that comes back with exactly a hundred has
+/// almost certainly been cut off, so it says nothing about the pull requests past the cut — and
+/// the prune reads precisely that silence. SKEIN-231 owns saying the truncation out loud; this
+/// asserts only that it cannot cost the owner an archive entry in the meantime.
+#[test]
+fn a_search_cut_off_at_the_page_does_not_prune_what_it_never_reached() {
+    let (_env, dir) = setup("me", false);
+    let full: Vec<String> = (1..=100).map(|n| pr_json(n, "open", "")).collect();
+    put_search(
+        &dir,
+        "review-requested:me",
+        &format!("[{}]", full.join(",")),
+    );
+    skein::prq::set_archived("acme", 500, true).unwrap();
+
+    let q = skein::prq::queue(&repo("acme"), true).unwrap();
+    assert_eq!(q.prs.len(), 100, "the page itself is served in full");
+    assert_eq!(
+        skein::prq::archived("acme"),
+        vec![500],
+        "500 may be on page two, and a full page is no evidence that it is closed"
     );
 }
 

@@ -711,24 +711,51 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     let snoozed_shas = snoozed(&repo.id);
     let mut prs: Vec<Pr> = Vec::new();
     let texts: Vec<String> = searches.iter().map(|(s, _)| s.clone()).collect();
-    // A whole-request failure — the network, a 5xx, the rate-limit hold — is EVERY search failing:
-    // each rule still gets its own sentence, because "the queue is partial" is only actionable
-    // when it says which memberships went dark.
+    // Does this refresh know what is open?
+    //
+    // Every prune below deletes one of the owner's own decisions because a pull request did not
+    // appear — and "did not appear" only means "is not open" when the searches actually answered.
+    // A whole-request failure produces exactly the same empty list as a repo with nothing waiting,
+    // so the count cannot tell them apart; the searches can, and they say so here rather than
+    // leaving the prune to infer it (SKEIN-229).
+    let mut answered = true;
+    // A whole-request failure — the network, a 5xx, the rate-limit hold — is every search failing
+    // at once, and it is said ONCE.
+    //
+    // It used to be mapped onto each rule, so one dead request printed five near-identical alarms.
+    // The owner saw exactly that on a cold load: five lines that read as five broken things, none
+    // of which said the two facts a reader needs — that it was one failure, and that it took the
+    // whole refresh with it (SKEIN-258). A per-ALIAS failure keeps its own sentence in the loop
+    // below, because "which membership went dark" is real information there and the batching was
+    // careful to keep it answerable.
     let outcomes = match search_prs_all(&slug, &texts) {
         Ok(outcomes) => outcomes,
-        Err(e) => searches.iter().map(|_| Err(e.clone())).collect(),
+        Err(e) => {
+            answered = false;
+            blind_spots.push(format!(
+                "GitHub did not answer for {slug}, so all {n} of this refresh's membership \
+                 searches are missing — they travel in one request, so this is one failure and \
+                 not {n}: {e}",
+                n = searches.len()
+            ));
+            Vec::new()
+        }
     };
     for ((search, reason), outcome) in searches.iter().zip(outcomes) {
-        let items = match outcome {
-            Ok(items) => items,
+        let found = match outcome {
+            Ok(found) => found,
             Err(e) => {
+                answered = false;
                 blind_spots.push(format!(
                     "the `{search}` query failed, so those PRs are missing: {e}"
                 ));
                 continue;
             }
         };
-        for item in items {
+        // A search cut off at the page is an answer about what it returned and no answer at all
+        // about what it did not reach, which is the half the prune reads.
+        answered &= found.whole;
+        for item in found.items {
             let Some(number) = item.get("number").and_then(|v| v.as_u64()) else {
                 continue;
             };
@@ -755,8 +782,14 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // An archived PR that is no longer open cannot be in this list, so its entry is dead weight.
     // Pruning is safe in the direction that matters: if a PR is ever reopened it comes back
     // unarchived, which is *more* of your attention, not less.
+    //
+    // Safe in that direction only once `answered` holds. A refresh that went dark has an empty
+    // list too, and reading it as "nothing is open" rewrote both files to nothing — fleet-wide,
+    // because the badge poll runs this for every repo every three minutes, so one rate-limit
+    // window erased every set-aside and every snooze the owner had (SKEIN-229). A queue that
+    // genuinely has nothing open still prunes: it answered.
     let open: Vec<u64> = prs.iter().map(|p| p.number).collect();
-    if archived_numbers.iter().any(|n| !open.contains(n)) {
+    if answered && archived_numbers.iter().any(|n| !open.contains(n)) {
         let kept: Vec<u64> = archived_numbers
             .into_iter()
             .filter(|n| open.contains(n))
@@ -770,7 +803,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
     // open PR's current head. Same safety direction as the archive prune above: this can only
     // ever DROP a hold, which returns a row, which is more of your attention rather than less.
     let live = |n: &u64, sha: &String| prs.iter().any(|p| p.number == *n && &p.head_sha == sha);
-    if snoozed_shas.iter().any(|(n, sha)| !live(n, sha)) {
+    if answered && snoozed_shas.iter().any(|(n, sha)| !live(n, sha)) {
         let kept: BTreeMap<u64, String> = snoozed_shas
             .into_iter()
             .filter(|(n, sha)| live(n, sha))
@@ -900,6 +933,22 @@ fn batched_query(count: usize) -> String {
     format!("query({vars}) {{\n{body}}}\n{PR_FRAGMENT}")
 }
 
+/// One membership search's answer: the pull requests it returned, and whether that is all of them.
+///
+/// The two are separate facts because they decide different things. `items` is what fills the
+/// queue. `whole` is what lets the queue act on a pull request's **absence** — and the prunes in
+/// [`queue_within`] delete one of the owner's own decisions on exactly that evidence, so they may
+/// only read a search that came back short of the page. SKEIN-231 owns saying a truncated search
+/// out loud; this is the flag that stops the prune believing one in the meantime.
+struct Found {
+    items: Vec<serde_json::Value>,
+    whole: bool,
+}
+
+/// How many pull requests one membership search asks GitHub for. A search that comes back with
+/// exactly this many has been cut off at the page far more often than it has landed on it exactly.
+const SEARCH_PAGE: usize = 100;
+
 /// Every membership search of one refresh, in ONE GraphQL request — five requests per repo per
 /// refresh was where nearly all of skein's quota went (SKEIN-209).
 ///
@@ -908,13 +957,10 @@ fn batched_query(count: usize) -> String {
 /// given: GraphQL delivers a failed alias as `data.qN: null` plus an `errors` entry whose `path`
 /// names the alias, and that mapping is what keeps each failure its own blind spot — four good
 /// answers are still four good answers, exactly as they were when each search was its own request.
-fn search_prs_all(
-    slug: &str,
-    searches: &[String],
-) -> Result<Vec<Result<Vec<serde_json::Value>, String>>, String> {
+fn search_prs_all(slug: &str, searches: &[String]) -> Result<Vec<Result<Found, String>>, String> {
     let token = host_token()?;
     let mut variables = serde_json::Map::new();
-    variables.insert("n".into(), serde_json::json!(100));
+    variables.insert("n".into(), serde_json::json!(SEARCH_PAGE));
     for (i, search) in searches.iter().enumerate() {
         // `is:pr is:open` and the repo are what `gh pr list --repo … --state open` added for us.
         // Spelled out here because the search string is now ours to build rather than gh's.
@@ -941,11 +987,17 @@ fn search_prs_all(
                     // A search that matches an issue rather than a pull request comes back as an
                     // empty object — the fragment simply does not apply — so those are dropped
                     // rather than parsed into a PR with number 0.
-                    Ok(nodes
-                        .iter()
-                        .filter(|node| node.get("number").is_some())
-                        .map(shape)
-                        .collect())
+                    Ok(Found {
+                        // Counted before that filter, because the page is what GitHub filled
+                        // against `first: $n` — dropping a non-PR from it makes the answer
+                        // shorter without making it any more complete.
+                        whole: nodes.len() < SEARCH_PAGE,
+                        items: nodes
+                            .iter()
+                            .filter(|node| node.get("number").is_some())
+                            .map(shape)
+                            .collect(),
+                    })
                 }
                 // This alias came back null or absent: find ITS errors by path. An error that
                 // names no alias is ambient — attributed to every failed alias rather than
@@ -1372,6 +1424,21 @@ pub struct Count {
     /// leaves this empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stopped: Vec<StoppedPr>,
+    /// What this repo's queue could **not** see, in the queue's own words — carried onto the
+    /// badge rather than left behind in the pane.
+    ///
+    /// `error` above says the count could not be taken at all. This says it WAS taken and is
+    /// incomplete, which is the harder failure and the one that had no field: `prq::queue` records
+    /// a blind spot and still returns `Ok`, so every blind spot it recorded arrived here as a
+    /// plain integer with nothing attached. On the owner's own fleet a token without `read:org`
+    /// means the `team-review-requested:` searches are never issued at all, so the badge read 2
+    /// while 11 were waiting — unmarked, with a tooltip that said nothing — and under a
+    /// rate-limit hold that same zero is then served from the ten-minute cache. That is the
+    /// invariant `error`'s comment states in as many words, broken one field over.
+    ///
+    /// Empty means the count is whole, and that is the only case a bare number may be drawn for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blind_spots: Vec<String>,
 }
 
 /// One pull request a workflow has stopped on, and why — the shape the counts poll carries to the
@@ -1413,6 +1480,9 @@ pub fn counts() -> Vec<Count> {
                     error: String::new(),
                     skipped,
                     stopped: Vec::new(),
+                    // Nothing was looked at, so there is nothing this repo failed to see.
+                    // `skipped` is the whole story for it.
+                    blind_spots: Vec::new(),
                 };
             }
             match queue_within(&repo, Duration::from_secs(600)) {
@@ -1422,6 +1492,9 @@ pub fn counts() -> Vec<Count> {
                     error: String::new(),
                     skipped: String::new(),
                     stopped: Vec::new(),
+                    // The number and what it is missing travel together, or the number is a
+                    // claim the queue never made (SKEIN-239).
+                    blind_spots: q.blind_spots,
                 },
                 Err(e) => Count {
                     repo_id: repo.id,
@@ -1429,6 +1502,9 @@ pub fn counts() -> Vec<Count> {
                     error: e,
                     skipped: String::new(),
                     stopped: Vec::new(),
+                    // No queue was built, so there are no blind spots to report — `error` is
+                    // already the strongest thing this can say.
+                    blind_spots: Vec::new(),
                 },
             }
         })
@@ -1473,6 +1549,7 @@ pub fn merged(force: bool) -> MergedQueue {
         if !skipped.is_empty() {
             out.skipped.push(Count {
                 stopped: Vec::new(),
+                blind_spots: Vec::new(),
                 repo_id: repo.id,
                 needs_you: 0,
                 error: String::new(),
@@ -1517,6 +1594,9 @@ pub fn merged(force: bool) -> MergedQueue {
             Ok(q) => out.queues.push(q),
             Err(e) => out.failed.push(Count {
                 stopped: Vec::new(),
+                // The queues this repo's siblings DID build carry their own blind spots on the
+                // `Queue` itself; a repo that built none has only its error.
+                blind_spots: Vec::new(),
                 repo_id: repo.id,
                 needs_you: 0,
                 error: e,
@@ -1735,6 +1815,26 @@ pub fn live_head_sha(slug: &str, number: u64) -> Result<String, String> {
         .and_then(|s| s.as_str())
         .map(str::to_string)
         .ok_or_else(|| "GitHub's answer named no head commit".into())
+}
+
+/// The sha a review is posted against — the ONE way either write path learns it.
+///
+/// `remembered` is the queue's sha, and it is the fallback rather than the answer. It is up to a
+/// minute old (`queue`'s micro-cache) and older still whenever the pane is painting a remembered
+/// copy, so inside that window it names a commit the branch has already left. That is not only a
+/// wrong `commit_id`: [`submit_review_with_comments`] decides whether to re-anchor by comparing
+/// the sha the draft was read at against this one, and a draft read from the same stale queue
+/// carries the same stale sha — so the two agree, `moved` reads false, nothing re-anchors, and
+/// vetted comments post at line numbers computed against a diff that no longer exists. GitHub
+/// resolves them against the CURRENT diff, so they land on whatever text now occupies those
+/// numbers and the post reports success (SKEIN-230).
+///
+/// The two write paths had two answers to this and only one of them made the call. One function,
+/// so they cannot drift apart again. If GitHub will not answer, the remembered sha is the best
+/// truth available and the post still goes — refusing to post because a verification call failed
+/// would lose the review the person just vetted.
+pub fn head_to_post_against(slug: &str, number: u64, remembered: &str) -> String {
+    live_head_sha(slug, number).unwrap_or_else(|_| remembered.to_string())
 }
 
 /// Post one review carrying line comments — the vetted output of `crate::review::critique`.
@@ -2698,6 +2798,156 @@ mod tests {
         // Nothing reached the network: `gh` is never invoked for a repo that was not asked, which is
         // what makes reporting them free rather than three round trips each.
         unsafe { std::env::remove_var("SKEIN_HOME") };
+    }
+
+    /// The badge's number and what the queue could not see travel together (SKEIN-239).
+    ///
+    /// Both halves of this test report `needs_you: 0` with no `error` and nothing `skipped`. The
+    /// ONLY thing telling "nothing is waiting on you" apart from "skein could not look at the
+    /// searches where something might be waiting" is the blind spots — and `counts()` used to drop
+    /// them on the floor, so the two were the same integer. On the owner's fleet the second half
+    /// is the everyday state: no `read:org`, so the `team-review-requested:` searches are never
+    /// issued and every team-requested PR is absent from the count with nothing saying so.
+    #[test]
+    fn a_count_carries_what_its_queue_could_not_see() {
+        let _lock = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::repos::save_repos(&[batched_repo("acme/thing")]).unwrap();
+
+        // Teams listable, every search answering: a genuinely empty queue. Five aliases, because
+        // the team the viewer belongs to adds its own.
+        let (base, _seen) = batched_github(
+            true,
+            200,
+            r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]},"q4":{"nodes":[]}}}"#
+                .to_string(),
+        );
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let whole = counts();
+        let whole = whole
+            .iter()
+            .find(|c| c.repo_id == "thing")
+            .expect("counted");
+        assert_eq!(whole.needs_you, 0);
+        assert!(
+            whole.blind_spots.is_empty(),
+            "a queue that saw everything and found nothing must carry NO blind spot, or the badge              can never draw a plain zero: {:?}",
+            whole.blind_spots
+        );
+
+        // Same repo, same empty answers — but the token cannot list teams, so a whole class of
+        // pull request was never searched for.
+        let (base, _seen) = batched_github(
+            false,
+            200,
+            r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
+                .to_string(),
+        );
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let blind = counts();
+        let blind = blind
+            .iter()
+            .find(|c| c.repo_id == "thing")
+            .expect("counted");
+        assert_eq!(
+            blind.needs_you, 0,
+            "the count is still zero — that is the whole problem, and why the zero needs company"
+        );
+        assert!(
+            blind.error.is_empty() && blind.skipped.is_empty(),
+            "neither existing field fires here, which is how this stayed invisible: {blind:?}"
+        );
+        assert!(
+            blind
+                .blind_spots
+                .iter()
+                .any(|b| b.contains("team review requests")),
+            "the count must say it could not see team review requests: {:?}",
+            blind.blind_spots
+        );
+
+        // The wire contract the badge reads, pinned by name: the cockpit renders from this JSON,
+        // so a renamed field is a badge that silently goes back to a bare number.
+        let on_the_wire = serde_json::to_value(blind).unwrap();
+        assert!(
+            on_the_wire["blind_spots"]
+                .as_array()
+                .is_some_and(|b| !b.is_empty()),
+            "blind_spots must reach the client under that name: {on_the_wire}"
+        );
+        assert!(
+            serde_json::to_value(whole)
+                .unwrap()
+                .get("blind_spots")
+                .is_none(),
+            "and a whole count must not carry an empty array — absent is what lets the page tell \
+             `nothing missing` from `this skein is too old to say`"
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
+    }
+
+    /// The rate-limited half, which is the one the owner hit: GitHub answers 200 carrying
+    /// `RATE_LIMITED`, so the whole batched request fails, `queue_within` still returns `Ok` with
+    /// an empty list, and the badge showed a confident zero — then served it from the ten-minute
+    /// cache for the next ten minutes.
+    #[test]
+    fn a_rate_limited_count_is_not_reported_as_an_empty_queue() {
+        let _lock = crate::testutil::env_lock();
+        let _hold = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        crate::repos::save_repos(&[batched_repo("acme/thing")]).unwrap();
+
+        let (base, _seen) = batched_github(
+            false,
+            200,
+            r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded for user ID 123"}]}"#
+                .to_string(),
+        );
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+
+        let counted = counts();
+        let counted = counted
+            .iter()
+            .find(|c| c.repo_id == "thing")
+            .expect("counted");
+        assert_eq!(counted.needs_you, 0);
+        assert!(
+            counted.error.is_empty(),
+            "the queue returned Ok, so `error` is empty — the field that was supposed to catch              this never fires: {counted:?}"
+        );
+        assert!(
+            counted
+                .blind_spots
+                .iter()
+                .any(|b| b.contains("GitHub did not answer for acme/thing")),
+            "a zero standing on a refresh that answered nothing must say so: {:?}",
+            counted.blind_spots
+        );
+
+        for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
+            std::env::remove_var(key);
+        }
+        forget_host_token();
+        forget_renames();
     }
 
     /// The queue is newest-first by number, and stays that way.
@@ -4172,10 +4422,14 @@ mod tests {
         forget_host_token();
     }
 
-    /// A whole-request failure — here a 500, live it is just as often the network — is EVERY
-    /// membership rule going dark at once, and each one still gets its own sentence.
+    /// A whole-request failure — here a 500, live it is just as often the network — is every
+    /// membership rule going dark at once, and it is reported as the one failure it is.
+    ///
+    /// The negative half is the point (SKEIN-258): the per-rule sentence is right for a per-alias
+    /// failure and wrong here, where repeating it once per rule turned one dead request into five
+    /// alarms on the owner's cold load.
     #[test]
-    fn a_dead_batched_request_reports_every_membership_rule_missing() {
+    fn a_dead_batched_request_says_once_that_every_membership_is_missing() {
         let _g = crate::testutil::env_lock();
         let home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
@@ -4188,6 +4442,15 @@ mod tests {
         let q = queue(&batched_repo("acme/batch-dead"), true).expect("the queue still answers");
 
         assert!(q.prs.is_empty());
+        assert!(
+            q.blind_spots.iter().any(|b| {
+                b.contains("GitHub did not answer for acme/batch-dead")
+                    && b.contains("membership searches are missing")
+                    && b.contains("500")
+            }),
+            "the refresh's total loss went unreported: {:?}",
+            q.blind_spots
+        );
         for rule in [
             "review-requested:me",
             "reviewed-by:me",
@@ -4195,12 +4458,10 @@ mod tests {
             "mentions:me",
         ] {
             assert!(
-                q.blind_spots.iter().any(|b| {
-                    b.contains(&format!(
-                        "the `{rule}` query failed, so those PRs are missing"
-                    )) && b.contains("500")
-                }),
-                "the `{rule}` rule's loss went unreported: {:?}",
+                !q.blind_spots
+                    .iter()
+                    .any(|b| b.contains(&format!("the `{rule}` query failed"))),
+                "one dead request must not be reported as one broken rule per membership: {:?}",
                 q.blind_spots
             );
         }
@@ -4211,11 +4472,11 @@ mod tests {
         forget_host_token();
     }
 
-    /// A rate-limited batch is both at once: every rule's PRs missing, and the hold engaged — the
-    /// next refresh dies at home, never reaching the wire (SKEIN-208's contract, kept through the
-    /// merge into one request).
+    /// A rate-limited batch is both at once: the refresh's whole loss stated, and the hold engaged
+    /// — the next refresh dies at home, never reaching the wire (SKEIN-208's contract, kept through
+    /// the merge into one request).
     #[test]
-    fn a_rate_limited_batch_engages_the_hold_and_names_every_rule_missing() {
+    fn a_rate_limited_batch_engages_the_hold_and_says_the_refresh_is_missing() {
         let _g = crate::testutil::env_lock();
         let _hold = crate::github::HoldClear::new();
         let home = crate::testutil::tempdir();
@@ -4233,22 +4494,15 @@ mod tests {
 
         let first = queue(&batched_repo("acme/batch-limited"), true)
             .expect("a rate-limited refresh still answers, with its blind spots");
-        for rule in [
-            "review-requested:me",
-            "reviewed-by:me",
-            "author:me",
-            "mentions:me",
-        ] {
-            assert!(
-                first.blind_spots.iter().any(|b| {
-                    b.contains(&format!(
-                        "the `{rule}` query failed, so those PRs are missing"
-                    )) && b.contains("rate limiting skein")
-                }),
-                "a rate-limited batch must name every rule as missing: {:?}",
-                first.blind_spots
-            );
-        }
+        assert!(
+            first.blind_spots.iter().any(|b| {
+                b.contains("GitHub did not answer for acme/batch-limited")
+                    && b.contains("membership searches are missing")
+                    && b.contains("rate limiting skein")
+            }),
+            "a rate-limited batch must say the whole refresh is missing, and why: {:?}",
+            first.blind_spots
+        );
 
         // The hold is engaged: the next refresh is refused before the wire — viewer() is the
         // first call a refresh makes, and it never leaves the process.

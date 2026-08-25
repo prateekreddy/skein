@@ -1702,12 +1702,11 @@ async fn api_review_act(
         };
         let text = match (verdict, req.kind.as_str()) {
             (Some(v), _) if !req.comments.is_empty() => {
-                // The queue is cached for up to a minute, so its sha may already be history. One
-                // REST call reads the live head — posting `commit_id` you did not verify is how
-                // GitHub's 422 gets re-created. If GitHub will not answer, the cached sha is the
-                // best truth available and the post still goes.
-                let head = skein::prq::live_head_sha(&queue.slug, number)
-                    .unwrap_or_else(|_| pr.head_sha.clone());
+                // The queue is cached for up to a minute, so its sha may already be history —
+                // and `prq::head_to_post_against` is the one place that says what to do about it,
+                // shared with `review::post_critique` so the two write paths cannot answer it
+                // differently again (SKEIN-230).
+                let head = skein::prq::head_to_post_against(&queue.slug, number, &pr.head_sha);
                 skein::prq::submit_review_with_comments(
                     &queue.slug,
                     number,
