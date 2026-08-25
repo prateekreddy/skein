@@ -732,13 +732,7 @@ mod tests {
     /// A GitHub whose quota is spent: everything answers 403 "rate limit", except `/rate_limit`,
     /// which reports core out (resetting at `reset`) and graphql out an hour later. Counts what it
     /// is asked, per path, so a test can prove a call never arrived.
-    fn spent_github(
-        reset: u64,
-    ) -> (
-        String,
-        std::sync::Arc<AtomicU64>,
-        std::sync::Arc<AtomicU64>,
-    ) {
+    fn spent_github(reset: u64) -> (String, std::sync::Arc<AtomicU64>, std::sync::Arc<AtomicU64>) {
         use std::io::{Read as _, Write as _};
         use std::sync::atomic::Ordering;
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -864,11 +858,7 @@ mod tests {
     /// `reset`. Counts per path, so a test can prove a call never arrived.
     fn graphql_spent_github(
         reset: u64,
-    ) -> (
-        String,
-        std::sync::Arc<AtomicU64>,
-        std::sync::Arc<AtomicU64>,
-    ) {
+    ) -> (String, std::sync::Arc<AtomicU64>, std::sync::Arc<AtomicU64>) {
         use std::io::{Read as _, Write as _};
         use std::sync::atomic::Ordering;
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

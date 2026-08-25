@@ -1641,9 +1641,8 @@ fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
             in_hunk = false;
         } else if !in_hunk && line.starts_with("+++ ") {
             let name = line["+++ ".len()..].trim();
-            path = (name != "/dev/null").then(|| {
-                name.strip_prefix("b/").unwrap_or(name).to_string()
-            });
+            path =
+                (name != "/dev/null").then(|| name.strip_prefix("b/").unwrap_or(name).to_string());
         } else if !in_hunk && line.starts_with("--- ") {
             // The old-file header; only the +++ side names what RIGHT comments attach to.
         } else if line.starts_with("@@") {
@@ -2866,7 +2865,10 @@ mod tests {
 
     #[test]
     fn re_anchor_keeps_an_unmoved_line_at_its_number() {
-        let (kept, gone) = re_anchor(&[drafted("src/lib.rs", 1, "note", "fn keep() {}")], MOVED_DIFF);
+        let (kept, gone) = re_anchor(
+            &[drafted("src/lib.rs", 1, "note", "fn keep() {}")],
+            MOVED_DIFF,
+        );
         assert!(gone.is_empty());
         assert_eq!((kept[0].line, kept[0].path.as_str()), (1, "src/lib.rs"));
     }
@@ -2875,10 +2877,18 @@ mod tests {
     fn re_anchor_follows_a_line_pushed_down_by_an_insertion_above() {
         // Drafted at line 3; one line above became two, so it now lives at 4 — and the `-` line
         // between must not be counted on the way there.
-        let (kept, gone) =
-            re_anchor(&[drafted("src/lib.rs", 3, "note", "fn target() {}")], MOVED_DIFF);
-        assert!(gone.is_empty(), "the line still exists and was displaced anyway");
-        assert_eq!(kept[0].line, 4, "the comment did not follow its line to its new number");
+        let (kept, gone) = re_anchor(
+            &[drafted("src/lib.rs", 3, "note", "fn target() {}")],
+            MOVED_DIFF,
+        );
+        assert!(
+            gone.is_empty(),
+            "the line still exists and was displaced anyway"
+        );
+        assert_eq!(
+            kept[0].line, 4,
+            "the comment did not follow its line to its new number"
+        );
         assert_eq!(kept[0].body, "note", "the body must travel untouched");
     }
 
@@ -2901,9 +2911,15 @@ mod tests {
     #[test]
     fn re_anchor_displaces_a_deleted_line() {
         let (kept, gone) = re_anchor(&[drafted("src/lib.rs", 9, "n", "fn gone() {}")], MOVED_DIFF);
-        assert!(kept.is_empty(), "anchored a comment to a line that no longer exists");
+        assert!(
+            kept.is_empty(),
+            "anchored a comment to a line that no longer exists"
+        );
         assert_eq!(gone.len(), 1);
-        assert_eq!(gone[0].line, 9, "the displaced comment must keep its original coordinates");
+        assert_eq!(
+            gone[0].line, 9,
+            "the displaced comment must keep its original coordinates"
+        );
     }
 
     #[test]
@@ -2917,8 +2933,10 @@ mod tests {
     #[test]
     fn re_anchor_displaces_a_comment_on_a_file_the_new_diff_no_longer_touches() {
         // Same text exists — in a DIFFERENT file. Text matching never crosses paths.
-        let (kept, gone) =
-            re_anchor(&[drafted("src/other.rs", 1, "n", "fn keep() {}")], MOVED_DIFF);
+        let (kept, gone) = re_anchor(
+            &[drafted("src/other.rs", 1, "n", "fn keep() {}")],
+            MOVED_DIFF,
+        );
         assert!(kept.is_empty() && gone.len() == 1);
     }
 
@@ -2958,7 +2976,10 @@ mod tests {
                     reader.read_exact(&mut body).ok();
                 }
                 let body = String::from_utf8_lossy(&body).into_owned();
-                recorder.lock().unwrap().push(format!("{method} {path} {body}"));
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push(format!("{method} {path} {body}"));
                 let (status, answer) = match (method.as_str(), diff) {
                     ("POST", _) => (200, "{}".to_string()),
                     (_, Some(d)) => (200, d.to_string()),
@@ -3037,7 +3058,11 @@ mod tests {
             "commit_id must be the live head, never the drafted one"
         );
         let comments = payload["comments"].as_array().unwrap();
-        assert_eq!(comments.len(), 1, "the displaced comment leaked into the line comments");
+        assert_eq!(
+            comments.len(),
+            1,
+            "the displaced comment leaked into the line comments"
+        );
         assert_eq!(
             (comments[0]["line"].as_u64(), comments[0]["side"].as_str()),
             (Some(4), Some("RIGHT")),
@@ -3046,7 +3071,9 @@ mod tests {
         assert_eq!(comments[0]["body"], "tighten this");
         let body = payload["body"].as_str().unwrap();
         assert!(
-            body.contains("Reviewed at aaaaaaa — the branch has moved since, and these lines changed:"),
+            body.contains(
+                "Reviewed at aaaaaaa — the branch has moved since, and these lines changed:"
+            ),
             "the displaced heading is missing: {body}"
         );
         assert!(
@@ -3057,7 +3084,10 @@ mod tests {
             body.contains("(read at aaaaaaa, posted against bbbbbbb)"),
             "the record does not say what was actually reviewed: {body}"
         );
-        assert!(said.contains("1 line comment"), "the answer under-reports: {said}");
+        assert!(
+            said.contains("1 line comment"),
+            "the answer under-reports: {said}"
+        );
     }
 
     /// The unmoved case pays nothing: same head → no diff fetch, and the payload is byte-for-byte
@@ -3945,7 +3975,10 @@ mod tests {
                     reader.read_exact(&mut body).ok();
                 }
                 let body = String::from_utf8_lossy(&body).into_owned();
-                recorder.lock().unwrap().push(format!("{method} {path} {body}"));
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push(format!("{method} {path} {body}"));
                 let (code, answer) = match path.as_str() {
                     "/graphql" => (status, graphql_body.clone()),
                     "/rate_limit" => (200, "{}".to_string()),
@@ -4058,7 +4091,11 @@ mod tests {
         // aliases appears once with every reason, in search-list order.
         let mut numbers: Vec<u64> = q.prs.iter().map(|p| p.number).collect();
         numbers.sort();
-        assert_eq!(numbers, vec![1, 7, 9], "every alias's PRs are in the one queue");
+        assert_eq!(
+            numbers,
+            vec![1, 7, 9],
+            "every alias's PRs are in the one queue"
+        );
         let seven = q.prs.iter().find(|p| p.number == 7).unwrap();
         assert_eq!(
             seven.reasons,
@@ -4069,7 +4106,11 @@ mod tests {
             q.prs.iter().find(|p| p.number == 9).unwrap().reasons,
             vec![Reason::Team("acme/core".into())]
         );
-        assert!(q.blind_spots.is_empty(), "nothing was hidden: {:?}", q.blind_spots);
+        assert!(
+            q.blind_spots.is_empty(),
+            "nothing was hidden: {:?}",
+            q.blind_spots
+        );
 
         for key in ["SKEIN_HOME", "GH_TOKEN", "SKEIN_GITHUB_API"] {
             std::env::remove_var(key);
@@ -4111,7 +4152,9 @@ mod tests {
         );
         for survivor in ["review-requested:me", "reviewed-by:me", "mentions:me"] {
             assert!(
-                !q.blind_spots.iter().any(|b| b.contains(&format!("`{survivor}` query failed"))),
+                !q.blind_spots
+                    .iter()
+                    .any(|b| b.contains(&format!("`{survivor}` query failed"))),
                 "an alias that answered was reported as failed: {:?}",
                 q.blind_spots
             );
@@ -4138,19 +4181,24 @@ mod tests {
         std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
         std::env::set_var("GH_TOKEN", "gho_test");
         std::env::remove_var("GITHUB_TOKEN");
-        let (base, _seen) =
-            batched_github(false, 500, r#"{"message":"boom"}"#.to_string());
+        let (base, _seen) = batched_github(false, 500, r#"{"message":"boom"}"#.to_string());
         std::env::set_var("SKEIN_GITHUB_API", &base);
         forget_host_token();
 
         let q = queue(&batched_repo("acme/batch-dead"), true).expect("the queue still answers");
 
         assert!(q.prs.is_empty());
-        for rule in ["review-requested:me", "reviewed-by:me", "author:me", "mentions:me"] {
+        for rule in [
+            "review-requested:me",
+            "reviewed-by:me",
+            "author:me",
+            "mentions:me",
+        ] {
             assert!(
                 q.blind_spots.iter().any(|b| {
-                    b.contains(&format!("the `{rule}` query failed, so those PRs are missing"))
-                        && b.contains("500")
+                    b.contains(&format!(
+                        "the `{rule}` query failed, so those PRs are missing"
+                    )) && b.contains("500")
                 }),
                 "the `{rule}` rule's loss went unreported: {:?}",
                 q.blind_spots
@@ -4185,11 +4233,17 @@ mod tests {
 
         let first = queue(&batched_repo("acme/batch-limited"), true)
             .expect("a rate-limited refresh still answers, with its blind spots");
-        for rule in ["review-requested:me", "reviewed-by:me", "author:me", "mentions:me"] {
+        for rule in [
+            "review-requested:me",
+            "reviewed-by:me",
+            "author:me",
+            "mentions:me",
+        ] {
             assert!(
                 first.blind_spots.iter().any(|b| {
-                    b.contains(&format!("the `{rule}` query failed, so those PRs are missing"))
-                        && b.contains("rate limiting skein")
+                    b.contains(&format!(
+                        "the `{rule}` query failed, so those PRs are missing"
+                    )) && b.contains("rate limiting skein")
                 }),
                 "a rate-limited batch must name every rule as missing: {:?}",
                 first.blind_spots

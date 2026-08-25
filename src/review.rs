@@ -488,7 +488,9 @@ fn fresh(path: &std::path::Path) -> bool {
 
 /// The one ledger, above the per-repo dirs — the budget is the fleet's, not a repo's.
 fn spend_path() -> PathBuf {
-    crate::config::skein_home().join("review").join("reads-spent.json")
+    crate::config::skein_home()
+        .join("review")
+        .join("reads-spent.json")
 }
 
 /// Today's key. UTC, so the budget resets at the same moment for everyone and a test can name a
@@ -1149,7 +1151,8 @@ pub fn read_waiting() -> Vec<String> {
                 }
             }
             // Reported off what is now on disk, whichever door drafted it.
-            if !had_draft && critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha)
+            if !had_draft
+                && critiqued(&repo.id, pr.number).is_some_and(|c| c.head_sha == pr.head_sha)
             {
                 read.push(format!("{}: drafted a review for #{}", repo.id, pr.number));
             }
@@ -1763,7 +1766,9 @@ fn store_critique(repo_id: &str, c: &Critique) -> Result<(), String> {
 /// The content rides along because it is what a draft stores as each comment's durable anchor
 /// ([`Draft::line_text`]): the number places the comment today, the text finds it again after the
 /// branch moves.
-fn commentable(diff: &str) -> std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> {
+fn commentable(
+    diff: &str,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> {
     let mut map: std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>> =
         Default::default();
     let mut file: Option<String> = None;
@@ -2445,14 +2450,17 @@ mod tests {
                 } else if body.contains("review-requested") {
                     // One pull request, waiting on your review, unread. The batched wire
                     // (SKEIN-209): q0 review-requested, q1 reviewed-by, q2 author, q3 mentions.
-                    (200, r#"{"data":{"q0":{"nodes":[{"number":11,"title":"t","url":"u",
+                    (
+                        200,
+                        r#"{"data":{"q0":{"nodes":[{"number":11,"title":"t","url":"u",
                        "isDraft":false,"author":{"login":"someone"},"headRefName":"feat",
                        "headRefOid":"sha11","baseRefName":"main",
                        "updatedAt":"2020-01-01T00:00:00Z","reviewDecision":"REVIEW_REQUIRED",
                        "latestReviews":{"nodes":[]},
                        "commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z"}}]}}]},
                        "q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#
-                        .to_string())
+                            .to_string(),
+                    )
                 } else if head.contains("/graphql") {
                     (200, r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string())
                 } else {
@@ -2675,7 +2683,8 @@ mod tests {
                 }
                 // A commit dated NOW: the settle hour is gone, and the pass must read a branch
                 // that is still moving.
-                let committed = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let committed =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let node = |number: u64| {
                     format!(
                         r#"{{"number":{number},"title":"t","url":"u",
@@ -3435,10 +3444,15 @@ mod tests {
         let paths = vec!["src/a.rs".to_string(), "web/b.js".to_string()];
 
         // Could not read: no mirror, and none can be made from a path that does not exist.
-        let blind = repo_at("blind", &(home.as_ref() as &std::path::Path).join("nowhere"));
+        let blind = repo_at(
+            "blind",
+            &(home.as_ref() as &std::path::Path).join("nowhere"),
+        );
         match ownership(&blind, &["me".into()], &paths) {
             Ownership::Unreadable(why) => assert!(!why.is_empty(), "could-not-read must say why"),
-            other => panic!("an unreadable repo answered {other:?} instead of saying it could not look"),
+            other => {
+                panic!("an unreadable repo answered {other:?} instead of saying it could not look")
+            }
         }
 
         // Genuinely none: the repo was read, and the absence is its own answer.
@@ -3558,7 +3572,14 @@ mod tests {
         )
         .unwrap();
 
-        let s = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Unasked);
+        let s = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
         assert_eq!(s.line, "already read", "the cache answered");
         assert_eq!(
             reads_spent(&utc_day()),
@@ -3644,7 +3665,14 @@ mod tests {
         // two-stage path and the stage-1 stub above answers it.
         pr.reasons = vec![crate::prq::Reason::Mentioned];
 
-        let blind = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Unasked);
+        let blind = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
         assert_ne!(
             blind.depth,
             Depth::Unread,
@@ -3659,7 +3687,11 @@ mod tests {
             cached("heals", 5, "sha5").is_none(),
             "the blind summary was written down — a recovered mirror can never correct it"
         );
-        assert_eq!(reads_spent(&utc_day()), 1, "the blind visit still spent its unit");
+        assert_eq!(
+            reads_spent(&utc_day()),
+            1,
+            "the blind visit still spent its unit"
+        );
 
         // The mirror recovers: the checkout appears, CODEOWNERS and all.
         checkout_fixture(&checkout);
@@ -3668,7 +3700,14 @@ mod tests {
         git(&checkout, &["add", "-A"]);
         git(&checkout, &["commit", "-q", "-m", "owners"]);
 
-        let healed = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Unasked);
+        let healed = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Unasked,
+        );
         assert!(
             healed.ownership_unknown.is_empty(),
             "the recovered mirror was not consulted: {}",
@@ -3725,7 +3764,10 @@ mod tests {
 
         // The background pass finds a full queue and reads NOTHING.
         let read = read_waiting();
-        assert!(read.is_empty(), "over budget, and the pass still read: {read:?}");
+        assert!(
+            read.is_empty(),
+            "over budget, and the pass still read: {read:?}"
+        );
         assert!(
             !asked.exists(),
             "the summariser was reached with the day's budget spent"
@@ -3737,7 +3779,10 @@ mod tests {
         // the affordance.
         let pr = budget_pr(21, "sha21");
         let s = summarise(
-            &crate::repos::load_repos().into_iter().find(|r| r.id == "crit").unwrap(),
+            &crate::repos::load_repos()
+                .into_iter()
+                .find(|r| r.id == "crit")
+                .unwrap(),
             "acme/thing",
             &pr,
             &["me".into()],
@@ -3783,9 +3828,19 @@ mod tests {
         note_read_spent("elsewhere", &day);
         note_read_spent("elsewhere", &day);
 
-        let repo = crate::repos::load_repos().into_iter().find(|r| r.id == "crit").unwrap();
+        let repo = crate::repos::load_repos()
+            .into_iter()
+            .find(|r| r.id == "crit")
+            .unwrap();
         let pr = budget_pr(21, "sha21");
-        let s = summarise(&repo, "acme/thing", &pr, &["me".into()], false, Trigger::Asked);
+        let s = summarise(
+            &repo,
+            "acme/thing",
+            &pr,
+            &["me".into()],
+            false,
+            Trigger::Asked,
+        );
         assert_ne!(
             s.depth,
             Depth::Unread,
@@ -3793,7 +3848,11 @@ mod tests {
             s.unread_because
         );
         assert!(
-            std::fs::read_to_string(&asked).unwrap_or_default().lines().count() >= 1,
+            std::fs::read_to_string(&asked)
+                .unwrap_or_default()
+                .lines()
+                .count()
+                >= 1,
             "the model was never reached for the asked call"
         );
         assert_eq!(
@@ -3825,7 +3884,10 @@ mod tests {
         );
         // And the attribution names the repo.
         let raw = std::fs::read_to_string(spend_path()).unwrap();
-        assert!(raw.contains("crit"), "the ledger lost the attribution: {raw}");
+        assert!(
+            raw.contains("crit"),
+            "the ledger lost the attribution: {raw}"
+        );
 
         drafting_teardown();
     }
@@ -4088,10 +4150,7 @@ mod tests {
         )
         .unwrap();
 
-        let known = known(
-            "demo",
-            &[(1, "aaa".to_string()), (2, "bbb".to_string())],
-        );
+        let known = known("demo", &[(1, "aaa".to_string()), (2, "bbb".to_string())]);
         let one = &known[&1];
         assert!(one.has_critique);
         let riding = one.critique.as_ref().expect("the draft rides the payload");

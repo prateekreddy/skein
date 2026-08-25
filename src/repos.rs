@@ -1662,7 +1662,10 @@ mod tests {
             Ok(_) => panic!("a repo with nothing to mirror from was reported as readable"),
         };
         assert!(!why.is_empty(), "could-not-read must say why");
-        assert!(Tree::open(&repo).is_none(), "the convenience form stays absence-shaped");
+        assert!(
+            Tree::open(&repo).is_none(),
+            "the convenience form stays absence-shaped"
+        );
 
         // The same repo, now readable: `Ok`, and a file it does not have is an absence found
         // through the tree — the repo's own answer, not a failure to look.

@@ -3751,7 +3751,9 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
     let (program, argv) = match skein::fleet::login_spawn_argv(&runtime) {
         Ok(spawn) => spawn,
         Err(why) => {
-            let _ = socket.send(Message::Text(format!("skein: {why}\r\n"))).await;
+            let _ = socket
+                .send(Message::Text(format!("skein: {why}\r\n")))
+                .await;
             return;
         }
     };
@@ -3779,7 +3781,9 @@ async fn login_session(mut socket: WebSocket, runtime: String) {
             let rt = runtime.clone();
             let said = tokio::task::spawn_blocking(move || skein::fleet::after_login(&rt))
                 .await
-                .unwrap_or_else(|e| vec![format!("logged in, but the post-login share failed: {e}")]);
+                .unwrap_or_else(|e| {
+                    vec![format!("logged in, but the post-login share failed: {e}")]
+                });
             for line in said {
                 let _ = socket
                     .send(Message::Text(format!("skein: {line}\r\n")))

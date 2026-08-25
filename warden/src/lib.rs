@@ -150,10 +150,15 @@ mod tests {
     #[test]
     fn the_audit_home_is_never_inside_the_volume() {
         let _g = super::env_lock();
-        let keep: Vec<_> = ["SKEIN_WARDEN_HOME", "SKEIN_WARDEN_AUDIT", "SKEIN_HOME", "HOME"]
-            .iter()
-            .map(|k| (*k, std::env::var_os(k)))
-            .collect();
+        let keep: Vec<_> = [
+            "SKEIN_WARDEN_HOME",
+            "SKEIN_WARDEN_AUDIT",
+            "SKEIN_HOME",
+            "HOME",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var_os(k)))
+        .collect();
 
         std::env::set_var("HOME", "/host/home");
         for k in ["SKEIN_WARDEN_HOME", "SKEIN_WARDEN_AUDIT", "SKEIN_HOME"] {
@@ -168,7 +173,10 @@ mod tests {
         // The case the split exists for: a repointed volume moves the secret and must not move the
         // log with it — wherever the volume is pointed, that is a place skein can write.
         std::env::set_var("SKEIN_HOME", "/mnt/backup/.skein-backup");
-        assert_eq!(super::home(), std::path::PathBuf::from("/mnt/backup/.skein-backup/warden"));
+        assert_eq!(
+            super::home(),
+            std::path::PathBuf::from("/mnt/backup/.skein-backup/warden")
+        );
         assert_eq!(
             super::audit_home(),
             std::path::PathBuf::from("/host/home/.skein-warden"),

@@ -153,7 +153,11 @@ impl Fleet {
         if let Some(volume) = &f.volume {
             fs::create_dir_all(volume.join("credentials")).unwrap();
             fs::create_dir_all(volume.join("github-pats")).unwrap();
-            fs::write(volume.join("credentials/claude.json"), "{\"token\":\"live\"}\n").unwrap();
+            fs::write(
+                volume.join("credentials/claude.json"),
+                "{\"token\":\"live\"}\n",
+            )
+            .unwrap();
             fs::write(volume.join("github-pats/acme"), "ghp_live\n").unwrap();
             fs::write(volume.join("api-token"), "t".repeat(64)).unwrap();
         }

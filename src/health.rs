@@ -1169,15 +1169,24 @@ mod tests {
         // Room left: said, and nothing to do about it.
         let easy = disk_verdict(&full(20_000, 20_000), "fleet", boxes);
         assert_eq!(easy.level, Level::Satisfied, "{}", easy.detail);
-        assert!(easy.detail.contains("33%") && easy.detail.contains("40%"), "{}", easy.detail);
+        assert!(
+            easy.detail.contains("33%") && easy.detail.contains("40%"),
+            "{}",
+            easy.detail
+        );
 
         // The boxes' disk is full: the fix names the biggest, largest first, with figures — "3
         // boxes" is not something anybody can act on at the moment they read it.
         let tight = disk_verdict(&full(54_140, 20_000), "fleet", boxes);
         assert_eq!(tight.level, Level::Unsatisfied, "{}", tight.detail);
-        assert!(tight.detail.contains("90%"), "the share is not stated: {}", tight.detail);
         assert!(
-            tight.fix.contains("example-box-1 (14.0G)") && tight.fix.contains("example-box-6 (10.4G)"),
+            tight.detail.contains("90%"),
+            "the share is not stated: {}",
+            tight.detail
+        );
+        assert!(
+            tight.fix.contains("example-box-1 (14.0G)")
+                && tight.fix.contains("example-box-6 (10.4G)"),
             "the fix does not name what is taking the space: {}",
             tight.fix
         );
@@ -1193,7 +1202,9 @@ mod tests {
         let images = disk_verdict(&full(20_000, 45_000), "fleet", boxes);
         assert_eq!(images.level, Level::Unsatisfied, "{}", images.detail);
         assert!(
-            images.fix.contains("sbx exec fleet docker system prune -af"),
+            images
+                .fix
+                .contains("sbx exec fleet docker system prune -af"),
             "the image store's fix is not the one that clears it: {}",
             images.fix
         );
@@ -1202,11 +1213,18 @@ mod tests {
             "the boxes' disk has room and the fix asks somebody to stop a box: {}",
             images.fix
         );
-        assert!(images.destructive, "a prune deletes; §2.4 says such a recipe is never driven");
+        assert!(
+            images.destructive,
+            "a prune deletes; §2.4 says such a recipe is never driven"
+        );
 
         // Both, and both sentences.
         let both = disk_verdict(&full(54_140, 45_000), "fleet", boxes);
-        assert!(both.fix.contains("example-box-1") && both.fix.contains("prune"), "{}", both.fix);
+        assert!(
+            both.fix.contains("example-box-1") && both.fix.contains("prune"),
+            "{}",
+            both.fix
+        );
 
         // Docker sharing the boxes' filesystem: the same bytes are never counted twice, and there
         // is no second thing to clear.
@@ -1218,13 +1236,21 @@ mod tests {
             ..Default::default()
         };
         let one = disk_verdict(&shared, "fleet", boxes);
-        assert!(one.detail.contains("no separate image store"), "{}", one.detail);
+        assert!(
+            one.detail.contains("no separate image store"),
+            "{}",
+            one.detail
+        );
         assert!(!one.fix.contains("prune"), "{}", one.fix);
 
         // Asked and not answered is not a fault — the third state exists for exactly this.
         let blind = disk_verdict(&crate::fleet::FleetResources::default(), "fleet", boxes);
         assert_eq!(blind.level, Level::Unknown);
-        assert!(blind.fix.is_empty(), "an unknown offers no fix: {}", blind.fix);
+        assert!(
+            blind.fix.is_empty(),
+            "an unknown offers no fix: {}",
+            blind.fix
+        );
     }
 
     /// **No fault without a way out.** The parent property, in the only form that can be enforced.

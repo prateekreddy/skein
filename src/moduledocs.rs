@@ -334,7 +334,8 @@ pub fn write(repo: &Repo, module: &str) -> Result<Doc, String> {
     }
     // The telling form, so a repo that could not be read is refused as that — not as the module
     // somehow not being one of the repo's, which is a claim about a repo nobody looked at.
-    let known = modules_telling(repo).map_err(|why| format!("could not read {}: {why}", repo.id))?;
+    let known =
+        modules_telling(repo).map_err(|why| format!("could not read {}: {why}", repo.id))?;
     if !known.iter().any(|m| m.path == module) {
         return Err(format!("{module:?} is not one of this repo's modules"));
     }

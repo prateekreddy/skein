@@ -64,7 +64,10 @@ pub fn adopt_left_behind(volume_home: &Path, record: &Path) {
     if std::fs::create_dir_all(record).is_err() {
         return; // The log reports its own failure to open, loudly, at the first append.
     }
-    move_file(&volume_home.join("audit.jsonl"), &record.join("audit.jsonl"));
+    move_file(
+        &volume_home.join("audit.jsonl"),
+        &record.join("audit.jsonl"),
+    );
     move_outcomes(&volume_home.join("outcomes"), &record.join("outcomes"));
 }
 

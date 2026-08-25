@@ -793,7 +793,11 @@ mod tests {
 
         std::fs::create_dir_all(volume.join("warden")).unwrap();
         std::fs::write(volume.join("warden/secret"), "moved-in\n").unwrap();
-        assert_eq!(secret(), "moved-in", "the derived home did not win once it had a secret");
+        assert_eq!(
+            secret(),
+            "moved-in",
+            "the derived home did not win once it had a secret"
+        );
 
         match was {
             Some(h) => std::env::set_var("HOME", h),

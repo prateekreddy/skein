@@ -215,10 +215,7 @@ pub const CONDITIONS: [(&str, &str); 14] = [
     ("mine", "you opened it"),
     ("behind", "the base has commits this branch lacks"),
     ("current", "known up to date with its base"),
-    (
-        "base:trunk",
-        "its base is the repository's default branch",
-    ),
+    ("base:trunk", "its base is the repository's default branch"),
 ];
 
 /// Every action that can be written. See [`CONDITIONS`] for why this is a table.
@@ -989,7 +986,10 @@ mod tests {
         // always the reader's next question.
         let why = Cond::parse("caboose").expect_err("a word nobody defined must be refused");
         for word in ["behind", "current", "base:trunk"] {
-            assert!(why.contains(word), "{word:?} missing from the listing: {why}");
+            assert!(
+                why.contains(word),
+                "{word:?} missing from the listing: {why}"
+            );
         }
     }
 
@@ -1054,7 +1054,10 @@ mod tests {
           {"name":"plain","steps":[{"when":[],"do":"flag:look"}]}]}"#;
         let flows = from_bytes(file).unwrap();
         assert!(flows[0].serial, "serial was not read");
-        assert!(!flows[1].serial, "a file that says nothing means not serial");
+        assert!(
+            !flows[1].serial,
+            "a file that says nothing means not serial"
+        );
 
         let again = from_bytes(&to_bytes(&flows).unwrap()).unwrap();
         assert_eq!(again, flows, "serial did not survive the round trip");

@@ -542,7 +542,14 @@ pub fn perform(pr: &Subject, flow: &Workflow, chosen: &Chosen, token: &str) -> O
             // just proved stale, and the next poll would make the same one.
             let why = format!("{by} could not be done: {why}");
             stop(repo_id, number, &why);
-            record(repo_id, number, &flow.name, chosen.step + 1, "stopped", &why);
+            record(
+                repo_id,
+                number,
+                &flow.name,
+                chosen.step + 1,
+                "stopped",
+                &why,
+            );
             crate::warden_client::reported(
                 &format!("pr-workflow:{}", flow.name),
                 &format!("stopped on #{number}"),
@@ -712,10 +719,12 @@ pub fn trains(repo_id: &str, prs: &[(u64, String)], flows: &[Workflow]) -> Vec<T
             let stopped = line
                 .iter()
                 .filter_map(|number| {
-                    stops.get(&number.to_string()).map(|why| crate::prq::StoppedPr {
-                        number: *number,
-                        why: why.clone(),
-                    })
+                    stops
+                        .get(&number.to_string())
+                        .map(|why| crate::prq::StoppedPr {
+                            number: *number,
+                            why: why.clone(),
+                        })
                 })
                 .collect();
             TrainView {
@@ -1481,8 +1490,14 @@ mod tests {
             .unwrap()
         };
 
-        assert_eq!(facts_of(&pr("BEHIND", "main"), "me", "main").behind, Some(true));
-        assert_eq!(facts_of(&pr("CLEAN", "main"), "me", "main").behind, Some(false));
+        assert_eq!(
+            facts_of(&pr("BEHIND", "main"), "me", "main").behind,
+            Some(true)
+        );
+        assert_eq!(
+            facts_of(&pr("CLEAN", "main"), "me", "main").behind,
+            Some(false)
+        );
         assert_eq!(
             facts_of(&pr("", "main"), "me", "main").behind,
             None,
@@ -1720,7 +1735,11 @@ mod tests {
         let entries = journal("demo", 41);
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert_eq!(
-            (entries[0].kind.as_str(), entries[0].flow.as_str(), entries[0].step),
+            (
+                entries[0].kind.as_str(),
+                entries[0].flow.as_str(),
+                entries[0].step
+            ),
             ("did", "ship-mine", 4),
             "the entry must name the flow and the 1-based step: {entries:?}"
         );
@@ -1881,7 +1900,11 @@ mod tests {
             Some(7),
             "the front must be the oldest UNSTOPPED pull request"
         );
-        assert_eq!(view.line, vec![5, 7, 9], "train order is oldest first, front included");
+        assert_eq!(
+            view.line,
+            vec![5, 7, 9],
+            "train order is oldest first, front included"
+        );
         assert_eq!(view.stopped.len(), 1);
         assert_eq!(
             (view.stopped[0].number, view.stopped[0].why.as_str()),
