@@ -372,27 +372,72 @@ pub fn host_token() -> Result<String, String> {
     })
 }
 
-/// The repository's current name when it differs from the one skein holds, else `None`.
+/// **A per-process memo here holds only what GitHub actually said.**
 ///
-/// Remembered per process like the token beside it: this is a REST round trip and the queue is
-/// polled from the board, so asking per refresh would spend a call on an answer that changes about
-/// once a year. A lookup that fails is remembered as "no rename" rather than retried on every poll
-/// — the cost of being wrong is one stale name until a restart, and the cost of not caching it is a
-/// call per repo per poll on every fleet that has no rename at all, which is all of them.
-fn renamed_to(slug: &str) -> Option<String> {
-    let mut seen = match RENAMES.lock() {
+/// The rule, and the reason it is a function rather than a comment. Two lookups below are
+/// remembered for the life of the process because their answers change about once a year and the
+/// queue is polled from a board: [`renamed_to`] and [`trunk_of`]. Both used to swallow a failure
+/// into a sentinel — `None` for "not renamed", `""` for "trunk unknown" — and then cache the
+/// sentinel exactly as they would cache an answer.
+///
+/// That is worse than it sounds, because of WHEN it happens. `crate::github::call` refuses every
+/// request while the rate-limit hold is engaged, without asking GitHub at all, and the hold is
+/// engaged by the GraphQL search that runs *before* both of these inside [`queue_within`]. So one
+/// rate-limited refresh does not fail these lookups: it fills them, permanently, with answers
+/// nobody was given. The limit lifts, the queue comes back, and skein goes on believing a thing it
+/// was never told until somebody restarts it. Nothing logs, nothing shows a blind spot, and there
+/// is nothing for a person to clear because nothing says it is there. Found three times — the
+/// merge train dead until a restart (SKEIN-238), a renamed repo reading as an empty queue
+/// (SKEIN-281), and once avoided on purpose in `crate::prwork::facts_of`, where an unknown trunk
+/// is `None` rather than "not the trunk" so that blindness cannot become a stop.
+///
+/// So: `ask` returns `Ok` only when GitHub answered. An `Err` — a refusal, a hold, a missing
+/// token, a body that did not carry the field — is returned to the caller and **not written down**,
+/// so the next refresh asks again. During a hold that retry costs nothing: it is refused before it
+/// is spent, in exactly the condition that produces it.
+///
+/// Anything else remembered per process from a GitHub answer belongs here too. Reading a local
+/// credential does not ([`host_credential`]): "no token at all" is a real answer, it is reported as
+/// one, and no rate limit can manufacture it.
+fn what_github_said<T: Clone>(
+    memo: &std::sync::Mutex<std::collections::BTreeMap<String, T>>,
+    slug: &str,
+    ask: impl FnOnce() -> Result<T, String>,
+) -> Option<T> {
+    // Poison-tolerant like the hold in `crate::github`: the value is a cached answer, and there is
+    // no invariant a panicking caller could have left half-written.
+    let mut seen = match memo.lock() {
         Ok(seen) => seen,
         Err(poisoned) => poisoned.into_inner(),
     };
     if let Some(known) = seen.get(slug) {
-        return known.clone();
+        return Some(known.clone());
     }
-    let now = host_token()
-        .ok()
-        .and_then(|token| crate::github::canonical_repo(slug, &token).ok())
-        .filter(|now| !now.eq_ignore_ascii_case(slug));
-    seen.insert(slug.to_string(), now.clone());
-    now
+    let answer = ask().ok()?;
+    seen.insert(slug.to_string(), answer.clone());
+    Some(answer)
+}
+
+/// The repository's current name when it differs from the one skein holds, else `None`.
+///
+/// Remembered per process like the token beside it: this is a REST round trip and the queue is
+/// polled from the board, so asking per refresh would spend a call on an answer that changes about
+/// once a year. Only through [`remembered`], so the thing written down is always a name GitHub
+/// gave — **"GitHub says it is still called this" is an answer and is cached; "GitHub would not
+/// tell me" is not.** The two used to be the same `None`, and on the one repo the owner had the
+/// queue switched on for — renamed, with the old slug still in the registry — a single refused
+/// lookup meant the search kept asking `repo:<the old name>` and the queue read empty until a
+/// restart. GitHub's *search* does not follow a rename the way its REST redirect does, which is
+/// what `crate::github::canonical_repo` exists to read.
+fn renamed_to(slug: &str) -> Option<String> {
+    what_github_said(&RENAMES, slug, || {
+        let token = host_token()?;
+        let now = crate::github::canonical_repo(slug, &token)?;
+        // The name GitHub gave, and `None` when that is the name skein already holds. This `None`
+        // is an ANSWER — it is inside the `Ok`, so it is remembered.
+        Ok(Some(now).filter(|now| !now.eq_ignore_ascii_case(slug)))
+    })
+    .flatten()
 }
 
 static RENAMES: std::sync::Mutex<std::collections::BTreeMap<String, Option<String>>> =
@@ -409,45 +454,24 @@ pub fn forget_renames() {
 /// [`Queue::trunk`].
 ///
 /// Remembered per process for [`renamed_to`]'s reason: this is a REST round trip whose answer
-/// changes about never, asked from a poll. [`Queue::trunk`]'s contract is that `""` means "not
-/// known", so nothing downstream mistakes a failure for an answer.
+/// changes about never, asked from a poll. Through [`what_github_said`], so only a branch GitHub named
+/// is written down — a refusal is not, and the next refresh asks again (SKEIN-238: cached, one
+/// rate-limited refresh made `base_is_trunk` false on every pull request in the repo, the merge
+/// train's `base:trunk` claimed nothing, and the train was dead until a restart).
 ///
-/// **Only an answer is remembered.** A failed lookup is not cached, and the next refresh asks
-/// again. That is the difference between a rate limit costing skein a minute and costing it the
-/// rest of the process: the ordering inside [`queue_within`] is `viewer()` [REST],
-/// `search_prs_all` [GraphQL], then this — so a GraphQL-only limit engages
-/// `crate::github`'s process-wide hold and this REST call is refused by it, having asked GitHub
-/// nothing. Cached, that refusal became `""` for ever; `base_is_trunk` was then false on every
-/// pull request in the repo, the merge train's `base:trunk` claimed nothing, and the train stopped
-/// dead with no banner, no blind spot and no log line until somebody restarted the server
-/// (SKEIN-238). Nothing anybody could clear, because nothing said it was there.
-///
-/// Not caching the failure costs one REST call per refresh on a repo whose lookup is failing — and
-/// during the hold that is the condition that causes this, the call is refused before it is spent
-/// (`crate::github::call` checks the hold first), so the retry is free in exactly the case that
-/// produces it. The queue itself is cached for a minute, so this is bounded by the refresh rate
-/// rather than by anything a poll does.
+/// `""` for a repo whose trunk skein has not been told, which is [`Queue::trunk`]'s contract for
+/// "not known" — and the empty string is never what gets remembered, because a body with no
+/// `default_branch` is an `Err` here rather than an answer.
 fn trunk_of(slug: &str) -> String {
-    let mut seen = TRUNKS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(known) = seen.get(slug) {
-        return known.clone();
-    }
-    let trunk = host_token()
-        .ok()
-        .and_then(|token| crate::github::get_json(&format!("/repos/{slug}"), &token).ok())
-        .and_then(|repo| {
-            repo.get("default_branch")
-                .and_then(|b| b.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
-    // The one line SKEIN-238 turned on: an answer is remembered, a failure is not. `TRUNKS`
-    // therefore only ever holds trunks skein has actually been told, and the early return above
-    // can never hand back a remembered failure.
-    if !trunk.is_empty() {
-        seen.insert(slug.to_string(), trunk.clone());
-    }
-    trunk
+    what_github_said(&TRUNKS, slug, || {
+        let token = host_token()?;
+        let repo = crate::github::get_json(&format!("/repos/{slug}"), &token)?;
+        repo.get("default_branch")
+            .and_then(|b| b.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("GitHub did not say what {slug}'s default branch is"))
+    })
+    .unwrap_or_default()
 }
 
 static TRUNKS: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
@@ -2704,6 +2728,193 @@ mod tests {
         std::env::remove_var("SKEIN_GITHUB_API");
         forget_host_token();
         forget_renames();
+    }
+
+    /// A GitHub that can be taken away and given back, answering a rename either way.
+    ///
+    /// Beside [`routing_github`] rather than folded into it: that one exists to prove a rename is
+    /// followed at all, and this one exists to prove that FAILING to ask about one is not an
+    /// answer. It also counts what was asked, because the other half of the rule — an answer, even
+    /// "not renamed", is still remembered — is a claim about how often GitHub is paid.
+    fn flaky_rename_github(
+        down: std::sync::Arc<std::sync::Mutex<bool>>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = asked.clone();
+        let mine = base.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).ok();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut length = 0usize;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap_or(0);
+                    }
+                    line.clear();
+                }
+                let mut body = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut body).ok();
+                }
+                let body = String::from_utf8_lossy(&body).into_owned();
+                recorder.lock().unwrap().push(path.clone());
+                let out = *down.lock().unwrap();
+                let (status, answer) = match path.as_str() {
+                    // The one call that is taken away. 504 rather than a 403, because that is what
+                    // the owner's fleet actually got the day this was written — and because the
+                    // rule is about caching a failure, not about which failure it was.
+                    "/repos/acme/old-name" if out => {
+                        (504, r#"{"message":"Gateway Timeout"}"#.to_string())
+                    }
+                    "/user" => (200, r#"{"login":"me"}"#.to_string()),
+                    p if p.starts_with("/user/teams") => (200, "[]".to_string()),
+                    "/repos/acme/old-name" => (
+                        301,
+                        format!(
+                            r#"{{"message":"Moved Permanently","url":"{mine}/repositories/42"}}"#
+                        ),
+                    ),
+                    "/repositories/42" => (200, r#"{"full_name":"acme/new-name"}"#.to_string()),
+                    // `default_branch` included, or `trunk_of` would rightly keep asking and the
+                    // paid-once assertion below would be counting its retries.
+                    "/repos/acme/new-name" => (
+                        200,
+                        r#"{"full_name":"acme/new-name","default_branch":"main"}"#.to_string(),
+                    ),
+                    "/graphql" => {
+                        let hit =
+                            body.contains("acme/new-name") && body.contains("review-requested");
+                        (
+                            200,
+                            match hit {
+                                true => r#"{"data":{"q0":{"nodes":[{"number":7,"title":"a pull request","url":"u","isDraft":false,"author":{"login":"someone"},"headRefOid":"abc","updatedAt":"2026-08-01T00:00:00Z","latestReviews":{"nodes":[]},"reviewRequests":{"nodes":[]}}]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string(),
+                                false => r#"{"data":{"q0":{"nodes":[]},"q1":{"nodes":[]},"q2":{"nodes":[]},"q3":{"nodes":[]}}}"#.to_string(),
+                            },
+                        )
+                    }
+                    _ => (200, "{}".to_string()),
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                        answer.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (base, asked)
+    }
+
+    /// A rename lookup that failed is asked again — and one that answered is not.
+    ///
+    /// Both halves, in one test, because either alone is a bug. This is [`what_github_said`]'s
+    /// rule asserted on the memo that had it wrong (SKEIN-281): `renamed_to` swallowed a refusal
+    /// into the same `None` it uses for "GitHub says this repo is still called that", and cached
+    /// it for the life of the process. The failure is not hypothetical — the one repository the
+    /// owner has the review queue switched on for was renamed, its registry entry still carried
+    /// the old slug, and GitHub 504'd on it the day this was written. GitHub's SEARCH does not
+    /// follow a rename the way its REST redirect does, so the queue reads 200 with zero results
+    /// and renders empty, with no error and no blind spot — until somebody restarts skein.
+    ///
+    /// The second half is what stops the fix being "cache nothing": `Ok(None)` — a repository
+    /// GitHub says was NOT renamed — is an answer, and must still be paid for only once, or every
+    /// poll on every fleet buys a call per repo to be told nothing changed.
+    #[test]
+    fn a_rename_lookup_that_failed_is_asked_again_and_one_that_answered_is_not() {
+        let _g = crate::testutil::env_lock();
+        let _h = crate::github::HoldClear::new();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        std::env::set_var("GH_TOKEN", "gho_test");
+        std::env::remove_var("GITHUB_TOKEN");
+        let down = std::sync::Arc::new(std::sync::Mutex::new(true));
+        let (base, asked) = flaky_rename_github(down.clone());
+        std::env::set_var("SKEIN_GITHUB_API", &base);
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
+
+        let repo: crate::repos::Repo = serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "source": "https://github.com/acme/old-name.git",
+            "work": "",
+            "store": "",
+            "review_queue": true,
+        }))
+        .unwrap();
+        crate::repos::save_repos(std::slice::from_ref(&repo)).unwrap();
+
+        // The refresh that lands while the lookup is refused. An empty queue here is honest:
+        // skein was not told the new name, so it searched the one it holds.
+        let during = queue(&repo, true).expect("a blind queue still answers");
+        assert!(
+            during.prs.is_empty(),
+            "the fixture did not reproduce the outage: {:?}",
+            asked.lock().unwrap()
+        );
+
+        // GitHub comes back.
+        *down.lock().unwrap() = false;
+
+        let after = queue(&repo, true).expect("a healthy GitHub answers");
+        assert!(
+            !after.prs.is_empty(),
+            "one refused lookup was remembered as \"this repo was not renamed\", so the search \
+             keeps asking a name GitHub matches against nothing and the queue reads empty until \
+             the process restarts. Asked: {:?}",
+            asked.lock().unwrap()
+        );
+        // And the recovered name is written down, exactly as it is on the path that never failed.
+        let stored = crate::repos::load_repos()
+            .into_iter()
+            .find(|r| r.id == "demo")
+            .map(|r| r.source)
+            .unwrap_or_default();
+        assert!(
+            stored.contains("acme/new-name"),
+            "the rename was recovered and not written down: {stored}"
+        );
+
+        // The other half. `acme/new-name` answers "still called that" — an answer, and remembered:
+        // a second refresh must not pay for it again.
+        let repo = crate::repos::load_repos().remove(0);
+        let _settled = queue(&repo, true).expect("the queue answered under the new name");
+        let asks_of_new = || {
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.as_str() == "/repos/acme/new-name")
+                .count()
+        };
+        let paid = asks_of_new();
+        assert!(paid >= 1, "nothing ever asked GitHub about the new name");
+        let _again = queue(&repo, true).expect("and again");
+        assert_eq!(
+            asks_of_new(),
+            paid,
+            "\"not renamed\" stopped being remembered, so every poll now buys a call per repo to \
+             be told nothing changed"
+        );
+
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("SKEIN_GITHUB_API");
+        forget_host_token();
+        forget_renames();
+        forget_trunks();
     }
 
     /// The TTL rule the badge rides on: a remembered in-process queue is served only while it is
