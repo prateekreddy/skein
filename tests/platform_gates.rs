@@ -50,6 +50,14 @@ const GATED: &[(&str, &str)] = &[
         "runs the mailbox scripts skein installs into a box",
     ),
     (
+        "a_registry_key_named_after_the_sandbox_is_not_a_recipient",
+        "runs mailbox.sh's own prune against a real registry, and ages a message with GNU `touch -d`",
+    ),
+    (
+        "a_legacy_box_named_by_its_vm_is_still_a_recipient",
+        "the same, in the legacy world the script's identity chain branches on",
+    ),
+    (
         "box_token_usage_sums_new_assistant_entries_and_is_idempotent",
         "drives box-token-usage.sh in the userland it is installed into",
     ),
