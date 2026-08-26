@@ -277,6 +277,14 @@ async function drain(b) {
   t.check("a row unread for another reason keeps the plain statement",
     large.includes("Not summarised — its diff is too large"), true);
   t.check("and offers no budget button", large.includes("read this one now"), false);
+  // SKEIN-392: it must still offer SOMETHING. This branch is reached only when skein tried and
+  // could not — a diff too large to read, a call that ran out of time — and it used to end "Read
+  // this one yourself.", a sentence telling the reader to give up while the collapsed row was
+  // drawing them a button for the same row. The two surfaces cannot disagree about that.
+  t.check("a row skein tried and failed to read still offers the way back",
+    large.includes(`revReadAgainPress('acme', 2)`), true);
+  t.check("and does not tell the reader to give up",
+    /Read this one yourself/.test(large), false);
 
   // The collapsed line is unchanged: it says what it always says, so the queue can be scanned.
   t.check("the row still states its absence where you scan", b.line(1).includes("not read —"), true);

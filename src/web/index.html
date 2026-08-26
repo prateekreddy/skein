@@ -5885,7 +5885,16 @@ function revDetail(pr) {
         esc(pr.repo_id)}', ${pr.number}, 'asked')">read this one now</button>
       <span class="dim">a read you ask for is never counted against the day</span></div></div>`;
   }
-  if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")} Read this one yourself.</div>`;
+  // **The one row where the reader is actually stuck was the one with no move in it** (SKEIN-392).
+  // Both neighbours carry a control — the budget panel above offers "read this one now", "Not read
+  // yet" below offers "read it" — and this branch, reached only when skein TRIED and could not,
+  // ended "Read this one yourself.". That is what a person is given after waiting for a reading,
+  // and it told them to give up while the collapsed row was still drawing them a button
+  // (`revReadAgain` counts depth === "unread"): the pane and the row disagreeing about whether
+  // there was anything left to do. §law 1 — never a statement without the move it implies.
+  if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")}
+    <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress('${
+      esc(pr.repo_id)}', ${pr.number})">read it again</button></div></div>`;
   // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable
   // about which code it describes — and the way out is right here rather than somewhere else.
   const stale = s.stale

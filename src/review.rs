@@ -829,6 +829,48 @@ const STAGE2_BYTES: usize = 140_000;
 /// stronger model's context with room for the answer.
 const CRITIQUE_BYTES: usize = 300_000;
 
+/// Three seconds of wall clock per KB of diff — how long the merged summary-and-review call gets.
+///
+/// **Why it is not one number any more.** It was a flat `300s`, and the sentence a large pull
+/// request produced said exactly what was wrong with that: "`claude` was still going after 300s. A
+/// larger diff needs longer than this call allows" — skein naming the cause and then doing nothing
+/// with it (SKEIN-392). The merged call is the largest thing this module asks for, and what makes
+/// it slow is what it was handed, so what it was handed is what sets the clock.
+///
+/// Both ends are derived rather than chosen. The floor is what every call used to get, so no diff
+/// gets *less* time than before. The ceiling is what this rule gives the largest diff that can
+/// arrive — [`CRITIQUE_BYTES`], the truncation just above — so it moves when that moves, and there
+/// is no waiting for an answer to a question nobody can ask.
+const MERGED_SECS_PER_KB: u64 = 3;
+const MERGED_FLOOR: Duration = Duration::from_secs(300);
+
+fn merged_budget(diff_len: usize) -> Duration {
+    let ceiling = (CRITIQUE_BYTES as u64 / 1000) * MERGED_SECS_PER_KB;
+    let want = (diff_len as u64 / 1000) * MERGED_SECS_PER_KB;
+    Duration::from_secs(want.clamp(MERGED_FLOOR.as_secs(), ceiling))
+}
+
+/// What a merged call that did not come back leaves worth trying.
+#[derive(Debug, PartialEq, Eq)]
+enum AfterMerged {
+    /// Ask again, smaller — the summary-only ladder over a fraction of the diff. The reader ends
+    /// with a line they can act on instead of a sentence telling them to read it themselves.
+    Narrow,
+    /// Nothing narrower would help: the binary is not there, the sandbox is not answering, the CLI
+    /// refused. A second call fails the same way, only faster, and spends the reader's minute.
+    Stop,
+}
+
+/// The line is [`crate::ai::Unread`]'s own, drawn again here for the same reason it draws it for the
+/// refusal cache: a timeout is a fact about this diff and the next attempt may differ, while every
+/// other refusal is a fact about the setup and will not.
+fn after_merged(unread: &crate::ai::Unread) -> AfterMerged {
+    match unread {
+        crate::ai::Unread::Slow(_) => AfterMerged::Narrow,
+        _ => AfterMerged::Stop,
+    }
+}
+
 /// The PR's diff, and whether it was cut short.
 fn pr_diff(slug: &str, number: u64, limit: usize) -> Result<(String, bool), String> {
     Ok(truncate_diff(
@@ -2025,7 +2067,6 @@ fn spend_a_visit(
     }
     let (full, deep_cut) = truncate_diff(&raw, STAGE2_BYTES);
     let signals = crate::contracts::scan(&full);
-    let (diff, cut) = truncate(&full, STAGE1_BYTES);
 
     // Where the review is yours to give, summary and review are ONE model call over the one
     // download — the owner's decision (2026-08-24): "combine summary with critique review …
@@ -2061,8 +2102,38 @@ fn spend_a_visit(
     // second half of the SAME unit: the budget counts pull requests analysed, and one that needed
     // explaining must not cost double what a boring one did.
     note_spent_if_unasked(trigger, &repo.id, &day);
+    // Stage 1, and stage 2 when stage 1 earns it. Extracted because this is now reached from TWO
+    // places: here, and from the merged call when it runs out of time (`summarise_and_draft`) —
+    // and both must be the same reading, not two ladders that drift apart.
+    summarise_in_stages(repo, pr, &owned, &signals, &full, deep_cut)
+}
+
+/// The summary-only ladder: one cheap call over the first [`STAGE1_BYTES`], and a second, longer
+/// one over [`STAGE2_BYTES`] when the first says this pull request needs explaining.
+///
+/// **Two callers, deliberately.** [`visit`] takes this path for a row whose review is not yours to
+/// give. [`summarise_and_draft`] falls back to it when the merged summary-and-review call runs out
+/// of time (SKEIN-392): the merged call is the largest thing this module asks for — the whole
+/// [`CRITIQUE_BYTES`] diff, a summary AND a review with line comments in one answer — and the
+/// reader who was told it was too big has nothing to do with a button that makes exactly that call
+/// again. This is the reading skein gave before the two were merged, so its rules are already
+/// written and already hold; what it does not produce is the review, and the tried-note the caller
+/// leaves is what puts "no review — read again" on the row.
+///
+/// It never counts a budget unit of its own. The unit is the pull request analysed and the caller
+/// counted it before the first call; a narrower second attempt at the same pull request is the
+/// same unit, on the same rule that makes stage 2 free after stage 1.
+fn summarise_in_stages(
+    repo: &Repo,
+    pr: &Pr,
+    owned: &Ownership,
+    signals: &[crate::contracts::Signal],
+    full: &str,
+    deep_cut: bool,
+) -> Summary {
+    let (diff, cut) = truncate(full, STAGE1_BYTES);
     let raw = match crate::ai::claude_oneshot_telling(
-        &stage1_prompt(pr, &owned, &diff, cut),
+        &stage1_prompt(pr, owned, &diff, cut),
         review_model(None).as_deref(),
         Duration::from_secs(60),
     ) {
@@ -2090,7 +2161,7 @@ fn spend_a_visit(
     // keeps its flag. There is no path here where mechanical evidence *lowers* the depth, which is
     // what makes shipping imperfect rules safe — see [`crate::contracts`].
     let mut flags = verdict.flags.clone();
-    for s in &signals {
+    for s in signals {
         if !flags.contains(&s.kind) {
             flags.push(s.kind.clone());
         }
@@ -2108,7 +2179,7 @@ fn spend_a_visit(
         line: verdict.line.clone(),
         detail: String::new(),
         flags,
-        signals: signals.clone(),
+        signals: signals.to_vec(),
         yours,
         others,
         ownership_unknown: owned.unread_why().unwrap_or_default().to_string(),
@@ -2120,7 +2191,7 @@ fn spend_a_visit(
         // actually decide from. The stronger model is named here rather than in the env so a pinned
         // `$SKEIN_AI_MODEL` still overrides both stages together.
         match claude_oneshot_with(
-            &stage2_prompt(pr, &verdict, &summary.yours, &signals, &full, deep_cut),
+            &stage2_prompt(pr, &verdict, &summary.yours, signals, full, deep_cut),
             review_model(Some("claude-sonnet-5")).as_deref(),
             Duration::from_secs(180),
         ) {
@@ -2189,9 +2260,44 @@ fn summarise_and_draft(
     let answer = match crate::ai::claude_oneshot_telling(
         &merged_prompt(pr, owned, signals, &diff, cut),
         review_model(Some("claude-sonnet-5")).as_deref(),
-        Duration::from_secs(300),
+        merged_budget(diff.len()),
     ) {
         Ok(answer) => answer,
+        // **Out of time is not the end of the reading** (SKEIN-392). This call carries the whole
+        // [`CRITIQUE_BYTES`] diff and is asked for a summary AND a review with line comments over
+        // it; when it does not come back, the thing to do is the reading skein gave before the two
+        // were merged — smaller diff, cheaper model, and no review. The reader gets a line.
+        //
+        // Not a second budget unit: the unit is the pull request analysed, and the caller counted
+        // it before the first call. Same rule that makes stage 2 free after stage 1.
+        Err(unread) if after_merged(&unread) == AfterMerged::Narrow => {
+            // The call WAS the draft attempt and it is gone, so the absence is written down: the
+            // pass's draft-only door will not re-buy the same timeout every ten minutes, and the
+            // row carries "no review — read again" with this as its reason (SKEIN-371).
+            note_critique_tried(
+                &repo.id,
+                pr.number,
+                &pr.head_sha,
+                &format!(
+                    "{} What follows is a shorter read with no review in it — press draft to \
+                     spend a whole call on the review alone.",
+                    unread.say()
+                ),
+            );
+            let (full, deep_cut) = truncate_diff(raw_diff, STAGE2_BYTES);
+            let mut narrower = summarise_in_stages(repo, pr, owned, signals, &full, deep_cut);
+            if narrower.depth == Depth::Unread {
+                // BOTH attempts are the answer. The shorter one's own sentence alone would send the
+                // reader to look at a 60-second call, which was never the thing that was slow.
+                narrower.unread_because = format!(
+                    "{} A shorter read of the first {}KB did not get there either: {}",
+                    unread.say(),
+                    STAGE1_BYTES / 1000,
+                    narrower.unread_because,
+                );
+            }
+            return narrower;
+        }
         Err(unread) => return spent_unread(&unread.say()),
     };
     let Some((verdict, detail, critique)) = parse_merged(&answer) else {
@@ -6446,6 +6552,86 @@ mod tests {
         assert_eq!(never.summary.head_sha, "zzz");
 
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    // ── a reading that ran out of time (SKEIN-392) ─────────────────────────────────────────────
+    //
+    // Reported from the live fleet: "Not summarised — `claude` was still going after 300s. A larger
+    // diff needs longer than this call allows; nothing is wrong with the model. Read this one
+    // yourself." Two decisions were behind that sentence and neither existed — how long the call
+    // gets, and what is left to try when it does not come back. Both are pure functions now, which
+    // is why they can be asserted here rather than by waiting five minutes for a clock.
+
+    /// The floor is what every call used to get, so nothing lost time; the ceiling is what the
+    /// biggest diff that can arrive earns, so nobody waits for an answer to a question that cannot
+    /// be asked. Both are DERIVED — the ceiling from [`super::CRITIQUE_BYTES`] — so this test also
+    /// fails if that truncation moves and the clock does not follow it.
+    #[test]
+    fn the_reading_budget_grows_with_the_diff_and_stops_where_the_diff_stops() {
+        let secs = |n: usize| super::merged_budget(n).as_secs();
+        assert_eq!(
+            secs(0),
+            300,
+            "an empty diff got less than the flat budget every call used to have"
+        );
+        assert_eq!(
+            secs(50_000),
+            300,
+            "a small diff was given less than the old flat budget"
+        );
+        assert!(
+            secs(150_000) > secs(50_000),
+            "a diff three times the size got no more time than the small one, which is the bug"
+        );
+        assert_eq!(
+            secs(super::CRITIQUE_BYTES),
+            super::merged_budget(super::CRITIQUE_BYTES * 4).as_secs(),
+            "the ceiling is not the largest diff that can reach this call: a truncated diff is \
+             capped at CRITIQUE_BYTES, so more time than that buys nothing"
+        );
+        assert!(
+            secs(super::CRITIQUE_BYTES) >= 900,
+            "the largest diff skein will read got under fifteen minutes to read it"
+        );
+    }
+
+    /// The one refusal with a smaller second attempt in it. Every other one is about the SETUP — a
+    /// binary that is not there, a sandbox that is not answering — and asking again with less diff
+    /// fails identically, one more minute later.
+    #[test]
+    fn a_slow_read_is_narrowed_and_every_other_refusal_stops() {
+        use crate::ai::Unread;
+        assert_eq!(
+            super::after_merged(&Unread::Slow(std::time::Duration::from_secs(300))),
+            super::AfterMerged::Narrow,
+            "a call that ran out of time led nowhere, which is the row that says `read this one \
+             yourself` with no way to"
+        );
+        for refusal in [
+            Unread::Missing {
+                bin: "claude".into(),
+                why: "not found".into(),
+            },
+            Unread::Unreachable {
+                sandbox: "fleet".into(),
+                why: "no route".into(),
+            },
+            Unread::AbsentInSandbox {
+                bin: "claude".into(),
+                sandbox: "fleet".into(),
+            },
+            Unread::Refused {
+                code: "1".into(),
+                said: "not logged in".into(),
+            },
+            Unread::Silent,
+        ] {
+            assert_eq!(
+                super::after_merged(&refusal),
+                super::AfterMerged::Stop,
+                "a second, smaller call was spent on a refusal a smaller diff cannot fix: {refusal:?}"
+            );
+        }
     }
 }
 
