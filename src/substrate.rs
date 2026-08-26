@@ -274,10 +274,30 @@ fn decision_path(id: &str) -> Option<std::path::PathBuf> {
     })
 }
 
-/// The decision skein recorded for `id`, if it has made one.
+/// The decision skein recorded for `id` — with **"nobody has answered this" kept apart from
+/// "skein cannot tell"**.
+///
+/// The generic form is [`crate::util::read_json_or_why`], and the distinction it keeps is the one
+/// [`decide`]'s guard turns on: `Ok(None)` is an id nobody has answered, `Ok(Some(_))` is the
+/// answer, and `Err` is a decision file that is *there* and will not parse — the zero-length file a
+/// crash between [`crate::util::write_atomic`]'s write and its rename used to leave, or a hand
+/// edit. A guard that reads the third as the first has no way to know it is looking at a request
+/// that was already answered.
+fn decision_or_why(id: &str) -> Result<Option<Request>, String> {
+    let path = decision_path(id).ok_or_else(|| format!("unusable request id {id:?}"))?;
+    crate::util::read_json_or_why(&path)
+}
+
+/// The decision skein recorded for `id`, if it has made one — an unreadable file reading as none.
+///
+/// **For the readers, and there is one left.** [`decided_over`] paints the cockpit's list, and a
+/// decision it cannot read falls back to showing the box's own copy of the request: wrong, and
+/// wrong in the direction a person sees, because the row reappears as pending with a button on it.
+/// Pressing that button is [`decide`], which reads [`decision_or_why`] and refuses — so the
+/// unreadable file costs a confusing row and never a second privileged act. Everything that
+/// *decides* something asks [`decision_or_why`] instead.
 pub fn decision(id: &str) -> Option<Request> {
-    let body = std::fs::read_to_string(decision_path(id)?).ok()?;
-    serde_json::from_str(&body).ok()
+    decision_or_why(id).ok().flatten()
 }
 
 /// Approve or deny **the request the caller was looking at**. Approving does not install —
@@ -292,6 +312,8 @@ pub fn decision(id: &str) -> Option<Request> {
 ///
 /// A decision is made **once**. A second call for the same id is refused rather than overwriting,
 /// so a box cannot get a fresh decision by resurrecting a request under an id already answered.
+/// **Including when skein cannot read the decision it may already have made** (SKEIN-418) — see the
+/// refusal below for why that direction is the safe one.
 pub fn decide(
     sandbox: &str,
     rendered: &Request,
@@ -302,11 +324,36 @@ pub fn decide(
         return Err(format!("refusing to act on this request: {why}"));
     }
     let path = decision_path(&rendered.id).ok_or("unusable request id")?;
-    if let Some(already) = decision(&rendered.id) {
-        return Err(format!(
-            "request {} is already {} — a decision is made once",
-            rendered.id, already.state
-        ));
+    match decision_or_why(&rendered.id) {
+        Ok(None) => {}
+        Ok(Some(already)) => {
+            return Err(format!(
+                "request {} is already {} — a decision is made once",
+                rendered.id, already.state
+            ))
+        }
+        // **A guard is not a store, so it does not get to fall back to a default** (SKEIN-418).
+        // `record`'s file has a value in it and refusing there is about not destroying it; this
+        // file's value is that it EXISTS, and the whole of the guard is asking whether it does.
+        // Read through `.ok()`, an unparseable one answered "no decision" — the guard passed, and
+        // the approval that followed both ran an apt/npm install as root inside every box for the
+        // second time and wrote its record over the first decision, which may have been a denial.
+        //
+        // Refusing is the safe direction because the two mistakes are not the same size. Refusing
+        // an id that was never answered costs a person one file to move and one press again, and
+        // they are already at the cockpit. Approving one that was answered is a privileged act
+        // performed twice from a single yes, with the evidence of the first destroyed on the way.
+        Err(why) => {
+            return Err(format!(
+                "refusing to decide {} — skein cannot read the decision it may already have made \
+                 ({why}). A decision is made once, and that file is the only record of whether \
+                 this one was; skein cannot tell an id nobody has answered from one already \
+                 approved or denied. Approving now would run a privileged install a second time \
+                 and replace the first decision. The file is left alone; fix or move it, then \
+                 decide again.",
+                rendered.id
+            ))
+        }
     }
     let mut decided = rendered.clone();
     decided.state = if approve { "approved" } else { "denied" }.into();
@@ -390,7 +437,13 @@ pub fn install(sandbox: &str, id: &str) -> Result<Request, String> {
     // closing render-to-click while leaving click-to-install open would have moved the window
     // rather than shut it: a box whose request was approved could still swap the package list
     // before apt saw it.
-    let req = decision(id).ok_or_else(|| format!("skein has no decision recorded for {id}"))?;
+    //
+    // Unreadable and absent are told apart here too (SKEIN-418), for the person rather than for
+    // safety: this call already fails closed either way — no decision, no install — but "skein has
+    // no decision recorded" sends somebody looking for a decision that is on disk in front of them.
+    let req = decision_or_why(id)
+        .map_err(|why| format!("refusing to install {id} — skein cannot read the decision recorded for it ({why}). The file is left alone; fix or move it, then decide again."))?
+        .ok_or_else(|| format!("skein has no decision recorded for {id}"))?;
     // Checked again even though `decide` checked it: this is the last thing between a name and a
     // root command line, and a decision file on the host can be hand-edited.
     if let Some(why) = req.problem() {
@@ -617,6 +670,65 @@ mod tests {
             again.unwrap_err().contains("already"),
             "a second decision on one id must be refused"
         );
+    }
+
+    /// **A decision skein cannot read is not the same answer as no decision** (SKEIN-418).
+    ///
+    /// "A decision is made once" was a guard over a read that answered `None` to both, so a
+    /// decision file that was present and unparseable — the zero-length file a crash between
+    /// `write_atomic`'s write and its rename used to leave behind — let the same request be
+    /// answered a second time. What is on the other end of that second yes is an `apt`/`npm`
+    /// install running as root in every box in the fleet, and the write that follows replaces the
+    /// record of the decision that was actually made. So the first decision here is a **denial**:
+    /// what the guard is protecting is not "do not install twice" but "the answer the owner gave
+    /// stands", and a corrupt file must not turn a no into a yes.
+    #[test]
+    fn a_decision_file_skein_cannot_read_does_not_let_a_request_be_approved_a_second_time() {
+        let _g = crate::testutil::env_lock();
+        let home = crate::testutil::tempdir();
+        std::env::set_var("SKEIN_HOME", home.as_ref() as &std::path::Path);
+
+        let rendered = req("apt", &["libnss3"]);
+        let denied = decide("no-such-sandbox", &rendered, false, false).expect("decided");
+        assert_eq!(denied.state, "denied");
+        let path = decision_path(&rendered.id).expect("the id names a file");
+
+        for corrupt in [
+            &b""[..],
+            &b"{\"id\":\"20260812-101010-1\",\"state\":\"den"[..],
+        ] {
+            std::fs::write(&path, corrupt).unwrap();
+
+            let why = decide("no-such-sandbox", &rendered, true, true).expect_err(
+                "a request whose decision skein could not read was approved a second time — a \
+                 denial became an approval, and a root install can now run from it",
+            );
+            assert!(
+                why.contains("cannot read") && why.contains(&rendered.id),
+                "the refusal has to say skein could not read it and name the request: {why}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                corrupt,
+                "the decision skein could not read was replaced by a second one"
+            );
+
+            // And the install path says the same thing rather than "no decision recorded", which
+            // would send somebody looking for a file that is sitting there.
+            let said = install("no-such-sandbox", &rendered.id).unwrap_err();
+            assert!(
+                said.contains("cannot read"),
+                "an unreadable decision reads to the installer as one nobody ever made: {said}"
+            );
+        }
+
+        // It recovers by itself once the file parses, and the answer that comes back is the one
+        // that was given: still denied, and still refusing a second decision.
+        std::fs::write(&path, serde_json::to_vec_pretty(&denied).unwrap()).unwrap();
+        let why = decide("no-such-sandbox", &rendered, true, true).unwrap_err();
+        assert!(why.contains("already denied"), "{why}");
+
+        std::env::remove_var("SKEIN_HOME");
     }
 
     /// The install reads the artifact, and there is nothing else for it to read.
