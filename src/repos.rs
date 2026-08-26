@@ -583,6 +583,29 @@ fn clone_mirror(repo: &Repo, mirror: &Path) -> Result<PathBuf, String> {
         .arg(mirror)
         .args(["remote", "set-url", "origin", &origin]);
     let _ = bounded_output(&mut set, "git remote set-url", Duration::from_secs(10));
+    // **Pack it, once, before any box ever clones from it** (SKEIN-406).
+    //
+    // `from` is usually a working CHECKOUT, and cloning over git's local transport copies that
+    // checkout's object store as it stands — loose objects and all. A checkout somebody has been
+    // committing in for months carries thousands of them, and every box that clones this mirror
+    // then copies every one, across the sandbox boundary, for ever.
+    //
+    // Measured on this repository (2026-08-26): the mirror arrived at 88 MB — 4,394 loose objects
+    // holding 85 MB of it, against 1 MB actually in a pack. One `git gc` took 1.4s and left 6 MB.
+    // A clone from it went from 154 ms and 88 MB of `.git` to 36 ms and 6 MB: four times faster,
+    // 93% less data, and 82 MB off the volume permanently.
+    //
+    // **This is the fix instead of `--shared` or `--reference`, and the measurement is why.** On a
+    // packed mirror `--shared` saves nothing at all (36 ms either way) while making every box's
+    // objects depend on this directory surviving — and `ensure_mirror` DELETES it above to repair a
+    // half-made clone. `--reference … --dissociate` measured 68 ms, nearly twice a plain clone.
+    // Neither risk buys anything once the loose objects are gone.
+    //
+    // Best-effort: a mirror that could not be packed is a slower mirror, not a broken one, and
+    // failing the clone over housekeeping would turn a working repo into no repo.
+    let mut pack = Command::new("git");
+    pack.arg("-C").arg(mirror).args(["gc", "--quiet"]);
+    let _ = bounded_output(&mut pack, "git gc", Duration::from_secs(300));
     Ok(mirror.to_path_buf())
 }
 
@@ -602,14 +625,26 @@ pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
         .arg(&mirror)
         .args(["remote", "update", "--prune"]);
     let out = bounded_output(&mut command, "git remote update", Duration::from_secs(300))?;
-    match out.status.success() {
-        true => Ok(()),
-        false => Err(format!(
+    if !out.status.success() {
+        return Err(format!(
             "fetching {}: {}",
             repo.id,
             String::from_utf8_lossy(&out.stderr).trim()
-        )),
+        ));
     }
+    // Keep it packed as it grows (SKEIN-406). `--auto` rather than a plain `gc`: it is a no-op
+    // below git's own threshold, so an idle repo pays nothing and a busy one is tidied without
+    // skein deciding how often that should be. The one-off cost is at creation, above, where the
+    // mirror inherits a checkout's whole loose object store in a single copy.
+    //
+    // After the fetch and not before, and never in a way that can fail it: what a caller asked for
+    // is the new commits, and a repo that could not be packed still has them.
+    let mut pack = Command::new("git");
+    pack.arg("-C")
+        .arg(&mirror)
+        .args(["gc", "--auto", "--quiet"]);
+    let _ = bounded_output(&mut pack, "git gc --auto", Duration::from_secs(120));
+    Ok(())
 }
 
 /// A repo's files, read out of its **mirror** rather than off somebody's disk.
@@ -1616,6 +1651,85 @@ mod tests {
         fs::write(dir.join("secret.env"), "KEY=1\n").unwrap();
         git(dir, &["add", "-A"]);
         git(dir, &["commit", "-m", "one"]);
+    }
+
+    /// **The mirror a box clones from is PACKED** (SKEIN-406), and that is the whole of why a box
+    /// creation stopped copying a repository's history byte by byte.
+    ///
+    /// A mirror is made with `git clone --mirror` from a working CHECKOUT, over git's local
+    /// transport, which copies that checkout's object store exactly as it stands — loose objects
+    /// and all. A checkout somebody has been committing in for months carries thousands, and every
+    /// box that clones the mirror then copies every one of them across the sandbox boundary.
+    ///
+    /// Measured on this repository (2026-08-26): the mirror arrived at 88 MB, 4,394 loose objects
+    /// holding 85 MB of it against 1 MB in a pack. One `git gc` took 1.4s and left 6 MB, and a
+    /// clone from it went from 154 ms / 88 MB to 36 ms / 6 MB.
+    ///
+    /// The counter-half matters as much: on a packed mirror `--shared` measured 36 ms against a
+    /// plain clone's 36 ms — no saving at all, in exchange for every box's objects depending on
+    /// this directory, which `ensure_mirror` deletes to repair a half-made clone. So this asserts
+    /// the loose objects are gone, NOT that a flag is present.
+    #[test]
+    fn the_mirror_a_box_clones_from_carries_no_loose_objects() {
+        let _g = env_lock();
+        let home = tempdir();
+        std::env::set_var("SKEIN_HOME", &home);
+        std::env::set_var("SKEIN_NO_GH_SECRET", "1");
+
+        let checkout = tempdir();
+        origin_repo(&checkout);
+        // Commits made one at a time, which is how a person makes them and how the loose objects
+        // that cost the box its clone accumulate. Committing once would pack nothing and prove
+        // nothing.
+        for i in 0..12 {
+            fs::write(checkout.join(format!("f{i}.txt")), format!("{i}\n")).unwrap();
+            git(&checkout, &["add", "-A"]);
+            git(&checkout, &["commit", "-m", &format!("c{i}")]);
+        }
+        assert!(
+            loose_objects(&checkout.join(".git")) > 0,
+            "the fixture checkout has no loose objects, so it cannot show that the mirror \
+             inherited any — the thing under test never happens"
+        );
+
+        add_repo(
+            &checkout.to_string_lossy(),
+            Some("proj"),
+            Some("claude"),
+            None,
+        )
+        .unwrap();
+
+        let mirror = mirror_path("proj");
+        assert_eq!(
+            loose_objects(&mirror),
+            0,
+            "the mirror carries loose objects inherited from the checkout it was made from, so \
+             every box that clones it copies each one across the sandbox boundary — measured at \
+             85MB of a 88MB mirror on the skein repo itself"
+        );
+        // And it is still a mirror afterwards: packing must not cost the refs a box clones.
+        assert!(
+            mirror_is_made(&mirror),
+            "packing the mirror left something that is no longer a mirror"
+        );
+        assert!(
+            !git(&mirror, &["rev-parse", "HEAD"]).is_empty(),
+            "the packed mirror has no HEAD to clone"
+        );
+
+        std::env::remove_var("SKEIN_HOME");
+        std::env::remove_var("SKEIN_NO_GH_SECRET");
+    }
+
+    /// How many objects are sitting loose in a git directory, asked of git rather than counted by
+    /// walking `objects/` — the layout is git's to change and the question is not.
+    fn loose_objects(gitdir: &Path) -> u64 {
+        git(gitdir, &["count-objects", "-v"])
+            .lines()
+            .find_map(|l| l.strip_prefix("count: "))
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or_default()
     }
 
     /// A registered repo has a mirror, the mirror is bare, and it is what a box clones from.
